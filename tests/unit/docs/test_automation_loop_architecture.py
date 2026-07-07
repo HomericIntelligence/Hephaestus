@@ -81,12 +81,17 @@ def test_automation_loop_architecture_status_is_implemented() -> None:
 def test_automation_loop_architecture_has_interrupt_semantics_and_exit_codes() -> None:
     """The architecture contract must keep interrupt and exit-code details."""
     text = _arch_text()
+    normalized = " ".join(text.split())
 
     assert "Finalized in the cutover issue." not in text
     assert "## Interrupt semantics and exit codes" in text
     assert "SIGINT, SIGTERM, and SIGHUP" in text
     assert "resumable at <stage>" in text
     assert "Exit codes are stable: `130` for interrupted runs" in text
+    assert (
+        "If an interrupt overlaps a non-passing ledger entry or fatal coordinator error, "
+        "`130` deliberately takes priority because the run did not complete." in normalized
+    )
 
 
 def test_automation_loop_architecture_has_concurrency_cli_dry_run_and_glossary() -> None:
