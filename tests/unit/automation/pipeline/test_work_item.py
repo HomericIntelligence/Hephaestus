@@ -10,8 +10,8 @@ from hephaestus.automation.pipeline import (
     ItemResult,
     StageName,
     WorkItem,
+    work_item as work_item_module,
 )
-from hephaestus.automation.pipeline import work_item as work_item_module
 from hephaestus.automation.pipeline.routing import budget_keys
 
 

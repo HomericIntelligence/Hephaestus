@@ -1,8 +1,8 @@
 """Tests for GitHub API utilities."""
 
 import json
-import threading
 import subprocess
+import threading
 from collections.abc import Generator
 from typing import Any
 from unittest.mock import Mock, patch
@@ -11,7 +11,6 @@ import pytest
 
 import hephaestus.automation.github_api as _github_api_module
 import hephaestus.github.client as client_module
-from hephaestus.github.rate_limit import configure_gh_global_throttle
 from hephaestus.automation.github_api import (
     GitHubRateLimitError,
     _check_graphql_errors,
@@ -38,6 +37,7 @@ from hephaestus.automation.github_api import (
     skip_epics,
 )
 from hephaestus.automation.models import IssueState
+from hephaestus.github.rate_limit import configure_gh_global_throttle
 from hephaestus.io import utils as io_utils
 
 # Circuit-breaker reset is now an autouse package-scope fixture in

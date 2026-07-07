@@ -78,9 +78,7 @@ def _split_threads(threads: list[dict[str, Any]]) -> tuple[int, int]:
     if not threads:
         return (0, 0)
     current_login = github_api.gh_current_login()
-    automation = sum(
-        1 for thread in threads if _is_automation_owned_thread(thread, current_login)
-    )
+    automation = sum(1 for thread in threads if _is_automation_owned_thread(thread, current_login))
     return automation, len(threads) - automation
 
 

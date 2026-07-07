@@ -29,11 +29,15 @@ class RunStats:
     """Aggregate run statistics the coordinator hands to :func:`print_summary`."""
 
     exit_code: int
-    interrupted: bool
     loops_run: int
     agent_job_count: int
     agent_job_time_s: float
     wall_s: float
+
+    @property
+    def interrupted(self) -> bool:
+        """Return whether the run ended with the interrupt exit code."""
+        return self.exit_code == 130
 
 
 def format_preserved_worktrees(
