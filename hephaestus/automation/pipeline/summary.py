@@ -88,6 +88,15 @@ def _disposition_bucket(item: WorkItem) -> str:
     return cell.split(":")[0].split(" ")[0].lower()
 
 
+def _json_message(exit_code: int) -> str:
+    """Map a pipeline exit code to its JSON summary message."""
+    if exit_code == 130:
+        return "pipeline interrupted"
+    if exit_code == 0:
+        return "pipeline complete"
+    return "pipeline failed"
+
+
 def _item_row(item: WorkItem) -> str:
     """Format one per-item summary row."""
     issue = f"#{item.issue}" if item.issue else "-"
@@ -158,7 +167,7 @@ def print_summary(
         ]
         emit_json_status(
             stats.exit_code,
-            message="pipeline interrupted" if stats.interrupted else "pipeline complete",
+            message=_json_message(stats.exit_code),
             dispositions=dict(sorted(dispositions.items())),
             loops_run=stats.loops_run,
             agent_jobs=stats.agent_job_count,
