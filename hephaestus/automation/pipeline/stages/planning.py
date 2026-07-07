@@ -121,9 +121,17 @@ def build_plan_prompt(
 def _normalize_plan_comment(plan: str) -> str:
     """Normalize plan text so the body begins exactly at the plan marker.
 
-    The upsert helper keys off ``body.startswith(PLAN_COMMENT_MARKER)``, and
-    ``plan.lstrip()`` is load-bearing — a plan arriving with leading
-    whitespace would otherwise keep it and break the marker match (#700).
+    The marker prefix is the upsert dedupe key for
+    ``ctx.github.upsert_plan_comment``: the GitHub adapter updates the latest
+    existing plan comment whose body starts with ``PLAN_COMMENT_MARKER``.
+    ``plan.lstrip()`` is load-bearing because a plan arriving with leading
+    whitespace would otherwise keep it and break that dedupe match (#700).
+
+    This normalization is separate from the PlanningStage VERIFY ADVANCE gate.
+    VERIFY advances only after this step posts a plan comment or
+    ``ctx.github.has_existing_plan(item.issue)`` reports an existing plan or
+    approved plan-review gate. Do not read this function as the ADVANCE
+    decision.
 
     Args:
         plan: Raw plan text from the planner agent.
