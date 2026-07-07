@@ -31,6 +31,7 @@ each apply-state helper removes the other two as it sets its own.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Sequence
 from typing import Any
 
@@ -156,7 +157,7 @@ def is_epic(labels: Iterable[str], title: str = "") -> bool:
 
     * it carries a label whose name is in :data:`EPIC_LABELS`
       (``epic`` / ``roadmap``), **or**
-    * its ``title`` contains one of those markers as a substring.
+    * its ``title`` contains one of those markers as a standalone token.
 
     The title fallback catches the convention even when the label was not
     applied. Pure function (no I/O) so both discovery paths and unit tests can
@@ -173,7 +174,10 @@ def is_epic(labels: Iterable[str], title: str = "") -> bool:
     if {label.lower() for label in labels} & set(EPIC_LABELS):
         return True
     lowered_title = title.lower()
-    return any(marker in lowered_title for marker in EPIC_LABELS)
+    return any(
+        re.search(rf"(?<![a-z0-9_]){re.escape(marker)}(?![a-z0-9_])", lowered_title)
+        for marker in EPIC_LABELS
+    )
 
 
 def partition_epics(

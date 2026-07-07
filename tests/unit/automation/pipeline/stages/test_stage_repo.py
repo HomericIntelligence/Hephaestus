@@ -319,6 +319,41 @@ class TestDiscover:
         epic_products = [p for p in repo_item.payload["products"] if p["number"] == 5]
         assert epic_products[0]["stage"] is None
 
+    def test_skip_epics_failure_is_non_fatal_to_discovery(
+        self,
+        repo_item: WorkItem,
+        repo_ctx: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A failed epic label write does not block emitting discovered products."""
+        meta = [
+            {"number": 5, "labels": ["epic"], "title": "Epic: umbrella"},
+            {"number": 6, "labels": [], "title": "real work"},
+        ]
+        classified = self._patch_discovery(
+            monkeypatch,
+            meta=meta,
+            facts={6: _facts(6)},
+            classifications={6: (StageName.PLANNING, "needs plan")},
+        )
+        gh: FakeStageGitHub = repo_ctx.github
+        monkeypatch.setattr(
+            gh,
+            "skip_epics",
+            lambda _epics_labels: (_ for _ in ()).throw(RuntimeError("label write failed")),
+        )
+        repo_item.state = "DISCOVER"
+
+        result = RepoStage().step(repo_item, repo_ctx)
+
+        assert isinstance(result, Continue) and result.next_state == "SEEDED"
+        assert classified == [6]
+        products = repo_item.payload["products"]
+        assert {p["number"]: p["stage"] for p in products} == {
+            5: None,
+            6: StageName.PLANNING,
+        }
+
     def test_drive_green_all_routes_orphan_prs_to_ci(
         self,
         repo_item: WorkItem,
