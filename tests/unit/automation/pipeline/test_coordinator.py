@@ -9,6 +9,7 @@ asserts-no-submit, poisoned-item isolation, and FAIL_BACK routing.
 
 from __future__ import annotations
 
+import json
 from collections import deque
 from collections.abc import Callable
 from pathlib import Path
@@ -75,6 +76,7 @@ def make_coordinator(
     loops: int = 1,
     max_workers: int = 1,
     dry_run: bool = False,
+    serialize_file_overlap: bool = True,
     github: FakeStageGitHub | None = None,
     rate_budget_ok: Callable[[], tuple[bool, float]] | None = None,
 ) -> tuple[Coordinator, FakeWorkerPool, FakeStageGitHub]:
@@ -85,6 +87,7 @@ def make_coordinator(
         loops=loops,
         max_workers=max_workers,
         dry_run=dry_run,
+        serialize_file_overlap=serialize_file_overlap,
         projects_dir=tmp_path,
     )
     gh = github or FakeStageGitHub()
@@ -528,6 +531,64 @@ class TestImplementationAdmission:
 
         assert run_order == [22]  # dependency first; 21 deferred by overlap
         assert len(coordinator.queues[StageName.IMPLEMENTATION]) == 1
+
+    def test_file_overlap_serialization_can_be_disabled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--no-serialize-file-overlap lets all ready implementation items dispatch."""
+        coordinator, _pool, _ = make_coordinator(
+            tmp_path, monkeypatch, max_workers=2, serialize_file_overlap=False
+        )
+        run_order: list[int] = []
+
+        class RecordingStage(StubStage):
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                run_order.append(item.issue or 0)
+                return StageOutcome(Disposition.SKIP, "recorded")
+
+        coordinator.stages[StageName.IMPLEMENTATION] = RecordingStage()
+        item_a = _issue_item(21, StageName.IMPLEMENTATION)
+        item_b = _issue_item(22, StageName.IMPLEMENTATION)
+        coordinator._push_item(item_a, StageName.IMPLEMENTATION, enter=True)
+        coordinator._push_item(item_b, StageName.IMPLEMENTATION, enter=True)
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.admission._select_non_overlapping",
+            lambda issues: (_ for _ in ()).throw(AssertionError("should not serialize overlap")),
+        )
+
+        coordinator._drain_implementation()
+
+        assert run_order == [21, 22]
+        assert len(coordinator.queues[StageName.IMPLEMENTATION]) == 0
+
+
+class TestDurableEventLog:
+    """Optional JSONL event log mirrors the coordinator's in-memory event log."""
+
+    def test_event_log_path_persists_queue_events(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Configured event_log_path receives JSONL queue/event records."""
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            loops=1,
+            projects_dir=tmp_path,
+            event_log_path=event_log_path,
+        )
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        )
+        item = _issue_item(44, StageName.PLANNING)
+
+        coordinator._push_item(item, StageName.PLANNING, enter=True)
+
+        records = [json.loads(line) for line in event_log_path.read_text().splitlines()]
+        assert records[-1]["event"] == "push"
+        assert records[-1]["fields"] == ["planning", "repo-a#44"]
+        assert coordinator.event_log[-1] == ("push", "planning", "repo-a#44")
 
 
 class TestPipelineScopeWiring:

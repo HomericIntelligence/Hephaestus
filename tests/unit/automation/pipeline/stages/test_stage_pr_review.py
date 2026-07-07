@@ -164,9 +164,7 @@ class TestPrReviewStageStep:
         assert result.job.prompt_kwargs["pr_number"] == 1001
         assert item.attempts["pr_review_iter"] == 0  # submission burns nothing
 
-    def test_review_wait_forwards_nitpick_config(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
+    def test_review_wait_forwards_nitpick_config(self, make_ctx: Any, make_work_item: Any) -> None:
         """--nitpick must reach the strict PR-review prompt."""
         stage = PrReviewStage()
         ctx = make_ctx(config=SimpleNamespace(agent="claude", nitpick=True))
@@ -417,9 +415,12 @@ class TestEvalVerdicts:
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.ADVANCE
         assert github.mutation_log == [
+            ("gh_issue_comment", (1001,)),
             ("mark_pr_implementation_go", (1001,)),
             ("arm_auto_merge", (1001,)),
         ]
+        assert "<!-- hephaestus-pr-review-go -->" in github.comments[1001][0]
+        assert "Automated PR review result: GO" in github.comments[1001][0]
         assert item.attempts["pr_review_iter"] == 1  # real verdict counted
 
     def test_go_rechecks_human_threads_inside_arm_helper(
@@ -456,7 +457,8 @@ class TestEvalVerdicts:
 
         assert isinstance(result, Continue)
         assert result.next_state == "FOLLOWUP_WAIT"
-        assert github.mutation_log[0] == ("mark_pr_implementation_go", (1001,))
+        assert github.mutation_log[0] == ("gh_issue_comment", (1001,))
+        assert github.mutation_log[1] == ("mark_pr_implementation_go", (1001,))
 
     def test_failed_mark_write_skips_arming(self, make_ctx: Any, make_work_item: Any) -> None:
         """If the implementation-go mark fails, auto-merge is NOT armed.
@@ -497,7 +499,10 @@ class TestEvalVerdicts:
         result = stage.step(item, ctx)  # must not raise
 
         assert isinstance(result, Continue)
-        assert github.mutation_log == [("mark_pr_implementation_go", (1001,))]
+        assert github.mutation_log == [
+            ("gh_issue_comment", (1001,)),
+            ("mark_pr_implementation_go", (1001,)),
+        ]
 
     def test_go_with_human_thread_is_human_blocked_and_unlabeled(
         self, make_ctx: Any, make_work_item: Any
@@ -1000,6 +1005,7 @@ class TestFullWalks:
         assert item.attempts["pr_review_iter"] == 2  # two real rounds
         assert github.mutation_log == [
             ("mark_pr_implementation_no_go", (1001,)),  # round 1 NOGO recorded (M2)
+            ("gh_issue_comment", (1001,)),
             ("mark_pr_implementation_go", (1001,)),
             ("arm_auto_merge", (1001,)),
         ]

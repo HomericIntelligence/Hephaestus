@@ -84,6 +84,7 @@ def test_build_pipeline_config_maps_cli_fields(dispatch: dict[str, MagicMock]) -
             "--prs",
             "21,22",
             "--no-advise",
+            "--no-serialize-file-overlap",
             "--nitpick",
         ]
     )
@@ -98,8 +99,11 @@ def test_build_pipeline_config_maps_cli_fields(dispatch: dict[str, MagicMock]) -
     assert config.parallel_repos == 2
     assert config.dry_run is True
     assert config.no_advise is True
+    assert config.serialize_file_overlap is False
     assert config.nitpick is True
     assert config.scope is None
+    assert config.event_log_path is not None
+    assert config.event_log_path.name.startswith("pipeline-events-")
 
 
 def test_build_pipeline_config_maps_plan_phase_to_planning_scope(

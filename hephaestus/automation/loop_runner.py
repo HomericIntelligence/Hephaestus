@@ -30,9 +30,11 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -49,6 +51,7 @@ from hephaestus.automation.loop_repo_manager import (
     _resolve_repo_dir as _resolve_repo_dir,
     _sort_repos_by_open_count as _sort_repos_by_open_count,
 )
+from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.cli.utils import (
     configure_github_throttle_from_args,
     emit_json_status,
@@ -425,6 +428,16 @@ def _pipeline_scope_for_phases(phases: tuple[str, ...]) -> PipelineScope | None:
         raise SystemExit(str(exc)) from exc
 
 
+def _pipeline_event_log_path(projects_dir: Path, repos: list[str]) -> Path | None:
+    """Return the default durable event-log path for a loop invocation."""
+    if not repos:
+        return None
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return (
+        projects_dir / repos[0] / DEFAULT_STATE_DIR / f"pipeline-events-{stamp}-{os.getpid()}.jsonl"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Repo discovery — re-exported from loop_repo_manager (refs #1360 / #1179).
 # The helpers above are imported at module level with explicit ``as`` aliases,
@@ -576,6 +589,8 @@ def _build_pipeline_config(
         nitpick=cfg.nitpick,
         drive_green_all=cfg.drive_green_all,
         budget_overrides={"merge": cfg.max_merge_attempts},
+        serialize_file_overlap=cfg.serialize_file_overlap,
+        event_log_path=_pipeline_event_log_path(cfg.projects_dir, repos),
         projects_dir=cfg.projects_dir,
         json_out=args.json,
         scope=_pipeline_scope_for_phases(cfg.phases),

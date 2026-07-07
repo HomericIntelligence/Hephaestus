@@ -999,6 +999,7 @@ class PrReviewStage(Stage):
             PrReviewStage._post_human_blocked_comment(pr_number, human_unresolved, ctx)
             return False
 
+        PrReviewStage._post_clean_go_comment(pr_number, ctx)
         try:
             ctx.github.mark_pr_implementation_go(pr_number)
         except Exception as e:
@@ -1016,3 +1017,21 @@ class PrReviewStage(Stage):
                 "pr_review: failed to arm auto-merge on PR #%d (non-fatal): %s", pr_number, e
             )
         return True
+
+    @staticmethod
+    def _post_clean_go_comment(pr_number: int, ctx: StageContext) -> None:
+        """Leave a durable public artifact for clean automated GO reviews."""
+        body = (
+            "<!-- hephaestus-pr-review-go -->\n"
+            "Automated PR review result: GO.\n\n"
+            "No unresolved blocking review threads were found by the automation reviewer. "
+            "The pipeline is marking this PR `state:implementation-go` and arming auto-merge."
+        )
+        try:
+            ctx.github.post_pr_comment(pr_number, body)
+        except Exception as e:
+            logger.warning(
+                "pr_review: failed to post clean-GO review comment on PR #%d (non-fatal): %s",
+                pr_number,
+                e,
+            )
