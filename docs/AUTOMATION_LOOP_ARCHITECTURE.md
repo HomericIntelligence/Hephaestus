@@ -1,6 +1,6 @@
 # Automation Loop Architecture
 
-Status: as-built for the epic #1809 queue-based automation loop. The
+Status: implemented for the epic #1809 queue-based automation loop. The
 `hephaestus-automation-loop` CLI defaults to this pipeline; the legacy loop
 remains available only through `--legacy-loop` or `HEPH_PIPELINE=0`.
 
@@ -458,8 +458,8 @@ serialization unless `--no-serialize-file-overlap` is passed.
 
 The pipeline never sleeps inside stage logic. Backoff uses the coordinator's
 timer heap, and low GitHub rate budget parks agent jobs until the reset instead
-of blocking the loop. Under the pipeline, `--phase-timeout` bounds each agent
-job. Under the legacy loop, the same flag still bounds a phase subprocess.
+of blocking the loop. Under the pipeline, `--phase-timeout` bounds each agent job.
+Under the legacy loop, the same flag still bounds a phase subprocess.
 
 Dry-run mode logs GitHub mutations and job submissions without executing them;
 `_submit` asserts that no worker job is submitted in dry-run. This makes
