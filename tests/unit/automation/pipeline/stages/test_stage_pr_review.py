@@ -405,6 +405,26 @@ class TestEvalVerdicts:
         ]
         assert item.attempts["pr_review_iter"] == 1  # real verdict counted
 
+    def test_go_rechecks_human_threads_inside_arm_helper(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A human thread opened after EVAL's count prevents GO label and arm."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(by_severity=[(0, 0, 0), (0, 0, 1)])
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="EVAL")
+        item.payload["review_verdict"] = _verdict("GO")
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.FINISH_FAIL
+        assert result.note == "human_blocked"
+        assert github.mutation_log == [("gh_issue_comment", (1001,))]
+        assert ("mark_pr_implementation_go", (1001,)) not in github.mutation_log
+        assert ("arm_auto_merge", (1001,)) not in github.mutation_log
+        assert "Automation stand-down" in github.comments[1001][0]
+
     def test_go_with_follow_up_enabled_continues_to_followup(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
