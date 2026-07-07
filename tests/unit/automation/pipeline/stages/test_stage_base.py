@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from typing import Any
+from types import SimpleNamespace
+
+import pytest
 
 from hephaestus.automation.pipeline.routing import Disposition, StageOutcome
 from hephaestus.automation.pipeline.stages import (
@@ -12,11 +15,13 @@ from hephaestus.automation.pipeline.stages import (
     ci,
     merge_wait,
 )
+from hephaestus.automation.pipeline.stages import base as stage_base
 from hephaestus.automation.pipeline.stages.base import (
     BACKOFF_CAP_S,
     Continue,
     JobRequest,
     StageContext,
+    agent_provider,
 )
 
 
@@ -100,3 +105,20 @@ class TestSharedBackoffCap:
         assert BACKOFF_CAP_S == 60
         assert ci.BACKOFF_CAP_S == BACKOFF_CAP_S
         assert merge_wait.BACKOFF_CAP_S == BACKOFF_CAP_S
+
+
+class TestAgentProvider:
+    """The provider helper falls back to the shared agent default."""
+
+    def _ctx(self, agent: str | None = None) -> StageContext:
+        """Build a minimal stage context for provider selection tests."""
+        return TestStageContext()._bare_ctx(config=SimpleNamespace(agent=agent))
+
+    def test_defaults_to_shared_default_agent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Blank config values use the shared backend default, not a literal."""
+        monkeypatch.setattr(stage_base, "DEFAULT_AGENT", "codex", raising=False)
+        assert agent_provider(self._ctx(agent="")) == "codex"
+
+    def test_prefers_explicit_agent(self) -> None:
+        """Configured agent values are returned unchanged."""
+        assert agent_provider(self._ctx(agent="pi")) == "pi"
