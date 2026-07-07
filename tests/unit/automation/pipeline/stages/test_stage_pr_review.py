@@ -179,6 +179,7 @@ class TestPrReviewStageStep:
                 "review_verdict": _verdict("NOGO"),
                 "review_text": "stale",
                 "review_threads": [{"id": "t1"}],
+                "raw_review_threads": [{"id": "raw-t1"}],
                 "posted_thread_ids": ["t1"],
                 "validation_result": "stale",
                 "difficulty_tiers": "stale",
@@ -194,6 +195,7 @@ class TestPrReviewStageStep:
             "review_verdict",
             "review_text",
             "review_threads",
+            "raw_review_threads",
             "posted_thread_ids",
             "validation_result",
             "difficulty_tiers",
@@ -1150,6 +1152,34 @@ class TestRealCommitGate:
         assert item.payload["no_commit_retry_done"] is True
         assert item.attempts["pr_review_iter"] == 0  # no round burned by the retry
 
+    def test_first_no_commit_retry_uses_raw_review_threads_not_survivors(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The retry directive uses reviewer text, not validator-synthesized survivors."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=45, pr=1001, state="EVAL")
+        raw_threads = [{"thread_id": "t1", "path": "x.py", "line": 3, "body": "reviewer text"}]
+        surviving_threads = [
+            {
+                "path": "y.py",
+                "line": 7,
+                "body": "Reopened (prior round, still unaddressed): synthesized text",
+            }
+        ]
+        item.payload["review_verdict"] = _verdict("NOGO")
+        item.payload["raw_review_threads"] = raw_threads
+        item.payload["review_threads"] = surviving_threads
+        item.payload["push_no_commit"] = True
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, Continue)
+        assert result.next_state == "ADDRESS_WAIT"
+        assert item.payload["unaddressed_findings"] == raw_threads
+        assert item.payload["no_commit_retry_done"] is True
+        assert item.attempts["pr_review_iter"] == 0
+
     def test_retry_address_job_carries_the_directive_findings(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -1287,7 +1317,9 @@ class TestSurvivingThreads:
             {"thread_id": "t2", "body": "by-design"},
         ]
         item.payload["validation_result"] = (
-            '{"unaddressed": [], "wont_fix": [{"thread_id": "t2", "reason": "documented"}]}'
+            '{"unaddressed": [{"thread_id": "t9", "path": "y.py", "line": 7,'
+            ' "detail": "still missing"}],'
+            ' "wont_fix": [{"thread_id": "t2", "reason": "documented"}]}'
         )
         item.payload["review_text"] = "Verdict: NOGO"
 
@@ -1296,8 +1328,13 @@ class TestSurvivingThreads:
         assert isinstance(result, Continue)
         assert github.mutation_log == [("gh_pr_review_post", (1001, "COMMENT"))]
         posted = github.reviews[1001][0]["comments"]
-        assert [t["thread_id"] for t in posted] == ["t1"]  # t2 filtered out
-        assert [t["thread_id"] for t in item.payload["review_threads"]] == ["t1"]
+        assert item.payload["raw_review_threads"] == [
+            {"thread_id": "t1", "body": "real bug"},
+            {"thread_id": "t2", "body": "by-design"},
+        ]
+        assert [t.get("thread_id") for t in item.payload["review_threads"]] == ["t1", None]
+        assert [t.get("thread_id") for t in posted] == ["t1", None]
+        assert posted[1]["body"].startswith("Reopened (prior round, still unaddressed):")
 
 
 class TestProgressCountsAutomationOnly:
