@@ -80,6 +80,8 @@ def test_build_pipeline_config_maps_cli_fields(dispatch: dict[str, MagicMock]) -
             "--dry-run",
             "--issues",
             "11,12",
+            "--prs",
+            "21,22",
             "--no-advise",
             "--nitpick",
         ]
@@ -89,13 +91,13 @@ def test_build_pipeline_config_maps_cli_fields(dispatch: dict[str, MagicMock]) -
     assert config.org == "org"
     assert config.repos == ["repo-a"]
     assert config.issues == [11, 12]
+    assert config.prs == [21, 22]
     assert config.loops == 3
     assert config.max_workers == 4
     assert config.parallel_repos == 2
     assert config.dry_run is True
     assert config.no_advise is True
     assert config.nitpick is True
-    assert config.prs == []
 
 
 def test_build_pipeline_config_maps_agent_and_models(
