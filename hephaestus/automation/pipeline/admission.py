@@ -15,9 +15,10 @@ source files, which would lead to merge conflicts when the first PR lands.
 Dropped deliverable (documented): the per-repo in-flight cap helper
 (``within_repo_cap``) is intentionally NOT implemented. The issue #1813
 "# Implementation Plan" comment sanctions the drop: "justify or drop
-``within_repo_cap`` (YAGNI — no named consumer)" — no consumer exists until
-the coordinator slice (#1817), which owns worker-slot accounting and can add
-a cap where it dispatches.
+``within_repo_cap`` (YAGNI — no named consumer)" — the cap is owned by
+:meth:`~hephaestus.automation.pipeline.coordinator.Coordinator._admit`, where
+the coordinator slice tracks per-repo worker slots and applies the cap at
+dispatch time.
 """
 
 from __future__ import annotations
