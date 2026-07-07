@@ -77,6 +77,8 @@ ALL_POST_LOOP_STAGES: tuple[str, ...] = ("drive-green",)
 # any subset via --phases; unselected phases are skipped.
 ALL_SELECTABLE: tuple[str, ...] = ALL_PHASES + ALL_POST_LOOP_STAGES
 
+LOOP_DEFAULT_MAX_WORKERS = 6
+
 # DEFAULT_PROJECTS_DIR is re-exported from hephaestus.config.paths so existing
 # tests that patch this module-level name continue to work. See #704: the
 # projects root is now resolved at runtime via resolve_projects_dir().
@@ -163,7 +165,7 @@ class LoopConfig:
     """
 
     loops: int = 5
-    max_workers: int = 3
+    max_workers: int = LOOP_DEFAULT_MAX_WORKERS
     parallel_repos: int = 1
     # Dataclass default covers ONLY the iteration phases (``ALL_PHASES`` =
     # plan, implement), deliberately excluding drive-green — a bare
@@ -214,8 +216,9 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="hephaestus-automation-loop",
         description=("Run the queue-based automation pipeline across HomericIntelligence repos."),
         max_workers_help=(
-            "Parallel workers per repo per phase (1-32, default: 3). Passes to child phases."
+            "Parallel workers per repo per phase (1-32, default: 6). Passes to child phases."
         ),
+        max_workers_default=LOOP_DEFAULT_MAX_WORKERS,
         add_github_throttle=True,
         dry_run_prefix=(
             "Forward --dry-run to every phase (suppresses GitHub mutations and git pushes)."
@@ -429,13 +432,17 @@ def _pipeline_scope_for_phases(phases: tuple[str, ...]) -> PipelineScope | None:
 
 
 def _pipeline_event_log_path(projects_dir: Path, repos: list[str]) -> Path | None:
-    """Return the default durable event-log path for a loop invocation."""
+    """Return the default durable event-log path for a loop invocation.
+
+    The coordinator writes ``run_start`` before repo discovery. Keeping the
+    default log under the local automation state dir avoids creating
+    ``projects_dir / repo`` early, which would look like a cloned checkout to
+    the repo stage.
+    """
     if not repos:
         return None
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return (
-        projects_dir / repos[0] / DEFAULT_STATE_DIR / f"pipeline-events-{stamp}-{os.getpid()}.jsonl"
-    )
+    return Path(DEFAULT_STATE_DIR) / f"pipeline-events-{stamp}-{os.getpid()}.jsonl"
 
 
 # ---------------------------------------------------------------------------

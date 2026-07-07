@@ -158,10 +158,10 @@ def test_parse_args_accepts_valid_max_workers() -> None:
     assert args.max_workers == 8
 
 
-def test_parse_args_default_max_workers_is_three() -> None:
-    """Omitted --max-workers defaults to 3."""
+def test_parse_args_default_max_workers_is_six() -> None:
+    """Omitted --max-workers defaults to 6 for the queue-based loop."""
     args = loop_runner._parse_args([])
-    assert args.max_workers == 3
+    assert args.max_workers == 6
 
 
 def test_parse_args_serialize_file_overlap_default_on() -> None:

@@ -134,6 +134,10 @@ class TestQuiescence:
             return []
 
         monkeypatch.setattr(seeding_mod, "seed_from_cli", fake_seed)
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
+            lambda _repo, issues: list(issues),
+        )
         coordinator = Coordinator(
             config,
             github=gh,
@@ -611,6 +615,7 @@ class TestDurableEventLog:
             stages={StageName.PLANNING: stage},
             install_signals=False,
         )
+        coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
         item = _issue_item(44, StageName.PLANNING)
 
         coordinator._submit(item, JobRequest(_agent_job(issue=44), "REVIEWED"))
@@ -633,6 +638,42 @@ class TestDurableEventLog:
         ]
         assert "stdout_tail" not in complete["fields"][-1]
         assert "stderr_tail" not in complete["fields"][-1]
+
+    def test_event_log_path_sanitizes_job_error_text(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Job completions persist safe error classes, not raw error text."""
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            loops=1,
+            projects_dir=tmp_path,
+            event_log_path=event_log_path,
+        )
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
+        stage = StubStage()
+        pool = FakeWorkerPool()
+        pool.queue_result(JobResult(ok=False, error="token=secret private-endpoint"))
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(),
+            pool=pool,
+            stages={StageName.PLANNING: stage},
+            install_signals=False,
+        )
+        coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
+        item = _issue_item(44, StageName.PLANNING)
+
+        coordinator._submit(item, JobRequest(_agent_job(issue=44), "REVIEWED"))
+        coordinator._drain_completions()
+
+        records = [json.loads(line) for line in event_log_path.read_text().splitlines()]
+        text = event_log_path.read_text()
+        complete = next(record for record in records if record["event"] == "complete")
+        assert "token=secret" not in text
+        assert "private-endpoint" not in text
+        assert complete["fields"][-1]["error"] == "error"
 
     def test_event_log_path_persists_resumable_records(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -665,6 +706,14 @@ class TestDurableEventLog:
 
 class TestPipelineScopeWiring:
     """Scope-trimmed routing + the planner CLI's --force re-plan override (#1820)."""
+
+    @pytest.fixture(autouse=True)
+    def _stub_open_issue_filter(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Keep scope-wiring tests unit-local; filter behavior has its own test."""
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
+            lambda _repo, issues: list(issues),
+        )
 
     def _scoped_config(
         self, tmp_path: Path, *, issues: list[int], force: bool = False

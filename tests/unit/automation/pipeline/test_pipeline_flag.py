@@ -9,13 +9,16 @@ The queue-based pipeline is the only automation-loop path (epic #1809, cutover
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 import hephaestus.automation.loop_runner as loop_runner
 import hephaestus.automation.pipeline.coordinator as coordinator_mod
+from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.routing import StageName
+from hephaestus.config.paths import DEFAULT_PROJECTS_DIR
 
 
 @pytest.fixture
@@ -104,6 +107,16 @@ def test_build_pipeline_config_maps_cli_fields(dispatch: dict[str, MagicMock]) -
     assert config.scope is None
     assert config.event_log_path is not None
     assert config.event_log_path.name.startswith("pipeline-events-")
+    assert config.event_log_path.parent == Path(DEFAULT_STATE_DIR)
+
+
+def test_default_pipeline_event_log_path_does_not_create_repo_checkout() -> None:
+    """The default event log path must not live under a repo clone directory."""
+    path = loop_runner._pipeline_event_log_path(DEFAULT_PROJECTS_DIR, ["repo-a"])
+
+    assert path is not None
+    assert path.parent == Path(DEFAULT_STATE_DIR)
+    assert DEFAULT_PROJECTS_DIR / "repo-a" not in path.parents
 
 
 def test_build_pipeline_config_maps_plan_phase_to_planning_scope(

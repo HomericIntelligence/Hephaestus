@@ -50,6 +50,12 @@ _MUTATOR_CASES = [
     ("close_issue_as_covered", (5, 7), "module", "close_issue_as_covered"),
     ("upsert_plan_comment", (5, "body"), "github_api", "gh_issue_upsert_comment"),
     ("post_pr_comment", (7, "why"), "github_api", "gh_issue_comment"),
+    (
+        "upsert_pr_comment",
+        (7, "<!-- marker -->", "<!-- marker -->\nbody"),
+        "github_api",
+        "gh_issue_upsert_comment",
+    ),
     ("mark_pr_implementation_go", (7,), "pr_manager", "mark_pr_implementation_go"),
     ("mark_pr_implementation_no_go", (7,), "pr_manager", "mark_pr_implementation_no_go"),
     ("defer_auto_merge", (7,), "pr_manager", "ensure_pr_auto_merge_deferred"),
@@ -374,6 +380,39 @@ class TestRepoScoping:
 
         assert any(call[:3] == ["api", "--method", "PATCH"] for call in calls)
         assert any("/repos/org/repo-a/issues/comments/9" in call for call in calls)
+        assert not any(call[:2] == ["issue", "comment"] for call in calls)
+
+    def test_repo_scoped_upsert_pr_comment_updates_marker_comment(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[list[str]] = []
+        marker = "<!-- hephaestus-pr-review-go -->"
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            if argv[:2] == ["api", "graphql"]:
+                payload = {
+                    "data": {
+                        "repository": {
+                            "issue": {
+                                "comments": {
+                                    "nodes": [{"databaseId": 12, "body": f"{marker}\nold"}]
+                                }
+                            }
+                        }
+                    }
+                }
+                return SimpleNamespace(stdout=json.dumps(payload))
+            return SimpleNamespace(stdout="")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).upsert_pr_comment(
+            7, marker, f"{marker}\nnew"
+        )
+
+        assert any(call[:3] == ["api", "--method", "PATCH"] for call in calls)
+        assert any("/repos/org/repo-a/issues/comments/12" in call for call in calls)
         assert not any(call[:2] == ["issue", "comment"] for call in calls)
 
     def test_repo_scoped_review_post_uses_repo_endpoint(

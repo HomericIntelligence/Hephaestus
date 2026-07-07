@@ -703,9 +703,20 @@ class Coordinator:
         return {
             "ok": result.ok,
             "interrupted": result.interrupted,
-            "error": result.error,
+            "error": Coordinator._job_result_error_class(result),
             "duration_s": round(result.duration_s, 3),
         }
+
+    @staticmethod
+    def _job_result_error_class(result: JobResult) -> str | None:
+        """Classify job failures without persisting raw error text."""
+        if result.error is None:
+            return None
+        if result.interrupted:
+            return "interrupted"
+        if result.error.startswith("worker_crash:"):
+            return "worker_crash"
+        return "error"
 
     # -- queue draining and admission ---------------------------------------
 
@@ -1066,7 +1077,7 @@ class Coordinator:
                 self._pass_work_count += 1
             if item.stage is StageName.FINISHED and item.result is None:
                 item.result = ItemResult(
-                    passed=True, reason=entry.reason, final_stage=StageName.FINISHED
+                    passed=entry.passed, reason=entry.reason, final_stage=StageName.FINISHED
                 )
             self._push_item(item, item.stage, enter=True)
             pushed += 1
@@ -1079,6 +1090,17 @@ class Coordinator:
         reason: str,
         scope_stages: frozenset[StageName] | None,
     ) -> tuple[StageName | None, str]:
+        """Compatibility wrapper returning only stage/reason for callers."""
+        stage, reason, _passed = self._scope_seed_decision(issue, stage, reason, scope_stages)
+        return stage, reason
+
+    def _scope_seed_decision(
+        self,
+        issue: int,
+        stage: StageName | None,
+        reason: str,
+        scope_stages: frozenset[StageName] | None,
+    ) -> tuple[StageName | None, str, bool]:
         """Reconcile a classified entry stage with the run's pipeline scope.
 
         Full-pipeline runs (``scope_stages is None``) pass the classification
@@ -1105,11 +1127,12 @@ class Coordinator:
             scope_stages: The scope's stage set, or None for a full run.
 
         Returns:
-            The reconciled ``(stage, reason)``.
+            The reconciled ``(stage, reason, passed)``. ``passed`` is used when
+            the stage is clamped directly to ``FINISHED``.
 
         """
         if stage is None or scope_stages is None:
-            return stage, reason
+            return stage, reason, True
 
         first_in_scope = next((s for s in PIPELINE_ORDER if s in scope_stages), None)
         if self.config.force:
@@ -1124,13 +1147,21 @@ class Coordinator:
             if first_in_scope is not None and stage != first_in_scope:
                 first_idx = PIPELINE_ORDER.index(first_in_scope)
                 if PIPELINE_ORDER.index(stage) >= first_idx:
-                    return first_in_scope, f"#{issue} force re-plan ({reason})"
-            return stage, reason
+                    return first_in_scope, f"#{issue} force re-plan ({reason})", True
+            return stage, reason, True
 
         if stage not in scope_stages:
+            if first_in_scope is not None and PIPELINE_ORDER.index(stage) < PIPELINE_ORDER.index(
+                first_in_scope
+            ):
+                return (
+                    StageName.FINISHED,
+                    f"#{issue} not ready for selected scope ({reason})",
+                    False,
+                )
             # Classified past the scope: the scoped work is already done.
-            return StageName.FINISHED, f"#{issue} already past planning scope ({reason})"
-        return stage, reason
+            return StageName.FINISHED, f"#{issue} already past selected scope ({reason})", True
+        return stage, reason, True
 
     def _seed_direct_scope(self, repo: str) -> list[_seeding.SeedEntry]:
         """Seed explicit ``--issues`` / ``--prs`` through the target repo accessor."""
@@ -1143,7 +1174,7 @@ class Coordinator:
         for issue in issue_numbers:
             facts = _seeding.seed_issue_from_github(issue, github)
             stage, reason = _seeding.classify_issue(facts)
-            stage, reason = self._clamp_seed_stage_to_scope(issue, stage, reason, scope_stages)
+            stage, reason, passed = self._scope_seed_decision(issue, stage, reason, scope_stages)
             entries.append(
                 _seeding.SeedEntry(
                     kind="issue",
@@ -1153,31 +1184,47 @@ class Coordinator:
                     pr_number=facts.pr_number if facts.pr_is_open else None,
                     issue_title=facts.title,
                     issue_body=facts.body,
+                    passed=passed,
                 )
             )
         for pr in self.config.prs:
             has_go, _has_no_go = github.pr_has_implementation_state_label(pr)
             issue_number = github.find_issue_for_pr(pr)
+            scope_identifier = issue_number if issue_number is not None else pr
             if has_go:
+                stage, reason, passed = self._scope_seed_decision(
+                    scope_identifier,
+                    StageName.CI,
+                    f"PR #{pr} carries {STATE_IMPLEMENTATION_GO}",
+                    scope_stages,
+                )
                 entries.append(
                     _seeding.SeedEntry(
                         kind="pr",
                         identifier=pr,
-                        stage=StageName.CI,
-                        reason=f"PR #{pr} carries {STATE_IMPLEMENTATION_GO}",
+                        stage=stage,
+                        reason=reason,
                         pr_number=pr,
                         issue_number=issue_number,
+                        passed=passed,
                     )
                 )
             else:
+                stage, reason, passed = self._scope_seed_decision(
+                    scope_identifier,
+                    StageName.PR_REVIEW,
+                    f"PR #{pr} without {STATE_IMPLEMENTATION_GO} — awaiting review",
+                    scope_stages,
+                )
                 entries.append(
                     _seeding.SeedEntry(
                         kind="pr",
                         identifier=pr,
-                        stage=StageName.PR_REVIEW,
-                        reason=(f"PR #{pr} without {STATE_IMPLEMENTATION_GO} — awaiting review"),
+                        stage=stage,
+                        reason=reason,
                         pr_number=pr,
                         issue_number=issue_number,
+                        passed=passed,
                     )
                 )
         return entries

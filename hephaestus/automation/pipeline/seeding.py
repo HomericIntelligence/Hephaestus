@@ -135,6 +135,7 @@ class SeedEntry:
             planner/reviewer/implementer prompts.
         issue_body: Issue body copied into the issue WorkItem payload for
             planner/reviewer/implementer prompts.
+        passed: Terminal result for entries clamped directly to ``finished``.
 
     """
 
@@ -146,6 +147,7 @@ class SeedEntry:
     issue_number: int | None = None
     issue_title: str = ""
     issue_body: str = ""
+    passed: bool = True
 
 
 def _get_state_label(labels: set[str]) -> str | None:

@@ -911,6 +911,56 @@ class PipelineGitHub:
             return
         github_api.gh_issue_comment(pr_number, body)
 
+    def upsert_pr_comment(self, pr_number: int, marker_prefix: str, body: str) -> None:
+        """Create-or-update a marker-keyed PR comment (issue comment channel)."""
+        if self._skip(f"upsert comment on PR #{pr_number}"):
+            return
+        if self._repo_slug is None:
+            github_api.gh_issue_upsert_comment(pr_number, marker_prefix, body)
+            return
+        self._upsert_repo_issue_comment(pr_number, marker_prefix, body)
+
+    def _upsert_repo_issue_comment(
+        self, issue_number: int, marker_prefix: str, body: str
+    ) -> int | None:
+        """Repo-scoped version of ``gh_issue_upsert_comment``."""
+        comments = self._repo_issue_comments(issue_number)
+        matching = [
+            comment
+            for comment in comments
+            if str(comment.get("body", "")).startswith(marker_prefix)
+            and comment.get("databaseId") is not None
+        ]
+        if not matching:
+            self.post_pr_comment(issue_number, body)
+            return None
+
+        owner, name = self._owner_name()
+        target_id = int(matching[-1]["databaseId"])
+        for duplicate in matching[:-1]:
+            duplicate_id = duplicate.get("databaseId")
+            if duplicate_id is not None:
+                gh_call(
+                    [
+                        "api",
+                        "--method",
+                        "DELETE",
+                        f"/repos/{owner}/{name}/issues/comments/{int(duplicate_id)}",
+                    ]
+                )
+        with github_api._body_file(body) as path:
+            gh_call(
+                [
+                    "api",
+                    "--method",
+                    "PATCH",
+                    f"/repos/{owner}/{name}/issues/comments/{target_id}",
+                    "-F",
+                    f"body=@{path}",
+                ]
+            )
+        return target_id
+
     def mark_pr_implementation_no_go(self, pr_number: int) -> None:
         """Apply ``state:implementation-no-go`` (``pr_manager``)."""
         if self._skip(f"mark PR #{pr_number} implementation-no-go"):

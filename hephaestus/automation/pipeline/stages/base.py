@@ -127,7 +127,7 @@ class StageGitHub(Protocol):
 
     def find_issue_for_pr(self, pr_number: int) -> int | None:
         """Return the linked issue for this PR, if its body has ``Closes #N``."""
-        ...
+        pass
 
     def has_existing_plan(self, issue_number: int) -> bool:
         """Return True when the issue already counts as planned.
@@ -226,6 +226,15 @@ class StageGitHub(Protocol):
         The coordinator maps this onto ``gh_issue_comment`` (PRs share the
         issue comment channel). Used by pr_review's HUMAN_BLOCKED terminal
         path to record WHY automation stood down before finishing failed.
+        """
+        pass
+
+    def upsert_pr_comment(self, pr_number: int, marker_prefix: str, body: str) -> None:
+        """Durably create-or-update a marker-keyed PR conversation comment.
+
+        PRs share the issue comment channel, so the coordinator maps this onto
+        an issue-comment upsert scoped to the PR number. Used by lightweight
+        durable artifacts that should remain one-per-role across retries.
         """
         pass
 

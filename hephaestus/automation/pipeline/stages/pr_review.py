@@ -999,7 +999,6 @@ class PrReviewStage(Stage):
             PrReviewStage._post_human_blocked_comment(pr_number, human_unresolved, ctx)
             return False
 
-        PrReviewStage._post_clean_go_comment(pr_number, ctx)
         try:
             ctx.github.mark_pr_implementation_go(pr_number)
         except Exception as e:
@@ -1010,28 +1009,41 @@ class PrReviewStage(Stage):
                 e,
             )
             return True
+        auto_merge_armed = False
         try:
             ctx.github.arm_auto_merge(pr_number)
+            auto_merge_armed = True
         except Exception as e:
             logger.warning(
                 "pr_review: failed to arm auto-merge on PR #%d (non-fatal): %s", pr_number, e
             )
+        PrReviewStage._upsert_clean_go_comment(pr_number, ctx, auto_merge_armed=auto_merge_armed)
         return True
 
     @staticmethod
-    def _post_clean_go_comment(pr_number: int, ctx: StageContext) -> None:
+    def _upsert_clean_go_comment(
+        pr_number: int, ctx: StageContext, *, auto_merge_armed: bool
+    ) -> None:
         """Leave a durable public artifact for clean automated GO reviews."""
+        arm_sentence = (
+            "The pipeline marked this PR `state:implementation-go` and armed auto-merge."
+            if auto_merge_armed
+            else (
+                "The pipeline marked this PR `state:implementation-go`. Auto-merge arming "
+                "failed; a later run will retry."
+            )
+        )
         body = (
             "<!-- hephaestus-pr-review-go -->\n"
             "Automated PR review result: GO.\n\n"
             "No unresolved blocking review threads were found by the automation reviewer. "
-            "The pipeline is marking this PR `state:implementation-go` and arming auto-merge."
+            f"{arm_sentence}"
         )
         try:
-            ctx.github.post_pr_comment(pr_number, body)
+            ctx.github.upsert_pr_comment(pr_number, "<!-- hephaestus-pr-review-go -->", body)
         except Exception as e:
             logger.warning(
-                "pr_review: failed to post clean-GO review comment on PR #%d (non-fatal): %s",
+                "pr_review: failed to upsert clean-GO review comment on PR #%d (non-fatal): %s",
                 pr_number,
                 e,
             )
