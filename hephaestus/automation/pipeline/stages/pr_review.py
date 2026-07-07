@@ -180,6 +180,7 @@ _ROUND_PAYLOAD_KEYS = (
     "review_failed",
     "validation_result",
     "review_threads",
+    "raw_review_threads",
     "posted_thread_ids",
     "difficulty_tiers",
     "address_error",
@@ -557,10 +558,9 @@ class PrReviewStage(Stage):
         """
         if item.pr is None:  # guarded by step(); kept for type narrowing
             return self._fail_back_agent_error(item)
-        threads = _surviving_threads(
-            list(item.payload.get("review_threads") or []),
-            item.payload.get("validation_result"),
-        )
+        raw_threads = [dict(t) for t in item.payload.get("review_threads") or []]
+        threads = _surviving_threads(raw_threads, item.payload.get("validation_result"))
+        item.payload["raw_review_threads"] = raw_threads
         # The surviving set is what gets posted, classified, and addressed.
         item.payload["review_threads"] = threads
         if threads:
@@ -825,7 +825,10 @@ class PrReviewStage(Stage):
         if no_commit:
             if not payload.get("no_commit_retry_done"):
                 payload["no_commit_retry_done"] = True
-                payload["unaddressed_findings"] = list(payload.get("review_threads") or [])
+                retry_threads = (
+                    payload.get("raw_review_threads") or payload.get("review_threads") or []
+                )
+                payload["unaddressed_findings"] = [dict(t) for t in retry_threads]
                 logger.warning(
                     "pr_review:%s: address turn produced NO commit; retrying the "
                     "address once with the unaddressed-findings directive (#1575)",
