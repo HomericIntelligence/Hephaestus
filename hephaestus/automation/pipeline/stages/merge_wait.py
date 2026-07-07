@@ -8,7 +8,7 @@ binding contract):
 
 - States: ENTER -> ARM -> POLL -> DIRTY_REBASE_WAIT -> DIRTY_PUSH_WAIT |
   BLOCKED_ADDRESS_WAIT -> BLOCKED_PUSH_WAIT -> (POLL) -> LEARN_WAIT ->
-  FINISH. Budgets: ``blocked_address`` = 2, ``rebase`` = 2 (both consumed
+  MW_FINISH. Budgets: ``blocked_address`` = 2, ``rebase`` = 2 (both consumed
   in ``on_job_done``, read from ROUTES via ``ctx.budget``); the ``merge``
   poll-window bound stays wall-clock (below), untouched by the pipeline.
 - ARM [M, durable]: arm squash auto-merge (``ctx.github.arm_auto_merge``)
@@ -53,9 +53,9 @@ binding contract):
   in-worker by :func:`build_drive_green_learn_prompt` reusing
   ``learn.build_learn_prompt`` verbatim. Best-effort: ``on_job_done``
   durably marks the learn result on the arming record
-  (``ctx.github.mark_drive_green_learn_result``) BEFORE FINISH — success
+  (``ctx.github.mark_drive_green_learn_result``) BEFORE MW_FINISH — success
   or failure alike, so a restart never replays ``/learn`` — and a failed
-  learn never flips a merged PR to failure (FINISH is FINISH_PASS
+  learn never flips a merged PR to failure (MW_FINISH is FINISH_PASS
   regardless).
 - Owned labels: none (merge state is PR state); ``state:skip`` only on the
   genuinely-stuck exhaustion path above.
@@ -112,7 +112,8 @@ DIRTY_PUSH_WAIT = "DIRTY_PUSH_WAIT"
 BLOCKED_ADDRESS_WAIT = "BLOCKED_ADDRESS_WAIT"
 BLOCKED_PUSH_WAIT = "BLOCKED_PUSH_WAIT"
 LEARN_WAIT = "LEARN_WAIT"
-FINISH = "FINISH"
+MW_FINISH = "MW_FINISH"
+FINISH = MW_FINISH
 
 #: Env var bounding the merge wait (legacy ``_wait_for_pr_terminal`` budget).
 MERGE_MAX_WAIT_ENV = "HEPH_PR_MERGE_MAX_WAIT"
@@ -196,7 +197,7 @@ class MergeWaitStage(Stage):
             return self._request_blocked_push(item, ctx)
         if item.state == LEARN_WAIT:
             return self._request_learn(item, ctx)
-        if item.state == FINISH:
+        if item.state == MW_FINISH:
             # The PR merged; /learn already ran (best-effort) and its result
             # was durably marked in on_job_done. A failed learn never flips
             # a merged PR to failure.
@@ -509,7 +510,7 @@ class MergeWaitStage(Stage):
         Prompt composed in-worker by :func:`build_drive_green_learn_prompt`.
         The dedupe already held at ``_route_merged`` (a terminal record never
         reaches here); ``on_job_done`` durably marks the outcome on the
-        arming record BEFORE FINISH, closing the exactly-once loop.
+        arming record BEFORE MW_FINISH, closing the exactly-once loop.
         """
         job = AgentJob(
             repo=item.repo,
@@ -526,7 +527,7 @@ class MergeWaitStage(Stage):
             },
             descr="drive_green_learn",
         )
-        return JobRequest(job, on_done_state=FINISH)
+        return JobRequest(job, on_done_state=MW_FINISH)
 
     def on_job_done(self, item: WorkItem, result: JobResult, ctx: StageContext) -> None:
         """Consume budgets and record result flags (state is still the WAIT state).
