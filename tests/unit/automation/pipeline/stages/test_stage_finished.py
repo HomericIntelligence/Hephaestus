@@ -8,15 +8,21 @@ Terminal: no outgoing routes.
 from __future__ import annotations
 
 import logging
+import re
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from hephaestus.automation.pipeline.jobs import GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageName
+from hephaestus.automation.pipeline.stages import finished as finished_module
 from hephaestus.automation.pipeline.stages.base import Continue, JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages.finished import FinishedStage
 from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkItem
+
+ROOT = Path(__file__).resolve().parents[5]
+ARCHITECTURE_DOC = ROOT / "docs" / "AUTOMATION_LOOP_ARCHITECTURE.md"
 
 
 @pytest.fixture
@@ -56,8 +62,27 @@ def _item(
     return item
 
 
+def _finished_doc_section() -> str:
+    """Return the architecture doc's finished-stage section."""
+    text = ARCHITECTURE_DOC.read_text(encoding="utf-8")
+    match = re.search(r"### 8\. finished\n(?P<section>.*?)(?=\n## ROUTES table)", text, re.S)
+    assert match is not None
+    return match.group("section")
+
+
+def _state_list(text: str) -> str:
+    """Extract and normalize a single-line state list."""
+    match = re.search(r"(?:\*\*)?States(?:\*\*)?:\s*(?P<states>[^.\n]+)", text)
+    assert match is not None
+    return match.group("states").strip().replace("→", "->")
+
+
 class TestRecord:
     """Step 1 [M]: record the ItemResult in the run ledger."""
+
+    def test_architecture_doc_states_match_stage_contract(self) -> None:
+        """The normative architecture doc lists every FinishedStage state."""
+        assert _state_list(_finished_doc_section()) == _state_list(finished_module.__doc__ or "")
 
     def test_enter_advances_to_record(self, stage: FinishedStage, make_ctx: Any) -> None:
         result = stage.step(_item(), make_ctx())
