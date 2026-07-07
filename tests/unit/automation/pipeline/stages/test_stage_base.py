@@ -7,6 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 
+import pytest
+
+from hephaestus.automation.pipeline import ROUTES
 from hephaestus.automation.pipeline.routing import Disposition, StageOutcome
 from hephaestus.automation.pipeline.stages import (
     PlanningStage,
@@ -22,6 +25,12 @@ from hephaestus.automation.pipeline.stages.base import (
     JobRequest,
     StageContext,
     agent_provider,
+)
+
+KNOWN_ROUTE_BUDGETS: tuple[tuple[str, int], ...] = tuple(
+    (budget_name, budget_value)
+    for route in ROUTES.values()
+    for budget_name, budget_value in route.budgets.items()
 )
 
 
@@ -51,11 +60,19 @@ class TestStageContext:
 
     def test_budget_uses_injected_lookup(self) -> None:
         """budget() returns the injected routing lookup's value."""
-        ctx = self._bare_ctx(budget_fn=lambda name: {"plan": 2}.get(name, 0))
-        assert ctx.budget("plan") == 2
+        ctx = self._bare_ctx(budget_fn=lambda name: {"plan": 7}.get(name, 0))
+        assert ctx.budget("plan") == 7
 
-    def test_budget_defaults_conservatively(self) -> None:
-        """budget() without a lookup defaults to 1 (never unbounded)."""
+    @pytest.mark.parametrize(("budget_name", "expected"), KNOWN_ROUTE_BUDGETS)
+    def test_budget_defaults_to_route_budget_for_known_keys(
+        self, budget_name: str, expected: int
+    ) -> None:
+        """budget() falls back to the declared ROUTES budget for known keys."""
+        ctx = self._bare_ctx()
+        assert ctx.budget(budget_name) == expected
+
+    def test_budget_unknown_key_defaults_conservatively(self) -> None:
+        """budget() without a lookup returns 1 for unknown keys only."""
         ctx = self._bare_ctx()
         assert ctx.budget("anything") == 1
 
