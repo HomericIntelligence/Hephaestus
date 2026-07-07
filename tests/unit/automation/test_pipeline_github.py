@@ -452,6 +452,58 @@ class TestCreatePr:
         assert dry_adapter.create_pr(5, "b", "t", "x") == 0
         create.assert_not_called()
 
+    def test_repo_scoped_create_pr_parses_pull_url(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[list[str]] = []
+
+        monkeypatch.setattr(pg.PipelineGitHub, "find_pr_for_issue", lambda self, issue: None)
+        monkeypatch.setattr(
+            github_api_mod, "_assert_branch_commits_signed", lambda branch, base: None
+        )
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            return SimpleNamespace(stdout="https://github.com/org/repo-a/pull/1888\n")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        pr_number = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).create_pr(
+            1887, "1887-auto-impl", "title", "body\n\nCloses #1887"
+        )
+
+        assert pr_number == 1888
+        assert calls[0][-2:] == ["--repo", "org/repo-a"]
+
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            "gh: GraphQL: Head sha can't be blank",
+            "https://github.com/org/repo-a/123?foo=bar",
+        ],
+    )
+    def test_repo_scoped_create_pr_parse_miss_logs_and_raises_runtime_error(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        stdout: str,
+    ) -> None:
+        monkeypatch.setattr(pg.PipelineGitHub, "find_pr_for_issue", lambda self, issue: None)
+        monkeypatch.setattr(
+            github_api_mod, "_assert_branch_commits_signed", lambda branch, base: None
+        )
+        monkeypatch.setattr(pg, "gh_call", lambda argv, **kwargs: SimpleNamespace(stdout=stdout))
+
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+
+        with caplog.at_level("ERROR", logger=pg.__name__):
+            with pytest.raises(RuntimeError, match="Failed to parse PR number") as excinfo:
+                adapter.create_pr(1887, "1887-auto-impl", "title", "body\n\nCloses #1887")
+
+        assert stdout in str(excinfo.value)
+        assert any(stdout in record.message for record in caplog.records)
+
 
 class TestReadSurface:
     """Reads delegate verbatim (and stay LIVE even under dry-run)."""
