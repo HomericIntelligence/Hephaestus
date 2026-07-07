@@ -250,6 +250,7 @@ class TestCiRebase:
         stage = CiStage()
         ctx = make_ctx(github=_go_github())
         item = _item(make_work_item, state=REBASE_WAIT)
+        item.worktree = "/tmp/wt/issue-1"
         item.payload["base_branch"] = "develop"
 
         result = stage.step(item, ctx)
@@ -263,6 +264,19 @@ class TestCiRebase:
 
         stage.on_job_done(item, JobResult(ok=True, value=True), ctx)
         assert item.attempts["rebase"] == 1  # consumed on completion
+
+    def test_rebase_without_item_worktree_fails_back_before_git_job(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """CI must not mechanically rebase the loop driver's shared checkout."""
+        stage = CiStage()
+        ctx = make_ctx(github=_go_github())
+        item = _item(make_work_item, state=REBASE_WAIT)
+        item.worktree = ""
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FAIL_BACK, "missing_worktree")
 
     def test_failed_rebase_is_best_effort(self, make_ctx: Any, make_work_item: Any) -> None:
         """A failed rebase counts the budget but records no routing flag."""

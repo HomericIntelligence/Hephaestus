@@ -675,11 +675,6 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "opened by teammates and bots. By default drive-green operates only on PRs "
             "authored by the authenticated viewer (#821).",
         ),
-        _store_true(
-            "--allow-unsafe-phase-order",
-            "allow_unsafe_phase_order",
-            "Silence dependency-ordering warnings when --phases skips a recommended predecessor",
-        ),
         _action_spec(
             ("--model",),
             "model",

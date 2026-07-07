@@ -167,11 +167,27 @@ class TestGate:
     def test_gate_existing_pr_with_impl_go_routes_to_ci(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """An existing implementation-go PR fails back already_implementation_go_pr.
+        """An implementation-go PR with a worktree routes straight to CI."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub(
+            open_pr=1001, pr_impl_state=(True, False), pr_head_branch="1-real-branch"
+        )
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, state="GATE")
+        item.worktree = "/tmp/wt/issue-1"
 
-        The ci stage must receive a fully-identified PR: item.pr and the
-        PR's REAL head branch are set BEFORE the fail-back (m7).
-        """
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.FAIL_BACK
+        assert result.note == "already_implementation_go_pr"
+        assert item.pr == 1001  # set before the fail-back (m7)
+        assert item.branch == "1-real-branch"
+
+    def test_gate_existing_pr_with_impl_go_without_worktree_adopts_first(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An implementation-go PR still needs an isolated worktree before CI."""
         stage = ImplementationStage()
         github = FakeStageGitHub(
             open_pr=1001, pr_impl_state=(True, False), pr_head_branch="1-real-branch"
@@ -181,11 +197,12 @@ class TestGate:
 
         result = stage.step(item, ctx)
 
-        assert isinstance(result, StageOutcome)
-        assert result.disposition == Disposition.FAIL_BACK
-        assert result.note == "already_implementation_go_pr"
-        assert item.pr == 1001  # set before the fail-back (m7)
+        assert isinstance(result, Continue)
+        assert result.next_state == "WORKTREE_WAIT"
+        assert item.pr == 1001
         assert item.branch == "1-real-branch"
+        assert item.payload["existing_pr"] is True
+        assert item.payload["existing_pr_impl_go"] is True
 
     def test_gate_existing_pr_without_impl_go_adopts_via_worktree(
         self, make_ctx: Any, make_work_item: Any
