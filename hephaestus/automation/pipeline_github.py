@@ -70,6 +70,8 @@ from hephaestus.github.client import gh_call
 
 logger = logging.getLogger(__name__)
 
+_CLOSES_ISSUE_LINE_RE = re.compile(r"^Closes #(\d+)\s*$", re.MULTILINE)
+
 
 def rate_limit_remaining() -> tuple[int, int] | None:
     """Return ``(remaining, reset_epoch)`` for the GraphQL budget, or ``None``.
@@ -512,6 +514,21 @@ class PipelineGitHub:
         if self._repo_slug is not None:
             return self._find_pr_for_issue(issue_number, state="open")
         return find_pr_for_issue(issue_number)
+
+    def find_issue_for_pr(self, pr_number: int) -> int | None:
+        """Return the PR's linked issue from its exact ``Closes #N`` body line."""
+        try:
+            result = self._gh(["pr", "view", str(pr_number), "--json", "body"], check=False)
+            data = json.loads(result.stdout or "{}")
+        except Exception as exc:
+            logger.warning("PR #%s: linked issue read failed: %s", pr_number, exc)
+            return None
+        body = str(data.get("body") or "")
+        match = _CLOSES_ISSUE_LINE_RE.search(body)
+        if match is None:
+            logger.warning("PR #%s: no exact Closes #N line found for PR-scope seeding", pr_number)
+            return None
+        return int(match.group(1))
 
     def has_existing_plan(self, issue_number: int) -> bool:
         """Labels-first plan gate incl. comment-scan backfill (``is_plan_review_go``)."""

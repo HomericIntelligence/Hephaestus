@@ -125,6 +125,10 @@ class StageGitHub(Protocol):
         """Return an open PR covering this issue, if any (``_review_utils``)."""
         ...
 
+    def find_issue_for_pr(self, pr_number: int) -> int | None:
+        """Return the linked issue for this PR, if its body has ``Closes #N``."""
+        ...
+
     def has_existing_plan(self, issue_number: int) -> bool:
         """Return True when the issue already counts as planned.
 

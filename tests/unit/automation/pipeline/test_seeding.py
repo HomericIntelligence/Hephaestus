@@ -556,6 +556,7 @@ class TestSeedFromCli:
                 identifier=77,
                 stage=StageName.CI,
                 reason=f"PR #77 carries {STATE_IMPLEMENTATION_GO}",
+                pr_number=77,
             )
         ]
 

@@ -459,7 +459,7 @@ class TestSeedingEdges:
             "gh_pr_label_names",
             MagicMock(side_effect=AssertionError("ambient PR label seeding called")),
         )
-        target_github = FakeStageGitHub(pr_impl_state=(True, False))
+        target_github = FakeStageGitHub(pr_impl_state=(True, False), pr_issue=1818)
         created: list[tuple[str, Path]] = []
 
         def github_factory(repo: str, repo_root: Path) -> FakeStageGitHub:
@@ -487,6 +487,7 @@ class TestSeedingEdges:
         item = coordinator.queues[StageName.CI].snapshot()[0]
         assert item.repo == "target-repo"
         assert item.kind is ItemKind.PR
+        assert item.issue == 1818
         assert item.pr == 1854
 
     def test_repo_product_finished_entry_gets_pass_result(

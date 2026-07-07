@@ -1129,6 +1129,7 @@ class Coordinator:
             )
         for pr in self.config.prs:
             has_go, _has_no_go = github.pr_has_implementation_state_label(pr)
+            issue_number = github.find_issue_for_pr(pr)
             if has_go:
                 entries.append(
                     _seeding.SeedEntry(
@@ -1136,6 +1137,8 @@ class Coordinator:
                         identifier=pr,
                         stage=StageName.CI,
                         reason=f"PR #{pr} carries {STATE_IMPLEMENTATION_GO}",
+                        pr_number=pr,
+                        issue_number=issue_number,
                     )
                 )
             else:
@@ -1145,6 +1148,8 @@ class Coordinator:
                         identifier=pr,
                         stage=StageName.PR_REVIEW,
                         reason=(f"PR #{pr} without {STATE_IMPLEMENTATION_GO} — awaiting review"),
+                        pr_number=pr,
+                        issue_number=issue_number,
                     )
                 )
         return entries
@@ -1165,7 +1170,11 @@ class Coordinator:
             item = WorkItem(repo=str(entry.identifier), kind=ItemKind.REPO, stage=entry.stage)
         elif entry.kind == "pr":
             item = WorkItem(
-                repo=default_repo, kind=ItemKind.PR, pr=int(entry.identifier), stage=entry.stage
+                repo=default_repo,
+                kind=ItemKind.PR,
+                issue=entry.issue_number,
+                pr=entry.pr_number or int(entry.identifier),
+                stage=entry.stage,
             )
         else:
             item = WorkItem(
