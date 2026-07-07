@@ -873,11 +873,15 @@ class PipelineGitHub:
                         body_path,
                     ]
                 )
-            output = result.stdout.strip()
+            raw_output = result.stdout
+            output = raw_output.strip()
             match = re.search(r"/pull/(\d+)", output)
             if match:
                 return int(match.group(1))
-            return int(output.split("/")[-1])
+            logger.error("Failed to parse PR number from gh pr create output: %r", raw_output)
+            raise RuntimeError(
+                f"Failed to parse PR number from gh pr create output: {raw_output!r}"
+            )
         return github_api.gh_pr_create(branch, title, body)
 
     def post_pr_comment(self, pr_number: int, body: str) -> None:
