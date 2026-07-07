@@ -201,11 +201,16 @@ def _label_at_or_past(label: str | None, target: str) -> bool:
         True iff the label's rank >= target's rank (absence == needs-plan,
         rank 0).
 
+    Raises:
+        ValueError: If ``target`` is not a known ordered state label.
+
     """
     if label is None:
         label = STATE_NEEDS_PLAN  # absence == needs-plan
+    if target not in _LABEL_RANK:
+        raise ValueError(f"Unknown target state label: {target}")
     label_rank = _LABEL_RANK.get(label, -1)
-    target_rank = _LABEL_RANK.get(target, -1)
+    target_rank = _LABEL_RANK[target]
     return label_rank >= target_rank
 
 

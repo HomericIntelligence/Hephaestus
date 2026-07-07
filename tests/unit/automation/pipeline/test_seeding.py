@@ -20,6 +20,7 @@ from hephaestus.automation.pipeline.seeding import (
     EPIC_NEEDS_SKIP_TAG,
     IssueFacts,
     SeedEntry,
+    _label_at_or_past,
     classify_issue,
     seed_from_cli,
     seed_issue,
@@ -589,6 +590,11 @@ class TestSeedFromCli:
 
 class TestLabelRank:
     """At-or-past label rank comparisons prevent re-queueing."""
+
+    def test_unknown_target_label_raises(self) -> None:
+        """A typo in a compile-time target label must fail closed."""
+        with pytest.raises(ValueError, match="Unknown target state label: state:typo"):
+            _label_at_or_past(STATE_PLAN_GO, "state:typo")
 
     def test_issue_already_past_plan_go_not_requeued_to_planning(self) -> None:
         """AC: issue with state:implementation-go is NOT re-routed to planning."""
