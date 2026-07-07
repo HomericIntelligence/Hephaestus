@@ -72,6 +72,7 @@ module's ``finally`` — on completion AND interrupt.
 from __future__ import annotations
 
 import heapq
+import json
 import logging
 import queue as queue_mod
 import signal
@@ -136,6 +137,8 @@ _MAX_STEPS_PER_TICK = 100
 #: cycles terminate even if a stage's own bookkeeping has a bug.
 _FAIL_BACK_CAP = sum(sum(route.budgets.values()) for route in ROUTES.values())
 
+_WAKE_HANDLE = object()
+
 #: Downstream-first drain order: finish work before admitting new (epic
 #: #1809 "drain queues downstream-first (merge_wait -> ... -> repo)"; the
 #: finished sink drains first of all so results are recorded promptly).
@@ -157,6 +160,23 @@ def _budget_lookup(name: str) -> int:
         if name in route.budgets:
             return route.budgets[name]
     return 1
+
+
+def _json_safe(value: Any) -> Any:
+    """Return a JSON-serializable representation for event-log fields."""
+    if isinstance(value, StageName):
+        return value.value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
 
 
 @dataclass(frozen=True)
@@ -192,6 +212,8 @@ class PipelineConfig:
     # coordinator's budget accessor. ``--max-fix-iterations N`` maps to
     # ``{"ci_fix": N}`` so the CI-fix attempt budget is caller-tunable.
     budget_overrides: dict[str, int] = field(default_factory=dict)
+    serialize_file_overlap: bool = True
+    event_log_path: Path | None = None
     projects_dir: Path = field(default_factory=lambda: Path.home() / "Projects")
     json_out: bool = False
     # Optional contiguous stage subset. When set, the coordinator routes items
@@ -297,6 +319,7 @@ class Coordinator:
         self.preserved: list[tuple[int, str]] = []
         self.items: list[WorkItem] = []
         self.event_log: list[tuple[Any, ...]] = []
+        self._event_log_disabled = False
         self.stages: dict[StageName, Stage] = stages or self._default_stages()
         # Route table for this run: the full ROUTES, or a scope-trimmed copy
         # (out-of-scope next/fail targets rewritten to FINISHED) when the
@@ -394,6 +417,31 @@ class Coordinator:
             return override
         return _budget_lookup(name)
 
+    def _record_event(self, event: str, *fields: Any) -> None:
+        """Append an event to memory and, when configured, to JSONL on disk."""
+        self.event_log.append((event, *fields))
+        if self._event_log_disabled:
+            return
+        path = self.config.event_log_path
+        if path is None:
+            return
+        record = {
+            "ts": time.time(),
+            "event": event,
+            "fields": [_json_safe(field) for field in fields],
+        }
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, sort_keys=True) + "\n")
+        except OSError as exc:
+            logger.warning("failed to write pipeline event log %s: %s", path, exc)
+            self._event_log_disabled = True
+
+    def _wake_completion_wait(self) -> None:
+        """Wake the coordinator if it is blocked in completion_q.get()."""
+        self.completion_q.put((_WAKE_HANDLE, JobResult(ok=False, interrupted=True, error="wake")))
+
     # -- run loop ---------------------------------------------------------------
 
     def run(self) -> int:
@@ -402,6 +450,17 @@ class Coordinator:
         if self._install_signals:
             self._install_signal_handlers()
         try:
+            self._record_event(
+                "run_start",
+                {
+                    "org": self.config.org,
+                    "repos": self.config.repos,
+                    "issues": self.config.issues,
+                    "prs": self.config.prs,
+                    "loops": self.config.loops,
+                    "max_workers": self.config.max_workers,
+                },
+            )
             self._loops_run = 1
             self._seed_pass()
             while True:
@@ -435,6 +494,16 @@ class Coordinator:
                 agent_job_count=self._agent_job_count,
                 agent_job_time_s=self._agent_job_time_s,
                 wall_s=time.monotonic() - started,
+            )
+            self._record_event(
+                "run_end",
+                {
+                    "exit_code": exit_code,
+                    "interrupted": self.shutdown.is_set(),
+                    "items": len(self.items),
+                    "agent_jobs": self._agent_job_count,
+                    "wall_s": stats.wall_s,
+                },
             )
             print_summary(self.items, stats, self.preserved, json_out=self.config.json_out)
         return exit_code
@@ -510,7 +579,7 @@ class Coordinator:
         heapq.heappush(self.timers, (wake, self._seq, item))
         self._seq += 1
         item.add_history_event(item.stage, item.state, note=f"timer-parked {delay_s:.1f}s")
-        self.event_log.append(("timer_park", item.stage.value, self._item_key(item), delay_s))
+        self._record_event("timer_park", item.stage.value, self._item_key(item), delay_s)
 
     def _wake_timers(self) -> None:
         """Move every expired timer entry back into its stage queue."""
@@ -529,6 +598,9 @@ class Coordinator:
                 handle, result = self.completion_q.get_nowait()
             except queue_mod.Empty:
                 return
+            if handle is _WAKE_HANDLE:
+                self._record_event("wake", "completion_q")
+                continue
             self._handle_completion(handle, result)
 
     def _wait_for_completion(self, timeout: float) -> None:
@@ -536,6 +608,9 @@ class Coordinator:
         try:
             handle, result = self.completion_q.get(timeout=timeout)
         except queue_mod.Empty:
+            return
+        if handle is _WAKE_HANDLE:
+            self._record_event("wake", "completion_q")
             return
         self._handle_completion(handle, result)
 
@@ -548,8 +623,25 @@ class Coordinator:
         self._progress = True
         item = self.in_flight.pop(handle, None)
         if item is None:
+            self._record_event(
+                "complete_unknown",
+                type(handle.job).__name__,
+                handle.on_done_state,
+                self._job_result_event_fields(result),
+            )
             logger.warning("completion for unknown handle (already torn down?): %s", handle)
             return
+        self._record_event(
+            "complete",
+            type(handle.job).__name__,
+            self._item_key(item),
+            item.stage.value,
+            handle.on_done_state,
+            {
+                "descr": getattr(handle.job, "descr", ""),
+                **self._job_result_event_fields(result),
+            },
+        )
         self.inflight_per_repo[item.repo] -= 1
         if self.inflight_per_repo[item.repo] <= 0:
             del self.inflight_per_repo[item.repo]
@@ -598,11 +690,33 @@ class Coordinator:
         )
         item.add_history_event(item.stage, item.state, note="interrupted; resumable")
         self._resumable.append(item)
+        self._record_event("resumable", self._item_key(item), item.stage.value, item.state)
         logger.info(
             "interrupt: item %s RESUMABLE at %s (never failed)",
             self._item_key(item),
             item.stage.value,
         )
+
+    @staticmethod
+    def _job_result_event_fields(result: JobResult) -> dict[str, Any]:
+        """Return bounded, output-free job result fields for durable event logs."""
+        return {
+            "ok": result.ok,
+            "interrupted": result.interrupted,
+            "error": Coordinator._job_result_error_class(result),
+            "duration_s": round(result.duration_s, 3),
+        }
+
+    @staticmethod
+    def _job_result_error_class(result: JobResult) -> str | None:
+        """Classify job failures without persisting raw error text."""
+        if result.error is None:
+            return None
+        if result.interrupted:
+            return "interrupted"
+        if result.error.startswith("worker_crash:"):
+            return "worker_crash"
+        return "error"
 
     # -- queue draining and admission ---------------------------------------
 
@@ -622,7 +736,7 @@ class Coordinator:
                 if not self._admit(item):
                     q.push(item)
                     continue
-                self.event_log.append(("drain", stage_name.value, self._item_key(item)))
+                self._record_event("drain", stage_name.value, self._item_key(item))
                 self._run_item(item)
 
     def _drain_implementation(self) -> None:
@@ -659,7 +773,7 @@ class Coordinator:
         ]
         ordered = _admission.order_for_implementation(infos)
         dispatch = ordered
-        if self.config.max_workers > 1 and len(ordered) > 1:
+        if self.config.serialize_file_overlap and self.config.max_workers > 1 and len(ordered) > 1:
             dispatch, deferred = _admission._select_non_overlapping(ordered)
             for number in deferred:
                 logger.info("implementation #%s deferred (file overlap)", number)
@@ -669,7 +783,7 @@ class Coordinator:
             if self.shutdown.is_set() or not self._admit(item):
                 continue  # stays queued (re-pushed below)
             ran.add(id(item))
-            self.event_log.append(("drain", StageName.IMPLEMENTATION.value, self._item_key(item)))
+            self._record_event("drain", StageName.IMPLEMENTATION.value, self._item_key(item))
             self._run_item(item)
         # Preserve original queue order for deferred / non-admitted / non-issue items.
         for it in items:
@@ -771,8 +885,11 @@ class Coordinator:
         handle = self.pool.submit(job, request.on_done_state)
         self.in_flight[handle] = item
         self.inflight_per_repo[item.repo] += 1
-        self.event_log.append(
-            ("submit", type(job).__name__, self._item_key(item), request.on_done_state)
+        self._record_event(
+            "submit",
+            type(job).__name__,
+            self._item_key(item),
+            request.on_done_state,
         )
 
     def _rate_budget_ok(self) -> tuple[bool, float]:
@@ -792,7 +909,7 @@ class Coordinator:
 
         if item.stage is StageName.FINISHED:
             # Sink outcomes are terminal: the result is already recorded.
-            self.event_log.append(("done", self._item_key(item), outcome.note))
+            self._record_event("done", self._item_key(item), outcome.note)
             return
 
         if disposition is Disposition.ADVANCE:
@@ -919,7 +1036,7 @@ class Coordinator:
             self.items.append(item)
             item.payload.setdefault("entry_stage", stage.value)
         self.queues[stage].push(item)
-        self.event_log.append(("push", stage.value, self._item_key(item)))
+        self._record_event("push", stage.value, self._item_key(item))
 
     @staticmethod
     def _item_key(item: WorkItem) -> str:
@@ -960,7 +1077,7 @@ class Coordinator:
                 self._pass_work_count += 1
             if item.stage is StageName.FINISHED and item.result is None:
                 item.result = ItemResult(
-                    passed=True, reason=entry.reason, final_stage=StageName.FINISHED
+                    passed=entry.passed, reason=entry.reason, final_stage=StageName.FINISHED
                 )
             self._push_item(item, item.stage, enter=True)
             pushed += 1
@@ -973,6 +1090,17 @@ class Coordinator:
         reason: str,
         scope_stages: frozenset[StageName] | None,
     ) -> tuple[StageName | None, str]:
+        """Compatibility wrapper returning only stage/reason for callers."""
+        stage, reason, _passed = self._scope_seed_decision(issue, stage, reason, scope_stages)
+        return stage, reason
+
+    def _scope_seed_decision(
+        self,
+        issue: int,
+        stage: StageName | None,
+        reason: str,
+        scope_stages: frozenset[StageName] | None,
+    ) -> tuple[StageName | None, str, bool]:
         """Reconcile a classified entry stage with the run's pipeline scope.
 
         Full-pipeline runs (``scope_stages is None``) pass the classification
@@ -999,11 +1127,12 @@ class Coordinator:
             scope_stages: The scope's stage set, or None for a full run.
 
         Returns:
-            The reconciled ``(stage, reason)``.
+            The reconciled ``(stage, reason, passed)``. ``passed`` is used when
+            the stage is clamped directly to ``FINISHED``.
 
         """
         if stage is None or scope_stages is None:
-            return stage, reason
+            return stage, reason, True
 
         first_in_scope = next((s for s in PIPELINE_ORDER if s in scope_stages), None)
         if self.config.force:
@@ -1018,13 +1147,21 @@ class Coordinator:
             if first_in_scope is not None and stage != first_in_scope:
                 first_idx = PIPELINE_ORDER.index(first_in_scope)
                 if PIPELINE_ORDER.index(stage) >= first_idx:
-                    return first_in_scope, f"#{issue} force re-plan ({reason})"
-            return stage, reason
+                    return first_in_scope, f"#{issue} force re-plan ({reason})", True
+            return stage, reason, True
 
         if stage not in scope_stages:
+            if first_in_scope is not None and PIPELINE_ORDER.index(stage) < PIPELINE_ORDER.index(
+                first_in_scope
+            ):
+                return (
+                    StageName.FINISHED,
+                    f"#{issue} not ready for selected scope ({reason})",
+                    False,
+                )
             # Classified past the scope: the scoped work is already done.
-            return StageName.FINISHED, f"#{issue} already past planning scope ({reason})"
-        return stage, reason
+            return StageName.FINISHED, f"#{issue} already past selected scope ({reason})", True
+        return stage, reason, True
 
     def _seed_direct_scope(self, repo: str) -> list[_seeding.SeedEntry]:
         """Seed explicit ``--issues`` / ``--prs`` through the target repo accessor."""
@@ -1037,7 +1174,7 @@ class Coordinator:
         for issue in issue_numbers:
             facts = _seeding.seed_issue_from_github(issue, github)
             stage, reason = _seeding.classify_issue(facts)
-            stage, reason = self._clamp_seed_stage_to_scope(issue, stage, reason, scope_stages)
+            stage, reason, passed = self._scope_seed_decision(issue, stage, reason, scope_stages)
             entries.append(
                 _seeding.SeedEntry(
                     kind="issue",
@@ -1047,26 +1184,47 @@ class Coordinator:
                     pr_number=facts.pr_number if facts.pr_is_open else None,
                     issue_title=facts.title,
                     issue_body=facts.body,
+                    passed=passed,
                 )
             )
         for pr in self.config.prs:
             has_go, _has_no_go = github.pr_has_implementation_state_label(pr)
+            issue_number = github.find_issue_for_pr(pr)
+            scope_identifier = issue_number if issue_number is not None else pr
             if has_go:
+                stage, reason, passed = self._scope_seed_decision(
+                    scope_identifier,
+                    StageName.CI,
+                    f"PR #{pr} carries {STATE_IMPLEMENTATION_GO}",
+                    scope_stages,
+                )
                 entries.append(
                     _seeding.SeedEntry(
                         kind="pr",
                         identifier=pr,
-                        stage=StageName.CI,
-                        reason=f"PR #{pr} carries {STATE_IMPLEMENTATION_GO}",
+                        stage=stage,
+                        reason=reason,
+                        pr_number=pr,
+                        issue_number=issue_number,
+                        passed=passed,
                     )
                 )
             else:
+                stage, reason, passed = self._scope_seed_decision(
+                    scope_identifier,
+                    StageName.PR_REVIEW,
+                    f"PR #{pr} without {STATE_IMPLEMENTATION_GO} — awaiting review",
+                    scope_stages,
+                )
                 entries.append(
                     _seeding.SeedEntry(
                         kind="pr",
                         identifier=pr,
-                        stage=StageName.PR_REVIEW,
-                        reason=(f"PR #{pr} without {STATE_IMPLEMENTATION_GO} — awaiting review"),
+                        stage=stage,
+                        reason=reason,
+                        pr_number=pr,
+                        issue_number=issue_number,
+                        passed=passed,
                     )
                 )
         return entries
@@ -1087,7 +1245,11 @@ class Coordinator:
             item = WorkItem(repo=str(entry.identifier), kind=ItemKind.REPO, stage=entry.stage)
         elif entry.kind == "pr":
             item = WorkItem(
-                repo=default_repo, kind=ItemKind.PR, pr=int(entry.identifier), stage=entry.stage
+                repo=default_repo,
+                kind=ItemKind.PR,
+                issue=entry.issue_number,
+                pr=entry.pr_number or int(entry.identifier),
+                stage=entry.stage,
             )
         else:
             item = WorkItem(
@@ -1133,6 +1295,7 @@ class Coordinator:
             if self.shutdown.is_set():
                 logger.warning("second signal %d: immediate shutdown", signum)
                 self._immediate = True
+                self._wake_completion_wait()
             else:
                 logger.warning(
                     "signal %d: graceful shutdown (grace %.0fs; press again to force)",
@@ -1141,6 +1304,7 @@ class Coordinator:
                 )
                 self.shutdown.set()
                 self._grace_deadline = time.monotonic() + self.config.grace_s
+                self._wake_completion_wait()
 
         sigs = [signal.SIGINT, signal.SIGTERM]
         if hasattr(signal, "SIGHUP"):  # pragma: no branch - always true on POSIX

@@ -40,6 +40,7 @@ class FakeStageGitHub(FakeGitHub):
         issue_body: str = "",
         merged_pr: int | None = None,
         open_pr: int | None = None,
+        pr_issue: int | None = None,
         has_plan: bool = False,
         pr_head_branch: str | None = None,
         pr_impl_state: tuple[bool, bool] = (False, False),
@@ -61,6 +62,7 @@ class FakeStageGitHub(FakeGitHub):
             issue_body: Canned issue body returned by gh_issue_json.
             merged_pr: Canned answer for find_merged_closing_pr.
             open_pr: Canned answer for find_pr_for_issue.
+            pr_issue: Canned answer for find_issue_for_pr.
             has_plan: Canned answer for has_existing_plan.
             pr_head_branch: Canned answer for get_pr_head_branch.
             pr_impl_state: Canned (has_go, has_no_go) answer for
@@ -90,6 +92,7 @@ class FakeStageGitHub(FakeGitHub):
         self._issue_body = issue_body
         self._merged_pr = merged_pr
         self._open_pr = open_pr
+        self._pr_issue = pr_issue
         self._has_plan = has_plan
         self._pr_head_branch = pr_head_branch
         self._pr_impl_state = pr_impl_state
@@ -136,6 +139,10 @@ class FakeStageGitHub(FakeGitHub):
     def find_pr_for_issue(self, issue_number: int) -> int | None:
         """Mirror _review_utils.find_pr_for_issue (open PR lookup)."""
         return self._open_pr
+
+    def find_issue_for_pr(self, pr_number: int) -> int | None:
+        """Mirror PipelineGitHub.find_issue_for_pr (PR body Closes lookup)."""
+        return self._pr_issue
 
     def has_existing_plan(self, issue_number: int) -> bool:
         """Mirror PlannerStateManager.has_existing_plan (plan comment check)."""
@@ -235,6 +242,10 @@ class FakeStageGitHub(FakeGitHub):
         stores the body for content assertions.
         """
         self.gh_issue_comment(pr_number, body)
+
+    def upsert_pr_comment(self, pr_number: int, marker_prefix: str, body: str) -> None:
+        """Mirror the coordinator PR-comment upsert (delegates to issue comments)."""
+        self.gh_issue_upsert_comment(pr_number, marker_prefix, body)
 
     def arm_auto_merge(self, pr_number: int) -> None:
         """Mirror pr_manager.enable_auto_merge_after_implementation_go."""
@@ -339,6 +350,7 @@ def make_ctx() -> Callable[..., StageContext]:
         dry_run: bool = False,
         github: FakeStageGitHub | None = None,
         paths: Any = None,
+        budget_fn: Callable[[str], int] | None = None,
     ) -> StageContext:
         ticks = [0]
 
@@ -353,7 +365,7 @@ def make_ctx() -> Callable[..., StageContext]:
             github=github if github is not None else FakeStageGitHub(),
             paths=paths if paths is not None else _Paths(),
             now_fn=now_fn,
-            budget_fn=_budget_fn,
+            budget_fn=budget_fn if budget_fn is not None else _budget_fn,
         )
 
     return _make_ctx

@@ -30,14 +30,17 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from hephaestus.automation.pipeline.coordinator import PipelineConfig
+    from hephaestus.automation.pipeline.routing import PipelineScope
 
 from hephaestus.agents.runtime import resolve_agent
 from hephaestus.automation._review_utils import build_automation_parser
@@ -48,6 +51,7 @@ from hephaestus.automation.loop_repo_manager import (
     _resolve_repo_dir as _resolve_repo_dir,
     _sort_repos_by_open_count as _sort_repos_by_open_count,
 )
+from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.cli.utils import (
     configure_github_throttle_from_args,
     emit_json_status,
@@ -72,6 +76,8 @@ ALL_POST_LOOP_STAGES: tuple[str, ...] = ("drive-green",)
 # Per-phase sequence, in order: plan → implement → drive-green. Operators select
 # any subset via --phases; unselected phases are skipped.
 ALL_SELECTABLE: tuple[str, ...] = ALL_PHASES + ALL_POST_LOOP_STAGES
+
+LOOP_DEFAULT_MAX_WORKERS = 6
 
 # DEFAULT_PROJECTS_DIR is re-exported from hephaestus.config.paths so existing
 # tests that patch this module-level name continue to work. See #704: the
@@ -159,7 +165,7 @@ class LoopConfig:
     """
 
     loops: int = 5
-    max_workers: int = 3
+    max_workers: int = LOOP_DEFAULT_MAX_WORKERS
     parallel_repos: int = 1
     # Dataclass default covers ONLY the iteration phases (``ALL_PHASES`` =
     # plan, implement), deliberately excluding drive-green — a bare
@@ -210,8 +216,9 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="hephaestus-automation-loop",
         description=("Run the queue-based automation pipeline across HomericIntelligence repos."),
         max_workers_help=(
-            "Parallel workers per repo per phase (1-32, default: 3). Passes to child phases."
+            "Parallel workers per repo per phase (1-32, default: 6). Passes to child phases."
         ),
+        max_workers_default=LOOP_DEFAULT_MAX_WORKERS,
         add_github_throttle=True,
         dry_run_prefix=(
             "Forward --dry-run to every phase (suppresses GitHub mutations and git pushes)."
@@ -396,6 +403,48 @@ def _phase_order_warnings(cfg: LoopConfig) -> list[str]:
     return warnings
 
 
+def _pipeline_scope_for_phases(phases: tuple[str, ...]) -> PipelineScope | None:
+    """Translate top-level phase names into a contiguous pipeline scope.
+
+    ``None`` preserves the default full pipeline, including repo discovery.
+    Partial selections use the same stage ownership as the focused wrapper
+    CLIs: plan = planning+plan_review, implement = implementation+pr_review,
+    drive-green = ci+merge_wait.
+    """
+    selected = set(phases)
+    if selected == set(ALL_SELECTABLE):
+        return None
+
+    from hephaestus.automation.pipeline.routing import PipelineScope, StageName
+
+    stage_sets = {
+        "plan": (StageName.PLANNING, StageName.PLAN_REVIEW),
+        "implement": (StageName.IMPLEMENTATION, StageName.PR_REVIEW),
+        "drive-green": (StageName.CI, StageName.MERGE_WAIT),
+    }
+    stages = frozenset(
+        stage for phase in ALL_SELECTABLE if phase in selected for stage in stage_sets[phase]
+    )
+    try:
+        return PipelineScope(stages)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def _pipeline_event_log_path(projects_dir: Path, repos: list[str]) -> Path | None:
+    """Return the default durable event-log path for a loop invocation.
+
+    The coordinator writes ``run_start`` before repo discovery. Keeping the
+    default log under the local automation state dir avoids creating
+    ``projects_dir / repo`` early, which would look like a cloned checkout to
+    the repo stage.
+    """
+    if not repos:
+        return None
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return Path(DEFAULT_STATE_DIR) / f"pipeline-events-{stamp}-{os.getpid()}.jsonl"
+
+
 # ---------------------------------------------------------------------------
 # Repo discovery — re-exported from loop_repo_manager (refs #1360 / #1179).
 # The helpers above are imported at module level with explicit ``as`` aliases,
@@ -546,8 +595,12 @@ def _build_pipeline_config(
         no_advise=cfg.no_advise,
         nitpick=cfg.nitpick,
         drive_green_all=cfg.drive_green_all,
+        budget_overrides={"merge": cfg.max_merge_attempts},
+        serialize_file_overlap=cfg.serialize_file_overlap,
+        event_log_path=_pipeline_event_log_path(cfg.projects_dir, repos),
         projects_dir=cfg.projects_dir,
         json_out=args.json,
+        scope=_pipeline_scope_for_phases(cfg.phases),
     )
 
 

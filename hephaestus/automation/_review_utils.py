@@ -348,6 +348,7 @@ def build_automation_parser(
     formatter_class: type[argparse.HelpFormatter] | None = None,
     add_agent: bool = True,
     add_max_workers: bool = True,
+    max_workers_default: int = DEFAULT_WORKER_COUNT,
     max_workers_help: str = "Maximum number of parallel workers, 1-32 (default: 3)",
     add_parallel: bool = False,
     parallel_help: str = "Number of parallel workers, 1-32 (default: 3)",
@@ -370,6 +371,7 @@ def build_automation_parser(
         formatter_class: Optional argparse formatter class.
         add_agent: Add the common ``--agent`` provider selector.
         add_max_workers: Add the common validated ``--max-workers`` flag.
+        max_workers_default: Default worker count when ``--max-workers`` is omitted.
         max_workers_help: Help text for ``--max-workers``.
         add_parallel: Add the planner-style ``--parallel`` worker flag.
         parallel_help: Help text for ``--parallel``.
@@ -394,7 +396,7 @@ def build_automation_parser(
     if add_agent:
         add_agent_argument(parser)
     if add_max_workers:
-        add_max_workers_arg(parser, help_text=max_workers_help)
+        add_max_workers_arg(parser, default=max_workers_default, help_text=max_workers_help)
     if add_parallel:
         parser.add_argument(
             "--parallel",

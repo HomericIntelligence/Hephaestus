@@ -405,7 +405,13 @@ class PrReviewStage(Stage):
                     "ci_status": item.payload.get("ci_status", ""),
                     "pr_description": item.payload.get("pr_description", ""),
                     "advise_findings": item.payload.get("advise_findings", ""),
-                    "include_nitpicks": False,
+                    "include_nitpicks": bool(
+                        getattr(
+                            ctx.config,
+                            "nitpick",
+                            getattr(ctx.config, "include_nitpicks", False),
+                        )
+                    ),
                 },
                 parse=parse_review_verdict,  # verdict parsed in-worker
                 descr="review",
@@ -1003,10 +1009,41 @@ class PrReviewStage(Stage):
                 e,
             )
             return True
+        auto_merge_armed = False
         try:
             ctx.github.arm_auto_merge(pr_number)
+            auto_merge_armed = True
         except Exception as e:
             logger.warning(
                 "pr_review: failed to arm auto-merge on PR #%d (non-fatal): %s", pr_number, e
             )
+        PrReviewStage._upsert_clean_go_comment(pr_number, ctx, auto_merge_armed=auto_merge_armed)
         return True
+
+    @staticmethod
+    def _upsert_clean_go_comment(
+        pr_number: int, ctx: StageContext, *, auto_merge_armed: bool
+    ) -> None:
+        """Leave a durable public artifact for clean automated GO reviews."""
+        arm_sentence = (
+            "The pipeline marked this PR `state:implementation-go` and armed auto-merge."
+            if auto_merge_armed
+            else (
+                "The pipeline marked this PR `state:implementation-go`. Auto-merge arming "
+                "failed; a later run will retry."
+            )
+        )
+        body = (
+            "<!-- hephaestus-pr-review-go -->\n"
+            "Automated PR review result: GO.\n\n"
+            "No unresolved blocking review threads were found by the automation reviewer. "
+            f"{arm_sentence}"
+        )
+        try:
+            ctx.github.upsert_pr_comment(pr_number, "<!-- hephaestus-pr-review-go -->", body)
+        except Exception as e:
+            logger.warning(
+                "pr_review: failed to upsert clean-GO review comment on PR #%d (non-fatal): %s",
+                pr_number,
+                e,
+            )

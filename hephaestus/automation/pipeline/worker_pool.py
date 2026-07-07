@@ -340,6 +340,7 @@ class WorkerPool:
             stdout = resilient_call(
                 _invoke,
                 circuit_breaker_name=f"agent:{agent}:{job.model}",
+                retry_predicate=lambda _exc: not self._shutdown.is_set(),
             )
 
             value = None

@@ -129,10 +129,13 @@ class SeedEntry:
         pr_number: Open PR number for directly-seeded issue entries, when one
             exists. Repo discovery carries this in products; direct ``--issues``
             seeding needs the same value so downstream PR stages have context.
+        issue_number: Linked issue number for directly-seeded PR entries, when
+            the PR body carries the repo-policy ``Closes #N`` line.
         issue_title: Issue title copied into the issue WorkItem payload for
             planner/reviewer/implementer prompts.
         issue_body: Issue body copied into the issue WorkItem payload for
             planner/reviewer/implementer prompts.
+        passed: Terminal result for entries clamped directly to ``finished``.
 
     """
 
@@ -141,8 +144,10 @@ class SeedEntry:
     stage: StageName | None
     reason: str
     pr_number: int | None = None
+    issue_number: int | None = None
     issue_title: str = ""
     issue_body: str = ""
+    passed: bool = True
 
 
 def _get_state_label(labels: set[str]) -> str | None:
@@ -460,6 +465,7 @@ def seed_from_cli(
                     identifier=pr,
                     stage=StageName.CI,
                     reason=f"PR #{pr} carries {STATE_IMPLEMENTATION_GO}",
+                    pr_number=pr,
                 )
             )
         else:
@@ -469,6 +475,7 @@ def seed_from_cli(
                     identifier=pr,
                     stage=StageName.PR_REVIEW,
                     reason=f"PR #{pr} without {STATE_IMPLEMENTATION_GO} — awaiting review",
+                    pr_number=pr,
                 )
             )
     return entries

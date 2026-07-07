@@ -99,6 +99,7 @@ def resilient_call(
     max_retries: int = 3,
     initial_delay: float = 1.0,
     max_delay: float = 30.0,
+    retry_predicate: Callable[[BaseException], bool] | None = None,
     **kwargs: Any,
 ) -> R:
     """Execute a function with retry and optional circuit breaker.
@@ -120,6 +121,8 @@ def resilient_call(
         max_retries: Maximum retry attempts
         initial_delay: Initial backoff delay in seconds
         max_delay: Maximum backoff delay cap in seconds
+        retry_predicate: Optional extra predicate applied after the standard
+            transient-error classifier. Returning False suppresses retry.
         **kwargs: Keyword arguments for func
 
     Returns:
@@ -134,13 +137,18 @@ def resilient_call(
     if circuit_breaker_name:
         cb = get_circuit_breaker(circuit_breaker_name)
 
+    def _retry_predicate(error: BaseException) -> bool:
+        if not is_transient_subprocess_error(error):
+            return False
+        return retry_predicate is None or retry_predicate(error)
+
     @retry_with_backoff(
         max_retries=max_retries,
         initial_delay=initial_delay,
         backoff_factor=2,
         max_delay=max_delay,
         retry_on=TRANSIENT_SUBPROCESS_ERRORS,
-        retry_predicate=is_transient_subprocess_error,
+        retry_predicate=_retry_predicate,
         logger=logger.warning,
         jitter=True,
     )
