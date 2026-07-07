@@ -445,7 +445,9 @@ the correct entry queue. There is no persisted queue snapshot.
 
 Exit codes are stable: `130` for interrupted runs, `1` if any item failed,
 skipped, blocked, or the coordinator itself hit a fatal error, and `0` for a
-clean run.
+clean run. If an interrupt overlaps a non-passing ledger entry or fatal
+coordinator error, `130` deliberately takes priority because the run did not
+complete.
 
 ## Concurrency and tuning
 

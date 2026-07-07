@@ -154,6 +154,44 @@ class TestWiring:
         assert hints["return"] is coordinator_mod.StageStepResult
 
 
+class TestExitCode:
+    """Exit-code precedence contract."""
+
+    def test_exit_code_documents_interrupt_priority(self) -> None:
+        """The interrupt branch should explain why it wins over prior failures."""
+        source = inspect.getsource(Coordinator._exit_code)
+
+        assert "Interrupt deliberately takes priority" in source
+        assert "earlier work had already failed" in source
+
+    @pytest.mark.parametrize(
+        ("reason"),
+        [
+            "fail: stage crash",
+            "skip: state:skip",
+            "blocked: unresolved review",
+        ],
+    )
+    def test_shutdown_takes_priority_over_recorded_nonpassing_result(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        reason: str,
+    ) -> None:
+        """Interrupts should still exit 130 when the ledger already has failures."""
+        coordinator = _coordinator(tmp_path, monkeypatch)
+        coordinator.ledger.append(
+            work_item_mod.ItemResult(
+                passed=False,
+                reason=reason,
+                final_stage=StageName.FINISHED,
+            )
+        )
+        coordinator.shutdown.set()
+
+        assert coordinator._exit_code() == 130
+
+
 class TestCompletionEdges:
     """_handle_completion bookkeeping branches."""
 

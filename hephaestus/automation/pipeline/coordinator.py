@@ -67,6 +67,9 @@ immediately and synthesizes interrupted results. Items touched by an
 interrupt report ``RESUMABLE at <stage>``, never FAILED. Exit codes: 130
 interrupt, 1 any fail/skip/blocked, 0 clean. The summary prints in this
 module's ``finally`` — on completion AND interrupt.
+
+When an interrupt overlaps a non-passing ledger entry or fatal coordinator
+error, 130 deliberately takes priority because the run did not complete.
 """
 
 from __future__ import annotations
@@ -512,6 +515,10 @@ class Coordinator:
     def _exit_code(self) -> int:
         """130 on interrupt; 1 on any fail/skip/blocked (or fatal error); 0 clean."""
         if self.shutdown.is_set():
+            # Interrupt deliberately takes priority over non-passing ledger
+            # entries and fatal coordinator errors: a signal means the run did
+            # not complete, so wrappers must classify it as cancellation even
+            # if earlier work had already failed.
             return 130
         if self._fatal or any(not result.passed for result in self.ledger):
             return 1
