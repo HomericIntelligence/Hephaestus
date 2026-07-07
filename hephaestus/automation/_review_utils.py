@@ -62,6 +62,7 @@ from hephaestus.cli.utils import (
 from hephaestus.constants import AUTOMATION_LOG_FORMAT, LOG_DATEFMT
 from hephaestus.io.utils import write_secure
 
+from .git_utils import issue_auto_impl_branch_name
 from .github_api import _gh_call
 from .models import DEFAULT_STATE_DIR as DEFAULT_STATE_DIR, DEFAULT_WORKER_COUNT
 
@@ -735,7 +736,7 @@ def find_pr_for_issue(
 
     """
     # Strategy 1: branch-name lookup
-    branch_name = f"{issue_number}-auto-impl"
+    branch_name = issue_auto_impl_branch_name(issue_number)
     try:
         result = _gh_call(
             [
@@ -906,7 +907,7 @@ def find_merged_pr_for_issue(issue_number: int) -> int | None:
         The merged PR number if found, ``None`` otherwise.
 
     """
-    branch_name = f"{issue_number}-auto-impl"
+    branch_name = issue_auto_impl_branch_name(issue_number)
     try:
         result = _gh_call(
             [

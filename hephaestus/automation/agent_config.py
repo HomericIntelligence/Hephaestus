@@ -519,6 +519,14 @@ def current_trunk_githash(repo_path: Path | None = None) -> str:
     return short_githash(repo_path if repo_path is not None else Path.cwd())
 
 
+_AUTO_IMPL_BRANCH_SUFFIX = "-auto-impl"
+
+
+def issue_auto_impl_branch_name(issue_number: int | str) -> str:
+    """Return the canonical branch name for an issue implementation PR."""
+    return f"{issue_number}{_AUTO_IMPL_BRANCH_SUFFIX}"
+
+
 def session_jsonl_path(uuid_str: str, cwd: Path) -> Path:
     """Return the path where Claude Code persists a session's transcript.
 
@@ -586,6 +594,7 @@ __all__ = [
     "git_message_model",
     "implementer_claude_timeout",
     "implementer_model",
+    "issue_auto_impl_branch_name",
     "learn_claude_timeout",
     "learn_model",
     "normalize_claude_model",

@@ -25,6 +25,8 @@ from hephaestus.utils.cache import ThreadSafeCache
 from hephaestus.utils.helpers import get_repo_root as get_repo_root, run_subprocess
 from hephaestus.utils.retry import retry_with_backoff
 
+from .session_naming import issue_auto_impl_branch_name as _session_issue_auto_impl_branch_name
+
 logger = logging.getLogger(__name__)
 
 COMMIT_POLICY_REWRITE_EXEC = "git commit --amend --no-edit -S -s"
@@ -178,6 +180,11 @@ def issue_ref(issue_number: int | str) -> str:
 def pr_ref(pr_number: int | str) -> str:
     """Return a ``<repo>#<number>`` reference string for PRs (same format as issues)."""
     return f"{get_repo_slug()}#{pr_number}"
+
+
+def issue_auto_impl_branch_name(issue_number: int | str) -> str:
+    """Return the canonical branch name for an issue implementation PR."""
+    return _session_issue_auto_impl_branch_name(issue_number)
 
 
 def commit_if_changes(

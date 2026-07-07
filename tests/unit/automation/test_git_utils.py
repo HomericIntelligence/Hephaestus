@@ -19,6 +19,7 @@ from hephaestus.automation.git_utils import (
     get_repo_info,
     get_repo_root,
     is_clean_working_tree,
+    issue_auto_impl_branch_name,
     push_branch,
     push_current_branch_with_lease_on_divergence,
     rebase_worktree_onto,
@@ -169,6 +170,16 @@ class TestGetRepoInfo:
         # Next call should invoke run() again
         get_repo_info(repo_root)
         assert git_utils_mocks.run.call_count == 2
+
+
+class TestIssueAutoImplBranchName:
+    """Tests for the canonical issue auto-implementation branch formatter."""
+
+    def test_returns_canonical_branch_name(self) -> None:
+        """Issue branches must use the shared ``<issue>-auto-impl`` formatter."""
+        branch_name = issue_auto_impl_branch_name(123)
+
+        assert branch_name == "123-auto-impl"
 
 
 class TestCommitIfChanges:

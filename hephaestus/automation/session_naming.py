@@ -13,6 +13,7 @@ from hephaestus.automation.agent_config import (
     AGENT_PR_MESSAGE as AGENT_PR_MESSAGE,
     AGENT_PR_REVIEWER as AGENT_PR_REVIEWER,
     current_trunk_githash as current_trunk_githash,
+    issue_auto_impl_branch_name as issue_auto_impl_branch_name,
     reviewer_agent as reviewer_agent,
     session_jsonl_path as session_jsonl_path,
     session_name as session_name,
