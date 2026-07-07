@@ -23,7 +23,10 @@ DEFAULT_MERGE_ATTEMPTS = 1
 
 
 class StageName(str, Enum):
-    """Pipeline stage identifiers."""
+    """Pipeline stage identifiers.
+
+    Members are declared in pipeline order and MUST NOT be reordered.
+    """
 
     REPO = "repo"
     PLANNING = "planning"

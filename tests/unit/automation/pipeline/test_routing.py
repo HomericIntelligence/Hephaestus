@@ -37,6 +37,12 @@ class TestStageName:
         assert isinstance(StageName.REPO, str)
         assert StageName.REPO == "repo"
 
+    def test_stage_name_docstring_warns_about_order(self) -> None:
+        """StageName docstring must warn that declaration order is semantic."""
+        assert StageName.__doc__ is not None
+        assert "pipeline order" in StageName.__doc__
+        assert "MUST NOT be reordered" in StageName.__doc__
+
 
 class TestDisposition:
     """Tests for Disposition enum."""
