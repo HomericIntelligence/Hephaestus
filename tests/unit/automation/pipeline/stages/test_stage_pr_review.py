@@ -13,6 +13,7 @@ from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages.pr_review import (
+    PR_FINISH,
     REVIEW_ERROR_RETRY_CAP,
     PrReviewStage,
     _surviving_threads,
@@ -380,7 +381,7 @@ class TestPrReviewStageStep:
         assert result.on_done_state == "EVAL"
 
     def test_followup_wait_requests_follow_up(self, make_ctx: Any, make_work_item: Any) -> None:
-        """FOLLOWUP_WAIT submits the follow-up job, then FINISH advances."""
+        """FOLLOWUP_WAIT submits the follow-up job, then PR_FINISH advances."""
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state="FOLLOWUP_WAIT")
@@ -389,9 +390,9 @@ class TestPrReviewStageStep:
 
         assert isinstance(result, JobRequest)
         assert result.job.descr == "follow_up"
-        assert result.on_done_state == "FINISH"
+        assert result.on_done_state == PR_FINISH
 
-        item.state = "FINISH"
+        item.state = PR_FINISH
         outcome = stage.step(item, ctx)
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition == Disposition.ADVANCE

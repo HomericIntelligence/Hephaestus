@@ -163,7 +163,8 @@ ADDRESS_WAIT = "ADDRESS_WAIT"
 PUSH_WAIT = "PUSH_WAIT"
 EVAL = "EVAL"
 FOLLOWUP_WAIT = "FOLLOWUP_WAIT"
-FINISH = "FINISH"
+PR_FINISH = "PR_FINISH"
+FINISH = PR_FINISH
 
 _STEP_HANDLER_NAMES: dict[str, str] = {
     ENTER: "_enter",
@@ -175,7 +176,7 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
     PUSH_WAIT: "_push_wait",
     EVAL: "_eval",
     FOLLOWUP_WAIT: "_followup_wait",
-    FINISH: "_finish",
+    PR_FINISH: "_finish",
 }
 
 
@@ -338,7 +339,7 @@ class PrReviewStage(Stage):
     - PUSH_WAIT: commit+push the addressing changes.
     - EVAL [M]: re-housed ``_evaluate_go_verdict`` + budget gate (see
       module docstring).
-    - FOLLOWUP_WAIT (GO only): submit the follow-up job, then FINISH ->
+    - FOLLOWUP_WAIT (GO only): submit the follow-up job, then PR_FINISH ->
       ADVANCE.
     """
 
@@ -522,7 +523,7 @@ class PrReviewStage(Stage):
         return JobRequest(git_job, on_done_state=EVAL)
 
     def _followup_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """FOLLOWUP_WAIT submits the follow-up job before FINISH advances."""
+        """FOLLOWUP_WAIT submits the follow-up job before PR_FINISH advances."""
         issue = _issue_number(item)
         logger.info("pr_review:%d: requesting follow-up job", issue)
         job = AgentJob(
@@ -537,10 +538,10 @@ class PrReviewStage(Stage):
             prompt_kwargs={"issue_number": item.issue},
             descr="follow_up",
         )
-        return JobRequest(job, on_done_state=FINISH)
+        return JobRequest(job, on_done_state=PR_FINISH)
 
     def _finish(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """FINISH advances after the follow-up job completes."""
+        """PR_FINISH advances after the follow-up job completes."""
         issue = _issue_number(item)
         logger.info("pr_review:%d: follow-up completed; advancing", issue)
         return StageOutcome(Disposition.ADVANCE, "implementation review approved")

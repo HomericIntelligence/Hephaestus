@@ -16,9 +16,9 @@ from hephaestus.automation.pipeline.stages.merge_wait import (
     DIRTY_PUSH_WAIT,
     DIRTY_REBASE_WAIT,
     ENTER,
-    FINISH,
     LEARN_WAIT,
     MERGE_MAX_WAIT_ENV,
+    MW_FINISH,
     POLL,
     MergeWaitStage,
     build_drive_green_learn_prompt,
@@ -634,10 +634,10 @@ class TestMergeWaitLearn:
         assert "issue #9" in prompt
 
     def test_finish_state_is_terminal_pass(self, make_ctx: Any, make_work_item: Any) -> None:
-        """FINISH always passes — /learn outcome can never flip a merged PR."""
+        """MW_FINISH always passes — /learn outcome can never flip a merged PR."""
         stage = MergeWaitStage()
         ctx = make_ctx(github=FakeStageGitHub())
-        item = _armed_item(make_work_item, state=FINISH)
+        item = _armed_item(make_work_item, state=MW_FINISH)
 
         assert stage.step(item, ctx) == StageOutcome(Disposition.FINISH_PASS, "merged")
 
@@ -672,7 +672,7 @@ class TestMergeWaitOnJobDone:
             assert "rebase_clean" not in item.payload
 
     def test_learn_wait_step_dispatches_learn_job(self, make_ctx: Any, make_work_item: Any) -> None:
-        """LEARN_WAIT submits the composed learn job targeting FINISH."""
+        """LEARN_WAIT submits the composed learn job targeting MW_FINISH."""
         stage = MergeWaitStage()
         ctx = make_ctx(github=FakeStageGitHub())
         item = _armed_item(make_work_item, state=LEARN_WAIT)
@@ -682,6 +682,6 @@ class TestMergeWaitOnJobDone:
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)
         assert result.job.prompt_builder is build_drive_green_learn_prompt
-        assert result.on_done_state == FINISH
+        assert result.on_done_state == MW_FINISH
         prompt = result.job.prompt_builder(**result.job.prompt_kwargs)
         assert "PR #601" in prompt
