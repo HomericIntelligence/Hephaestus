@@ -16,6 +16,7 @@ import pytest
 
 from hephaestus.automation.pipeline.routing import ROUTES, StageName
 from hephaestus.automation.pipeline.stages import StageContext, StageGitHub
+from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARGV
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.protocol import PLAN_COMMENT_MARKER
 from tests.unit.automation.pipeline.conftest import FakeGitHub
@@ -330,6 +331,7 @@ class _Config:
         self.force = False
         self.agent = "claude"
         self.dry_run = dry_run
+        self.pre_pr_test_argv = PRE_PR_TEST_ARGV
 
 
 class _Paths:

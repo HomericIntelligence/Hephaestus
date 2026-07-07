@@ -445,10 +445,11 @@ class ImplementationStage(Stage):
         item.payload.pop("tests_failed", None)
         item.payload.pop("test_output", None)
         logger.info("implementation:%d: requesting pre-PR test job", issue)
+        test_argv = tuple(getattr(ctx.config, "pre_pr_test_argv", PRE_PR_TEST_ARGV))
         test_job = BuildTestJob(
             repo=item.repo,
             cwd=_worktree_path(item, ctx),
-            argv=PRE_PR_TEST_ARGV,
+            argv=test_argv,
             timeout_s=PRE_PR_TEST_TIMEOUT_S,
             descr="pre_pr_tests",
         )
