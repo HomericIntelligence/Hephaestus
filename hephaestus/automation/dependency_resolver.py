@@ -26,6 +26,7 @@ from collections import defaultdict, deque
 
 from .github_api import fetch_issue_info, prefetch_issue_states
 from .models import DependencyGraph, IssueInfo, IssueState
+from .state_labels import is_skipped
 
 logger = logging.getLogger(__name__)
 
@@ -211,11 +212,23 @@ class DependencyResolver:
             dep_state = cached_states.get(dep_num)
             if self.skip_closed and dep_state is not None and dep_state.is_done:
                 logger.info("Dependency #%s is closed, marking complete", dep_num)
-                self.completed.add(dep_num)
+                self.mark_completed(dep_num)
                 continue
 
             try:
                 dep_issue = fetch_issue_info(dep_num)
+                cached_states[dep_num] = dep_issue.state
+
+                if is_skipped(dep_issue.labels):
+                    logger.info("Dependency #%s is tagged state:skip, marking complete", dep_num)
+                    self.mark_completed(dep_num)
+                    continue
+
+                if self.skip_closed and dep_issue.state.is_done:
+                    logger.info("Dependency #%s is closed, marking complete", dep_num)
+                    self.mark_completed(dep_num)
+                    continue
+
                 self.add_issue(dep_issue)
                 # Enqueue this issue's own dependencies for the next BFS level
                 for child_dep in dep_issue.dependencies:
