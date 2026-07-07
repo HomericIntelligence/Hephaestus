@@ -679,6 +679,20 @@ class TestTestsAndFix:
         assert result.on_done_state == "COMMIT_PUSH_WAIT"
         assert "tests_failed" not in item.payload  # stale result cleared at submit
 
+    def test_tests_enabled_use_configured_argv(self, make_ctx: Any, make_work_item: Any) -> None:
+        """The pre-PR test command comes from config when overridden."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        ctx.config.run_pre_pr_tests = True
+        ctx.config.pre_pr_test_argv = ("pytest", "tests/custom", "-q")
+        item = make_work_item(issue=1, state="TEST_WAIT")
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, BuildTestJob)
+        assert result.job.argv == ("pytest", "tests/custom", "-q")
+
     def test_failed_tests_route_to_testfix(self, make_ctx: Any, make_work_item: Any) -> None:
         """A red test run stores the output and routes to TESTFIX_WAIT."""
         stage = ImplementationStage()
