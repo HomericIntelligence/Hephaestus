@@ -474,6 +474,32 @@ class TestFailBackRouting:
 class TestImplementationAdmission:
     """Topological order + file-overlap reuse for the implementation queue."""
 
+    def test_duplicate_issue_numbers_assert_before_dispatch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Duplicate issue-number work items assert before dict indexing."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        ran: list[int] = []
+
+        class RecordingStage(StubStage):
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                ran.append(item.issue or 0)
+                return StageOutcome(Disposition.SKIP, "recorded")
+
+        coordinator.stages[StageName.IMPLEMENTATION] = RecordingStage()
+        first = _issue_item(21, StageName.IMPLEMENTATION)
+        duplicate = _issue_item(21, StageName.IMPLEMENTATION)
+        coordinator._push_item(first, StageName.IMPLEMENTATION, enter=True)
+        coordinator._push_item(duplicate, StageName.IMPLEMENTATION, enter=True)
+        coordinator.event_log.clear()
+
+        with pytest.raises(AssertionError, match=r"duplicate issue numbers: \[21\]"):
+            coordinator._drain_implementation()
+
+        assert ran == []
+        assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == [first, duplicate]
+        assert coordinator.event_log == []
+
     def test_topo_order_and_overlap_reuse(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
