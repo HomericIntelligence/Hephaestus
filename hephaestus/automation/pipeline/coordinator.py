@@ -82,7 +82,7 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeAlias
 
 from hephaestus.automation.agent_config import DEFAULT_CI_POLL_MAX_WAIT
 from hephaestus.automation.models import IssueInfo
@@ -152,6 +152,8 @@ _DRAIN_ORDER: tuple[StageName, ...] = (
     StageName.PLANNING,
     StageName.REPO,
 )
+
+StageStepResult: TypeAlias = Continue | JobRequest | StageOutcome
 
 
 def _budget_lookup(name: str) -> int:
@@ -842,7 +844,9 @@ class Coordinator:
             )
             self._finish(item, passed=False, reason=f"poisoned: {exc}")
 
-    def _step_with_watchdog(self, stage: Stage, item: WorkItem, ctx: StageContext) -> Any:
+    def _step_with_watchdog(
+        self, stage: Stage, item: WorkItem, ctx: StageContext
+    ) -> StageStepResult:
         """Run one stage.step, warning when it breaches the <~5s contract."""
         t0 = time.monotonic()
         result = stage.step(item, ctx)
