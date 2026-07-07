@@ -110,10 +110,12 @@ def _item(make_work_item: Any, **kwargs: Any) -> Any:
     return item
 
 
-def _armed_item(make_work_item: Any, **kwargs: Any) -> Any:
+def _armed_item(make_work_item: Any, *, with_anchor: bool = True, **kwargs: Any) -> Any:
     kwargs.setdefault("state", POLL)
     item = _item(make_work_item, **kwargs)
     item.armed = True
+    if with_anchor:
+        item.payload["merge_wait_started_at"] = 1000.0
     return item
 
 
@@ -338,18 +340,22 @@ class TestMergeWaitPoll:
 
         assert result == StageOutcome(Disposition.FINISH_FAIL, "timeout")
 
-    def test_poll_stamps_missing_wall_clock_anchor(
-        self, make_ctx: Any, make_work_item: Any
+    @pytest.mark.parametrize("payload", ({}, {"merge_wait_started_at": None}))
+    def test_poll_missing_wall_clock_anchor_finishes_failed(
+        self, make_ctx: Any, make_work_item: Any, payload: dict[str, object]
     ) -> None:
-        """A restart that lost the anchor re-stamps it instead of timing out."""
+        """A restart that reaches POLL without the ARM anchor fails the invariant."""
         stage = MergeWaitStage()
         ctx = make_ctx(github=FakeStageGitHub(pr_state=OPEN_STATE))
-        item = _armed_item(make_work_item)
+        item = _armed_item(make_work_item, with_anchor=False)
+        item.payload.update(payload)
 
         result = stage.step(item, ctx)
 
-        assert result == StageOutcome(Disposition.RETRY, "merge_pending")
-        assert item.payload["merge_wait_started_at"] > 0
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "missing_merge_wait_started_at")
+        assert item.payload == payload
+        assert "retry_delay_s" not in item.payload
+        assert "merge_poll_count" not in item.payload
 
     def test_poll_without_pr_finishes_no_pr(self, make_ctx: Any, make_work_item: Any) -> None:
         """Restart safety: POLL with no PR finishes failed."""
