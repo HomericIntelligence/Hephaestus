@@ -329,7 +329,7 @@ def test_codex_approval_args_preserves_legacy_flag() -> None:
 @pytest.mark.parametrize(
     ("claude_model", "expected_model", "expected_reasoning"),
     [
-        ("claude-opus-4-7", "gpt-5.6", "xhigh"),
+        ("claude-opus-4-7", "gpt-5.5", "xhigh"),
         ("claude-sonnet-4-6", "gpt-5.5", "medium"),
     ],
 )
@@ -371,13 +371,42 @@ def test_codex_base_cmd_keeps_native_codex_model_ids(
     assert "model_reasoning_effort" not in cmd
 
 
-def test_codex_base_cmd_defaults_new_sessions_to_gpt_56_xhigh(tmp_path: Path) -> None:
+def test_codex_base_cmd_defaults_new_sessions_to_gpt_55_xhigh(tmp_path: Path) -> None:
     """A fresh Codex session should not depend on the operator's CLI default."""
     with patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]):
         cmd = agent_runtime._codex_base_cmd(cwd=tmp_path)
 
-    assert cmd[cmd.index("--model") + 1] == "gpt-5.6"
+    assert cmd[cmd.index("--model") + 1] == "gpt-5.5"
     assert cmd[cmd.index("-c") + 1] == 'model_reasoning_effort="xhigh"'
+
+
+def test_run_codex_session_does_not_inherit_parent_thread_id(tmp_path: Path) -> None:
+    """Automation child sessions must not inherit the interactive Codex thread."""
+    captured_env: dict[str, str] = {}
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeCodexPopen:
+        captured_env.update(kwargs["env"])
+        stdout = (
+            '{"type":"session_meta","payload":{"id":"019e1e57-7652-7892-b1ca-c31c93d4b160"}}\n'
+            '{"type":"agent_message","message":"fallback"}\n'
+        )
+        return _FakeCodexPopen(cmd, proc_stdout=stdout, final_message="final answer", **kwargs)
+
+    with (
+        patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
+        patch.dict("os.environ", {"CODEX_THREAD_ID": "parent-thread"}, clear=False),
+        patch("subprocess.Popen", side_effect=fake_popen),
+    ):
+        agent_runtime.run_codex_session(
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+            sandbox="workspace-write",
+        )
+
+    assert "CODEX_THREAD_ID" not in captured_env
+    assert captured_env["CODEX_HOME"]
 
 
 def test_codex_base_cmd_adds_git_common_dir_for_worktree_metadata(tmp_path: Path) -> None:

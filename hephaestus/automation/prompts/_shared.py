@@ -117,13 +117,19 @@ def _iteration_guidance(iteration: int) -> str:
     )
 
 
-def _prior_review_block(prior_review: str | None) -> str:
+def _prior_review_block(
+    prior_review: str | None,
+    fenced: FencedContent | None = None,
+    *,
+    label: str = "PRIOR_REVIEW",
+) -> str:
     """Format the prior review (if any) as a context block."""
     if not prior_review:
         return ""
+    body = fenced.fence(label, prior_review) if fenced is not None else prior_review
     return (
         "\n---\n\n**Prior review (from previous iteration) — verify these findings "
-        f"have been addressed:**\n\n{prior_review}\n"
+        f"have been addressed:**\n\n{body}\n"
     )
 
 

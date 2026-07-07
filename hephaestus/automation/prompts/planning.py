@@ -147,7 +147,8 @@ any earlier review, verdict line, or `## 🔍 Plan Review` text as the plan
 
 {untrusted_notice}
 
-**Issue Title (untrusted):** {issue_title}
+**Issue Title (untrusted):**
+{issue_title_block}
 
 **Issue Description (untrusted):**
 {issue_body_block}
@@ -196,7 +197,8 @@ actually addressed in the current plan.
 
 {untrusted_notice}
 
-**Issue Title (untrusted):** {issue_title}
+**Issue Title (untrusted):**
+{issue_title_block}
 
 **Issue Description (untrusted):**
 {issue_body_block}
@@ -245,7 +247,7 @@ def get_plan_review_prompt(
 
     Args:
         issue_number: GitHub issue number
-        issue_title: Issue title (interpolated as untrusted text)
+        issue_title: Issue title (fenced as untrusted)
         issue_body: Issue body/description (fenced as untrusted)
         plan_text: The full plan text to review (fenced as untrusted)
 
@@ -256,7 +258,7 @@ def get_plan_review_prompt(
     fenced = fence_content()
     return PLAN_REVIEW_PROMPT.format(
         issue_number=issue_number,
-        issue_title=issue_title,
+        issue_title_block=fenced.fence("ISSUE_TITLE", issue_title),
         issue_body_block=fenced.fence("ISSUE_BODY", issue_body),
         plan_text_block=fenced.fence("PLAN_TEXT", plan_text),
         untrusted_notice=fenced.untrusted_notice,
@@ -301,7 +303,7 @@ def get_plan_loop_review_prompt(
         iteration_label=_iteration_label(iteration),
         iteration_guidance=_iteration_guidance(iteration),
         issue_number=issue_number,
-        issue_title=issue_title,
+        issue_title_block=fenced.fence("ISSUE_TITLE", issue_title),
         issue_body_block=fenced.fence("ISSUE_BODY", issue_body),
         advise_findings_block=fenced.fence(
             "ADVISE_FINDINGS",
@@ -309,7 +311,7 @@ def get_plan_loop_review_prompt(
         ),
         plan_text_block=fenced.fence("PLAN_TEXT", plan_text),
         learnings=learnings or "_(no learnings captured this iteration)_",
-        prior_review_block=_prior_review_block(prior_review),
+        prior_review_block=_prior_review_block(prior_review, fenced),
         full_sweep_suffix=full_sweep_suffix,
         output_format=_STRICT_REVIEW_OUTPUT_FORMAT.strip(),
         untrusted_notice=fenced.untrusted_notice,

@@ -205,6 +205,8 @@ class RepoStage(Stage):
                     "reason": reason,
                     "pr": facts.pr_number if facts.pr_is_open else None,
                     "labels": sorted(facts.labels),
+                    "title": facts.title,
+                    "body": facts.body,
                 }
             )
 
@@ -281,6 +283,9 @@ def product_to_work_item(repo: str, product: dict[str, Any]) -> WorkItem | None:
     labels = product.get("labels") or []
     if labels:
         item.labels_cache = dict.fromkeys(labels, True)
+    if kind is ItemKind.ISSUE:
+        item.payload["issue_title"] = str(product.get("title") or "")
+        item.payload["issue_body"] = str(product.get("body") or "")
     item.payload["entry_stage"] = stage.value
     item.payload["entry_reason"] = product.get("reason", "")
     return item

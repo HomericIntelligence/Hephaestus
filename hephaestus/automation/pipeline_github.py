@@ -285,6 +285,23 @@ class PipelineGitHub:
                 latest_review_body = body
         return latest_review_body
 
+    @staticmethod
+    def _comments_have_plan(comments: Any) -> bool:
+        if not isinstance(comments, list):
+            return False
+        for comment in comments:
+            if not isinstance(comment, dict):
+                continue
+            body = comment.get("body")
+            if not isinstance(body, str):
+                continue
+            stripped = body.lstrip()
+            if stripped.startswith(PLAN_REVIEW_PREFIX):
+                continue
+            if stripped.startswith(PLAN_COMMENT_MARKER):
+                return True
+        return False
+
     def _backfill_plan_go(self, issue_number: int) -> None:
         if self.dry_run:
             logger.info("[dry-run] would backfill %s on #%d", STATE_PLAN_GO, issue_number)
@@ -516,12 +533,15 @@ class PipelineGitHub:
             if has_label(labels, STATE_PLAN_NO_GO):
                 return False
 
-            latest_review_body = self._latest_plan_review_body(data.get("comments"))
-            if latest_review_body is None or latest_verdict(latest_review_body) != "GO":
-                return False
+            comments = data.get("comments")
+            latest_review_body = self._latest_plan_review_body(comments)
+            if latest_review_body is not None:
+                if latest_verdict(latest_review_body) != "GO":
+                    return False
+                self._backfill_plan_go(issue_number)
+                return True
 
-            self._backfill_plan_go(issue_number)
-            return True
+            return bool(self._comments_have_plan(comments))
         return bool(is_plan_review_go(issue_number))
 
     def get_pr_head_branch(self, pr_number: int) -> str | None:

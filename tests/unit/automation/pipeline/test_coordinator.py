@@ -551,6 +551,24 @@ class TestPipelineScopeWiring:
 
         assert coordinator._routes is ROUTES
 
+    def test_direct_issue_scope_hydrates_issue_context_payload(self, tmp_path: Path) -> None:
+        """Explicit --issues seeding preserves the real issue title/body for prompts."""
+        gh = FakeStageGitHub(
+            labels=["state:needs-plan"],
+            issue_title="Hydrate planner context",
+            issue_body="Use the real issue body.",
+        )
+        config = self._scoped_config(tmp_path, issues=[1881])
+        coordinator = Coordinator(config, github=gh, pool=FakeWorkerPool(), install_signals=False)
+
+        entries = coordinator._seed_direct_scope("repo-a")
+        item = coordinator._entry_to_item(entries[0], "repo-a")
+
+        assert entries[0].issue_title == "Hydrate planner context"
+        assert entries[0].issue_body == "Use the real issue body."
+        assert item.payload["issue_title"] == "Hydrate planner context"
+        assert item.payload["issue_body"] == "Use the real issue body."
+
     def test_at_or_past_plan_go_issue_clamps_to_finished(self, tmp_path: Path) -> None:
         """A plan-go issue classifies to IMPLEMENTATION; the scope clamps it to FINISHED-pass."""
         gh = FakeStageGitHub(labels=["state:plan-go"])

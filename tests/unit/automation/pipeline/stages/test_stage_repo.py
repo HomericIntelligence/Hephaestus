@@ -50,6 +50,8 @@ def repo_ctx(tmp_path: Path, make_ctx: Callable[..., Any]) -> Any:
 def _facts(
     number: int,
     *,
+    title: str | None = None,
+    body: str = "",
     labels: set[str] | None = None,
     pr: int | None = None,
     pr_open: bool = False,
@@ -57,12 +59,13 @@ def _facts(
 ) -> IssueFacts:
     return IssueFacts(
         number=number,
-        title=f"task {number}",
+        title=title or f"task {number}",
         is_epic=False,
         labels=labels or set(),
         pr_number=pr,
         pr_is_open=pr_open,
         pr_is_merged=pr_merged,
+        body=body,
     )
 
 
@@ -413,6 +416,24 @@ class TestProductToWorkItem:
         assert item.stage is StageName.PLANNING and item.state == "ENTER"
         assert item.labels_cache == {"state:needs-plan": True}
         assert item.payload["entry_stage"] == "planning"
+
+    def test_issue_product_hydrates_issue_context_payload(self) -> None:
+        item = product_to_work_item(
+            "repo-a",
+            {
+                "kind": "issue",
+                "number": 9,
+                "stage": StageName.PLANNING,
+                "reason": "r",
+                "labels": ["state:needs-plan"],
+                "title": "Repo-discovered task",
+                "body": "Repo-discovered body.",
+            },
+        )
+
+        assert item is not None
+        assert item.payload["issue_title"] == "Repo-discovered task"
+        assert item.payload["issue_body"] == "Repo-discovered body."
 
     def test_issue_product_with_open_pr(self) -> None:
         item = product_to_work_item(

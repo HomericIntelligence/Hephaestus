@@ -227,6 +227,46 @@ class TestRepoScoping:
             ],
         ]
 
+    def test_repo_scoped_has_existing_plan_detects_plan_comment(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            if argv[:2] == ["issue", "view"]:
+                payload = {
+                    "labels": [],
+                    "comments": [{"body": f"{PLAN_COMMENT_MARKER}\n\nDo the thing."}],
+                }
+                return SimpleNamespace(stdout=json.dumps(payload))
+            return SimpleNamespace(stdout="")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        assert pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).has_existing_plan(5)
+
+    def test_repo_scoped_has_existing_plan_rejects_plan_comment_after_latest_nogo(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stale plan comment is not valid after the latest plan review is NOGO."""
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            if argv[:2] == ["issue", "view"]:
+                payload = {
+                    "labels": [],
+                    "comments": [
+                        {"body": f"{PLAN_COMMENT_MARKER}\n\nOld rejected plan."},
+                        {"body": f"{PLAN_REVIEW_PREFIX}\n\nVerdict: NOGO"},
+                    ],
+                }
+                return SimpleNamespace(stdout=json.dumps(payload))
+            return SimpleNamespace(stdout="")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        assert (
+            pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).has_existing_plan(5)
+            is False
+        )
+
     def test_repo_scoped_pr_lookup_raises_on_gh_failure(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

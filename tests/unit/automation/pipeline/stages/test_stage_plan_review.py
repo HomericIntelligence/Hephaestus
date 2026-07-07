@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from hephaestus.automation.claude_invoke import ReviewVerdict, parse_review_verdict
@@ -13,6 +14,7 @@ from hephaestus.automation.pipeline.stages.plan_review import (
     PlanReviewStage,
     build_amend_prompt,
 )
+from hephaestus.automation.prompts._shared import _UNTRUSTED_NOTICE
 from hephaestus.automation.prompts.planning import get_plan_prompt
 from hephaestus.automation.state_labels import (
     STATE_NEEDS_PLAN,
@@ -27,17 +29,36 @@ def _verdict(kind: str) -> ReviewVerdict:
     return ReviewVerdict(grade=None, verdict=kind, raw=f"review text ({kind})")
 
 
+def _fence_present(prompt: str, label: str) -> bool:
+    """Return True when a prompt has nonce-delimited markers for label."""
+    return bool(
+        re.search(rf"BEGIN_[0-9A-F]+_{label}\b", prompt)
+        and re.search(rf"END_[0-9A-F]+_{label}\b", prompt)
+    )
+
+
 class TestBuildAmendPrompt:
     """build_amend_prompt composes the plan prompt with the feedback block."""
 
     def test_contains_plan_prompt_and_feedback_block(self) -> None:
-        """The output is the verbatim plan prompt plus the critique block."""
-        prompt = build_amend_prompt(42, "The plan misses the tests section.")
+        """The output keeps issue context and fences reviewer critique."""
+        prompt = build_amend_prompt(
+            42,
+            "The plan misses the tests section.",
+            issue_title="Retry failure",
+            issue_body="The loop retries forever.",
+            advise_findings="Use the retry helper.",
+        )
 
-        assert prompt.startswith(get_plan_prompt(42))  # template reused verbatim
+        assert get_plan_prompt(42) in prompt  # template reused inside the composed prompt
+        assert _UNTRUSTED_NOTICE in prompt
+        assert _fence_present(prompt, "ISSUE_TITLE")
+        assert _fence_present(prompt, "ISSUE_BODY")
+        assert _fence_present(prompt, "ADVISE_FINDINGS")
+        assert _fence_present(prompt, "PRIOR_REVIEW")
         assert "## Prior reviewer critique — your previous plan got NOGO" in prompt
         assert "Address every concrete finding below in your revised plan:" in prompt
-        assert prompt.endswith("The plan misses the tests section.")
+        assert "The plan misses the tests section." in prompt
 
 
 class TestPlanReviewStageOnEnter:
@@ -330,6 +351,9 @@ class TestPlanReviewStageStep:
         stage = PlanReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=10, state="AMEND_WAIT")
+        item.payload["issue_title"] = "Retry failure"
+        item.payload["issue_body"] = "The loop retries forever."
+        item.payload["advise_findings"] = "Use the retry helper."
         item.payload["prior_review"] = "Feedback: improve clarity"
 
         result = stage.step(item, ctx)
@@ -343,6 +367,9 @@ class TestPlanReviewStageStep:
         # in-worker; AgentJob is frozen, so no closures over payload).
         assert result.job.prompt_kwargs == {
             "issue_number": 10,
+            "issue_title": "Retry failure",
+            "issue_body": "The loop retries forever.",
+            "advise_findings": "Use the retry helper.",
             "prior_review": "Feedback: improve clarity",
         }
 
