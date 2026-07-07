@@ -39,12 +39,14 @@ contract):
   outcome] naming the blocking human thread count and that automation
   stands down, then finish failed with the PR left UNLABELED (a human must
   act; automation may not resolve their thread). GO + open automation
-  thread -> downgraded to NOGO (address + re-review). Clean GO -> durably
-  ``mark_pr_implementation_go`` then ``arm_auto_merge`` [durable, in that
-  order — the label authorizes the arming; arming is skipped if the mark
-  write fails] -> follow-up step -> ADVANCE. Every real non-GO round
-  durably writes ``state:implementation-no-go`` (doc section 5 owned
-  label, "NOGO verdict, before retry/regress"; legacy
+  thread -> downgraded to NOGO (address + re-review). Clean GO ->
+  ``_write_go_and_arm`` performs one final human-thread live-read before
+  GO writes; a late human thread posts HUMAN_BLOCKED and skips labels/arm.
+  Otherwise, durably ``mark_pr_implementation_go`` then ``arm_auto_merge``
+  [durable, in that order — the label authorizes the arming; arming is
+  skipped if the mark write fails] -> follow-up step -> ADVANCE. Every
+  real non-GO round durably writes ``state:implementation-no-go`` (doc
+  section 5 owned label, "NOGO verdict, before retry/regress"; legacy
   ``_apply_impl_review_verdict`` -> ``mark_pr_implementation_no_go``
   :248) before looping/regressing, non-fatally. Exhaustion -> durably
   apply ``state:skip`` [durable] -> SKIP.
@@ -703,20 +705,7 @@ class PrReviewStage(Stage):
             return StageOutcome(Disposition.FINISH_FAIL, "human_blocked")
 
         if verdict.is_go and blocking_auto == 0:
-            if minor_auto:
-                # Automation owns these waved minor/nitpick threads; resolve them so
-                # required_review_thread_resolution does not re-block at merge_wait.
-                logger.info(
-                    "pr_review:%d: GO with %d advisory minor thread(s); resolving before arm",
-                    item.issue,
-                    minor_auto,
-                )
-                ctx.github.resolve_automation_threads(item.pr)
-            logger.info("pr_review:%d: clean GO; marking PR #%d and arming", item.issue, item.pr)
-            self._write_go_and_arm(item.pr, ctx)
-            if getattr(ctx.config, "enable_follow_up", True):
-                return Continue(next_state=FOLLOWUP_WAIT)
-            return StageOutcome(Disposition.ADVANCE, "GO with zero blocking threads")
+            return self._handle_clean_go(item, ctx, minor_auto)
 
         # NOGO/AMBIGUOUS — or a GO downgraded by open automation threads
         # (re-housed downgrade: address + re-review before GO can stand;
@@ -790,6 +779,26 @@ class PrReviewStage(Stage):
         # the implement budget). No labels, no round burned.
         logger.warning("pr_review:%d: address step failed; failing back", item.issue)
         return self._fail_back_agent_error(item)
+
+    def _handle_clean_go(self, item: WorkItem, ctx: StageContext, minor_auto: int) -> StepResult:
+        """Resolve advisory automation threads, write GO, and route onward."""
+        if item.pr is None or item.issue is None:  # guarded by caller; narrowing
+            return self._fail_back_agent_error(item)
+        if minor_auto:
+            # Automation owns these waved minor/nitpick threads; resolve them so
+            # required_review_thread_resolution does not re-block at merge_wait.
+            logger.info(
+                "pr_review:%d: GO with %d advisory minor thread(s); resolving before arm",
+                item.issue,
+                minor_auto,
+            )
+            ctx.github.resolve_automation_threads(item.pr)
+        logger.info("pr_review:%d: clean GO; marking PR #%d and arming", item.issue, item.pr)
+        if not self._write_go_and_arm(item.pr, ctx):
+            return StageOutcome(Disposition.FINISH_FAIL, "human_blocked")
+        if getattr(ctx.config, "enable_follow_up", True):
+            return Continue(next_state=FOLLOWUP_WAIT)
+        return StageOutcome(Disposition.ADVANCE, "GO with zero blocking threads")
 
     @staticmethod
     def _gate_no_commit(item: WorkItem) -> Continue | None:
@@ -950,8 +959,13 @@ class PrReviewStage(Stage):
             )
 
     @staticmethod
-    def _write_go_and_arm(pr_number: int, ctx: StageContext) -> None:
+    def _write_go_and_arm(pr_number: int, ctx: StageContext) -> bool:
         """Durably mark implementation GO, then arm auto-merge (that order).
+
+        Returns ``False`` only when a fresh human-thread read inside this
+        helper finds a late human block before GO writes. GitHub has no atomic
+        check-unresolved-threads-and-arm primitive, so this closes the EVAL to
+        helper gap without changing the existing non-fatal write semantics.
 
         Each write is non-fatal (legacy warn pattern), but arming is SKIPPED
         when the mark write fails: auto-merge must never be armed on a PR
@@ -962,7 +976,20 @@ class PrReviewStage(Stage):
             pr_number: GitHub PR number that earned the clean GO.
             ctx: Stage context carrying the GitHub accessor.
 
+        Returns:
+            ``False`` when a late human thread blocks arming; otherwise ``True``.
+
         """
+        _, _, human_unresolved = ctx.github.count_unresolved_threads_by_severity(pr_number)
+        if human_unresolved:
+            logger.info(
+                "pr_review: clean GO recheck found %d late human thread(s) on PR #%d; not arming",
+                human_unresolved,
+                pr_number,
+            )
+            PrReviewStage._post_human_blocked_comment(pr_number, human_unresolved, ctx)
+            return False
+
         try:
             ctx.github.mark_pr_implementation_go(pr_number)
         except Exception as e:
@@ -972,10 +999,11 @@ class PrReviewStage(Stage):
                 pr_number,
                 e,
             )
-            return
+            return True
         try:
             ctx.github.arm_auto_merge(pr_number)
         except Exception as e:
             logger.warning(
                 "pr_review: failed to arm auto-merge on PR #%d (non-fatal): %s", pr_number, e
             )
+        return True
