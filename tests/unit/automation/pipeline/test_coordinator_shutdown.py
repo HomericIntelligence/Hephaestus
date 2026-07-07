@@ -18,12 +18,20 @@ from typing import Any
 
 import pytest
 
+from hephaestus.automation.claude_invoke import ReviewVerdict
 from hephaestus.automation.pipeline import seeding as seeding_mod
 from hephaestus.automation.pipeline.coordinator import Coordinator, PipelineConfig
 from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
 from hephaestus.automation.pipeline.routing import PIPELINE_ORDER, StageName
 from hephaestus.automation.pipeline.seeding import IssueFacts, classify_issue
-from hephaestus.automation.pipeline.stages.base import JobRequest, StageContext, StageOutcome
+from hephaestus.automation.pipeline.stages.base import (
+    Continue,
+    JobRequest,
+    StageContext,
+    StageOutcome,
+)
+from hephaestus.automation.pipeline.stages.implementation import ImplementationStage
+from hephaestus.automation.pipeline.stages.plan_review import PlanReviewStage
 from hephaestus.automation.pipeline.stages.planning import PlanningStage
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.state_labels import (
@@ -49,6 +57,11 @@ def _agent_job(issue: int = 1) -> AgentJob:
         timeout_s=10,
         descr="stub",
     )
+
+
+def _verdict(kind: str) -> ReviewVerdict:
+    """Build a ReviewVerdict of the given kind for crash-matrix stage drives."""
+    return ReviewVerdict(grade=None, verdict=kind, raw=f"review text ({kind})")
 
 
 class JobRequestingStage:
@@ -308,6 +321,37 @@ class TestCrashMatrixJournal:
             budget_fn=_budget_fn,
         )
 
+    def _drive_plan_review_go_label(self, gh: FakeStageGitHub, issue: int) -> None:
+        """Drive plan_review's real GO path until it writes state:plan-go."""
+        stage = PlanReviewStage()
+        ctx = self._ctx(gh)
+        ctx.config.enable_learn = False
+        item = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=issue,
+            stage=StageName.PLAN_REVIEW,
+            state="ENTER",
+        )
+        item.payload["issue_title"] = "A task"
+        item.payload["issue_body"] = "Body"
+        item.payload["plan_text"] = "# Implementation Plan\n\nDo the work."
+
+        assert stage.on_enter(item, ctx) is None
+        enter = stage.step(item, ctx)
+        assert isinstance(enter, Continue)
+        item.state = enter.next_state
+
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        stage.on_job_done(item, JobResult(ok=True, value=_verdict("GO")), ctx)
+        item.state = request.on_done_state
+
+        outcome = stage.step(item, ctx)
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition.value == "advance"
+        assert ("gh_issue_add_labels", (issue, (STATE_PLAN_GO,))) in gh.mutation_log
+
     def test_crash_after_needs_plan_label_reenters_planning(self) -> None:
         """S1: crash right after planning's entry-label write -> planning again."""
         gh = FakeStageGitHub()
@@ -350,8 +394,8 @@ class TestCrashMatrixJournal:
     def test_crash_after_plan_go_label_reenters_implementation(self) -> None:
         """S3: crash after plan_review's GO label write -> implementation."""
         gh = FakeStageGitHub()
-        # plan_review's EVAL journal entry: the state:plan-go label [durable].
-        gh.add_labels(3, ["state:plan-go"])
+        self._drive_plan_review_go_label(gh, 3)
+
         # CRASH before the push to the implementation queue.
         entry = _classify_from_fake(gh, 3)
 
@@ -362,8 +406,32 @@ class TestCrashMatrixJournal:
     def test_crash_after_pr_creation_reenters_pr_review(self) -> None:
         """S4: with an open PR journaled, re-seeding enters pr_review (not earlier)."""
         gh = FakeStageGitHub()
-        gh.add_labels(4, ["state:plan-go"])
-        # implementation's journal entry is the PR itself.
-        entry = _classify_from_fake(gh, 4, open_pr=77)
+        self._drive_plan_review_go_label(gh, 4)
+
+        stage = ImplementationStage()
+        item = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=4,
+            stage=StageName.IMPLEMENTATION,
+            state="PR_CREATE",
+        )
+        item.branch = "4-auto-impl"
+        item.payload["issue_title"] = "A task"
+        item.payload["implement_summary"] = "Implemented issue #4."
+
+        outcome = stage.step(item, self._ctx(gh))
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition.value == "advance"
+        assert item.pr is not None
+        assert item.pr in gh.prs
+        assert [name for name, _ in gh.mutation_log[-2:]] == [
+            "gh_pr_create",
+            "defer_auto_merge",
+        ]
+
+        # CRASH before the push to the pr_review queue.
+        entry = _classify_from_fake(gh, 4, open_pr=item.pr)
 
         assert entry is StageName.PR_REVIEW
