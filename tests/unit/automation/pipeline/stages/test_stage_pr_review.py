@@ -1106,6 +1106,27 @@ class TestFullWalks:
         assert item.attempts["pr_review_iter"] == 3
         assert github.mutation_log[-1] == ("gh_issue_add_labels", (22, (STATE_SKIP,)))
 
+    def test_nogo_without_durable_artifact_retries_without_skip(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """NOGO with no posted findings is infrastructure loss, not terminal skip."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(unresolved=[(0, 0)], by_severity=[(0, 0, 0)])
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=24, pr=1001, state="EVAL")
+        item.payload["review_verdict"] = _verdict("NOGO")
+        item.payload["review_text"] = "Verdict: NOGO"
+        item.payload["raw_review_threads"] = []
+        item.payload["review_threads"] = []
+
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.RETRY
+        assert outcome.note == "nogo_without_artifact"
+        assert item.attempts["pr_review_iter"] == 0
+        assert not any(entry[0] == "gh_issue_add_labels" for entry in github.mutation_log)
+
     def test_reviewer_error_walk_burns_nothing(self, make_ctx: Any, make_work_item: Any) -> None:
         """A failed review job walks straight to EVAL's ERROR path: RETRY.
 

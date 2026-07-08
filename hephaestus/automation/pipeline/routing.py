@@ -132,6 +132,7 @@ ROUTES: dict[StageName, Route] = {
         fail_routes={
             "fix_exhausted": StageName.IMPLEMENTATION,
             "not_implementation_go": StageName.PR_REVIEW,
+            "missing_worktree": StageName.IMPLEMENTATION,
             "no_pr": StageName.FINISHED,
             "*": StageName.CI,
         },
@@ -142,6 +143,7 @@ ROUTES: dict[StageName, Route] = {
         fail_routes={
             "ci_red": StageName.CI,
             "blocked_exhausted": StageName.PR_REVIEW,
+            "missing_worktree": StageName.IMPLEMENTATION,
             "closed": StageName.FINISHED,
             "timeout": StageName.FINISHED,
             "*": StageName.FINISHED,

@@ -1209,9 +1209,37 @@ class Coordinator:
                 )
             )
         for pr in self.config.prs:
-            has_go, _has_no_go = github.pr_has_implementation_state_label(pr)
             issue_number = github.find_issue_for_pr(pr)
             scope_identifier = issue_number if issue_number is not None else pr
+            pr_state = github.gh_pr_state(pr)
+            pr_state_name = ((pr_state or {}).get("state") or "").upper()
+            if pr_state_name == "MERGED":
+                entries.append(
+                    _seeding.SeedEntry(
+                        kind="pr",
+                        identifier=pr,
+                        stage=StageName.FINISHED,
+                        reason=f"PR #{pr} already merged",
+                        pr_number=pr,
+                        issue_number=issue_number,
+                        passed=True,
+                    )
+                )
+                continue
+            if pr_state_name == "CLOSED":
+                entries.append(
+                    _seeding.SeedEntry(
+                        kind="pr",
+                        identifier=pr,
+                        stage=StageName.FINISHED,
+                        reason=f"PR #{pr} already closed without merging",
+                        pr_number=pr,
+                        issue_number=issue_number,
+                        passed=False,
+                    )
+                )
+                continue
+            has_go, _has_no_go = github.pr_has_implementation_state_label(pr)
             if has_go:
                 stage, reason, passed = self._scope_seed_decision(
                     scope_identifier,

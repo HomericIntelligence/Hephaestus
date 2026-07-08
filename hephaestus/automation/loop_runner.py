@@ -186,7 +186,6 @@ class LoopConfig:
     no_advise: bool = False
     nitpick: bool = False
     drive_green_all: bool = False
-    allow_unsafe_phase_order: bool = False
     # ``model`` is the catch-all applied to every phase when set; per-phase
     # fields below take precedence over it.
     model: str = ""
@@ -301,11 +300,6 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
-        "--allow-unsafe-phase-order",
-        action="store_true",
-        help="Silence dependency-ordering warnings when --phases skips a recommended predecessor",
-    )
-    p.add_argument(
         "--model",
         default="",
         help=(
@@ -385,22 +379,14 @@ def _validate_phases(phases_csv: str) -> tuple[str, ...]:
 
 
 def _phase_order_warnings(cfg: LoopConfig) -> list[str]:
-    """Dependency-ordering safety warnings for the 2-phase loop body.
+    """Return phase-order warnings.
 
-    Plan-review and PR-review/address-review fold into plan/implement; the
-    only remaining ordering hazard is selecting plan without implement
-    (planning-only, produces no PRs). drive-green intentionally supports being
-    run without implement so operators can drive existing PRs without opening
-    new work.
+    Queue stages own their prerequisites: a selected late stage either acts on
+    a satisfied item or routes it to the prerequisite queue. Therefore a phase
+    subset is an entry hint, not an unsafe ordering contract.
     """
-    warnings: list[str] = []
-    selected = set(cfg.phases)
-    if "plan" in selected and "implement" not in selected:
-        warnings.append(
-            "--phases includes 'plan' but not 'implement'; this is planning-only "
-            "and will not create implementation PRs"
-        )
-    return warnings
+    del cfg
+    return []
 
 
 def _pipeline_scope_for_phases(phases: tuple[str, ...]) -> PipelineScope | None:
@@ -679,7 +665,6 @@ def main(argv: list[str] | None = None) -> int:
         no_advise=args.no_advise,
         nitpick=args.nitpick,
         drive_green_all=args.drive_green_all,
-        allow_unsafe_phase_order=args.allow_unsafe_phase_order,
         model=args.model,
         planner_model=args.planner_model,
         reviewer_model=args.reviewer_model,
@@ -694,10 +679,6 @@ def main(argv: list[str] | None = None) -> int:
             args.phase_timeout if args.phase_timeout and args.phase_timeout > 0 else None
         ),
     )
-
-    if not cfg.allow_unsafe_phase_order:
-        for w in _phase_order_warnings(cfg):
-            LOG.warning("%s (pass --allow-unsafe-phase-order to silence)", w)
 
     if not repos:
         return _error_exit(args, "Repo list is empty; nothing to do.", "empty repo list")

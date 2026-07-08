@@ -656,9 +656,10 @@ class TestRebaseWorktreeOnto:
             "git",
             "rebase",
             "--force-rebase",
+            "--empty=drop",
             "origin/main",
             "--exec",
-            "git commit --amend --no-edit -S -s",
+            "git commit --amend --no-edit -S -s --allow-empty",
         ]
         assert rebase_kwargs["cwd"] == worktree
 
@@ -676,9 +677,10 @@ class TestRebaseWorktreeOnto:
             "git",
             "rebase",
             "--force-rebase",
+            "--empty=drop",
             "origin/main",
             "--exec",
-            "git commit --amend --no-edit -S -s",
+            "git commit --amend --no-edit -S -s --allow-empty",
         ]
 
     def test_policy_rebase_forces_replay_when_branch_already_based_on_target(
@@ -689,6 +691,14 @@ class TestRebaseWorktreeOnto:
 
         assert "--force-rebase" in command
         assert command.index("--force-rebase") < command.index("--exec")
+
+    def test_policy_rebase_drops_empty_replays_and_allows_empty_amend(self) -> None:
+        """Skipped cherry-picks must not strand automation in an empty amend."""
+        command = _commit_policy_rebase_command("origin/main")
+
+        assert "--empty=drop" in command
+        assert command.index("--empty=drop") < command.index("origin/main")
+        assert "--allow-empty" in command[-1]
 
     def test_conflict_aborts_and_returns_false(self, git_utils_mocks: Any) -> None:
         """A rebase conflict triggers ``git rebase --abort`` and returns False."""
@@ -767,9 +777,10 @@ class TestRebaseWorktreeOnto:
             "git",
             "rebase",
             "--force-rebase",
+            "--empty=drop",
             "upstream/develop",
             "--exec",
-            "git commit --amend --no-edit -S -s",
+            "git commit --amend --no-edit -S -s --allow-empty",
         ]
 
     def test_timeout_threads_through_fetch_cleanup_and_rebase(self, git_utils_mocks: Any) -> None:
@@ -826,9 +837,10 @@ class TestEnsureBranchCommitMetadata:
             "git",
             "rebase",
             "--force-rebase",
+            "--empty=drop",
             "origin/main",
             "--exec",
-            "git commit --amend --no-edit -S -s",
+            "git commit --amend --no-edit -S -s --allow-empty",
         ]
         assert rebase_kwargs["cwd"] == tmp_path
 
@@ -861,9 +873,10 @@ class TestEnsureBranchCommitMetadata:
             "git",
             "rebase",
             "--force-rebase",
+            "--empty=drop",
             "origin/main",
             "--exec",
-            "git commit --amend --no-edit -S -s",
+            "git commit --amend --no-edit -S -s --allow-empty",
         ]
         assert rebase_kwargs["cwd"] == worktree
         abort_args, abort_kwargs = git_utils_mocks.run.call_args_list[3]

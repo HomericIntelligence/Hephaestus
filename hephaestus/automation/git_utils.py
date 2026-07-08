@@ -29,7 +29,7 @@ from .session_naming import issue_auto_impl_branch_name as _session_issue_auto_i
 
 logger = logging.getLogger(__name__)
 
-COMMIT_POLICY_REWRITE_EXEC = "git commit --amend --no-edit -S -s"
+COMMIT_POLICY_REWRITE_EXEC = "git commit --amend --no-edit -S -s --allow-empty"
 
 
 def _timeout_kw(timeout: int | None) -> dict[str, Any]:
@@ -591,6 +591,7 @@ def _commit_policy_rebase_command(base_ref: str) -> list[str]:
         "git",
         "rebase",
         "--force-rebase",
+        "--empty=drop",
         base_ref,
         "--exec",
         COMMIT_POLICY_REWRITE_EXEC,

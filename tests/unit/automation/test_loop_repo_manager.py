@@ -286,9 +286,10 @@ class TestRebaseMain:
             "-C",
             str(tmp_path),
             "rebase",
+            "--empty=drop",
             "origin/main",
             "--exec",
-            "git commit --amend --no-edit -S -s",
+            "git commit --amend --no-edit -S -s --allow-empty",
             "--quiet",
         ] in commands
 

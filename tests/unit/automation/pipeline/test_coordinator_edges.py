@@ -575,6 +575,52 @@ class TestSeedingEdges:
         assert item.issue == 1818
         assert item.pr == 1854
 
+    def test_direct_pr_scope_finishes_already_merged_pr(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Direct --prs seeding must not adopt a deleted branch for a merged PR."""
+        monkeypatch.setattr(
+            seeding_mod,
+            "gh_pr_label_names",
+            MagicMock(side_effect=AssertionError("ambient PR label seeding called")),
+        )
+
+        class MergedPrGitHub(FakeStageGitHub):
+            def pr_has_implementation_state_label(self, pr_number: int) -> tuple[bool, bool]:
+                raise AssertionError("merged PRs should finish before label routing")
+
+        target_github = MergedPrGitHub(
+            pr_issue=1912,
+            pr_state={"state": "MERGED", "headRefOid": "abc123"},
+        )
+
+        def github_factory(repo: str, repo_root: Path) -> FakeStageGitHub:
+            return target_github
+
+        config = PipelineConfig(
+            org="org",
+            repos=["target-repo"],
+            prs=[2004],
+            projects_dir=tmp_path,
+        )
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(),
+            github_factory=github_factory,
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
+
+        assert coordinator.run() == 0
+
+        assert not coordinator.queues[StageName.CI].snapshot()
+        assert not coordinator.queues[StageName.PR_REVIEW].snapshot()
+        assert len(coordinator.ledger) == 1
+        assert coordinator.ledger[0].passed
+        assert coordinator.ledger[0].final_stage is StageName.FINISHED
+        assert "already merged" in coordinator.ledger[0].reason
+
     def test_direct_pr_scope_respects_drive_green_phase_scope(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

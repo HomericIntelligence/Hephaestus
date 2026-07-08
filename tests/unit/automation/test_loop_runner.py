@@ -82,11 +82,10 @@ def test_phase_order_warnings_drive_green_no_longer_warns() -> None:
     assert all("drive-green" not in w for w in _phase_order_warnings(cfg_with))
 
 
-def test_phase_order_warnings_plan_without_implement_warns() -> None:
-    """Plan selected without implement makes the invocation planning-only."""
+def test_phase_order_warnings_plan_without_implement_is_queue_safe() -> None:
+    """Partial phase selection is a queue entry hint, not an unsafe order."""
     cfg = LoopConfig(phases=("plan",))
-    warnings = _phase_order_warnings(cfg)
-    assert any("planning-only" in w and "implementation PRs" in w for w in warnings)
+    assert _phase_order_warnings(cfg) == []
 
 
 def test_phase_order_warnings_silent_on_full_pipeline() -> None:

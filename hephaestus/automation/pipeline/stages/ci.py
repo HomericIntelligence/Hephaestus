@@ -88,6 +88,7 @@ from .base import (
     StageOutcome,
     StepResult,
     WorkItem,
+    _require_item_worktree,
     _worktree_path,
     agent_provider,
     stage_model,
@@ -326,6 +327,9 @@ class CiStage(Stage):
         if item.attempts.get("rebase", 0) >= ctx.budget("rebase"):
             logger.info("ci:%s: rebase budget spent; polling as-is", item.issue)
             return Continue(next_state=POLL)
+        missing_worktree = _require_item_worktree(item, "ci", "mechanical rebase")
+        if missing_worktree is not None:
+            return missing_worktree
         rebase_job = GitJob(
             repo=item.repo,
             op="rebase",
@@ -412,7 +416,7 @@ class CiStage(Stage):
         logger.warning("ci:%s: ci_fix budget exhausted; failing back", item.issue)
         return StageOutcome(Disposition.FAIL_BACK, "fix_exhausted")
 
-    def _request_fix(self, item: WorkItem, ctx: StageContext) -> JobRequest:
+    def _request_fix(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """FIX_WAIT [W:A]: dispatch the CI-fix (or force-engagement) session.
 
         The prompt is composed in-worker by :func:`build_ci_fix_prompt` — or
@@ -424,6 +428,9 @@ class CiStage(Stage):
         attempt can never replay an earlier attempt's outcome.
         """
         item.payload.pop("ci_fix_failed", None)
+        missing_worktree = _require_item_worktree(item, "ci", "CI fix")
+        if missing_worktree is not None:
+            return missing_worktree
         escalate = bool(item.payload.pop("force_engagement", None))
         prompt_builder: Callable[..., str]
         common_kwargs = {
@@ -471,6 +478,9 @@ class CiStage(Stage):
         """
         if item.payload.pop("ci_fix_failed", None):
             return Continue(next_state=POLL)
+        missing_worktree = _require_item_worktree(item, "ci", "CI fix push")
+        if missing_worktree is not None:
+            return missing_worktree
         push_job = GitJob(
             repo=item.repo,
             op="commit_push",

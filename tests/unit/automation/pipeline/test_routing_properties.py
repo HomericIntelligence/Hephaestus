@@ -38,8 +38,8 @@ _REASONS = [*_DECLARED_REASONS, "unknown_reason"]
 # none and resolve purely via the "*" default. Fail-back EXITS that leave
 # their stage rather than retry it consume no retry budget: plan_not_go
 # (implementation -> plan_review), already_implementation_go_pr (-> ci),
-# not_implementation_go (ci -> pr_review), and no_pr (-> finished) all map
-# to None.
+# not_implementation_go (ci -> pr_review), missing_worktree (-> implementation),
+# and no_pr (-> finished) all map to None.
 _REASON_BUDGET: dict[str, str | None] = {
     "nogo": "plan_review_iter",
     "plan_cycles_exhausted": "plan_cycles",
@@ -50,6 +50,7 @@ _REASON_BUDGET: dict[str, str | None] = {
     "exhaustion": None,
     "fix_exhausted": None,
     "not_implementation_go": None,
+    "missing_worktree": None,
     "no_pr": None,
     # ci_red cycles merge_wait -> ci for another merge attempt later, so it
     # consumes a merge slot; closed/timeout EXIT the pipeline entirely and

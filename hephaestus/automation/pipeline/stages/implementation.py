@@ -10,7 +10,8 @@ binding contract):
 - States: ENTER -> GATE -> WORKTREE_WAIT -> DIRTY_DECISION_WAIT ->
   ADVISE_WAIT -> IMPLEMENT_WAIT -> TEST_WAIT -> TESTFIX_WAIT ->
   COMMIT_PUSH_WAIT -> PR_CREATE. The existing-PR fast path short-circuits
-  WORKTREE_WAIT -> DIRTY_DECISION_WAIT -> ADOPTED (ADVANCE to pr_review).
+  WORKTREE_WAIT -> DIRTY_DECISION_WAIT -> ADOPTED (ADVANCE to pr_review)
+  or ADOPTED_CI (fail-back to ci for implementation-go PRs).
 - Budgets: ``implement`` = 2 (bounds implement attempts INCLUDING
   agent_error retries — the doc's "agent_error -> RETRY (consumes the
   implement budget)"), ``test_fix`` = 1 (one fix attempt on red pre-PR
@@ -117,6 +118,7 @@ GATE = "GATE"
 WORKTREE_WAIT = "WORKTREE_WAIT"
 DIRTY_DECISION_WAIT = "DIRTY_DECISION_WAIT"
 ADOPTED = "ADOPTED"
+ADOPTED_CI = "ADOPTED_CI"
 ADVISE_WAIT = "ADVISE_WAIT"
 IMPLEMENT_WAIT = "IMPLEMENT_WAIT"
 TEST_WAIT = "TEST_WAIT"
@@ -130,6 +132,7 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
     WORKTREE_WAIT: "_worktree_wait",
     DIRTY_DECISION_WAIT: "_dirty_decision_wait",
     ADOPTED: "_adopted",
+    ADOPTED_CI: "_adopted_ci",
     ADVISE_WAIT: "_advise_wait",
     IMPLEMENT_WAIT: "_implement_wait",
     TEST_WAIT: "_test_wait",
@@ -326,13 +329,20 @@ class ImplementationStage(Stage):
         issue = _issue_number(item)
         if item.payload.pop("git_error", None):
             # Worktree creation failed: transient infrastructure, not an
-            # implement outcome — RETRY without burning the implement
-            # budget, bounded by GIT_ERROR_RETRY_CAP (M5).
-            return self._git_retry(item, "worktree creation failed")
+            # implement outcome. If the retry budget remains, retry the
+            # worktree job itself; do not let adopted-PR state fall through
+            # to ADOPTED/ADOPTED_CI without a valid synced worktree.
+            outcome = self._git_retry(item, "worktree creation failed")
+            if outcome.disposition is Disposition.RETRY:
+                item.state = WORKTREE_WAIT
+            return outcome
         # Adopted-PR path: after the (clean or salvaged) worktree is
         # ready, skip the implement leg — the PR's code already exists;
         # pr_review's address leg drives it from here.
-        adopted_next = ADOPTED if item.payload.get("existing_pr") else ADVISE_WAIT
+        if item.payload.get("existing_pr_impl_go"):
+            adopted_next = ADOPTED_CI
+        else:
+            adopted_next = ADOPTED if item.payload.get("existing_pr") else ADVISE_WAIT
         if not item.payload.get("worktree_dirty"):
             return Continue(next_state=adopted_next)
         logger.info("implementation:%d: requesting dirty-worktree decision", issue)
@@ -367,6 +377,17 @@ class ImplementationStage(Stage):
             item.branch,
         )
         return StageOutcome(Disposition.ADVANCE, f"existing PR #{item.pr}")
+
+    def _adopted_ci(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """ADOPTED_CI routes an implementation-go PR to CI after worktree setup."""
+        issue = _issue_number(item)
+        logger.info(
+            "implementation:%d: adopted implementation-go PR #%s (branch %r); routing to ci",
+            issue,
+            item.pr,
+            item.branch,
+        )
+        return StageOutcome(Disposition.FAIL_BACK, "already_implementation_go_pr")
 
     def _advise_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """ADVISE_WAIT either skips advice or submits the advise job."""
@@ -603,6 +624,10 @@ class ImplementationStage(Stage):
         """
         if not result.ok:
             logger.warning("implementation:%s: worktree job failed: %s", item.issue, result.error)
+            item.worktree = ""
+            item.payload.pop("worktree_dirty", None)
+            item.payload.pop("worktree_status", None)
+            item.payload.pop("worktree_diff", None)
             item.payload["git_error"] = True
             return
         # A successful worktree job ends the consecutive-git-failure streak.
@@ -666,13 +691,25 @@ class ImplementationStage(Stage):
             has_go, _has_no_go = ctx.github.pr_has_implementation_state_label(existing_pr)
             if has_go:
                 # item.pr/item.branch are set above so the ci stage receives
-                # a fully-identified PR (m7).
+                # a fully-identified PR (m7). CI also needs a per-item
+                # worktree for any mutating git job; prepare one first when
+                # this is a late-stage entry that only knew the PR.
+                if item.worktree:
+                    logger.info(
+                        "implementation:%d: PR #%d already implementation-go; routing to ci",
+                        item.issue,
+                        existing_pr,
+                    )
+                    return StageOutcome(Disposition.FAIL_BACK, "already_implementation_go_pr")
+                item.payload["existing_pr"] = True
+                item.payload["existing_pr_impl_go"] = True
                 logger.info(
-                    "implementation:%d: PR #%d already implementation-go; routing to ci",
+                    "implementation:%d: PR #%d already implementation-go; "
+                    "preparing worktree before ci",
                     item.issue,
                     existing_pr,
                 )
-                return StageOutcome(Disposition.FAIL_BACK, "already_implementation_go_pr")
+                return Continue(next_state=WORKTREE_WAIT)
             if agent_error_reentry:
                 # M1: consume the implement budget at GATE-adoption so the
                 # pr_review agent_error -> re-adopt cycle is bounded.
