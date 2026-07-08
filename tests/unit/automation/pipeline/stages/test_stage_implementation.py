@@ -224,6 +224,26 @@ class TestGate:
 
         assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
 
+    def test_gate_existing_item_pr_closed_finishes_before_adoption(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A late fail-back must terminalize a PR that closed before adoption."""
+
+        class ClosedGitHub(FakeStageGitHub):
+            def get_pr_head_branch(self, pr_number: int) -> str | None:
+                raise AssertionError("closed PRs should finish before branch adoption")
+
+            def pr_has_implementation_state_label(self, pr_number: int) -> tuple[bool, bool]:
+                raise AssertionError("closed PRs should finish before label routing")
+
+        stage = ImplementationStage()
+        ctx = make_ctx(github=ClosedGitHub(pr_state={"state": "CLOSED"}))
+        item = make_work_item(issue=1, pr=1001, state="GATE")
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "closed")
+
     def test_gate_existing_pr_without_impl_go_adopts_via_worktree(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
