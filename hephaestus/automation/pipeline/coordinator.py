@@ -118,7 +118,7 @@ from hephaestus.automation.pipeline.stages import (
 )
 from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARGV
 from hephaestus.automation.pipeline.stages.repo import product_to_work_item
-from hephaestus.automation.pipeline.summary import RunStats, print_summary
+from hephaestus.automation.pipeline.summary import RunStats, latest_logical_items, print_summary
 from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkItem
 from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_GO
 
@@ -511,28 +511,53 @@ class Coordinator:
                 agent_job_time_s=self._agent_job_time_s,
                 wall_s=time.monotonic() - started,
             )
+            summary_items = self._effective_items()
+            preserved = self._active_preserved_worktrees()
             self._record_event(
                 "run_end",
                 {
                     "exit_code": exit_code,
                     "interrupted": stats.interrupted,
-                    "items": len(self.items),
+                    "items": len(summary_items),
                     "agent_jobs": self._agent_job_count,
                     "wall_s": stats.wall_s,
                 },
             )
-            print_summary(self.items, stats, self.preserved, json_out=self.config.json_out)
+            print_summary(summary_items, stats, preserved, json_out=self.config.json_out)
         return exit_code
 
+    def _effective_items(self) -> list[WorkItem]:
+        """Return latest logical items, collapsing superseded re-seed attempts."""
+        return latest_logical_items(self.items)
+
+    def _active_preserved_worktrees(self) -> list[tuple[int, str]]:
+        """Return preserved worktrees for latest failed items that still exist."""
+        failed_numbers = {
+            item.issue or item.pr or 0
+            for item in self._effective_items()
+            if item.result is not None and not item.result.passed
+        }
+        active: list[tuple[int, str]] = []
+        seen: set[tuple[int, str]] = set()
+        for issue_or_pr, path in self.preserved:
+            entry = (issue_or_pr, path)
+            if entry in seen or issue_or_pr not in failed_numbers or not Path(path).exists():
+                continue
+            seen.add(entry)
+            active.append(entry)
+        return active
+
     def _exit_code(self) -> int:
-        """130 on interrupt; 1 on any fail/skip/blocked (or fatal error); 0 clean."""
+        """130 on interrupt; 1 on any effective fail/skip/blocked; 0 clean."""
         if self.shutdown.is_set():
             # Interrupt deliberately takes priority over non-passing ledger
             # entries and fatal coordinator errors: a signal means the run did
             # not complete, so wrappers must classify it as cancellation even
             # if earlier work had already failed.
             return 130
-        if self._fatal or any(not result.passed for result in self.ledger):
+        effective_results = [item.result for item in self._effective_items() if item.result]
+        results = effective_results or self.ledger
+        if self._fatal or any(not result.passed for result in results):
             return 1
         return 0
 

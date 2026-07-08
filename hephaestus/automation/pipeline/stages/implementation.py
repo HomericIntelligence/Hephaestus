@@ -104,6 +104,7 @@ from .base import (
     StepResult,
     WorkItem,
     _issue_labels,
+    _terminal_pr_outcome,
     _worktree_path,
     agent_provider,
     stage_model,
@@ -685,6 +686,9 @@ class ImplementationStage(Stage):
         existing_pr = item.pr or ctx.github.find_pr_for_issue(item.issue)
         if existing_pr:
             item.pr = existing_pr
+            terminal = _terminal_pr_outcome(ctx.github.gh_pr_state(existing_pr), existing_pr)
+            if terminal is not None:
+                return terminal
             head_branch = ctx.github.get_pr_head_branch(existing_pr)
             if head_branch:
                 item.branch = head_branch

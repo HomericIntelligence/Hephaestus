@@ -522,6 +522,20 @@ def _require_item_worktree(item: WorkItem, stage_name: str, action: str) -> Stag
     return StageOutcome(Disposition.FAIL_BACK, "missing_worktree")
 
 
+def _terminal_pr_outcome(pr_state: dict[str, Any] | None, pr_number: int) -> StageOutcome | None:
+    """Return a terminal outcome for PRs already merged/closed, if known."""
+    if not pr_state:
+        return None
+    state = str(pr_state.get("state") or "").upper()
+    if state == "MERGED" or pr_state.get("mergedAt"):
+        logger.info("PR #%d is already merged; terminalizing", pr_number)
+        return StageOutcome(Disposition.FINISH_PASS, "merged")
+    if state == "CLOSED":
+        logger.info("PR #%d is already closed; terminalizing", pr_number)
+        return StageOutcome(Disposition.FINISH_FAIL, "closed")
+    return None
+
+
 def write_skip_label(issue_number: int, ctx: StageContext) -> None:
     """Durably apply ``state:skip``, non-fatally (legacy warn pattern).
 

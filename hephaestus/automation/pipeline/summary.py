@@ -18,7 +18,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from hephaestus.automation.pipeline.work_item import WorkItem
+from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.cli.utils import emit_json_status
 
 logger = logging.getLogger(__name__)
@@ -68,6 +68,27 @@ def format_preserved_worktrees(
     lines.append("To discard them instead:")
     lines.extend(f"  git worktree remove --force {path}" for _, path in preserved)
     return lines
+
+
+def _logical_item_key(item: WorkItem) -> tuple[object, ...]:
+    """Return the stable logical identity for a potentially re-seeded item."""
+    if item.kind is ItemKind.REPO:
+        return (item.repo, "repo")
+    if item.issue is not None:
+        return (item.repo, "issue", item.issue)
+    if item.pr is not None:
+        return (item.repo, "pr", item.pr)
+    return (item.repo, item.kind.value, id(item))
+
+
+def latest_logical_items(items: Sequence[WorkItem]) -> list[WorkItem]:
+    """Return only the latest queued item for each logical issue/PR/repo."""
+    latest: dict[tuple[object, ...], WorkItem] = {}
+    for item in items:
+        key = _logical_item_key(item)
+        latest.pop(key, None)
+        latest[key] = item
+    return list(latest.values())
 
 
 def _disposition(item: WorkItem) -> str:
@@ -130,6 +151,8 @@ def print_summary(
         json_out: Emit the machine-readable ``emit_json_status`` envelope.
 
     """
+    items = latest_logical_items(items)
+
     logger.info("")
     logger.info("=== Pipeline summary ===")
     header = (
