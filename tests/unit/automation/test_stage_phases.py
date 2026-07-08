@@ -9,6 +9,7 @@ cross-phase dispatch contract that the pipeline stages rely on.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -18,7 +19,7 @@ import pytest
 
 from hephaestus.automation._followup_phase import FollowUpPhase
 from hephaestus.automation._implement_phase import ImplementPhase, _prepend_advise
-from hephaestus.automation._plan_phase import PlanPhase
+from hephaestus.automation._plan_phase import PlanPhase, _phase_env
 from hephaestus.automation._pr_create_phase import PRCreatePhase
 from hephaestus.automation._review_phase import ReviewPhase, _is_automation_owned_thread
 from hephaestus.automation._stage_context import StageContext, StageMixin
@@ -104,6 +105,17 @@ def test_plan_phase_has_plan_false_on_subprocess_error(tmp_path: Path) -> None:
         assert phase._has_plan(7) is False
 
 
+def test_phase_env_keeps_only_repo_root_pythonpath(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The child phase env drops inherited site-packages contamination."""
+    monkeypatch.setenv("PYTHONPATH", f"/opt/site-packages{os.pathsep}/tmp/elsewhere")
+
+    env = _phase_env(tmp_path)
+
+    assert env["PYTHONPATH"] == str(tmp_path)
+
+
 def test_plan_phase_generate_uses_entry_point(tmp_path: Path) -> None:
     """_generate prefers the installed hephaestus-plan-issues entry point."""
     phase = PlanPhase(_make_ctx(tmp_path))
@@ -115,6 +127,20 @@ def test_plan_phase_generate_uses_entry_point(tmp_path: Path) -> None:
     args = mock_run.call_args[0][0]
     assert args[0] == "/usr/bin/hpi"
     assert "--issues" in args and "7" in args
+
+
+def test_plan_phase_generate_sanitizes_pythonpath(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """_generate passes a repo-root-only PYTHONPATH to child subprocesses."""
+    monkeypatch.setenv("PYTHONPATH", f"/opt/site-packages{os.pathsep}/tmp/elsewhere")
+    phase = PlanPhase(_make_ctx(tmp_path))
+    with (
+        mock.patch("shutil.which", return_value="/usr/bin/hpi"),
+        mock.patch("hephaestus.automation._plan_phase.run") as mock_run,
+    ):
+        phase._generate(7)
+    assert mock_run.call_args.kwargs["env"]["PYTHONPATH"] == str(tmp_path)
 
 
 def test_plan_phase_generate_uses_long_stage_timeout(tmp_path: Path) -> None:

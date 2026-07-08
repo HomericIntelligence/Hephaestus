@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import subprocess
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from hephaestus.github.client import gh_call
@@ -23,6 +25,18 @@ from .planner_state import _comments_contain_plan
 
 if TYPE_CHECKING:
     from ._stage_context import StageContext
+
+
+def _phase_env(repo_root: Path) -> dict[str, str]:
+    """Return a sanitized environment for a phase subprocess.
+
+    Child phase invocations must not inherit a ``PYTHONPATH`` that can place
+    third-party ``site-packages`` ahead of the stdlib. Keep only the repo root
+    so source-checkout fallback still works without the ambient search path.
+    """
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(repo_root)
+    return env
 
 
 class PlanPhase(StageMixin):
@@ -74,11 +88,13 @@ class PlanPhase(StageMixin):
             run(
                 [entry_point, "--issues", str(issue_number), "--agent", self.options.agent],
                 timeout=plan_timeout,
+                env=_phase_env(self.repo_root),
             )
             return
 
-        # Fall back to python -m invocation (works when PYTHONPATH is set).
-        # On failure, fall through to the legacy scripts/plan_issues.py path.
+        # Fall back to python -m invocation using the sanitized repo-root-only
+        # PYTHONPATH (source-checkout fallback). On failure, fall through to the
+        # legacy scripts/plan_issues.py path.
         with contextlib.suppress(subprocess.SubprocessError, OSError):
             run(
                 [
@@ -91,6 +107,7 @@ class PlanPhase(StageMixin):
                     self.options.agent,
                 ],
                 timeout=plan_timeout,
+                env=_phase_env(self.repo_root),
             )
             return
 
@@ -100,6 +117,7 @@ class PlanPhase(StageMixin):
             run(
                 [sys.executable, str(plan_script), "--issues", str(issue_number)],
                 timeout=plan_timeout,
+                env=_phase_env(self.repo_root),
             )
             return
 
