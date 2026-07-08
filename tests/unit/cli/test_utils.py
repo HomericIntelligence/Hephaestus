@@ -174,32 +174,33 @@ class TestConfigureCliLogging:
     """Tests for configure_cli_logging."""
 
     def test_default_uses_info_level(self) -> None:
-        """Without verbose, basicConfig is called at INFO level."""
-        with patch("hephaestus.cli.utils.logging.basicConfig") as basic_config:
+        """Without verbose, setup_logging is called at INFO level."""
+        with patch("hephaestus.cli.utils.setup_logging") as setup:
             configure_cli_logging()
-        assert basic_config.call_args.kwargs["level"] == logging.INFO
+        assert setup.call_args.kwargs["level"] == logging.INFO
 
     def test_verbose_uses_debug_level(self) -> None:
         """verbose=True raises the configured level to DEBUG."""
-        with patch("hephaestus.cli.utils.logging.basicConfig") as basic_config:
+        with patch("hephaestus.cli.utils.setup_logging") as setup:
             configure_cli_logging(verbose=True)
-        assert basic_config.call_args.kwargs["level"] == logging.DEBUG
+        assert setup.call_args.kwargs["level"] == logging.DEBUG
 
     def test_sets_standard_format(self) -> None:
         """A consistent stderr-safe format string is applied."""
-        with patch("hephaestus.cli.utils.logging.basicConfig") as basic_config:
+        with patch("hephaestus.cli.utils.setup_logging") as setup:
             configure_cli_logging()
-        assert "%(levelname)s" in basic_config.call_args.kwargs["format"]
-        assert "%(name)s" in basic_config.call_args.kwargs["format"]
+        assert "%(levelname)s" in setup.call_args.kwargs["format_string"]
+        assert "%(name)s" in setup.call_args.kwargs["format_string"]
+        assert setup.call_args.kwargs["primary_stream"] == "stderr"
 
     def test_routes_through_canonical_constants(self) -> None:
         """configure_cli_logging uses the shared AUTOMATION_LOG_FORMAT (#1427)."""
         import hephaestus.constants as constants
 
-        with patch("hephaestus.cli.utils.logging.basicConfig") as basic_config:
+        with patch("hephaestus.cli.utils.setup_logging") as setup:
             configure_cli_logging()
-        assert basic_config.call_args.kwargs["format"] == constants.AUTOMATION_LOG_FORMAT
-        assert basic_config.call_args.kwargs["datefmt"] == constants.LOG_DATEFMT
+        assert setup.call_args.kwargs["format_string"] == constants.AUTOMATION_LOG_FORMAT
+        assert setup.call_args.kwargs["datefmt"] == constants.LOG_DATEFMT
 
 
 class TestResolveRepoRoot:

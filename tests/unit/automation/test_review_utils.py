@@ -103,37 +103,19 @@ class TestLogFilePath:
 
 
 class TestSetupReviewLogging:
-    """setup_review_logging routes through the canonical constants (#1427)."""
+    """setup_review_logging routes through the shared CLI logging helper."""
 
-    def test_uses_canonical_format(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import hephaestus.constants as constants
+    def test_uses_cli_logging_helper(self) -> None:
+        with patch("hephaestus.automation._review_utils.configure_cli_logging") as configure:
+            review_utils.setup_review_logging(verbose=False)
 
-        captured: dict[str, Any] = {}
+        configure.assert_called_once_with(verbose=False)
 
-        def fake_basic_config(**kwargs: Any) -> None:
-            captured.update(kwargs)
+    def test_verbose_sets_debug_level(self) -> None:
+        with patch("hephaestus.automation._review_utils.configure_cli_logging") as configure:
+            review_utils.setup_review_logging(verbose=True)
 
-        monkeypatch.setattr(
-            "hephaestus.automation._review_utils.logging.basicConfig", fake_basic_config
-        )
-        review_utils.setup_review_logging(verbose=False)
-
-        assert captured["format"] == constants.AUTOMATION_LOG_FORMAT
-        assert captured["datefmt"] == constants.LOG_DATEFMT
-        assert captured["level"] == logging.INFO
-
-    def test_verbose_sets_debug_level(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        captured: dict[str, Any] = {}
-
-        def fake_basic_config(**kwargs: Any) -> None:
-            captured.update(kwargs)
-
-        monkeypatch.setattr(
-            "hephaestus.automation._review_utils.logging.basicConfig", fake_basic_config
-        )
-        review_utils.setup_review_logging(verbose=True)
-
-        assert captured["level"] == logging.DEBUG
+        configure.assert_called_once_with(verbose=True)
 
 
 # ---------------------------------------------------------------------------

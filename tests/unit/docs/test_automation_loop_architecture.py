@@ -78,6 +78,18 @@ def test_automation_loop_architecture_status_is_implemented() -> None:
     assert "pre-implementation" not in header
 
 
+def test_automation_loop_architecture_describes_post_cutover_loop() -> None:
+    """The architecture contract must not document removed rollback controls."""
+    text = _arch_text()
+    normalized = " ".join(text.split())
+
+    assert "subprocess-per-phase loop was removed" in text
+    assert "there is no `--legacy-loop` rollback path" in text
+    assert "legacy loop remains available" not in normalized
+    assert "HEPH_PIPELINE=0" not in text
+    assert "forces the pre-pipeline path" not in text
+
+
 def test_automation_loop_architecture_has_interrupt_semantics_and_exit_codes() -> None:
     """The architecture contract must keep interrupt and exit-code details."""
     text = _arch_text()

@@ -52,6 +52,7 @@ from hephaestus.cli.utils import (
 )
 from hephaestus.config.paths import resolve_projects_dir
 from hephaestus.constants import AUTOMATION_LOG_FORMAT, LOG_DATEFMT
+from hephaestus.logging.utils import setup_logging
 
 from ._review_utils import build_automation_parser, ensure_state_dir
 from .agent_config import AGENT_IMPL_TIMEOUT
@@ -107,15 +108,15 @@ def _setup_logging(verbose: bool = False, log_dir: Path | None = None) -> None:
         log_dir: Optional directory to write a ``run.log`` file into.
 
     """
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(level=level, format=AUTOMATION_LOG_FORMAT, datefmt=LOG_DATEFMT)
-
     if log_dir:
         log_dir.mkdir(parents=True, exist_ok=True)
-        fh = logging.FileHandler(log_dir / "run.log", mode="a")
-        fh.setLevel(logging.DEBUG)
-        fh.setFormatter(logging.Formatter(AUTOMATION_LOG_FORMAT, datefmt=LOG_DATEFMT))
-        logging.getLogger().addHandler(fh)
+    setup_logging(
+        level=logging.DEBUG if verbose else logging.INFO,
+        log_file=str(log_dir / "run.log") if log_dir else None,
+        format_string=AUTOMATION_LOG_FORMAT,
+        datefmt=LOG_DATEFMT,
+        primary_stream="stderr",
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:

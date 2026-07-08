@@ -92,10 +92,10 @@ class InterruptingPool(FakeWorkerPool):
         super().__init__()
         self._coordinator_shutdown = coordinator_shutdown
 
-    def submit(self, job: Any, on_done_state: Any) -> Any:
+    def submit(self, job: Any, on_done_state: Any, **kwargs: Any) -> Any:
         self._coordinator_shutdown.set()
         self.queue_result(JobResult(ok=False, interrupted=True, error="interrupted"))
-        return super().submit(job, on_done_state)
+        return super().submit(job, on_done_state, **kwargs)
 
 
 def _capture_signal_handlers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -122,16 +122,17 @@ def _raise_sigterm() -> None:
 class GracefulSignalCompletionPool(FakeWorkerPool):
     """Send first SIGTERM during submit, then deliver a non-interrupted result."""
 
-    def submit(self, job: Any, on_done_state: Any) -> Any:
+    def submit(self, job: Any, on_done_state: Any, **kwargs: Any) -> Any:
         _raise_sigterm()
         self.queue_result(JobResult(ok=True, value="completed after shutdown"))
-        return super().submit(job, on_done_state)
+        return super().submit(job, on_done_state, **kwargs)
 
 
 class SecondSignalPool(FakeWorkerPool):
     """Send two SIGTERMs during submit and leave the job in flight."""
 
-    def submit(self, job: Any, on_done_state: Any) -> Any:
+    def submit(self, job: Any, on_done_state: Any, **kwargs: Any) -> Any:
+        del kwargs
         handle = JobHandle(job=job, on_done_state=on_done_state)
         self.submitted.append(handle)
         _raise_sigterm()

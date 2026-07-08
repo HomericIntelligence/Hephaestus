@@ -1,8 +1,8 @@
 # Automation Loop Architecture
 
 Status: implemented for the epic #1809 queue-based automation loop. The
-`hephaestus-automation-loop` CLI defaults to this pipeline; the legacy loop
-remains available only through `--legacy-loop` or `HEPH_PIPELINE=0`.
+`hephaestus-automation-loop` CLI runs this pipeline directly; the legacy
+subprocess-per-phase loop was removed after the #1818/#1819 cutover.
 
 ## Overview and goals
 
@@ -65,7 +65,11 @@ A single worker pool executes:
 
 The only cross-thread channel is `CompletionQueue = queue.Queue[(JobHandle,
 JobResult)]`, whose blocking `get(timeout=…)` also serves as the loop's idle
-sleep.
+sleep. When a worker starts executing a submitted job it logs a `worker_claim`
+line with the stable worker thread ID plus the coordinator item/stage claim
+context. The returned `JobResult` carries that same `worker_id`, and the
+coordinator persists it in the durable `complete` event record so operators can
+correlate queue drain/submission with actual worker execution.
 
 ## WorkItem lifecycle
 
@@ -154,8 +158,10 @@ causes a queue push.
    FAIL_BACK(nogo) while plan_cycles remain or
    FAIL_BACK(plan_cycles_exhausted) once plan_cycles is exhausted; if ERROR →
    leave labels untouched, RETRY next tick.
-3. [W:A] **Amend step** — resume planner session with feedback block;
-   iteration counter increments.
+3. [W:A] **Amend step** — resume planner session with feedback block.
+   [M] Upsert the amended plan comment [durable] before looping back to
+   review. The iteration counter increments in EVAL when each real review
+   verdict is processed.
 4. [W:A] **Learn step** (on GO only) — `learn.py:111 build_learn_prompt`.
 
 **Verdicts**: ADVANCE, RETRY, FAIL_BACK(nogo, plan_cycles_exhausted).
@@ -460,8 +466,8 @@ serialization unless `--no-serialize-file-overlap` is passed.
 
 The pipeline never sleeps inside stage logic. Backoff uses the coordinator's
 timer heap, and low GitHub rate budget parks agent jobs until the reset instead
-of blocking the loop. Under the pipeline, `--phase-timeout` bounds each agent job.
-Under the legacy loop, the same flag still bounds a phase subprocess.
+of blocking the loop. `--phase-timeout` bounds each agent job inside the
+queue pipeline.
 
 Dry-run mode logs GitHub mutations and job submissions without executing them;
 `_submit` asserts that no worker job is submitted in dry-run. This makes
@@ -470,11 +476,10 @@ check for seed classification and route reconstruction.
 
 ## CLI scopes and rollout controls
 
-`hephaestus-automation-loop` runs the queue pipeline by default. `--pipeline`
-is retained as an explicit affirmative flag for scripts and evidence commands;
-`--legacy-loop` forces the pre-pipeline path for rollback. Environment default:
-`HEPH_PIPELINE=0` disables the pipeline when neither CLI flag is present, and
-the CLI flag always wins over the environment.
+`hephaestus-automation-loop` runs the queue pipeline directly. `--pipeline`
+remains accepted as an affirmative compatibility flag for pinned scripts and
+evidence commands; there is no `--legacy-loop` rollback path, and
+`HEPH_PIPELINE` no longer selects a subprocess-per-phase implementation.
 
 The default pipeline's scopes are the `hephaestus-automation-loop` selectors
 listed above. Standalone scripts are still legacy/manual compatibility paths at

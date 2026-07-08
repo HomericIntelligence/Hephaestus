@@ -639,6 +639,66 @@ class TestDurableEventLog:
         assert "stdout_tail" not in complete["fields"][-1]
         assert "stderr_tail" not in complete["fields"][-1]
 
+    def test_event_log_completion_records_worker_id(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Completion records include the worker that executed the submitted job."""
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            loops=1,
+            projects_dir=tmp_path,
+            event_log_path=event_log_path,
+        )
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
+        pool = FakeWorkerPool()
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(),
+            pool=pool,
+            stages={StageName.PLANNING: StubStage()},
+            install_signals=False,
+        )
+        coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
+        result = JobResult(ok=True, value="done")
+        object.__setattr__(result, "worker_id", "hephaestus-pipeline-worker_0")
+        pool.queue_result(result)
+        item = _issue_item(45, StageName.PLANNING)
+
+        coordinator._submit(item, JobRequest(_agent_job(issue=45), "REVIEWED"))
+        coordinator._drain_completions()
+
+        records = [json.loads(line) for line in event_log_path.read_text().splitlines()]
+        complete = next(record for record in records if record["event"] == "complete")
+        assert complete["fields"][-1]["worker_id"] == "hephaestus-pipeline-worker_0"
+
+    def test_submit_forwards_claim_context_to_worker_pool(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Submitted jobs carry item/stage context for worker-claim logging."""
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            loops=1,
+            projects_dir=tmp_path,
+        )
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
+        pool = FakeWorkerPool()
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(),
+            pool=pool,
+            stages={StageName.PLANNING: StubStage()},
+            install_signals=False,
+        )
+        coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
+        item = _issue_item(46, StageName.PLANNING)
+
+        coordinator._submit(item, JobRequest(_agent_job(issue=46), "REVIEWED"))
+
+        assert pool.submitted_claims == [("repo-a#46", "planning")]
+
     def test_event_log_path_sanitizes_job_error_text(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

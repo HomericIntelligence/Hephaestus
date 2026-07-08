@@ -41,7 +41,8 @@ re-pointed at the pipeline (#1820):
 - Prompt functions (imported, never re-authored):
   ``prompts/planning.py get_plan_loop_review_prompt``,
   ``prompts/planning.py get_plan_prompt`` (composed with the reviewer
-  feedback block by :func:`build_amend_prompt` for amends), and
+  feedback block by :func:`build_amend_prompt` for amends, then
+  upserted as the durable plan comment before the next review), and
   ``learn.py build_learn_prompt`` (GO only).
 """
 
@@ -79,7 +80,7 @@ from .base import (
     agent_provider,
     stage_model,
 )
-from .planning import build_plan_prompt
+from .planning import _normalize_plan_comment, build_plan_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -464,7 +465,13 @@ class PlanReviewStage(Stage):
                     )
                     item.payload["prior_review"] = raw_review
             elif item.state == "AMEND_WAIT":
-                item.payload["plan_text"] = result.value
+                plan_text = result.value
+                item.payload["plan_text"] = plan_text
+                if item.issue is not None and isinstance(plan_text, str):
+                    ctx.github.upsert_plan_comment(
+                        item.issue,
+                        _normalize_plan_comment(plan_text),
+                    )
             # LEARN_WAIT intentionally has no branch: the learn job's output
             # is a side effect for the Mnemosyne skill store, not a payload
             # value any later state consumes.

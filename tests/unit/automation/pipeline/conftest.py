@@ -65,6 +65,7 @@ class FakeWorkerPool:
             completion_q if completion_q is not None else (queue.Queue())
         )
         self.submitted: list[JobHandle] = []
+        self.submitted_claims: list[tuple[str, str]] = []
         self._scripted: deque[JobResult | Exception] = deque()
 
     def script(self, *outcomes: JobResult | Exception) -> None:
@@ -79,12 +80,21 @@ class FakeWorkerPool:
         """FIFO-enqueue an exception, delivered as an error JobResult."""
         self._scripted.append(exc)
 
-    def submit(self, job: AgentJob | BuildTestJob | GitJob, on_done_state: StageName) -> JobHandle:
+    def submit(
+        self,
+        job: AgentJob | BuildTestJob | GitJob,
+        on_done_state: StageName,
+        *,
+        claim_key: str = "",
+        claim_stage: str = "",
+    ) -> JobHandle:
         """Execute *job* inline and put its completion on the queue.
 
         Args:
             job: Frozen job spec (any of the three job types).
             on_done_state: Target stage on completion.
+            claim_key: Coordinator item key forwarded to the worker pool.
+            claim_stage: Stage queue name forwarded to the worker pool.
 
         Returns:
             The JobHandle also recorded in :attr:`submitted`.
@@ -92,6 +102,7 @@ class FakeWorkerPool:
         """
         handle = JobHandle(job=job, on_done_state=on_done_state)
         self.submitted.append(handle)
+        self.submitted_claims.append((claim_key, claim_stage))
         outcome: JobResult | Exception = (
             self._scripted.popleft() if self._scripted else self._default_result(job)
         )
