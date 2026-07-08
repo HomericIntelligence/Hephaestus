@@ -433,7 +433,7 @@ def _rebase_main(repo: str, repo_dir: Path) -> tuple[str, bool]:
             fetch_ok = False
     base_ref = _detect_remote_base_ref(repo, repo_dir)
     local_ahead = _local_ahead_count(repo, repo_dir, base_ref)
-    rebase_cmd = ["git", "-C", str(repo_dir), "rebase", base_ref]
+    rebase_cmd = ["git", "-C", str(repo_dir), "rebase", "--empty=drop", base_ref]
     if local_ahead > 0:
         rebase_cmd.extend(["--exec", COMMIT_POLICY_REWRITE_EXEC])
     rebase_cmd.append("--quiet")

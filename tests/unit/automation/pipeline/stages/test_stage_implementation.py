@@ -167,11 +167,27 @@ class TestGate:
     def test_gate_existing_pr_with_impl_go_routes_to_ci(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """An existing implementation-go PR fails back already_implementation_go_pr.
+        """An implementation-go PR with a worktree routes straight to CI."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub(
+            open_pr=1001, pr_impl_state=(True, False), pr_head_branch="1-real-branch"
+        )
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, state="GATE")
+        item.worktree = "/tmp/wt/issue-1"
 
-        The ci stage must receive a fully-identified PR: item.pr and the
-        PR's REAL head branch are set BEFORE the fail-back (m7).
-        """
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.FAIL_BACK
+        assert result.note == "already_implementation_go_pr"
+        assert item.pr == 1001  # set before the fail-back (m7)
+        assert item.branch == "1-real-branch"
+
+    def test_gate_existing_pr_with_impl_go_without_worktree_adopts_first(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An implementation-go PR still needs an isolated worktree before CI."""
         stage = ImplementationStage()
         github = FakeStageGitHub(
             open_pr=1001, pr_impl_state=(True, False), pr_head_branch="1-real-branch"
@@ -181,11 +197,12 @@ class TestGate:
 
         result = stage.step(item, ctx)
 
-        assert isinstance(result, StageOutcome)
-        assert result.disposition == Disposition.FAIL_BACK
-        assert result.note == "already_implementation_go_pr"
-        assert item.pr == 1001  # set before the fail-back (m7)
+        assert isinstance(result, Continue)
+        assert result.next_state == "WORKTREE_WAIT"
+        assert item.pr == 1001
         assert item.branch == "1-real-branch"
+        assert item.payload["existing_pr"] is True
+        assert item.payload["existing_pr_impl_go"] is True
 
     def test_gate_existing_pr_without_impl_go_adopts_via_worktree(
         self, make_ctx: Any, make_work_item: Any
@@ -356,6 +373,37 @@ class TestGitErrorRetryCap:
         assert outcome.disposition == Disposition.FINISH_FAIL
         assert outcome.note == "git_error"
         assert item.attempts["implement"] == 0  # git failures never burn implement
+
+    def test_adopted_impl_go_worktree_failure_retries_worktree_not_ci(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A failed adopted worktree sync must not flow through ADOPTED_CI."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="WORKTREE_WAIT")
+        item.branch = "1-real-branch"
+        item.worktree = "/tmp/stale-worktree"
+        item.payload["existing_pr"] = True
+        item.payload["existing_pr_impl_go"] = True
+        item.payload["worktree_dirty"] = False
+
+        stage.on_job_done(item, JobResult(ok=False, error="missing remote ref"), ctx)
+        item.state = "DIRTY_DECISION_WAIT"
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.RETRY
+        assert outcome.note == "worktree creation failed"
+        assert item.state == "WORKTREE_WAIT"
+        assert item.worktree == ""
+        assert "worktree_dirty" not in item.payload
+
+        retry = stage.step(item, ctx)
+
+        assert isinstance(retry, JobRequest)
+        assert isinstance(retry.job, GitJob)
+        assert retry.job.op == "create_worktree"
+        assert retry.on_done_state == "DIRTY_DECISION_WAIT"
 
     def test_push_failures_share_the_same_cap(self, make_ctx: Any, make_work_item: Any) -> None:
         """Consecutive push failures hit the same bounded-RETRY path."""

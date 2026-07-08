@@ -93,6 +93,7 @@ from .base import (
     StageOutcome,
     StepResult,
     WorkItem,
+    _require_item_worktree,
     _worktree_path,
     agent_provider,
     stage_model,
@@ -399,7 +400,7 @@ class MergeWaitStage(Stage):
             return StageOutcome(Disposition.FAIL_BACK, "blocked_exhausted")
         return Continue(next_state=BLOCKED_ADDRESS_WAIT)
 
-    def _request_dirty_rebase(self, item: WorkItem, ctx: StageContext) -> JobRequest:
+    def _request_dirty_rebase(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """DIRTY_REBASE_WAIT [W:G]: mechanical rebase onto the PR's base.
 
         The cheap deterministic path of the legacy ``_resolve_dirty_pr``:
@@ -410,6 +411,9 @@ class MergeWaitStage(Stage):
         DIRTY_PUSH_WAIT pushes only a clean result.
         """
         item.payload.pop("rebase_clean", None)
+        missing_worktree = _require_item_worktree(item, "merge_wait", "dirty rebase")
+        if missing_worktree is not None:
+            return missing_worktree
         rebase_job = GitJob(
             repo=item.repo,
             op="rebase",
@@ -433,6 +437,9 @@ class MergeWaitStage(Stage):
         """
         if not item.payload.pop("rebase_clean", None):
             return Continue(next_state=POLL)
+        missing_worktree = _require_item_worktree(item, "merge_wait", "dirty rebase push")
+        if missing_worktree is not None:
+            return missing_worktree
         push_job = GitJob(
             repo=item.repo,
             op="push",
@@ -445,7 +452,7 @@ class MergeWaitStage(Stage):
         )
         return JobRequest(push_job, on_done_state=POLL)
 
-    def _request_blocked_address(self, item: WorkItem, ctx: StageContext) -> JobRequest:
+    def _request_blocked_address(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """BLOCKED_ADDRESS_WAIT [W:A]: address the unresolved review threads.
 
         An armed PR sitting BLOCKED behind branch protection (unresolved
@@ -459,6 +466,9 @@ class MergeWaitStage(Stage):
         ``blocked_address`` budget; the push leg then re-POLLs.
         """
         item.payload.pop("address_failed", None)
+        missing_worktree = _require_item_worktree(item, "merge_wait", "blocked address")
+        if missing_worktree is not None:
+            return missing_worktree
         job = AgentJob(
             repo=item.repo,
             issue=item.issue if item.issue is not None else 0,
@@ -490,6 +500,9 @@ class MergeWaitStage(Stage):
         """
         if item.payload.pop("address_failed", None):
             return Continue(next_state=POLL)
+        missing_worktree = _require_item_worktree(item, "merge_wait", "blocked address push")
+        if missing_worktree is not None:
+            return missing_worktree
         push_job = GitJob(
             repo=item.repo,
             op="commit_push",

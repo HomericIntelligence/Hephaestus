@@ -509,6 +509,19 @@ def _worktree_path(item: WorkItem, ctx: StageContext) -> Path:
     return Path(str(ctx.paths.worktree))
 
 
+def _require_item_worktree(item: WorkItem, stage_name: str, action: str) -> StageOutcome | None:
+    """Return a fail-back outcome when a mutating action lacks a worktree."""
+    if item.worktree:
+        return None
+    logger.warning(
+        "%s:%s: %s requires an item worktree; failing back to implementation",
+        stage_name,
+        item.issue if item.issue is not None else item.pr,
+        action,
+    )
+    return StageOutcome(Disposition.FAIL_BACK, "missing_worktree")
+
+
 def write_skip_label(issue_number: int, ctx: StageContext) -> None:
     """Durably apply ``state:skip``, non-fatally (legacy warn pattern).
 
