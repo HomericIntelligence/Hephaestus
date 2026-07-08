@@ -717,6 +717,17 @@ class PrReviewStage(Stage):
         if verdict is None or verdict.is_error:
             return self._handle_error_verdict(item, verdict)
 
+        # Fresh counts AFTER the address/push leg, split by severity so a GO is
+        # downgraded only by BLOCKING automation threads (#1856 / re-introduced #1554).
+        blocking_auto, minor_auto, human_unresolved = (
+            ctx.github.count_unresolved_threads_by_severity(item.pr)
+        )
+        automation_unresolved = blocking_auto + minor_auto  # progress-trail parity (#1554)
+        unresolved = automation_unresolved + human_unresolved
+
+        if self._nogo_without_durable_artifact(verdict, payload, automation_unresolved):
+            return self._handle_lost_review_artifact(item)
+
         # Real verdict: this round counts. Reset the consecutive-failure
         # cap; advance the cycle-relative gate and the lifetime audit trail.
         payload["review_error_retries"] = 0
@@ -728,14 +739,6 @@ class PrReviewStage(Stage):
         if round_done > soft_cap:
             # Audit trail of progress-earned extension rounds (4..hard_cap).
             item.attempts["pr_review_hard"] = item.attempts.get("pr_review_hard", 0) + 1
-
-        # Fresh counts AFTER the address/push leg, split by severity so a GO is
-        # downgraded only by BLOCKING automation threads (#1856 / re-introduced #1554).
-        blocking_auto, minor_auto, human_unresolved = (
-            ctx.github.count_unresolved_threads_by_severity(item.pr)
-        )
-        automation_unresolved = blocking_auto + minor_auto  # progress-trail parity (#1554)
-        unresolved = automation_unresolved + human_unresolved
 
         if verdict.is_go and human_unresolved:
             # Unchanged human-blocked guard (pr_review.py:690-701).
@@ -798,6 +801,43 @@ class PrReviewStage(Stage):
         )
         write_skip_label(item.issue, ctx)
         return StageOutcome(Disposition.SKIP, "exhaustion")
+
+    @staticmethod
+    def _nogo_without_durable_artifact(
+        verdict: Any, payload: dict[str, Any], automation_unresolved: int
+    ) -> bool:
+        """Return True for a NOGO verdict that left no durable review artifact."""
+        if getattr(verdict, "verdict", "").upper() != "NOGO" or automation_unresolved:
+            return False
+        artifact_keys = (
+            "raw_review_threads",
+            "review_threads",
+            "posted_thread_ids",
+            "unaddressed_findings",
+        )
+        return not any(payload.get(key) for key in artifact_keys)
+
+    def _handle_lost_review_artifact(self, item: WorkItem) -> StageOutcome:
+        """Retry an artifactless NOGO without burning a review round."""
+        payload = item.payload
+        retries = payload.get("review_error_retries", 0) + 1
+        payload["review_error_retries"] = retries
+        if retries > REVIEW_ERROR_RETRY_CAP:
+            logger.error(
+                "pr_review:%s: NOGO produced no durable findings; %d consecutive "
+                "artifact failures (cap %d) — failing back to implementation",
+                item.issue,
+                retries,
+                REVIEW_ERROR_RETRY_CAP,
+            )
+            return self._fail_back_agent_error(item)
+        logger.warning(
+            "pr_review:%s: NOGO produced no durable findings; retry %d/%d (no round burned)",
+            item.issue,
+            retries,
+            REVIEW_ERROR_RETRY_CAP,
+        )
+        return StageOutcome(Disposition.RETRY, "nogo_without_artifact")
 
     def _handle_address_error(self, item: WorkItem) -> StageOutcome | None:
         """Fail back hard address/push errors with explicit retry cleanup."""
