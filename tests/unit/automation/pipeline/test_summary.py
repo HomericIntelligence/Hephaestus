@@ -124,6 +124,22 @@ class TestPrintSummaryRows:
         assert "loops: 2" in text
         assert "wall: 99.5s" in text
 
+    def test_summary_uses_latest_logical_item_for_aggregates(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A later PASS for the same issue/PR supersedes an earlier failed attempt."""
+        failed = _item(2009, StageName.FINISHED, passed=False, reason="git_error", pr=2010)
+        passed = _item(2009, StageName.FINISHED, passed=True, reason="merged", pr=2010)
+
+        with caplog.at_level(logging.INFO):
+            print_summary([failed, passed], _stats(), [], json_out=False)
+
+        text = caplog.text
+        assert "items: 1" in text
+        assert "'pass': 1" in text
+        assert "'fail'" not in text
+        assert "FAIL:git_error" not in text
+
     def test_nonzero_attempts_render(self, caplog: pytest.LogCaptureFixture) -> None:
         """Only non-zero attempt counters appear in the row."""
         item = _item(6, StageName.FINISHED, passed=True, reason="ok")

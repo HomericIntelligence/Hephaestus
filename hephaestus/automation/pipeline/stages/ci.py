@@ -89,6 +89,7 @@ from .base import (
     StepResult,
     WorkItem,
     _require_item_worktree,
+    _terminal_pr_outcome,
     _worktree_path,
     agent_provider,
     stage_model,
@@ -297,6 +298,9 @@ class CiStage(Stage):
                 logger.info("ci:%d: no open PR found; finishing failed", item.issue)
                 return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
             item.pr = discovered
+        terminal = _terminal_pr_outcome(ctx.github.gh_pr_state(item.pr), item.pr)
+        if terminal is not None:
+            return terminal
         if not item.branch:
             # Adopt the PR's REAL head branch — never assume {issue}-auto-impl
             # (the _review_existing_pr branch-assumption bug).

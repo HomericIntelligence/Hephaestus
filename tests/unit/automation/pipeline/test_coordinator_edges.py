@@ -191,6 +191,64 @@ class TestExitCode:
 
         assert coordinator._exit_code() == 130
 
+    def test_later_pass_supersedes_earlier_failed_logical_item(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A retry loop that later passes must not exit failed due to stale ledger rows."""
+        coordinator = _coordinator(tmp_path, monkeypatch)
+        failed = _item(2009, StageName.FINISHED)
+        failed.pr = 2010
+        failed.result = work_item_mod.ItemResult(
+            passed=False, reason="git_error", final_stage=StageName.FINISHED
+        )
+        passed = _item(2009, StageName.FINISHED)
+        passed.pr = 2010
+        passed.result = work_item_mod.ItemResult(
+            passed=True, reason="merged", final_stage=StageName.FINISHED
+        )
+        coordinator.items = [failed, passed]
+        coordinator.ledger.extend([failed.result, passed.result])
+
+        assert coordinator._exit_code() == 0
+
+    def test_preserved_worktrees_ignore_superseded_passed_items(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stale preserved path from an earlier failed attempt should not be reported."""
+        coordinator = _coordinator(tmp_path, monkeypatch)
+        preserved_path = tmp_path / "issue-2009"
+        preserved_path.mkdir()
+        failed = _item(2009, StageName.FINISHED)
+        failed.pr = 2010
+        failed.result = work_item_mod.ItemResult(
+            passed=False, reason="git_error", final_stage=StageName.FINISHED
+        )
+        passed = _item(2009, StageName.FINISHED)
+        passed.pr = 2010
+        passed.result = work_item_mod.ItemResult(
+            passed=True, reason="merged", final_stage=StageName.FINISHED
+        )
+        coordinator.items = [failed, passed]
+        coordinator.preserved.append((2009, str(preserved_path)))
+
+        assert coordinator._active_preserved_worktrees() == []
+
+    def test_preserved_worktrees_ignore_missing_paths_for_failed_items(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A missing preserved path for the latest failed item should not be reported."""
+        coordinator = _coordinator(tmp_path, monkeypatch)
+        missing_path = tmp_path / "issue-2009"
+        failed = _item(2009, StageName.FINISHED)
+        failed.pr = 2010
+        failed.result = work_item_mod.ItemResult(
+            passed=False, reason="git_error", final_stage=StageName.FINISHED
+        )
+        coordinator.items = [failed]
+        coordinator.preserved.append((2009, str(missing_path)))
+
+        assert coordinator._active_preserved_worktrees() == []
+
 
 class TestCompletionEdges:
     """_handle_completion bookkeeping branches."""
@@ -620,6 +678,52 @@ class TestSeedingEdges:
         assert coordinator.ledger[0].passed
         assert coordinator.ledger[0].final_stage is StageName.FINISHED
         assert "already merged" in coordinator.ledger[0].reason
+
+    def test_direct_pr_scope_finishes_already_closed_pr(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Direct --prs seeding must not adopt a deleted branch for a closed PR."""
+        monkeypatch.setattr(
+            seeding_mod,
+            "gh_pr_label_names",
+            MagicMock(side_effect=AssertionError("ambient PR label seeding called")),
+        )
+
+        class ClosedPrGitHub(FakeStageGitHub):
+            def pr_has_implementation_state_label(self, pr_number: int) -> tuple[bool, bool]:
+                raise AssertionError("closed PRs should finish before label routing")
+
+        target_github = ClosedPrGitHub(
+            pr_issue=1912,
+            pr_state={"state": "CLOSED", "headRefOid": "abc123"},
+        )
+
+        def github_factory(repo: str, repo_root: Path) -> FakeStageGitHub:
+            return target_github
+
+        config = PipelineConfig(
+            org="org",
+            repos=["target-repo"],
+            prs=[2004],
+            projects_dir=tmp_path,
+        )
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(),
+            github_factory=github_factory,
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
+
+        assert coordinator.run() == 1
+
+        assert not coordinator.queues[StageName.CI].snapshot()
+        assert not coordinator.queues[StageName.PR_REVIEW].snapshot()
+        assert len(coordinator.ledger) == 1
+        assert not coordinator.ledger[0].passed
+        assert coordinator.ledger[0].final_stage is StageName.FINISHED
+        assert "already closed" in coordinator.ledger[0].reason
 
     def test_direct_pr_scope_respects_drive_green_phase_scope(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
