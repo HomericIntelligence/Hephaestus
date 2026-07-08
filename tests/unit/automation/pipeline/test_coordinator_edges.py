@@ -191,6 +191,48 @@ class TestExitCode:
 
         assert coordinator._exit_code() == 130
 
+    def test_later_pass_supersedes_earlier_failed_logical_item(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A retry loop that later passes must not exit failed due to stale ledger rows."""
+        coordinator = _coordinator(tmp_path, monkeypatch)
+        failed = _item(2009, StageName.FINISHED)
+        failed.pr = 2010
+        failed.result = work_item_mod.ItemResult(
+            passed=False, reason="git_error", final_stage=StageName.FINISHED
+        )
+        passed = _item(2009, StageName.FINISHED)
+        passed.pr = 2010
+        passed.result = work_item_mod.ItemResult(
+            passed=True, reason="merged", final_stage=StageName.FINISHED
+        )
+        coordinator.items = [failed, passed]
+        coordinator.ledger.extend([failed.result, passed.result])
+
+        assert coordinator._exit_code() == 0
+
+    def test_preserved_worktrees_ignore_superseded_passed_items(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stale preserved path from an earlier failed attempt should not be reported."""
+        coordinator = _coordinator(tmp_path, monkeypatch)
+        preserved_path = tmp_path / "issue-2009"
+        preserved_path.mkdir()
+        failed = _item(2009, StageName.FINISHED)
+        failed.pr = 2010
+        failed.result = work_item_mod.ItemResult(
+            passed=False, reason="git_error", final_stage=StageName.FINISHED
+        )
+        passed = _item(2009, StageName.FINISHED)
+        passed.pr = 2010
+        passed.result = work_item_mod.ItemResult(
+            passed=True, reason="merged", final_stage=StageName.FINISHED
+        )
+        coordinator.items = [failed, passed]
+        coordinator.preserved.append((2009, str(preserved_path)))
+
+        assert coordinator._active_preserved_worktrees() == []
+
 
 class TestCompletionEdges:
     """_handle_completion bookkeeping branches."""

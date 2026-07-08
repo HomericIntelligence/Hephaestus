@@ -183,6 +183,27 @@ class TestCiDiscover:
         assert item.pr == 777
         assert item.branch == "real-head"
 
+    def test_already_merged_pr_finishes_before_branch_adoption(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A PR merged after review arming must not adopt a deleted head branch."""
+
+        class MergedGitHub(FakeStageGitHub):
+            def get_pr_head_branch(self, pr_number: int) -> str | None:
+                raise AssertionError("merged PRs should finish before branch adoption")
+
+            def pr_has_implementation_state_label(self, pr_number: int) -> tuple[bool, bool]:
+                raise AssertionError("merged PRs should finish before label routing")
+
+        stage = CiStage()
+        ctx = make_ctx(github=MergedGitHub(pr_state={"state": "MERGED"}))
+        item = _item(make_work_item, state=DISCOVER)
+        item.branch = ""
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
+
     def test_missing_implementation_go_fails_back(self, make_ctx: Any, make_work_item: Any) -> None:
         """A PR without state:implementation-go regresses to pr_review."""
         stage = CiStage()

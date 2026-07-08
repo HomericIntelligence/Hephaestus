@@ -204,6 +204,26 @@ class TestGate:
         assert item.payload["existing_pr"] is True
         assert item.payload["existing_pr_impl_go"] is True
 
+    def test_gate_existing_item_pr_merged_finishes_before_adoption(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A late fail-back must terminalize a PR that merged before adoption."""
+
+        class MergedGitHub(FakeStageGitHub):
+            def get_pr_head_branch(self, pr_number: int) -> str | None:
+                raise AssertionError("merged PRs should finish before branch adoption")
+
+            def pr_has_implementation_state_label(self, pr_number: int) -> tuple[bool, bool]:
+                raise AssertionError("merged PRs should finish before label routing")
+
+        stage = ImplementationStage()
+        ctx = make_ctx(github=MergedGitHub(pr_state={"state": "MERGED"}))
+        item = make_work_item(issue=1, pr=1001, state="GATE")
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
+
     def test_gate_existing_pr_without_impl_go_adopts_via_worktree(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
