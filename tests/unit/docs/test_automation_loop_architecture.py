@@ -20,6 +20,13 @@ from hephaestus.automation.prompts.planning import (
 
 DOC_PATH = Path(__file__).resolve().parents[3] / "docs" / "AUTOMATION_LOOP_ARCHITECTURE.md"
 AGENTS_PATH = Path(__file__).resolve().parents[3] / "AGENTS.md"
+COORDINATOR_PATH = (
+    Path(__file__).resolve().parents[3]
+    / "hephaestus"
+    / "automation"
+    / "pipeline"
+    / "coordinator.py"
+)
 
 PROMPT_REFS: tuple[tuple[str, str, Callable[..., object]], ...] = (
     ("prompts/planning.py", "get_plan_prompt", get_plan_prompt),
@@ -92,6 +99,15 @@ def test_automation_loop_architecture_describes_post_cutover_loop() -> None:
     assert "legacy loop remains available" not in normalized
     assert "HEPH_PIPELINE=0" not in text
     assert "forces the pre-pipeline path" not in text
+
+
+def test_coordinator_comments_describe_queue_only_loop() -> None:
+    """Coordinator comments must not describe removed pipeline selector flags."""
+    text = COORDINATOR_PATH.read_text(encoding="utf-8")
+
+    assert "when ``--pipeline`` is passed explicitly" not in text
+    assert "Under ``--pipeline``" not in text
+    assert "legacy path binds it to the phase subprocess" not in text
 
 
 def test_automation_loop_architecture_describes_thin_queue_wrappers() -> None:
