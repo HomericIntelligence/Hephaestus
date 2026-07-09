@@ -24,7 +24,7 @@ ProjectHephaestus is the shared utilities and tooling library for the HomericInt
 - **hephaestus.nats** — NATS JetStream subscriber for event-driven workflows
 - **hephaestus.resilience** — Circuit breaker + retry + subprocess resilience primitives
 - **hephaestus.system** — System information collection
-- **hephaestus.utils** — General utility functions (slugify, retry, subprocess helpers)
+- **hephaestus.utils** — General utility functions (slugify, retry, subprocess and git helpers)
 - **hephaestus.validation** — README, schema, and structural validation
 - **hephaestus.version** — Version management (hatch-vcs + consistency checks)
 

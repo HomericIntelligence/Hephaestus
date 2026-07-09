@@ -31,8 +31,8 @@ from hephaestus.cli.utils import (
     emit_json_status,
 )
 from hephaestus.github.client import gh_call
+from hephaestus.github.git_ops import git_branch_exists, git_push, git_remote_url, run_git
 from hephaestus.logging.utils import get_logger
-from hephaestus.utils.helpers import METADATA_TIMEOUT, run_subprocess
 
 logger = get_logger(__name__)
 
@@ -45,8 +45,10 @@ def detect_repo_from_remote() -> str | None:
 
     """
     try:
-        result = run_subprocess(["git", "remote", "get-url", "origin"])
-        remote_url = result.stdout.strip()
+        remote_url = git_remote_url()
+        if not remote_url:
+            logger.warning("Could not read GitHub repo from origin remote")
+            return None
 
         # Parse github.com:owner/repo.git or https://github.com/owner/repo.git
         patterns = [
@@ -81,7 +83,7 @@ def run_git_cmd(cmd: list[str], dry_run: bool = False, cwd: str | None = None) -
         logger.info("$ %s (cwd=%s)", " ".join(cmd), cwd)
     else:
         logger.info("$ %s", " ".join(cmd))
-    run_subprocess(cmd, cwd=cwd, dry_run=dry_run)
+    run_git(cmd, cwd=cwd, dry_run=dry_run)
 
 
 def checks_success_and_log(commit: Any) -> tuple[bool | None, list[Any]]:
@@ -150,12 +152,7 @@ def local_branch_exists(branch_name: str) -> bool:
 
     """
     try:
-        result = run_subprocess(
-            ["git", "branch", "--list", branch_name],
-            timeout=METADATA_TIMEOUT,
-            log_on_error=False,
-        )
-        return bool(result.stdout.strip())
+        return git_branch_exists(branch_name)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return False
 
@@ -175,7 +172,7 @@ def try_push_head_branch(head_branch: str, dry_run: bool) -> None:
         return
 
     if local_branch_exists(head_branch):
-        run_git_cmd(["git", "push", "origin", f"{head_branch}:{head_branch}"], dry_run=False)
+        git_push(None, "origin", f"{head_branch}:{head_branch}", dry_run=False)
     else:
         logger.info(
             "  Local branch '%s' not found; assuming remote branch already present.", head_branch
