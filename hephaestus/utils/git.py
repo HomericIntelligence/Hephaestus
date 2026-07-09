@@ -5,9 +5,10 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
+from typing import Any
 
 from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT, run_subprocess
-from hephaestus.utils.retry import retry_with_backoff
+from hephaestus.utils.retry import is_network_error, retry_with_backoff
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,16 @@ def _git_args(args: list[str]) -> list[str]:
     return _git_command(args)[1:]
 
 
+def _is_retryable_git_error(error: BaseException) -> bool:
+    """Return True for transient Git subprocess failures."""
+    if isinstance(error, subprocess.TimeoutExpired):
+        return True
+    if not isinstance(error, subprocess.CalledProcessError):
+        return False
+    blob = "\n".join(part for part in (error.stdout, error.stderr, str(error)) if part)
+    return is_network_error(Exception(blob))
+
+
 def run_git(
     args: list[str],
     *,
@@ -54,25 +65,16 @@ def run_git(
         retries = 2 if normalized_args and normalized_args[0] in _NETWORK_GIT_COMMANDS else 0
 
     def _call() -> subprocess.CompletedProcess[str]:
-        cmd = ["git", *normalized_args]
-        if env is None:
-            return run_subprocess(
-                cmd,
-                cwd=_cwd_arg(cwd),
-                check=check,
-                timeout=timeout,
-                dry_run=dry_run,
-                log_on_error=log_on_error,
-            )
-        return run_subprocess(
-            cmd,
-            cwd=_cwd_arg(cwd),
-            check=check,
-            timeout=timeout,
-            dry_run=dry_run,
-            log_on_error=log_on_error,
-            env=env,
-        )
+        kwargs: dict[str, Any] = {
+            "cwd": _cwd_arg(cwd),
+            "check": check,
+            "timeout": timeout,
+            "dry_run": dry_run,
+            "log_on_error": log_on_error,
+        }
+        if env is not None:
+            kwargs["env"] = env
+        return run_subprocess(["git", *normalized_args], **kwargs)
 
     if retries <= 0:
         return _call()
@@ -84,6 +86,7 @@ def run_git(
         retry_on=(subprocess.CalledProcessError, subprocess.TimeoutExpired),
         logger=logger.warning,
         jitter=True,
+        retry_predicate=_is_retryable_git_error,
     )
     def _retrying_call() -> subprocess.CompletedProcess[str]:
         return _call()

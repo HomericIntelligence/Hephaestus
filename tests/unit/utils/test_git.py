@@ -40,6 +40,23 @@ def test_run_git_retries_network_commands() -> None:
     assert mock_run.call_count == 2
 
 
+def test_run_git_does_not_retry_deterministic_network_command_errors() -> None:
+    """Deterministic network-command failures are not retried."""
+    failure = subprocess.CalledProcessError(
+        128, ["git", "push"], stderr="fatal: Authentication failed"
+    )
+    completed = subprocess.CompletedProcess(["git"], 0, stdout="", stderr="")
+    with patch("hephaestus.utils.git.run_subprocess", side_effect=[failure, completed]) as mock_run:
+        try:
+            shared_git.run_git(["push", "origin", "feature"])
+        except subprocess.CalledProcessError:
+            pass
+        else:  # pragma: no cover - assertion below is clearer when this fails
+            raise AssertionError("deterministic Git failure should be raised")
+
+    assert mock_run.call_count == 1
+
+
 def test_git_ls_remote_contains_matches_exact_branch_refs_only() -> None:
     """Branch shorthand must not match similarly named remote refs."""
     found = subprocess.CompletedProcess(["git"], 0, stdout="abc\trefs/heads/feature\n", stderr="")

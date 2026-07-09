@@ -81,6 +81,19 @@ def test_run_git_does_not_retry_local_commands_by_default() -> None:
     assert mock_run.call_count == 1
 
 
+def test_run_git_does_not_retry_deterministic_network_command_errors() -> None:
+    """Network commands fail fast when Git reports a deterministic error."""
+    failure = subprocess.CalledProcessError(
+        128, ["git", "fetch"], stderr="fatal: Authentication failed"
+    )
+    completed = subprocess.CompletedProcess(["git"], 0, stdout="", stderr="")
+    with patch("hephaestus.utils.git.run_subprocess", side_effect=[failure, completed]) as mock_run:
+        with pytest.raises(subprocess.CalledProcessError):
+            run_git(["fetch", "origin"])
+
+    assert mock_run.call_count == 1
+
+
 def test_run_git_honors_explicit_retry_budget_for_local_commands() -> None:
     """Callers can request retries even for local git commands."""
     failure = subprocess.TimeoutExpired(["git", "status"], timeout=1)
