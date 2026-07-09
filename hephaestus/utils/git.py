@@ -56,7 +56,10 @@ _GIT_SECRET_ASSIGNMENT_RE = re.compile(
     r"([^&\s]+)"
 )
 _GIT_AUTH_HEADER_RE = re.compile(r"(?i)\b(authorization:\s*(?:basic|bearer)\s+)\S+")
-_GITHUB_TOKEN_RE = re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b")
+_GITHUB_TOKEN_RE = re.compile(
+    r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github"
+    r"_pat_[A-Za-z0-9_]{20,})\b"
+)
 
 
 def _cwd_arg(cwd: Path | str | None) -> str | None:
@@ -144,6 +147,11 @@ def _tail_for_git_log(value: str) -> str:
     return _tail_for_log(_redact_git_diagnostics(value))
 
 
+def _log_git_retry_warning(message: str) -> None:
+    """Log retry utility warnings without credential-bearing Git diagnostics."""
+    logger.warning(_redact_git_diagnostics(message))
+
+
 def _is_retryable_git_error(error: BaseException) -> bool:
     """Return True for transient Git subprocess failures."""
     if isinstance(error, subprocess.TimeoutExpired):
@@ -217,7 +225,7 @@ def run_git(
         initial_delay=1.0,
         backoff_factor=2,
         retry_on=(subprocess.CalledProcessError, subprocess.TimeoutExpired),
-        logger=logger.warning,
+        logger=_log_git_retry_warning,
         jitter=True,
         retry_predicate=_is_retryable_git_error,
     )

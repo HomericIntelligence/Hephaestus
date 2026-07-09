@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Any, cast
@@ -246,6 +247,20 @@ class TestGetResignEmail:
         cmd = get_resign_exec()
         assert "user.email=carol@example.com" in cmd
         assert "commit --amend --no-edit -S -s --reset-author" in cmd
+
+    def test_get_resign_exec_shell_quotes_resolved_email(self, monkeypatch) -> None:
+        """Rebase --exec command construction keeps email metacharacters in one argv."""
+        from hephaestus.github.fleet_sync import get_resign_exec
+
+        monkeypatch.setenv("FLEET_SKIP_EMAIL_KEY_CHECK", "1")
+        monkeypatch.setenv("FLEET_GIT_EMAIL", "dev@example.com; injected-word")
+        argv = shlex.split(get_resign_exec())
+        assert argv[:3] == [
+            "git",
+            "-c",
+            "user.email=dev@example.com; injected-word",
+        ]
+        assert "injected-word" not in argv[3:]
 
 
 class TestResignEmailKeyGuard:

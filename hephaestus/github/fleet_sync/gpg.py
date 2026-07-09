@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 
 from hephaestus.github.git_ops import git_config_get
@@ -87,4 +88,5 @@ def get_resign_email() -> str:
 
 def get_resign_exec() -> str:
     """Return the ``git commit --amend`` shell command used as ``rebase --exec``."""
-    return f"git -c user.email={get_resign_email()} commit --amend --no-edit -S -s --reset-author"
+    email = shlex.quote(get_resign_email())
+    return f"git -c user.email={email} commit --amend --no-edit -S -s --reset-author"

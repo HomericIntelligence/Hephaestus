@@ -9,20 +9,21 @@ from unittest.mock import patch
 
 import pytest
 
-from hephaestus.github.git_ops import (
-    git_branch_exists,
-    git_config_get,
-    git_ls_remote_contains,
-    git_push,
-    git_remote_url,
-    git_rev_list_count,
-    git_unmerged_files,
-    in_git_repo,
-    repo_root,
-    run_git,
-    working_tree_clean,
-)
+import hephaestus.github.git_ops as github_git_ops
+import hephaestus.utils.git as shared_git
 from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
+
+git_branch_exists = github_git_ops.git_branch_exists
+git_config_get = github_git_ops.git_config_get
+git_ls_remote_contains = github_git_ops.git_ls_remote_contains
+git_push = github_git_ops.git_push
+git_remote_url = github_git_ops.git_remote_url
+git_rev_list_count = github_git_ops.git_rev_list_count
+git_unmerged_files = github_git_ops.git_unmerged_files
+in_git_repo = github_git_ops.in_git_repo
+repo_root = github_git_ops.repo_root
+run_git = github_git_ops.run_git
+working_tree_clean = github_git_ops.working_tree_clean
 
 
 def test_run_git_uses_shared_subprocess_helper() -> None:
@@ -155,15 +156,22 @@ def test_run_git_logs_final_failure_after_retries() -> None:
 def test_run_git_redacts_sensitive_command_and_stream_diagnostics() -> None:
     """Final retry diagnostics redact credential-bearing remotes and tokens."""
     token_value = "gh" + "p_" + "1" * 36
+    fine_grained_token = "github" + "_pat_" + "A" * 28
     query_key = "access" + "_token"
     query_value = "super" + "sensitive"
+    auth_value = "bearer" + "value" * 6
     remote_path = "example.invalid/o/r.git"
     remote_url = f"https://user:{token_value}@{remote_path}"
+    scp_remote = "git@example.invalid:o/r.git"
     failure = subprocess.CalledProcessError(
         128,
         ["git", "fetch"],
         output=f"clone from {remote_url}?{query_key}={query_value} failed",
-        stderr=f"fatal: Authentication failed for {remote_url}",
+        stderr=(
+            f"fatal: Authentication failed for {remote_url}\n"
+            f"Authorization: Bearer {auth_value}\n"
+            f"try {fine_grained_token} with {scp_remote}"
+        ),
     )
     with (
         patch("hephaestus.utils.git.run_subprocess", side_effect=failure),
@@ -173,6 +181,37 @@ def test_run_git_redacts_sensitive_command_and_stream_diagnostics() -> None:
             run_git(["fetch", remote_url])
 
     rendered = "\n".join(str(call.args) for call in logger.error.call_args_list)
+    assert token_value not in rendered
+    assert fine_grained_token not in rendered
+    assert query_value not in rendered
+    assert auth_value not in rendered
+    assert remote_path not in rendered
+    assert scp_remote not in rendered
+    assert "Authorization: Bearer <redacted-value>" in rendered
+    assert "<redacted-git-url>" in rendered
+
+
+def test_run_git_redacts_retry_warning_diagnostics() -> None:
+    """Retry warnings redact credential-bearing remotes before a later success."""
+    token_value = "gh" + "p_" + "2" * 36
+    query_key = "access" + "_token"
+    query_value = "retry" + "sensitive"
+    remote_path = "example.invalid/o/retry.git"
+    remote_url = f"https://user:{token_value}@{remote_path}?{query_key}={query_value}"
+    failure = subprocess.CalledProcessError(
+        128,
+        ["git", "fetch", remote_url],
+        stderr="network timeout",
+    )
+    completed = subprocess.CompletedProcess(["git"], 0, stdout="", stderr="")
+    with (
+        patch("hephaestus.utils.git.run_subprocess", side_effect=[failure, completed]),
+        patch("hephaestus.utils.retry.time.sleep"),
+        patch("hephaestus.utils.git.logger") as logger,
+    ):
+        assert run_git(["fetch", remote_url], retries=1) is completed
+
+    rendered = "\n".join(str(call.args) for call in logger.warning.call_args_list)
     assert token_value not in rendered
     assert query_value not in rendered
     assert remote_path not in rendered
@@ -526,8 +565,5 @@ def test_git_ls_remote_contains_accepts_full_exact_refs() -> None:
 
 def test_github_git_ops_reexports_shared_helpers() -> None:
     """GitHub callers keep their old import path while using the utils implementation."""
-    import hephaestus.github.git_ops as github_git_ops
-    import hephaestus.utils.git as shared_git
-
     assert github_git_ops.run_git is shared_git.run_git
     assert github_git_ops.git_ls_remote_contains is shared_git.git_ls_remote_contains
