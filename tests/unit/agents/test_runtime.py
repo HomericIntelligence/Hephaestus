@@ -327,21 +327,28 @@ def test_codex_approval_args_preserves_legacy_flag() -> None:
 
 
 @pytest.mark.parametrize(
-    ("claude_model", "expected_model", "expected_reasoning"),
+    ("model", "expected_model", "expected_reasoning"),
     [
+        ("claude-fable-5", "gpt-5.5", "xhigh"),
         ("claude-opus-4-7", "gpt-5.5", "xhigh"),
         ("claude-sonnet-4-6", "gpt-5.5", "medium"),
+        ("sol", "gpt-5.6-sol", "xhigh"),
+        ("terra", "gpt-5.6-terra", "xhigh"),
+        ("luna", "gpt-5.6-luna", "medium"),
+        ("gpt-5.6-sol", "gpt-5.6-sol", "xhigh"),
+        ("gpt-5.6-terra", "gpt-5.6-terra", "xhigh"),
+        ("gpt-5.6-luna", "gpt-5.6-luna", "medium"),
     ],
 )
 def test_codex_base_cmd_maps_claude_reasoning_tiers(
     tmp_path: Path,
-    claude_model: str,
+    model: str,
     expected_model: str,
     expected_reasoning: str,
 ) -> None:
-    """Codex must receive Codex model IDs plus tier-specific reasoning config."""
+    """Codex must receive recognized tier IDs plus matching reasoning config."""
     with patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]):
-        cmd = agent_runtime._codex_base_cmd(cwd=tmp_path, model=claude_model)
+        cmd = agent_runtime._codex_base_cmd(cwd=tmp_path, model=model)
 
     assert cmd[cmd.index("--model") + 1] == expected_model
     assert cmd[cmd.index("-c") + 1] == (f"model_reasoning_effort={json.dumps(expected_reasoning)}")
@@ -358,7 +365,10 @@ def test_codex_base_cmd_maps_haiku_to_mini_without_reasoning_override(
     assert "model_reasoning_effort" not in cmd
 
 
-@pytest.mark.parametrize("native_model", ["gpt-5.4-mini", "gpt-5.5", "gpt-5.6"])
+@pytest.mark.parametrize(
+    "native_model",
+    ["gpt-5.4-mini", "gpt-5.5", "gpt-5.6"],
+)
 def test_codex_base_cmd_keeps_native_codex_model_ids(
     tmp_path: Path,
     native_model: str,

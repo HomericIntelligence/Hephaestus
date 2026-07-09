@@ -32,6 +32,11 @@ CODEX_FINAL_MESSAGE_GRACE_ENV = "HEPH_CODEX_FINAL_MESSAGE_GRACE"
 CODEX_FINAL_MESSAGE_GRACE_SECONDS = 5.0
 CODEX_GPT_56_MODEL = "gpt-5.6"
 CODEX_GPT_55_MODEL = "gpt-5.5"
+CODEX_GPT_56_SOL_MODEL = "gpt-5.6-sol"
+CODEX_GPT_56_TERRA_MODEL = "gpt-5.6-terra"
+CODEX_GPT_56_LUNA_MODEL = "gpt-5.6-luna"
+# Preserve the established Claude-tier translation while exposing the GPT-5.6
+# Sol/Terra/Luna family as explicit capability-tier aliases below.
 CODEX_FABLE_MODEL = CODEX_GPT_55_MODEL
 CODEX_FABLE_REASONING_EFFORT = "xhigh"
 CODEX_OPUS_MODEL = CODEX_GPT_55_MODEL
@@ -376,13 +381,19 @@ def codex_approval_args(approval: str) -> list[str]:
 
 
 def _codex_model_config(model: str, *, use_default: bool = False) -> CodexModelConfig:
-    """Translate Claude tier IDs into Codex-native model/reasoning settings."""
+    """Translate legacy and GPT-5.6 tier IDs into Codex model settings."""
     normalized = model.strip()
     if not normalized:
         if use_default:
             return CodexModelConfig(CODEX_DEFAULT_MODEL, CODEX_DEFAULT_REASONING_EFFORT)
         return CodexModelConfig("")
     lower_model = normalized.lower()
+    if lower_model in {"sol", CODEX_GPT_56_SOL_MODEL}:
+        return CodexModelConfig(CODEX_GPT_56_SOL_MODEL, CODEX_FABLE_REASONING_EFFORT)
+    if lower_model in {"terra", CODEX_GPT_56_TERRA_MODEL}:
+        return CodexModelConfig(CODEX_GPT_56_TERRA_MODEL, CODEX_OPUS_REASONING_EFFORT)
+    if lower_model in {"luna", CODEX_GPT_56_LUNA_MODEL}:
+        return CodexModelConfig(CODEX_GPT_56_LUNA_MODEL, CODEX_SONNET_REASONING_EFFORT)
     if lower_model == "fable" or lower_model.startswith("claude-fable-"):
         return CodexModelConfig(CODEX_FABLE_MODEL, CODEX_FABLE_REASONING_EFFORT)
     if lower_model == "opus" or lower_model.startswith("claude-opus-"):
