@@ -57,6 +57,43 @@ def test_run_git_accepts_git_prefixed_commands_and_dry_run() -> None:
     )
 
 
+def test_run_git_retries_network_commands_by_default() -> None:
+    """Network git commands get bounded retry protection by default."""
+    failure = subprocess.CalledProcessError(128, ["git", "fetch"], stderr="network timeout")
+    completed = subprocess.CompletedProcess(["git"], 0, stdout="", stderr="")
+    with (
+        patch("hephaestus.utils.git.run_subprocess", side_effect=[failure, completed]) as mock_run,
+        patch("hephaestus.utils.retry.time.sleep"),
+    ):
+        assert run_git(["fetch", "origin"]) is completed
+
+    assert mock_run.call_count == 2
+
+
+def test_run_git_does_not_retry_local_commands_by_default() -> None:
+    """Local metadata commands stay single-shot unless the caller asks for retries."""
+    failure = subprocess.CalledProcessError(128, ["git", "status"], stderr="fatal")
+    completed = subprocess.CompletedProcess(["git"], 0, stdout="", stderr="")
+    with patch("hephaestus.utils.git.run_subprocess", side_effect=[failure, completed]) as mock_run:
+        with pytest.raises(subprocess.CalledProcessError):
+            run_git(["status"])
+
+    assert mock_run.call_count == 1
+
+
+def test_run_git_honors_explicit_retry_budget_for_local_commands() -> None:
+    """Callers can request retries even for local git commands."""
+    failure = subprocess.TimeoutExpired(["git", "status"], timeout=1)
+    completed = subprocess.CompletedProcess(["git"], 0, stdout="", stderr="")
+    with (
+        patch("hephaestus.utils.git.run_subprocess", side_effect=[failure, completed]) as mock_run,
+        patch("hephaestus.utils.retry.time.sleep"),
+    ):
+        assert run_git(["status"], retries=1) is completed
+
+    assert mock_run.call_count == 2
+
+
 def test_working_tree_clean_uses_git_status_porcelain() -> None:
     """A clean porcelain status means the working tree is clean."""
     completed = subprocess.CompletedProcess(["git"], 0, stdout="", stderr="")
@@ -169,6 +206,7 @@ def test_git_push_builds_remote_refspec_command() -> None:
         cwd=Path("/repo"),
         dry_run=True,
         timeout=NETWORK_TIMEOUT,
+        retries=None,
     )
 
 

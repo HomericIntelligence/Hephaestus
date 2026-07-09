@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
 
 from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT, run_subprocess
+from hephaestus.utils.retry import retry_with_backoff
+
+logger = logging.getLogger(__name__)
+
+_NETWORK_GIT_COMMANDS = frozenset({"clone", "fetch", "ls-remote", "pull", "push"})
 
 
 def _cwd_arg(cwd: Path | str | None) -> str | None:
@@ -21,6 +27,11 @@ def _git_command(args: list[str]) -> list[str]:
     return ["git", *normalized]
 
 
+def _git_args(args: list[str]) -> list[str]:
+    """Return git arguments without the leading executable."""
+    return _git_command(args)[1:]
+
+
 def run_git(
     args: list[str],
     *,
@@ -32,28 +43,52 @@ def run_git(
     dry_run: bool = False,
     log_on_error: bool = True,
     env: dict[str, str] | None = None,
+    retries: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run git through the repository's standard subprocess helper."""
     if not capture_output or not text:
         raise ValueError("run_git always captures text output through run_subprocess")
-    if env is None:
+
+    normalized_args = _git_args(args)
+    if retries is None:
+        retries = 2 if normalized_args and normalized_args[0] in _NETWORK_GIT_COMMANDS else 0
+
+    def _call() -> subprocess.CompletedProcess[str]:
+        cmd = ["git", *normalized_args]
+        if env is None:
+            return run_subprocess(
+                cmd,
+                cwd=_cwd_arg(cwd),
+                check=check,
+                timeout=timeout,
+                dry_run=dry_run,
+                log_on_error=log_on_error,
+            )
         return run_subprocess(
-            _git_command(args),
+            cmd,
             cwd=_cwd_arg(cwd),
             check=check,
             timeout=timeout,
             dry_run=dry_run,
             log_on_error=log_on_error,
+            env=env,
         )
-    return run_subprocess(
-        _git_command(args),
-        cwd=_cwd_arg(cwd),
-        check=check,
-        timeout=timeout,
-        dry_run=dry_run,
-        log_on_error=log_on_error,
-        env=env,
+
+    if retries <= 0:
+        return _call()
+
+    @retry_with_backoff(
+        max_retries=retries,
+        initial_delay=1.0,
+        backoff_factor=2,
+        retry_on=(subprocess.CalledProcessError, subprocess.TimeoutExpired),
+        logger=logger.warning,
+        jitter=True,
     )
+    def _retrying_call() -> subprocess.CompletedProcess[str]:
+        return _call()
+
+    return _retrying_call()
 
 
 def git_config_get(key: str, *, global_: bool = False, cwd: Path | str | None = None) -> str | None:
@@ -117,6 +152,7 @@ def git_push(
     refspec: str,
     *,
     dry_run: bool = False,
+    retries: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Push ``refspec`` to ``remote`` from ``cwd``."""
     return run_git(
@@ -124,6 +160,7 @@ def git_push(
         cwd=cwd,
         dry_run=dry_run,
         timeout=NETWORK_TIMEOUT,
+        retries=retries,
     )
 
 
@@ -157,13 +194,15 @@ def _remote_ref_candidates(ref: str) -> set[str]:
 
 def git_ls_remote_contains(cwd: Path | str, remote: str, ref: str) -> bool:
     """Return whether ``remote`` advertises ``ref`` as an exact ref."""
-    result = run_git(
-        ["ls-remote", remote, ref],
-        cwd=cwd,
-        timeout=NETWORK_TIMEOUT,
-        check=False,
-    )
-    if result.returncode != 0:
+    try:
+        result = run_git(
+            ["ls-remote", remote, ref],
+            cwd=cwd,
+            timeout=NETWORK_TIMEOUT,
+            check=True,
+            log_on_error=False,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
         return False
 
     candidates = _remote_ref_candidates(ref)

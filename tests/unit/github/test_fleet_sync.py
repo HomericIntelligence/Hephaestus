@@ -475,16 +475,37 @@ class TestTimeoutHandling:
             timeout=NETWORK_TIMEOUT,
         )
 
-    def test_git_uses_network_timeout(self) -> None:
-        """_git function uses NETWORK_TIMEOUT."""
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="")
+    def test_git_uses_network_timeout_and_retries(self) -> None:
+        """_git routes network commands through the shared helper with retries."""
+        completed = subprocess.CompletedProcess(["git"], 0, stdout="", stderr="")
+        with patch.object(fleet_git_ops, "run_git", return_value=completed) as mock_run:
             work_dir = Path("/tmp/test")
-            fleet_git_ops._git(["clone", "url", "."], cwd=work_dir)
-            assert mock_run.called
-            call_kwargs = mock_run.call_args[1]
-            assert "timeout" in call_kwargs
-            assert call_kwargs["timeout"] == NETWORK_TIMEOUT
+            assert fleet_git_ops._git(["clone", "url", "."], cwd=work_dir) is completed
+
+        mock_run.assert_called_once_with(
+            ["clone", "url", "."],
+            cwd=work_dir,
+            check=True,
+            timeout=NETWORK_TIMEOUT,
+            retries=2,
+        )
+
+    def test_git_does_not_retry_local_commands(self) -> None:
+        """_git keeps local commands single-shot while still using the shared helper."""
+        completed = subprocess.CompletedProcess(["git"], 0, stdout="", stderr="")
+        with patch.object(fleet_git_ops, "run_git", return_value=completed) as mock_run:
+            work_dir = Path("/tmp/test")
+            assert (
+                fleet_git_ops._git(["rebase", "--continue"], cwd=work_dir, check=False) is completed
+            )
+
+        mock_run.assert_called_once_with(
+            ["rebase", "--continue"],
+            cwd=work_dir,
+            check=False,
+            timeout=NETWORK_TIMEOUT,
+            retries=0,
+        )
 
     def test_conflict_agent_uses_env_configured_rebase_timeout(
         self, monkeypatch: pytest.MonkeyPatch

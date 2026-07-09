@@ -94,6 +94,7 @@ class TestRun:
             check=False,
             log_on_error=False,
             env=None,
+            retries=0,
         )
 
 

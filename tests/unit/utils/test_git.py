@@ -27,6 +27,19 @@ def test_run_git_routes_through_standard_subprocess_helper() -> None:
     )
 
 
+def test_run_git_retries_network_commands() -> None:
+    """Network git operations retry transient subprocess failures."""
+    failure = subprocess.CalledProcessError(128, ["git", "push"], stderr="network timeout")
+    completed = subprocess.CompletedProcess(["git"], 0, stdout="", stderr="")
+    with (
+        patch("hephaestus.utils.git.run_subprocess", side_effect=[failure, completed]) as mock_run,
+        patch("hephaestus.utils.retry.time.sleep"),
+    ):
+        assert shared_git.run_git(["push", "origin", "feature"]) is completed
+
+    assert mock_run.call_count == 2
+
+
 def test_git_ls_remote_contains_matches_exact_branch_refs_only() -> None:
     """Branch shorthand must not match similarly named remote refs."""
     found = subprocess.CompletedProcess(["git"], 0, stdout="abc\trefs/heads/feature\n", stderr="")

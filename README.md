@@ -284,7 +284,7 @@ homericintelligence-hephaestus = { path = "../ProjectHephaestus", editable = tru
 - `human_readable_size(bytes)`: Convert bytes to human readable format
 - `flatten_dict(dict)`: Flatten nested dictionaries
 - `run_subprocess(cmd)`: Execute shell commands with error handling
-- `run_git(args)`: Execute Git commands through the shared subprocess adapter
+- `run_git(args, retries=None)`: Execute Git commands through the shared subprocess adapter with bounded timeout and network retry protection
 - `get_setting(config, key_path)`: Get nested dict values with dot notation
 
 ### Configuration (`hephaestus.config`)

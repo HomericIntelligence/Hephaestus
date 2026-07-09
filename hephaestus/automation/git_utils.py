@@ -77,6 +77,7 @@ def run(
             check=check,
             log_on_error=log_errors,
             env=env,
+            retries=0,
         )
     return run_subprocess(
         cmd,
