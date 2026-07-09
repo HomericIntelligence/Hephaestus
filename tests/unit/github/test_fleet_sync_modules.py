@@ -8,6 +8,9 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _FLEET_SYNC_DIR = _REPO_ROOT / "hephaestus" / "github" / "fleet_sync"
+# Issue #1407 decomposes the former fleet-sync monolith. Keep orchestration
+# helpers small enough that a single function cannot quietly become the new
+# monolith.
 _MAX_FUNCTION_LINES = 80
 
 
@@ -42,7 +45,7 @@ def test_fleet_sync_functions_stay_decomposed() -> None:
     for path in sorted(_FLEET_SYNC_DIR.glob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef):
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
                 length = (node.end_lineno or node.lineno) - node.lineno + 1
                 if length > _MAX_FUNCTION_LINES:
                     rel_path = path.relative_to(_REPO_ROOT)
