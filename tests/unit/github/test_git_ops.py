@@ -91,6 +91,26 @@ def test_run_git_retries_network_commands_after_global_options() -> None:
     ]
 
 
+def test_run_git_retries_network_commands_after_inline_global_options_and_flags() -> None:
+    """Inline git global options and flags still expose the network subcommand."""
+    failure = subprocess.CalledProcessError(128, ["git", "fetch"], stderr="network timeout")
+    completed = subprocess.CompletedProcess(["git"], 0, stdout="", stderr="")
+    with (
+        patch("hephaestus.utils.git.run_subprocess", side_effect=[failure, completed]) as mock_run,
+        patch("hephaestus.utils.retry.time.sleep"),
+    ):
+        assert run_git(["--no-pager", "--git-dir=/repo/.git", "fetch", "origin"]) is completed
+
+    assert mock_run.call_count == 2
+    assert mock_run.call_args_list[0].args[0] == [
+        "git",
+        "--no-pager",
+        "--git-dir=/repo/.git",
+        "fetch",
+        "origin",
+    ]
+
+
 def test_run_git_keeps_local_commands_after_global_options_single_shot() -> None:
     """Leading git global options do not make local commands retry by accident."""
     failure = subprocess.CalledProcessError(128, ["git", "status"], stderr="fatal")
@@ -130,6 +150,97 @@ def test_run_git_logs_final_failure_after_retries() -> None:
     assert [call.kwargs["log_on_error"] for call in mock_run.call_args_list] == [False] * 3
     logger.error.assert_any_call("Git command failed after retry handling: %s", "git fetch origin")
     logger.error.assert_any_call("stderr: %s", "network timeout")
+
+
+def test_run_git_redacts_sensitive_command_and_stream_diagnostics() -> None:
+    """Final retry diagnostics redact credential-bearing remotes and tokens."""
+    token_value = "gh" + "p_" + "1" * 36
+    query_key = "access" + "_token"
+    query_value = "super" + "sensitive"
+    remote_path = "example.invalid/o/r.git"
+    remote_url = f"https://user:{token_value}@{remote_path}"
+    failure = subprocess.CalledProcessError(
+        128,
+        ["git", "fetch"],
+        output=f"clone from {remote_url}?{query_key}={query_value} failed",
+        stderr=f"fatal: Authentication failed for {remote_url}",
+    )
+    with (
+        patch("hephaestus.utils.git.run_subprocess", side_effect=failure),
+        patch("hephaestus.utils.git.logger") as logger,
+    ):
+        with pytest.raises(subprocess.CalledProcessError):
+            run_git(["fetch", remote_url])
+
+    rendered = "\n".join(str(call.args) for call in logger.error.call_args_list)
+    assert token_value not in rendered
+    assert query_value not in rendered
+    assert remote_path not in rendered
+    assert "<redacted-git-url>" in rendered
+
+
+def test_run_git_logs_timeout_diagnostics_after_retries() -> None:
+    """Timeout failures log timeout/stdout/stderr details after retry handling."""
+    failure = subprocess.TimeoutExpired(
+        ["git", "fetch"],
+        timeout=5,
+        output="partial stdout",
+        stderr="timeout stderr",
+    )
+    with (
+        patch("hephaestus.utils.git.run_subprocess", side_effect=failure) as mock_run,
+        patch("hephaestus.utils.retry.time.sleep"),
+        patch("hephaestus.utils.git.logger") as logger,
+    ):
+        with pytest.raises(subprocess.TimeoutExpired):
+            run_git(["fetch", "origin"])
+
+    assert mock_run.call_count == 3
+    logger.error.assert_any_call("Git command failed after retry handling: %s", "git fetch origin")
+    logger.error.assert_any_call("timeout: %s", 5)
+    logger.error.assert_any_call("stdout: %s", "partial stdout")
+    logger.error.assert_any_call("stderr: %s", "timeout stderr")
+
+
+def test_run_git_suppresses_subprocess_timeout_error_logs_during_retries() -> None:
+    """Retry-managed timeout attempts do not emit lower-level ERROR logs."""
+    failure = subprocess.TimeoutExpired(["git", "fetch"], timeout=5)
+    with (
+        patch("subprocess.run", side_effect=failure),
+        patch("hephaestus.utils.retry.time.sleep"),
+        patch("hephaestus.utils.helpers.logger") as helpers_logger,
+        patch("hephaestus.utils.git.logger") as git_logger,
+    ):
+        with pytest.raises(subprocess.TimeoutExpired):
+            run_git(["fetch", "origin"], retries=1)
+
+    helpers_logger.error.assert_not_called()
+    git_logger.error.assert_any_call(
+        "Git command failed after retry handling: %s", "git fetch origin"
+    )
+
+
+def test_run_git_bounds_long_final_failure_stream_logs() -> None:
+    """Final retry-managed diagnostics log bounded stream tails."""
+    long_stdout = "x" * 2105
+    failure = subprocess.CalledProcessError(
+        128,
+        ["git", "fetch"],
+        output=long_stdout,
+        stderr="network timeout",
+    )
+    with (
+        patch("hephaestus.utils.git.run_subprocess", side_effect=failure),
+        patch("hephaestus.utils.retry.time.sleep"),
+        patch("hephaestus.utils.git.logger") as logger,
+    ):
+        with pytest.raises(subprocess.CalledProcessError):
+            run_git(["fetch", "origin"])
+
+    stdout_logs = [
+        call.args[1] for call in logger.error.call_args_list if call.args[:1] == ("stdout: %s",)
+    ]
+    assert stdout_logs == ["...(105 earlier chars)" + "x" * 2000]
 
 
 def test_run_git_does_not_retry_local_commands_by_default() -> None:

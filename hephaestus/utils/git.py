@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,18 @@ _GIT_GLOBAL_FLAGS = frozenset(
     }
 )
 _LOG_STREAM_TAIL_MAX = 2000
+
+
+_REDACTED_GIT_URL = "<redacted-git-url>"
+_REDACTED_VALUE = "<redacted-value>"
+_GIT_URL_RE = re.compile(r"\b(?:https?|ssh|git)://\S+", re.IGNORECASE)
+_GIT_SCP_REMOTE_RE = re.compile(r"(?<![\w./-])(?:[\w.-]+@)?[\w.-]+:\S+(?:\.git)?")
+_GIT_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b(access_token|auth_token|oauth_token|token|password|passwd|secret|credential)="
+    r"([^&\s]+)"
+)
+_GIT_AUTH_HEADER_RE = re.compile(r"(?i)\b(authorization:\s*(?:basic|bearer)\s+)\S+")
+_GITHUB_TOKEN_RE = re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b")
 
 
 def _cwd_arg(cwd: Path | str | None) -> str | None:
@@ -109,6 +122,28 @@ def _tail_for_log(value: str, limit: int = _LOG_STREAM_TAIL_MAX) -> str:
     return f"...({omitted} earlier chars){value[-limit:]}"
 
 
+def _redact_git_diagnostics(value: str) -> str:
+    """Return Git diagnostics with credential-bearing values redacted."""
+    redacted = _GIT_AUTH_HEADER_RE.sub(r"\1" + _REDACTED_VALUE, value)
+    redacted = _GIT_SECRET_ASSIGNMENT_RE.sub(
+        lambda match: f"{match.group(1)}={_REDACTED_VALUE}", redacted
+    )
+    redacted = _GITHUB_TOKEN_RE.sub(_REDACTED_VALUE, redacted)
+    redacted = _GIT_URL_RE.sub(_REDACTED_GIT_URL, redacted)
+    redacted = _GIT_SCP_REMOTE_RE.sub(_REDACTED_GIT_URL, redacted)
+    return redacted
+
+
+def _format_git_cmd_for_log(cmd: list[str]) -> str:
+    """Return a redacted Git command string for logs."""
+    return " ".join(_redact_git_diagnostics(part) for part in cmd)
+
+
+def _tail_for_git_log(value: str) -> str:
+    """Return a bounded redacted tail for Git subprocess streams."""
+    return _tail_for_log(_redact_git_diagnostics(value))
+
+
 def _is_retryable_git_error(error: BaseException) -> bool:
     """Return True for transient Git subprocess failures."""
     if isinstance(error, subprocess.TimeoutExpired):
@@ -123,7 +158,7 @@ def _is_retryable_git_error(error: BaseException) -> bool:
 
 def _log_retry_managed_git_failure(cmd: list[str], error: BaseException) -> None:
     """Log the final failure from a retry-managed Git command."""
-    logger.error("Git command failed after retry handling: %s", " ".join(cmd))
+    logger.error("Git command failed after retry handling: %s", _format_git_cmd_for_log(cmd))
     if isinstance(error, subprocess.TimeoutExpired):
         if error.timeout is not None:
             logger.error("timeout: %s", error.timeout)
@@ -133,12 +168,12 @@ def _log_retry_managed_git_failure(cmd: list[str], error: BaseException) -> None
         stdout = _as_text(error.stdout)
         stderr = _as_text(error.stderr)
     else:
-        logger.error("error: %s", error)
+        logger.error("error: %s", _redact_git_diagnostics(str(error)))
         return
     if stdout:
-        logger.error("stdout: %s", _tail_for_log(stdout))
+        logger.error("stdout: %s", _tail_for_git_log(stdout))
     if stderr:
-        logger.error("stderr: %s", _tail_for_log(stderr))
+        logger.error("stderr: %s", _tail_for_git_log(stderr))
 
 
 def run_git(

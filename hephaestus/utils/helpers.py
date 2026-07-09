@@ -233,11 +233,12 @@ def run_subprocess(
         )
         return result
     except subprocess.TimeoutExpired:
-        logger.error(
-            "Command timed out after %ds: %s",
-            timeout,
-            _format_cmd_for_log(cmd),
-        )
+        if log_on_error:
+            logger.error(
+                "Command timed out after %ds: %s",
+                timeout,
+                _format_cmd_for_log(cmd),
+            )
         raise
     except subprocess.CalledProcessError as e:
         if log_on_error:
