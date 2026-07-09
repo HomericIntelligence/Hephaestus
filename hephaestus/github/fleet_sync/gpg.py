@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 
+from hephaestus.github.git_ops import git_config_get
 from hephaestus.utils.helpers import METADATA_TIMEOUT
 
 
@@ -15,18 +17,8 @@ def _signing_key_uid_emails() -> list[str] | None:
     via ``gpg --list-keys --with-colons``. Returns ``None`` when the key cannot
     be determined, and an empty list when the key exposes no UID emails.
     """
-    try:
-        key_result = subprocess.run(
-            ["git", "config", "--get", "user.signingkey"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=METADATA_TIMEOUT,
-        )
-    except subprocess.TimeoutExpired:
-        return None
-    signing_key = key_result.stdout.strip()
-    if key_result.returncode != 0 or not signing_key:
+    signing_key = git_config_get("user.signingkey")
+    if not signing_key:
         return None
 
     try:
@@ -84,20 +76,10 @@ def get_resign_email() -> str:
     env = os.environ.get("FLEET_GIT_EMAIL", "").strip()
     if env:
         return _validate_resign_email(env)
-    for args in (["--global"], []):
-        try:
-            result = subprocess.run(
-                ["git", "config", *args, "--get", "user.email"],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=METADATA_TIMEOUT,
-            )
-            email = result.stdout.strip()
-            if result.returncode == 0 and email:
-                return _validate_resign_email(email)
-        except subprocess.TimeoutExpired:
-            continue
+    for global_ in (True, False):
+        email = git_config_get("user.email", global_=global_)
+        if email:
+            return _validate_resign_email(email)
     raise RuntimeError(
         "fleet_sync: no resign email configured. Set FLEET_GIT_EMAIL=<address> "
         "or `git config --global user.email <address>` before running."
@@ -106,4 +88,5 @@ def get_resign_email() -> str:
 
 def get_resign_exec() -> str:
     """Return the ``git commit --amend`` shell command used as ``rebase --exec``."""
-    return f"git -c user.email={get_resign_email()} commit --amend --no-edit -S -s --reset-author"
+    email = shlex.quote(get_resign_email())
+    return f"git -c user.email={email} commit --amend --no-edit -S -s --reset-author"

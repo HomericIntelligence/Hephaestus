@@ -521,3 +521,15 @@ class TestRunSubprocessTimeoutLogging:
         with patch("subprocess.run", side_effect=exc):
             with pytest.raises(subprocess.TimeoutExpired):
                 run_subprocess(["ls"], timeout=5)
+
+    def test_timeout_log_on_error_false_suppresses_error_log(self) -> None:
+        """Expected timeout failures can suppress lower-level ERROR logs."""
+        exc = subprocess.TimeoutExpired(cmd=["sleep", "99"], timeout=1)
+        with (
+            patch("subprocess.run", side_effect=exc),
+            patch("hephaestus.utils.helpers.logger.error") as mock_error,
+        ):
+            with pytest.raises(subprocess.TimeoutExpired):
+                run_subprocess(["sleep", "99"], timeout=1, log_on_error=False)
+
+        mock_error.assert_not_called()

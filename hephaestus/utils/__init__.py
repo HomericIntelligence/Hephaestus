@@ -3,6 +3,9 @@
 # Import from cache
 from .cache import ThreadSafeCache
 
+# Import from git
+from .git import run_git
+
 # Import from helpers
 from .helpers import (
     flatten_dict,
@@ -40,6 +43,7 @@ __all__ = [
     "restore_terminal",
     "retry_on_network_error",
     "retry_with_backoff",
+    "run_git",
     "run_subprocess",
     "slugify",
     "terminal_guard",

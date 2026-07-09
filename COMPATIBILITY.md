@@ -247,8 +247,25 @@ Lazy-loaded symbols (accessible via `hephaestus.<name>`): `add_logging_args`,
 | `retry_on_network_error` | 0.2.0 | Retry decorator scoped to network errors |
 | `retry_with_backoff` | 0.1.0 | Exponential backoff retry decorator |
 | `run_subprocess` | 0.1.0 | Execute shell commands with error handling |
+| `run_git` | TBD | Execute Git commands through the shared subprocess adapter with bounded timeout and network retry protection; captures text output only |
 | `slugify` | 0.1.0 | Convert text to URL-friendly slug |
 | `terminal_guard` | 0.3.0 | Context manager that saves/restores terminal state |
+
+### `hephaestus.utils.git`
+
+| Symbol | Added | Notes |
+|--------|-------|-------|
+| `git_branch_exists` | TBD | Check whether a local branch exists through the shared Git adapter |
+| `git_config_get` | TBD | Read Git config values through the shared Git adapter |
+| `git_ls_remote_contains` | TBD | Check exact advertised remote refs with retry-protected `ls-remote` |
+| `git_push` | TBD | Push a refspec through the retry-protected shared Git adapter |
+| `git_remote_url` | TBD | Read a remote URL through the shared Git adapter |
+| `git_rev_list_count` | TBD | Count revisions for a revspec through the shared Git adapter |
+| `git_unmerged_files` | TBD | List unresolved merge-conflict paths through the shared Git adapter |
+| `in_git_repo` | TBD | Check whether cwd is inside a Git repository through the shared Git adapter |
+| `repo_root` | TBD | Resolve the current Git repository root through the shared Git adapter |
+| `run_git` | TBD | Execute Git commands through the shared subprocess adapter with bounded timeout and network retry protection; captures text output only |
+| `working_tree_clean` | TBD | Check porcelain status through the shared Git adapter |
 
 ### `hephaestus.cli`
 

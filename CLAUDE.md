@@ -43,7 +43,7 @@ ProjectHephaestus/
 │   ├── resilience/             # Circuit breaker + retry + subprocess resilience
 │   ├── scripts_lib/            # Standalone consistency-check scripts (CLI table, version)
 │   ├── system/                 # System information collection
-│   ├── utils/                  # General utility functions (slugify, retry, subprocess)
+│   ├── utils/                  # General utility functions (slugify, retry, subprocess, git helpers)
 │   ├── validation/             # README, schema, and structural validation
 │   └── version/                # Version management
 ├── scripts/                    # Automation and maintenance scripts

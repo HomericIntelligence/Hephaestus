@@ -1,57 +1,36 @@
-"""Shared git subprocess helpers for GitHub-facing CLIs."""
+"""Compatibility exports for shared git subprocess helpers.
+
+The implementation lives in :mod:`hephaestus.utils.git` so library packages and
+``hephaestus.automation`` can share one git subprocess path without making
+``hephaestus.github`` depend on the automation product layer.
+"""
 
 from __future__ import annotations
 
-import subprocess
-from pathlib import Path
+from hephaestus.utils.git import (
+    git_branch_exists,
+    git_config_get,
+    git_ls_remote_contains,
+    git_push,
+    git_remote_url,
+    git_rev_list_count,
+    git_unmerged_files,
+    in_git_repo,
+    repo_root,
+    run_git,
+    working_tree_clean,
+)
 
-from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
-
-
-def run_git(
-    args: list[str],
-    *,
-    cwd: Path | None = None,
-    timeout: float = NETWORK_TIMEOUT,
-    capture_output: bool = True,
-    text: bool = True,
-    check: bool = True,
-) -> subprocess.CompletedProcess[str]:
-    """Run git with the repository's standard subprocess defaults."""
-    return subprocess.run(
-        ["git", *args],
-        cwd=cwd,
-        capture_output=capture_output,
-        text=text,
-        check=check,
-        timeout=timeout,
-    )
-
-
-def working_tree_clean() -> bool:
-    """Return True if the current git working tree has no uncommitted changes."""
-    result = run_git(
-        ["status", "--porcelain"],
-        timeout=METADATA_TIMEOUT,
-        check=False,
-    )
-    return result.returncode == 0 and result.stdout.strip() == ""
-
-
-def in_git_repo() -> bool:
-    """Return True if the current directory is inside a git repository."""
-    result = run_git(
-        ["rev-parse", "--git-dir"],
-        timeout=METADATA_TIMEOUT,
-        check=False,
-    )
-    return result.returncode == 0
-
-
-def repo_root() -> Path:
-    """Return the root directory of the current git repository."""
-    result = run_git(
-        ["rev-parse", "--show-toplevel"],
-        timeout=METADATA_TIMEOUT,
-    )
-    return Path(result.stdout.strip())
+__all__ = [
+    "git_branch_exists",
+    "git_config_get",
+    "git_ls_remote_contains",
+    "git_push",
+    "git_remote_url",
+    "git_rev_list_count",
+    "git_unmerged_files",
+    "in_git_repo",
+    "repo_root",
+    "run_git",
+    "working_tree_clean",
+]

@@ -47,6 +47,18 @@ class TestLoadDocumentedSymbols:
         assert tables["hephaestus.config"] == {"load_config"}
         assert tables["hephaestus.utils"] == {"slugify"}
 
+    def test_parses_nested_module_table(self, tmp_path: Path) -> None:
+        p = tmp_path / "COMPATIBILITY.md"
+        p.write_text(
+            "### `hephaestus.utils.git`\n\n"
+            "| Symbol | Added | Notes |\n"
+            "|--------|-------|-------|\n"
+            "| `run_git` | TBD | Execute Git commands |\n",
+            encoding="utf-8",
+        )
+        tables = load_documented_symbols(p)
+        assert tables["hephaestus.utils.git"] == {"run_git"}
+
     def test_skips_separator_rows(self, tmp_path: Path) -> None:
         p = tmp_path / "COMPATIBILITY.md"
         p.write_text(
@@ -147,6 +159,20 @@ class TestFindViolations:
         p.write_text("# empty\n", encoding="utf-8")
         documented = load_documented_symbols(p)
         assert find_violations(documented, packages=()) == []
+
+    def test_nested_module_missing_from_docs_detected(self, tmp_path: Path) -> None:
+        p = tmp_path / "COMPATIBILITY.md"
+        p.write_text(
+            "### `hephaestus.utils.git`\n\n"
+            "| Symbol | Added | Notes |\n"
+            "|--------|-------|-------|\n"
+            "| `run_git` | TBD | Execute Git commands |\n",
+            encoding="utf-8",
+        )
+        documented = load_documented_symbols(p)
+        findings = find_violations(documented, packages=("hephaestus.utils.git",))
+        assert any(f.kind == "missing-from-docs" for f in findings)
+        assert any("git_ls_remote_contains" in f.detail for f in findings)
 
     def test_finding_is_dataclass(self, tmp_path: Path) -> None:
         p = tmp_path / "COMPATIBILITY.md"

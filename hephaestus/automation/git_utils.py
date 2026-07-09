@@ -22,6 +22,7 @@ from hephaestus.constants import agent_git_timeout
 # marks it an explicit re-export so mypy does not flag ``attr-defined`` at the
 # 13 import sites under --no-implicit-reexport.
 from hephaestus.utils.cache import ThreadSafeCache
+from hephaestus.utils.git import run_git as _shared_run_git
 from hephaestus.utils.helpers import get_repo_root as get_repo_root, run_subprocess
 from hephaestus.utils.retry import retry_with_backoff
 
@@ -68,6 +69,16 @@ def run(
 
     """
     logger.debug("Running command: %s", " ".join(cmd))
+    if cmd and cmd[0] == "git":
+        return _shared_run_git(
+            cmd,
+            cwd=cwd,
+            timeout=timeout,
+            check=check,
+            log_on_error=log_errors,
+            env=env,
+            retries=0,
+        )
     return run_subprocess(
         cmd,
         cwd=str(cwd) if cwd else None,
