@@ -27,7 +27,7 @@ from pathlib import Path
 
 from hephaestus.cli.utils import create_validation_parser, resolve_repo_root
 
-# Subpackages whose API tables are completeness-guarded. Add a name here only
+# Modules whose API tables are completeness-guarded. Add a name here only
 # after authoring its table in COMPATIBILITY.md.
 GUARDED_PACKAGES: tuple[str, ...] = (
     "hephaestus.cli",
@@ -65,8 +65,8 @@ def load_documented_symbols(compatibility_path: Path) -> dict[str, set[str]]:
         compatibility_path: Path to ``COMPATIBILITY.md``.
 
     Returns:
-        Mapping from fully-qualified package name to the set of symbol names
-        parsed from that package's table.
+        Mapping from fully-qualified module name to the set of symbol names
+        parsed from that module's table.
 
     """
     tables: dict[str, set[str]] = {}
@@ -95,10 +95,10 @@ def live_all(package: str) -> set[str]:
     """Return the live ``__all__`` of *package* as a set.
 
     Args:
-        package: Fully-qualified package name (e.g. ``hephaestus.utils``).
+        package: Fully-qualified module name (e.g. ``hephaestus.utils``).
 
     Returns:
-        Set of public symbol names exported by the package.
+        Set of public symbol names exported by the module.
 
     """
     mod = importlib.import_module(package)
@@ -111,9 +111,9 @@ def find_violations(
 ) -> list[ApiTableFinding]:
     """Cross-check *packages* live ``__all__`` against *documented* table rows.
 
-    For each package in *packages*:
+    For each module name in *packages*:
 
-    - ``table-not-found`` if the package has no ``### `hephaestus.<pkg>``` heading.
+    - ``table-not-found`` if the module has no ``### `hephaestus.<pkg>``` heading.
     - ``parser-found-no-rows`` if the heading exists but zero rows were parsed.
     - ``missing-from-docs`` for each ``__all__`` symbol with no table row.
     - ``missing-from-all`` for each table row whose symbol is not in ``__all__``.
@@ -124,7 +124,7 @@ def find_violations(
 
     Args:
         documented: Output of :func:`load_documented_symbols`.
-        packages: Tuple of package names to check; defaults to
+        packages: Tuple of module names to check; defaults to
             :data:`GUARDED_PACKAGES`.
 
     Returns:
@@ -175,7 +175,7 @@ def find_violations(
 def format_report(findings: list[ApiTableFinding]) -> str:
     """Render *findings* as a human-readable text report."""
     if not findings:
-        return "OK: every guarded subpackage's __all__ is fully documented in COMPATIBILITY.md."
+        return "OK: every guarded module's __all__ is fully documented in COMPATIBILITY.md."
     lines = [f"FAIL: {len(findings)} API-table violation(s):"]
     lines.extend(f"  [{f.kind}] {f.detail}" for f in findings)
     return "\n".join(lines)

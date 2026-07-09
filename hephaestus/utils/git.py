@@ -13,6 +13,37 @@ from hephaestus.utils.retry import is_network_error, retry_with_backoff
 logger = logging.getLogger(__name__)
 
 _NETWORK_GIT_COMMANDS = frozenset({"clone", "fetch", "ls-remote", "pull", "push"})
+_GIT_GLOBAL_OPTIONS_WITH_VALUE = frozenset(
+    {
+        "-C",
+        "-c",
+        "--config-env",
+        "--exec-path",
+        "--git-dir",
+        "--namespace",
+        "--super-prefix",
+        "--work-tree",
+    }
+)
+_GIT_GLOBAL_FLAGS = frozenset(
+    {
+        "--bare",
+        "--glob-pathspecs",
+        "--help",
+        "--html-path",
+        "--icase-pathspecs",
+        "--info-path",
+        "--literal-pathspecs",
+        "--man-path",
+        "--no-optional-locks",
+        "--no-pager",
+        "--no-replace-objects",
+        "--noglob-pathspecs",
+        "--paginate",
+        "--version",
+    }
+)
+_LOG_STREAM_TAIL_MAX = 2000
 
 
 def _cwd_arg(cwd: Path | str | None) -> str | None:
@@ -33,14 +64,81 @@ def _git_args(args: list[str]) -> list[str]:
     return _git_command(args)[1:]
 
 
+def _git_option_name(arg: str) -> str:
+    """Return the option name without an inline ``=value`` suffix."""
+    return arg.split("=", 1)[0]
+
+
+def _git_subcommand(args: list[str]) -> str | None:
+    """Return the git subcommand after leading global options."""
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        option_name = _git_option_name(arg)
+        if arg == "--":
+            return args[index + 1] if index + 1 < len(args) else None
+        if arg in _GIT_GLOBAL_OPTIONS_WITH_VALUE:
+            index += 2
+            continue
+        if "=" in arg and option_name in _GIT_GLOBAL_OPTIONS_WITH_VALUE:
+            index += 1
+            continue
+        if arg in _GIT_GLOBAL_FLAGS:
+            index += 1
+            continue
+        if arg.startswith("-"):
+            return None
+        return arg
+    return None
+
+
+def _as_text(value: object) -> str:
+    """Return subprocess stream data as text for classification/logging."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _tail_for_log(value: str, limit: int = _LOG_STREAM_TAIL_MAX) -> str:
+    """Return a bounded tail for Git subprocess streams."""
+    if len(value) <= limit:
+        return value
+    omitted = len(value) - limit
+    return f"...({omitted} earlier chars){value[-limit:]}"
+
+
 def _is_retryable_git_error(error: BaseException) -> bool:
     """Return True for transient Git subprocess failures."""
     if isinstance(error, subprocess.TimeoutExpired):
         return True
     if not isinstance(error, subprocess.CalledProcessError):
         return False
-    blob = "\n".join(part for part in (error.stdout, error.stderr, str(error)) if part)
+    blob = "\n".join(
+        part for part in (_as_text(error.stdout), _as_text(error.stderr), str(error)) if part
+    )
     return is_network_error(Exception(blob))
+
+
+def _log_retry_managed_git_failure(cmd: list[str], error: BaseException) -> None:
+    """Log the final failure from a retry-managed Git command."""
+    logger.error("Git command failed after retry handling: %s", " ".join(cmd))
+    if isinstance(error, subprocess.TimeoutExpired):
+        if error.timeout is not None:
+            logger.error("timeout: %s", error.timeout)
+        stdout = _as_text(error.output)
+        stderr = _as_text(error.stderr)
+    elif isinstance(error, subprocess.CalledProcessError):
+        stdout = _as_text(error.stdout)
+        stderr = _as_text(error.stderr)
+    else:
+        logger.error("error: %s", error)
+        return
+    if stdout:
+        logger.error("stdout: %s", _tail_for_log(stdout))
+    if stderr:
+        logger.error("stderr: %s", _tail_for_log(stderr))
 
 
 def run_git(
@@ -62,7 +160,7 @@ def run_git(
 
     normalized_args = _git_args(args)
     if retries is None:
-        retries = 2 if normalized_args and normalized_args[0] in _NETWORK_GIT_COMMANDS else 0
+        retries = 2 if _git_subcommand(normalized_args) in _NETWORK_GIT_COMMANDS else 0
 
     def _call(*, log_errors: bool = log_on_error) -> subprocess.CompletedProcess[str]:
         kwargs: dict[str, Any] = {
@@ -79,8 +177,6 @@ def run_git(
     if retries <= 0:
         return _call()
 
-    retry_log_on_error = False if log_on_error else log_on_error
-
     @retry_with_backoff(
         max_retries=retries,
         initial_delay=1.0,
@@ -91,9 +187,14 @@ def run_git(
         retry_predicate=_is_retryable_git_error,
     )
     def _retrying_call() -> subprocess.CompletedProcess[str]:
-        return _call(log_errors=retry_log_on_error)
+        return _call(log_errors=False)
 
-    return _retrying_call()
+    try:
+        return _retrying_call()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        if log_on_error:
+            _log_retry_managed_git_failure(["git", *normalized_args], e)
+        raise
 
 
 def git_config_get(key: str, *, global_: bool = False, cwd: Path | str | None = None) -> str | None:

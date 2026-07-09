@@ -70,6 +70,38 @@ def test_run_git_retries_network_commands_by_default() -> None:
     assert mock_run.call_count == 2
 
 
+def test_run_git_retries_network_commands_after_global_options() -> None:
+    """Leading git global options do not hide a retryable network command."""
+    failure = subprocess.CalledProcessError(128, ["git", "fetch"], stderr="network timeout")
+    completed = subprocess.CompletedProcess(["git"], 0, stdout="", stderr="")
+    with (
+        patch("hephaestus.utils.git.run_subprocess", side_effect=[failure, completed]) as mock_run,
+        patch("hephaestus.utils.retry.time.sleep"),
+    ):
+        assert run_git(["-C", "/repo", "-c", "http.lowSpeedLimit=0", "fetch"]) is completed
+
+    assert mock_run.call_count == 2
+    assert mock_run.call_args_list[0].args[0] == [
+        "git",
+        "-C",
+        "/repo",
+        "-c",
+        "http.lowSpeedLimit=0",
+        "fetch",
+    ]
+
+
+def test_run_git_keeps_local_commands_after_global_options_single_shot() -> None:
+    """Leading git global options do not make local commands retry by accident."""
+    failure = subprocess.CalledProcessError(128, ["git", "status"], stderr="fatal")
+    completed = subprocess.CompletedProcess(["git"], 0, stdout="", stderr="")
+    with patch("hephaestus.utils.git.run_subprocess", side_effect=[failure, completed]) as mock_run:
+        with pytest.raises(subprocess.CalledProcessError):
+            run_git(["-C", "/repo", "status"])
+
+    assert mock_run.call_count == 1
+
+
 def test_run_git_suppresses_error_log_noise_during_retries() -> None:
     """Retry attempts use retry warnings instead of per-attempt ERROR logs."""
     failure = subprocess.CalledProcessError(128, ["git", "fetch"], stderr="network timeout")
@@ -81,6 +113,23 @@ def test_run_git_suppresses_error_log_noise_during_retries() -> None:
         assert run_git(["fetch", "origin"]) is completed
 
     assert [call.kwargs["log_on_error"] for call in mock_run.call_args_list] == [False, False]
+
+
+def test_run_git_logs_final_failure_after_retries() -> None:
+    """Retry-managed commands log diagnostics once when retries are exhausted."""
+    failure = subprocess.CalledProcessError(128, ["git", "fetch"], stderr="network timeout")
+    with (
+        patch("hephaestus.utils.git.run_subprocess", side_effect=failure) as mock_run,
+        patch("hephaestus.utils.retry.time.sleep"),
+        patch("hephaestus.utils.git.logger") as logger,
+    ):
+        with pytest.raises(subprocess.CalledProcessError):
+            run_git(["fetch", "origin"])
+
+    assert mock_run.call_count == 3
+    assert [call.kwargs["log_on_error"] for call in mock_run.call_args_list] == [False] * 3
+    logger.error.assert_any_call("Git command failed after retry handling: %s", "git fetch origin")
+    logger.error.assert_any_call("stderr: %s", "network timeout")
 
 
 def test_run_git_does_not_retry_local_commands_by_default() -> None:
@@ -100,11 +149,16 @@ def test_run_git_does_not_retry_deterministic_network_command_errors() -> None:
         128, ["git", "fetch"], stderr="fatal: Authentication failed"
     )
     completed = subprocess.CompletedProcess(["git"], 0, stdout="", stderr="")
-    with patch("hephaestus.utils.git.run_subprocess", side_effect=[failure, completed]) as mock_run:
+    with (
+        patch("hephaestus.utils.git.run_subprocess", side_effect=[failure, completed]) as mock_run,
+        patch("hephaestus.utils.git.logger") as logger,
+    ):
         with pytest.raises(subprocess.CalledProcessError):
             run_git(["fetch", "origin"])
 
     assert mock_run.call_count == 1
+    logger.error.assert_any_call("Git command failed after retry handling: %s", "git fetch origin")
+    logger.error.assert_any_call("stderr: %s", "fatal: Authentication failed")
 
 
 def test_run_git_honors_explicit_retry_budget_for_local_commands() -> None:
