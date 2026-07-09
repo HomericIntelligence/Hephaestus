@@ -407,7 +407,7 @@ class TestSubmitEdges:
     def test_phase_timeout_maps_onto_agent_job(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """M4: --phase-timeout bounds each AGENT JOB under --pipeline."""
+        """M4: --phase-timeout bounds each queue-pipeline AGENT JOB."""
         monkeypatch.setattr(
             "hephaestus.automation.pipeline_github.rate_budget_ok",
             lambda now_epoch=None: (True, 0.0),

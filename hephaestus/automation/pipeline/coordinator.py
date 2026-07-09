@@ -31,12 +31,10 @@ implementation queue is additionally gated by dependency topological order
 (:func:`~.admission._select_non_overlapping`). Pool size =
 ``parallel_repos x max_workers``.
 
-### ``--phase-timeout`` semantic shift
+### ``--phase-timeout`` queue semantics
 
-Under ``--pipeline`` this flag bounds each AGENT JOB, not a whole phase
-subprocess: the coordinator maps ``phase_timeout_s`` onto
-``AgentJob.timeout_s`` at submit time. The legacy path binds it to the phase
-subprocess lifetime.
+This flag bounds each AGENT JOB, not a whole phase subprocess: the coordinator
+maps ``phase_timeout_s`` onto ``AgentJob.timeout_s`` at submit time.
 
 ### Journal-order invariant
 
@@ -930,8 +928,7 @@ class Coordinator:
                 self._timer_park(item, delay)
                 return
             if self.config.phase_timeout_s and self.config.phase_timeout_s > 0:
-                # --phase-timeout semantic shift (M4): under --pipeline it
-                # bounds each AGENT JOB, not a phase subprocess.
+                # --phase-timeout bounds each AGENT JOB, not a phase subprocess.
                 job = replace(job, timeout_s=int(self.config.phase_timeout_s))
         handle = self.pool.submit(
             job,
@@ -1430,7 +1427,7 @@ def run_pipeline(config: PipelineConfig) -> int:
     """Run the queue-based pipeline to completion.
 
     Public entry point called from ``loop_runner.main()`` on the default
-    pipeline path (or when ``--pipeline`` is passed explicitly).
+    queue-pipeline path.
 
     Args:
         config: Pipeline configuration.
