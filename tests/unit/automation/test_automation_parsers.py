@@ -675,6 +675,12 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "opened by teammates and bots. By default drive-green operates only on PRs "
             "authored by the authenticated viewer (#821).",
         ),
+        _store_true(
+            "--run-pre-pr-tests",
+            "run_pre_pr_tests",
+            "Run the implementation-stage pre-PR unit-test gate before committing and "
+            "creating PRs.",
+        ),
         _action_spec(
             ("--model",),
             "model",

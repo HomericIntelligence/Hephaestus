@@ -475,6 +475,34 @@ class TestSetupLogging:
             root.handlers.clear()
             root.handlers.extend(saved)
 
+    def test_primary_stream_stderr_does_not_add_stdout(self) -> None:
+        """setup_logging can route CLI logs to stderr without touching stdout."""
+        root = logging.getLogger()
+        saved = list(root.handlers)
+        root.handlers.clear()
+        try:
+            setup_logging(primary_stream="stderr")
+
+            stdout_handlers = [
+                h
+                for h in root.handlers
+                if isinstance(h, logging.StreamHandler)
+                and not isinstance(h, logging.FileHandler)
+                and h.stream is sys.stdout
+            ]
+            stderr_handlers = [
+                h
+                for h in root.handlers
+                if isinstance(h, logging.StreamHandler)
+                and not isinstance(h, logging.FileHandler)
+                and h.stream is sys.stderr
+            ]
+            assert stdout_handlers == []
+            assert len(stderr_handlers) == 1
+        finally:
+            root.handlers.clear()
+            root.handlers.extend(saved)
+
     def test_no_duplicate_file_handler(self, tmp_path: Path) -> None:
         """Calling setup_logging with same log_file twice adds only one FileHandler."""
         log_file = str(tmp_path / "dup.log")

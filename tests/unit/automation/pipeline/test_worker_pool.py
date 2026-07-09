@@ -152,6 +152,114 @@ class TestWorkerPoolSubmitComplete:
         assert result.ok is True
         assert "hello" in result.stdout_tail
 
+    def test_worker_claim_logs_and_result_carries_worker_id(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A worker records its identity when it starts executing a submitted job."""
+        job = BuildTestJob(
+            repo="test/repo",
+            cwd=tmp_path,
+            argv=("pytest", "-q"),
+            timeout_s=60,
+            descr="unit gate",
+        )
+        completed = subprocess.CompletedProcess(job.argv, 0, stdout="", stderr="")
+        caplog.set_level(logging.INFO, logger=_WP)
+
+        with patch(f"{_WP}.subprocess.run", return_value=completed):
+            pool.submit(
+                job,
+                StageName.CI,
+                claim_key="test/repo#123",
+                claim_stage="ci",
+            )
+            _handle, result = completion_q.get(timeout=10)
+
+        worker_id = getattr(result, "worker_id", "")
+        assert worker_id
+        assert any(
+            "worker_claim" in record.message
+            and worker_id in record.message
+            and "item=test/repo#123" in record.message
+            and "stage=ci" in record.message
+            for record in caplog.records
+        )
+
+    def test_distinct_workers_claim_concurrent_queue_entries(
+        self,
+        shutdown_event: threading.Event,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Concurrent entries expose distinct worker IDs in claim logs and results."""
+        pool = WorkerPool(
+            size=2,
+            shutdown=shutdown_event,
+            completion_q=completion_q,
+            lock_dir=tmp_path / "locks",
+        )
+        jobs = [
+            BuildTestJob(
+                repo="test/repo",
+                cwd=tmp_path,
+                argv=("pytest", "-q", f"case-{idx}"),
+                timeout_s=60,
+                descr=f"unit gate {idx}",
+            )
+            for idx in range(2)
+        ]
+        barrier = threading.Barrier(2, timeout=5)
+
+        def complete_after_both_workers_enter(
+            argv: tuple[str, ...],
+            **_kwargs: object,
+        ) -> subprocess.CompletedProcess[str]:
+            barrier.wait()
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+        caplog.set_level(logging.INFO, logger=_WP)
+
+        try:
+            with patch(f"{_WP}.subprocess.run", side_effect=complete_after_both_workers_enter):
+                pool.submit(
+                    jobs[0],
+                    StageName.CI,
+                    claim_key="test/repo#123",
+                    claim_stage="ci",
+                )
+                pool.submit(
+                    jobs[1],
+                    StageName.PR_REVIEW,
+                    claim_key="test/repo!456",
+                    claim_stage="pr_review",
+                )
+                results = [completion_q.get(timeout=10)[1] for _ in jobs]
+        finally:
+            pool.shutdown()
+
+        worker_ids = {result.worker_id for result in results}
+        assert len(worker_ids) == 2
+        claim_messages = [
+            record.message for record in caplog.records if "worker_claim" in record.message
+        ]
+        assert any(
+            worker_id in message and "item=test/repo#123" in message and "stage=ci" in message
+            for worker_id in worker_ids
+            for message in claim_messages
+        )
+        assert any(
+            worker_id in message
+            and "item=test/repo!456" in message
+            and "stage=pr_review" in message
+            for worker_id in worker_ids
+            for message in claim_messages
+        )
+
     def test_build_test_nonzero_rc_is_not_ok(
         self,
         pool: WorkerPool,
@@ -1202,6 +1310,21 @@ class TestOnFutureDone:
         future.cancel()
         pool._on_future_done(handle, future)
         assert completion_q.empty()
+
+    @pytest.mark.parametrize("exc", [KeyboardInterrupt(), SystemExit(3), GeneratorExit()])
+    def test_run_converts_process_control_escape_with_worker_id(
+        self, pool: WorkerPool, exc: BaseException
+    ) -> None:
+        """Escapes inside the worker preserve the executing worker identity."""
+        job = BuildTestJob(repo="r", cwd=Path("/tmp"), argv=("true",), timeout_s=1)
+
+        with patch.object(pool, "_run_build_test", side_effect=exc):
+            result = pool._run(job, claim_key="r#1", claim_stage="ci")
+
+        assert result.ok is False
+        assert result.error is not None
+        assert result.error.startswith(f"worker_crash: {type(exc).__name__}")
+        assert result.worker_id == threading.current_thread().name
 
     def test_exception_future_emits_worker_crash_completion_and_logs_traceback(
         self,

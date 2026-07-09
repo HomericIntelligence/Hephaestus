@@ -53,6 +53,7 @@ from hephaestus.automation.loop_repo_manager import (
 )
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.cli.utils import (
+    configure_cli_logging,
     configure_github_throttle_from_args,
     emit_json_status,
 )
@@ -186,6 +187,7 @@ class LoopConfig:
     no_advise: bool = False
     nitpick: bool = False
     drive_green_all: bool = False
+    run_pre_pr_tests: bool = False
     # ``model`` is the catch-all applied to every phase when set; per-phase
     # fields below take precedence over it.
     model: str = ""
@@ -297,6 +299,13 @@ def _build_parser() -> argparse.ArgumentParser:
             "including those opened by teammates and bots. By default "
             "drive-green operates only on PRs authored by the authenticated "
             "viewer (#821)."
+        ),
+    )
+    p.add_argument(
+        "--run-pre-pr-tests",
+        action="store_true",
+        help=(
+            "Run the implementation-stage pre-PR unit-test gate before committing and creating PRs."
         ),
     )
     p.add_argument(
@@ -481,9 +490,7 @@ def _preflight_token_scopes(org: str, probe_repo: str) -> None:
 
 
 def _setup_logging(verbose: bool) -> None:
-    from hephaestus.logging import setup_logging
-
-    setup_logging(level=logging.DEBUG if verbose else logging.INFO)
+    configure_cli_logging(verbose=verbose)
 
 
 def _resolve_org_and_repos(
@@ -581,6 +588,7 @@ def _build_pipeline_config(
         no_advise=cfg.no_advise,
         nitpick=cfg.nitpick,
         drive_green_all=cfg.drive_green_all,
+        run_pre_pr_tests=cfg.run_pre_pr_tests,
         budget_overrides={"merge": cfg.max_merge_attempts},
         serialize_file_overlap=cfg.serialize_file_overlap,
         event_log_path=_pipeline_event_log_path(cfg.projects_dir, repos),
@@ -665,6 +673,7 @@ def main(argv: list[str] | None = None) -> int:
         no_advise=args.no_advise,
         nitpick=args.nitpick,
         drive_green_all=args.drive_green_all,
+        run_pre_pr_tests=args.run_pre_pr_tests,
         model=args.model,
         planner_model=args.planner_model,
         reviewer_model=args.reviewer_model,

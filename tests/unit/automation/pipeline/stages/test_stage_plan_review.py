@@ -19,6 +19,7 @@ from hephaestus.automation.pipeline.stages.plan_review import (
 )
 from hephaestus.automation.prompts._shared import _UNTRUSTED_NOTICE
 from hephaestus.automation.prompts.planning import get_plan_prompt
+from hephaestus.automation.protocol import PLAN_COMMENT_MARKER
 from hephaestus.automation.state_labels import (
     STATE_NEEDS_PLAN,
     STATE_PLAN_GO,
@@ -490,6 +491,24 @@ class TestPlanReviewStageOnJobDone:
 
         assert item.payload["plan_text"] == "# Amended plan here"
 
+    def test_amend_result_upserts_durable_plan_comment(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Amended plans are journaled before the next review can approve them."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=2, state="AMEND_WAIT")
+        result = JobResult(ok=True, value="\n\n# Amended plan here")
+
+        stage.on_job_done(item, result, ctx)
+
+        assert item.payload["plan_text"] == "\n\n# Amended plan here"
+        assert github.comments[2] == [f"{PLAN_COMMENT_MARKER}\n\n# Amended plan here"]
+        assert github.mutation_log == [
+            ("gh_issue_upsert_comment", (2, PLAN_COMMENT_MARKER)),
+        ]
+
     def test_failed_result_is_not_stored(self, make_ctx: Any, make_work_item: Any) -> None:
         """A failed job result is logged and never stored."""
         stage = PlanReviewStage()
@@ -579,7 +598,9 @@ class TestStaleVerdictAndErrorAccounting:
         assert outcome.disposition == Disposition.RETRY  # NOT a replayed NOGO
         assert item.attempts["plan_review_iter"] == iter_before  # budget intact
         assert item.payload["review_round"] == round_before
-        assert github.mutation_log == []  # no labels on the error path
+        assert github.mutation_log == [
+            ("gh_issue_upsert_comment", (30, PLAN_COMMENT_MARKER)),
+        ]  # amended plan persisted, no labels on the error path
 
     def test_error_round_burns_nothing_and_nogo_still_amendable(
         self, make_ctx: Any, make_work_item: Any
@@ -830,8 +851,9 @@ class TestReviewFlowWithFakePool:
         assert item.attempts["plan_review_iter"] == 2
         # All four jobs ran, in order.
         assert [h.job.descr for h in pool.submitted] == ["review", "amend", "review", "learn"]
-        # Durable GO write happened (before the ADVANCE outcome).
+        # Durable amended-plan write happens before the GO label write and ADVANCE outcome.
         assert github.mutation_log == [
+            ("gh_issue_upsert_comment", (21, PLAN_COMMENT_MARKER)),
             ("gh_issue_add_labels", (21, (STATE_PLAN_GO,))),
             ("gh_issue_remove_labels", (21, (STATE_PLAN_NO_GO, STATE_NEEDS_PLAN))),
         ]

@@ -25,16 +25,16 @@ omitted (see `hephaestus.agents.runtime.add_agent_argument`).
 | merge_wait | `hephaestus.automation.pipeline.stages.merge_wait` | Auto-merge arming, merge polling, dirty/blocked handling, and post-merge learn |
 | finished | `hephaestus.automation.pipeline.stages.finished` | Terminal ledger and worktree cleanup/preservation |
 
-Legacy/manual console scripts remain available during the #1818 cutover and
-cleanup wave. They are rollback or out-of-band entry points until the scoped
-wrapper cleanup issues rewire/delete them:
+Console scripts preserve their historical names. Stage-scoped wrappers are
+thin queue-pipeline scoped entry points over the coordinator; manual commands
+that do not map to a pipeline stage remain out-of-band tools:
 
 | Console script | Current module | Purpose |
 |----------------|----------------|---------|
-| `hephaestus-plan-issues` | `hephaestus.automation.planner` | Legacy/manual planning path |
-| `hephaestus-implement-issues` | `hephaestus.automation.implementer` | Legacy/manual implementation path |
-| `hephaestus-merge-prs` | `hephaestus.github.pr_merge` | Legacy/manual merge driving path |
-| `hephaestus-review-prs` | `hephaestus.automation.pr_reviewer` | Manual, out-of-band PR review |
+| `hephaestus-plan-issues` | `hephaestus.automation.planner` | Thin queue-pipeline planning/plan_review wrapper |
+| `hephaestus-implement-issues` | `hephaestus.automation.implementer` | Thin queue-pipeline implementation/pr_review wrapper |
+| `hephaestus-merge-prs` | `hephaestus.github.pr_merge` | Manual merge-driving command outside the queue coordinator |
+| `hephaestus-review-prs` | `hephaestus.automation.pr_reviewer` | Thin queue-pipeline pr_review wrapper |
 | `hephaestus-agent-stage` | `hephaestus.automation.agent_stage` | One-off stage invocation |
 
 ## Agent runtime

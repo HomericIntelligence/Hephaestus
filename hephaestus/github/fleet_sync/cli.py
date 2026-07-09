@@ -18,9 +18,9 @@ from hephaestus.cli.utils import (
 from hephaestus.github.fleet_sync.config import resolve_fleet_config
 from hephaestus.github.fleet_sync.models import ASCII_SYMBOLS, UNICODE_SYMBOLS
 from hephaestus.github.fleet_sync.sync_coordinator import process_repo
-from hephaestus.logging.utils import get_logger
+from hephaestus.logging.utils import setup_logging
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -79,10 +79,11 @@ def main(argv: list[str] | None = None) -> int:
     configure_github_throttle_from_args(args)
     args.agent = resolve_agent(args.agent)
 
-    logging.basicConfig(
+    setup_logging(
         level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)-7s %(message)s",
+        format_string="%(asctime)s %(levelname)-7s %(message)s",
         datefmt="%H:%M:%S",
+        primary_stream="stderr",
     )
 
     try:

@@ -44,7 +44,7 @@ processing an issue, or a phase times out, and you need to resume safely.
 
 ## Pipeline recovery semantics
 
-For `--pipeline` recovery, distinguish interrupts from fatal coordinator
+For queue-pipeline recovery, distinguish interrupts from fatal coordinator
 failures:
 
 - A first `SIGINT`, `SIGTERM`, or `SIGHUP` starts graceful shutdown. The
@@ -72,16 +72,12 @@ last-known durable state. There is no persisted queue snapshot — the label and
 PR/worktree state are the checkpoint.
 
 ```bash
-hephaestus-automation-loop --pipeline --issues <N> --loops <K> --repos <REPO>
+hephaestus-automation-loop --issues <N> --loops <K> --repos <REPO>
 ```
 
-`--pipeline` is optional because the pipeline is the default, but keeping it in
-recovery commands makes the selected path visible in logs. If the pipeline
-itself is the suspected cause, use the rollback hatch:
-
-```bash
-hephaestus-automation-loop --legacy-loop --issues <N> --loops <K> --repos <REPO>
-```
+The queue pipeline is the only automation-loop implementation. There is no
+separate rollback selector; use the scoped command above to reconstruct queue
+state from GitHub labels, PR state, and local worktrees.
 
 The shared checkout is reset between turns, so any uncommitted in-flight edit
 from the crashed turn is discarded; this is by design. Issue work happens in

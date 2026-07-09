@@ -1,10 +1,10 @@
 # Runbook: CI-Driver Stall (Green-but-BLOCKED PR)
 
 Use this when the CI/merge stage keeps running but PRs never merge — they sit
-armed for auto-merge with all checks green, yet stay un-mergeable. The default
-pipeline handles this in `hephaestus/automation/pipeline/stages/merge_wait.py`;
-the legacy standalone drive-green behavior is grounded in
-`hephaestus/automation/ci_driver.py`.
+armed for auto-merge with all checks green, yet stay un-mergeable. The queue
+pipeline handles this in `hephaestus/automation/pipeline/stages/merge_wait.py`; the
+`hephaestus-drive-prs-green` console script is a thin queue-pipeline wrapper for
+the ci/merge_wait slice.
 
 ## Symptom
 
@@ -15,13 +15,6 @@ the legacy standalone drive-green behavior is grounded in
   - `merge_wait:N: PR #M still BLOCKED after address budget; regressing`
   - `merge_wait:N: PR #M genuinely stuck after address budget; skipping`
   - `merge_wait:N: PR #M still OPEN after ...; timing out`
-- In the legacy path, the drive-green stage exits `0`, open PRs pile up
-  un-mergeable, and the log shows (from `ci_driver.py`):
-
-  > Issue #N: PR #M is BLOCKED by branch protection (unresolved conversations
-  > or required review) — cannot auto-merge; leaving armed and exiting poll
-  > early
-
 - `mergeStateStatus` for the PR is `BLOCKED` even though every check is green
   and auto-merge is armed.
 
@@ -34,12 +27,10 @@ repo's CI never emits, so the PR is `BLOCKED` permanently. A second cause is an
 unresolved review thread when the ruleset requires
 `required_review_thread_resolution`.
 
-In the default pipeline, `merge_wait` addresses blocked threads while the
+In the queue pipeline, `merge_wait` addresses blocked threads while the
 `blocked_address` budget remains. After that budget is exhausted, genuinely
 stuck PRs receive `state:skip`; other blocked PRs regress to `pr_review` via
-`blocked_exhausted`. In the legacy path, `ci_driver.py` attempts to address
-green-but-BLOCKED PRs at most `_BLOCKED_ADDRESS_MAX_ATTEMPTS = 2` times, then
-leaves the PR armed and exits the poll early.
+`blocked_exhausted`.
 
 ## Diagnose
 
@@ -71,7 +62,7 @@ gh pr view <N> --json reviewDecision,reviewRequests
    review threads, then the armed auto-merge proceeds on its own.
 
 After the gate is satisfied, the already-armed PR merges without re-running the
-driver; re-run `hephaestus-automation-loop --pipeline` only if you need to
+driver; re-run `hephaestus-automation-loop` only if you need to
 drive other issues, continue a regressed item, or refresh the pipeline summary.
 
 ## See also

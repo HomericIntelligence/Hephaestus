@@ -58,8 +58,8 @@ from hephaestus.cli.utils import (
     add_github_throttle_args,
     add_json_arg,
     add_version_arg,
+    configure_cli_logging,
 )
-from hephaestus.constants import AUTOMATION_LOG_FORMAT, LOG_DATEFMT
 from hephaestus.io.utils import write_secure
 
 from .git_utils import issue_auto_impl_branch_name
@@ -199,12 +199,7 @@ def setup_review_logging(verbose: bool = False) -> None:
         verbose: Enable DEBUG-level logging (otherwise INFO).
 
     """
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format=AUTOMATION_LOG_FORMAT,
-        datefmt=LOG_DATEFMT,
-    )
+    configure_cli_logging(verbose=verbose)
 
 
 def ensure_state_dir(repo_root: Path, subdir: str = DEFAULT_STATE_DIR) -> Path:

@@ -45,9 +45,9 @@ from hephaestus.github.git_ops import (
     working_tree_clean as _shared_working_tree_clean,
 )
 from hephaestus.github.pr_merge import detect_repo_from_remote
-from hephaestus.logging.utils import get_logger
+from hephaestus.logging.utils import setup_logging
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 # Model the tidy conflict-resolution swarm runs on. Defined locally rather than
 # imported from hephaestus.automation.claude_models because hephaestus.github
@@ -490,10 +490,11 @@ def _print_summary(results: dict[str, str]) -> int:
 
 def _configure_logging(verbose: bool) -> None:
     """Configure CLI logging for tidy output."""
-    logging.basicConfig(
+    setup_logging(
         level=logging.DEBUG if verbose else logging.INFO,
-        format="%(asctime)s %(levelname)-7s %(message)s",
+        format_string="%(asctime)s %(levelname)-7s %(message)s",
         datefmt="%H:%M:%S",
+        primary_stream="stderr",
     )
 
 

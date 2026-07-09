@@ -21,6 +21,7 @@ from typing import Any
 
 from hephaestus._version_lookup import get_version
 from hephaestus.constants import AUTOMATION_LOG_FORMAT, LOG_DATEFMT
+from hephaestus.logging.utils import setup_logging
 from hephaestus.utils.helpers import get_repo_root
 
 __version__ = get_version()
@@ -228,18 +229,19 @@ def resolve_repo_root(args: argparse.Namespace) -> Path:
 def configure_cli_logging(*, verbose: bool = False) -> None:
     """Configure standard stderr-safe logging for a ``hephaestus-*`` CLI.
 
-    Centralizes the ``logging.basicConfig(...)`` boilerplate repeated across
+    Centralizes the logging setup boilerplate repeated across
     CLI entry points so the log level and format stay consistent. Use this
-    in a CLI ``main()`` instead of calling ``logging.basicConfig`` directly.
+    in a CLI ``main()`` instead of configuring root logging directly.
 
     Args:
         verbose: When True, set the root level to ``DEBUG``; otherwise ``INFO``.
 
     """
-    logging.basicConfig(
+    setup_logging(
         level=logging.DEBUG if verbose else logging.INFO,
-        format=AUTOMATION_LOG_FORMAT,
+        format_string=AUTOMATION_LOG_FORMAT,
         datefmt=LOG_DATEFMT,
+        primary_stream="stderr",
     )
 
 

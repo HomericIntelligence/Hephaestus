@@ -45,11 +45,11 @@ from hephaestus.cli.utils import (
     add_agent_timeout_arg,
     add_learn_timeout_arg,
     add_poll_max_wait_arg,
+    configure_cli_logging,
     configure_github_throttle_from_args,
     emit_json_status,
 )
 from hephaestus.config.paths import resolve_projects_dir
-from hephaestus.constants import AUTOMATION_LOG_FORMAT, LOG_DATEFMT
 
 from ._review_utils import build_automation_parser
 from .agent_config import ci_poll_max_wait
@@ -115,12 +115,7 @@ def _setup_logging(verbose: bool = False) -> None:
         verbose: Enable verbose (DEBUG) logging.
 
     """
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format=AUTOMATION_LOG_FORMAT,
-        datefmt=LOG_DATEFMT,
-    )
+    configure_cli_logging(verbose=verbose)
 
 
 def _build_parser() -> argparse.ArgumentParser:

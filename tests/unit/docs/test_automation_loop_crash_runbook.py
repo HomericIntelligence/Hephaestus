@@ -20,7 +20,7 @@ def _pipeline_section() -> str:
     match = _PIPELINE_SECTION_RE.search(text)
     assert match is not None, (
         "automation-loop-crash.md must document pipeline recovery semantics "
-        "for interrupted or crashed --pipeline runs."
+        "for interrupted or crashed queue-pipeline runs."
     )
     return re.sub(r"\s+", " ", match.group(1).lower())
 
@@ -29,7 +29,7 @@ def test_pipeline_recovery_semantics_are_documented() -> None:
     """The crash runbook must cover pipeline interrupt and restart behavior."""
     section = _pipeline_section()
 
-    assert "--pipeline" in section
+    assert "--pipeline" not in section
     assert "exit code 130" in section
     assert "resumable" in section
     assert "never failed" in section
