@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import subprocess
 from pathlib import Path
 
 from hephaestus.agents.runtime import (
@@ -20,8 +19,14 @@ from hephaestus.github.fleet_sync.git_ops import (
 )
 from hephaestus.github.fleet_sync.gpg import get_resign_email, get_resign_exec
 from hephaestus.github.fleet_sync.models import UNICODE_SYMBOLS, PRInfo, Symbols
+from hephaestus.github.git_ops import (
+    git_ls_remote_contains,
+    git_rev_list_count,
+    git_unmerged_files,
+    run_git,
+)
 from hephaestus.logging.utils import get_logger
-from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
+from hephaestus.utils.helpers import NETWORK_TIMEOUT
 
 logger = get_logger(__name__)
 
@@ -83,8 +88,8 @@ def resolve_conflict_with_agent(
         repo_clone = ensure_repo_clone(pr.repo, org, repo_clone.parent, dry_run=False)
         add_pr_worktree(repo_clone, work, branch, base, dry_run=False)
 
-        subprocess.run(
-            ["git", "rebase", f"origin/{base}"],
+        run_git(
+            ["rebase", f"origin/{base}"],
             cwd=work,
             capture_output=True,
             text=True,
@@ -92,15 +97,7 @@ def resolve_conflict_with_agent(
             timeout=NETWORK_TIMEOUT,
         )
 
-        status_result = subprocess.run(
-            ["git", "diff", "--name-only", "--diff-filter=U"],
-            cwd=work,
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=METADATA_TIMEOUT,
-        )
-        conflict_files = [f.strip() for f in status_result.stdout.splitlines() if f.strip()]
+        conflict_files = git_unmerged_files(work)
 
         if not conflict_files:
             _git(["rebase", "--continue"], cwd=work, dry_run=False, check=False)
@@ -117,15 +114,7 @@ def resolve_conflict_with_agent(
                 return False
 
             conflict_list = "\n".join(f"- {f}" for f in conflict_files)
-            commit_count_result = subprocess.run(
-                ["git", "rev-list", "--count", f"origin/{base}..HEAD"],
-                cwd=work,
-                capture_output=True,
-                text=True,
-                check=True,
-                timeout=METADATA_TIMEOUT,
-            )
-            commit_count = commit_count_result.stdout.strip()
+            commit_count = str(git_rev_list_count(work, f"origin/{base}..HEAD"))
             resign_email = get_resign_email()
             resign_exec = get_resign_exec()
 
@@ -166,15 +155,7 @@ Rules:
             if not _run_conflict_agent(agent, prompt, work, pr.number):
                 return False
 
-        verify = subprocess.run(
-            ["git", "ls-remote", "origin", branch],
-            cwd=work,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=NETWORK_TIMEOUT,
-        )
-        if branch in verify.stdout:
+        if git_ls_remote_contains(work, "origin", branch):
             logger.info("  %s Conflict resolved and pushed for PR #%d", symbols.check, pr.number)
             return True
 
