@@ -228,6 +228,7 @@ class PipelineConfig:
     # implementation stage reads this vector instead of hardcoding the test
     # command so non-pixi repos and non-standard unit-test layouts can opt in.
     pre_pr_test_argv: tuple[str, ...] = PRE_PR_TEST_ARGV
+    run_pre_pr_tests: bool = False
     serialize_file_overlap: bool = True
     event_log_path: Path | None = None
     projects_dir: Path = field(default_factory=lambda: Path.home() / "Projects")
@@ -376,6 +377,7 @@ class Coordinator:
             enable_mechanical_rebase=config.enable_mechanical_rebase,
             poll_max_wait=config.poll_max_wait,
             pre_pr_test_argv=config.pre_pr_test_argv,
+            run_pre_pr_tests=config.run_pre_pr_tests,
         )
         self._ctx_cache: dict[str, StageContext] = {}
 
@@ -744,12 +746,15 @@ class Coordinator:
     @staticmethod
     def _job_result_event_fields(result: JobResult) -> dict[str, Any]:
         """Return bounded, output-free job result fields for durable event logs."""
-        return {
+        fields = {
             "ok": result.ok,
             "interrupted": result.interrupted,
             "error": Coordinator._job_result_error_class(result),
             "duration_s": round(result.duration_s, 3),
         }
+        if result.worker_id:
+            fields["worker_id"] = result.worker_id
+        return fields
 
     @staticmethod
     def _job_result_error_class(result: JobResult) -> str | None:
@@ -928,7 +933,12 @@ class Coordinator:
                 # --phase-timeout semantic shift (M4): under --pipeline it
                 # bounds each AGENT JOB, not a phase subprocess.
                 job = replace(job, timeout_s=int(self.config.phase_timeout_s))
-        handle = self.pool.submit(job, request.on_done_state)
+        handle = self.pool.submit(
+            job,
+            request.on_done_state,
+            claim_key=self._item_key(item),
+            claim_stage=item.stage.value,
+        )
         self.in_flight[handle] = item
         self.inflight_per_repo[item.repo] += 1
         self._record_event(

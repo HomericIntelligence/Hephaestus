@@ -154,7 +154,10 @@ class WorkerPool:
                 automation state dir — see :func:`_repo_lock_path`).
 
         """
-        self._executor = ThreadPoolExecutor(max_workers=size)
+        self._executor = ThreadPoolExecutor(
+            max_workers=size,
+            thread_name_prefix="hephaestus-pipeline-worker",
+        )
         self._shutdown = shutdown
         self._completion_q = completion_q
         self._repo_locks: dict[str, _RepoLockEntry] = {}
@@ -181,7 +184,12 @@ class WorkerPool:
                     self._repo_locks.pop(repo, None)
 
     def submit(
-        self, job: AgentJob | BuildTestJob | GitJob, on_done_state: str | StageName
+        self,
+        job: AgentJob | BuildTestJob | GitJob,
+        on_done_state: str | StageName,
+        *,
+        claim_key: str = "",
+        claim_stage: str = "",
     ) -> JobHandle:
         """Submit a job for execution.
 
@@ -189,6 +197,8 @@ class WorkerPool:
             job: Immutable frozen job spec.
             on_done_state: Pipeline stage the item should transition to when
                 this job completes.
+            claim_key: Optional coordinator item key for worker-claim logging.
+            claim_stage: Optional stage queue name for worker-claim logging.
 
         Returns:
             JobHandle carrying the submitted job and target state; the
@@ -197,7 +207,7 @@ class WorkerPool:
 
         """
         handle = JobHandle(job=job, on_done_state=on_done_state)
-        future = self._executor.submit(self._run, job)
+        future = self._executor.submit(self._run, job, claim_key, claim_stage)
         future.add_done_callback(lambda f: self._on_future_done(handle, f))
         return handle
 
@@ -229,6 +239,7 @@ class WorkerPool:
         """
         if future.cancelled():
             return  # cancel_futures synthesizes NO completion
+        worker_id = threading.current_thread().name
         try:
             result = future.result()
         except KeyboardInterrupt as exc:
@@ -236,32 +247,50 @@ class WorkerPool:
             result = JobResult(
                 ok=False,
                 error=f"worker_crash: {type(exc).__name__}: {exc!s}"[:_ERR_MAX],
+                worker_id=worker_id,
             )
         except (SystemExit, GeneratorExit) as exc:
             logger.info("Worker future exited during shutdown; converting to worker_crash result")
             result = JobResult(
                 ok=False,
                 error=f"worker_crash: {type(exc).__name__}: {exc!s}"[:_ERR_MAX],
+                worker_id=worker_id,
             )
         except Exception as exc:
             logger.exception("Worker future raised; converting to worker_crash result")
             result = JobResult(
                 ok=False,
                 error=f"worker_crash: {type(exc).__name__}: {exc!s}"[:_ERR_MAX],
+                worker_id=worker_id,
             )
         self._completion_q.put((handle, result))
 
-    def _run(self, job: AgentJob | BuildTestJob | GitJob) -> JobResult:
+    def _run(
+        self,
+        job: AgentJob | BuildTestJob | GitJob,
+        claim_key: str = "",
+        claim_stage: str = "",
+    ) -> JobResult:
         """Execute a job and return its result.
 
-        Catches Exception subclasses so a single job failure does not crash the
-        worker thread; process-control escapes are converted in
-        _on_future_done's crash handler. After every job, post-checks the
-        shutdown event and marks interrupted=True if it was set (SIGINT to the
-        process group makes children return normally; the interrupt flag
-        prevents misreading a killed job as success).
+        Converts normal job exceptions and process-control escapes into
+        ``JobResult`` values so a single job failure does not crash the worker
+        thread. After every job, post-checks the shutdown event and marks
+        interrupted=True if it was set (SIGINT to the process group makes
+        children return normally; the interrupt flag prevents misreading a
+        killed job as success).
         """
         start = time.monotonic()
+        worker_id = threading.current_thread().name
+        logger.info(
+            "worker_claim: worker_id=%s item=%s stage=%s job=%s repo=%s descr=%s",
+            worker_id,
+            claim_key or "-",
+            claim_stage or "-",
+            type(job).__name__,
+            getattr(job, "repo", ""),
+            getattr(job, "descr", ""),
+        )
 
         # Pre-check: do not start a queued job if shutdown is set.
         if self._shutdown.is_set():
@@ -280,10 +309,22 @@ class WorkerPool:
                     result = self._run_git(job)
                 else:
                     raise TypeError(f"unknown job type {type(job)}")
+            except (KeyboardInterrupt, SystemExit, GeneratorExit) as exc:
+                # Preserve the executing worker identity for process-control
+                # escapes. The future callback may run outside the worker
+                # thread if the future completed before callback registration.
+                logger.info(
+                    "Job %s exited via %s, returning worker_crash result",
+                    job,
+                    type(exc).__name__,
+                )
+                result = JobResult(
+                    ok=False,
+                    error=f"worker_crash: {type(exc).__name__}: {exc!s}"[:_ERR_MAX],
+                )
             except Exception as exc:
                 # Convert job execution failures into a JobResult so the callback
-                # never re-raises into its thread. This catches normal runtime errors
-                # but allows process-control exceptions to propagate normally.
+                # never re-raises into its thread.
                 logger.exception("Job %s raised, returning error result", job)
                 result = JobResult(
                     ok=False,
@@ -301,6 +342,7 @@ class WorkerPool:
             duration_s=time.monotonic() - start,
             stdout_tail=result.stdout_tail[-_TAIL:] if result.stdout_tail else "",
             stderr_tail=result.stderr_tail[-_TAIL:] if result.stderr_tail else "",
+            worker_id=worker_id,
         )
 
     def _run_agent(self, job: AgentJob) -> JobResult:
@@ -320,7 +362,8 @@ class WorkerPool:
         Unexpected Exception subclasses from agent resolution, prompt
         construction, and the resilience wrapper are classified in this method
         for symmetry with the specific agent failures below. Process-control
-        escapes still propagate to _on_future_done's crash handler.
+        escapes are converted by :meth:`_run` so the returned result preserves
+        the executing worker identity.
         """
         try:
             agent = resolve_agent(job.agent)

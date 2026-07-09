@@ -102,7 +102,7 @@ ProjectHephaestus/
 ├── hephaestus/        # Main package
 │   ├── __init__.py
 │   ├── agents/        # Agent frontmatter + loader + runtime
-│   ├── automation/    # Issue planning / implementation / PR review pipeline
+│   ├── automation/    # Queue-based automation pipeline and scoped wrappers
 │   ├── benchmarks/    # Benchmark comparison utilities
 │   ├── ci/            # CI helpers (precommit, workflows, docker timing)
 │   ├── cli/           # CLI helpers (argument parsing, output formatting)
@@ -329,7 +329,7 @@ with `--help` to see full usage.
 
 | Command | Description |
 |---|---|
-| `hephaestus-automation-loop` | Multi-repo 3-stage automation pipeline using Claude Code or Codex (plan → implement → drive-green; plan-review and PR-review/address-review run in-loop within plan/implement) |
+| `hephaestus-automation-loop` | Multi-repo queue-based automation pipeline using Claude Code or Codex (repo → planning → plan_review → implementation → pr_review → ci → merge_wait → finished) |
 | `hephaestus-plan-issues` | Bulk issue planning using Claude Code or Codex |
 | `hephaestus-implement-issues` | Bulk issue implementation using Claude Code or Codex in parallel worktrees |
 | `hephaestus-review-prs` | Read-only PR review automation using Claude Code or Codex in parallel worktrees |

@@ -21,7 +21,7 @@ import uuid
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from hephaestus.constants import LOG_FORMAT
 from hephaestus.logging.formatters import JsonFormatter
@@ -199,8 +199,7 @@ def get_logger(
                 file_handler.setFormatter(formatter)
                 logger.addHandler(file_handler)
 
-    # Prevent duplicate output when root logger also has handlers
-    # (e.g., from setup_logging() or logging.basicConfig()).
+    # Prevent duplicate output when root logger also has handlers.
     # Safe to set outside the lock — simple attribute assignment on the logger object.
     logger.propagate = propagate
 
@@ -213,6 +212,8 @@ def setup_logging(
     format_string: str | None = None,
     log_to_stderr: bool = False,
     json_format: bool = False,
+    datefmt: str | None = None,
+    primary_stream: Literal["stdout", "stderr"] = "stdout",
 ) -> None:
     """Set up global logging configuration.
 
@@ -222,8 +223,13 @@ def setup_logging(
         format_string: Custom log format (ignored when *json_format* is True)
         log_to_stderr: Whether to also log to stderr
         json_format: If True, use structured JSON output instead of plain text
+        datefmt: Optional date format for text log records
+        primary_stream: Console stream for the primary root handler
 
     """
+    if primary_stream not in {"stdout", "stderr"}:
+        raise ValueError("primary_stream must be 'stdout' or 'stderr'")
+
     root_logger = logging.getLogger()
     root_logger.setLevel(level)
 
@@ -232,34 +238,27 @@ def setup_logging(
         formatter = JsonFormatter()
     else:
         format_string = format_string or LOG_FORMAT
-        formatter = logging.Formatter(format_string)
+        formatter = logging.Formatter(format_string, datefmt=datefmt)
+
+    primary_target = sys.stderr if primary_stream == "stderr" else sys.stdout
+    stream_targets = [primary_target]
+    if log_to_stderr and sys.stderr not in stream_targets:
+        stream_targets.append(sys.stderr)
 
     # Lock protects the check-then-add TOCTOU race on the root logger's handler list
     with _handler_setup_lock:
-        # Deduplicate stdout StreamHandler
-        has_stdout = any(
-            isinstance(h, logging.StreamHandler)
-            and not isinstance(h, logging.FileHandler)
-            and getattr(h, "stream", None) is sys.stdout
-            for h in root_logger.handlers
-        )
-        if not has_stdout:
-            stdout_handler = logging.StreamHandler(sys.stdout)
-            stdout_handler.setFormatter(formatter)
-            root_logger.addHandler(stdout_handler)
-
-        # Deduplicate stderr StreamHandler
-        if log_to_stderr:
-            has_stderr = any(
+        # Deduplicate console StreamHandlers by stream identity.
+        for stream in stream_targets:
+            has_stream = any(
                 isinstance(h, logging.StreamHandler)
                 and not isinstance(h, logging.FileHandler)
-                and getattr(h, "stream", None) is sys.stderr
+                and getattr(h, "stream", None) is stream
                 for h in root_logger.handlers
             )
-            if not has_stderr:
-                stderr_handler = logging.StreamHandler(sys.stderr)
-                stderr_handler.setFormatter(formatter)
-                root_logger.addHandler(stderr_handler)
+            if not has_stream:
+                stream_handler = logging.StreamHandler(stream)
+                stream_handler.setFormatter(formatter)
+                root_logger.addHandler(stream_handler)
 
         # Deduplicate FileHandler by resolved path
         if log_file:

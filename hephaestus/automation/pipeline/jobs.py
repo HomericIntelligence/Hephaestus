@@ -93,6 +93,7 @@ class JobResult:
     error: str | None = None
     interrupted: bool = False
     duration_s: float = 0.0
+    worker_id: str = ""
 
 
 @dataclass(frozen=True, eq=False)

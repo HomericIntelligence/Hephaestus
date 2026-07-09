@@ -112,6 +112,13 @@ def test_parse_args_accepts_no_advise() -> None:
     assert args.no_advise is True
 
 
+def test_parse_args_accepts_run_pre_pr_tests() -> None:
+    """The queue runner can enable the implementation-stage pre-PR test gate."""
+    args = loop_runner._parse_args(["--run-pre-pr-tests"])
+    assert args.run_pre_pr_tests is True
+    assert loop_runner._parse_args([]).run_pre_pr_tests is False
+
+
 def test_parse_args_accepts_nitpick() -> None:
     """The loop runner can enable nitpick comments across review phases."""
     assert loop_runner._parse_args(["--nitpick"]).nitpick is True
@@ -561,3 +568,15 @@ def test_legacy_loop_symbols_removed() -> None:
     assert not hasattr(loop_runner, "run_loop")
     assert not hasattr(loop_runner, "_run_post_loop_stages")
     assert not hasattr(loop_runner, "_PHASE_FLAGS")
+
+
+def test_main_wires_run_pre_pr_tests_to_pipeline_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--run-pre-pr-tests`` reaches the queue implementation stage config."""
+    config = _capture_config(
+        ["--repos", "Repo", "--run-pre-pr-tests", "--loops", "1", "--agent", "claude"],
+        monkeypatch,
+    )
+
+    assert config.run_pre_pr_tests is True  # type: ignore[attr-defined]

@@ -31,8 +31,7 @@ from hephaestus.automation._review_utils import (
     print_worker_summary,
     work_report_context,
 )
-from hephaestus.cli.utils import add_agent_timeout_arg, emit_json_status
-from hephaestus.constants import AUTOMATION_LOG_FORMAT, LOG_DATEFMT
+from hephaestus.cli.utils import add_agent_timeout_arg, configure_cli_logging, emit_json_status
 from hephaestus.github.rate_limit import wait_until
 
 from .agent_config import DEFAULT_AGENT_TIMEOUT
@@ -606,12 +605,7 @@ def _setup_logging(verbose: bool = False) -> None:
         verbose: Enable verbose (DEBUG) logging.
 
     """
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format=AUTOMATION_LOG_FORMAT,
-        datefmt=LOG_DATEFMT,
-    )
+    configure_cli_logging(verbose=verbose)
 
 
 def _build_parser() -> argparse.ArgumentParser:
