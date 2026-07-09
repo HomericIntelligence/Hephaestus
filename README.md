@@ -118,7 +118,7 @@ ProjectHephaestus/
 │   ├── resilience/    # Circuit breaker + retry + subprocess resilience primitives
 │   ├── scripts_lib/   # Standalone consistency-check scripts (CLI table, version)
 │   ├── system/        # System information collection
-│   ├── utils/         # General utility functions (slugify, retry, subprocess)
+│   ├── utils/         # General utility functions (slugify, retry, subprocess, git helpers)
 │   ├── validation/    # README, schema, and structural validation
 │   └── version/       # Version management (hatch-vcs + consistency checks)
 ├── tests/             # Unit tests
@@ -284,6 +284,7 @@ homericintelligence-hephaestus = { path = "../ProjectHephaestus", editable = tru
 - `human_readable_size(bytes)`: Convert bytes to human readable format
 - `flatten_dict(dict)`: Flatten nested dictionaries
 - `run_subprocess(cmd)`: Execute shell commands with error handling
+- `run_git(args)`: Execute Git commands through the shared subprocess adapter
 - `get_setting(config, key_path)`: Get nested dict values with dot notation
 
 ### Configuration (`hephaestus.config`)

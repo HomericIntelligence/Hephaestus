@@ -72,6 +72,30 @@ class TestRun:
         assert result.returncode == 0
         assert "test.txt" in result.stdout
 
+    def test_git_command_delegates_to_shared_git_helper(self) -> None:
+        """Automation keeps its run seam while sharing git subprocess execution."""
+        completed = subprocess.CompletedProcess(["git"], 0, stdout="", stderr="")
+        with patch(
+            "hephaestus.automation.git_utils._shared_run_git", return_value=completed
+        ) as mock_run:
+            result = run(
+                ["git", "status"],
+                cwd=Path("/repo"),
+                check=False,
+                timeout=42,
+                log_errors=False,
+            )
+
+        assert result is completed
+        mock_run.assert_called_once_with(
+            ["git", "status"],
+            cwd=Path("/repo"),
+            timeout=42,
+            check=False,
+            log_on_error=False,
+            env=None,
+        )
+
 
 class TestGetRepoRoot:
     """Tests for get_repo_root function."""

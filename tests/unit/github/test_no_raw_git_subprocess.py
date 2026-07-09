@@ -12,6 +12,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _TARGETS = (
     *_REPO_ROOT.joinpath("hephaestus", "github", "fleet_sync").glob("*.py"),
     _REPO_ROOT / "hephaestus" / "github" / "pr_merge.py",
+    _REPO_ROOT / "hephaestus" / "github" / "tidy.py",
 )
 _RUNNERS = {"run", "Popen", "check_output", "check_call"}
 
@@ -118,7 +119,7 @@ def _raw_git_subprocess_violations(path: Path) -> list[str]:
 
 
 def test_github_modules_do_not_run_git_via_raw_subprocess() -> None:
-    """GitHub modules must use hephaestus.github.git_ops for git commands."""
+    """GitHub modules must use the shared git adapter for git commands."""
     violations: list[str] = []
     for path in _TARGETS:
         violations.extend(_raw_git_subprocess_violations(path))

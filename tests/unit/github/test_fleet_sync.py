@@ -515,6 +515,145 @@ def _pr(number: int, status: PRStatus, head: str = "feat") -> PRInfo:
     )
 
 
+class TestResolveConflictWithAgent:
+    """Direct coverage for conflict resolver git-helper orchestration."""
+
+    def test_no_conflicts_continues_rebase_and_verifies_push(self, tmp_path: Path) -> None:
+        """A clean rebase continues and requires an advertised remote branch."""
+        pr = _pr(7, PRStatus.CONFLICTED, head="feature")
+        repo_clone = tmp_path / "RepoA"
+        work = tmp_path / "RepoA-7-conflict"
+
+        with (
+            patch.object(fleet_conflicts, "ensure_repo_clone", return_value=repo_clone) as ensure,
+            patch.object(fleet_conflicts, "add_pr_worktree") as add_worktree,
+            patch.object(fleet_conflicts, "run_git") as run_git,
+            patch.object(fleet_conflicts, "git_unmerged_files", return_value=[]) as unmerged,
+            patch.object(fleet_conflicts, "_git") as raw_git,
+            patch.object(
+                fleet_conflicts, "git_ls_remote_contains", return_value=True
+            ) as remote_has,
+            patch.object(fleet_conflicts, "remove_worktree") as remove,
+        ):
+            assert fleet_conflicts.resolve_conflict_with_agent(pr, "Org", repo_clone) is True
+
+        ensure.assert_called_once_with("RepoA", "Org", tmp_path, dry_run=False)
+        add_worktree.assert_called_once_with(repo_clone, work, "feature", "main", dry_run=False)
+        run_git.assert_called_once_with(
+            ["rebase", "origin/main"],
+            cwd=work,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=NETWORK_TIMEOUT,
+        )
+        unmerged.assert_called_once_with(work)
+        raw_git.assert_called_once_with(
+            ["rebase", "--continue"], cwd=work, dry_run=False, check=False
+        )
+        remote_has.assert_called_once_with(work, "origin", "feature")
+        remove.assert_called_once_with(repo_clone, work, dry_run=False)
+
+    def test_dry_run_conflicts_abort_without_agent(self, tmp_path: Path) -> None:
+        """Dry-run conflict handling aborts the rebase and never invokes an agent."""
+        pr = _pr(8, PRStatus.CONFLICTED, head="feature")
+        repo_clone = tmp_path / "RepoA"
+
+        with (
+            patch.object(fleet_conflicts, "ensure_repo_clone", return_value=repo_clone),
+            patch.object(fleet_conflicts, "add_pr_worktree"),
+            patch.object(fleet_conflicts, "run_git"),
+            patch.object(fleet_conflicts, "git_unmerged_files", return_value=["a.py"]),
+            patch.object(fleet_conflicts, "_git") as raw_git,
+            patch.object(fleet_conflicts, "_run_conflict_agent") as agent,
+            patch.object(fleet_conflicts, "git_ls_remote_contains") as remote_has,
+            patch.object(fleet_conflicts, "remove_worktree"),
+        ):
+            assert (
+                fleet_conflicts.resolve_conflict_with_agent(pr, "Org", repo_clone, dry_run=True)
+                is False
+            )
+
+        raw_git.assert_called_once_with(
+            ["rebase", "--abort"],
+            cwd=tmp_path / "RepoA-8-conflict",
+            dry_run=False,
+            check=False,
+        )
+        agent.assert_not_called()
+        remote_has.assert_not_called()
+
+    def test_conflicts_run_agent_and_verify_remote_branch(self, tmp_path: Path) -> None:
+        """Agent resolution must count commits, build a prompt, and verify the push."""
+        pr = _pr(9, PRStatus.CONFLICTED, head="feature")
+        repo_clone = tmp_path / "RepoA"
+
+        with (
+            patch.object(fleet_conflicts, "ensure_repo_clone", return_value=repo_clone),
+            patch.object(fleet_conflicts, "add_pr_worktree"),
+            patch.object(fleet_conflicts, "run_git"),
+            patch.object(fleet_conflicts, "git_unmerged_files", return_value=["a.py", "b.py"]),
+            patch.object(fleet_conflicts, "git_rev_list_count", return_value=2) as rev_count,
+            patch.object(fleet_conflicts, "get_resign_email", return_value="dev@example.com"),
+            patch.object(fleet_conflicts, "get_resign_exec", return_value="git resign"),
+            patch.object(fleet_conflicts, "_run_conflict_agent", return_value=True) as agent,
+            patch.object(
+                fleet_conflicts, "git_ls_remote_contains", return_value=True
+            ) as remote_has,
+            patch.object(fleet_conflicts, "remove_worktree"),
+        ):
+            assert fleet_conflicts.resolve_conflict_with_agent(pr, "Org", repo_clone) is True
+
+        work = tmp_path / "RepoA-9-conflict"
+        assert pr.conflict_files == ["a.py", "b.py"]
+        rev_count.assert_called_once_with(work, "origin/main..HEAD")
+        prompt = agent.call_args.args[1]
+        assert "- a.py" in prompt
+        assert "git -c user.email=dev@example.com rebase --continue" in prompt
+        assert "git rebase HEAD~2 --exec 'git resign'" in prompt
+        remote_has.assert_called_once_with(work, "origin", "feature")
+
+    def test_agent_failure_returns_false_and_skips_remote_probe(self, tmp_path: Path) -> None:
+        """If the resolver agent fails, the branch is not reported as pushed."""
+        pr = _pr(10, PRStatus.CONFLICTED, head="feature")
+        repo_clone = tmp_path / "RepoA"
+
+        with (
+            patch.object(fleet_conflicts, "ensure_repo_clone", return_value=repo_clone),
+            patch.object(fleet_conflicts, "add_pr_worktree"),
+            patch.object(fleet_conflicts, "run_git"),
+            patch.object(fleet_conflicts, "git_unmerged_files", return_value=["a.py"]),
+            patch.object(fleet_conflicts, "git_rev_list_count", return_value=1),
+            patch.object(fleet_conflicts, "get_resign_email", return_value="dev@example.com"),
+            patch.object(fleet_conflicts, "get_resign_exec", return_value="git resign"),
+            patch.object(fleet_conflicts, "_run_conflict_agent", return_value=False),
+            patch.object(fleet_conflicts, "git_ls_remote_contains") as remote_has,
+            patch.object(fleet_conflicts, "remove_worktree") as remove,
+        ):
+            assert fleet_conflicts.resolve_conflict_with_agent(pr, "Org", repo_clone) is False
+
+        remote_has.assert_not_called()
+        remove.assert_called_once_with(repo_clone, tmp_path / "RepoA-10-conflict", dry_run=False)
+
+    def test_exceptions_abort_rebase_and_clean_worktree(self, tmp_path: Path) -> None:
+        """Unexpected git failures abort the rebase before cleanup."""
+        pr = _pr(11, PRStatus.CONFLICTED, head="feature")
+        repo_clone = tmp_path / "RepoA"
+        work = tmp_path / "RepoA-11-conflict"
+
+        with (
+            patch.object(fleet_conflicts, "ensure_repo_clone", return_value=repo_clone),
+            patch.object(fleet_conflicts, "add_pr_worktree"),
+            patch.object(fleet_conflicts, "run_git", side_effect=RuntimeError("boom")),
+            patch.object(fleet_conflicts, "_git") as raw_git,
+            patch.object(fleet_conflicts, "remove_worktree") as remove,
+        ):
+            assert fleet_conflicts.resolve_conflict_with_agent(pr, "Org", repo_clone) is False
+
+        raw_git.assert_called_once_with(["rebase", "--abort"], cwd=work, dry_run=False, check=False)
+        remove.assert_called_once_with(repo_clone, work, dry_run=False)
+
+
 @pytest.fixture
 def capture_fleet_sync_logs():
     r"""Fixture to capture fleet_sync logger messages.

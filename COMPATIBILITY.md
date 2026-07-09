@@ -247,6 +247,7 @@ Lazy-loaded symbols (accessible via `hephaestus.<name>`): `add_logging_args`,
 | `retry_on_network_error` | 0.2.0 | Retry decorator scoped to network errors |
 | `retry_with_backoff` | 0.1.0 | Exponential backoff retry decorator |
 | `run_subprocess` | 0.1.0 | Execute shell commands with error handling |
+| `run_git` | TBD | Execute Git commands through the shared subprocess adapter |
 | `slugify` | 0.1.0 | Convert text to URL-friendly slug |
 | `terminal_guard` | 0.3.0 | Context manager that saves/restores terminal state |
 
