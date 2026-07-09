@@ -475,8 +475,8 @@ class TestTimeoutHandling:
             timeout=NETWORK_TIMEOUT,
         )
 
-    def test_git_uses_network_timeout_and_retries(self) -> None:
-        """_git routes network commands through the shared helper with retries."""
+    def test_git_uses_network_timeout_and_shared_retry_defaults(self) -> None:
+        """_git routes through the shared helper and its central retry policy."""
         completed = subprocess.CompletedProcess(["git"], 0, stdout="", stderr="")
         with patch.object(fleet_git_ops, "run_git", return_value=completed) as mock_run:
             work_dir = Path("/tmp/test")
@@ -487,11 +487,10 @@ class TestTimeoutHandling:
             cwd=work_dir,
             check=True,
             timeout=NETWORK_TIMEOUT,
-            retries=2,
         )
 
-    def test_git_does_not_retry_local_commands(self) -> None:
-        """_git keeps local commands single-shot while still using the shared helper."""
+    def test_git_delegates_local_commands_to_shared_helper(self) -> None:
+        """_git keeps local command policy centralized in the shared helper."""
         completed = subprocess.CompletedProcess(["git"], 0, stdout="", stderr="")
         with patch.object(fleet_git_ops, "run_git", return_value=completed) as mock_run:
             work_dir = Path("/tmp/test")
@@ -504,7 +503,6 @@ class TestTimeoutHandling:
             cwd=work_dir,
             check=False,
             timeout=NETWORK_TIMEOUT,
-            retries=0,
         )
 
     def test_conflict_agent_uses_env_configured_rebase_timeout(
@@ -572,7 +570,7 @@ class TestResolveConflictWithAgent:
         raw_git.assert_called_once_with(
             ["rebase", "--continue"], cwd=work, dry_run=False, check=False
         )
-        remote_has.assert_called_once_with(work, "origin", "feature")
+        remote_has.assert_called_once_with(work, "origin", "feature", raise_on_error=True)
         remove.assert_called_once_with(repo_clone, work, dry_run=False)
 
     def test_dry_run_conflicts_abort_without_agent(self, tmp_path: Path) -> None:
@@ -632,7 +630,36 @@ class TestResolveConflictWithAgent:
         assert "- a.py" in prompt
         assert "git -c user.email=dev@example.com rebase --continue" in prompt
         assert "git rebase HEAD~2 --exec 'git resign'" in prompt
-        remote_has.assert_called_once_with(work, "origin", "feature")
+        remote_has.assert_called_once_with(work, "origin", "feature", raise_on_error=True)
+
+    def test_remote_probe_failure_returns_false_with_specific_warning(self, tmp_path: Path) -> None:
+        """A failed remote probe is reported separately from a missing agent push."""
+        pr = _pr(10, PRStatus.CONFLICTED, head="feature")
+        repo_clone = tmp_path / "RepoA"
+        probe_error = subprocess.TimeoutExpired(["git", "ls-remote"], timeout=1)
+
+        with (
+            patch.object(fleet_conflicts, "ensure_repo_clone", return_value=repo_clone),
+            patch.object(fleet_conflicts, "add_pr_worktree"),
+            patch.object(fleet_conflicts, "run_git"),
+            patch.object(fleet_conflicts, "git_unmerged_files", return_value=["a.py"]),
+            patch.object(fleet_conflicts, "git_rev_list_count", return_value=1),
+            patch.object(fleet_conflicts, "get_resign_email", return_value="dev@example.com"),
+            patch.object(fleet_conflicts, "get_resign_exec", return_value="git resign"),
+            patch.object(fleet_conflicts, "_run_conflict_agent", return_value=True),
+            patch.object(
+                fleet_conflicts, "git_ls_remote_contains", side_effect=probe_error
+            ) as remote_has,
+            patch.object(fleet_conflicts, "logger") as logger,
+            patch.object(fleet_conflicts, "remove_worktree"),
+        ):
+            assert fleet_conflicts.resolve_conflict_with_agent(pr, "Org", repo_clone) is False
+
+        remote_has.assert_called_once_with(
+            tmp_path / "RepoA-10-conflict", "origin", "feature", raise_on_error=True
+        )
+        logger.warning.assert_called_once()
+        assert "Could not verify pushed branch" in logger.warning.call_args.args[0]
 
     def test_agent_failure_returns_false_and_skips_remote_probe(self, tmp_path: Path) -> None:
         """If the resolver agent fails, the branch is not reported as pushed."""

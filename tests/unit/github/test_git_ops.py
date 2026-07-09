@@ -53,7 +53,7 @@ def test_run_git_accepts_git_prefixed_commands_and_dry_run() -> None:
         check=True,
         timeout=NETWORK_TIMEOUT,
         dry_run=True,
-        log_on_error=True,
+        log_on_error=False,
     )
 
 
@@ -68,6 +68,19 @@ def test_run_git_retries_network_commands_by_default() -> None:
         assert run_git(["fetch", "origin"]) is completed
 
     assert mock_run.call_count == 2
+
+
+def test_run_git_suppresses_error_log_noise_during_retries() -> None:
+    """Retry attempts use retry warnings instead of per-attempt ERROR logs."""
+    failure = subprocess.CalledProcessError(128, ["git", "fetch"], stderr="network timeout")
+    completed = subprocess.CompletedProcess(["git"], 0, stdout="", stderr="")
+    with (
+        patch("hephaestus.utils.git.run_subprocess", side_effect=[failure, completed]) as mock_run,
+        patch("hephaestus.utils.retry.time.sleep"),
+    ):
+        assert run_git(["fetch", "origin"]) is completed
+
+    assert [call.kwargs["log_on_error"] for call in mock_run.call_args_list] == [False, False]
 
 
 def test_run_git_does_not_retry_local_commands_by_default() -> None:
@@ -273,6 +286,15 @@ def test_git_ls_remote_contains_rejects_partial_ref_matches() -> None:
     )
     with patch("hephaestus.utils.git.run_git", return_value=partial):
         assert git_ls_remote_contains(Path("/repo"), "origin", "feature") is False
+
+
+def test_git_ls_remote_contains_can_raise_probe_errors() -> None:
+    """Callers can distinguish remote probe failures from absent refs."""
+    probe_error = subprocess.TimeoutExpired(["git", "ls-remote"], timeout=1)
+    with patch("hephaestus.utils.git.run_git", side_effect=probe_error):
+        assert git_ls_remote_contains(Path("/repo"), "origin", "feature") is False
+        with pytest.raises(subprocess.TimeoutExpired):
+            git_ls_remote_contains(Path("/repo"), "origin", "feature", raise_on_error=True)
 
 
 def test_shared_git_helpers_live_in_utils_package() -> None:

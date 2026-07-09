@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import subprocess
 from pathlib import Path
 
 from hephaestus.agents.runtime import (
@@ -155,7 +156,13 @@ Rules:
             if not _run_conflict_agent(agent, prompt, work, pr.number):
                 return False
 
-        if git_ls_remote_contains(work, "origin", branch):
+        try:
+            remote_has_branch = git_ls_remote_contains(work, "origin", branch, raise_on_error=True)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
+            logger.warning("  Could not verify pushed branch for PR #%d: %s", pr.number, e)
+            return False
+
+        if remote_has_branch:
             logger.info("  %s Conflict resolved and pushed for PR #%d", symbols.check, pr.number)
             return True
 

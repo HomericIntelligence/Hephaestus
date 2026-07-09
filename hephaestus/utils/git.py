@@ -64,13 +64,13 @@ def run_git(
     if retries is None:
         retries = 2 if normalized_args and normalized_args[0] in _NETWORK_GIT_COMMANDS else 0
 
-    def _call() -> subprocess.CompletedProcess[str]:
+    def _call(*, log_errors: bool = log_on_error) -> subprocess.CompletedProcess[str]:
         kwargs: dict[str, Any] = {
             "cwd": _cwd_arg(cwd),
             "check": check,
             "timeout": timeout,
             "dry_run": dry_run,
-            "log_on_error": log_on_error,
+            "log_on_error": log_errors,
         }
         if env is not None:
             kwargs["env"] = env
@@ -78,6 +78,8 @@ def run_git(
 
     if retries <= 0:
         return _call()
+
+    retry_log_on_error = False if log_on_error else log_on_error
 
     @retry_with_backoff(
         max_retries=retries,
@@ -89,7 +91,7 @@ def run_git(
         retry_predicate=_is_retryable_git_error,
     )
     def _retrying_call() -> subprocess.CompletedProcess[str]:
-        return _call()
+        return _call(log_errors=retry_log_on_error)
 
     return _retrying_call()
 
@@ -195,7 +197,13 @@ def _remote_ref_candidates(ref: str) -> set[str]:
     return candidates
 
 
-def git_ls_remote_contains(cwd: Path | str, remote: str, ref: str) -> bool:
+def git_ls_remote_contains(
+    cwd: Path | str,
+    remote: str,
+    ref: str,
+    *,
+    raise_on_error: bool = False,
+) -> bool:
     """Return whether ``remote`` advertises ``ref`` as an exact ref."""
     try:
         result = run_git(
@@ -206,6 +214,8 @@ def git_ls_remote_contains(cwd: Path | str, remote: str, ref: str) -> bool:
             log_on_error=False,
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        if raise_on_error:
+            raise
         return False
 
     candidates = _remote_ref_candidates(ref)

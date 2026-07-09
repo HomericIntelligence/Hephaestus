@@ -68,6 +68,21 @@ def test_git_ls_remote_contains_matches_exact_branch_refs_only() -> None:
         assert shared_git.git_ls_remote_contains(Path("/repo"), "origin", "feature") is False
 
 
+def test_git_ls_remote_contains_can_raise_probe_errors() -> None:
+    """Callers can request an exception when a remote probe fails."""
+    probe_error = subprocess.TimeoutExpired(["git", "ls-remote"], timeout=1)
+    with patch("hephaestus.utils.git.run_git", side_effect=probe_error):
+        assert shared_git.git_ls_remote_contains(Path("/repo"), "origin", "feature") is False
+        try:
+            shared_git.git_ls_remote_contains(
+                Path("/repo"), "origin", "feature", raise_on_error=True
+            )
+        except subprocess.TimeoutExpired:
+            pass
+        else:  # pragma: no cover - assertion below is clearer when this fails
+            raise AssertionError("remote probe failure should be raised")
+
+
 def test_run_git_is_available_from_utils_package() -> None:
     """The package-level utils surface exposes the shared git runner."""
     assert utils_pkg.run_git is shared_git.run_git

@@ -13,8 +13,6 @@ from hephaestus.utils.helpers import NETWORK_TIMEOUT
 
 logger = get_logger(__name__)
 
-_NETWORK_RETRY_COMMANDS = frozenset({"clone", "fetch", "ls-remote", "pull", "push"})
-
 
 def _git(
     args: list[str],
@@ -26,8 +24,7 @@ def _git(
     if dry_run:
         logger.info("[dry-run] git %s (in %s)", " ".join(args), cwd)
         return subprocess.CompletedProcess(["git", *args], 0, stdout="", stderr="")
-    retries = 2 if args and args[0] in _NETWORK_RETRY_COMMANDS else 0
-    return run_git(args, cwd=cwd, check=check, timeout=NETWORK_TIMEOUT, retries=retries)
+    return run_git(args, cwd=cwd, check=check, timeout=NETWORK_TIMEOUT)
 
 
 def ensure_repo_clone(repo: str, org: str, clone_dir: Path, dry_run: bool = False) -> Path:

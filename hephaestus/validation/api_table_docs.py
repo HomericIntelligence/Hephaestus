@@ -1,7 +1,7 @@
 """Enforce per-symbol API stability-table documentation.
 
-Every member of a documented subpackage's __all__ MUST have a matching row in
-that subpackage's "### `hephaestus.<pkg>`" table in COMPATIBILITY.md, and every
+Every member of a documented module's __all__ MUST have a matching row in
+that module's "### `hephaestus.<pkg>[.<module>]`" table in COMPATIBILITY.md, and every
 documented row MUST correspond to a live __all__ member. Only TABLE MEMBERSHIP
 is validated — the "Added" version column is a best-effort historical anchor
 and is intentionally NOT asserted.
@@ -34,10 +34,11 @@ GUARDED_PACKAGES: tuple[str, ...] = (
     "hephaestus.config",
     "hephaestus.system",
     "hephaestus.utils",
+    "hephaestus.utils.git",
     "hephaestus.version",
 )
 
-_HEADER_RE = re.compile(r"^###\s+`(hephaestus\.[a-z_]+)`\s*$")
+_HEADER_RE = re.compile(r"^###\s+`(hephaestus(?:\.[a-z_]+)+)`\s*$")
 _SEPARATOR_RE = re.compile(r"^\|[\s\-:|]+\|?\s*$")
 _ROW_RE = re.compile(r"^\|\s*`([A-Za-z_][A-Za-z0-9_]*)`\s*\|")
 
@@ -54,9 +55,9 @@ class ApiTableFinding:
 
 
 def load_documented_symbols(compatibility_path: Path) -> dict[str, set[str]]:
-    """Return ``{package: {symbol, ...}}`` parsed from each ``### `hephaestus.<pkg>``` table.
+    """Return symbols parsed from each guarded ``hephaestus.*`` API table.
 
-    Scans all ``### `hephaestus.<pkg>``` headings, reading table rows until
+    Scans all ``### `hephaestus.<pkg>[.<module>]``` headings, reading table rows until
     the next heading (``###`` or ``##``) or the end of the file. Separator
     rows and the column header row are skipped.
 
