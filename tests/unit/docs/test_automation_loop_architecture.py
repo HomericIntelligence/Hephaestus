@@ -19,6 +19,7 @@ from hephaestus.automation.prompts.planning import (
 )
 
 DOC_PATH = Path(__file__).resolve().parents[3] / "docs" / "AUTOMATION_LOOP_ARCHITECTURE.md"
+AGENTS_PATH = Path(__file__).resolve().parents[3] / "AGENTS.md"
 
 PROMPT_REFS: tuple[tuple[str, str, Callable[..., object]], ...] = (
     ("prompts/planning.py", "get_plan_prompt", get_plan_prompt),
@@ -84,10 +85,32 @@ def test_automation_loop_architecture_describes_post_cutover_loop() -> None:
     normalized = " ".join(text.split())
 
     assert "subprocess-per-phase loop was removed" in text
-    assert "there is no `--legacy-loop` rollback path" in text
+    assert "there is no `--pipeline` compatibility flag" in normalized
+    assert "there is no `--legacy-loop` rollback path" in normalized
+    assert "hephaestus-automation-loop --pipeline" not in text
+    assert "`--pipeline` remains accepted" not in text
     assert "legacy loop remains available" not in normalized
     assert "HEPH_PIPELINE=0" not in text
     assert "forces the pre-pipeline path" not in text
+
+
+def test_automation_loop_architecture_describes_thin_queue_wrappers() -> None:
+    """Wrapper docs must describe queue-pipeline scoped entry points, not legacy paths."""
+    text = _arch_text()
+
+    assert "thin queue-pipeline scoped entry points" in text
+    assert "standalone console scripts remain legacy/manual compatibility paths" not in text
+    assert "still invokes the legacy planner entry point" not in text
+    assert "still invokes the legacy implementer entry" not in text
+
+
+def test_agents_map_describes_thin_queue_wrappers() -> None:
+    """The root agent map must not carry stale cutover-era wrapper language."""
+    text = AGENTS_PATH.read_text(encoding="utf-8")
+
+    assert "thin queue-pipeline scoped entry points" in text
+    assert "rollback or out-of-band entry points" not in text
+    assert "during the #1818 cutover" not in text
 
 
 def test_automation_loop_architecture_has_interrupt_semantics_and_exit_codes() -> None:

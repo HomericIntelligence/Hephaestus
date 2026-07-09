@@ -487,6 +487,17 @@ class TestParser:
                 mock_resolve.assert_not_called()
                 assert mock_cls.call_args[1]["agent"] == "claude"
 
+    def test_main_configures_cli_logging(self) -> None:
+        with mock.patch("hephaestus.automation.audit_reviewer.configure_cli_logging") as configure:
+            with mock.patch("hephaestus.automation.audit_reviewer.AuditReviewer") as mock_cls:
+                mock_instance = mock.Mock()
+                mock_instance.run.return_value = (0, [])
+                mock_cls.return_value = mock_instance
+
+                main(["--dry-run", "--verbose"])
+
+        configure.assert_called_once_with(verbose=True)
+
     def test_json_flag_emits_envelope_on_exit(self) -> None:
         with mock.patch("hephaestus.automation.audit_reviewer.AuditReviewer") as mock_cls:
             mock_instance = mock.Mock()

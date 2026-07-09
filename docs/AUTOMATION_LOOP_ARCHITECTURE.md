@@ -428,8 +428,9 @@ semantics.
   enqueued, so a scoped run cannot reconstruct every open issue in the repo.
 - `--org` expands to non-fork, non-archived repository seeds.
 
-The standalone console scripts remain legacy/manual compatibility paths at the
-issue #1818 cutover. Cleanup issues #1820-#1822 rewire or delete those wrappers.
+The standalone console scripts are thin queue-pipeline scoped entry points.
+They preserve the historical CLI surfaces while building a `PipelineConfig`
+limited to the matching stage slice.
 
 ## Interrupt semantics and exit codes
 
@@ -471,28 +472,33 @@ queue pipeline.
 
 Dry-run mode logs GitHub mutations and job submissions without executing them;
 `_submit` asserts that no worker job is submitted in dry-run. This makes
-`hephaestus-automation-loop --pipeline --dry-run --loops 1 -v` the operator
-check for seed classification and route reconstruction.
+`hephaestus-automation-loop --dry-run --loops 1 -v` the operator check
+for seed classification and route reconstruction.
 
 ## CLI scopes and rollout controls
 
-`hephaestus-automation-loop` runs the queue pipeline directly. `--pipeline`
-remains accepted as an affirmative compatibility flag for pinned scripts and
-evidence commands; there is no `--legacy-loop` rollback path, and
+`hephaestus-automation-loop` runs the queue pipeline directly; there is no
+`--pipeline` compatibility flag, there is no `--legacy-loop` rollback path, and
 `HEPH_PIPELINE` no longer selects a subprocess-per-phase implementation.
 
 The default pipeline's scopes are the `hephaestus-automation-loop` selectors
-listed above. Standalone scripts are still legacy/manual compatibility paths at
-the #1818 cutover:
+listed above. Standalone scripts are thin queue-pipeline scoped entry points:
 
-- `hephaestus-plan-issues` still invokes the legacy planner entry point.
-- `hephaestus-implement-issues` still invokes the legacy implementer entry
-  point.
-- `hephaestus-merge-prs` still invokes the legacy merge-driving entry point.
+- `hephaestus-plan-issues` preserves the historical planner CLI and dispatches
+  the planning/plan_review stage slice.
+- `hephaestus-implement-issues` preserves the historical implementer CLI and
+  dispatches the implementation/pr_review stage slice after the plan-go gate.
+- `hephaestus-review-prs` preserves the historical reviewer CLI and dispatches
+  the pr_review stage slice.
+- `hephaestus-drive-prs-green` preserves the historical drive-green CLI and
+  dispatches the ci/merge_wait stage slice.
+- `hephaestus-merge-prs` remains a manual merge-driving command outside the
+  queue coordinator.
 
-The target cleanup wave is to rewire or delete those wrappers so their behavior
-is represented by the pipeline's planning/plan_review, implementation/pr_review,
-and ci/merge_wait slices.
+`--run-pre-pr-tests` is an opt-in queue-runner flag that enables the
+implementation-stage pre-PR unit-test gate before commit and PR creation. The
+stage executes `PipelineConfig.pre_pr_test_argv` as an argv vector; CLI users get
+the repository default test command through the boolean flag.
 
 ## Glossary
 
