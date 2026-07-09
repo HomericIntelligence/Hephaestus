@@ -71,59 +71,42 @@ def _run_conflict_agent(agent: str, prompt: str, work: Path, pr_number: int) -> 
     return True
 
 
-def resolve_conflict_with_agent(
+def _start_conflict_rebase(
     pr: PRInfo,
     org: str,
     repo_clone: Path,
-    dry_run: bool = False,
-    agent: str = "claude",
-    *,
-    symbols: Symbols = UNICODE_SYMBOLS,
-) -> bool:
-    """Spawn the selected agent to semantically resolve merge conflicts, then re-sign."""
-    branch = pr.head_ref
-    base = pr.base_ref
-    work = repo_clone.parent / f"{pr.repo}-{pr.number}-conflict"
+    work: Path,
+) -> tuple[Path, list[str]]:
+    """Prepare the conflict worktree and return unresolved conflict files."""
+    repo_clone = ensure_repo_clone(pr.repo, org, repo_clone.parent, dry_run=False)
+    add_pr_worktree(repo_clone, work, pr.head_ref, pr.base_ref, dry_run=False)
+    run_git(
+        ["rebase", f"origin/{pr.base_ref}"],
+        cwd=work,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=NETWORK_TIMEOUT,
+    )
+    return repo_clone, git_unmerged_files(work)
 
-    try:
-        repo_clone = ensure_repo_clone(pr.repo, org, repo_clone.parent, dry_run=False)
-        add_pr_worktree(repo_clone, work, branch, base, dry_run=False)
 
-        run_git(
-            ["rebase", f"origin/{base}"],
-            cwd=work,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=NETWORK_TIMEOUT,
-        )
-
-        conflict_files = git_unmerged_files(work)
-
-        if not conflict_files:
-            _git(["rebase", "--continue"], cwd=work, dry_run=False, check=False)
-        else:
-            pr.conflict_files = conflict_files
-            logger.info("  Conflicted files: %s", ", ".join(conflict_files))
-
-            if dry_run:
-                logger.info(
-                    "  [dry-run] Would spawn agent to resolve conflicts in %s",
-                    conflict_files,
-                )
-                _git(["rebase", "--abort"], cwd=work, dry_run=False, check=False)
-                return False
-
-            conflict_list = "\n".join(f"- {f}" for f in conflict_files)
-            commit_count = str(git_rev_list_count(work, f"origin/{base}..HEAD"))
-            resign_email = get_resign_email()
-            resign_exec = get_resign_exec()
-
-            prompt = f"""You are resolving merge conflicts in a git rebase.
+def _build_conflict_prompt(
+    pr: PRInfo,
+    org: str,
+    work: Path,
+    conflict_files: list[str],
+) -> str:
+    """Build the prompt sent to the conflict-resolution agent."""
+    conflict_list = "\n".join(f"- {path}" for path in conflict_files)
+    commit_count = git_rev_list_count(work, f"origin/{pr.base_ref}..HEAD")
+    resign_email = get_resign_email()
+    resign_exec = get_resign_exec()
+    return f"""You are resolving merge conflicts in a git rebase.
 
 Repository: {org}/{pr.repo}
 PR: #{pr.number} — "{pr.title}"
-Branch `{branch}` is being rebased onto `origin/{base}`.
+Branch `{pr.head_ref}` is being rebased onto `origin/{pr.base_ref}`.
 Working directory: {work}
 
 Conflicted files:
@@ -140,7 +123,7 @@ After ALL conflicts are resolved:
    (repeat if more conflicts appear)
 2. Re-sign all commits:
    git rebase HEAD~{commit_count} --exec '{resign_exec}'
-3. Push: git push --force-with-lease origin {branch}
+3. Push: git push --force-with-lease origin {pr.head_ref}
 
 Rules:
 - Never use `git rebase --skip` or discard either side without understanding it
@@ -148,16 +131,53 @@ Rules:
 - For generated/lock files, prefer the incoming (theirs) side
 - All commits must be GPG-signed (-S flag)
 """
-            logger.info(
-                "  Spawning %s agent to resolve %d conflict(s)...",
-                agent,
-                len(conflict_files),
-            )
-            if not _run_conflict_agent(agent, prompt, work, pr.number):
-                return False
+
+
+def _resolve_conflict_files(
+    pr: PRInfo,
+    org: str,
+    work: Path,
+    conflict_files: list[str],
+    dry_run: bool,
+    agent: str,
+) -> bool:
+    """Resolve a non-empty conflict file set through the selected agent."""
+    pr.conflict_files = conflict_files
+    logger.info("  Conflicted files: %s", ", ".join(conflict_files))
+
+    if dry_run:
+        logger.info("  [dry-run] Would spawn agent to resolve conflicts in %s", conflict_files)
+        _git(["rebase", "--abort"], cwd=work, dry_run=False, check=False)
+        return False
+
+    prompt = _build_conflict_prompt(pr, org, work, conflict_files)
+    logger.info("  Spawning %s agent to resolve %d conflict(s)...", agent, len(conflict_files))
+    return _run_conflict_agent(agent, prompt, work, pr.number)
+
+
+def resolve_conflict_with_agent(
+    pr: PRInfo,
+    org: str,
+    repo_clone: Path,
+    dry_run: bool = False,
+    agent: str = "claude",
+    *,
+    symbols: Symbols = UNICODE_SYMBOLS,
+) -> bool:
+    """Spawn the selected agent to semantically resolve merge conflicts, then re-sign."""
+    work = repo_clone.parent / f"{pr.repo}-{pr.number}-conflict"
+
+    try:
+        repo_clone, conflict_files = _start_conflict_rebase(pr, org, repo_clone, work)
+        if not conflict_files:
+            _git(["rebase", "--continue"], cwd=work, dry_run=False, check=False)
+        elif not _resolve_conflict_files(pr, org, work, conflict_files, dry_run, agent):
+            return False
 
         try:
-            remote_has_branch = git_ls_remote_contains(work, "origin", branch, raise_on_error=True)
+            remote_has_branch = git_ls_remote_contains(
+                work, "origin", pr.head_ref, raise_on_error=True
+            )
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
             logger.warning("  Could not verify pushed branch for PR #%d: %s", pr.number, e)
             return False
