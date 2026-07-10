@@ -237,7 +237,7 @@ class StageGitHub(Protocol):
         """
         pass
 
-    def upsert_pr_comment(self, pr_number: int, marker_prefix: str, body: str) -> None:
+    def upsert_pr_comment(self, pr_number: int, marker_prefix: str, body: str) -> bool:
         """Durably create-or-update a marker-keyed PR conversation comment.
 
         PRs share the issue comment channel, so the coordinator maps this onto

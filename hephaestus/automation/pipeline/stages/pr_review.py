@@ -908,7 +908,9 @@ class PrReviewStage(Stage):
             f"Artifactless reviewer attempt: {retry_attempt}/{REVIEW_ERROR_RETRY_CAP}."
         )
         try:
-            ctx.github.upsert_pr_comment(pr_number, _ZERO_THREAD_NOGO_MARKER, body)
+            artifact_written = ctx.github.upsert_pr_comment(
+                pr_number, _ZERO_THREAD_NOGO_MARKER, body
+            )
         except Exception as error:
             logger.warning(
                 "pr_review:%s: failed to upsert zero-thread NOGO artifact (%s)",
@@ -916,7 +918,7 @@ class PrReviewStage(Stage):
                 type(error).__name__,
             )
             return False
-        return True
+        return artifact_written
 
     def _handle_address_error(self, item: WorkItem) -> StageOutcome | None:
         """Fail back hard address/push errors with explicit retry cleanup."""

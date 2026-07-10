@@ -245,9 +245,10 @@ class FakeStageGitHub(FakeGitHub):
         """
         self.gh_issue_comment(pr_number, body)
 
-    def upsert_pr_comment(self, pr_number: int, marker_prefix: str, body: str) -> None:
+    def upsert_pr_comment(self, pr_number: int, marker_prefix: str, body: str) -> bool:
         """Mirror the coordinator PR-comment upsert (delegates to issue comments)."""
         self.gh_issue_upsert_comment(pr_number, marker_prefix, body)
+        return True
 
     def arm_auto_merge(self, pr_number: int) -> None:
         """Mirror pr_manager.enable_auto_merge_after_implementation_go."""

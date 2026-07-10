@@ -1178,6 +1178,40 @@ class TestFullWalks:
         assert "<private reviewer detail>" not in zero_thread_comments[0]
         assert not any(entry[0] == "mark_pr_implementation_no_go" for entry in github.mutation_log)
 
+    @pytest.mark.parametrize(
+        ("by_severity", "posted_thread_ids"),
+        [
+            pytest.param((0, 0, 1), [], id="human-thread"),
+            pytest.param((0, 0, 0), ["thread-existing"], id="posted-thread"),
+        ],
+    )
+    def test_zero_thread_nogo_predicate_exclusions_count_real_round(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        by_severity: tuple[int, int, int],
+        posted_thread_ids: list[str],
+    ) -> None:
+        """Human or already-posted threads follow the ordinary NOGO path."""
+        events: list[Any] = []
+        github = FakeStageGitHub(by_severity=[by_severity])
+        ctx = make_ctx(github=github, event_fn=events.append)
+        item = make_work_item(issue=28, pr=1001, state="EVAL")
+        item.payload["review_verdict"] = _verdict("NOGO")
+        item.payload["posted_thread_ids"] = posted_thread_ids
+
+        outcome = PrReviewStage().step(item, ctx)
+
+        assert isinstance(outcome, Continue)
+        assert outcome.next_state == "REVIEW_WAIT"
+        assert item.attempts["pr_review_iter"] == 1
+        assert events == []
+        assert not any(
+            body.startswith("<!-- hephaestus-pr-review-zero-thread-nogo -->")
+            for body in github.comments.get(1001, [])
+        )
+        assert any(entry[0] == "mark_pr_implementation_no_go" for entry in github.mutation_log)
+
     def test_zero_thread_nogo_cap_fails_back_without_rounds_or_skip(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -1214,7 +1248,7 @@ class TestFullWalks:
         sensitive_details = "private provider diagnostics"
 
         class CommentFailsGitHub(FakeStageGitHub):
-            def upsert_pr_comment(self, pr_number: int, marker_prefix: str, body: str) -> None:
+            def upsert_pr_comment(self, pr_number: int, marker_prefix: str, body: str) -> bool:
                 raise RuntimeError(sensitive_details)
 
         events: list[Any] = []
@@ -1232,6 +1266,29 @@ class TestFullWalks:
         assert events[0].artifact_written is False
         assert sensitive_details not in str(logger.warning.call_args)
 
+    def test_zero_thread_nogo_dry_run_reports_artifact_not_written(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A dry-run no-op must not be recorded as a durable artifact write."""
+
+        class DryRunGitHub(FakeStageGitHub):
+            def upsert_pr_comment(self, pr_number: int, marker_prefix: str, body: str) -> bool:
+                return False
+
+        events: list[Any] = []
+        ctx = make_ctx(
+            dry_run=True,
+            github=DryRunGitHub(unresolved=[(0, 0)], by_severity=[(0, 0, 0)]),
+            event_fn=events.append,
+        )
+        item = make_work_item(issue=29, pr=1001, state="EVAL")
+        item.payload["review_verdict"] = _verdict("NOGO")
+
+        outcome = PrReviewStage().step(item, ctx)
+
+        assert isinstance(outcome, Continue)
+        assert events[0].artifact_written is False
+
     def test_zero_thread_summary_is_escaped_and_bounded(self) -> None:
         """Only a short escaped structured summary enters the PR artifact."""
         raw = f"```json\n{json.dumps({'summary': '<secret> ' + 'x' * 300})}\n```"
@@ -1240,6 +1297,11 @@ class TestFullWalks:
         assert len(summary) == 200
         assert summary.startswith("&lt;secret&gt;")
         assert summary.endswith("...")
+        malformed = PrReviewStage._structured_review_summary(
+            '```json\n{"summary": raw-review-secret\n```'
+        )
+        assert malformed == "No structured reviewer summary was provided."
+        assert "raw-review-secret" not in malformed
 
     def test_reviewer_error_walk_burns_nothing(self, make_ctx: Any, make_work_item: Any) -> None:
         """A failed review job walks straight to EVAL's ERROR path: RETRY.
