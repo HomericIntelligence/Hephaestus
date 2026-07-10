@@ -30,7 +30,11 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Sync all PRs across a configurable GitHub organization's fleet",
         epilog=None,
     )
-    parser.add_argument("--dry-run", action="store_true", help="Print actions without executing")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print actions without executing GitHub, Git, or agent mutations",
+    )
     parser.add_argument(
         "--org",
         metavar="ORG",
