@@ -55,6 +55,7 @@ def test_runbook_audits_rulesets_and_preserves_bindings() -> None:
         "app_id",
         "integration_id",
         "($status_rules | length) > 0",
+        ".parameters.required_status_checks | length) > 0",
         'has("context") and has("integration_id")',
         "cmp -s",
     )

@@ -130,6 +130,7 @@ jq -e --argjson expected "$expected" '
       $status_rules[];
       .parameters.strict_required_status_checks_policy == true
       and (.parameters.required_status_checks | type) == "array"
+      and (.parameters.required_status_checks | length) > 0
       and all(
         .parameters.required_status_checks[];
         has("context") and has("integration_id")
