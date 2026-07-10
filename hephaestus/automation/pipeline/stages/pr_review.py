@@ -377,8 +377,7 @@ class PrReviewStage(Stage):
         """
         if item.pr is not None:
             try:
-                if not ctx.dry_run:
-                    ctx.github.defer_auto_merge(item.pr)
+                ctx.github.defer_auto_merge(item.pr)
             except Exception as exc:
                 logger.error(
                     "pr_review:%s: failed to verify auto-merge disabled for PR #%d: %s",

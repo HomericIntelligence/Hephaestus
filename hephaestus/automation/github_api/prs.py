@@ -9,6 +9,7 @@ import subprocess
 from typing import Any, cast
 
 import hephaestus.automation.github_api as _api
+from hephaestus.github.auto_merge import defer_auto_merge
 from hephaestus.utils.helpers import strip_null_bytes
 
 _ACCEPTABLE_SIG_STATUSES = frozenset({"G", "U"})
@@ -209,6 +210,10 @@ def gh_pr_create(
     existing_open_pr = _api._find_open_pr_for_head(branch)
     if existing_open_pr is not None:
         _api.logger.info("Reusing existing open PR #%s on head %s", existing_open_pr, branch)
+        if not defer_auto_merge(existing_open_pr, lambda args: _api._gh_call(args, check=False)):
+            raise RuntimeError(
+                f"could not verify auto-merge disabled for existing PR #{existing_open_pr}"
+            )
         return existing_open_pr
 
     try:

@@ -719,7 +719,7 @@ class TestRepoScopedAutoMerge:
                     "view",
                     "7",
                     "--json",
-                    "autoMergeRequest,state",
+                    "state,autoMergeRequest",
                     "--repo",
                     "org/repo-a",
                 ],
@@ -735,7 +735,7 @@ class TestRepoScopedAutoMerge:
                     "view",
                     "7",
                     "--json",
-                    "autoMergeRequest,state",
+                    "state,autoMergeRequest",
                     "--repo",
                     "org/repo-a",
                 ],
@@ -756,7 +756,7 @@ class TestRepoScopedAutoMerge:
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
 
-        with pytest.raises(RuntimeError, match="still enabled"):
+        with pytest.raises(RuntimeError, match="could not verify auto-merge disabled"):
             pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).defer_auto_merge(7)
 
     def test_defer_auto_merge_rejects_unreadable_pr_state(
@@ -770,7 +770,20 @@ class TestRepoScopedAutoMerge:
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
 
-        with pytest.raises(RuntimeError, match="could not read auto-merge state"):
+        with pytest.raises(RuntimeError, match="could not verify auto-merge disabled"):
+            pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).defer_auto_merge(7)
+
+    def test_defer_auto_merge_rejects_an_incomplete_open_pr_state(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The queue adapter requires the arm field before treating OPEN as safe."""
+        monkeypatch.setattr(
+            pg,
+            "gh_call",
+            lambda _argv, **_kwargs: SimpleNamespace(stdout=json.dumps({"state": "OPEN"})),
+        )
+
+        with pytest.raises(RuntimeError, match="could not verify auto-merge disabled"):
             pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).defer_auto_merge(7)
 
     def test_arm_auto_merge_rejects_direct_arming(

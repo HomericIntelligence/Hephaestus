@@ -362,6 +362,28 @@ def test_review_phase_apply_verdict_go_defers_auto_merge_before_labeling(tmp_pat
     mark_go.assert_called_once_with(12)
 
 
+def test_review_phase_apply_verdict_marks_no_go_when_auto_merge_deferral_fails(
+    tmp_path: Path,
+) -> None:
+    """The legacy review path cannot apply GO after an unverified read-back."""
+    phase = ReviewPhase(_make_ctx(tmp_path))
+    with (
+        mock.patch(
+            "hephaestus.automation._review_phase.ensure_pr_auto_merge_deferred",
+            side_effect=RuntimeError("PR remains armed"),
+        ),
+        mock.patch("hephaestus.automation._review_phase.mark_pr_implementation_go") as mark_go,
+        mock.patch(
+            "hephaestus.automation._review_phase.mark_pr_implementation_no_go"
+        ) as mark_no_go,
+    ):
+        phase._apply_impl_review_verdict(
+            issue_number=7, pr_number=12, last_verdict="GO", slot_id=None, thread_id=None
+        )
+    mark_go.assert_not_called()
+    mark_no_go.assert_called_once_with(12)
+
+
 def test_review_phase_apply_verdict_error_applies_no_label(tmp_path: Path) -> None:
     """An ERROR verdict applies neither GO nor NO-GO labels."""
     phase = ReviewPhase(_make_ctx(tmp_path))

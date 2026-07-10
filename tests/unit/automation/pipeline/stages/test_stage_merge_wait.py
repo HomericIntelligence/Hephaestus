@@ -118,6 +118,23 @@ class TestMergeWaitContainment:
             Disposition.FINISH_FAIL, "auto_merge_disable_failed"
         )
 
+    def test_restored_open_poll_fails_when_auto_merge_deferral_cannot_be_verified(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A persisted POLL state also fails closed on an unsuccessful read-back."""
+
+        class DeferFailsGitHub(FakeStageGitHub):
+            def defer_auto_merge(self, pr_number: int) -> None:
+                raise RuntimeError(f"PR #{pr_number} remains armed")
+
+        stage = MergeWaitStage()
+        ctx = make_ctx(github=DeferFailsGitHub(pr_state=OPEN_STATE))
+        item = _poll_item(make_work_item)
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "auto_merge_disable_failed"
+        )
+
     def test_dry_run_stops_without_mutating(self, make_ctx: Any, make_work_item: Any) -> None:
         stage = MergeWaitStage()
         github = FakeStageGitHub(pr_state=OPEN_STATE)
@@ -127,7 +144,7 @@ class TestMergeWaitContainment:
         assert stage.step(item, ctx) == StageOutcome(
             Disposition.FINISH_FAIL, "strict_gate_unavailable"
         )
-        assert github.mutation_log == []
+        assert github.mutation_log == [("defer_auto_merge", (601,))]
 
     def test_arm_without_pr_finishes_no_pr(self, make_ctx: Any, make_work_item: Any) -> None:
         stage = MergeWaitStage()

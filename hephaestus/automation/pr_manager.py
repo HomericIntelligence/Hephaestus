@@ -22,6 +22,7 @@ from hephaestus.agents.runtime import (
     run_agent_text,
     uses_direct_agent_runner,
 )
+from hephaestus.github.auto_merge import defer_auto_merge
 
 from .agent_config import DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT
 from .ci_check_inspector import FAILING_CHECK_CONCLUSIONS
@@ -587,39 +588,10 @@ def _branch_has_commits_vs_base(branch_name: str, base: str, worktree_path: Path
     return True
 
 
-def _pr_auto_merge_state(pr_number: int) -> tuple[str, bool]:
-    """Return a verified ``(state, auto_merge_enabled)`` tuple for a PR."""
-    result = _gh_call(
-        ["pr", "view", str(pr_number), "--json", "state,autoMergeRequest"], check=False
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"could not read auto-merge state for PR #{pr_number}: {result.stderr}")
-    data = json.loads(result.stdout or "{}")
-    if not isinstance(data, dict):
-        raise RuntimeError(f"could not parse auto-merge state for PR #{pr_number}")
-    state = str(data.get("state") or "").upper()
-    if state not in {"OPEN", "MERGED", "CLOSED"}:
-        raise RuntimeError(f"unexpected state {state!r} for PR #{pr_number}")
-    return state, data.get("autoMergeRequest") is not None
-
-
 def ensure_pr_auto_merge_deferred(pr_number: int) -> None:
     """Disable auto-merge and verify it remains disabled while the PR is open."""
-    state, armed = _pr_auto_merge_state(pr_number)
-    if state in {"MERGED", "CLOSED"}:
-        return
-    if not armed:
-        return
-    result = _gh_call(["pr", "merge", str(pr_number), "--disable-auto"], check=False)
-    if result.returncode != 0:
-        raise RuntimeError(f"could not disable auto-merge for PR #{pr_number}: {result.stderr}")
-    verified_state, still_armed = _pr_auto_merge_state(pr_number)
-    if verified_state == "OPEN" and still_armed:
-        raise RuntimeError(f"auto-merge is still enabled for PR #{pr_number}")
-    logger.warning(
-        "Disabled auto-merge for PR #%s pending the strict-review gate",
-        pr_number,
-    )
+    if not defer_auto_merge(pr_number, lambda args: _gh_call(args, check=False)):
+        raise RuntimeError(f"could not verify auto-merge disabled for PR #{pr_number}")
 
 
 def mark_pr_implementation_go(pr_number: int) -> None:
@@ -965,16 +937,18 @@ def ensure_pr_created(
 
     # Check if PR exists, if not create it
     _update_slot(f"{issue_ref(issue_number)}: Creating PR")
-    pr_number = None
+    pr_number: int | None = None
     try:
         result = _gh_call(["pr", "list", "--head", branch_name, "--json", "number", "--limit", "1"])
         pr_data = json.loads(result.stdout)
         if pr_data and len(pr_data) > 0:
             pr_number = cast(int, pr_data[0]["number"])
             logger.info("PR #%s already exists", pr_number)
-            return pr_number
     except Exception as e:  # broad catch: gh CLI + JSON parsing; fallback is to create PR
         logger.debug("Could not find existing PR: %s", e)
+    if pr_number is not None:
+        ensure_pr_auto_merge_deferred(pr_number)
+        return pr_number
 
     # PR doesn't exist, create it
     logger.warning("No PR found for branch %s, creating one...", branch_name)

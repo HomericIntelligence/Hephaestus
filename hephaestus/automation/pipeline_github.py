@@ -67,6 +67,7 @@ from hephaestus.automation.state_labels import (
     is_plan_go,
 )
 from hephaestus.constants import read_timeout_env
+from hephaestus.github.auto_merge import defer_auto_merge
 from hephaestus.github.client import gh_call
 
 logger = logging.getLogger(__name__)
@@ -1008,38 +1009,13 @@ class PipelineGitHub:
             return
         pr_manager.mark_pr_implementation_go(pr_number)
 
-    def _read_auto_merge_state(self, pr_number: int) -> tuple[str, bool]:
-        """Read a PR's terminal/open state and auto-merge status without fail-open defaults."""
-        result = self._gh(
-            ["pr", "view", str(pr_number), "--json", "autoMergeRequest,state"],
-            check=False,
-        )
-        if getattr(result, "returncode", 0) != 0:
-            raise RuntimeError(f"could not read auto-merge state for PR #{pr_number}")
-        try:
-            data = json.loads(result.stdout or "{}")
-        except json.JSONDecodeError as e:
-            raise RuntimeError(f"invalid auto-merge state for PR #{pr_number}") from e
-        if not isinstance(data, dict):
-            raise RuntimeError(f"invalid auto-merge state for PR #{pr_number}")
-        state = str(data.get("state") or "").upper()
-        if state not in {"OPEN", "CLOSED", "MERGED"}:
-            raise RuntimeError(f"unknown PR state while deferring auto-merge for PR #{pr_number}")
-        return state, data.get("autoMergeRequest") is not None
-
     def defer_auto_merge(self, pr_number: int) -> None:
         """Disable auto-merge and verify it remains disabled while the PR is open."""
         if self._skip(f"defer auto-merge on PR #{pr_number}"):
             return
         if self._repo_slug is not None:
-            state, armed = self._read_auto_merge_state(pr_number)
-            if state != "OPEN":
-                return
-            if armed:
-                self._gh(["pr", "merge", str(pr_number), "--disable-auto"], check=False)
-            verified_state, verified_armed = self._read_auto_merge_state(pr_number)
-            if verified_state == "OPEN" and verified_armed:
-                raise RuntimeError(f"auto-merge is still enabled for open PR #{pr_number}")
+            if not defer_auto_merge(pr_number, lambda args: self._gh(args, check=False)):
+                raise RuntimeError(f"could not verify auto-merge disabled for PR #{pr_number}")
             return
         pr_manager.ensure_pr_auto_merge_deferred(pr_number)
 

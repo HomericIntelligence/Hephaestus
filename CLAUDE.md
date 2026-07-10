@@ -329,14 +329,15 @@ releases from signed `vX.Y.Z` tags; there are no release branches.
 1. The PR body MUST contain the literal line `Closes #<issue-number>` (capital
    `C`, no colon, on its own line). `Fixes`, `Resolves`, `closes`, and
    `Closes:` are NOT accepted.
-2. Auto-merge MUST remain disabled while #2054's fail-closed policy is active.
-   Bootstrap PRs require an unconditional independent strict-review GO and a
-   manual squash merge; #2055 will restore queue-owned arming after a
-   head-bound strict-review proof.
-3. Every commit MUST be cryptographically signed (`git commit -S`).
+2. Every commit MUST be cryptographically signed (`git commit -S`) and carry a
+   DCO `Signed-off-by` trailer.
 
-CI blocks PRs that fail any of these checks. No exceptions, including
-Dependabot and dependency-bump PRs.
+`pr-policy` blocks PRs that fail those checks. During #2054's fail-closed
+bootstrap, auto-merge must also remain disabled: pipeline code verifies that
+state, `auto-merge-policy` reports armed PRs advisory-only, and the PR reviewer
+requires an unconditional independent strict-review GO before a maintainer
+manually squash-merges. #2055 will restore queue-owned arming after a
+head-bound strict-review proof.
 
 ```bash
 # 1. Create feature branch

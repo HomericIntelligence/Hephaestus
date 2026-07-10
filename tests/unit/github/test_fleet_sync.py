@@ -1440,6 +1440,18 @@ class TestMergePr:
 
         gh.assert_called_once()
 
+    def test_fleet_deferral_rejects_an_incomplete_open_pr_state(self) -> None:
+        """Fleet sync cannot interpret an omitted arm field as an unarmed PR."""
+        pr = _pr(42, PRStatus.READY)
+
+        with patch.object(
+            fleet_pr_api,
+            "_gh",
+            return_value=MagicMock(returncode=0, stdout=json.dumps({"state": "OPEN"})),
+        ) as gh:
+            assert fleet_pr_api._defer_auto_merge(pr, "HomericIntelligence") is False
+        gh.assert_called_once()
+
 
 class TestListPrs:
     """Regression tests for #1027: statusCheckRollup must not be bulk-fetched.

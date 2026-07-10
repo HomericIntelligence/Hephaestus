@@ -68,6 +68,35 @@ class TestPrReviewStageOnEnter:
         assert stage.on_enter(item, ctx) is None
         assert github.mutation_log == [("defer_auto_merge", (1001,))]
 
+    def test_on_enter_delegates_deferral_during_dry_run(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Dry-run leaves no stage-side mutation branch around the accessor."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github, dry_run=True)
+        item = make_work_item(issue=1, pr=1001, state="ENTER")
+
+        assert stage.on_enter(item, ctx) is None
+        assert github.mutation_log == [("defer_auto_merge", (1001,))]
+
+    def test_on_enter_stops_when_auto_merge_deferral_cannot_be_verified(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A direct PR-review ingress fails closed on a failed read-back."""
+
+        class DeferFailsGitHub(FakeStageGitHub):
+            def defer_auto_merge(self, pr_number: int) -> None:
+                raise RuntimeError(f"PR #{pr_number} remains armed")
+
+        stage = PrReviewStage()
+        ctx = make_ctx(github=DeferFailsGitHub())
+        item = make_work_item(issue=1, pr=1001, state="ENTER")
+
+        assert stage.on_enter(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "auto_merge_disable_failed"
+        )
+
     def test_on_enter_resets_round_for_new_implementation_pass(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -669,7 +698,8 @@ class TestEvalVerdicts:
 
         This is the regression case from #1856: previously a GO with minor
         automation threads would deadlock to skip because `unresolved == 0`
-        never held. Now severity filtering allows the GO to arm.
+        never held. Now severity filtering allows the internal GO to terminate
+        at the strict-review gate.
         """
         stage = PrReviewStage()
         github = FakeStageGitHub(by_severity=[(0, 2, 0)])  # 0 blocking, 2 minor, 0 human
@@ -1109,7 +1139,7 @@ class TestFullWalks:
         # POST calls count_unresolved_threads once per round; EVAL calls the
         # new by_severity method once per round. Two rounds => one entry each
         # per round. Round 1 has 2 open blocking threads (NOGO address leg);
-        # round 2 is clean (GO: skips difficulty/address, arms).
+        # round 2 is clean (GO: skips difficulty/address, then terminalizes).
         github = FakeStageGitHub(
             unresolved=[(2, 0), (0, 0)],
             by_severity=[(2, 0, 0), (0, 0, 0)],

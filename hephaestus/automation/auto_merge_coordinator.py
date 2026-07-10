@@ -10,6 +10,7 @@ from collections.abc import Callable
 from typing import Any, Literal, cast
 
 from hephaestus.constants import read_timeout_env
+from hephaestus.github.auto_merge import defer_auto_merge
 
 from .git_utils import issue_ref, pr_ref
 from .models import CIDriverOptions, WorkerResult
@@ -24,61 +25,6 @@ TerminalOutcome = Literal["MERGED", "CLOSED", "FAILING", "DIRTY", "BLOCKED", "TI
 def without_auto_merge_policy(check_names: list[str]) -> list[str]:
     """Return failing checks that can plausibly be fixed by a CI-fix agent."""
     return [name for name in check_names if name != AUTO_MERGE_POLICY_CHECK]
-
-
-def _defer_auto_merge(
-    gh_call: Callable[..., subprocess.CompletedProcess[str]],
-    gh_pr_state: Callable[[int], dict[str, Any] | None],
-    pr_number: int,
-) -> bool:
-    """Disable an open PR's auto-merge request and verify the read-back.
-
-    Compatibility callers use a different GitHub adapter from the queue
-    pipeline, so they must perform the same fail-closed state/read-back check
-    locally until #2055 centralizes strict-gated arming.
-    """
-    try:
-        state = gh_pr_state(pr_number)
-    except Exception as exc:
-        logger.error("Could not read auto-merge state for PR #%s: %s", pr_number, exc)
-        return False
-    if not isinstance(state, dict):
-        logger.error("Could not read auto-merge state for PR #%s", pr_number)
-        return False
-    pr_state = str(state.get("state") or "").upper()
-    if pr_state in {"MERGED", "CLOSED"}:
-        return True
-    if pr_state != "OPEN":
-        logger.error(
-            "PR #%s has unexpected state %r while deferring auto-merge", pr_number, pr_state
-        )
-        return False
-    if not state.get("autoMergeRequest"):
-        return True
-    try:
-        result = gh_call(["pr", "merge", str(pr_number), "--disable-auto"], check=False)
-    except (OSError, subprocess.CalledProcessError) as exc:
-        logger.error("Could not disable auto-merge for PR #%s: %s", pr_number, exc)
-        return False
-    if result.returncode != 0:
-        logger.error("Could not disable auto-merge for PR #%s: %s", pr_number, result.stderr)
-        return False
-    try:
-        verified = gh_pr_state(pr_number)
-    except Exception as exc:
-        logger.error("Could not verify auto-merge disablement for PR #%s: %s", pr_number, exc)
-        return False
-    if not isinstance(verified, dict):
-        logger.error("Could not verify auto-merge disablement for PR #%s", pr_number)
-        return False
-    verified_state = str(verified.get("state") or "").upper()
-    if verified_state in {"MERGED", "CLOSED"}:
-        return True
-    if verified_state != "OPEN" or verified.get("autoMergeRequest"):
-        logger.error("Auto-merge remains enabled or unreadable for PR #%s", pr_number)
-        return False
-    logger.warning("Disabled auto-merge for PR #%s pending the strict-review gate", pr_number)
-    return True
 
 
 class AutoMergeCoordinator:
@@ -120,7 +66,7 @@ class AutoMergeCoordinator:
 
     def defer_auto_merge(self, pr_number: int) -> bool:
         """Fail closed by disabling and reading back auto-merge for one PR."""
-        return _defer_auto_merge(self._gh_call, self._gh_pr_state, pr_number)
+        return defer_auto_merge(pr_number, lambda args: self._gh_call(args, check=False))
 
     def arm_all_unarmed_open_prs(self, open_prs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Contain every open PR retained by the legacy final-sweep API.
@@ -130,19 +76,24 @@ class AutoMergeCoordinator:
         Open PRs remain in the result so callers report that manual action is
         still required.
         """
+        contained_prs: list[dict[str, Any]] = []
         disable_failures: list[int] = []
         for pr in open_prs:
             number = pr.get("number")
             if not isinstance(number, int) or number < 0:
+                contained_prs.append(pr)
                 continue
             if not self.defer_auto_merge(number):
                 disable_failures.append(number)
+                contained_prs.append(pr)
+                continue
+            contained_prs.append({**pr, "autoMergeRequest": None})
         if disable_failures:
             logger.error(
                 "Could not verify auto-merge disabled for legacy open PR(s): %s",
                 sorted(disable_failures),
             )
-        return open_prs
+        return contained_prs
 
     def arm_and_wait_for_merge(
         self, issue_number: int, pr_number: int, acquired_slot: int

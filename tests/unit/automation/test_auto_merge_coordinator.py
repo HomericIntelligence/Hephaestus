@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any, cast
@@ -33,26 +34,39 @@ def _coordinator(gh_call: Any, gh_pr_state: Any) -> AutoMergeCoordinator:
 
 def test_legacy_open_pr_sweep_disables_prearmed_auto_merge() -> None:
     """The legacy final sweep must contain an existing arm, not skip it."""
-    states = iter(
+    responses = iter(
         [
-            {"state": "OPEN", "autoMergeRequest": {"enabledAt": "now"}},
-            {"state": "OPEN", "autoMergeRequest": None},
+            SimpleNamespace(
+                returncode=0,
+                stderr="",
+                stdout=json.dumps({"state": "OPEN", "autoMergeRequest": {"enabledAt": "now"}}),
+            ),
+            SimpleNamespace(returncode=0, stderr="", stdout=""),
+            SimpleNamespace(
+                returncode=0,
+                stderr="",
+                stdout=json.dumps({"state": "OPEN", "autoMergeRequest": None}),
+            ),
         ]
     )
     calls: list[list[str]] = []
 
     def gh_call(args: list[str], **_kwargs: object) -> SimpleNamespace:
         calls.append(args)
-        return SimpleNamespace(returncode=0, stderr="")
+        return next(responses)
 
-    coordinator = _coordinator(gh_call, lambda _pr_number: next(states))
+    coordinator = _coordinator(gh_call, lambda _pr_number: {"state": "OPEN"})
 
     remaining = coordinator.arm_all_unarmed_open_prs(
         [{"number": 42, "autoMergeRequest": {"enabledAt": "stale"}}]
     )
 
-    assert remaining == [{"number": 42, "autoMergeRequest": {"enabledAt": "stale"}}]
-    assert calls == [["pr", "merge", "42", "--disable-auto"]]
+    assert remaining == [{"number": 42, "autoMergeRequest": None}]
+    assert calls == [
+        ["pr", "view", "42", "--json", "state,autoMergeRequest"],
+        ["pr", "merge", "42", "--disable-auto"],
+        ["pr", "view", "42", "--json", "state,autoMergeRequest"],
+    ]
 
 
 def test_legacy_drive_stops_after_verified_auto_merge_deferral() -> None:
@@ -85,3 +99,14 @@ def test_legacy_drive_stops_after_verified_auto_merge_deferral() -> None:
     assert deferred == [42]
     assert result.success is False
     assert result.error == "strict_gate_unavailable"
+
+
+def test_legacy_coordinator_rejects_an_incomplete_open_pr_state() -> None:
+    """A compatibility caller cannot treat an omitted arm field as unarmed."""
+
+    def gh_call(_args: list[str], **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(returncode=0, stderr="", stdout=json.dumps({"state": "OPEN"}))
+
+    coordinator = _coordinator(gh_call, lambda _pr_number: {"state": "OPEN"})
+
+    assert coordinator.defer_auto_merge(42) is False

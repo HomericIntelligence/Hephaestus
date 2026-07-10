@@ -340,8 +340,40 @@ class TestEnsurePRCreated:
         with (
             patch.object(pr_manager, "run", run_mock),
             patch.object(pr_manager, "_gh_call", return_value=gh_mock),
+            patch.object(pr_manager, "ensure_pr_auto_merge_deferred") as defer,
         ):
             assert pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt")) == 99
+        defer.assert_called_once_with(99)
+
+    def test_existing_pr_containment_failure_does_not_fall_through_to_creation(self) -> None:
+        """A reused PR with an unverified arm must fail instead of creating a duplicate."""
+        run_mock = MagicMock(
+            side_effect=[
+                _status("abc1234 commit msg"),
+                _status("origin/master"),
+                _status("2"),
+                _status("refs/heads/branch"),
+            ]
+        )
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "_gh_call", return_value=_status('[{"number": 99}]')),
+            patch.object(
+                pr_manager,
+                "ensure_pr_auto_merge_deferred",
+                side_effect=RuntimeError("PR remains armed"),
+            ),
+            patch.object(pr_manager, "create_pr") as create_pr,
+        ):
+            with pytest.raises(RuntimeError, match="PR remains armed"):
+                pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt"))
+        create_pr.assert_not_called()
+
+    def test_auto_merge_deferral_rejects_an_incomplete_open_pr_state(self) -> None:
+        """Legacy review containment requires an explicit autoMergeRequest field."""
+        with patch.object(pr_manager, "_gh_call", return_value=_status('{"state": "OPEN"}')):
+            with pytest.raises(RuntimeError, match="could not verify auto-merge disabled"):
+                pr_manager.ensure_pr_auto_merge_deferred(99)
 
     def test_creates_pr_when_missing(self) -> None:
         run_mock = MagicMock(

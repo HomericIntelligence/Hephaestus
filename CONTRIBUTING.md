@@ -234,16 +234,20 @@ computes the next semver string and prints the `git tag` commands to run.
 
 ## Pull Request Process
 
-The `main` branch is protected. CI's `pr-policy` gate enforces three rules — a PR
-that violates any of them is blocked:
+The `main` branch is protected. CI's `pr-policy` gate blocks a PR that lacks a
+valid issue reference, signed commits, or DCO sign-offs:
 
 1. **Sign every commit**: `git commit -S`. Verify with `git log --show-signature -1`.
 2. **Reference the issue**: the PR body must contain the literal line `Closes #<n>`
    (capital `C`, no colon, on its own line). `Fixes`, `Resolves`, `closes`, and
    `Closes:` are **not** accepted.
-3. **Keep auto-merge disabled**: during #2054's bootstrap, an unconditional
-   independent strict-review GO is required before a maintainer manually runs
-   `gh pr merge --squash`.
+3. **Sign off every commit**: include a DCO `Signed-off-by` trailer, normally
+   with `git commit -s -S`.
+
+During #2054's bootstrap, auto-merge must remain disabled. The pipeline verifies
+that state and the advisory `auto-merge-policy` reports any armed PR, but it is
+not a required check. An unconditional independent strict-review GO is required
+before a maintainer manually runs `gh pr merge --squash`.
 
 Also: ensure tests pass locally (`pixi run test`), keep commits to logical units with
 [conventional commit](https://www.conventionalcommits.org/) messages, and never bypass

@@ -287,6 +287,23 @@ class TestGate:
         assert item.payload["existing_pr"] is True
         assert github.mutation_log == [("defer_auto_merge", (1001,))]
 
+    def test_gate_existing_pr_fails_closed_when_auto_merge_deferral_cannot_be_verified(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Existing-PR adoption stops before worktree preparation on failed containment."""
+
+        class DeferFailsGitHub(FakeStageGitHub):
+            def defer_auto_merge(self, pr_number: int) -> None:
+                raise RuntimeError(f"PR #{pr_number} remains armed")
+
+        stage = ImplementationStage()
+        ctx = make_ctx(github=DeferFailsGitHub(open_pr=1001))
+        item = make_work_item(issue=1, state="GATE")
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "auto_merge_disable_failed"
+        )
+
     def test_adopted_worktree_job_syncs_without_trunk_reset(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

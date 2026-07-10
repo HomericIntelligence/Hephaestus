@@ -6,6 +6,7 @@ import json
 import subprocess
 from typing import Any
 
+from hephaestus.github.auto_merge import defer_auto_merge
 from hephaestus.github.client import gh_call
 from hephaestus.github.fleet_sync.models import PRInfo, PRStatus
 from hephaestus.logging.utils import get_logger
@@ -130,51 +131,10 @@ def list_prs(repo: str, org: str) -> list[PRInfo]:
 
 def _defer_auto_merge(pr: PRInfo, org: str) -> bool:
     """Disable a pre-existing fleet PR arm and verify the read-back."""
-    try:
-        result = _gh(
-            ["pr", "view", str(pr.number), "--json", "state,autoMergeRequest"],
-            repo=pr.repo,
-            org=org,
-            check=False,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr)
-        data = json.loads(result.stdout or "{}")
-        if not isinstance(data, dict):
-            raise RuntimeError("malformed PR state")
-        state = str(data.get("state") or "").upper()
-        if state in {"MERGED", "CLOSED"}:
-            return True
-        if state != "OPEN":
-            raise RuntimeError(f"unexpected state {state!r}")
-        if data.get("autoMergeRequest") is None:
-            return True
-        disabled = _gh(
-            ["pr", "merge", str(pr.number), "--disable-auto"],
-            repo=pr.repo,
-            org=org,
-            check=False,
-        )
-        if disabled.returncode != 0:
-            raise RuntimeError(disabled.stderr)
-        verified = _gh(
-            ["pr", "view", str(pr.number), "--json", "state,autoMergeRequest"],
-            repo=pr.repo,
-            org=org,
-            check=False,
-        )
-        if verified.returncode != 0:
-            raise RuntimeError(verified.stderr)
-        verified_data = json.loads(verified.stdout or "{}")
-        if not isinstance(verified_data, dict):
-            raise RuntimeError("malformed auto-merge read-back")
-        verified_state = str(verified_data.get("state") or "").upper()
-        return verified_state in {"MERGED", "CLOSED"} or (
-            verified_state == "OPEN" and verified_data.get("autoMergeRequest") is None
-        )
-    except (json.JSONDecodeError, RuntimeError, subprocess.CalledProcessError) as exc:
-        logger.error("  Could not verify auto-merge disabled for PR #%d: %s", pr.number, exc)
-        return False
+    return defer_auto_merge(
+        pr.number,
+        lambda args: _gh(args, repo=pr.repo, org=org, check=False),
+    )
 
 
 def merge_pr(pr: PRInfo, org: str, dry_run: bool = False) -> bool:

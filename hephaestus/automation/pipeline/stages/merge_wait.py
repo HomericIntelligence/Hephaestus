@@ -190,8 +190,7 @@ class MergeWaitStage(Stage):
             item.payload.setdefault("merge_wait_started_at", ctx.now())
             return Continue(next_state=POLL)
         try:
-            if not ctx.dry_run:
-                ctx.github.defer_auto_merge(item.pr)
+            ctx.github.defer_auto_merge(item.pr)
         except Exception as e:
             logger.error(
                 "merge_wait: failed to verify auto-merge disabled on PR #%d: %s", item.pr, e
@@ -208,8 +207,7 @@ class MergeWaitStage(Stage):
         pr_state_str = ((gh_state or {}).get("state") or "").upper()
         if pr_state_str not in {"MERGED", "CLOSED"}:
             try:
-                if not ctx.dry_run:
-                    ctx.github.defer_auto_merge(item.pr)
+                ctx.github.defer_auto_merge(item.pr)
             except Exception as exc:
                 logger.error(
                     "merge_wait:%s: failed to verify auto-merge disabled for PR #%d: %s",

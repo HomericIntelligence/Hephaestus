@@ -8,11 +8,11 @@ on:
   pull_request:
     # Default types are [opened, synchronize, reopened], which do NOT fire when
     # auto-merge is toggled or labels are changed after PR creation — so
-    # pr-policy's auto-merge check was stuck with its PR-open verdict until the
+    # auto-merge-policy's check was stuck with its PR-open verdict until the
     # next push (the race that #680 papered over with `needs: lint`).
     # Re-running on auto_merge_enabled / auto_merge_disabled, labeled /
     # unlabeled, and ready_for_review makes that gate converge on the true
-    # state with no timing reliance. See pr-policy below.
+    # state with no timing reliance. See auto-merge-policy below.
     #
     # IMPORTANT: a pull_request trigger applies to the WHOLE workflow, so the
     # label / auto-merge event types would otherwise re-run EVERY job on each

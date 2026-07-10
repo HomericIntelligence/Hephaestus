@@ -1519,7 +1519,10 @@ class TestGhPrCreate:
         """An OPEN PR already on the head is reused, not duplicated (issue #1018)."""
         list_result = Mock()
         list_result.stdout = json.dumps([{"number": 962, "state": "OPEN"}])
-        mock_gh_call.return_value = list_result
+        state_result = Mock()
+        state_result.returncode = 0
+        state_result.stdout = json.dumps({"state": "OPEN", "autoMergeRequest": None})
+        mock_gh_call.side_effect = [list_result, state_result]
 
         pr_number = gh_pr_create(
             branch="768-auto-impl",
@@ -1528,10 +1531,34 @@ class TestGhPrCreate:
         )
 
         assert pr_number == 962
-        # Only the pre-flight `pr list` ran; no `pr create`.
-        assert mock_gh_call.call_count == 1
+        # The pre-flight `pr list` and containment read ran; no `pr create`.
+        assert mock_gh_call.call_count == 2
         for call in mock_gh_call.call_args_list:
             assert "create" not in call.args[0]
+
+    @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_gh_pr_create_disables_auto_merge_before_reusing_existing_pr(
+        self, mock_gh_call: Any, _mock_signed: Any
+    ) -> None:
+        """Reusing a pre-#2054 PR contains any existing auto-merge arm first."""
+        list_result = Mock(stdout=json.dumps([{"number": 962, "state": "OPEN"}]))
+        mock_gh_call.side_effect = [
+            list_result,
+            Mock(
+                returncode=0,
+                stdout=json.dumps({"state": "OPEN", "autoMergeRequest": {"enabledAt": "now"}}),
+            ),
+            Mock(returncode=0, stdout="", stderr=""),
+            Mock(returncode=0, stdout=json.dumps({"state": "OPEN", "autoMergeRequest": None})),
+        ]
+
+        assert gh_pr_create(branch="768-auto-impl", title="Test PR", body=_POLICY_BODY) == 962
+        assert [call.args[0][:3] for call in mock_gh_call.call_args_list[1:]] == [
+            ["pr", "view", "962"],
+            ["pr", "merge", "962"],
+            ["pr", "view", "962"],
+        ]
 
     @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
     @patch("hephaestus.automation.github_api._gh_call")

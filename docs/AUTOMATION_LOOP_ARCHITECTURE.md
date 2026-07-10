@@ -461,8 +461,8 @@ inputs are terminalized at the seed boundary when their PR is already merged or
 closed: merged PRs become `finished(pass)` and closed PRs become
 `finished(fail)`, before branch adoption or label-based routing is attempted.
 Open direct PRs enter the target repo's `pr_review` queue unless the PR already
-carries `state:implementation-go`, in which case they enter `ci`. During
-During #2054 this is not merge readiness: `ci` immediately verifies auto-merge is
+carries `state:implementation-go`, in which case they enter `ci`. During #2054
+this is not merge readiness: `ci` immediately verifies auto-merge is
 disabled and `merge_wait` stops at `strict_gate_unavailable`.
 
 The same terminal-state check is repeated at the CI and implementation stage
