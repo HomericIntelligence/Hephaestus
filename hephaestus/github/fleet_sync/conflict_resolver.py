@@ -291,16 +291,35 @@ def _resolve_conflict_files(
                     return False
                 if not _apply_agent_edits(work, current_files, agent_output):
                     return False
-        except (OSError, ValueError) as exc:
-            logger.warning("  Could not transfer conflict files for PR #%d: %s", pr.number, exc)
+        except (OSError, ValueError) as error:
+            logger.warning(
+                "  Could not transfer conflict files for PR #%d (%s)",
+                pr.number,
+                type(error).__name__,
+            )
             return False
 
         staged = _git(["add", "--", *current_files], cwd=work, dry_run=False, check=False)
         if staged.returncode != 0:
             logger.warning("  Could not stage conflict files for PR #%d", pr.number)
             return False
+        # ``rebase --continue`` creates an intermediate commit. Use a stable
+        # local identity here so a freshly cloned worktree without Git user
+        # config can continue; _resign_and_push rewrites and signs every commit
+        # with the operator's configured identity before publication.
         continued = _git(
-            ["-c", "core.editor=true", "rebase", "--continue"],
+            [
+                "-c",
+                "core.editor=true",
+                "-c",
+                "user.name=Hephaestus",
+                "-c",
+                "user.email=hephaestus@localhost",
+                "-c",
+                "commit.gpgsign=false",
+                "rebase",
+                "--continue",
+            ],
             cwd=work,
             dry_run=False,
             check=False,
@@ -377,13 +396,46 @@ def _apply_agent_edits(work: Path, paths: list[str], response: str) -> bool:
         return False
 
     work_base = work.resolve()
+    destinations: dict[str, Path] = {}
     for relative in paths:
+        if _contains_conflict_markers(edits[relative]):
+            logger.warning("  Conflict agent left unresolved markers in %r", relative)
+            return False
         destination = _safe_workspace_path(work_base, relative)
         if destination is None or not destination.is_file():
             logger.warning("  Conflict edit path is not a regular host file: %r", relative)
             return False
-        destination.write_text(edits[relative], encoding="utf-8")
+        destinations[relative] = destination
+
+    return _write_agent_edits(destinations, edits)
+
+
+def _write_agent_edits(destinations: dict[str, Path], edits: dict[str, str]) -> bool:
+    """Apply validated edits transactionally, restoring originals on failure."""
+    originals = {
+        relative: destination.read_bytes() for relative, destination in destinations.items()
+    }
+    try:
+        for relative, destination in destinations.items():
+            destination.write_text(edits[relative], encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        logger.warning("  Could not apply conflict edits (%s)", type(error).__name__)
+        for relative, destination in destinations.items():
+            try:
+                destination.write_bytes(originals[relative])
+            except OSError as rollback_error:
+                logger.error(
+                    "  Could not roll back conflict edit for %r (%s)",
+                    relative,
+                    type(rollback_error).__name__,
+                )
+        return False
     return True
+
+
+def _contains_conflict_markers(content: str) -> bool:
+    """Return whether text still contains Git's unresolved-conflict markers."""
+    return any(line.startswith(("<<<<<<<", "=======", ">>>>>>>")) for line in content.splitlines())
 
 
 def _safe_workspace_path(base: Path, relative: str) -> Path | None:
@@ -548,8 +600,15 @@ def resolve_conflict_with_agent(
             return True
         return False
 
-    except Exception as e:
-        logger.error("  Conflict resolution failed for PR #%d: %s", pr.number, e)
+    except Exception as error:
+        # Provider and Git exceptions can carry command output or prompt data.
+        # Keep that material out of fleet-sync logs; the boolean result is the
+        # durable failure signal and the exception type is enough to classify it.
+        logger.error(
+            "  Conflict resolution failed for PR #%d (%s)",
+            pr.number,
+            type(error).__name__,
+        )
         with contextlib.suppress(Exception):
             _git(["rebase", "--abort"], cwd=work, dry_run=False, check=False)
         return False

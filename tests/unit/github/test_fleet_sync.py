@@ -573,7 +573,7 @@ class TestTimeoutHandling:
 
         async def query(*, prompt: str, options: object):
             del prompt, options
-            yield SimpleNamespace(text="Authorization: Bearer secret-token")
+            yield SimpleNamespace(text="resolved conflict content")
 
         sdk = SimpleNamespace(ClaudeCodeOptions=options_factory, query=query)
         with (
@@ -582,13 +582,13 @@ class TestTimeoutHandling:
         ):
             assert (
                 fleet_conflicts._run_conflict_agent("claude", "prompt", Path("/repo"), 7)
-                == "Authorization: Bearer secret-token"
+                == "resolved conflict content"
             )
 
         assert captured["options"]["allowed_tools"] == []
         assert captured["options"]["permission_mode"] == "dontAsk"
         logger.debug.assert_called_once_with(
-            "  agent emitted %d output characters", len("Authorization: Bearer secret-token")
+            "  agent emitted %d output characters", len("resolved conflict content")
         )
 
     def test_claude_conflict_agent_has_wall_clock_timeout(
@@ -602,9 +602,7 @@ class TestTimeoutHandling:
             await asyncio.sleep(0.01)
             yield SimpleNamespace(text="unreachable")
 
-        sdk = SimpleNamespace(
-            ClaudeCodeOptions=lambda **kwargs: SimpleNamespace(**kwargs), query=query
-        )
+        sdk = SimpleNamespace(ClaudeCodeOptions=SimpleNamespace, query=query)
         monkeypatch.setattr(fleet_conflicts, "agent_rebase_timeout", lambda: 0.001)
         with patch.dict(sys.modules, {"claude_code_sdk": sdk}):
             assert fleet_conflicts._run_conflict_agent("claude", "prompt", Path("/repo"), 7) is None
@@ -1252,6 +1250,88 @@ class TestConflictResolutionFlow:
         with pytest.raises(ValueError):
             fleet_conflicts._copy_conflict_files(work, tmp_path / "copy", ["linkdir/safe.py"])
 
+    def test_agent_edits_reject_unresolved_conflict_markers(self, tmp_path: Path) -> None:
+        """A successful Git add must not allow conflict markers into a commit."""
+        work = tmp_path / "work"
+        work.mkdir()
+        first = work / "first.py"
+        second = work / "second.py"
+        first.write_text("first original\n", encoding="utf-8")
+        second.write_text("second original\n", encoding="utf-8")
+        response = json.dumps(
+            {
+                "files": [
+                    {"path": "first.py", "content": "first merged\n"},
+                    {
+                        "path": "second.py",
+                        "content": "<<<<<<< ours\nsecond merged\n>>>>>>> theirs\n",
+                    },
+                ]
+            }
+        )
+
+        assert (
+            fleet_conflicts._apply_agent_edits(work, ["first.py", "second.py"], response) is False
+        )
+        assert first.read_text(encoding="utf-8") == "first original\n"
+        assert second.read_text(encoding="utf-8") == "second original\n"
+
+    def test_agent_edits_roll_back_when_a_host_write_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed later write restores every earlier host file."""
+        work = tmp_path / "work"
+        work.mkdir()
+        first = work / "first.py"
+        second = work / "second.py"
+        first.write_text("first original\n", encoding="utf-8")
+        second.write_text("second original\n", encoding="utf-8")
+        response = json.dumps(
+            {
+                "files": [
+                    {"path": "first.py", "content": "first merged\n"},
+                    {"path": "second.py", "content": "second merged\n"},
+                ]
+            }
+        )
+        original_write_text = Path.write_text
+
+        def fail_second_write(path: Path, *args: Any, **kwargs: Any) -> int:
+            if path == second:
+                raise OSError("private write diagnostics")
+            return original_write_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "write_text", fail_second_write)
+
+        assert (
+            fleet_conflicts._apply_agent_edits(work, ["first.py", "second.py"], response) is False
+        )
+        assert first.read_text(encoding="utf-8") == "first original\n"
+        assert second.read_text(encoding="utf-8") == "second original\n"
+
+    def test_conflict_transfer_exception_details_are_not_logged(self, tmp_path: Path) -> None:
+        """Transfer failures log only their exception type, not raw diagnostics."""
+        pr = _pr(7, PRStatus.CONFLICTED)
+        work = tmp_path / "RepoA-7-conflict"
+        sensitive_details = "private transfer diagnostics"
+
+        with (
+            patch.object(
+                fleet_conflicts,
+                "_copy_conflict_files",
+                side_effect=ValueError(sensitive_details),
+            ),
+            patch.object(fleet_conflicts, "logger") as logger,
+        ):
+            assert (
+                fleet_conflicts._resolve_conflict_files(
+                    pr, "Org", work, ["safe.py"], agent="claude"
+                )
+                is False
+            )
+
+        assert sensitive_details not in str(logger.warning.call_args)
+
     def test_start_conflict_rebase_prepares_worktree_and_returns_conflicts(
         self, tmp_path: Path
     ) -> None:
@@ -1355,6 +1435,8 @@ class TestConflictResolutionFlow:
         git("commit", "-m", "base update", cwd=seed)
         git("push", "origin", "main", cwd=seed)
         git("clone", "-q", str(origin), str(repo_clone), cwd=clone_dir)
+        git("config", "user.name", "Test User", cwd=repo_clone)
+        git("config", "user.email", "test@example.com", cwd=repo_clone)
 
         pr = _pr(12, PRStatus.CONFLICTED, head="feature")
         pr.head_sha = original_head
@@ -1877,6 +1959,25 @@ class TestLoggingSafety:
             assert fleet_conflicts._run_conflict_agent("codex", "prompt", Path("/repo"), 7) is None
 
         assert logger.debug.call_count == 0
+
+    def test_conflict_exception_details_are_not_logged(self, tmp_path: Path) -> None:
+        """Provider or Git exception text cannot leak into fleet-sync logs."""
+        pr = _pr(7, PRStatus.CONFLICTED)
+        repo_clone = tmp_path / "RepoA"
+        sensitive_details = "private provider diagnostics"
+
+        with (
+            patch.object(
+                fleet_conflicts,
+                "_start_conflict_rebase",
+                side_effect=RuntimeError(sensitive_details),
+            ),
+            patch.object(fleet_conflicts, "logger") as logger,
+            patch.object(fleet_conflicts, "remove_worktree"),
+        ):
+            assert fleet_conflicts.resolve_conflict_with_agent(pr, "Org", repo_clone) is False
+
+        assert sensitive_details not in str(logger.error.call_args)
 
 
 class TestCloneReuseAndWorktrees:
