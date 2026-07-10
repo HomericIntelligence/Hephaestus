@@ -93,7 +93,7 @@ class TestDiscoverBotPrs:
             patch("hephaestus.automation.pr_discovery.get_repo_info", return_value=("o", "r")),
             patch(
                 "hephaestus.automation.pr_discovery._gh_call",
-                return_value=MagicMock(stdout=json.dumps(pulls)),
+                return_value=MagicMock(returncode=0, stdout=json.dumps(pulls)),
             ),
         ):
             result = discovery.discover_bot_prs()
@@ -142,7 +142,7 @@ class TestDiscoverFailingPrs:
             patch("hephaestus.automation.pr_discovery.get_repo_info", return_value=("o", "r")),
             patch(
                 "hephaestus.automation.pr_discovery._gh_call",
-                return_value=MagicMock(stdout=json.dumps(pulls)),
+                return_value=MagicMock(returncode=0, stdout=json.dumps(pulls)),
             ),
         ):
             result = discovery.discover_failing_prs(lambda pr: not pr.get("isDraft"))
@@ -155,3 +155,28 @@ class TestDiscoverFailingPrs:
         ):
             result = discovery.discover_failing_prs(lambda pr: True)
         assert result == {}
+
+
+class TestListOpenPrsRemaining:
+    """Tests for the final open-PR discovery used by containment."""
+
+    @pytest.mark.parametrize(
+        "result",
+        [
+            MagicMock(returncode=1, stdout="", stderr="gh failed"),
+            MagicMock(returncode=0, stdout="", stderr=""),
+            MagicMock(returncode=0, stdout="{}", stderr=""),
+        ],
+        ids=["nonzero-exit", "empty-output", "non-list-json"],
+    )
+    def test_malformed_lookup_returns_unknown_sentinel(
+        self, discovery: PRDiscovery, result: MagicMock
+    ) -> None:
+        """A failed final-sweep lookup cannot be reinterpreted as a clean repo."""
+        with (
+            patch("hephaestus.automation.pr_discovery.get_repo_info", return_value=("o", "r")),
+            patch("hephaestus.automation.pr_discovery._gh_call", return_value=result),
+        ):
+            remaining = discovery.list_open_prs_remaining()
+
+        assert remaining == [{"number": -1, "title": "(unknown: gh api pulls failed)"}]

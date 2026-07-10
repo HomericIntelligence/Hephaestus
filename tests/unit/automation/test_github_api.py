@@ -1462,24 +1462,34 @@ class TestGhPrCreate:
         with pytest.raises(RuntimeError, match="could not verify existing PR state"):
             _github_api_module._find_open_pr_for_head("768-auto-impl", "main")
 
+    @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
     @patch("hephaestus.automation.github_api._gh_call")
-    def test_existing_pr_lookup_rejects_a_different_base_branch(self, mock_gh_call: Any) -> None:
-        """A head-only lookup cannot reuse a PR targeting another base branch."""
-        mock_gh_call.return_value = Mock(
-            stdout=json.dumps([{"number": 962, "state": "OPEN", "baseRefName": "release"}])
-        )
-
-        with pytest.raises(RuntimeError, match="could not verify existing PR state"):
-            _github_api_module._find_open_pr_for_head("768-auto-impl", "main")
-
-        assert mock_gh_call.call_args.args[0][0:6] == [
-            "pr",
-            "list",
-            "--head",
-            "768-auto-impl",
-            "--base",
-            "main",
+    def test_fresh_pr_creation_contains_open_prs_on_other_bases(
+        self, mock_gh_call: Any, _mock_signed: Any
+    ) -> None:
+        """A head branch's other-base PR is contained before a fresh PR is created."""
+        mock_gh_call.side_effect = [
+            Mock(stdout=json.dumps([{"number": 962, "state": "OPEN", "baseRefName": "release"}])),
+            Mock(
+                returncode=0,
+                stdout=json.dumps({"state": "OPEN", "autoMergeRequest": {"enabledAt": "now"}}),
+            ),
+            Mock(returncode=0, stdout="", stderr=""),
+            Mock(returncode=0, stdout=json.dumps({"state": "OPEN", "autoMergeRequest": None})),
+            Mock(stdout="https://github.com/owner/repo/pull/456"),
+            _unarmed_pr_state(),
         ]
+
+        assert gh_pr_create(branch="768-auto-impl", title="Test PR", body=_POLICY_BODY) == 456
+
+        calls = [call.args[0] for call in mock_gh_call.call_args_list]
+        assert "--base" not in calls[0]
+        assert calls[1:4] == [
+            ["pr", "view", "962", "--json", "state,autoMergeRequest"],
+            ["pr", "merge", "962", "--disable-auto"],
+            ["pr", "view", "962", "--json", "state,autoMergeRequest"],
+        ]
+        assert calls[4][0:2] == ["pr", "create"]
 
     @patch("hephaestus.automation.github_api._gh_call")
     def test_existing_pr_lookup_rejects_multiple_open_prs_on_the_requested_base(

@@ -30,8 +30,9 @@ from .claude_invoke import invoke_claude_with_session
 from .claude_models import git_message_model, implementer_model
 from .git_utils import get_repo_slug, issue_ref, run
 from .github_api import (
-    _find_open_pr_for_head,
+    _find_open_prs_for_head,
     _gh_call,
+    _select_open_pr_for_base,
     fetch_issue_info,
     gh_issue_add_labels,
     gh_issue_remove_labels,
@@ -940,12 +941,14 @@ def ensure_pr_created(
     # Check if PR exists, if not create it
     _update_slot(f"{issue_ref(issue_number)}: Creating PR")
     try:
-        pr_number = _find_open_pr_for_head(branch_name, base_branch)
+        open_prs = _find_open_prs_for_head(branch_name)
+        pr_number = _select_open_pr_for_base(open_prs, base_branch)
     except Exception as e:
         raise RuntimeError(f"could not verify existing PR state for branch {branch_name!r}") from e
+    for open_pr_number, _open_pr_base in open_prs:
+        ensure_pr_auto_merge_deferred(open_pr_number)
     if pr_number is not None:
         logger.info("PR #%s already exists", pr_number)
-        ensure_pr_auto_merge_deferred(pr_number)
         return pr_number
 
     # PR doesn't exist, create it

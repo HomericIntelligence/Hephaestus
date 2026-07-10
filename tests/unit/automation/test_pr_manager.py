@@ -340,13 +340,13 @@ class TestEnsurePRCreated:
             patch.object(pr_manager, "run", run_mock),
             patch.object(
                 pr_manager,
-                "_find_open_pr_for_head",
-                return_value=99,
+                "_find_open_prs_for_head",
+                return_value=[(99, "master")],
             ) as find_open_pr,
             patch.object(pr_manager, "ensure_pr_auto_merge_deferred") as defer,
         ):
             assert pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt")) == 99
-        find_open_pr.assert_called_once_with("branch", "master")
+        find_open_pr.assert_called_once_with("branch")
         defer.assert_called_once_with(99)
 
     def test_existing_pr_containment_failure_does_not_fall_through_to_creation(self) -> None:
@@ -361,7 +361,7 @@ class TestEnsurePRCreated:
         )
         with (
             patch.object(pr_manager, "run", run_mock),
-            patch.object(pr_manager, "_find_open_pr_for_head", return_value=99),
+            patch.object(pr_manager, "_find_open_prs_for_head", return_value=[(99, "master")]),
             patch.object(
                 pr_manager,
                 "ensure_pr_auto_merge_deferred",
@@ -372,6 +372,29 @@ class TestEnsurePRCreated:
             with pytest.raises(RuntimeError, match="PR remains armed"):
                 pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt"))
         create_pr.assert_not_called()
+
+    def test_existing_pr_contains_every_open_pr_on_the_head(self) -> None:
+        """A target-base PR is reused only after every head PR is contained."""
+        run_mock = MagicMock(
+            side_effect=[
+                _status("abc1234 commit msg"),
+                _status("origin/master"),
+                _status("2"),
+                _status("refs/heads/branch"),
+            ]
+        )
+        with (
+            patch.object(
+                pr_manager,
+                "_find_open_prs_for_head",
+                return_value=[(99, "master"), (100, "release")],
+            ),
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "ensure_pr_auto_merge_deferred") as defer,
+        ):
+            assert pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt")) == 99
+
+        assert [call.args[0] for call in defer.call_args_list] == [99, 100]
 
     def test_auto_merge_deferral_rejects_an_incomplete_open_pr_state(self) -> None:
         """Legacy review containment requires an explicit autoMergeRequest field."""
@@ -391,7 +414,7 @@ class TestEnsurePRCreated:
         )
         with (
             patch.object(pr_manager, "run", run_mock),
-            patch.object(pr_manager, "_find_open_pr_for_head", return_value=None),
+            patch.object(pr_manager, "_find_open_prs_for_head", return_value=[]),
             patch.object(pr_manager, "create_pr", return_value=42) as create_mock,
         ):
             assert pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt")) == 42
@@ -416,7 +439,7 @@ class TestEnsurePRCreated:
         )
         with (
             patch.object(pr_manager, "run", run_mock),
-            patch.object(pr_manager, "_find_open_pr_for_head", return_value=None),
+            patch.object(pr_manager, "_find_open_prs_for_head", return_value=[]),
             patch.object(pr_manager, "create_pr", return_value=42) as create_mock,
         ):
             assert pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt"), agent="codex") == 42

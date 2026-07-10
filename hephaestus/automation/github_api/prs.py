@@ -128,8 +128,8 @@ def _assert_branch_commits_signed(branch: str, base: str = "main") -> None:
         )
 
 
-def _find_open_pr_for_head(branch: str, base: str) -> int | None:
-    """Return the number of the single OPEN PR from ``branch`` into ``base``.
+def _find_open_prs_for_head(branch: str) -> list[tuple[int, str]]:
+    """Return every validated OPEN PR number and base branch for ``branch``.
 
     Used by :func:`gh_pr_create` as an idempotency guard so a re-run on a
     branch that already has an open PR reuses it rather than creating a
@@ -138,10 +138,9 @@ def _find_open_pr_for_head(branch: str, base: str) -> int | None:
 
     Args:
         branch: Head branch name to look up.
-        base: Required base branch for the PR.
 
     Returns:
-        The PR number of the matching OPEN PR, or None.
+        Every open PR as ``(number, base_ref_name)``.
 
     """
     try:
@@ -151,12 +150,10 @@ def _find_open_pr_for_head(branch: str, base: str) -> int | None:
                 "list",
                 "--head",
                 branch,
-                "--base",
-                base,
                 "--json",
                 "number,state,baseRefName",
                 "--limit",
-                "10",
+                "1000",
             ]
         )
         stdout = result.stdout
@@ -167,7 +164,7 @@ def _find_open_pr_for_head(branch: str, base: str) -> int | None:
         raise RuntimeError(f"could not verify existing PR state for head {branch!r}") from e
     if not isinstance(prs, list):
         raise RuntimeError(f"could not verify existing PR state for head {branch!r}")
-    open_pr_numbers: list[int] = []
+    open_prs: list[tuple[int, str]] = []
     for pr in prs:
         if not isinstance(pr, dict):
             raise RuntimeError(f"could not verify existing PR state for head {branch!r}")
@@ -175,16 +172,33 @@ def _find_open_pr_for_head(branch: str, base: str) -> int | None:
         base_ref_name = pr.get("baseRefName")
         if not isinstance(state, str) or not isinstance(base_ref_name, str):
             raise RuntimeError(f"could not verify existing PR state for head {branch!r}")
-        if base_ref_name != base:
-            raise RuntimeError(f"could not verify existing PR state for head {branch!r}")
         if state.upper() == "OPEN":
             number = pr.get("number")
             if not isinstance(number, int) or number <= 0:
                 raise RuntimeError(f"could not verify existing PR state for head {branch!r}")
-            open_pr_numbers.append(number)
-    if len(open_pr_numbers) > 1:
-        raise RuntimeError(f"could not verify existing PR state for head {branch!r}")
-    return open_pr_numbers[0] if open_pr_numbers else None
+            open_prs.append((number, base_ref_name))
+    return open_prs
+
+
+def _select_open_pr_for_base(open_prs: list[tuple[int, str]], base: str) -> int | None:
+    """Return the single open PR targeting ``base`` or fail on ambiguity."""
+    matching_numbers = [number for number, base_ref_name in open_prs if base_ref_name == base]
+    if len(matching_numbers) > 1:
+        raise RuntimeError(f"could not verify existing PR state for base {base!r}")
+    return matching_numbers[0] if matching_numbers else None
+
+
+def _find_open_pr_for_head(branch: str, base: str) -> int | None:
+    """Return the single OPEN PR from ``branch`` into ``base``.
+
+    This compatibility selector preserves the historical return type. Callers
+    that must contain every same-head PR should use
+    :func:`_find_open_prs_for_head` before selecting the requested base.
+    """
+    try:
+        return _select_open_pr_for_base(_find_open_prs_for_head(branch), base)
+    except RuntimeError as e:
+        raise RuntimeError(f"could not verify existing PR state for head {branch!r}") from e
 
 
 def gh_pr_create(
@@ -236,13 +250,15 @@ def gh_pr_create(
     # failure observed on issue #768 (issue #1018). A closed/merged-only head
     # still gets a fresh PR — the issue may legitimately need new work, and the
     # worktree manager already extends the remote branch's history.
-    existing_open_pr = _api._find_open_pr_for_head(branch, base)
+    open_prs = _api._find_open_prs_for_head(branch)
+    existing_open_pr = _api._select_open_pr_for_base(open_prs, base)
+    for open_pr_number, _open_pr_base in open_prs:
+        if not defer_auto_merge(open_pr_number, lambda args: _api._gh_call(args, check=False)):
+            raise RuntimeError(
+                f"could not verify auto-merge disabled for existing PR #{open_pr_number}"
+            )
     if existing_open_pr is not None:
         _api.logger.info("Reusing existing open PR #%s on head %s", existing_open_pr, branch)
-        if not defer_auto_merge(existing_open_pr, lambda args: _api._gh_call(args, check=False)):
-            raise RuntimeError(
-                f"could not verify auto-merge disabled for existing PR #{existing_open_pr}"
-            )
         return existing_open_pr
 
     try:

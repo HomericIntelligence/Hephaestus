@@ -91,7 +91,7 @@ def _dedupe_issue_prs(raw_map: dict[int, int]) -> PRWorkset:
 
 
 def _fetch_open_pulls(repo_root: Any, *, purpose: str) -> list[dict[str, Any]] | None:
-    """Fetch open REST pull rows, returning None on lookup failure."""
+    """Fetch open REST pull rows, returning None on lookup or parse failure."""
     try:
         owner, repo = get_repo_info(repo_root)
     except RuntimeError as exc:
@@ -106,14 +106,29 @@ def _fetch_open_pulls(repo_root: Any, *, purpose: str) -> list[dict[str, Any]] |
             ],
             check=False,
         )
-        raw_pulls = json.loads(result.stdout or "[]")
+        if result.returncode != 0:
+            logger.error(
+                "Could not list open PRs for %s: gh api exited %s: %s",
+                purpose,
+                result.returncode,
+                (result.stderr or "").strip(),
+            )
+            return None
+        stdout = result.stdout
+        if not isinstance(stdout, str) or not stdout.strip():
+            logger.error("Could not list open PRs for %s: empty response", purpose)
+            return None
+        raw_pulls = json.loads(stdout)
     except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
         logger.error("Could not list open PRs for %s: %s", purpose, exc)
         return None
     except (subprocess.TimeoutExpired, OSError) as exc:
         logger.info("%s skipped: gh api failed (%s)", purpose, exc)
         return None
-    return raw_pulls if isinstance(raw_pulls, list) else []
+    if not isinstance(raw_pulls, list) or not all(isinstance(pr, dict) for pr in raw_pulls):
+        logger.error("Could not list open PRs for %s: invalid response shape", purpose)
+        return None
+    return raw_pulls
 
 
 def _normalise_open_pr(
@@ -418,11 +433,10 @@ class PRDiscovery:
         """Return the list of open PRs left on the repo after the drive (#838).
 
         A repo is only truly "driven" when there are zero open PRs left. The
-        per-issue ``_drive_issue`` loop's notion of success — every issue's
-        PR moved to green and/or got auto-merge enabled — does NOT imply the
-        repo is clean: PRs that have not yet merged (auto-merge waiting on
-        CI), PRs from issues outside the input set, and PRs opened by
-        humans/other-automation all leave open work behind.
+        per-issue ``_drive_issue`` loop's notion of success does NOT imply the
+        repo is clean: PRs awaiting manual strict review, PRs from issues
+        outside the input set, and PRs opened by humans/other-automation all
+        leave open work behind.
 
         Uses ``gh api --paginate`` so the result is the FULL set of open PRs,
         not a capped prefix. A repo with hundreds of dependabot PRs would
@@ -434,7 +448,9 @@ class PRDiscovery:
             metadata blob), and ``mergeStateStatus`` / ``mergeable`` (the
             per-PR merge-state, fetched separately because the REST list
             endpoint does not populate ``mergeable`` reliably — see #1328).
-            Empty list iff the repo is clean.
+            Empty list iff the repo is clean. A lookup failure returns an
+            unknown-record sentinel so the caller fails closed rather than
+            treating an unverified repository as clean.
 
         """
         raw_pulls = _fetch_open_pulls(self._repo_root(), purpose="open-PR done-state")
@@ -472,8 +488,8 @@ class PRDiscovery:
         The REST ``/pulls`` list endpoint does NOT populate ``mergeable`` /
         ``mergeable_state`` reliably (GitHub computes the merge-state lazily and
         omits it from list responses), so the done-gate cannot tell a
-        permanently-CONFLICTING armed PR apart from one that is genuinely still
-        merging. A per-PR ``gh pr view`` forces GitHub to compute the merge
+        permanently-CONFLICTING open PR apart from one that is genuinely still
+        pending. A per-PR ``gh pr view`` forces GitHub to compute the merge
         state, matching how the rest of the driver queries merge-state.
 
         Args:
