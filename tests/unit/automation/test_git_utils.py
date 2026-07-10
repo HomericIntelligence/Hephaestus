@@ -646,6 +646,35 @@ class TestSyncWorktreeToRemoteBranch:
         # Reset must NOT have run after a fetch failure.
         assert git_utils_mocks.run.call_count == 1
 
+    def test_uses_pull_request_ref_when_branch_ref_is_missing(self, git_utils_mocks: Any) -> None:
+        """Adopted PRs can be reachable through GitHub's pull ref only."""
+        fetch_error = subprocess.CalledProcessError(
+            128,
+            ["git", "fetch"],
+            output="",
+            stderr="fatal: couldn't find remote ref feature\n",
+        )
+        git_utils_mocks.run.side_effect = [
+            fetch_error,
+            Mock(returncode=0),
+            Mock(returncode=0),
+        ]
+
+        sync_worktree_to_remote_branch(Path("/tmp/worktree-xyz"), "feature", pr_number=42)
+
+        assert git_utils_mocks.run.call_args_list[1].args[0] == [
+            "git",
+            "fetch",
+            "origin",
+            "refs/pull/42/head",
+        ]
+        assert git_utils_mocks.run.call_args_list[2].args[0] == [
+            "git",
+            "reset",
+            "--hard",
+            "FETCH_HEAD",
+        ]
+
     def test_timeout_threads_through_fetch_and_reset(self, git_utils_mocks: Any) -> None:
         """sync_worktree_to_remote_branch bounds fetch and reset."""
         git_utils_mocks.run.return_value = Mock(returncode=0)
