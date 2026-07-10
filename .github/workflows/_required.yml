@@ -884,12 +884,13 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # required-checks-gate is an aggregate workflow-level signal, not a substitute
-  # for the repository ruleset's direct required contexts. It fans in every
-  # gating job above so the full workflow has one auditable result; add a new
-  # gating job to the `needs:` list and update GitHub rules deliberately when
-  # that job should block merges. See docs/ci/required-checks.md and the guard
-  # test tests/unit/ci/test_required_checks_gate.py.
+  # required-checks-gate is an aggregate workflow-level signal and a classic
+  # branch-protection context, alongside the repository ruleset's direct
+  # required contexts. It fans in every gating job above so the full workflow
+  # has one auditable result; add every new gating job to `needs:`. Update the
+  # GitHub ruleset deliberately only when that job also needs its own direct
+  # ruleset context. See docs/ci/required-checks.md and the guard test
+  # tests/unit/ci/test_required_checks_gate.py.
   #
   # `if: always()` is mandatory: the heavy jobs skip on label / auto-merge PR
   # actions (they gate on changes-gate.code_event), so without always() this job

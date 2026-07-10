@@ -1,13 +1,23 @@
 # Required status checks
 
-This document records the CI contract and the last verified `main` ruleset.
-GitHub rulesets are authoritative and can change outside git; use the audit
+This document records the CI contract and the last verified `main` protection
+and ruleset configuration. GitHub policy can change outside git; use the audit
 commands below before relying on this record for an operational merge decision.
 
 ## The contract
 
-A PR can merge to `main` only when these direct ruleset **required status
-checks** are green:
+A PR can merge to `main` only when every enforced classic branch-protection
+context and direct ruleset **required status check** is green.
+
+Classic branch protection currently requires:
+
+| Required context | Source |
+|------------------|--------|
+| `required-checks-gate` | `.github/workflows/_required.yml` |
+| `test (ubuntu-latest, 3.12, unit)` | `.github/workflows/test.yml` |
+| `test (ubuntu-latest, 3.12, integration)` | `.github/workflows/test.yml` |
+
+The active ruleset currently requires these direct contexts:
 
 | Required context | Source |
 |------------------|--------|
@@ -49,10 +59,11 @@ through.
 > merged anyway. See issues #1313 / #1315.
 
 `required-checks-gate` `needs:` every gating job and reports one aggregate
-workflow result. It is not itself a direct branch-protection context in the
-current ruleset. Keep its `needs:` list complete (enforced by a test — see
-below), and make an explicit GitHub-ruleset change whenever a new job should
-block merges.
+workflow result. It is a **classic branch-protection context**, not a direct
+ruleset context. Keep its `needs:` list complete (enforced by a test — see
+below): every included job participates in the classic protection gate. Make
+an explicit GitHub-ruleset change only when a job also needs its own direct
+ruleset context.
 
 ### How the gate works
 
@@ -80,9 +91,10 @@ enabled. It must not block the independently reviewed manual bootstrap merge.
 
 1. Add the job to `.github/workflows/_required.yml` as usual.
 2. Add its job **key** to the `required-checks-gate` `needs:` list.
-3. Decide whether it must block merges. If so, update the GitHub ruleset after
-   auditing the existing bindings; the aggregate gate does not update GitHub-side
-   enforcement on its own.
+3. Decide whether it also needs an independently visible direct ruleset context.
+   If so, update the GitHub ruleset after auditing the existing bindings. The
+   aggregate gate already makes all jobs in its `needs:` list block through
+   classic branch protection.
 
 The guard test `tests/unit/ci/test_required_checks_gate.py` fails if a job is
 added to `_required.yml` without being wired into the gate (excepting the
@@ -121,37 +133,49 @@ gh ruleset check --default --repo "$repo"
 ```
 
 The branch snapshot must expose every classic check's `app_id`. The applicable
-rules snapshot retains every ruleset check's optional `integration_id`. The
-classic surface intentionally names the three aggregator contexts, while a
-ruleset may name the individual jobs that feed that gate. Abort rather than
-rebuilding either array when the response shape or effective contract is
-unexpected:
+rules snapshot retains every ruleset check's `integration_id`. The classic
+surface requires the aggregate gate plus the two Python 3.12 matrix contexts;
+the single applicable status-check ruleset requires the nine direct contexts
+listed above. Abort rather than rebuilding either array when the response shape
+or effective contract is unexpected:
 
 ```bash
-expected='[
+expected_classic='[
   "required-checks-gate",
   "test (ubuntu-latest, 3.12, unit)",
   "test (ubuntu-latest, 3.12, integration)"
 ]'
 
-jq -e --argjson expected "$expected" '
+expected_ruleset='[
+  "lint",
+  "unit-tests",
+  "integration-tests",
+  "security/dependency-scan",
+  "security/secrets-scan",
+  "build",
+  "schema-validation",
+  "deps/version-sync",
+  "pr-policy"
+]'
+
+jq -e --argjson expected_classic "$expected_classic" '
   ((.checks | type) == "array")
   and all(.checks[]; has("context") and has("app_id"))
-  and (([.checks[].context] | sort) == ($expected | sort))
+  and (([.checks[].context] | sort) == ($expected_classic | sort))
 ' "$state_dir/branch.before.json"
 
-jq -e --argjson expected "$expected" '
+jq -e --argjson expected_ruleset "$expected_ruleset" '
   [.[] | select(.type == "required_status_checks")] as $status_rules
-  | ($status_rules | length) > 0
+  | ($status_rules | length) == 1
+    and ($status_rules[0].parameters.strict_required_status_checks_policy == false)
+    and (($status_rules[0].parameters.required_status_checks | type) == "array")
     and all(
-      $status_rules[];
-      .parameters.strict_required_status_checks_policy == false
-      and (.parameters.required_status_checks | type) == "array"
-      and (.parameters.required_status_checks | length) > 0
-      and all(
-        .parameters.required_status_checks[];
-        has("context") and has("integration_id")
-      )
+      $status_rules[0].parameters.required_status_checks[];
+      has("context") and has("integration_id")
+    )
+    and (
+      ($status_rules[0].parameters.required_status_checks | map(.context) | sort)
+      == ($expected_ruleset | sort)
     )
 ' "$state_dir/rules.before.json"
 ```

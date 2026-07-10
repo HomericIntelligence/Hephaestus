@@ -1,4 +1,4 @@
-"""Auto-merge arming and terminal-state routing for drive-green."""
+"""Auto-merge containment and terminal-state routing for drive-green."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ def without_auto_merge_policy(check_names: list[str]) -> list[str]:
 
 
 class AutoMergeCoordinator:
-    """Owns auto-merge writes and terminal PR polling."""
+    """Owns compatibility containment and terminal PR polling."""
 
     def __init__(
         self,

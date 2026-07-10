@@ -336,13 +336,17 @@ class TestEnsurePRCreated:
                 _status("refs/heads/branch"),  # ls-remote (already pushed)
             ]
         )
-        gh_mock = _status('[{"number": 99}]')
         with (
             patch.object(pr_manager, "run", run_mock),
-            patch.object(pr_manager, "_gh_call", return_value=gh_mock),
+            patch.object(
+                pr_manager,
+                "_find_open_pr_for_head",
+                return_value=99,
+            ) as find_open_pr,
             patch.object(pr_manager, "ensure_pr_auto_merge_deferred") as defer,
         ):
             assert pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt")) == 99
+        find_open_pr.assert_called_once_with("branch", "master")
         defer.assert_called_once_with(99)
 
     def test_existing_pr_containment_failure_does_not_fall_through_to_creation(self) -> None:
@@ -357,7 +361,7 @@ class TestEnsurePRCreated:
         )
         with (
             patch.object(pr_manager, "run", run_mock),
-            patch.object(pr_manager, "_gh_call", return_value=_status('[{"number": 99}]')),
+            patch.object(pr_manager, "_find_open_pr_for_head", return_value=99),
             patch.object(
                 pr_manager,
                 "ensure_pr_auto_merge_deferred",
@@ -385,10 +389,9 @@ class TestEnsurePRCreated:
                 _status(""),  # git push
             ]
         )
-        gh_mock = _status("[]")
         with (
             patch.object(pr_manager, "run", run_mock),
-            patch.object(pr_manager, "_gh_call", return_value=gh_mock),
+            patch.object(pr_manager, "_find_open_pr_for_head", return_value=None),
             patch.object(pr_manager, "create_pr", return_value=42) as create_mock,
         ):
             assert pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt")) == 42
@@ -411,10 +414,9 @@ class TestEnsurePRCreated:
                 _status("refs/heads/branch"),  # ls-remote (already pushed)
             ]
         )
-        gh_mock = _status("[]")
         with (
             patch.object(pr_manager, "run", run_mock),
-            patch.object(pr_manager, "_gh_call", return_value=gh_mock),
+            patch.object(pr_manager, "_find_open_pr_for_head", return_value=None),
             patch.object(pr_manager, "create_pr", return_value=42) as create_mock,
         ):
             assert pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt"), agent="codex") == 42

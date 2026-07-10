@@ -1454,6 +1454,42 @@ def _unarmed_pr_state() -> Mock:
 class TestGhPrCreate:
     """Tests for gh_pr_create function."""
 
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_existing_pr_lookup_rejects_a_different_base_branch(self, mock_gh_call: Any) -> None:
+        """A head-only lookup cannot reuse a PR targeting another base branch."""
+        mock_gh_call.return_value = Mock(
+            stdout=json.dumps([{"number": 962, "state": "OPEN", "baseRefName": "release"}])
+        )
+
+        with pytest.raises(RuntimeError, match="could not verify existing PR state"):
+            _github_api_module._find_open_pr_for_head("768-auto-impl", "main")
+
+        assert mock_gh_call.call_args.args[0][0:6] == [
+            "pr",
+            "list",
+            "--head",
+            "768-auto-impl",
+            "--base",
+            "main",
+        ]
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_existing_pr_lookup_rejects_multiple_open_prs_on_the_requested_base(
+        self, mock_gh_call: Any
+    ) -> None:
+        """Ambiguous open PR discovery fails closed instead of choosing arbitrarily."""
+        mock_gh_call.return_value = Mock(
+            stdout=json.dumps(
+                [
+                    {"number": 962, "state": "OPEN", "baseRefName": "main"},
+                    {"number": 963, "state": "OPEN", "baseRefName": "main"},
+                ]
+            )
+        )
+
+        with pytest.raises(RuntimeError, match="could not verify existing PR state"):
+            _github_api_module._find_open_pr_for_head("768-auto-impl", "main")
+
     @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
     @patch("hephaestus.automation.github_api._gh_call")
     def test_successful_pr_creation_defers_auto_merge(
@@ -1569,7 +1605,7 @@ class TestGhPrCreate:
     ) -> None:
         """An OPEN PR already on the head is reused, not duplicated (issue #1018)."""
         list_result = Mock()
-        list_result.stdout = json.dumps([{"number": 962, "state": "OPEN"}])
+        list_result.stdout = json.dumps([{"number": 962, "state": "OPEN", "baseRefName": "main"}])
         state_result = Mock()
         state_result.returncode = 0
         state_result.stdout = json.dumps({"state": "OPEN", "autoMergeRequest": None})
@@ -1593,7 +1629,9 @@ class TestGhPrCreate:
         self, mock_gh_call: Any, _mock_signed: Any
     ) -> None:
         """Reusing a pre-#2054 PR contains any existing auto-merge arm first."""
-        list_result = Mock(stdout=json.dumps([{"number": 962, "state": "OPEN"}]))
+        list_result = Mock(
+            stdout=json.dumps([{"number": 962, "state": "OPEN", "baseRefName": "main"}])
+        )
         mock_gh_call.side_effect = [
             list_result,
             Mock(
@@ -1618,7 +1656,7 @@ class TestGhPrCreate:
     ) -> None:
         """A closed-only head still gets a fresh PR (issue #1018)."""
         list_result = Mock()
-        list_result.stdout = json.dumps([{"number": 942, "state": "CLOSED"}])
+        list_result.stdout = json.dumps([{"number": 942, "state": "CLOSED", "baseRefName": "main"}])
         create_result = Mock()
         create_result.stdout = "https://github.com/owner/repo/pull/967"
         mock_gh_call.side_effect = [list_result, create_result, _unarmed_pr_state()]

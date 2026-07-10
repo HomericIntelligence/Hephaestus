@@ -333,7 +333,7 @@ class CIDriveRunCoordinator:
         *,
         resolve_dirty: bool = True,
     ) -> WorkerResult | None:
-        """Re-poll post-fix CI and arm auto-merge if the PR is now green."""
+        """Re-poll post-fix CI and contain legacy auto-merge when the PR is green."""
         if self._options().dry_run:
             return None
         checks = _poll_post_fix_required(

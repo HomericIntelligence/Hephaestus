@@ -128,8 +128,8 @@ def _assert_branch_commits_signed(branch: str, base: str = "main") -> None:
         )
 
 
-def _find_open_pr_for_head(branch: str) -> int | None:
-    """Return the number of an OPEN PR on ``branch``'s head, or None.
+def _find_open_pr_for_head(branch: str, base: str) -> int | None:
+    """Return the number of the single OPEN PR from ``branch`` into ``base``.
 
     Used by :func:`gh_pr_create` as an idempotency guard so a re-run on a
     branch that already has an open PR reuses it rather than creating a
@@ -138,32 +138,50 @@ def _find_open_pr_for_head(branch: str) -> int | None:
 
     Args:
         branch: Head branch name to look up.
+        base: Required base branch for the PR.
 
     Returns:
-        The PR number of the first OPEN PR on the head, or None.
+        The PR number of the matching OPEN PR, or None.
 
     """
     try:
         result = _api._gh_call(
-            ["pr", "list", "--head", branch, "--json", "number,state", "--limit", "10"]
+            [
+                "pr",
+                "list",
+                "--head",
+                branch,
+                "--base",
+                base,
+                "--json",
+                "number,state,baseRefName",
+                "--limit",
+                "10",
+            ]
         )
         prs = json.loads(result.stdout or "[]")
     except (subprocess.CalledProcessError, json.JSONDecodeError, TypeError) as e:
         raise RuntimeError(f"could not verify existing PR state for head {branch!r}") from e
     if not isinstance(prs, list):
         raise RuntimeError(f"could not verify existing PR state for head {branch!r}")
+    open_pr_numbers: list[int] = []
     for pr in prs:
         if not isinstance(pr, dict):
             raise RuntimeError(f"could not verify existing PR state for head {branch!r}")
         state = pr.get("state")
-        if not isinstance(state, str):
+        base_ref_name = pr.get("baseRefName")
+        if not isinstance(state, str) or not isinstance(base_ref_name, str):
+            raise RuntimeError(f"could not verify existing PR state for head {branch!r}")
+        if base_ref_name != base:
             raise RuntimeError(f"could not verify existing PR state for head {branch!r}")
         if state.upper() == "OPEN":
             number = pr.get("number")
             if not isinstance(number, int) or number <= 0:
                 raise RuntimeError(f"could not verify existing PR state for head {branch!r}")
-            return number
-    return None
+            open_pr_numbers.append(number)
+    if len(open_pr_numbers) > 1:
+        raise RuntimeError(f"could not verify existing PR state for head {branch!r}")
+    return open_pr_numbers[0] if open_pr_numbers else None
 
 
 def gh_pr_create(
@@ -215,7 +233,7 @@ def gh_pr_create(
     # failure observed on issue #768 (issue #1018). A closed/merged-only head
     # still gets a fresh PR — the issue may legitimately need new work, and the
     # worktree manager already extends the remote branch's history.
-    existing_open_pr = _api._find_open_pr_for_head(branch)
+    existing_open_pr = _api._find_open_pr_for_head(branch, base)
     if existing_open_pr is not None:
         _api.logger.info("Reusing existing open PR #%s on head %s", existing_open_pr, branch)
         if not defer_auto_merge(existing_open_pr, lambda args: _api._gh_call(args, check=False)):

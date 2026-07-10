@@ -34,11 +34,12 @@ A piece of work is **done** when every item below is true.
 | 21 | Pre-commit hooks pass on the diff | CI job `lint` (pre-commit suite folded into `lint` per #1173) |
 | 22 | Every review thread is resolved (including bot-authored threads) | Org ruleset `required_review_thread_resolution` |
 
-> **Which of these actually block the merge button?** The direct GitHub ruleset
-> contexts documented in [`docs/ci/required-checks.md`](ci/required-checks.md)
-> do. `required-checks-gate` provides aggregate workflow coverage, but excludes
-> advisory `auto-merge-policy` during #2054 so it cannot block the independently
-> reviewed manual bootstrap merge.
+> **Which of these actually block the merge button?** Both the classic branch
+> protection contexts (`required-checks-gate` and the two Python 3.12 matrix
+> contexts) and the direct GitHub ruleset contexts documented in
+> [`docs/ci/required-checks.md`](ci/required-checks.md) do. The aggregate gate
+> excludes advisory `auto-merge-policy` during #2054 so it cannot block the
+> independently reviewed manual bootstrap merge.
 
 ## For new features
 
