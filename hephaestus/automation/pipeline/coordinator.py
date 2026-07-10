@@ -832,7 +832,14 @@ class Coordinator:
         ordered = _admission.order_for_implementation(infos)
         dispatch = ordered
         if self.config.serialize_file_overlap and self.config.max_workers > 1 and len(ordered) > 1:
-            dispatch, deferred = _admission._select_non_overlapping(ordered)
+            # Resolve each issue's owning repo from its own WorkItem: the queue is
+            # keyed by stage, so one round can hold issues from several repos (#1795).
+            repo_of = {
+                number: (self.config.org, item.repo)
+                for number, item in issue_items.items()
+                if item.repo
+            }
+            dispatch, deferred = _admission._select_non_overlapping(ordered, repo_of=repo_of)
             for number in deferred:
                 logger.info("implementation #%s deferred (file overlap)", number)
         ran: set[int] = set()

@@ -521,20 +521,32 @@ class TestImplementationAdmission:
 
         coordinator.stages[StageName.IMPLEMENTATION] = RecordingStage()
         # 21 depends on 22 (payload dependency): topo order runs 22 first.
-        item_a = _issue_item(21, StageName.IMPLEMENTATION)
+        # Distinct repos: the implementation queue is keyed by stage, not repo,
+        # so the coordinator must resolve each issue's repo from its own item (#1795).
+        item_a = _issue_item(21, StageName.IMPLEMENTATION, repo="repo-a")
         item_a.payload["dependencies"] = [22]
-        item_b = _issue_item(22, StageName.IMPLEMENTATION)
+        item_b = _issue_item(22, StageName.IMPLEMENTATION, repo="repo-b")
         coordinator._push_item(item_a, StageName.IMPLEMENTATION, enter=True)
         coordinator._push_item(item_b, StageName.IMPLEMENTATION, enter=True)
+        seen_repo_of: dict[int, tuple[str, str]] = {}
+
+        def _fake_select(
+            issues: list[int], repo_of: dict[int, tuple[str, str]] | None = None
+        ) -> tuple[list[int], list[int]]:
+            seen_repo_of.update(repo_of or {})
+            return issues[:1], issues[1:]  # defer everything but the first
+
         monkeypatch.setattr(
             "hephaestus.automation.pipeline.admission._select_non_overlapping",
-            lambda issues: (issues[:1], issues[1:]),  # defer everything but the first
+            _fake_select,
         )
 
         coordinator._drain_implementation()
 
         assert run_order == [22]  # dependency first; 21 deferred by overlap
         assert len(coordinator.queues[StageName.IMPLEMENTATION]) == 1
+        # Each issue is scoped to the repo of ITS OWN WorkItem, not the ambient CWD.
+        assert seen_repo_of == {21: ("org", "repo-a"), 22: ("org", "repo-b")}
 
     def test_file_overlap_serialization_can_be_disabled(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
