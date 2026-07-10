@@ -292,12 +292,14 @@ class StageGitHub(Protocol):
     # -- merge_wait surface (#1816) ------------------------------------------
 
     def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
-        """Return ``{state, headRefOid, mergedAt, mergeStateStatus, baseRefName}``.
+        """Read shared PR state for seed, stage, and merge decisions.
 
-        Returns ``None`` on a transient read failure. Mirrors
-        ``ci_driver.CIDriver._gh_pr_state``: the single PR-state read the
-        merge_wait ARM step uses to capture the head OID at arming time, and
-        the POLL step uses to classify MERGED/CLOSED/FAILING/DIRTY/BLOCKED.
+        Returns ``{state, headRefOid, mergedAt, mergeStateStatus,
+        baseRefName}``, or ``None`` on a transient read failure. The repo seed
+        path and the CI and implementation stage boundaries use this read for
+        merged/closed terminal-state checks before branch adoption or further
+        routing. The merge_wait path uses the same contract to capture the
+        head OID and classify MERGED/CLOSED/FAILING/DIRTY/BLOCKED/PENDING.
         """
         ...
 
