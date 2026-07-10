@@ -66,7 +66,7 @@ _GH_BREAKER = get_circuit_breaker(
     # Resolved at call time: `_breaker_should_ignore` is defined below, after the
     # error-pattern tables it consults. A 404 means GitHub answered — it is not
     # evidence of unavailability and must not open this breaker (#2048).
-    ignore=lambda exc: _breaker_should_ignore(exc),
+    ignore=_breaker_should_ignore,
 )
 
 
