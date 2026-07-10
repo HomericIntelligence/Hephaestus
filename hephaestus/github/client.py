@@ -57,15 +57,72 @@ def gh_cli_timeout() -> int:
         return 120
 
 
+# Facts about the REQUESTED TARGET, not about GitHub's health: the service was
+# reachable and answered correctly ("that issue does not exist", "that branch has
+# no checks yet"). They must not count toward the circuit breaker, which exists to
+# detect an unavailable service. Six wrong-repo "Could not resolve" 404s once
+# opened the github-api breaker (failure_threshold=5) and poisoned 236 items
+# across 9 repos (#1795).
+#
+# Every entry here MUST also appear in _NON_TRANSIENT_PATTERNS below (asserted by
+# tests/unit/github/test_client.py). Otherwise the error would be retried 6x AND
+# excluded from the breaker — the worst of both.
+#
+# Deliberately EXCLUDED — per-credential or per-request facts that WILL recur on
+# every subsequent call, so tripping the breaker is correct: 403/forbidden,
+# 401/unauthorized, token-scope, 400/bad request, 422/unprocessable entity,
+# invalid argument, unknown json field.
+_PER_TARGET_PATTERNS = [
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"(?:^|\s)404(?:\s|$)|not found",
+        r"could not resolve to (?:an? )?(?:issue|pull request)\b",
+        # GraphQL schema/syntax errors: deterministic properties of the query
+        # this caller sent, not of the service (#1040, #1350).
+        r"doesn't accept argument",
+        r"is declared by .* but not used",
+        r"Expected VALUE",
+        r"UNKNOWN_CHAR",
+        r"Parse error",
+        # Editing another app's review comment: a property of that comment (#1327).
+        r"not editable",
+        # The expected empty state right after a push, before checks register (#1587).
+        r"no checks reported",
+    )
+]
+
+
+def _is_per_target_error(stderr: str) -> bool:
+    """Report whether *stderr* describes the target, not GitHub's availability."""
+    return any(p.search(stderr) for p in _PER_TARGET_PATTERNS)
+
+
+def _is_service_failure(exc: BaseException) -> bool:
+    """Report whether *exc* is evidence that the GitHub API itself is unhealthy.
+
+    Only a ``CalledProcessError`` carries gh's stderr to classify. Anything else
+    (connection reset, timeout) is treated as a genuine service failure.
+    """
+    if isinstance(exc, subprocess.CalledProcessError):
+        return not _is_per_target_error(exc.stderr or "")
+    return True
+
+
+def _breaker_should_ignore(exc: BaseException) -> bool:
+    """Circuit-breaker predicate: exceptions that prove the service is UP (#2048)."""
+    return not _is_service_failure(exc)
+
+
 _GH_THROTTLE = threading.local()
+# NOTE: the predicate and its pattern table are defined ABOVE this call on
+# purpose. `ignore=` is evaluated at module import, so a forward reference here
+# raises NameError and makes this module unimportable.
 _GH_BREAKER = get_circuit_breaker(
     "github-api",
     failure_threshold=5,
     recovery_timeout=60,
     half_open_max_calls=2,
-    # Resolved at call time: `_breaker_should_ignore` is defined below, after the
-    # error-pattern tables it consults. A 404 means GitHub answered — it is not
-    # evidence of unavailability and must not open this breaker (#2048).
+    # A 404 means GitHub answered — not evidence of unavailability (#2048).
     ignore=_breaker_should_ignore,
 )
 
@@ -186,57 +243,6 @@ _NON_TRANSIENT_PATTERNS = [
     )
 ]
 _NON_TRANSIENT_PATTERNS.append(_TOKEN_SCOPE_PATTERN)
-
-# Of the non-transient errors above, these are facts about the REQUESTED TARGET,
-# not about GitHub's health: the service was reachable and answered correctly
-# ("that issue does not exist", "that branch has no checks yet"). They must not
-# count toward the circuit breaker, which exists to detect an unavailable
-# service. Six wrong-repo "Could not resolve" 404s once opened the github-api
-# breaker (failure_threshold=5) and poisoned 236 items across 9 repos (#1795).
-#
-# Deliberately EXCLUDED from this list — they are per-credential or per-request
-# facts that WILL recur on every subsequent call, so failing fast is correct:
-#   403/forbidden, 401/unauthorized, token-scope, 400/bad request,
-#   422/unprocessable entity, invalid argument, unknown json field.
-_PER_TARGET_PATTERNS = [
-    re.compile(p, re.IGNORECASE)
-    for p in (
-        r"(?:^|\s)404(?:\s|$)|not found",
-        r"could not resolve to (?:an? )?(?:issue|pull request)\b",
-        # GraphQL schema/syntax errors: deterministic properties of the query
-        # this caller sent, not of the service (#1040, #1350).
-        r"doesn't accept argument",
-        r"is declared by .* but not used",
-        r"Expected VALUE",
-        r"UNKNOWN_CHAR",
-        r"Parse error",
-        # Editing another app's review comment: a property of that comment (#1327).
-        r"not editable",
-        # The expected empty state right after a push, before checks register (#1587).
-        r"no checks reported",
-    )
-]
-
-
-def _is_per_target_error(stderr: str) -> bool:
-    """Report whether *stderr* describes the target, not GitHub's availability."""
-    return any(p.search(stderr) for p in _PER_TARGET_PATTERNS)
-
-
-def _is_service_failure(exc: BaseException) -> bool:
-    """Report whether *exc* is evidence that the GitHub API itself is unhealthy.
-
-    Only a ``CalledProcessError`` carries gh's stderr to classify. Anything else
-    (connection reset, timeout) is treated as a genuine service failure.
-    """
-    if isinstance(exc, subprocess.CalledProcessError):
-        return not _is_per_target_error(exc.stderr or "")
-    return True
-
-
-def _breaker_should_ignore(exc: BaseException) -> bool:
-    """Circuit-breaker predicate: exceptions that prove the service is UP (#2048)."""
-    return not _is_service_failure(exc)
 
 
 def _is_token_scope_error(stderr: str) -> bool:

@@ -2,11 +2,14 @@
 """Tests for hephaestus.github.client.gh_call public contract."""
 
 import subprocess
+import sys
 from collections.abc import Generator
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
 
+import hephaestus.github.client as client_module
 from hephaestus.github.client import (
     _GH_BREAKER,
     _NON_TRANSIENT_PATTERNS,
@@ -32,6 +35,43 @@ def _reset_breaker() -> Generator[None, None, None]:
 def _gh_error(stderr: str) -> subprocess.CalledProcessError:
     """Build a CalledProcessError shaped like a failed ``gh`` invocation."""
     return subprocess.CalledProcessError(1, ["gh"], output="", stderr=stderr)
+
+
+class TestBreakerPredicateWiring:
+    """The ``ignore`` predicate must be defined before ``_GH_BREAKER`` uses it."""
+
+    def test_module_imports_in_a_fresh_interpreter(self) -> None:
+        """``ignore=`` is evaluated at import: a forward reference is a NameError.
+
+        No in-process test can catch this — importing this test module already
+        imported ``client``. A lint autofix once rewrote
+        ``ignore=lambda exc: _breaker_should_ignore(exc)`` into a direct
+        reference while the predicate was still defined ~130 lines BELOW
+        ``_GH_BREAKER``, making the module unimportable and failing every test
+        job on every Python version.
+        """
+        proc = subprocess.run(
+            [sys.executable, "-c", "import hephaestus.github.client"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert proc.returncode == 0, proc.stderr
+
+    def test_predicate_is_defined_before_the_breaker(self) -> None:
+        """Guard the ordering invariant directly, with a readable failure."""
+        source = Path(client_module.__file__).read_text(encoding="utf-8")
+        predicate_def = source.index("def _breaker_should_ignore")
+        breaker_use = source.index("_GH_BREAKER = get_circuit_breaker")
+        assert predicate_def < breaker_use, (
+            "_breaker_should_ignore must be defined before _GH_BREAKER references it"
+        )
+
+    def test_breaker_actually_uses_the_predicate(self) -> None:
+        """The live breaker carries the ignore predicate, not a stale None."""
+        assert _GH_BREAKER._ignore is not None
+        assert _GH_BREAKER._ignore(_gh_error("gh: Not Found (HTTP 404)")) is True
+        assert _GH_BREAKER._ignore(_gh_error("gh: HTTP 401: Bad credentials")) is False
 
 
 class TestPerTargetPatternInvariants:
