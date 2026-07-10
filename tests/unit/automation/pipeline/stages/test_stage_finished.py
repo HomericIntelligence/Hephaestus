@@ -32,13 +32,13 @@ def ledger() -> list[ItemResult]:
 
 
 @pytest.fixture
-def preserved() -> list[tuple[int, str]]:
+def preserved() -> list[tuple[str, int, str]]:
     """Fresh preserved-worktree list."""
     return []
 
 
 @pytest.fixture
-def stage(ledger: list[ItemResult], preserved: list[tuple[int, str]]) -> FinishedStage:
+def stage(ledger: list[ItemResult], preserved: list[tuple[str, int, str]]) -> FinishedStage:
     """FinishedStage bound to the fixture ledger/preserved lists."""
     return FinishedStage(ledger, preserved)
 
@@ -144,7 +144,7 @@ class TestCleanup:
     def test_fail_with_worktree_preserves_for_debugging(
         self,
         stage: FinishedStage,
-        preserved: list[tuple[int, str]],
+        preserved: list[tuple[str, int, str]],
         make_ctx: Any,
     ) -> None:
         """Preserve-on-fail: recorded for the summary, no removal job."""
@@ -153,12 +153,12 @@ class TestCleanup:
         result = stage.step(item, make_ctx())
 
         assert isinstance(result, Continue) and result.next_state == "DONE"
-        assert preserved == [(42, "/wt/issue-42")]
+        assert preserved == [("repo-a", 42, "/wt/issue-42")]
 
     def test_fail_preserve_is_idempotent(
         self,
         stage: FinishedStage,
-        preserved: list[tuple[int, str]],
+        preserved: list[tuple[str, int, str]],
         make_ctx: Any,
     ) -> None:
         ctx = make_ctx()
@@ -168,12 +168,12 @@ class TestCleanup:
         item.state = "CLEANUP"
         stage.step(item, ctx)
 
-        assert preserved == [(42, "/wt/issue-42")]
+        assert preserved == [("repo-a", 42, "/wt/issue-42")]
 
     def test_pr_only_failure_preserves_pr_number(
         self,
         stage: FinishedStage,
-        preserved: list[tuple[int, str]],
+        preserved: list[tuple[str, int, str]],
         make_ctx: Any,
     ) -> None:
         """PR-only failures are attributable in the preserved summary."""
@@ -190,12 +190,12 @@ class TestCleanup:
         result = stage.step(item, make_ctx())
 
         assert isinstance(result, Continue) and result.next_state == "DONE"
-        assert preserved == [(777, "/wt/pr-777")]
+        assert preserved == [("repo-a", 777, "/wt/pr-777")]
 
     def test_distinct_pr_only_failures_do_not_dedupe_on_zero_key(
         self,
         stage: FinishedStage,
-        preserved: list[tuple[int, str]],
+        preserved: list[tuple[str, int, str]],
         make_ctx: Any,
     ) -> None:
         ctx = make_ctx()
@@ -219,7 +219,10 @@ class TestCleanup:
         stage.step(first, ctx)
         stage.step(second, ctx)
 
-        assert preserved == [(777, "/wt/shared-pr"), (888, "/wt/shared-pr")]
+        assert preserved == [
+            ("repo-a", 777, "/wt/shared-pr"),
+            ("repo-a", 888, "/wt/shared-pr"),
+        ]
 
     def test_no_worktree_skips_cleanup(self, stage: FinishedStage, make_ctx: Any) -> None:
         result = stage.step(_item(state="CLEANUP"), make_ctx())

@@ -16,9 +16,8 @@ import logging
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path
 
-from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
+from hephaestus.automation.pipeline.work_item import ItemKind, PreservedWorktree, WorkItem
 from hephaestus.cli.utils import emit_json_status
 
 logger = logging.getLogger(__name__)
@@ -40,9 +39,7 @@ class RunStats:
         return self.exit_code == 130
 
 
-def format_preserved_worktrees(
-    preserved: Sequence[tuple[int, str | Path]], script: str
-) -> list[str]:
+def format_preserved_worktrees(preserved: Sequence[PreservedWorktree], script: str) -> list[str]:
     """Format the preserved-worktree footer (legacy line sequence, verbatim).
 
     Re-housed from the legacy implementer preserved-worktree footer so the
@@ -50,7 +47,7 @@ def format_preserved_worktrees(
     with the pipeline conversion (#1821).
 
     Args:
-        preserved: ``(issue_number, worktree_path)`` tuples for failed items.
+        preserved: ``(repo, issue_number, worktree_path)`` tuples for failed items.
         script: The script name (``sys.argv[0]``) for the rerun hint.
 
     Returns:
@@ -59,14 +56,14 @@ def format_preserved_worktrees(
     """
     if not preserved:
         return []
-    issue_nums = [n for n, _ in preserved]
+    issue_nums = [number for _, number, _ in preserved]
     issues_arg = " ".join(str(n) for n in issue_nums)
     lines: list[str] = ["\nPreserved worktrees (contain uncommitted changes):"]
-    lines.extend(f"  #{issue_num}: {path}" for issue_num, path in preserved)
+    lines.extend(f"  #{number}: {path}" for _, number, path in preserved)
     lines.append("\nRerun these issues after inspecting/cleaning the worktrees:")
     lines.append(f"  {script} --issues {issues_arg} --resume")
     lines.append("To discard them instead:")
-    lines.extend(f"  git worktree remove --force {path}" for _, path in preserved)
+    lines.extend(f"  git worktree remove --force {path}" for _, _, path in preserved)
     return lines
 
 
@@ -138,7 +135,7 @@ def _item_row(item: WorkItem) -> str:
 def print_summary(
     items: list[WorkItem],
     stats: RunStats,
-    preserved: list[tuple[int, str]],
+    preserved: list[PreservedWorktree],
     *,
     json_out: bool,
 ) -> None:
@@ -147,7 +144,7 @@ def print_summary(
     Args:
         items: Every work item the run ever queued (results attached).
         stats: Aggregate run statistics (exit code, loops, agent time, wall).
-        preserved: ``(issue_number, worktree_path)`` tuples for failed items.
+        preserved: ``(repo, issue_number, worktree_path)`` tuples for failed items.
         json_out: Emit the machine-readable ``emit_json_status`` envelope.
 
     """
@@ -201,5 +198,5 @@ def print_summary(
             agent_job_time_s=round(stats.agent_job_time_s, 1),
             wall_s=round(stats.wall_s, 1),
             resumable=resumable,
-            preserved_worktrees=[list(entry) for entry in preserved],
+            preserved_worktrees=[[number, path] for _, number, path in preserved],
         )
