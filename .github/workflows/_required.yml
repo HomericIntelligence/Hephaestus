@@ -491,6 +491,7 @@ jobs:
               and has("autoMergeRequest")
               and (.state | type == "string")
               and (.state == "OPEN" or .state == "MERGED" or .state == "CLOSED")
+              and (.autoMergeRequest == null or (.autoMergeRequest | type == "object"))
             ' pr.json > /dev/null; then
             echo "::error::Incomplete PR state response; cannot verify auto-merge is disabled."
             exit 1
@@ -883,13 +884,12 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # required-checks-gate is the SINGLE branch-protection required status check
-  # for this workflow (alongside the two `test (...)` contexts from test.yml).
-  # It fans in every gating job above so that branch protection never has to
-  # enumerate them individually — add a new gating job to the `needs:` list and
-  # protection keeps working with no GitHub-side change. See
-  # docs/ci/required-checks.md and the guard test
-  # tests/unit/ci/test_required_checks_gate.py.
+  # required-checks-gate is an aggregate workflow-level signal, not a substitute
+  # for the repository ruleset's direct required contexts. It fans in every
+  # gating job above so the full workflow has one auditable result; add a new
+  # gating job to the `needs:` list and update GitHub rules deliberately when
+  # that job should block merges. See docs/ci/required-checks.md and the guard
+  # test tests/unit/ci/test_required_checks_gate.py.
   #
   # `if: always()` is mandatory: the heavy jobs skip on label / auto-merge PR
   # actions (they gate on changes-gate.code_event), so without always() this job

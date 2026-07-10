@@ -1,20 +1,25 @@
 # Required status checks
 
-This document is the single source of truth for **which CI checks block merges
-to `main`** and how that gating is wired. Branch protection itself lives on the
-GitHub side (out of git), so this doc plus the workflow definition are the
-in-repo record of the contract.
+This document records the CI contract and the last verified `main` ruleset.
+GitHub rulesets are authoritative and can change outside git; use the audit
+commands below before relying on this record for an operational merge decision.
 
 ## The contract
 
-A PR can merge to `main` only when these branch-protection **required status
+A PR can merge to `main` only when these direct ruleset **required status
 checks** are green:
 
 | Required context | Source |
 |------------------|--------|
-| `required-checks-gate` | `.github/workflows/_required.yml` (aggregator) |
-| `test (ubuntu-latest, 3.12, unit)` | `.github/workflows/test.yml` matrix |
-| `test (ubuntu-latest, 3.12, integration)` | `.github/workflows/test.yml` matrix |
+| `lint` | `.github/workflows/_required.yml` |
+| `unit-tests` | `.github/workflows/_required.yml` |
+| `integration-tests` | `.github/workflows/_required.yml` |
+| `security/dependency-scan` | `.github/workflows/_required.yml` |
+| `security/secrets-scan` | `.github/workflows/_required.yml` |
+| `build` | `.github/workflows/_required.yml` |
+| `schema-validation` | `.github/workflows/_required.yml` |
+| `deps/version-sync` | `.github/workflows/_required.yml` |
+| `pr-policy` | `.github/workflows/_required.yml` |
 
 Branch protection uses **`strict: false`**, and every active
 `required_status_checks` ruleset that applies to `main` must use
@@ -31,7 +36,7 @@ between two independently-green PRs — is rare and caught post-merge by CI on
 `main`, so it does not justify the churn. `strict: false` lets a green PR merge
 regardless of how far behind `main` it is.
 
-## Why a single aggregator gate
+## Aggregate workflow coverage
 
 `_required.yml` defines ~19 jobs (`lint`, `pr-policy`, `unit-tests`,
 `build`, the `security/*` scans, `license-scan`, etc.). Enumerating each one individually in
@@ -43,10 +48,11 @@ through.
 > required list (only the two `test` contexts were), so a PR with red lint
 > merged anyway. See issues #1313 / #1315.
 
-Instead, a single job — **`required-checks-gate`** — `needs:` every gating job
-and reports one aggregated result. Branch protection requires only that one
-context. Adding or renaming a gating job requires **no GitHub-side change**:
-just keep the gate's `needs:` list complete (enforced by a test — see below).
+`required-checks-gate` `needs:` every gating job and reports one aggregate
+workflow result. It is not itself a direct branch-protection context in the
+current ruleset. Keep its `needs:` list complete (enforced by a test — see
+below), and make an explicit GitHub-ruleset change whenever a new job should
+block merges.
 
 ### How the gate works
 
@@ -74,7 +80,9 @@ enabled. It must not block the independently reviewed manual bootstrap merge.
 
 1. Add the job to `.github/workflows/_required.yml` as usual.
 2. Add its job **key** to the `required-checks-gate` `needs:` list.
-3. That's it — no branch-protection change is needed.
+3. Decide whether it must block merges. If so, update the GitHub ruleset after
+   auditing the existing bindings; the aggregate gate does not update GitHub-side
+   enforcement on its own.
 
 The guard test `tests/unit/ci/test_required_checks_gate.py` fails if a job is
 added to `_required.yml` without being wired into the gate (excepting the

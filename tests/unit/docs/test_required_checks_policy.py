@@ -38,6 +38,25 @@ def test_strict_policy_has_operational_reason() -> None:
     assert "up to date" in text
 
 
+def test_policy_documents_live_ruleset_checks_and_advisory_aggregation() -> None:
+    """The in-repo policy distinguishes direct ruleset checks from aggregate coverage."""
+    text = _policy_text()
+
+    for context in (
+        "`lint`",
+        "`unit-tests`",
+        "`integration-tests`",
+        "`security/dependency-scan`",
+        "`security/secrets-scan`",
+        "`build`",
+        "`schema-validation`",
+        "`deps/version-sync`",
+        "`pr-policy`",
+    ):
+        assert context in text
+    assert "not itself a direct branch-protection context" in text
+
+
 def test_repair_patches_only_strict_mode() -> None:
     """Require the runbook to patch only the classic strict flag."""
     section = _reapply_section().lower()

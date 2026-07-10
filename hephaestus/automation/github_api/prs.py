@@ -252,6 +252,8 @@ def gh_pr_create(
                 "Ignoring auto_merge=True for PR #%s while the strict-review gate is unavailable",
                 pr_number,
             )
+        if not defer_auto_merge(pr_number, lambda args: _api._gh_call(args, check=False)):
+            raise RuntimeError(f"could not verify auto-merge disabled for new PR #{pr_number}")
 
         return pr_number
 

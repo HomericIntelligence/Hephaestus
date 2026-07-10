@@ -1446,6 +1446,11 @@ class TestGhListOpenIssues:
 _POLICY_BODY = "## Summary\nfoo\n\nCloses #1\n"
 
 
+def _unarmed_pr_state() -> Mock:
+    """Build the verified unarmed state returned after PR creation."""
+    return Mock(returncode=0, stdout=json.dumps({"state": "OPEN", "autoMergeRequest": None}))
+
+
 class TestGhPrCreate:
     """Tests for gh_pr_create function."""
 
@@ -1459,7 +1464,7 @@ class TestGhPrCreate:
         list_result.stdout = "[]"  # no existing PR on the head
         mock_create_result = Mock()
         mock_create_result.stdout = "https://github.com/owner/repo/pull/456"
-        mock_gh_call.side_effect = [list_result, mock_create_result]
+        mock_gh_call.side_effect = [list_result, mock_create_result, _unarmed_pr_state()]
 
         pr_number = gh_pr_create(
             branch="feature-branch",
@@ -1468,9 +1473,9 @@ class TestGhPrCreate:
         )
 
         assert pr_number == 456
-        # Pre-flight `pr list` (dedup) + the create call.
-        assert mock_gh_call.call_count == 2
-        assert "--base" in mock_gh_call.call_args.args[0]
+        # Pre-flight `pr list`, creation, then verified unarmed read-back.
+        assert mock_gh_call.call_count == 3
+        assert "--base" in mock_gh_call.call_args_list[1].args[0]
 
     @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
     @patch("hephaestus.automation.github_api._gh_call")
@@ -1480,7 +1485,7 @@ class TestGhPrCreate:
         list_result.stdout = "[]"  # no existing PR on the head
         mock_result = Mock()
         mock_result.stdout = "https://github.com/owner/repo/pull/789"
-        mock_gh_call.side_effect = [list_result, mock_result]
+        mock_gh_call.side_effect = [list_result, mock_result, _unarmed_pr_state()]
 
         pr_number = gh_pr_create(
             branch="feature-branch",
@@ -1490,8 +1495,8 @@ class TestGhPrCreate:
         )
 
         assert pr_number == 789
-        # Pre-flight dedup list + create; no auto-merge call.
-        assert mock_gh_call.call_count == 2
+        # Pre-flight dedup list + create + verified unarmed read-back.
+        assert mock_gh_call.call_count == 3
 
     @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
     @patch("hephaestus.automation.github_api._gh_call")
@@ -1500,7 +1505,8 @@ class TestGhPrCreate:
         mock_result = Mock()
         # URL without /pull/ pattern
         mock_result.stdout = "https://github.com/owner/repo/123"
-        mock_gh_call.return_value = mock_result
+        list_result = Mock(stdout="[]")
+        mock_gh_call.side_effect = [list_result, mock_result, _unarmed_pr_state()]
 
         pr_number = gh_pr_create(
             branch="feature-branch",
@@ -1570,7 +1576,7 @@ class TestGhPrCreate:
         list_result.stdout = json.dumps([{"number": 942, "state": "CLOSED"}])
         create_result = Mock()
         create_result.stdout = "https://github.com/owner/repo/pull/967"
-        mock_gh_call.side_effect = [list_result, create_result]
+        mock_gh_call.side_effect = [list_result, create_result, _unarmed_pr_state()]
 
         pr_number = gh_pr_create(
             branch="768-auto-impl",
@@ -1592,7 +1598,7 @@ class TestGhPrCreate:
         list_result.stdout = "[]"
         create_result = Mock()
         create_result.stdout = "https://github.com/owner/repo/pull/100"
-        mock_gh_call.side_effect = [list_result, create_result]
+        mock_gh_call.side_effect = [list_result, create_result, _unarmed_pr_state()]
 
         pr_number = gh_pr_create(
             branch="feature-branch",
@@ -1614,7 +1620,7 @@ class TestGhPrCreate:
         mock_create_result = Mock()
         mock_create_result.stdout = "https://github.com/owner/repo/pull/456"
 
-        mock_gh_call.side_effect = [list_result, mock_create_result]
+        mock_gh_call.side_effect = [list_result, mock_create_result, _unarmed_pr_state()]
 
         assert (
             gh_pr_create(
@@ -1625,7 +1631,7 @@ class TestGhPrCreate:
             )
             == 456
         )
-        assert mock_gh_call.call_count == 2
+        assert mock_gh_call.call_count == 3
 
     @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
     @patch("hephaestus.automation.github_api._gh_call")
@@ -1716,7 +1722,7 @@ class TestGhPrCreate:
 
         list_result = Mock(stdout="[]")  # no existing PR on the head
         mock_create_result = Mock(stdout="https://github.com/owner/repo/pull/42")
-        mock_gh_call.side_effect = [list_result, mock_create_result]
+        mock_gh_call.side_effect = [list_result, mock_create_result, _unarmed_pr_state()]
 
         pr_number = gh_pr_create(
             branch="feature-branch",
@@ -1724,8 +1730,8 @@ class TestGhPrCreate:
             body=_POLICY_BODY,
         )
         assert pr_number == 42
-        # Pre-flight dedup list + create (auto_merge defaults False).
-        assert mock_gh_call.call_count == 2
+        # Pre-flight dedup list + create + verified unarmed read-back.
+        assert mock_gh_call.call_count == 3
 
 
 class TestAssertBranchCommitsSignedApiFallback:

@@ -253,6 +253,7 @@ class TestStrictGateBootstrapWorkflow:
         assert "Incomplete PR state response" in text
         assert 'has("state")' in text
         assert 'has("autoMergeRequest")' in text
+        assert '.autoMergeRequest == null or (.autoMergeRequest | type == "object")' in text
         assert "auto-merge policy is terminal" in text
 
     def test_pr_policy_remains_independent_from_auto_merge_state(self) -> None:

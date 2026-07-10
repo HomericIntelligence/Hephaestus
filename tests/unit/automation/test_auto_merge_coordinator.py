@@ -185,6 +185,39 @@ def test_legacy_arm_and_wait_refuses_even_during_dry_run() -> None:
     assert result.error == "strict_gate_unavailable"
 
 
+def test_legacy_enable_auto_merge_contains_a_prearmed_pr_before_refusing() -> None:
+    """The retired armer keeps the same view-disable-readback containment contract."""
+    calls: list[list[str]] = []
+    responses = iter(
+        [
+            SimpleNamespace(
+                returncode=0,
+                stderr="",
+                stdout=json.dumps({"state": "OPEN", "autoMergeRequest": {"enabledAt": "now"}}),
+            ),
+            SimpleNamespace(returncode=0, stderr="", stdout=""),
+            SimpleNamespace(
+                returncode=0,
+                stderr="",
+                stdout=json.dumps({"state": "OPEN", "autoMergeRequest": None}),
+            ),
+        ]
+    )
+
+    def gh_call(args: list[str], **_kwargs: object) -> SimpleNamespace:
+        calls.append(args)
+        return next(responses)
+
+    coordinator = _coordinator(gh_call, lambda _pr_number: {"state": "OPEN"})
+
+    assert coordinator.enable_auto_merge(42) is False
+    assert calls == [
+        ["pr", "view", "42", "--json", "state,autoMergeRequest"],
+        ["pr", "merge", "42", "--disable-auto"],
+        ["pr", "view", "42", "--json", "state,autoMergeRequest"],
+    ]
+
+
 def test_legacy_coordinator_rejects_an_incomplete_open_pr_state() -> None:
     """A compatibility caller cannot treat an omitted arm field as unarmed."""
 

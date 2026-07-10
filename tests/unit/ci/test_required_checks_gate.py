@@ -26,8 +26,7 @@ REQUIRED_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "_required.yml"
 
 # Jobs intentionally NOT gated by required-checks-gate:
 #   - auto-merge-policy: advisory only (see its comment in _required.yml); must
-#     not block merges or it would contradict the state:implementation-go arming
-#     contract.
+#     not block the independently reviewed manual bootstrap merge during #2054.
 #   - required-checks-gate: the gate cannot depend on itself.
 EXEMPT_JOBS = frozenset({"auto-merge-policy", GATE_JOB})
 
