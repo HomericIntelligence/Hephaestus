@@ -1131,6 +1131,53 @@ class TestFullWalks:
         assert events[0].action is ZeroThreadNogoAction.RETRY_FRESH_REVIEW
         assert github.comments[1001][0].startswith("<!-- hephaestus-pr-review-zero-thread-nogo -->")
 
+    def test_zero_thread_nogo_full_walk_reinvokes_fresh_reviewer(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The anomaly clears stale state and runs a new review before counting GO."""
+        events: list[Any] = []
+        github = FakeStageGitHub(unresolved=[(0, 0)], by_severity=[(0, 0, 0)])
+        ctx = make_ctx(github=github, event_fn=events.append)
+        ctx.config.enable_follow_up = False
+        item = make_work_item(issue=27, pr=1001, state="ENTER")
+        pool = FakeWorkerPool()
+        first = ReviewVerdict(
+            grade="B",
+            verdict="NOGO",
+            raw=(
+                'Verdict: NOGO\n```json\n{"comments":[],"summary":"<private reviewer detail>"}\n```'
+            ),
+        )
+        pool.script(
+            JobResult(ok=True, value=first),
+            JobResult(ok=True, value='{"unaddressed": []}'),
+            JobResult(ok=True, value=_verdict("GO")),
+            JobResult(ok=True, value='{"unaddressed": []}'),
+        )
+
+        outcome = _drive(PrReviewStage(), item, ctx, pool)
+
+        assert outcome == StageOutcome(Disposition.ADVANCE, "GO with zero blocking threads")
+        assert [handle.job.descr for handle in pool.submitted] == [
+            "review",
+            "validate",
+            "review",
+            "validate",
+        ]
+        assert item.attempts["pr_review_iter"] == 1
+        assert item.payload["pr_review_round"] == 1
+        assert item.payload["review_error_retries"] == 0
+        assert events[0].action is ZeroThreadNogoAction.RETRY_FRESH_REVIEW
+        zero_thread_comments = [
+            body
+            for body in github.comments[1001]
+            if body.startswith("<!-- hephaestus-pr-review-zero-thread-nogo -->")
+        ]
+        assert len(zero_thread_comments) == 1
+        assert "&lt;private reviewer detail&gt;" in zero_thread_comments[0]
+        assert "<private reviewer detail>" not in zero_thread_comments[0]
+        assert not any(entry[0] == "mark_pr_implementation_no_go" for entry in github.mutation_log)
+
     def test_zero_thread_nogo_cap_fails_back_without_rounds_or_skip(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

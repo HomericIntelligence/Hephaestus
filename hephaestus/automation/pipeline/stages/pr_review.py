@@ -808,7 +808,6 @@ class PrReviewStage(Stage):
         return StageOutcome(Disposition.SKIP, "exhaustion")
 
     @staticmethod
-    @staticmethod
     def _is_zero_thread_nogo(verdict: Any, payload: dict[str, Any], total_unresolved: int) -> bool:
         """Return whether an explicit NOGO has no durable actionable threads."""
         return (

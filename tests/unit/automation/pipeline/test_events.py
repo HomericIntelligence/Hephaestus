@@ -1,6 +1,6 @@
 """Tests for closed stage-event schemas."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, cast
 
 import pytest
@@ -53,4 +53,51 @@ def test_encoder_rejects_foreign_event_with_raw_content() -> None:
         reviewer_summary: str
 
     with pytest.raises(TypeError, match="unsupported stage event"):
-        encode_stage_event(cast(Any, UnsafeEvent("token=secret private-endpoint")))
+        encode_stage_event(cast(Any, UnsafeEvent("untrusted reviewer data")))
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("repo", "", "repo"),
+        ("issue", 0, "issue"),
+        ("completed_rounds", -1, "completed_rounds"),
+        ("artifact_written", 1, "artifact_written"),
+    ],
+)
+def test_encoder_rejects_invalid_fixed_fields(field: str, value: Any, match: str) -> None:
+    """Reject malformed values before they reach the durable JSONL log."""
+    event = PrReviewZeroThreadNogoEvent(
+        repo="repo-a",
+        issue=1985,
+        pr=1984,
+        completed_rounds=0,
+        retry_attempt=1,
+        retry_cap=2,
+        action=ZeroThreadNogoAction.RETRY_FRESH_REVIEW,
+        artifact_written=True,
+    )
+
+    with pytest.raises(ValueError, match=match):
+        encode_stage_event(replace(event, **{field: value}))
+
+
+def test_encoder_rejects_action_retry_invariant_violations() -> None:
+    """Retry and fail-back actions must agree with the bounded retry counter."""
+    event = PrReviewZeroThreadNogoEvent(
+        repo="repo-a",
+        issue=1985,
+        pr=1984,
+        completed_rounds=0,
+        retry_attempt=1,
+        retry_cap=2,
+        action=ZeroThreadNogoAction.RETRY_FRESH_REVIEW,
+        artifact_written=True,
+    )
+
+    with pytest.raises(ValueError, match="exceeds retry cap"):
+        encode_stage_event(replace(event, retry_attempt=3))
+    with pytest.raises(ValueError, match="has not exceeded retry cap"):
+        encode_stage_event(
+            replace(event, action=ZeroThreadNogoAction.FAIL_BACK_AGENT_ERROR, retry_attempt=2)
+        )
