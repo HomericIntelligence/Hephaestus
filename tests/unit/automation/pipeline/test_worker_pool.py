@@ -60,9 +60,8 @@ def pool(
 def _agent_job(model: str = "opus-4-8", **overrides: object) -> AgentJob:
     """Build an AgentJob with test defaults.
 
-    Failing-path tests pass a unique ``model`` so each exercises its own
-    circuit breaker (breaker names include the model) and cannot trip a
-    breaker shared with other tests.
+    Failing-path tests pass a unique ``model`` to keep their invocation
+    details distinct while the runtime circuit breaker remains shared.
     """
     defaults: dict[str, object] = {
         "repo": "test/repo",
@@ -305,6 +304,30 @@ class TestWorkerPoolSubmitComplete:
 
 class TestAgentErrorHandling:
     """Tests for agent-job error handling paths."""
+
+    def test_agent_breaker_is_shared_across_models(
+        self,
+        pool: WorkerPool,
+    ) -> None:
+        """Agent model variants share the circuit breaker for their runtime."""
+        jobs = [_agent_job(model=model) for model in ("opus", "sonnet")]
+
+        with (
+            patch(f"{_WP}.resolve_agent", return_value="claude"),
+            patch(f"{_WP}.claude_invoke.invoke_claude_with_session", return_value=("", "")),
+            patch(
+                f"{_WP}.resilient_call",
+                side_effect=lambda function, **_kwargs: function(),
+            ) as call,
+        ):
+            for job in jobs:
+                result = pool._run_agent(job)
+                assert result.ok is True
+
+        assert [call_args.kwargs["circuit_breaker_name"] for call_args in call.call_args_list] == [
+            "agent:claude",
+            "agent:claude",
+        ]
 
     def test_circuit_breaker_open_returns_error(
         self,
