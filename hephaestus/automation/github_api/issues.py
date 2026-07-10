@@ -126,7 +126,9 @@ def gh_issue_comment(issue_number: int, body: str) -> None:
         raise RuntimeError(f"Failed to post comment to issue #{issue_number}: {e}") from e
 
 
-def _fetch_issue_comment_ids(issue_number: int) -> list[dict[str, Any]]:
+def _fetch_issue_comment_ids(
+    issue_number: int, repo: tuple[str, str] | None = None
+) -> list[dict[str, Any]]:
     """Return up to 100 most-recent issue comments as ``{databaseId, body}`` dicts.
 
     Unlike :func:`_fetch_issue_comments_graphql` in ``review_state`` (which
@@ -136,9 +138,20 @@ def _fetch_issue_comment_ids(issue_number: int) -> list[dict[str, Any]]:
     GraphQL is reversed to chronological order so "last match wins" matches
     the rest of the pipeline.
 
+    Args:
+        issue_number: GitHub issue number, meaningful only within *repo*.
+        repo: ``(owner, name)`` of the repository owning *issue_number*. When
+            omitted the repo is resolved from the ambient working directory,
+            which is correct only for single-repo callers. The multi-repo loop
+            MUST pass this explicitly: an issue number carries no repo, so
+            ambient resolution sent cross-repo lookups to the CWD repo,
+            404-ing (or, on number collision, silently reading an unrelated
+            issue) and tripping the ``github-api`` circuit breaker (#1795).
+
     Returns an empty list on any failure (callers then fall back to create).
+
     """
-    owner, name = _api.get_repo_info()
+    owner, name = repo if repo is not None else _api.get_repo_info()
     query = (
         "query($owner:String!,$name:String!,$number:Int!){"
         "  repository(owner:$owner,name:$name){"

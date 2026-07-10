@@ -134,6 +134,54 @@ class TestFetchPlannedFiles:
             assert _fetch_planned_files(103) == {"hephaestus/automation/address_review.py"}
 
 
+class TestAdmissionRepoScoping:
+    """Admission must look up plans in the OWNING repo, not the ambient CWD (#1795)."""
+
+    def test_fetch_planned_files_forwards_repo(self) -> None:
+        """``_fetch_planned_files`` threads ``repo`` down to the comment fetch."""
+        with patch(
+            "hephaestus.automation.pipeline.admission._fetch_issue_comment_ids",
+            return_value=[],
+        ) as mock_fetch:
+            from hephaestus.automation.pipeline.admission import _fetch_planned_files
+
+            _fetch_planned_files(188, repo=("HomericIntelligence", "Myrmidons"))
+
+        mock_fetch.assert_called_once_with(188, repo=("HomericIntelligence", "Myrmidons"))
+
+    def test_select_non_overlapping_resolves_repo_per_issue(self) -> None:
+        """Each issue is looked up in ITS OWN repo.
+
+        The implementation queue is global (keyed by stage, not repo), so a
+        single round can hold issues from different repositories. A batch-wide
+        repo would send some lookups to the wrong repo — the very bug in #1795.
+        """
+        repo_of = {
+            188: ("HomericIntelligence", "Myrmidons"),
+            121: ("HomericIntelligence", "ProjectNestor"),
+        }
+        with patch(
+            "hephaestus.automation.pipeline.admission._fetch_issue_comment_ids",
+            return_value=[],
+        ) as mock_fetch:
+            dispatch, defer = _select_non_overlapping([188, 121], repo_of=repo_of)
+
+        assert dispatch == [188, 121]
+        assert defer == []
+        seen = {call.args[0]: call.kwargs["repo"] for call in mock_fetch.call_args_list}
+        assert seen == repo_of
+
+    def test_select_non_overlapping_missing_repo_entry_is_ambient(self) -> None:
+        """Back-compat: an issue absent from ``repo_of`` forwards None (ambient)."""
+        with patch(
+            "hephaestus.automation.pipeline.admission._fetch_issue_comment_ids",
+            return_value=[],
+        ) as mock_fetch:
+            _select_non_overlapping([7])
+
+        assert mock_fetch.call_args.kwargs["repo"] is None
+
+
 class TestSelectNonOverlapping:
     """Greedy first-fit partitioning: defer issues with overlapping file sets."""
 
@@ -145,7 +193,7 @@ class TestSelectNonOverlapping:
         }
         with patch(
             "hephaestus.automation.pipeline.admission._fetch_planned_files",
-            side_effect=lambda i: plans[i],
+            side_effect=lambda i, repo=None: plans[i],
         ):
             dispatch, defer = _select_non_overlapping([1, 2])
         assert dispatch == [1]
@@ -159,7 +207,7 @@ class TestSelectNonOverlapping:
         }
         with patch(
             "hephaestus.automation.pipeline.admission._fetch_planned_files",
-            side_effect=lambda i: plans[i],
+            side_effect=lambda i, repo=None: plans[i],
         ):
             dispatch, defer = _select_non_overlapping([1, 2])
         assert dispatch == [1, 2]
@@ -174,7 +222,7 @@ class TestSelectNonOverlapping:
         }
         with patch(
             "hephaestus.automation.pipeline.admission._fetch_planned_files",
-            side_effect=lambda i: plans[i],
+            side_effect=lambda i, repo=None: plans[i],
         ):
             dispatch, defer = _select_non_overlapping([1, 2, 3])
         # #1 claims address_review.py; #2 unknown → dispatched; #3 overlaps #1 → deferred.
@@ -189,7 +237,7 @@ class TestSelectNonOverlapping:
         }
         with patch(
             "hephaestus.automation.pipeline.admission._fetch_planned_files",
-            side_effect=lambda i: plans[i],
+            side_effect=lambda i, repo=None: plans[i],
         ):
             dispatch, defer = _select_non_overlapping([1, 2])
         assert dispatch[0] == 1
@@ -204,7 +252,7 @@ class TestSelectNonOverlapping:
         }
         with patch(
             "hephaestus.automation.pipeline.admission._fetch_planned_files",
-            side_effect=lambda i: plans[i],
+            side_effect=lambda i, repo=None: plans[i],
         ):
             dispatch, defer = _select_non_overlapping([1, 2, 3])
         # #1 claims file1.py; #2 overlaps file1.py → defer; #3 claims file2.py → dispatch.
