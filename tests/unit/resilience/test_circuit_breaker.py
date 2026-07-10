@@ -24,6 +24,100 @@ def _clean_registry() -> None:
     reset_all_circuit_breakers()
 
 
+class TestCircuitBreakerIgnoredExceptions:
+    """``ignore`` excludes caller-classified exceptions from the failure count (#2048).
+
+    A circuit breaker exists to detect an unavailable SERVICE. Some exceptions
+    prove the opposite — the service answered, and answered correctly, about a
+    specific target (e.g. HTTP 404). Counting those toward the failure threshold
+    lets a handful of deterministic, per-target errors open the breaker and fail
+    every unrelated call behind it.
+    """
+
+    def test_ignored_exception_does_not_count_toward_threshold(self) -> None:
+        """N > threshold ignored failures never open the breaker."""
+        breaker = CircuitBreaker(
+            "ignore-probe", failure_threshold=2, ignore=lambda exc: isinstance(exc, KeyError)
+        )
+
+        def boom() -> None:
+            raise KeyError("404-ish: the service answered, the target is absent")
+
+        for _ in range(5):
+            with pytest.raises(KeyError):
+                breaker.call(boom)
+
+        assert breaker.state is CircuitBreakerState.CLOSED
+
+    def test_ignored_exception_still_propagates(self) -> None:
+        """Ignoring is about bookkeeping only — the caller still sees the error."""
+        breaker = CircuitBreaker("ignore-raise", ignore=lambda exc: isinstance(exc, KeyError))
+
+        with pytest.raises(KeyError, match="still raised"):
+            breaker.call(lambda: (_ for _ in ()).throw(KeyError("still raised")))
+
+    def test_non_ignored_exception_still_opens(self) -> None:
+        """Real failures are unaffected by the exclusion predicate."""
+        breaker = CircuitBreaker(
+            "ignore-mixed", failure_threshold=2, ignore=lambda exc: isinstance(exc, KeyError)
+        )
+
+        def down() -> None:
+            raise ConnectionError("service unreachable")
+
+        for _ in range(2):
+            with pytest.raises(ConnectionError):
+                breaker.call(down)
+
+        assert breaker.state is CircuitBreakerState.OPEN
+
+    def test_ignored_exception_does_not_reset_failure_count(self) -> None:
+        """An ignored error is neither a success nor a failure.
+
+        Recording a *success* instead would zero the accumulated failure count
+        and erase a genuine outage signal that was building.
+        """
+        breaker = CircuitBreaker(
+            "ignore-nosuccess", failure_threshold=2, ignore=lambda exc: isinstance(exc, KeyError)
+        )
+
+        with pytest.raises(ConnectionError):
+            breaker.call(lambda: (_ for _ in ()).throw(ConnectionError("down")))
+        with pytest.raises(KeyError):  # must NOT clear the failure above
+            breaker.call(lambda: (_ for _ in ()).throw(KeyError("404")))
+        with pytest.raises(ConnectionError):
+            breaker.call(lambda: (_ for _ in ()).throw(ConnectionError("down")))
+
+        assert breaker.state is CircuitBreakerState.OPEN
+
+    def test_ignored_exception_does_not_reopen_half_open_breaker(self) -> None:
+        """In HALF_OPEN a single failure re-opens; an ignored error must not."""
+        breaker = CircuitBreaker(
+            "ignore-halfopen",
+            failure_threshold=1,
+            recovery_timeout=0.0,  # immediately eligible for HALF_OPEN
+            ignore=lambda exc: isinstance(exc, KeyError),
+        )
+        with pytest.raises(ConnectionError):
+            breaker.call(lambda: (_ for _ in ()).throw(ConnectionError("down")))
+        assert breaker.state is CircuitBreakerState.HALF_OPEN  # recovery_timeout=0
+
+        with pytest.raises(KeyError):
+            breaker.call(lambda: (_ for _ in ()).throw(KeyError("404")))
+
+        assert breaker.state is CircuitBreakerState.HALF_OPEN  # not re-OPENed
+
+    def test_default_ignores_nothing(self) -> None:
+        """Back-compat: no ``ignore`` predicate → every exception counts."""
+        breaker = CircuitBreaker("ignore-default", failure_threshold=2)
+
+        for _ in range(2):
+            with pytest.raises(KeyError):
+                breaker.call(lambda: (_ for _ in ()).throw(KeyError("x")))
+
+        assert breaker.state is CircuitBreakerState.OPEN
+
+
 class TestCircuitBreakerStates:
     """Tests for circuit breaker state transitions."""
 

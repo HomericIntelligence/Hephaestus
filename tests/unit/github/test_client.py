@@ -9,9 +9,13 @@ import pytest
 
 from hephaestus.github.client import (
     _GH_BREAKER,
+    _NON_TRANSIENT_PATTERNS,
+    _PER_TARGET_PATTERNS,
     ClaudeUsageCapError,
     GitHubRateLimitError,
     GitHubUnavailableError,
+    _is_per_target_error,
+    _is_service_failure,
     gh_call,
     gh_cli_timeout,
 )
@@ -23,6 +27,146 @@ def _reset_breaker() -> Generator[None, None, None]:
     _GH_BREAKER.reset()
     yield
     _GH_BREAKER.reset()
+
+
+def _gh_error(stderr: str) -> subprocess.CalledProcessError:
+    """Build a CalledProcessError shaped like a failed ``gh`` invocation."""
+    return subprocess.CalledProcessError(1, ["gh"], output="", stderr=stderr)
+
+
+class TestPerTargetPatternInvariants:
+    """``_PER_TARGET_PATTERNS`` must stay a strict subset of the non-transient set."""
+
+    def test_every_per_target_pattern_is_also_non_transient(self) -> None:
+        """A per-target error must already be non-transient, else it gets retried.
+
+        The two lists answer different questions — "should we retry?" and "does
+        this indicate an outage?" — but per-target implies non-transient. If a
+        pattern lands only in the per-target list it would be retried 6x AND
+        excluded from the breaker: the worst of both.
+        """
+        non_transient = {p.pattern for p in _NON_TRANSIENT_PATTERNS}
+        per_target = {p.pattern for p in _PER_TARGET_PATTERNS}
+        assert per_target <= non_transient, per_target - non_transient
+
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            "gh: HTTP 401: Bad credentials",
+            "gh: HTTP 403: Forbidden",
+            "gh: HTTP 422: Unprocessable Entity",
+            "gh: HTTP 400: Bad Request",
+            "Resource not accessible by personal access token",
+        ],
+    )
+    def test_credential_and_request_errors_are_not_per_target(self, stderr: str) -> None:
+        """These recur on every later call, so they must still open the breaker."""
+        assert not _is_per_target_error(stderr)
+        assert _is_service_failure(_gh_error(stderr))
+
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            "gh: Could not resolve to an Issue with the number of 188.",
+            "gh: Not Found (HTTP 404)",
+            "no checks reported on the 'main' branch",
+            "Body is not editable",
+        ],
+    )
+    def test_target_errors_are_not_service_failures(self, stderr: str) -> None:
+        assert _is_per_target_error(stderr)
+        assert not _is_service_failure(_gh_error(stderr))
+
+    def test_non_calledprocess_exceptions_are_service_failures(self) -> None:
+        """A ConnectionError carries no stderr — assume the service is down."""
+        assert _is_service_failure(ConnectionError("reset by peer"))
+        assert _is_service_failure(TimeoutError())
+
+
+class TestBreakerIgnoresPerTargetErrors:
+    """Deterministic per-target errors must not open the breaker (#2048).
+
+    Regression for the #1795 cascade: six wrong-repo ``Could not resolve`` 404s
+    opened the ``github-api`` breaker (``failure_threshold=5``), poisoning 236
+    items across 9 repos and aborting the run with ``agent_jobs=0``.
+
+    A 404 proves the service is UP and answering correctly about a target that
+    does not exist. An auth failure (401/403) proves every later call will fail
+    too, so that must still open the breaker.
+    """
+
+    PER_TARGET: tuple[str, ...] = (
+        "gh: Could not resolve to an Issue with the number of 188.",
+        "gh: Not Found (HTTP 404)",
+        "no checks reported on the 'main' branch",
+        "Body is not editable",
+    )
+
+    @pytest.mark.parametrize("stderr", PER_TARGET)
+    @patch("hephaestus.github.client._gh_call_impl")
+    def test_per_target_errors_never_open_breaker(self, mock_impl: Mock, stderr: str) -> None:
+        """Well past failure_threshold=5, the breaker stays closed."""
+        mock_impl.side_effect = _gh_error(stderr)
+
+        for _ in range(10):
+            with pytest.raises(subprocess.CalledProcessError):
+                gh_call(["api", "graphql"], log_on_error=False)
+
+        # The 11th call must still reach gh, not be short-circuited.
+        with pytest.raises(subprocess.CalledProcessError):
+            gh_call(["api", "graphql"], log_on_error=False)
+        assert mock_impl.call_count == 11
+
+    @patch("hephaestus.github.client._gh_call_impl")
+    def test_swallowed_404s_do_not_poison_a_later_unrelated_call(self, mock_impl: Mock) -> None:
+        """The exact #1795 shape: caller catches each 404; a later call still succeeds.
+
+        Catching the exception never prevented the breaker from counting it,
+        because the breaker records the failure before the caller's ``except``
+        runs. This is what turned 6 bad lookups into a whole-run abort.
+        """
+        ok = Mock(returncode=0, stdout="{}", stderr="")
+        mock_impl.side_effect = [
+            *[_gh_error("gh: Could not resolve to an Issue with the number of 188.")] * 6,
+            ok,
+        ]
+
+        for _ in range(6):
+            with pytest.raises(subprocess.CalledProcessError):
+                gh_call(["api", "graphql"], log_on_error=False)
+
+        assert gh_call(["api", "graphql"]) is ok  # would raise GitHubUnavailableError before
+
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            "gh: HTTP 401: Bad credentials",
+            "gh: HTTP 403: Forbidden",
+        ],
+    )
+    @patch("hephaestus.github.client._gh_call_impl")
+    def test_auth_errors_still_open_breaker(self, mock_impl: Mock, stderr: str) -> None:
+        """401/403 are per-credential, not per-target: every later call fails too."""
+        mock_impl.side_effect = _gh_error(stderr)
+
+        for _ in range(5):
+            with pytest.raises(subprocess.CalledProcessError):
+                gh_call(["api", "graphql"], log_on_error=False)
+
+        with pytest.raises(GitHubUnavailableError):
+            gh_call(["api", "graphql"], log_on_error=False)
+
+    @patch("hephaestus.github.client._gh_call_impl")
+    def test_transient_failures_still_open_breaker(self, mock_impl: Mock) -> None:
+        """A genuinely unavailable service must still trip the breaker."""
+        mock_impl.side_effect = ConnectionError("connection reset by peer")
+
+        for _ in range(5):
+            with pytest.raises(ConnectionError):
+                gh_call(["api", "graphql"], log_on_error=False)
+
+        with pytest.raises(GitHubUnavailableError):
+            gh_call(["api", "graphql"], log_on_error=False)
 
 
 class TestGhCallCircuitBreaker:

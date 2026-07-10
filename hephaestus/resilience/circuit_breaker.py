@@ -96,6 +96,8 @@ class CircuitBreaker:
         half_open_max_calls: Maximum number of calls admitted concurrently in-flight
             while HALF_OPEN; each call releases its slot on completion (success or failure)
         success_threshold: Consecutive successes in HALF_OPEN required to close
+        ignore: Optional predicate deciding whether an exception is evidence of
+            service unavailability. See :meth:`call`.
 
     Example:
         >>> cb = CircuitBreaker("api", failure_threshold=3, recovery_timeout=30)
@@ -110,6 +112,8 @@ class CircuitBreaker:
         recovery_timeout: float = 60.0,
         half_open_max_calls: int = 1,
         success_threshold: int = 1,
+        *,
+        ignore: Callable[[BaseException], bool] | None = None,
     ) -> None:
         """Initialize circuit breaker.
 
@@ -120,6 +124,13 @@ class CircuitBreaker:
             half_open_max_calls: Maximum number of calls admitted concurrently
                 in-flight while HALF_OPEN; each call releases its slot on completion
             success_threshold: Consecutive successes in HALF_OPEN to close
+            ignore: Predicate returning True for exceptions that do NOT indicate
+                the service is unavailable (e.g. an HTTP 404 — the service
+                answered, and answered correctly). Such exceptions still
+                propagate to the caller but are neither counted as a failure nor
+                recorded as a success, so a burst of them can never open the
+                breaker and can never clear an accumulating outage signal.
+                Defaults to ignoring nothing.
 
         """
         self.name = name
@@ -127,6 +138,7 @@ class CircuitBreaker:
         self.recovery_timeout = recovery_timeout
         self.half_open_max_calls = half_open_max_calls
         self.success_threshold = success_threshold
+        self._ignore = ignore
 
         self._state = CircuitBreakerState.CLOSED
         self._failure_count = 0
@@ -164,6 +176,12 @@ class CircuitBreaker:
             *args: Positional arguments for func
             **kwargs: Keyword arguments for func
 
+        An exception matched by the ``ignore`` predicate is re-raised without
+        being recorded as either a failure or a success: the service demonstrably
+        responded, so it is not evidence of unavailability, but the call did not
+        succeed either. Recording it as a success would zero an accumulating
+        failure count and mask a real outage.
+
         Returns:
             Result of func(*args, **kwargs)
 
@@ -195,12 +213,26 @@ class CircuitBreaker:
         # Execute outside the lock to avoid blocking other threads
         try:
             result = func(*args, **kwargs)
-        except Exception:
+        except Exception as exc:
+            if self._ignore is not None and self._ignore(exc):
+                self._release_half_open_slot()
+                raise
             self._record_failure()
             raise
 
         self._record_success()
         return result
+
+    def _release_half_open_slot(self) -> None:
+        """Give back a HALF_OPEN slot without scoring the call either way.
+
+        An ignored exception must not hold its probe slot: leaking it would
+        exhaust ``half_open_max_calls`` and wedge the breaker in HALF_OPEN,
+        rejecting every later probe with ``HALF_OPEN_EXHAUSTED``.
+        """
+        with self._lock:
+            if self._state == CircuitBreakerState.HALF_OPEN and self._half_open_calls > 0:
+                self._half_open_calls -= 1
 
     def _record_success(self) -> None:
         """Record a successful call (releases this call's half-open slot)."""
@@ -265,6 +297,8 @@ def get_circuit_breaker(
     recovery_timeout: float = 60.0,
     half_open_max_calls: int = 1,
     success_threshold: int = 1,
+    *,
+    ignore: Callable[[BaseException], bool] | None = None,
 ) -> CircuitBreaker:
     """Get or create a named circuit breaker (singleton per name).
 
@@ -275,6 +309,8 @@ def get_circuit_breaker(
         half_open_max_calls: Maximum concurrent in-flight calls in HALF_OPEN state
             (only used on creation)
         success_threshold: Successes in HALF_OPEN to close (only used on creation)
+        ignore: Predicate for exceptions that are not evidence of service
+            unavailability (only used on creation). See :meth:`CircuitBreaker.call`.
 
     Returns:
         CircuitBreaker instance for the given name
@@ -288,6 +324,7 @@ def get_circuit_breaker(
                 recovery_timeout=recovery_timeout,
                 half_open_max_calls=half_open_max_calls,
                 success_threshold=success_threshold,
+                ignore=ignore,
             )
         return _registry[name]
 
