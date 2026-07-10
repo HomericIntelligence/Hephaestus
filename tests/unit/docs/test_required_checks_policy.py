@@ -48,11 +48,14 @@ def test_runbook_audits_rulesets_and_preserves_bindings() -> None:
     section = _reapply_section()
 
     required_markers = (
+        'state_dir=$(mktemp -d "${TMPDIR:-/tmp}/projecthephaestus-issue-2025.XXXXXX")',
         "rulesets?includes_parents=true&targets=branch",
         "rules/branches/$branch",
         "gh ruleset check --default",
         "app_id",
         "integration_id",
+        '($status_rules | length) > 0',
+        'has(\"context\") and has(\"integration_id\")',
         "cmp -s",
     )
     for marker in required_markers:

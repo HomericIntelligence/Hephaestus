@@ -82,8 +82,8 @@ set -euo pipefail
 
 repo=HomericIntelligence/ProjectHephaestus
 branch=main
-state_dir=/tmp/projecthephaestus-issue-2025
-install -d -m 700 "$state_dir"
+umask 077
+state_dir=$(mktemp -d "${TMPDIR:-/tmp}/projecthephaestus-issue-2025.XXXXXX")
 
 gh api \
   -H "Accept: application/vnd.github+json" \
@@ -104,9 +104,11 @@ gh ruleset check --default --repo "$repo"
 ```
 
 The branch snapshot must expose every classic check's `app_id`. The applicable
-rules snapshot retains every ruleset check's optional `integration_id`. Abort
-rather than rebuilding either array when the response shape or effective
-contract is unexpected:
+rules snapshot retains every ruleset check's optional `integration_id`. The
+classic surface intentionally names the three aggregator contexts, while a
+ruleset may name the individual jobs that feed that gate. Abort rather than
+rebuilding either array when the response shape or effective contract is
+unexpected:
 
 ```bash
 expected='[
@@ -123,17 +125,15 @@ jq -e --argjson expected "$expected" '
 
 jq -e --argjson expected "$expected" '
   [.[] | select(.type == "required_status_checks")] as $status_rules
-  | all(
+  | ($status_rules | length) > 0
+    and all(
       $status_rules[];
       .parameters.strict_required_status_checks_policy == true
-    )
-    and (
-      (
-        $expected
-        + [$status_rules[].parameters.required_status_checks[].context]
-        | unique
-        | sort
-      ) == ($expected | sort)
+      and (.parameters.required_status_checks | type) == "array"
+      and all(
+        .parameters.required_status_checks[];
+        has("context") and has("integration_id")
+      )
     )
 ' "$state_dir/rules.before.json"
 ```
