@@ -13,6 +13,7 @@ from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from .coordinator import PipelineConfig, run_pipeline
     from .jobs import GIT_OPS, AgentJob, BuildTestJob, GitJob, JobHandle, JobResult
     from .queues import CompletionQueue, StageQueue
     from .routing import (
