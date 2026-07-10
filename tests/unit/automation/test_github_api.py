@@ -2082,6 +2082,60 @@ class TestGhPrChecks:
         assert exc_info.value.returncode == 128
 
 
+class TestFetchIssueCommentIdsRepoScoping:
+    """``_fetch_issue_comment_ids`` must query the OWNING repo, not the ambient CWD (#1795).
+
+    The multi-repo loop calls this helper with issue numbers belonging to other
+    repositories. Resolving the repo from the process CWD sent every query to
+    ProjectHephaestus, producing 404s (or, where issue numbers collide, silently
+    reading an unrelated issue/PR in the wrong repo).
+    """
+
+    @staticmethod
+    def _graphql_vars(argv: list[str]) -> dict[str, str]:
+        """Extract the ``-F key=value`` GraphQL variables from a gh argv."""
+        return dict(argv[i + 1].split("=", 1) for i, tok in enumerate(argv) if tok == "-F")
+
+    @patch("hephaestus.automation.github_api.get_repo_info")
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_explicit_repo_is_queried_not_ambient_cwd(
+        self, mock_gh_call: Any, mock_repo_info: Any
+    ) -> None:
+        """An explicit ``repo=`` scopes the query and bypasses ambient resolution."""
+        mock_repo_info.return_value = ("HomericIntelligence", "ProjectHephaestus")
+        mock_gh_call.return_value = Mock(
+            stdout=json.dumps({"data": {"repository": {"issue": {"comments": {"nodes": []}}}}})
+        )
+
+        _github_api_module._fetch_issue_comment_ids(188, repo=("HomericIntelligence", "Myrmidons"))
+
+        argv = mock_gh_call.call_args[0][0]
+        variables = self._graphql_vars(argv)
+        assert variables["owner"] == "HomericIntelligence"
+        assert variables["name"] == "Myrmidons", (
+            "query must target the owning repo, not the ambient CWD repo"
+        )
+        assert variables["number"] == "188"
+        mock_repo_info.assert_not_called()
+
+    @patch("hephaestus.automation.github_api.get_repo_info")
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_omitted_repo_falls_back_to_ambient_cwd(
+        self, mock_gh_call: Any, mock_repo_info: Any
+    ) -> None:
+        """Back-compat: no ``repo=`` keeps the historical ambient behaviour."""
+        mock_repo_info.return_value = ("HomericIntelligence", "ProjectHephaestus")
+        mock_gh_call.return_value = Mock(
+            stdout=json.dumps({"data": {"repository": {"issue": {"comments": {"nodes": []}}}}})
+        )
+
+        _github_api_module._fetch_issue_comment_ids(42)
+
+        variables = self._graphql_vars(mock_gh_call.call_args[0][0])
+        assert variables["name"] == "ProjectHephaestus"
+        mock_repo_info.assert_called_once()
+
+
 class TestUpsertAndDeleteComment:
     """Idempotent plan/review comment lifecycle (one comment per role)."""
 

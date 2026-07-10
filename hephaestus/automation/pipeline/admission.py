@@ -36,7 +36,7 @@ from hephaestus.automation.github_api import (
 from hephaestus.automation.protocol import PLAN_COMMENT_MARKER
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from hephaestus.automation.models import IssueInfo
 
@@ -84,7 +84,7 @@ def _parse_planned_files(plan_body: str) -> set[str]:
     return files
 
 
-def _fetch_planned_files(issue: int) -> set[str] | None:
+def _fetch_planned_files(issue: int, repo: tuple[str, str] | None = None) -> set[str] | None:
     """Return the file set an issue's plan claims, or None if unknown.
 
     None (no plan comment / empty fetch) → caller fails OPEN and dispatches the
@@ -94,19 +94,24 @@ def _fetch_planned_files(issue: int) -> set[str] | None:
 
     Args:
         issue: GitHub issue number.
+        repo: ``(owner, name)`` of the repo owning *issue*. Required in the
+            multi-repo loop; omitting it resolves the repo from the ambient
+            working directory (#1795).
 
     Returns:
         The parsed plan file set, or None when no plan comment is present.
 
     """
-    for comment in _fetch_issue_comment_ids(issue):
+    for comment in _fetch_issue_comment_ids(issue, repo=repo):
         body = str(comment.get("body", ""))
         if body.startswith(PLAN_COMMENT_MARKER):
             return _parse_planned_files(body)
     return None
 
 
-def _select_non_overlapping(issues: list[int]) -> tuple[list[int], list[int]]:
+def _select_non_overlapping(
+    issues: list[int], repo_of: Mapping[int, tuple[str, str]] | None = None
+) -> tuple[list[int], list[int]]:
     """Partition *issues* into (dispatch_now, defer_next_round).
 
     Greedy first-fit in the given order: an issue whose parsed plan file set
@@ -119,16 +124,22 @@ def _select_non_overlapping(issues: list[int]) -> tuple[list[int], list[int]]:
 
     Args:
         issues: The issue numbers to partition, in dispatch-priority order.
+        repo_of: Maps each issue number to the ``(owner, name)`` that owns it.
+            Resolved PER ISSUE, not per batch: the implementation queue is keyed
+            by stage rather than by repo, so one round can legitimately hold
+            issues from several repositories. An issue missing from the mapping
+            falls back to ambient-CWD resolution (#1795).
 
     Returns:
         A ``(dispatch, defer)`` tuple of issue-number lists (order preserved).
 
     """
+    repo_of = repo_of or {}
     claimed: set[str] = set()
     dispatch: list[int] = []
     defer: list[int] = []
     for issue in issues:
-        planned = _fetch_planned_files(issue)
+        planned = _fetch_planned_files(issue, repo=repo_of.get(issue))
         if planned and (planned & claimed):
             LOG.info(
                 "issue #%s deferred: plan files %s overlap in-flight peers",
