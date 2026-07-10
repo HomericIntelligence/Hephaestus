@@ -540,13 +540,13 @@ Agent(description="Create skill C", prompt="...skill C content...")
    #    Do NOT add a markdownlint-disable comment to silence an error — the forbid-suppressions
    #    gate rejects blanket disables, and the defect is real. Fix the markdown instead.
 
-   # 2) plugin validator — note this lints the ENTIRE skills/ dir, not just your file (see below)
-   python3 scripts/validate_plugins.py
-
-   # 3) marketplace regression — proves the generated artifact matches the skill files
+   # 2) marketplace regression — proves the generated artifact matches the skill files
    #    in the target repository. This is the invariant that catches stale metadata.
    python3 -m pytest tests/test_generate_marketplace.py -q
    #    Must exit 0 before the artifact is committed.
+
+   # 3) plugin validator — note this lints the ENTIRE skills/ dir, not just your file (see below)
+   python3 scripts/validate_plugins.py
 
    # 4) pre-commit — runs the hooks CI also relies on (ruff, ruff-format, signed-commit check)
    pre-commit run --files "skills/<name>.md" "skills/<name>.history" \

@@ -81,7 +81,7 @@ def test_learn_skill_requires_marketplace_regression_and_atomic_staging() -> Non
     assert generator_command in canonical
     assert marketplace_command in canonical
     assert canonical.index(generator_command) < canonical.index(marketplace_command)
-    assert validator_command in canonical
+    assert canonical.index(marketplace_command) < canonical.index(validator_command)
     assert canonical.count("git add .claude-plugin/marketplace.json") >= 2
     assert ".claude-plugin/marketplace.json 2>/dev/null || true" not in canonical
     assert 'pre-commit run --files "skills/<name>.md" "skills/<name>.history" \\' in canonical
