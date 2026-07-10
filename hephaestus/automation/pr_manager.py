@@ -723,6 +723,7 @@ def pr_has_implementation_state_label(pr_number: int) -> tuple[bool, bool]:
 
 def enable_auto_merge_after_implementation_go(pr_number: int) -> None:
     """Refuse legacy auto-merge arming until #2055 supplies strict proof."""
+    ensure_pr_auto_merge_deferred(pr_number)
     raise RuntimeError(
         f"refusing to arm auto-merge for PR #{pr_number}: strict-review gate unavailable"
     )
@@ -872,8 +873,8 @@ def ensure_pr_created(
         issue_number: Issue number
         branch_name: Git branch name
         worktree_path: Path to worktree
-        auto_merge: Whether the caller eventually wants auto-merge. The PR is
-            still created with auto-merge disabled until implementation review GO.
+        auto_merge: Deprecated compatibility flag; auto-merge remains disabled
+            until #2055 supplies a head-bound strict-review proof.
         status_tracker: StatusTracker instance for slot updates (optional)
         slot_id: Worker slot ID for status updates
         agent: Selected implementation agent for generated PR metadata.
@@ -944,8 +945,8 @@ def ensure_pr_created(
         if pr_data and len(pr_data) > 0:
             pr_number = cast(int, pr_data[0]["number"])
             logger.info("PR #%s already exists", pr_number)
-    except Exception as e:  # broad catch: gh CLI + JSON parsing; fallback is to create PR
-        logger.debug("Could not find existing PR: %s", e)
+    except Exception as e:
+        raise RuntimeError(f"could not verify existing PR state for branch {branch_name!r}") from e
     if pr_number is not None:
         ensure_pr_auto_merge_deferred(pr_number)
         return pr_number
@@ -954,7 +955,7 @@ def ensure_pr_created(
     logger.warning("No PR found for branch %s, creating one...", branch_name)
     if auto_merge:
         logger.info(
-            "Deferring auto-merge for branch %s until implementation review marks the PR GO",
+            "Keeping auto-merge disabled for branch %s until the strict-review gate exists",
             branch_name,
         )
     pr_number = create_pr(

@@ -133,9 +133,8 @@ def _find_open_pr_for_head(branch: str) -> int | None:
 
     Used by :func:`gh_pr_create` as an idempotency guard so a re-run on a
     branch that already has an open PR reuses it rather than creating a
-    duplicate (issue #1018). Any failure to query or parse (no PRs, malformed
-    output, transient error) is treated as "no open PR" so PR creation can
-    proceed normally.
+    duplicate (issue #1018). A query or parse failure raises: treating an
+    unknown result as no PR could leave a pre-existing auto-merge arm uncontained.
 
     Args:
         branch: Head branch name to look up.
@@ -150,8 +149,9 @@ def _find_open_pr_for_head(branch: str) -> int | None:
         )
         prs = json.loads(result.stdout or "[]")
     except (subprocess.CalledProcessError, json.JSONDecodeError, TypeError) as e:
-        _api.logger.debug("Open-PR lookup failed for head %s (treating as none): %s", branch, e)
-        return None
+        raise RuntimeError(f"could not verify existing PR state for head {branch!r}") from e
+    if not isinstance(prs, list):
+        raise RuntimeError(f"could not verify existing PR state for head {branch!r}")
     for pr in prs:
         if str(pr.get("state", "")).upper() == "OPEN":
             return cast(int, pr["number"])

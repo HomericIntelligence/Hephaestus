@@ -1,12 +1,9 @@
 """Guard tests for the required-checks-gate aggregator job.
 
-The ``required-checks-gate`` job in ``.github/workflows/_required.yml`` is the
-single branch-protection required status check for that workflow (see
-``docs/ci/required-checks.md``). Branch protection requires only that one
-context, so the gate MUST fan in every gating job — if a new job is added to
-``_required.yml`` without being wired into the gate's ``needs:`` list, it would
-silently stop blocking merges (exactly the failure mode that let a red ``lint``
-job reach ``main``; issue #1315).
+The ``required-checks-gate`` job in ``.github/workflows/_required.yml`` is an
+aggregate workflow signal (see ``docs/ci/required-checks.md``). It does not
+replace the repository ruleset's direct required contexts, but it MUST fan in
+every gating job so the full workflow remains auditable.
 
 These tests turn that structural invariant into a unit-test failure.
 """
@@ -58,7 +55,7 @@ class TestRequiredChecksGate:
         """Every job except the exempt set must be in the gate's needs list.
 
         This is the core invariant: add a job to _required.yml and you MUST add
-        it to required-checks-gate.needs, or it stops gating merges.
+        it to required-checks-gate.needs, or it disappears from aggregate coverage.
         """
         missing = _unwired_jobs(workflow, EXEMPT_JOBS)
         assert not missing, (

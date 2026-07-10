@@ -185,6 +185,19 @@ def test_legacy_arm_and_wait_refuses_even_during_dry_run() -> None:
     assert result.error == "strict_gate_unavailable"
 
 
+def test_legacy_arm_and_wait_reports_failed_auto_merge_containment() -> None:
+    """The retired entry surfaces a failed disable/readback as a containment error."""
+    coordinator = _coordinator(
+        lambda _args, **_kwargs: SimpleNamespace(returncode=1, stdout="", stderr="failed"),
+        lambda _pr_number: {"state": "OPEN"},
+    )
+
+    result = coordinator.arm_and_wait_for_merge(issue_number=7, pr_number=42, acquired_slot=0)
+
+    assert result.success is False
+    assert result.error == "auto-merge containment failed for PR ProjectHephaestus#42"
+
+
 def test_legacy_enable_auto_merge_contains_a_prearmed_pr_before_refusing() -> None:
     """The retired armer keeps the same view-disable-readback containment contract."""
     calls: list[list[str]] = []

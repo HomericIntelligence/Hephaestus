@@ -1479,6 +1479,21 @@ class TestGhPrCreate:
 
     @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
     @patch("hephaestus.automation.github_api._gh_call")
+    def test_fresh_pr_creation_propagates_a_failed_auto_merge_readback(
+        self, mock_gh_call: Any, _mock_signed: Any
+    ) -> None:
+        """A fresh compatibility PR is not returned without verified containment."""
+        mock_gh_call.side_effect = [
+            Mock(stdout="[]"),
+            Mock(stdout="https://github.com/owner/repo/pull/456"),
+            Mock(returncode=0, stdout=json.dumps({"state": "OPEN"})),
+        ]
+
+        with pytest.raises(RuntimeError, match="could not verify auto-merge disabled"):
+            gh_pr_create(branch="feature-branch", title="Test PR", body=_POLICY_BODY)
+
+    @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
+    @patch("hephaestus.automation.github_api._gh_call")
     def test_pr_creation_without_auto_merge(self, mock_gh_call: Any, _mock_signed: Any) -> None:
         """Test PR creation without auto-merge."""
         list_result = Mock()
