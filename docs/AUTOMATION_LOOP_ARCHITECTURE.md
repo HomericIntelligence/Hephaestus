@@ -30,30 +30,29 @@ merge. This is a temporary safety state, not the intended steady-state route.
 
 ```mermaid
 flowchart LR
-  repo --> planning --> plan_review --> implementation --> pr_review --> ci --> merge_wait --> finished
+  repo --> planning --> plan_review --> implementation --> pr_review --> finished
+  implementation -- "legacy implementation-GO" --> ci --> merge_wait --> finished
   plan_review -- "NOGO (plan_review_iter 3 / plan_cycles 2)" --> planning
   implementation -- "agent err" --> implementation
   pr_review -- "agent_error" --> implementation
+  pr_review -- "internal GO: strict gate unavailable" --> finished
   ci -- "fix (in-stage)" --> ci
   ci -- "fix_exhausted" --> implementation
-  merge_wait -- "FAILING → ci_red" --> ci
-  merge_wait -- "DIRTY → rebase (in-stage)" --> merge_wait
-  merge_wait -- "BLOCKED → blocked_exhausted" --> pr_review
 ```
 
 ### ASCII
 
 ```
-repo ─> planning ─> plan_review ─> implementation ─> pr_review ─> ci ─> merge_wait ─> finished
-             ^             │              ^   ^           │  ^      │  ^       │
-             └─── NOGO ────┘              │   └ agent err ┘  └ fix ─┘  └ DIRTY→rebase (in-stage),
-                (iter 3, cycles 2)        └── fix_exhausted             FAILING→ci, BLOCKED→pr_review
+repo ─> planning ─> plan_review ─> implementation ─> pr_review ─> finished
+             ^             │              ^   ^              │
+             └─── NOGO ────┘              │   └ agent err ───┘ internal GO: strict gate unavailable
+                (iter 3, cycles 2)        └── legacy implementation-GO ─> ci ─> merge_wait ─> finished
 ```
 
-The diagrams show the primary flow and the most common regressions only. The
-complete edge set — including implementation → plan_review (`plan_not_go`),
-implementation → ci (`already_implementation_go_pr`), and ci → pr_review
-(`not_implementation_go`) — is normative in the ROUTES table below.
+The diagrams show the active #2054 bootstrap flow. The complete edge set —
+including implementation → plan_review (`plan_not_go`) and the legacy
+implementation → ci (`already_implementation_go_pr`) containment route — is
+normative in the ROUTES table below.
 
 ## Coordinator / worker contract
 
@@ -239,24 +238,27 @@ per-repo in-flight cap.
 ### 5. pr_review
 
 **States**: ENTER → REVIEW_WAIT → VALIDATE_WAIT → POST → DIFFICULTY_WAIT →
-ADDRESS_WAIT → PUSH_WAIT → EVAL → (loop) → FOLLOWUP_WAIT.
+ADDRESS_WAIT → PUSH_WAIT → EVAL → (loop). #2054 does not run follow-up after
+an internal GO because the PR is not eligible to merge.
 
 **Steps**:
 
-1. [W:A] **Inline review step** — `prompts/pr_review.py:104
+1. [M] **ENTER**: verify auto-merge is disabled before any review work. A
+   failed read-back finishes `auto_merge_disable_failed`.
+2. [W:A] **Inline review step** — `prompts/pr_review.py:104
    get_pr_review_analysis_prompt` via `pr_reviewer.review_pr_inline`; output
    is review body.
-2. [W:A] **Validation step** — `prompts/pr_review.py:232
+3. [W:A] **Validation step** — `prompts/pr_review.py:232
    get_review_validation_prompt`.
-3. [M] **POST**: post surviving review threads and comments to PR [durable].
-4. [W:A] **Difficulty step** — `prompts/pr_review.py:310
+4. [M] **POST**: post surviving review threads and comments to PR [durable].
+5. [W:A] **Difficulty step** — `prompts/pr_review.py:310
    get_comment_difficulty_prompt`.
-5. [W:A] **Address step**: if fresh PR → resume implementer with
+6. [W:A] **Address step**: if fresh PR → resume implementer with
    `prompts/implementation.py:342 get_impl_resume_feedback_prompt`; if
    existing-PR path → `prompts/address_review.py:181
    get_address_review_prompt`.
-6. [W:G] Push (commit+force-push addressing changes).
-7. [M] **EVAL**: invoke `_evaluate_go_verdict` (parse reviewerAgent verdict:
+7. [W:G] Push (commit+force-push addressing changes).
+8. [M] **EVAL**: invoke `_evaluate_go_verdict` (parse reviewerAgent verdict:
    GO, NOGO, AMBIGUOUS, ERROR, HUMAN_BLOCKED) + `count_unresolved_threads_by_severity`
    (returns `(blocking_automation, minor_automation, human)`, see
    "Severity-aware GO gate" below); an explicit NOGO with zero posted thread
@@ -266,18 +268,17 @@ ADDRESS_WAIT → PUSH_WAIT → EVAL → (loop) → FOLLOWUP_WAIT.
    `REVIEW_WAIT` for a fresh reviewer invocation without consuming a round;
    if GO + `human == 0` + `blocking_automation == 0` → resolve any advisory
    (`minor_automation`) threads, then verify auto-merge is disabled and
-   publish an internal-GO artifact [durable] → ADVANCE; it does not apply
-   `state:implementation-go` or arm auto-merge until #2055's strict gate is
-   present. If GO but `human > 0` → FINISH_FAIL (`human_blocked`); if
-   NOGO/AMBIGUOUS/ERROR and iteration < 3 → RETRY; if HUMAN_BLOCKED or
-   iteration cap exhausted → routes depend on iteration (hard cap 6) and
-   unresolved-thread progress; on exhaustion → apply `state:skip` label
-   [durable] → SKIP.
-8. [W:A] **Follow-up step** (on GO only) — `prompts/follow_up.py:105
-   get_follow_up_prompt`.
+   publish an internal-GO artifact [durable] → finish `strict_gate_unavailable`;
+   it does not apply `state:implementation-go`, run follow-up, or arm
+   auto-merge until issue #2055's strict gate is present. If GO but
+   `human > 0` → FINISH_FAIL (`human_blocked`); if NOGO/AMBIGUOUS/ERROR and
+   iteration < 3 → RETRY; if HUMAN_BLOCKED or iteration cap exhausted →
+   routes depend on iteration (hard cap 6) and unresolved-thread progress;
+   on exhaustion → apply `state:skip` label [durable] → SKIP.
 
-**Verdicts**: ADVANCE, RETRY, SKIP, BLOCKED (human intervention needed),
-FAIL_BACK(reason).
+**Verdicts**: FINISH_FAIL (`strict_gate_unavailable`, `human_blocked`, or
+failed disable verification), RETRY, SKIP, BLOCKED (human intervention
+needed), FAIL_BACK(reason).
 
 **Fail routes**: `agent_error` → implementation (retry from implement);
 `exhaustion` → SKIP (apply state:skip label); `human_blocked` →
@@ -438,8 +439,8 @@ CI/dirty/blocked recovery routes only after strict proof owns eligibility.
 Failure routing (single declarative location; per-stage fail-target and
 budgets). All budgets are per-item-lifetime counters stored in
 `WorkItem.attempts`; they are NEVER reset when an item re-enters a stage, so
-cross-stage regression cycles (e.g. merge_wait → ci → implementation →
-pr_review → ci) remain globally bounded.
+cross-stage regression cycles (e.g. ci → implementation → pr_review) remain
+globally bounded.
 
 | Stage | Next (success) | Fail targets | Budgets |
 |-------|---|---|---|
@@ -447,7 +448,7 @@ pr_review → ci) remain globally bounded.
 | planning | plan_review | finished(fail) | plan=2 |
 | plan_review | implementation | planning (nogo, default), finished(fail) on plan_cycles_exhausted | plan_review_iter=3, plan_cycles=2 |
 | implementation | pr_review | plan_review (plan_not_go), ci (already_implementation_go_pr), finished(fail) on exhaustion | implement=2, test_fix=1 |
-| pr_review | ci | implementation (agent_error), finished(fail) on human_blocked, finished(skip) on exhaustion | pr_review_iter=3, pr_review_hard=6; clean GO is internal only |
+| pr_review | finished(fail) on internal GO (`strict_gate_unavailable`) | implementation (agent_error), finished(fail) on human_blocked or failed disable verification, finished(skip) on exhaustion | pr_review_iter=3, pr_review_hard=6; clean GO is internal only |
 | ci | merge_wait | implementation (fix_exhausted, missing_worktree), pr_review (not_implementation_go), finished(fail) on no_pr | ci_fix=1, rebase=2 |
 | merge_wait | finished(pass) | finished(fail) on `strict_gate_unavailable` or failed disable verification; existing merged PRs learn then pass | compatibility budgets inactive for open PRs |
 | finished | — | — | — |
@@ -461,7 +462,7 @@ closed: merged PRs become `finished(pass)` and closed PRs become
 `finished(fail)`, before branch adoption or label-based routing is attempted.
 Open direct PRs enter the target repo's `pr_review` queue unless the PR already
 carries `state:implementation-go`, in which case they enter `ci`. During
-#2054 this is not merge readiness: `ci` immediately verifies auto-merge is
+During #2054 this is not merge readiness: `ci` immediately verifies auto-merge is
 disabled and `merge_wait` stops at `strict_gate_unavailable`.
 
 The same terminal-state check is repeated at the CI and implementation stage

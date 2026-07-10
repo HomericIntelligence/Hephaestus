@@ -74,25 +74,14 @@ from __future__ import annotations
 
 import logging
 
-from hephaestus.automation.agent_config import (
-    address_review_claude_timeout,
-    implementer_model,
-    learn_claude_timeout,
-)
-from hephaestus.automation.auto_merge_coordinator import without_auto_merge_policy
-from hephaestus.automation.ci_run_coordinator import PrMergeState, classify_pr_merge_state
+from hephaestus.automation.agent_config import implementer_model, learn_claude_timeout
 from hephaestus.automation.learn import build_learn_prompt
-from hephaestus.automation.prompts.address_review import get_address_review_prompt
-from hephaestus.automation.session_naming import AGENT_ADDRESS_REVIEW, AGENT_CI_DRIVER
-from hephaestus.constants import read_timeout_env
+from hephaestus.automation.session_naming import AGENT_CI_DRIVER
 
 from .base import (
-    BACKOFF_CAP_S as _BACKOFF_CAP_S,
-    GIT_JOB_TIMEOUT_S,
     AgentJob,
     Continue,
     Disposition,
-    GitJob,
     JobRequest,
     JobResult,
     Stage,
@@ -100,35 +89,20 @@ from .base import (
     StageOutcome,
     StepResult,
     WorkItem,
-    _build_rebase_job,
-    _require_item_worktree,
     _worktree_path,
     agent_provider,
     stage_model,
-    write_skip_label,
 )
 
 logger = logging.getLogger(__name__)
-
-BACKOFF_CAP_S = _BACKOFF_CAP_S
 
 # In-memory mini-states (stage-local strings, never GitHub labels).
 ENTER = "ENTER"
 ARM = "ARM"
 POLL = "POLL"
-DIRTY_REBASE_WAIT = "DIRTY_REBASE_WAIT"
-DIRTY_PUSH_WAIT = "DIRTY_PUSH_WAIT"
-BLOCKED_ADDRESS_WAIT = "BLOCKED_ADDRESS_WAIT"
-BLOCKED_PUSH_WAIT = "BLOCKED_PUSH_WAIT"
 LEARN_WAIT = "LEARN_WAIT"
 MW_FINISH = "MW_FINISH"
 FINISH = MW_FINISH
-
-#: Env var bounding the merge wait (legacy ``_wait_for_pr_terminal`` budget).
-MERGE_MAX_WAIT_ENV = "HEPH_PR_MERGE_MAX_WAIT"
-
-#: Default wall-clock merge-wait bound in seconds (legacy default 1800).
-MERGE_MAX_WAIT_DEFAULT_S = 1800
 
 
 def build_drive_green_learn_prompt(issue_number: int, pr_number: int) -> str:
@@ -196,14 +170,6 @@ class MergeWaitStage(Stage):
             return self._arm(item, ctx)
         if item.state == POLL:
             return self._poll(item, ctx)
-        if item.state == DIRTY_REBASE_WAIT:
-            return self._request_dirty_rebase(item, ctx)
-        if item.state == DIRTY_PUSH_WAIT:
-            return self._request_dirty_push(item, ctx)
-        if item.state == BLOCKED_ADDRESS_WAIT:
-            return self._request_blocked_address(item, ctx)
-        if item.state == BLOCKED_PUSH_WAIT:
-            return self._request_blocked_push(item, ctx)
         if item.state == LEARN_WAIT:
             return self._request_learn(item, ctx)
         if item.state == MW_FINISH:
@@ -235,16 +201,26 @@ class MergeWaitStage(Stage):
         return StageOutcome(Disposition.FINISH_FAIL, "strict_gate_unavailable")
 
     def _poll(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """POLL [M]: one non-blocking PR-state read -> classify -> route.
-
-        The reads mirror ``_wait_for_pr_terminal``'s laziness exactly: the
-        check-name reads are skipped for MERGED/CLOSED PRs, and the
-        pending-check read happens only for a BLOCKED merge state with no
-        failing checks (the legacy in-flight-checks guard). The pure
-        classifier then owns every branch decision.
-        """
+        """POLL only the post-merge state needed for the deduped learn path."""
         if item.pr is None:  # guarded by ARM; kept for restart safety
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        gh_state = ctx.github.gh_pr_state(item.pr)
+        pr_state_str = ((gh_state or {}).get("state") or "").upper()
+        if pr_state_str not in {"MERGED", "CLOSED"}:
+            try:
+                if not ctx.dry_run:
+                    ctx.github.defer_auto_merge(item.pr)
+            except Exception as exc:
+                logger.error(
+                    "merge_wait:%s: failed to verify auto-merge disabled for PR #%d: %s",
+                    item.issue,
+                    item.pr,
+                    exc,
+                )
+                return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_disable_failed")
+            item.armed = False
+            return StageOutcome(Disposition.FINISH_FAIL, "strict_gate_unavailable")
+
         started = item.payload.get("merge_wait_started_at")
         if started is None:
             logger.error(
@@ -254,69 +230,12 @@ class MergeWaitStage(Stage):
             )
             return StageOutcome(Disposition.FINISH_FAIL, "missing_merge_wait_started_at")
 
-        gh_state = ctx.github.gh_pr_state(item.pr)
-        pr_state_str = ((gh_state or {}).get("state") or "").upper()
-        failing: list[str] = []
-        fixable_failing: list[str] = []
-        pending: list[str] = []
-        if pr_state_str not in ("MERGED", "CLOSED"):
-            failing = ctx.github.failing_required_check_names(item.pr)
-            fixable_failing = without_auto_merge_policy(failing)
-            merge_status = ((gh_state or {}).get("mergeStateStatus") or "").upper()
-            if merge_status == "BLOCKED" and not failing:
-                pending = ctx.github.pending_required_check_names(item.pr)
-        state = classify_pr_merge_state(gh_state, failing, fixable_failing, pending)
-
-        if state is PrMergeState.MERGED:
+        if pr_state_str == "MERGED":
             return self._route_merged(item, ctx)
-        if state is PrMergeState.CLOSED:
+        if pr_state_str == "CLOSED":
             logger.info("merge_wait:%s: PR #%d closed without merging", item.issue, item.pr)
             return StageOutcome(Disposition.FINISH_FAIL, "closed")
-        if state is PrMergeState.FAILING:
-            logger.warning(
-                "merge_wait:%s: PR #%d went red while awaiting merge (%s); regressing to ci",
-                item.issue,
-                item.pr,
-                ", ".join(fixable_failing),
-            )
-            return StageOutcome(Disposition.FAIL_BACK, "ci_red")
-        if state is PrMergeState.DIRTY:
-            return self._route_dirty(item, ctx, gh_state)
-        if state is PrMergeState.BLOCKED:
-            return self._route_blocked(item, ctx)
-        return self._route_pending(item, ctx, float(started))
-
-    def _route_pending(self, item: WorkItem, ctx: StageContext, started: float) -> StageOutcome:
-        """PENDING: timer-park with exponential backoff, bounded by time and budget."""
-        now = ctx.now()
-        max_wait = read_timeout_env(MERGE_MAX_WAIT_ENV, MERGE_MAX_WAIT_DEFAULT_S)
-        if now - started > max_wait:
-            logger.warning(
-                "merge_wait:%s: PR #%d still OPEN after %ds (limit %ds); timing out",
-                item.issue,
-                item.pr,
-                int(now - started),
-                max_wait,
-            )
-            return StageOutcome(Disposition.FINISH_FAIL, "timeout")
-        polls = item.payload.get("merge_poll_count", 0)
-        if polls >= ctx.budget("merge"):
-            if item.issue is not None:
-                logger.warning(
-                    "merge_wait:%s: PR #%d exhausted merge pending budget (%d); skipping",
-                    item.issue,
-                    item.pr,
-                    ctx.budget("merge"),
-                )
-                write_skip_label(item.issue, ctx)
-                return StageOutcome(Disposition.SKIP, "merge_attempts_exhausted")
-            return StageOutcome(Disposition.FINISH_FAIL, "merge_attempts_exhausted")
-        delay = min(2**polls, BACKOFF_CAP_S)
-        item.payload["merge_poll_count"] = polls + 1
-        # Timer-park contract (base.py): the coordinator (#1817) reads the
-        # delay from the payload — StageOutcome has no delay field.
-        item.payload["retry_delay_s"] = delay
-        return StageOutcome(Disposition.RETRY, "merge_pending")
+        return StageOutcome(Disposition.FINISH_FAIL, "strict_gate_unavailable")
 
     def _route_merged(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Dedupe the MERGED PR's post-merge /learn via the arming record.
@@ -336,162 +255,6 @@ class MergeWaitStage(Stage):
             )
             return StageOutcome(Disposition.FINISH_PASS, "merged")
         return Continue(next_state=LEARN_WAIT)
-
-    def _route_dirty(
-        self, item: WorkItem, ctx: StageContext, gh_state: dict[str, object] | None
-    ) -> StepResult:
-        """DIRTY: mechanical rebase+push while the ``rebase`` budget remains.
-
-        An armed-but-DIRTY (merge-conflict) PR can never merge while armed
-        (#838), so waiting out the timeout is pointless. Exhaustion is the
-        legacy ``_resolve_dirty_pr`` terminal — an unresolved merge conflict
-        (``rebase_exhausted``), NOT a timeout. The PR's real base ref is
-        captured for the rebase target (mirrors the legacy ``baseRefName``
-        read, defaulting to ``main``).
-        """
-        if item.attempts.get("rebase", 0) >= ctx.budget("rebase"):
-            logger.warning(
-                "merge_wait:%s: PR #%d still conflicting after rebase budget; stopping",
-                item.issue,
-                item.pr,
-            )
-            return StageOutcome(Disposition.FINISH_FAIL, "rebase_exhausted")
-        item.payload["base_branch"] = str((gh_state or {}).get("baseRefName") or "main")
-        return Continue(next_state=DIRTY_REBASE_WAIT)
-
-    def _route_blocked(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """BLOCKED: address threads while budget remains; gate skip on stuck.
-
-        Exhaustion fails back ``blocked_exhausted`` (routes to pr_review) —
-        UNLESS the PR is genuinely stuck (``ctx.github.pr_is_genuinely_stuck``,
-        the #1576 single source of truth), in which case ``state:skip`` is
-        durably applied BEFORE the SKIP outcome. A BLOCKED-awaiting-review PR
-        returns False there and is never skip-tagged.
-        """
-        if item.attempts.get("blocked_address", 0) >= ctx.budget("blocked_address"):
-            if item.issue is not None and ctx.github.pr_is_genuinely_stuck(item.pr or 0):
-                logger.warning(
-                    "merge_wait:%d: PR #%s genuinely stuck after address budget; skipping",
-                    item.issue,
-                    item.pr,
-                )
-                write_skip_label(item.issue, ctx)
-                return StageOutcome(Disposition.SKIP, "blocked_stuck")
-            logger.warning(
-                "merge_wait:%s: PR #%s still BLOCKED after address budget; regressing",
-                item.issue,
-                item.pr,
-            )
-            return StageOutcome(Disposition.FAIL_BACK, "blocked_exhausted")
-        return Continue(next_state=BLOCKED_ADDRESS_WAIT)
-
-    def _request_dirty_rebase(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """DIRTY_REBASE_WAIT [W:G]: mechanical rebase onto the PR's base.
-
-        The cheap deterministic path of the legacy ``_resolve_dirty_pr``:
-        rebase the PR-head worktree onto ``origin/<base_branch>`` (worker
-        ``op="rebase"`` = ``git_utils.rebase_worktree_onto``). The stale
-        result flag is cleared at submission; ``on_job_done`` counts the
-        ``rebase`` budget and records whether the rebase landed cleanly, and
-        DIRTY_PUSH_WAIT pushes only a clean result.
-        """
-        item.payload.pop("rebase_clean", None)
-        missing_worktree = _require_item_worktree(item, "merge_wait", "dirty rebase")
-        if missing_worktree is not None:
-            return missing_worktree
-        rebase_job = _build_rebase_job(item, ctx, descr="resolve_dirty_rebase")
-        return JobRequest(rebase_job, on_done_state=DIRTY_PUSH_WAIT)
-
-    def _request_dirty_push(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """DIRTY_PUSH_WAIT [W:G]: push the clean rebase; a conflicted one re-polls.
-
-        A clean rebase must be pushed (lease-guarded worker ``op="push"``)
-        to re-trigger CI on the rebased head — the legacy rebase+push pair.
-        A still-conflicting rebase has nothing to push: re-POLL re-classifies
-        DIRTY and the ``rebase`` budget (already counted) bounds the loop to
-        its ``rebase_exhausted`` terminal.
-        """
-        if not item.payload.pop("rebase_clean", None):
-            return Continue(next_state=POLL)
-        missing_worktree = _require_item_worktree(item, "merge_wait", "dirty rebase push")
-        if missing_worktree is not None:
-            return missing_worktree
-        push_job = GitJob(
-            repo=item.repo,
-            op="push",
-            timeout_s=GIT_JOB_TIMEOUT_S,
-            kwargs={
-                "cwd": _worktree_path(item, ctx),
-                "branch": item.branch or None,
-            },
-            descr="push_rebased_head",
-        )
-        return JobRequest(push_job, on_done_state=POLL)
-
-    def _request_blocked_address(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """BLOCKED_ADDRESS_WAIT [W:A]: address the unresolved review threads.
-
-        An armed PR sitting BLOCKED behind branch protection (unresolved
-        threads with ``required_review_thread_resolution``) dispatches the
-        address-review session — the same
-        :func:`~hephaestus.automation.prompts.address_review.get_address_review_prompt`
-        builder the pr_review existing-PR address leg uses (kwargs mirror its
-        verified call shape). The unresolved-thread JSON / difficulty todo
-        block are seeded into ``item.payload`` by the coordinator (#1817),
-        which owns those gh reads. ``on_job_done`` counts the
-        ``blocked_address`` budget; the push leg then re-POLLs.
-        """
-        item.payload.pop("address_failed", None)
-        missing_worktree = _require_item_worktree(item, "merge_wait", "blocked address")
-        if missing_worktree is not None:
-            return missing_worktree
-        job = AgentJob(
-            repo=item.repo,
-            issue=item.issue if item.issue is not None else 0,
-            agent=agent_provider(ctx),
-            model=stage_model(ctx, "implementer", implementer_model),
-            prompt_builder=get_address_review_prompt,
-            cwd=_worktree_path(item, ctx),
-            timeout_s=address_review_claude_timeout(),
-            session_agent=AGENT_ADDRESS_REVIEW,
-            prompt_kwargs={
-                "pr_number": item.pr,
-                "issue_number": item.issue if item.issue is not None else 0,
-                "worktree_path": str(_worktree_path(item, ctx)),
-                "threads_json": item.payload.get("threads_json", "[]"),
-                "todo_block": item.payload.get("difficulty_tiers", ""),
-            },
-            descr="blocked_address",
-        )
-        return JobRequest(job, on_done_state=BLOCKED_PUSH_WAIT)
-
-    def _request_blocked_push(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """BLOCKED_PUSH_WAIT [W:G]: push the address fixes, or re-poll a dead turn.
-
-        A hard-failed address session (``payload["address_failed"]``) has
-        nothing to push — re-POLL re-classifies the live thread state and the
-        ``blocked_address`` budget (already counted) bounds the loop.
-        Otherwise commit+push the addressing changes so resolved threads can
-        clear the branch-protection gate and the armed PR can merge.
-        """
-        if item.payload.pop("address_failed", None):
-            return Continue(next_state=POLL)
-        missing_worktree = _require_item_worktree(item, "merge_wait", "blocked address push")
-        if missing_worktree is not None:
-            return missing_worktree
-        push_job = GitJob(
-            repo=item.repo,
-            op="commit_push",
-            timeout_s=GIT_JOB_TIMEOUT_S,
-            kwargs={
-                "issue_number": item.issue if item.issue is not None else 0,
-                "worktree_path": _worktree_path(item, ctx),
-                "branch": item.branch,
-                "agent": AGENT_ADDRESS_REVIEW,
-            },
-            descr="push_blocked_address",
-        )
-        return JobRequest(push_job, on_done_state=POLL)
 
     def _request_learn(self, item: WorkItem, ctx: StageContext) -> JobRequest:
         """LEARN_WAIT [W:A]: dispatch the deduped post-merge /learn session.
@@ -519,79 +282,21 @@ class MergeWaitStage(Stage):
         return JobRequest(job, on_done_state=MW_FINISH)
 
     def on_job_done(self, item: WorkItem, result: JobResult, ctx: StageContext) -> None:
-        """Consume budgets and record result flags (state is still the WAIT state).
-
-        The coordinator contract (:mod:`.base`): ``item.state`` is still the
-        WAIT state that submitted the job; the coordinator advances it to
-        ``on_done_state`` AFTER this returns, so routing decisions are
-        recorded as ``item.payload`` flags, never ``item.state`` writes.
-        Budgets are consumed HERE, on completion, success or hard failure
-        alike (sibling pattern; interrupted results never reach this method,
-        so an interrupt never burns budget).
-
-        - ``DIRTY_REBASE_WAIT``: count ``rebase``; record ``rebase_clean``
-          (the worker's rebase result) so DIRTY_PUSH_WAIT pushes only a
-          clean rebase.
-        - ``DIRTY_PUSH_WAIT`` / ``BLOCKED_PUSH_WAIT``: best-effort — a
-          failed push is logged and POLL re-classifies the live PR state
-          (the budgets already counted bound the loop).
-        - ``BLOCKED_ADDRESS_WAIT``: count ``blocked_address``; a hard job
-          failure flags ``address_failed`` so the push leg re-polls instead
-          of pushing a turn that never ran.
-        - ``LEARN_WAIT``: durably mark the learn outcome on the arming
-          record (``mark_drive_green_learn_result``, success or failure
-          alike) BEFORE the FINISH_PASS outcome — the exactly-once /learn
-          contract (#848). Non-fatal: a failed mark (or a failed learn) is
-          logged and never flips the merged PR to failure.
-
-        Args:
-            item: The work item whose job completed.
-            result: The job result from the worker pool.
-            ctx: Stage context.
-
-        """
-        if item.state == DIRTY_REBASE_WAIT:
-            item.attempts["rebase"] = item.attempts.get("rebase", 0) + 1
-            item.payload["rebase_clean"] = bool(result.ok and result.value)
-            if not result.ok:
-                logger.warning(
-                    "merge_wait:%s: mechanical rebase failed (re-polling): %s",
-                    item.issue,
-                    result.error,
-                )
+        """Record the post-merge learn result without changing a merged PR's outcome."""
+        if item.state != LEARN_WAIT:
             return
-        if item.state == BLOCKED_ADDRESS_WAIT:
-            item.attempts["blocked_address"] = item.attempts.get("blocked_address", 0) + 1
-            if not result.ok:
+        if not result.ok:
+            logger.warning(
+                "merge_wait:%s: post-merge /learn failed (non-fatal): %s",
+                item.issue,
+                result.error,
+            )
+        if item.issue is not None:
+            try:
+                ctx.github.mark_drive_green_learn_result(item.issue, succeeded=bool(result.ok))
+            except Exception as exc:
                 logger.warning(
-                    "merge_wait:%s: BLOCKED address turn failed (re-polling): %s",
+                    "merge_wait:%d: failed to mark /learn result (non-fatal): %s",
                     item.issue,
-                    result.error,
+                    exc,
                 )
-                item.payload["address_failed"] = True
-            return
-        if item.state in (DIRTY_PUSH_WAIT, BLOCKED_PUSH_WAIT):
-            if not result.ok:
-                logger.warning(
-                    "merge_wait:%s: push failed (non-fatal, re-polling): %s",
-                    item.issue,
-                    result.error,
-                )
-            return
-        if item.state == LEARN_WAIT:
-            if not result.ok:
-                logger.warning(
-                    "merge_wait:%s: post-merge /learn failed (non-fatal): %s",
-                    item.issue,
-                    result.error,
-                )
-            if item.issue is not None:
-                try:
-                    ctx.github.mark_drive_green_learn_result(item.issue, succeeded=bool(result.ok))
-                except Exception as e:
-                    logger.warning(
-                        "merge_wait:%d: failed to mark /learn result (non-fatal): %s",
-                        item.issue,
-                        e,
-                    )
-            return

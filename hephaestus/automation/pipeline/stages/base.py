@@ -257,10 +257,10 @@ class StageGitHub(Protocol):
         ...
 
     def defer_auto_merge(self, pr_number: int) -> None:
-        """Durably ensure auto-merge stays DISABLED until implementation GO.
+        """Durably ensure auto-merge stays DISABLED until strict proof exists.
 
         The adapter must read back disabled state for an open PR. #2054 calls
-        this before internal review/CI/merge transitions; #2055 will retain
+        this before every PR-stage ingress and transition; #2055 will retain
         the check before its strict-gated arming protocol.
         """
         ...

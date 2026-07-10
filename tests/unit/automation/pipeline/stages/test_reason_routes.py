@@ -46,9 +46,8 @@ _EXPECTED_REASONS: dict[StageName, set[str]] = {
     StageName.PR_REVIEW: {"agent_error"},
     # no_pr/timeout are emitted as FINISH_FAIL (terminal), not FAIL_BACK.
     StageName.CI: {"fix_exhausted", "not_implementation_go"},
-    # closed/timeout/rebase_exhausted/arm_* are FINISH_FAIL; blocked_stuck
-    # is SKIP — only the cross-stage regressions are FAIL_BACK.
-    StageName.MERGE_WAIT: {"ci_red", "blocked_exhausted"},
+    # #2054 terminalizes merge_wait; it emits no cross-stage FAIL_BACK reason.
+    StageName.MERGE_WAIT: set(),
 }
 
 
@@ -102,7 +101,6 @@ def test_scan_is_not_vacuous() -> None:
     assert "agent_error" in _fail_back_reason_literals(pr_review)
     assert "plan_not_go" in _fail_back_reason_literals(implementation)
     assert "fix_exhausted" in _fail_back_reason_literals(ci)
-    assert "ci_red" in _fail_back_reason_literals(merge_wait)
 
 
 def test_named_reasons_route_where_the_doc_says() -> None:
@@ -116,7 +114,4 @@ def test_named_reasons_route_where_the_doc_says() -> None:
     assert ROUTES[StageName.CI].fail_routes["fix_exhausted"] == StageName.IMPLEMENTATION
     assert ROUTES[StageName.CI].fail_routes["not_implementation_go"] == StageName.PR_REVIEW
     assert ROUTES[StageName.CI].fail_routes["no_pr"] == StageName.FINISHED
-    assert ROUTES[StageName.MERGE_WAIT].fail_routes["ci_red"] == StageName.CI
-    assert ROUTES[StageName.MERGE_WAIT].fail_routes["blocked_exhausted"] == StageName.PR_REVIEW
     assert ROUTES[StageName.MERGE_WAIT].fail_routes["closed"] == StageName.FINISHED
-    assert ROUTES[StageName.MERGE_WAIT].fail_routes["timeout"] == StageName.FINISHED

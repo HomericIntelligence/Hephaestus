@@ -587,19 +587,34 @@ def _branch_has_commits_vs_base(branch_name: str, base: str, worktree_path: Path
     return True
 
 
-def _pr_auto_merge_enabled(pr_number: int) -> bool:
-    """Return whether GitHub currently has auto-merge armed for a PR."""
-    result = _gh_call(["pr", "view", str(pr_number), "--json", "autoMergeRequest"])
+def _pr_auto_merge_state(pr_number: int) -> tuple[str, bool]:
+    """Return a verified ``(state, auto_merge_enabled)`` tuple for a PR."""
+    result = _gh_call(
+        ["pr", "view", str(pr_number), "--json", "state,autoMergeRequest"], check=False
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"could not read auto-merge state for PR #{pr_number}: {result.stderr}")
     data = json.loads(result.stdout or "{}")
-    return data.get("autoMergeRequest") is not None
+    if not isinstance(data, dict):
+        raise RuntimeError(f"could not parse auto-merge state for PR #{pr_number}")
+    state = str(data.get("state") or "").upper()
+    if state not in {"OPEN", "MERGED", "CLOSED"}:
+        raise RuntimeError(f"unexpected state {state!r} for PR #{pr_number}")
+    return state, data.get("autoMergeRequest") is not None
 
 
 def ensure_pr_auto_merge_deferred(pr_number: int) -> None:
     """Disable auto-merge and verify it remains disabled while the PR is open."""
-    if not _pr_auto_merge_enabled(pr_number):
+    state, armed = _pr_auto_merge_state(pr_number)
+    if state in {"MERGED", "CLOSED"}:
         return
-    _gh_call(["pr", "merge", str(pr_number), "--disable-auto"])
-    if _pr_auto_merge_enabled(pr_number):
+    if not armed:
+        return
+    result = _gh_call(["pr", "merge", str(pr_number), "--disable-auto"], check=False)
+    if result.returncode != 0:
+        raise RuntimeError(f"could not disable auto-merge for PR #{pr_number}: {result.stderr}")
+    verified_state, still_armed = _pr_auto_merge_state(pr_number)
+    if verified_state == "OPEN" and still_armed:
         raise RuntimeError(f"auto-merge is still enabled for PR #{pr_number}")
     logger.warning(
         "Disabled auto-merge for PR #%s pending the strict-review gate",

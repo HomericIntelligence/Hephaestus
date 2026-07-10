@@ -1376,13 +1376,69 @@ class TestCloneReuseAndWorktrees:
 class TestMergePr:
     """Merge-path error handling."""
 
-    def test_merge_pr_is_fail_closed_without_calling_gh(self) -> None:
-        """Fleet sync cannot bypass the temporary strict-review gate."""
+    def test_merge_pr_is_fail_closed_after_verifying_auto_merge_is_disabled(self) -> None:
+        """Fleet sync checks an unarmed PR before refusing the unavailable gate."""
         pr = _pr(42, PRStatus.READY)
 
-        with patch.object(fleet_pr_api, "_gh") as gh:
+        with patch.object(
+            fleet_pr_api,
+            "_gh",
+            return_value=MagicMock(
+                returncode=0,
+                stdout=json.dumps({"state": "OPEN", "autoMergeRequest": None}),
+            ),
+        ) as gh:
             assert fleet_pr_api.merge_pr(pr, "HomericIntelligence") is False
-        gh.assert_not_called()
+        gh.assert_called_once_with(
+            ["pr", "view", "42", "--json", "state,autoMergeRequest"],
+            repo=pr.repo,
+            org="HomericIntelligence",
+            check=False,
+        )
+
+    def test_merge_pr_disables_prearmed_auto_merge_and_reads_back(self) -> None:
+        """Fleet sync contains an existing arm before it refuses to merge."""
+        pr = _pr(42, PRStatus.READY)
+        calls: list[list[str]] = []
+        responses = iter(
+            [
+                MagicMock(
+                    returncode=0,
+                    stdout=json.dumps({"state": "OPEN", "autoMergeRequest": {"enabledAt": "now"}}),
+                ),
+                MagicMock(returncode=0, stdout=""),
+                MagicMock(
+                    returncode=0,
+                    stdout=json.dumps({"state": "OPEN", "autoMergeRequest": None}),
+                ),
+            ]
+        )
+
+        def gh(args: list[str], **_kwargs: object) -> MagicMock:
+            calls.append(args)
+            return next(responses)
+
+        with patch.object(fleet_pr_api, "_gh", side_effect=gh):
+            assert fleet_pr_api.merge_pr(pr, "HomericIntelligence") is False
+
+        assert calls == [
+            ["pr", "view", "42", "--json", "state,autoMergeRequest"],
+            ["pr", "merge", "42", "--disable-auto"],
+            ["pr", "view", "42", "--json", "state,autoMergeRequest"],
+        ]
+
+    def test_merge_pr_fails_closed_on_malformed_auto_merge_state(self) -> None:
+        """Fleet sync must not treat a valid-but-wrong JSON shape as unarmed."""
+        pr = _pr(42, PRStatus.READY)
+
+        with patch.object(
+            fleet_pr_api,
+            "_gh",
+            return_value=MagicMock(returncode=0, stdout="[]"),
+        ) as gh:
+            assert fleet_pr_api.merge_pr(pr, "HomericIntelligence") is False
+
+        gh.assert_called_once()
 
 
 class TestListPrs:

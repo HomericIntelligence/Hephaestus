@@ -66,7 +66,11 @@ from .github_api import (
     gh_pr_list_unresolved_threads,
 )
 from .models import PLAN_COMMENT_MARKER, ImplementationState
-from .pr_manager import mark_pr_implementation_go, mark_pr_implementation_no_go
+from .pr_manager import (
+    ensure_pr_auto_merge_deferred,
+    mark_pr_implementation_go,
+    mark_pr_implementation_no_go,
+)
 from .pr_reviewer import gather_impl_review_context, review_pr_inline
 from .prompts import get_impl_loop_review_prompt, get_impl_resume_feedback_prompt
 from .review_validator import validate_prior_comments_addressed
@@ -217,6 +221,17 @@ class ReviewPhase(StageMixin):
         auto-merge during #2054 and are replaced by strict proof in #2055.
         """
         impl = self.impl
+        try:
+            ensure_pr_auto_merge_deferred(pr_number)
+        except Exception as exc:
+            impl._log(
+                "error",
+                f"{issue_ref(issue_number)}: could not verify auto-merge disabled for "
+                f"{pr_ref(pr_number)}: {exc}",
+                thread_id,
+            )
+            mark_pr_implementation_no_go(pr_number)
+            return
         if last_verdict in ("ERROR", "HUMAN_BLOCKED"):
             reason = (
                 "reviewer-infrastructure error"

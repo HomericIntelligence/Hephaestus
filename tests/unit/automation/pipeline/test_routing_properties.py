@@ -52,13 +52,8 @@ _REASON_BUDGET: dict[str, str | None] = {
     "not_implementation_go": None,
     "missing_worktree": None,
     "no_pr": None,
-    # ci_red cycles merge_wait -> ci for another merge attempt later, so it
-    # consumes a merge slot; closed/timeout EXIT the pipeline entirely and
-    # charge nothing (a closed PR must not deplete merge attempts).
-    "ci_red": "merge",
-    "blocked_exhausted": "blocked_address",
+    # #2054 terminalizes every open merge-wait item after containment.
     "closed": None,
-    "timeout": None,
     "unknown_reason": None,
 }
 

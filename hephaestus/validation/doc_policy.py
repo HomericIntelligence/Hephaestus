@@ -10,8 +10,8 @@ Policies enforced:
 
 - ``gh pr create`` must NOT include ``--label``
 - ``git commit`` must NOT use ``--no-verify``
-- ``gh pr merge`` must use ``--auto --squash`` (not ``--merge`` or ``--rebase``;
-  rebase merges are disabled on this repo — squash-only per CLAUDE.md)
+- ``gh pr merge`` must use manual ``--squash`` without ``--auto`` (not ``--merge``
+  or ``--rebase``; #2054 keeps automatic merging disabled until #2055)
 - ``git push`` must NOT push directly to ``main``/``master``
 
 Excluded paths (archived / test-fixture content that is not authoritative):
@@ -111,24 +111,22 @@ _RAW_RULES: list[tuple[str, Severity, str, str]] = [
         "wrong-merge-strategy",
         Severity.CRITICAL,
         (
-            "gh pr merge must use --auto --squash (squash-only; rebase merges "
-            "are disabled on this repo per CLAUDE.md). --merge and --rebase "
-            "are rejected as merge-strategy flags."
+            "gh pr merge must use manual --squash without --auto while the "
+            "strict-review gate is unavailable. --merge and --rebase are "
+            "rejected as merge-strategy flags."
         ),
-        # Flag any ``gh pr merge`` invocation that does NOT carry both
-        # ``--auto`` AND ``--squash`` (in either order), OR that carries one
-        # of the rejected merge-strategy flags ``--merge`` / ``--rebase``.
-        #
-        # Implementation: this regex matches when the line contains
-        # ``gh pr merge`` and either lacks the required ``--auto --squash``
-        # combination, or includes a rejected strategy flag.
+        # Flag any ``gh pr merge`` invocation that carries ``--auto`` or a
+        # rejected strategy flag, or that omits the required manual squash
+        # strategy. The temporary #2054 policy is intentionally conservative:
+        # docs must not instruct an agent to arm a merge autonomously.
         r"gh\s+pr\s+merge\b"
         r"(?:"
+        r"(?=.*--auto\b)|"
         # rejected merge-strategy flags
         r"(?=.*--merge\b)"
         r"|(?=.*--rebase\b)"
-        # OR missing the required --auto / --squash combination
-        r"|(?!.*--auto\s+--squash\b)(?!.*--squash\s+--auto\b)"
+        # OR missing the required manual squash flag
+        r"|(?!.*--squash\b)"
         r")",
     ),
     (

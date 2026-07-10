@@ -1,63 +1,27 @@
-"""Tests for the merge-wait stage (doc section "7. merge_wait", issue #1816)."""
+"""Tests for the fail-closed merge-wait bootstrap stage (#2054)."""
 
 from __future__ import annotations
 
 from typing import Any
 
-import pytest
-
-from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobResult
-from hephaestus.automation.pipeline.routing import ROUTES, Disposition, StageName
+from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
+from hephaestus.automation.pipeline.routing import Disposition, StageName
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages.merge_wait import (
     ARM,
-    BLOCKED_ADDRESS_WAIT,
-    BLOCKED_PUSH_WAIT,
-    DIRTY_PUSH_WAIT,
-    DIRTY_REBASE_WAIT,
     ENTER,
     LEARN_WAIT,
-    MERGE_MAX_WAIT_ENV,
     MW_FINISH,
     POLL,
     MergeWaitStage,
     build_drive_green_learn_prompt,
 )
-from hephaestus.automation.state_labels import STATE_SKIP
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
-
-# Sanity anchors: the reasons this suite exercises are ROUTES rows.
-assert ROUTES[StageName.MERGE_WAIT].fail_routes["ci_red"] == StageName.CI
-assert ROUTES[StageName.MERGE_WAIT].fail_routes["blocked_exhausted"] == StageName.PR_REVIEW
-assert ROUTES[StageName.MERGE_WAIT].budgets["blocked_address"] == 2
-assert ROUTES[StageName.MERGE_WAIT].budgets["rebase"] == 2
-assert ROUTES[StageName.MERGE_WAIT].budgets["merge"] == 1
 
 MERGED_STATE = {"state": "MERGED", "headRefOid": "abc123"}
 CLOSED_STATE = {"state": "CLOSED"}
 OPEN_STATE = {"state": "OPEN", "mergeStateStatus": "BEHIND", "headRefOid": "abc123"}
-DIRTY_STATE = {
-    "state": "OPEN",
-    "mergeStateStatus": "DIRTY",
-    "baseRefName": "develop",
-    "headRefOid": "abc123",
-}
-BLOCKED_STATE = {"state": "OPEN", "mergeStateStatus": "BLOCKED", "headRefOid": "abc123"}
-
-
-class _FifoStateGitHub(FakeStageGitHub):
-    """FakeStageGitHub whose gh_pr_state pops a scripted FIFO (last repeats)."""
-
-    def __init__(self, states: list[dict[str, Any] | None], **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self._states = list(states)
-
-    def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
-        del pr_number
-        if len(self._states) > 1:
-            return self._states.pop(0)
-        return self._states[0]
 
 
 class _MarkFailGitHub(FakeStageGitHub):
@@ -67,8 +31,8 @@ class _MarkFailGitHub(FakeStageGitHub):
         raise OSError("disk full")
 
 
-def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int = 80) -> Any:
-    """Drive a stage through the canonical FakeWorkerPool until an outcome."""
+def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int = 20) -> Any:
+    """Drive one stage through the canonical fake worker pool."""
     entry = stage.on_enter(item, ctx)
     if entry is not None:
         return entry
@@ -80,7 +44,6 @@ def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int
         if isinstance(result, JobRequest):
             pool.submit(result.job, result.on_done_state)  # type: ignore[arg-type]
             _handle, job_result = pool.completion_q.get_nowait()
-            assert not job_result.interrupted  # on_job_done contract precondition
             stage.on_job_done(item, job_result, ctx)
             item.state = result.on_done_state
             continue
@@ -89,6 +52,7 @@ def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int
 
 
 def _item(make_work_item: Any, **kwargs: Any) -> Any:
+    """Build a merge-wait work item with a valid PR and worktree."""
     kwargs.setdefault("stage", StageName.MERGE_WAIT)
     kwargs.setdefault("pr", 601)
     item = make_work_item(**kwargs)
@@ -97,57 +61,41 @@ def _item(make_work_item: Any, **kwargs: Any) -> Any:
     return item
 
 
-def _armed_item(make_work_item: Any, *, with_anchor: bool = True, **kwargs: Any) -> Any:
+def _poll_item(make_work_item: Any, **kwargs: Any) -> Any:
+    """Build a persisted legacy POLL item."""
     kwargs.setdefault("state", POLL)
     item = _item(make_work_item, **kwargs)
     item.armed = True
-    if with_anchor:
-        item.payload["merge_wait_started_at"] = 1000.0
+    item.payload["merge_wait_started_at"] = 1000.0
     return item
 
 
-class TestMergeWaitArm:
-    """ARM: temporary fail-closed behavior before #2055 lands."""
-
-    def test_merged_pr_reaches_existing_learn_path(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A pre-existing merge still records its learn result exactly once."""
-        stage = MergeWaitStage()
-        github = FakeStageGitHub(pr_state=MERGED_STATE)
-        ctx = make_ctx(github=github)
-        pool = FakeWorkerPool()
-        item = _item(make_work_item, state="")
-
-        outcome = _drive(stage, item, ctx, pool)
-
-        assert outcome == StageOutcome(Disposition.FINISH_PASS, "merged")
-        assert github.mutation_log == [("mark_drive_green_learn_result", (1, True))]
+class TestMergeWaitContainment:
+    """Every open PR state is terminalized after verified deferral."""
 
     def test_arm_disables_and_stops_until_the_strict_gate_exists(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """No legacy implementation-GO label can arm the bootstrap baseline."""
         stage = MergeWaitStage()
         github = FakeStageGitHub(pr_state=OPEN_STATE)
         ctx = make_ctx(github=github)
         item = _item(make_work_item, state=ARM)
 
-        result = stage.step(item, ctx)
-
-        assert result == StageOutcome(Disposition.FINISH_FAIL, "strict_gate_unavailable")
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "strict_gate_unavailable"
+        )
         assert github.mutation_log == [("defer_auto_merge", (601,))]
         assert item.armed is False
 
-    def test_already_armed_item_is_disarmed_and_stopped(
+    def test_persisted_poll_disables_and_stops_without_an_anchor(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """Restart recovery cannot keep polling a legacy armed PR."""
+        """A restart cannot bypass containment by restoring POLL directly."""
         stage = MergeWaitStage()
         github = FakeStageGitHub(pr_state=OPEN_STATE)
         ctx = make_ctx(github=github)
-        item = _item(make_work_item, state=ARM)
-        item.armed = True
+        item = _poll_item(make_work_item)
+        item.payload.pop("merge_wait_started_at")
 
         assert stage.step(item, ctx) == StageOutcome(
             Disposition.FINISH_FAIL, "strict_gate_unavailable"
@@ -158,8 +106,6 @@ class TestMergeWaitArm:
     def test_disable_verification_failure_is_terminal(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A failure to prove disablement must not fall through to polling."""
-
         class DeferFailsGitHub(FakeStageGitHub):
             def defer_auto_merge(self, pr_number: int) -> None:
                 raise RuntimeError("auto-merge remains enabled")
@@ -171,12 +117,8 @@ class TestMergeWaitArm:
         assert stage.step(item, ctx) == StageOutcome(
             Disposition.FINISH_FAIL, "auto_merge_disable_failed"
         )
-        assert item.armed is False
 
-    def test_dry_run_reports_unavailable_gate_without_mutation(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """Dry-run makes no GitHub mutation but still exposes the unavailable gate."""
+    def test_dry_run_stops_without_mutating(self, make_ctx: Any, make_work_item: Any) -> None:
         stage = MergeWaitStage()
         github = FakeStageGitHub(pr_state=OPEN_STATE)
         ctx = make_ctx(github=github, dry_run=True)
@@ -186,20 +128,17 @@ class TestMergeWaitArm:
             Disposition.FINISH_FAIL, "strict_gate_unavailable"
         )
         assert github.mutation_log == []
-        assert item.armed is False
 
     def test_arm_without_pr_finishes_no_pr(self, make_ctx: Any, make_work_item: Any) -> None:
-        """No PR on the item: nothing to arm."""
         stage = MergeWaitStage()
         ctx = make_ctx(github=FakeStageGitHub())
         item = _item(make_work_item, pr=None, state=ARM)
 
-        result = stage.step(item, ctx)
+        assert stage.step(item, ctx) == StageOutcome(Disposition.FINISH_FAIL, "no_pr")
 
-        assert result == StageOutcome(Disposition.FINISH_FAIL, "no_pr")
-
-    def test_on_enter_and_dispatch(self, make_ctx: Any, make_work_item: Any) -> None:
-        """on_enter initializes ENTER; ENTER routes to ARM; unknown state stops."""
+    def test_on_enter_initializes_enter_and_unknown_state_fails(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
         stage = MergeWaitStage()
         ctx = make_ctx(github=FakeStageGitHub())
         item = _item(make_work_item, state="")
@@ -207,429 +146,89 @@ class TestMergeWaitArm:
         assert stage.on_enter(item, ctx) is None
         assert item.state == ENTER
         assert stage.step(item, ctx) == Continue(next_state=ARM)
-
         item.state = "BOGUS"
-        result = stage.step(item, ctx)
-        assert isinstance(result, StageOutcome)
-        assert result.disposition == Disposition.FINISH_FAIL
+        outcome = stage.step(item, ctx)
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.FINISH_FAIL
 
 
-class TestMergeWaitPoll:
-    """POLL: classify_pr_merge_state wiring and terminal routing."""
+class TestMergedPrLearn:
+    """The only active polling behavior is post-merge learn capture."""
 
-    def test_closed_finishes_failed(self, make_ctx: Any, make_work_item: Any) -> None:
-        """CLOSED-not-merged is the doc's finished(fail) terminal."""
+    def test_merged_pr_reaches_existing_learn_path(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        stage = MergeWaitStage()
+        github = FakeStageGitHub(pr_state=MERGED_STATE)
+        ctx = make_ctx(github=github)
+        pool = FakeWorkerPool()
+
+        assert _drive(stage, _item(make_work_item, state=""), ctx, pool) == StageOutcome(
+            Disposition.FINISH_PASS, "merged"
+        )
+        assert github.mutation_log == [("mark_drive_green_learn_result", (1, True))]
+
+    def test_closed_poll_finishes_failed(self, make_ctx: Any, make_work_item: Any) -> None:
         stage = MergeWaitStage()
         ctx = make_ctx(github=FakeStageGitHub(pr_state=CLOSED_STATE))
-        item = _armed_item(make_work_item)
 
-        assert stage.step(item, ctx) == StageOutcome(Disposition.FINISH_FAIL, "closed")
-
-    def test_failing_fails_back_ci_red(self, make_ctx: Any, make_work_item: Any) -> None:
-        """A fixable red required check regresses to the ci stage."""
-        stage = MergeWaitStage()
-        ctx = make_ctx(github=FakeStageGitHub(pr_state=OPEN_STATE, failing_checks=["lint"]))
-        item = _armed_item(make_work_item)
-
-        assert stage.step(item, ctx) == StageOutcome(Disposition.FAIL_BACK, "ci_red")
-
-    def test_policy_only_failure_keeps_waiting(self, make_ctx: Any, make_work_item: Any) -> None:
-        """auto-merge-policy alone is not fixable red: PENDING park (legacy)."""
-        stage = MergeWaitStage()
-        ctx = make_ctx(
-            github=FakeStageGitHub(pr_state=BLOCKED_STATE, failing_checks=["auto-merge-policy"])
+        assert stage.step(_poll_item(make_work_item), ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "closed"
         )
-        item = _armed_item(make_work_item)
 
-        result = stage.step(item, ctx)
-
-        assert result == StageOutcome(Disposition.RETRY, "merge_pending")
-
-    def test_blocked_with_pending_checks_is_pending(
+    def test_learn_dedupe_and_disabled_config_skip_agent(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """BLOCKED while checks are in flight parks instead of addressing."""
         stage = MergeWaitStage()
-        ctx = make_ctx(github=FakeStageGitHub(pr_state=BLOCKED_STATE, pending_checks=["pytest"]))
-        item = _armed_item(make_work_item)
-
-        result = stage.step(item, ctx)
-
-        assert result == StageOutcome(Disposition.RETRY, "merge_pending")
-
-    def test_pending_backoff_is_exponential_in_payload(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """PENDING parks with the legacy min(2**n, 60) delay in the payload."""
-        stage = MergeWaitStage()
-        ctx = make_ctx(
-            github=FakeStageGitHub(pr_state=OPEN_STATE),
-            budget_fn=lambda name: 10 if name == "merge" else 1,
-        )
-        item = _armed_item(make_work_item)
-        item.payload["merge_wait_started_at"] = 1000.0
-
-        for expected_delay in (1, 2, 4):
-            result = stage.step(item, ctx)
-            assert result == StageOutcome(Disposition.RETRY, "merge_pending")
-            assert item.payload["retry_delay_s"] == expected_delay
-        assert item.payload["merge_poll_count"] == 3
-        # The wall clock lives in the payload, NEVER in the attempts dict.
-        assert "merge_elapsed" not in item.attempts
-        assert "merge_poll" not in item.attempts
-
-    def test_pending_exhausts_merge_attempt_budget_before_wall_clock_timeout(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """The CLI merge budget bounds pending polls and durably skips the issue."""
-        stage = MergeWaitStage()
-        github = FakeStageGitHub(pr_state=OPEN_STATE)
-        ctx = make_ctx(github=github, budget_fn=lambda _name: 1)
-        item = _armed_item(make_work_item)
-
-        first = stage.step(item, ctx)
-        assert first == StageOutcome(Disposition.RETRY, "merge_pending")
-        item.payload.pop("retry_delay_s")
-
-        second = stage.step(item, ctx)
-
-        assert second == StageOutcome(Disposition.SKIP, "merge_attempts_exhausted")
-        assert STATE_SKIP in github.labels[item.issue]
-
-    def test_wall_clock_timeout_uses_ctx_now(
-        self, make_ctx: Any, make_work_item: Any, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The 1800s legacy budget is enforced via ctx.now(), not sleep sums."""
-        monkeypatch.setenv(MERGE_MAX_WAIT_ENV, "10")
-        stage = MergeWaitStage()
-        ctx = make_ctx(github=FakeStageGitHub(pr_state=OPEN_STATE))
-        item = _armed_item(make_work_item)
-        item.payload["merge_wait_started_at"] = 0.0  # ctx.now() is ~1000
-
-        result = stage.step(item, ctx)
-
-        assert result == StageOutcome(Disposition.FINISH_FAIL, "timeout")
-
-    @pytest.mark.parametrize("payload", ({}, {"merge_wait_started_at": None}))
-    def test_poll_missing_wall_clock_anchor_finishes_failed(
-        self, make_ctx: Any, make_work_item: Any, payload: dict[str, object]
-    ) -> None:
-        """A restart that reaches POLL without the ARM anchor fails the invariant."""
-        stage = MergeWaitStage()
-        ctx = make_ctx(github=FakeStageGitHub(pr_state=OPEN_STATE))
-        item = _armed_item(make_work_item, with_anchor=False)
-        item.payload.update(payload)
-
-        result = stage.step(item, ctx)
-
-        assert result == StageOutcome(Disposition.FINISH_FAIL, "missing_merge_wait_started_at")
-        assert item.payload == payload
-        assert "retry_delay_s" not in item.payload
-        assert "merge_poll_count" not in item.payload
-
-    def test_poll_without_pr_finishes_no_pr(self, make_ctx: Any, make_work_item: Any) -> None:
-        """Restart safety: POLL with no PR finishes failed."""
-        stage = MergeWaitStage()
-        ctx = make_ctx(github=FakeStageGitHub())
-        item = _armed_item(make_work_item, pr=None)
-
-        assert stage.step(item, ctx) == StageOutcome(Disposition.FINISH_FAIL, "no_pr")
-
-
-class TestMergeWaitDirty:
-    """DIRTY: mechanical rebase+push, budget-bounded."""
-
-    def test_dirty_routes_to_rebase_with_base_branch(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """DIRTY captures the PR's real base ref for the rebase target."""
-        stage = MergeWaitStage()
-        ctx = make_ctx(github=FakeStageGitHub(pr_state=DIRTY_STATE))
-        item = _armed_item(make_work_item)
-
-        result = stage.step(item, ctx)
-
-        assert result == Continue(next_state=DIRTY_REBASE_WAIT)
-        assert item.payload["base_branch"] == "develop"
-
-    def test_dirty_exhaustion_is_rebase_exhausted_not_timeout(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """Rebase-budget exhaustion uses its own vocabulary, never 'timeout'."""
-        stage = MergeWaitStage()
-        ctx = make_ctx(github=FakeStageGitHub(pr_state=DIRTY_STATE))
-        item = _armed_item(make_work_item)
-        item.attempts["rebase"] = 2
-
-        result = stage.step(item, ctx)
-
-        assert result == StageOutcome(Disposition.FINISH_FAIL, "rebase_exhausted")
-
-    def test_dirty_clean_rebase_pushes_then_merges(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """DIRTY -> rebase (clean) -> push -> re-poll MERGED -> learn -> PASS."""
-        stage = MergeWaitStage()
-        github = _FifoStateGitHub([DIRTY_STATE, MERGED_STATE])
+        github = FakeStageGitHub(pr_state=MERGED_STATE)
         ctx = make_ctx(github=github)
         pool = FakeWorkerPool()
-        pool.script(
-            JobResult(ok=True, value=True),  # rebase: clean
-            JobResult(ok=True),  # push
-            JobResult(ok=True, value="learned"),  # learn
-        )
-        item = _armed_item(make_work_item)
+        first = _poll_item(make_work_item)
+        assert _drive(stage, first, ctx, pool) == StageOutcome(Disposition.FINISH_PASS, "merged")
+        replay = _poll_item(make_work_item)
+        assert _drive(stage, replay, ctx, pool) == StageOutcome(Disposition.FINISH_PASS, "merged")
+        assert len(pool.submitted) == 1
 
-        outcome = _drive(stage, item, ctx, pool)
+        disabled_ctx = make_ctx(github=FakeStageGitHub(pr_state=MERGED_STATE))
+        disabled_ctx.config.enable_learn = False
+        disabled_pool = FakeWorkerPool()
+        assert _drive(
+            stage, _poll_item(make_work_item), disabled_ctx, disabled_pool
+        ) == StageOutcome(Disposition.FINISH_PASS, "merged")
+        assert disabled_pool.submitted == []
 
-        assert outcome == StageOutcome(Disposition.FINISH_PASS, "merged")
-        git_jobs = [h.job for h in pool.submitted if isinstance(h.job, GitJob)]
-        assert [j.op for j in git_jobs] == ["rebase", "push"]
-        assert git_jobs[0].kwargs["base_branch"] == "develop"
-        assert item.attempts["rebase"] == 1
-
-    def test_dirty_conflicting_rebase_never_pushes_and_exhausts(
+    def test_failed_learn_and_failed_mark_never_fail_a_merged_pr(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A still-conflicting rebase re-polls without pushing until exhausted."""
-        stage = MergeWaitStage()
-        github = _FifoStateGitHub([DIRTY_STATE])
-        ctx = make_ctx(github=github)
-        pool = FakeWorkerPool()
-        pool.script(
-            JobResult(ok=False, value=False, error="conflict"),  # rebase 1
-            JobResult(ok=False, value=False, error="conflict"),  # rebase 2
-        )
-        item = _armed_item(make_work_item)
-
-        outcome = _drive(stage, item, ctx, pool)
-
-        assert outcome == StageOutcome(Disposition.FINISH_FAIL, "rebase_exhausted")
-        git_jobs = [h.job for h in pool.submitted if isinstance(h.job, GitJob)]
-        assert [j.op for j in git_jobs] == ["rebase", "rebase"]  # no push ever
-        assert item.attempts["rebase"] == 2
-
-
-class TestMergeWaitBlocked:
-    """BLOCKED: address threads, budget-bounded, stuck-gated skip."""
-
-    def test_blocked_routes_to_address(self, make_ctx: Any, make_work_item: Any) -> None:
-        """BLOCKED with budget enters the address leg."""
-        stage = MergeWaitStage()
-        ctx = make_ctx(github=FakeStageGitHub(pr_state=BLOCKED_STATE))
-        item = _armed_item(make_work_item)
-
-        assert stage.step(item, ctx) == Continue(next_state=BLOCKED_ADDRESS_WAIT)
-
-    def test_blocked_walk_addresses_pushes_then_merges(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """BLOCKED -> address agent -> push -> re-poll MERGED -> learn -> PASS."""
-        stage = MergeWaitStage()
-        github = _FifoStateGitHub([BLOCKED_STATE, MERGED_STATE])
-        ctx = make_ctx(github=github)
-        pool = FakeWorkerPool()
-        item = _armed_item(make_work_item)
-        item.payload["threads_json"] = '[{"id": "T1"}]'
-        item.payload["difficulty_tiers"] = "@ file.py Line 3 - EASY - fix"
-
-        outcome = _drive(stage, item, ctx, pool)
-
-        assert outcome == StageOutcome(Disposition.FINISH_PASS, "merged")
-        address_jobs = [
-            h.job
-            for h in pool.submitted
-            if isinstance(h.job, AgentJob) and h.job.descr == "blocked_address"
-        ]
-        assert len(address_jobs) == 1
-        # kwargs-verified: the stored kwargs must compose a real prompt.
-        prompt = address_jobs[0].prompt_builder(**address_jobs[0].prompt_kwargs)
-        assert "T1" in prompt
-        push_jobs = [h.job for h in pool.submitted if isinstance(h.job, GitJob)]
-        assert [j.op for j in push_jobs] == ["commit_push"]
-        assert item.attempts["blocked_address"] == 1
-
-    def test_failed_address_turn_repolls_without_push(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A hard-failed address session re-polls; the budget still counts."""
-        stage = MergeWaitStage()
-        github = _FifoStateGitHub([BLOCKED_STATE])
-        ctx = make_ctx(github=github)
-        pool = FakeWorkerPool()
-        pool.script(
-            JobResult(ok=False, error="agent crashed"),  # address 1
-            JobResult(ok=False, error="agent crashed"),  # address 2
-        )
-        item = _armed_item(make_work_item)
-
-        outcome = _drive(stage, item, ctx, pool)
-
-        assert outcome == StageOutcome(Disposition.FAIL_BACK, "blocked_exhausted")
-        assert item.attempts["blocked_address"] == 2
-        assert not [h.job for h in pool.submitted if isinstance(h.job, GitJob)]
-
-    def test_blocked_exhaustion_not_stuck_fails_back(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """An awaiting-review BLOCKED PR is NOT stuck: regress, never skip (#1576)."""
-        stage = MergeWaitStage()
-        github = FakeStageGitHub(pr_state=BLOCKED_STATE, pr_stuck=False)
-        ctx = make_ctx(github=github)
-        item = _armed_item(make_work_item)
-        item.attempts["blocked_address"] = 2
-
-        result = stage.step(item, ctx)
-
-        assert result == StageOutcome(Disposition.FAIL_BACK, "blocked_exhausted")
-        assert STATE_SKIP not in github.labels.get(1, set())
-
-    def test_blocked_exhaustion_genuinely_stuck_skips_durably(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A genuinely stuck PR is durably skip-tagged BEFORE the SKIP outcome."""
-        stage = MergeWaitStage()
-        github = FakeStageGitHub(pr_state=BLOCKED_STATE, pr_stuck=True)
-        ctx = make_ctx(github=github)
-        item = _armed_item(make_work_item)
-        item.attempts["blocked_address"] = 2
-
-        result = stage.step(item, ctx)
-
-        assert result == StageOutcome(Disposition.SKIP, "blocked_stuck")
-        assert STATE_SKIP in github.labels[1]
-        assert ("gh_issue_add_labels", (1, (STATE_SKIP,))) in github.mutation_log
-
-
-class TestMergeWaitLearn:
-    """MERGED -> deduped /learn -> durable mark -> FINISH_PASS."""
-
-    def test_learn_dedupe_skips_terminal_records(self, make_ctx: Any, make_work_item: Any) -> None:
-        """Mutation probe (c): a terminal learn record never re-fires /learn."""
-        stage = MergeWaitStage()
-        github = FakeStageGitHub(pr_state=MERGED_STATE, learn_terminal=True)
-        ctx = make_ctx(github=github)
-        pool = FakeWorkerPool()
-        item = _armed_item(make_work_item)
-
-        outcome = _drive(stage, item, ctx, pool)
-
-        assert outcome == StageOutcome(Disposition.FINISH_PASS, "merged")
-        assert pool.submitted == []  # no learn session dispatched
-        assert github.mutation_log == []  # and nothing re-marked
-
-    def test_learn_disabled_by_config_skips_session(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """enable_learn=False finishes PASS without dispatching /learn."""
-        stage = MergeWaitStage()
-        ctx = make_ctx(github=FakeStageGitHub(pr_state=MERGED_STATE))
-        ctx.config.enable_learn = False
-        pool = FakeWorkerPool()
-        item = _armed_item(make_work_item)
-
-        outcome = _drive(stage, item, ctx, pool)
-
-        assert outcome == StageOutcome(Disposition.FINISH_PASS, "merged")
-        assert pool.submitted == []
-
-    def test_failed_learn_never_fails_a_merged_pr(self, make_ctx: Any, make_work_item: Any) -> None:
-        """A failed /learn is marked (succeeded=False) and the drive PASSes."""
         stage = MergeWaitStage()
         github = FakeStageGitHub(pr_state=MERGED_STATE)
         ctx = make_ctx(github=github)
         pool = FakeWorkerPool()
         pool.script(JobResult(ok=False, error="learn agent crashed"))
-        item = _armed_item(make_work_item)
+        assert _drive(stage, _poll_item(make_work_item), ctx, pool) == StageOutcome(
+            Disposition.FINISH_PASS, "merged"
+        )
+        assert github.learn_results[1] is False
 
-        outcome = _drive(stage, item, ctx, pool)
+        failing_ctx = make_ctx(github=_MarkFailGitHub(pr_state=MERGED_STATE))
+        assert _drive(
+            stage, _poll_item(make_work_item), failing_ctx, FakeWorkerPool()
+        ) == StageOutcome(Disposition.FINISH_PASS, "merged")
 
-        assert outcome == StageOutcome(Disposition.FINISH_PASS, "merged")
-        assert github.learn_results[1] is False  # terminal: failed, not retried
-
-    def test_learn_marked_terminal_prevents_replay(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """After one learn run, a restarted walk dedupes on the read-back."""
+    def test_learn_job_and_finish_state(self, make_ctx: Any, make_work_item: Any) -> None:
         stage = MergeWaitStage()
-        github = FakeStageGitHub(pr_state=MERGED_STATE)
-        ctx = make_ctx(github=github)
-        pool = FakeWorkerPool()
-        first = _armed_item(make_work_item)
-        assert _drive(stage, first, ctx, pool) == StageOutcome(Disposition.FINISH_PASS, "merged")
-        assert len(pool.submitted) == 1
+        ctx = make_ctx(github=FakeStageGitHub())
+        item = _poll_item(make_work_item, state=LEARN_WAIT)
 
-        replay = _armed_item(make_work_item)  # same issue, fresh in-memory item
-        assert _drive(stage, replay, ctx, pool) == StageOutcome(Disposition.FINISH_PASS, "merged")
-        assert len(pool.submitted) == 1  # no second learn session
-
-    def test_failed_learn_mark_is_non_fatal(self, make_ctx: Any, make_work_item: Any) -> None:
-        """A failed durable mark logs and still finishes PASS (merged is merged)."""
-        stage = MergeWaitStage()
-        ctx = make_ctx(github=_MarkFailGitHub(pr_state=MERGED_STATE))
-        pool = FakeWorkerPool()
-        item = _armed_item(make_work_item)
-
-        outcome = _drive(stage, item, ctx, pool)
-
-        assert outcome == StageOutcome(Disposition.FINISH_PASS, "merged")
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        assert request.on_done_state == MW_FINISH
+        assert isinstance(request.job, AgentJob)
+        assert "PR #601" in request.job.prompt_builder(**request.job.prompt_kwargs)
+        item.state = MW_FINISH
+        assert stage.step(item, ctx) == StageOutcome(Disposition.FINISH_PASS, "merged")
 
     def test_learn_prompt_renders(self) -> None:
-        """The composed /learn prompt names the PR and issue."""
         prompt = build_drive_green_learn_prompt(issue_number=9, pr_number=99)
         assert "/learn" in prompt
         assert "PR #99" in prompt
-        assert "issue #9" in prompt
-
-    def test_finish_state_is_terminal_pass(self, make_ctx: Any, make_work_item: Any) -> None:
-        """MW_FINISH always passes — /learn outcome can never flip a merged PR."""
-        stage = MergeWaitStage()
-        ctx = make_ctx(github=FakeStageGitHub())
-        item = _armed_item(make_work_item, state=MW_FINISH)
-
-        assert stage.step(item, ctx) == StageOutcome(Disposition.FINISH_PASS, "merged")
-
-
-class TestMergeWaitOnJobDone:
-    """on_job_done budget/flag routing (state still the WAIT state)."""
-
-    def test_rebase_done_counts_and_records_cleanliness(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """Rebase completion consumes the budget and records rebase_clean."""
-        stage = MergeWaitStage()
-        ctx = make_ctx(github=FakeStageGitHub())
-        item = _armed_item(make_work_item, state=DIRTY_REBASE_WAIT)
-
-        stage.on_job_done(item, JobResult(ok=True, value=True), ctx)
-        assert item.attempts["rebase"] == 1
-        assert item.payload["rebase_clean"] is True
-
-        stage.on_job_done(item, JobResult(ok=False, value=False, error="conflict"), ctx)
-        assert item.attempts["rebase"] == 2
-        assert item.payload["rebase_clean"] is False
-
-    def test_push_failures_are_best_effort(self, make_ctx: Any, make_work_item: Any) -> None:
-        """Push failures on either leg record nothing — POLL re-classifies."""
-        stage = MergeWaitStage()
-        ctx = make_ctx(github=FakeStageGitHub())
-        for state in (DIRTY_PUSH_WAIT, BLOCKED_PUSH_WAIT):
-            item = _armed_item(make_work_item, state=state)
-            stage.on_job_done(item, JobResult(ok=False, error="push failed"), ctx)
-            assert "address_failed" not in item.payload
-            assert "rebase_clean" not in item.payload
-
-    def test_learn_wait_step_dispatches_learn_job(self, make_ctx: Any, make_work_item: Any) -> None:
-        """LEARN_WAIT submits the composed learn job targeting MW_FINISH."""
-        stage = MergeWaitStage()
-        ctx = make_ctx(github=FakeStageGitHub())
-        item = _armed_item(make_work_item, state=LEARN_WAIT)
-
-        result = stage.step(item, ctx)
-
-        assert isinstance(result, JobRequest)
-        assert isinstance(result.job, AgentJob)
-        assert result.job.prompt_builder is build_drive_green_learn_prompt
-        assert result.on_done_state == MW_FINISH
-        prompt = result.job.prompt_builder(**result.job.prompt_kwargs)
-        assert "PR #601" in prompt

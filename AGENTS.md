@@ -28,7 +28,7 @@ strict-review GO and a manual squash merge.
 | implementation | `hephaestus.automation.pipeline.stages.implementation` | Worktree creation, implementation, tests, commit/push, and PR creation |
 | pr_review | `hephaestus.automation.pipeline.stages.pr_review` | Inline PR review, validation, comment addressing, and implementation labels |
 | ci | `hephaestus.automation.pipeline.stages.ci` | Non-blocking CI classification and CI-fix routing |
-| merge_wait | `hephaestus.automation.pipeline.stages.merge_wait` | Auto-merge arming, merge polling, dirty/blocked handling, and post-merge learn |
+| merge_wait | `hephaestus.automation.pipeline.stages.merge_wait` | Verifies auto-merge is disabled and terminalizes open PRs; preserves post-merge learn only for already-merged PRs |
 | finished | `hephaestus.automation.pipeline.stages.finished` | Terminal ledger and worktree cleanup/preservation |
 
 Console scripts preserve their historical names. Stage-scoped wrappers are

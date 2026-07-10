@@ -229,7 +229,7 @@ class CIDriveRunCoordinator:
         return remaining
 
     def drive_issue(self, issue_number: int, pr_number: int, slot_id: int) -> WorkerResult:
-        """Drive a single PR toward green CI and auto-merge."""
+        """Contain a legacy PR and stop until the strict-review gate exists."""
         with self._status.slot() as acquired_slot:
             if acquired_slot is None:
                 return WorkerResult(
@@ -238,49 +238,25 @@ class CIDriveRunCoordinator:
                     error="Failed to acquire worker slot",
                 )
             try:
-                armed = cast(
-                    WorkerResult | None,
-                    self._arming.check_on_drive_start(issue_number, pr_number),
-                )
-                if armed is not None:
-                    return armed
-                if self._options().enable_mechanical_rebase and not self._options().dry_run:
-                    self._auto_merge._attempt_mechanical_rebase(
-                        issue_number, pr_number, acquired_slot
-                    )
-                self._status.update_slot(acquired_slot, f"{pr_ref(pr_number)}: fetching checks")
-                poll_result = self.poll_ci_until_concluded(
-                    issue_number, pr_number, acquired_slot, self._options().poll_max_wait
-                )
-                if poll_result is None:
+                if getattr(self._options(), "dry_run", False):
                     return WorkerResult(
-                        issue_number=issue_number, success=True, pr_number=pr_number
+                        issue_number=issue_number,
+                        success=False,
+                        pr_number=pr_number,
+                        error="strict_gate_unavailable",
                     )
-                _checks, required_checks = poll_result
-                all_green = all(
-                    c.get("conclusion") in ("success", "skipped", "neutral")
-                    for c in required_checks
-                )
-                if all_green:
-                    if not self._auto_merge.pr_has_implementation_go(pr_number):
-                        logger.info(
-                            "Issue #%s: PR #%s is green but lacks state:implementation-go",
-                            issue_number,
-                            pr_number,
-                        )
-                        return WorkerResult(
-                            issue_number=issue_number,
-                            success=True,
-                            pr_number=pr_number,
-                        )
-                    return cast(
-                        WorkerResult,
-                        self._auto_merge.arm_and_wait_for_merge(
-                            issue_number, pr_number, acquired_slot
-                        ),
+                if not self._auto_merge.defer_auto_merge(pr_number):
+                    return WorkerResult(
+                        issue_number=issue_number,
+                        success=False,
+                        pr_number=pr_number,
+                        error="auto_merge_disable_failed",
                     )
-                return self.handle_failing_pr(
-                    issue_number, pr_number, acquired_slot, required_checks
+                return WorkerResult(
+                    issue_number=issue_number,
+                    success=False,
+                    pr_number=pr_number,
+                    error="strict_gate_unavailable",
                 )
             except Exception as exc:
                 logger.error("Issue #%s: unexpected error: %s", issue_number, exc)

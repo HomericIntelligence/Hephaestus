@@ -56,15 +56,17 @@ def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int
 class TestPrReviewStageOnEnter:
     """on_enter cycle-relative counter reset (attempts are per-lifetime)."""
 
-    def test_on_enter_writes_nothing(self, make_ctx: Any, make_work_item: Any) -> None:
-        """on_enter performs no durable writes and always proceeds."""
+    def test_on_enter_defers_auto_merge_and_proceeds(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """on_enter makes containment the first durable PR operation."""
         stage = PrReviewStage()
         github = FakeStageGitHub()
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, pr=1001, state="ENTER")
 
         assert stage.on_enter(item, ctx) is None
-        assert github.mutation_log == []
+        assert github.mutation_log == [("defer_auto_merge", (1001,))]
 
     def test_on_enter_resets_round_for_new_implementation_pass(
         self, make_ctx: Any, make_work_item: Any
@@ -94,8 +96,10 @@ class TestPrReviewStageOnEnter:
 
         assert item.payload["pr_review_round"] == 2  # progress preserved
 
-    def test_on_enter_double_call_is_idempotent(self, make_ctx: Any, make_work_item: Any) -> None:
-        """A literal double on_enter changes nothing the second time."""
+    def test_on_enter_double_call_rechecks_deferral_idempotently(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A literal double on_enter preserves state while rechecking containment."""
         stage = PrReviewStage()
         github = FakeStageGitHub()
         ctx = make_ctx(github=github)
@@ -106,7 +110,10 @@ class TestPrReviewStageOnEnter:
         assert stage.on_enter(item, ctx) is None
 
         assert item.payload == snapshot
-        assert github.mutation_log == []
+        assert github.mutation_log == [
+            ("defer_auto_merge", (1001,)),
+            ("defer_auto_merge", (1001,)),
+        ]
 
 
 class TestPrReviewStageStep:
@@ -439,7 +446,19 @@ class TestPrReviewRestartSafetyGuards:
 class TestEvalVerdicts:
     """EVAL: re-housed _evaluate_go_verdict semantics + the budget gate."""
 
-    def test_go_with_zero_threads_defers_and_advances(
+    def test_on_enter_defers_auto_merge_before_review_work(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Direct pr_review ingress contains a stale arm before submitting an agent."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="ENTER")
+
+        assert stage.on_enter(item, ctx) is None
+        assert github.mutation_log == [("defer_auto_merge", (1001,))]
+
+    def test_go_with_zero_threads_defers_and_stops_at_the_unavailable_gate(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
         """Clean internal GO defers auto-merge before publishing its artifact."""
@@ -453,7 +472,7 @@ class TestEvalVerdicts:
         result = stage.step(item, ctx)
 
         assert isinstance(result, StageOutcome)
-        assert result.disposition == Disposition.ADVANCE
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "strict_gate_unavailable")
         assert github.mutation_log == [
             ("defer_auto_merge", (1001,)),
             ("gh_issue_upsert_comment", (1001, "<!-- hephaestus-pr-review-go -->")),
@@ -477,7 +496,7 @@ class TestEvalVerdicts:
 
         result = stage.step(item, ctx)
 
-        assert result == StageOutcome(Disposition.ADVANCE, "GO with zero blocking threads")
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "strict_gate_unavailable")
         assert github.mutation_log == [
             ("defer_auto_merge", (1001,)),
             ("gh_issue_upsert_comment", (1001, "<!-- hephaestus-pr-review-go -->")),
@@ -499,7 +518,7 @@ class TestEvalVerdicts:
         result = stage.step(item, ctx)
 
         assert isinstance(result, StageOutcome)
-        assert result.disposition == Disposition.ADVANCE
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "strict_gate_unavailable")
         assert len(github.comments[1001]) == 1
         assert "stale" not in github.comments[1001][0]
 
@@ -526,10 +545,10 @@ class TestEvalVerdicts:
         assert ("arm_auto_merge", (1001,)) not in github.mutation_log
         assert "Automation stand-down" in github.comments[1001][0]
 
-    def test_go_with_follow_up_enabled_continues_to_followup(
+    def test_go_with_follow_up_enabled_stops_at_the_unavailable_gate(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """GO with follow-up enabled records internal review then runs follow-up."""
+        """The bootstrap cannot run a follow-up that implies merge eligibility."""
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(0, 0)])
         ctx = make_ctx(github=github)
@@ -538,8 +557,7 @@ class TestEvalVerdicts:
 
         result = stage.step(item, ctx)
 
-        assert isinstance(result, Continue)
-        assert result.next_state == "FOLLOWUP_WAIT"
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "strict_gate_unavailable")
         assert github.mutation_log[0] == ("defer_auto_merge", (1001,))
         assert github.mutation_log[1] == (
             "gh_issue_upsert_comment",
@@ -663,7 +681,7 @@ class TestEvalVerdicts:
         result = stage.step(item, ctx)
 
         assert isinstance(result, StageOutcome)
-        assert result.disposition == Disposition.ADVANCE
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "strict_gate_unavailable")
         # Should resolve the minor threads and preserve the strict-review gate.
         assert ("resolve_automation_threads", (1001,)) in github.mutation_log
         assert ("defer_auto_merge", (1001,)) in github.mutation_log
@@ -727,7 +745,7 @@ class TestEvalVerdicts:
         result = stage.step(item, ctx)
 
         assert isinstance(result, StageOutcome)
-        assert result.disposition == Disposition.ADVANCE
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "strict_gate_unavailable")
         # resolve should NOT be in the log
         assert ("resolve_automation_threads", (1001,)) not in github.mutation_log
         assert ("defer_auto_merge", (1001,)) in github.mutation_log
@@ -859,6 +877,7 @@ class TestProgressAwareBudget:
         # Every real NOGO round durably records NO-GO before its retry /
         # regress (M2); the exhaustion's state:skip write comes LAST.
         assert github.mutation_log == [
+            ("defer_auto_merge", (1001,)),
             ("mark_pr_implementation_no_go", (1001,)),
             ("defer_auto_merge", (1001,)),
             ("mark_pr_implementation_no_go", (1001,)),
@@ -1080,11 +1099,11 @@ class TestFullWalks:
     """Full pool-driven walks of the whole stage (canonical FakeWorkerPool)."""
 
     def test_nogo_round_then_clean_go_walk(self, make_ctx: Any, make_work_item: Any) -> None:
-        """ENTER -> NOGO round (address leg) -> GO round -> mark+arm -> follow-up.
+        """ENTER -> NOGO round (address leg) -> internal GO -> terminal gate.
 
         Round 1: review NOGO, 2 automation threads open -> difficulty ->
         address -> push -> EVAL loops. Round 2: review GO, all threads
-        resolved -> mark + arm [durable] -> follow-up -> ADVANCE.
+        resolved -> durable artifact -> strict_gate_unavailable.
         """
         stage = PrReviewStage()
         # POST calls count_unresolved_threads once per round; EVAL calls the
@@ -1109,13 +1128,12 @@ class TestFullWalks:
             JobResult(ok=True, value=True),  # push
             JobResult(ok=True, value=_verdict("GO")),  # review round 2
             JobResult(ok=True, value='{"unaddressed": []}'),  # validate round 2
-            JobResult(ok=True, value="follow-ups filed"),  # follow-up
         )
 
         outcome = _drive(stage, item, ctx, pool)
 
         assert isinstance(outcome, StageOutcome)
-        assert outcome.disposition == Disposition.ADVANCE
+        assert outcome == StageOutcome(Disposition.FINISH_FAIL, "strict_gate_unavailable")
         assert [h.job.descr for h in pool.submitted] == [
             "review",
             "validate",
@@ -1124,10 +1142,10 @@ class TestFullWalks:
             "push_fixes",
             "review",
             "validate",
-            "follow_up",
         ]
         assert item.attempts["pr_review_iter"] == 2  # two real rounds
         assert github.mutation_log == [
+            ("defer_auto_merge", (1001,)),
             ("mark_pr_implementation_no_go", (1001,)),  # round 1 NOGO recorded (M2)
             ("defer_auto_merge", (1001,)),
             ("defer_auto_merge", (1001,)),
@@ -1383,7 +1401,7 @@ class TestFullWalks:
         assert outcome.disposition == Disposition.RETRY
         assert [h.job.descr for h in pool.submitted] == ["review"]  # dead round short-circuits
         assert item.attempts["pr_review_iter"] == 0
-        assert github.mutation_log == []
+        assert github.mutation_log == [("defer_auto_merge", (1001,))]
 
 
 class TestNoGoLabel:
@@ -1403,6 +1421,7 @@ class TestNoGoLabel:
             assert isinstance(stage.step(item, ctx), Continue)
 
         assert github.mutation_log == [
+            ("defer_auto_merge", (1001,)),
             ("mark_pr_implementation_no_go", (1001,)),
             ("defer_auto_merge", (1001,)),
             ("mark_pr_implementation_no_go", (1001,)),

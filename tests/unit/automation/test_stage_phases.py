@@ -348,13 +348,17 @@ def test_is_automation_owned_thread_human_not_owned() -> None:
     assert _is_automation_owned_thread(thread, current_login="hephaestus-bot") is False
 
 
-def test_review_phase_apply_verdict_go_does_not_arm_auto_merge(tmp_path: Path) -> None:
-    """Legacy GO labeling cannot reactivate automatic auto-merge."""
+def test_review_phase_apply_verdict_go_defers_auto_merge_before_labeling(tmp_path: Path) -> None:
+    """Legacy GO handling contains any pre-existing arm before it labels the PR."""
     phase = ReviewPhase(_make_ctx(tmp_path))
-    with mock.patch("hephaestus.automation._review_phase.mark_pr_implementation_go") as mark_go:
+    with (
+        mock.patch("hephaestus.automation._review_phase.ensure_pr_auto_merge_deferred") as defer,
+        mock.patch("hephaestus.automation._review_phase.mark_pr_implementation_go") as mark_go,
+    ):
         phase._apply_impl_review_verdict(
             issue_number=7, pr_number=12, last_verdict="GO", slot_id=None, thread_id=None
         )
+    defer.assert_called_once_with(12)
     mark_go.assert_called_once_with(12)
 
 
@@ -362,6 +366,7 @@ def test_review_phase_apply_verdict_error_applies_no_label(tmp_path: Path) -> No
     """An ERROR verdict applies neither GO nor NO-GO labels."""
     phase = ReviewPhase(_make_ctx(tmp_path))
     with (
+        mock.patch("hephaestus.automation._review_phase.ensure_pr_auto_merge_deferred"),
         mock.patch("hephaestus.automation._review_phase.mark_pr_implementation_go") as mark_go,
         mock.patch(
             "hephaestus.automation._review_phase.mark_pr_implementation_no_go"
@@ -388,6 +393,7 @@ def test_review_phase_apply_verdict_mapping(
     """Verdict→label mapping is centralized and consistent."""
     phase = ReviewPhase(_make_ctx(tmp_path))
     with (
+        mock.patch("hephaestus.automation._review_phase.ensure_pr_auto_merge_deferred"),
         mock.patch("hephaestus.automation._review_phase.mark_pr_implementation_go") as mark_go,
         mock.patch(
             "hephaestus.automation._review_phase.mark_pr_implementation_no_go"

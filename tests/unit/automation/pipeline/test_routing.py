@@ -190,7 +190,7 @@ class TestROUTES:
                 budgets={"implement": 2, "test_fix": 1},
             ),
             StageName.PR_REVIEW: Route(
-                next=StageName.CI,
+                next=StageName.FINISHED,
                 fail_routes={
                     "agent_error": StageName.IMPLEMENTATION,
                     "human_blocked": StageName.FINISHED,
@@ -213,14 +213,10 @@ class TestROUTES:
             StageName.MERGE_WAIT: Route(
                 next=StageName.FINISHED,
                 fail_routes={
-                    "ci_red": StageName.CI,
-                    "blocked_exhausted": StageName.PR_REVIEW,
-                    "missing_worktree": StageName.IMPLEMENTATION,
                     "closed": StageName.FINISHED,
-                    "timeout": StageName.FINISHED,
                     "*": StageName.FINISHED,
                 },
-                budgets={"blocked_address": 2, "rebase": 2, "merge": 1},
+                budgets={},
             ),
             StageName.FINISHED: Route(next=StageName.FINISHED),
         }

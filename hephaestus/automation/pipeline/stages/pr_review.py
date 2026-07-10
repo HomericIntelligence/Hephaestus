@@ -357,7 +357,7 @@ class PrReviewStage(Stage):
     """
 
     def on_enter(self, item: WorkItem, ctx: StageContext) -> StageOutcome | None:
-        """Reset the cycle-relative round counter on a new implementation pass.
+        """Contain an existing arm, then reset the cycle-relative round counter.
 
         ``attempts["pr_review_iter"]`` is per-lifetime (routing.py: attempts
         are never reset), so the per-cycle review budget is tracked in
@@ -375,6 +375,19 @@ class PrReviewStage(Stage):
             None (always proceed to step()).
 
         """
+        if item.pr is not None:
+            try:
+                if not ctx.dry_run:
+                    ctx.github.defer_auto_merge(item.pr)
+            except Exception as exc:
+                logger.error(
+                    "pr_review:%s: failed to verify auto-merge disabled for PR #%d: %s",
+                    item.issue,
+                    item.pr,
+                    exc,
+                )
+                return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_disable_failed")
+            item.armed = False
         cycle = item.attempts.get("implement", 0)
         if item.payload.get("pr_review_cycle") != cycle:
             item.payload["pr_review_cycle"] = cycle
@@ -1014,9 +1027,7 @@ class PrReviewStage(Stage):
         blocked_reason = self._write_internal_go(item.pr, ctx)
         if blocked_reason is not None:
             return StageOutcome(Disposition.FINISH_FAIL, blocked_reason)
-        if getattr(ctx.config, "enable_follow_up", True):
-            return Continue(next_state=FOLLOWUP_WAIT)
-        return StageOutcome(Disposition.ADVANCE, "GO with zero blocking threads")
+        return StageOutcome(Disposition.FINISH_FAIL, "strict_gate_unavailable")
 
     @staticmethod
     def _gate_no_commit(item: WorkItem) -> Continue | None:

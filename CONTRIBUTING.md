@@ -23,7 +23,8 @@ links to the full section below.
    make it pass, keep coverage at 83%+ (target 90%).
 5. **Open the PR** ([Pull Request Process](#pull-request-process)) — sign every
    commit (`git commit -S`), put `Closes #<issue-number>` on its own line in the
-   body, and enable auto-merge (`gh pr merge --auto --squash`).
+   body, and keep auto-merge disabled. After an unconditional independent
+   strict-review GO, a maintainer performs the manual squash merge.
 
 If anything in steps 1–2 fails, see [Platform Support](#platform-support) — the
 pixi dev environment is `linux-64` only by design.
@@ -240,7 +241,9 @@ that violates any of them is blocked:
 2. **Reference the issue**: the PR body must contain the literal line `Closes #<n>`
    (capital `C`, no colon, on its own line). `Fixes`, `Resolves`, `closes`, and
    `Closes:` are **not** accepted.
-3. **Enable auto-merge**: `gh pr merge --auto --squash`.
+3. **Keep auto-merge disabled**: during #2054's bootstrap, an unconditional
+   independent strict-review GO is required before a maintainer manually runs
+   `gh pr merge --squash`.
 
 Also: ensure tests pass locally (`pixi run test`), keep commits to logical units with
 [conventional commit](https://www.conventionalcommits.org/) messages, and never bypass
