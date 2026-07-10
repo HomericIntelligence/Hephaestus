@@ -159,8 +159,8 @@ def _list_open_issue_meta(org: str, repo: str) -> list[dict[str, Any]]:
     ]
 
 
-def _list_open_pr_numbers(org: str, repo: str) -> list[int]:
-    """Return open PR numbers in ``org/repo``, sorted ascending.
+def _list_open_pr_meta(org: str, repo: str) -> list[dict[str, Any]]:
+    """Return open PR numbers and author metadata, sorted ascending.
 
     Read-only helper for the pipeline repo stage's ``--drive-green-all``
     orphan-PR discovery (#1817): PRs with no tracked issue route to the ci
@@ -170,23 +170,41 @@ def _list_open_pr_numbers(org: str, repo: str) -> list[int]:
     try:
         out = gh_call(
             [
-                "pr",
-                "list",
-                "--repo",
-                f"{org}/{repo}",
-                "--state",
-                "open",
-                "--limit",
-                "500",
-                "--json",
-                "number",
+                "api",
+                f"/repos/{org}/{repo}/pulls?state=open&per_page=100",
+                "--paginate",
+                "--slurp",
             ],
             timeout=NETWORK_TIMEOUT,
         )
-        entries = json.loads(out.stdout or "[]")
-    except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError) as exc:
+        pages = json.loads(out.stdout or "[]")
+        if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+            raise ValueError("expected paginated pull response")
+    except (
+        subprocess.SubprocessError,
+        RuntimeError,
+        OSError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as exc:
         raise RuntimeError(f"failed to list open PRs for {org}/{repo}: {exc}") from exc
-    return sorted(int(e["number"]) for e in entries if isinstance(e, dict) and "number" in e)
+    pulls: list[dict[str, Any]] = []
+    for page in pages:
+        for entry in page:
+            number = entry.get("number") if isinstance(entry, dict) else None
+            if not isinstance(number, int):
+                continue
+            user = entry.get("user") or {}
+            pulls.append(
+                {
+                    "number": number,
+                    "user": {
+                        "login": user.get("login"),
+                        "type": user.get("type"),
+                    },
+                }
+            )
+    return sorted(pulls, key=lambda pr: pr["number"])
 
 
 def _list_open_issue_numbers(org: str, repo: str) -> list[int]:

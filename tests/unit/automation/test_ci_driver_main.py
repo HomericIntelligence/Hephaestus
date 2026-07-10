@@ -115,6 +115,30 @@ def test_main_discovery_mode_enables_drive_green_all() -> None:
     assert config.drive_green_all is True
 
 
+@pytest.mark.parametrize(
+    ("argv", "include_bot_prs", "include_all_authors"),
+    [
+        pytest.param(["--dry-run"], True, False, id="defaults"),
+        pytest.param(["--no-include-bot-prs", "--dry-run"], False, False, id="exclude-bots"),
+        pytest.param(["--all", "--dry-run"], True, True, id="all-authors"),
+        pytest.param(
+            ["--all", "--no-include-bot-prs", "--dry-run"],
+            False,
+            True,
+            id="all-non-bots",
+        ),
+    ],
+)
+def test_main_threads_drive_green_filter_flags(
+    argv: list[str], include_bot_prs: bool, include_all_authors: bool
+) -> None:
+    """CLI discovery flags reach the pipeline configuration unchanged."""
+    config = _run_main_capturing_config(argv)["config"]
+
+    assert config.include_bot_prs is include_bot_prs
+    assert config.include_all_authors is include_all_authors
+
+
 def test_main_maps_max_workers_to_worker_pool() -> None:
     """--max-workers maps onto the pipeline worker-pool size."""
     captured = _run_main_capturing_config(["--issues", "5", "--max-workers", "7", "--dry-run"])

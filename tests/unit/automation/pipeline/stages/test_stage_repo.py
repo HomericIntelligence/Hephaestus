@@ -11,10 +11,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
 import hephaestus.automation.loop_repo_manager as loop_repo_manager_mod
+import hephaestus.automation.pr_discovery as pr_discovery_mod
 from hephaestus.automation.pipeline import seeding as seeding_mod
 from hephaestus.automation.pipeline.jobs import GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageName
@@ -170,13 +172,13 @@ class TestDiscover:
         meta: list[dict[str, Any]],
         facts: dict[int, IssueFacts],
         classifications: dict[int, tuple[StageName | None, str]],
-        open_prs: list[int] | None = None,
+        open_prs: list[dict[str, Any]] | None = None,
     ) -> list[int]:
         """Patch the repo-stage read seams; returns the classify-call order."""
         classified: list[int] = []
         monkeypatch.setattr(loop_repo_manager_mod, "_list_open_issue_meta", lambda org, repo: meta)
         monkeypatch.setattr(
-            loop_repo_manager_mod, "_list_open_pr_numbers", lambda org, repo: open_prs or []
+            loop_repo_manager_mod, "_list_open_pr_meta", lambda org, repo: open_prs or []
         )
         monkeypatch.setattr(seeding_mod, "seed_issue", lambda num: facts[num])
         monkeypatch.setattr(seeding_mod, "seed_issue_from_github", lambda num, github: facts[num])
@@ -222,7 +224,7 @@ class TestDiscover:
             "_list_open_issue_meta",
             lambda org, repo: [{"number": 8, "labels": ["state:implementation-go"], "title": "x"}],
         )
-        monkeypatch.setattr(loop_repo_manager_mod, "_list_open_pr_numbers", lambda org, repo: [])
+        monkeypatch.setattr(loop_repo_manager_mod, "_list_open_pr_meta", lambda org, repo: [])
         monkeypatch.setattr(
             seeding_mod,
             "seed_issue",
@@ -363,14 +365,26 @@ class TestDiscover:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Open PRs with no tracked issue become ci-stage PR products."""
-        config = type("Cfg", (), {"drive_green_all": True, "dry_run": False})()
+        config = type(
+            "Cfg",
+            (),
+            {
+                "drive_green_all": True,
+                "include_bot_prs": True,
+                "include_all_authors": True,
+                "dry_run": False,
+            },
+        )()
         ctx = make_ctx(config=config, paths=_RepoPaths(tmp_path))
         self._patch_discovery(
             monkeypatch,
             meta=[{"number": 1, "labels": [], "title": "covered"}],
             facts={1: _facts(1, pr=55, pr_open=True)},
             classifications={1: (StageName.PR_REVIEW, "open PR")},
-            open_prs=[55, 66],
+            open_prs=[
+                {"number": 55, "user": {"login": "alice", "type": "User"}},
+                {"number": 66, "user": {"login": "alice", "type": "User"}},
+            ],
         )
         repo_item.state = "DISCOVER"
 
@@ -378,6 +392,88 @@ class TestDiscover:
 
         orphan = [p for p in repo_item.payload["products"] if p.get("kind") == "pr"]
         assert [(p["number"], p["stage"]) for p in orphan] == [(66, StageName.CI)]
+
+    @pytest.mark.parametrize(
+        ("include_bot_prs", "include_all_authors", "expected"),
+        [
+            pytest.param(True, False, [66, 68], id="viewer-only-including-bots"),
+            pytest.param(False, False, [66], id="viewer-only-without-bots"),
+            pytest.param(True, True, [66, 67, 68, 69], id="all-authors-including-bots"),
+            pytest.param(False, True, [66, 67], id="all-authors-without-bots"),
+        ],
+    )
+    def test_drive_green_all_honors_author_and_bot_filters(
+        self,
+        include_bot_prs: bool,
+        include_all_authors: bool,
+        expected: list[int],
+        repo_item: WorkItem,
+        tmp_path: Path,
+        make_ctx: Callable[..., Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config = type(
+            "Cfg",
+            (),
+            {
+                "drive_green_all": True,
+                "include_bot_prs": include_bot_prs,
+                "include_all_authors": include_all_authors,
+                "dry_run": False,
+            },
+        )()
+        ctx = make_ctx(config=config, paths=_RepoPaths(tmp_path))
+        self._patch_discovery(
+            monkeypatch,
+            meta=[{"number": 1, "labels": [], "title": "covered"}],
+            facts={1: _facts(1)},
+            classifications={1: (StageName.PLANNING, "needs plan")},
+            open_prs=[
+                {"number": 66, "user": {"login": "alice", "type": "User"}},
+                {"number": 67, "user": {"login": "bob", "type": "User"}},
+                {"number": 68, "user": {"login": "alice", "type": "Bot"}},
+                {"number": 69, "user": {"login": "depbot", "type": "Bot"}},
+            ],
+        )
+        monkeypatch.setattr(
+            pr_discovery_mod,
+            "_resolve_viewer_login",
+            lambda: "alice",
+        )
+        repo_item.state = "DISCOVER"
+
+        RepoStage().step(repo_item, ctx)
+
+        orphan = [p for p in repo_item.payload["products"] if p.get("kind") == "pr"]
+        assert [p["number"] for p in orphan] == expected
+
+    def test_drive_green_all_skips_viewer_resolution_for_all_authors(
+        self,
+        repo_item: WorkItem,
+        tmp_path: Path,
+        make_ctx: Callable[..., Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config = type(
+            "Cfg",
+            (),
+            {"drive_green_all": True, "include_all_authors": True, "dry_run": False},
+        )()
+        ctx = make_ctx(config=config, paths=_RepoPaths(tmp_path))
+        self._patch_discovery(
+            monkeypatch,
+            meta=[],
+            facts={},
+            classifications={},
+            open_prs=[],
+        )
+        resolver = MagicMock(return_value="x")
+        monkeypatch.setattr(pr_discovery_mod, "_resolve_viewer_login", resolver)
+        repo_item.state = "DISCOVER"
+
+        RepoStage().step(repo_item, ctx)
+
+        resolver.assert_not_called()
 
     def test_drive_green_all_pr_discovery_failure_finishes_fail(
         self,
@@ -387,7 +483,11 @@ class TestDiscover:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Orphan-PR discovery failures are visible, not successful empty runs."""
-        config = type("Cfg", (), {"drive_green_all": True, "dry_run": False})()
+        config = type(
+            "Cfg",
+            (),
+            {"drive_green_all": True, "include_all_authors": True, "dry_run": False},
+        )()
         ctx = make_ctx(config=config, paths=_RepoPaths(tmp_path))
         self._patch_discovery(
             monkeypatch,
@@ -397,7 +497,7 @@ class TestDiscover:
         )
         monkeypatch.setattr(
             loop_repo_manager_mod,
-            "_list_open_pr_numbers",
+            "_list_open_pr_meta",
             lambda org, repo: (_ for _ in ()).throw(RuntimeError("pr list failed")),
         )
         repo_item.state = "DISCOVER"

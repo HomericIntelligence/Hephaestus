@@ -110,6 +110,16 @@ def test_build_pipeline_config_maps_cli_fields(dispatch: dict[str, MagicMock]) -
     assert config.event_log_path.parent == Path(DEFAULT_STATE_DIR)
 
 
+def test_drive_green_all_maps_all_authors_and_bots(dispatch: dict[str, MagicMock]) -> None:
+    """The legacy drive-green-all flag keeps its broad discovery scope."""
+    loop_runner.main(["--drive-green-all", "--dry-run"])
+
+    (config,) = dispatch["run_pipeline"].call_args.args
+    assert config.drive_green_all is True
+    assert config.include_all_authors is True
+    assert config.include_bot_prs is True
+
+
 def test_default_pipeline_event_log_path_does_not_create_repo_checkout() -> None:
     """The default event log path must not live under a repo clone directory."""
     path = loop_runner._pipeline_event_log_path(DEFAULT_PROJECTS_DIR, ["repo-a"])

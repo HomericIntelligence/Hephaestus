@@ -964,6 +964,24 @@ class TestConfigWiring:
         # A non-overridden key still resolves from ROUTES (rebase default 2).
         assert ctx.budget("rebase") == 2
 
+    def test_drive_green_filters_flow_to_stage_config(self, tmp_path: Path) -> None:
+        """Discovery flags survive the coordinator's stage-config copy."""
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            projects_dir=tmp_path,
+            include_bot_prs=False,
+            include_all_authors=True,
+        )
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        )
+
+        ctx = coordinator._ctx_for_repo("repo-a")
+
+        assert ctx.config.include_bot_prs is False
+        assert ctx.config.include_all_authors is True
+
     def test_no_budget_override_uses_routes_default(self, tmp_path: Path) -> None:
         """Without an override the ci_fix budget is the ROUTES default (1)."""
         config = PipelineConfig(org="org", repos=["repo-a"], projects_dir=tmp_path)
