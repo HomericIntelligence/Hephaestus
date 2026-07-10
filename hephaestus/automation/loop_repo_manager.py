@@ -194,7 +194,8 @@ def _list_open_pr_meta(org: str, repo: str) -> list[dict[str, Any]]:
             number = entry.get("number") if isinstance(entry, dict) else None
             if not isinstance(number, int):
                 continue
-            user = entry.get("user") or {}
+            raw_user = entry.get("user")
+            user = raw_user if isinstance(raw_user, dict) else {}
             pulls.append(
                 {
                     "number": number,
