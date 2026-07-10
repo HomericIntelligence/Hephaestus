@@ -27,7 +27,7 @@ from hephaestus.automation.pipeline.jobs import (
 from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.worker_pool import WorkerPool, _repo_lock_path
-from hephaestus.resilience import CircuitBreakerOpenError
+from hephaestus.resilience import CircuitBreakerOpenError, get_circuit_breaker
 from hephaestus.utils.file_lock import LockUnavailableError
 from hephaestus.utils.helpers import get_repo_root
 
@@ -309,25 +309,25 @@ class TestAgentErrorHandling:
         self,
         pool: WorkerPool,
     ) -> None:
-        """Agent model variants share the circuit breaker for their runtime."""
+        """Failures for one model open the runtime breaker for every model."""
+        get_circuit_breaker("agent:claude", failure_threshold=2)
         jobs = [_agent_job(model=model) for model in ("opus", "sonnet")]
 
         with (
             patch(f"{_WP}.resolve_agent", return_value="claude"),
-            patch(f"{_WP}.claude_invoke.invoke_claude_with_session", return_value=("", "")),
             patch(
-                f"{_WP}.resilient_call",
-                side_effect=lambda function, **_kwargs: function(),
-            ) as call,
+                f"{_WP}.claude_invoke.invoke_claude_with_session",
+                side_effect=RuntimeError("runtime unavailable"),
+            ) as invoke,
         ):
-            for job in jobs:
-                result = pool._run_agent(job)
-                assert result.ok is True
+            first = pool._run_agent(jobs[0])
+            second = pool._run_agent(jobs[0])
+            blocked = pool._run_agent(jobs[1])
 
-        assert [call_args.kwargs["circuit_breaker_name"] for call_args in call.call_args_list] == [
-            "agent:claude",
-            "agent:claude",
-        ]
+        assert first.error == "RuntimeError: runtime unavailable"
+        assert second.error == "RuntimeError: runtime unavailable"
+        assert blocked.error == "circuit_open"
+        assert invoke.call_count == 2
 
     def test_circuit_breaker_open_returns_error(
         self,
