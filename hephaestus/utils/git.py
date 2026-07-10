@@ -314,13 +314,13 @@ def git_push(
 
 
 def git_unmerged_files(cwd: Path | str) -> list[str]:
-    """Return files with unresolved merge conflicts in ``cwd``."""
+    """Return unresolved conflict paths from Git's NUL-delimited output."""
     result = run_git(
-        ["diff", "--name-only", "--diff-filter=U"],
+        ["diff", "--name-only", "--diff-filter=U", "-z"],
         cwd=cwd,
         timeout=METADATA_TIMEOUT,
     )
-    return [path.strip() for path in result.stdout.splitlines() if path.strip()]
+    return [path for path in result.stdout.split("\0") if path]
 
 
 def git_rev_list_count(cwd: Path | str, revspec: str) -> int:
@@ -349,6 +349,17 @@ def git_ls_remote_contains(
     raise_on_error: bool = False,
 ) -> bool:
     """Return whether ``remote`` advertises ``ref`` as an exact ref."""
+    return git_ls_remote_sha(cwd, remote, ref, raise_on_error=raise_on_error) is not None
+
+
+def git_ls_remote_sha(
+    cwd: Path | str,
+    remote: str,
+    ref: str,
+    *,
+    raise_on_error: bool = False,
+) -> str | None:
+    """Return the SHA advertised for an exact remote ref, if present."""
     try:
         result = run_git(
             ["ls-remote", remote, ref],
@@ -360,14 +371,14 @@ def git_ls_remote_contains(
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
         if raise_on_error:
             raise
-        return False
+        return None
 
     candidates = _remote_ref_candidates(ref)
     for line in result.stdout.splitlines():
         fields = line.split()
         if len(fields) >= 2 and fields[1] in candidates:
-            return True
-    return False
+            return fields[0]
+    return None
 
 
 def working_tree_clean() -> bool:
@@ -403,6 +414,7 @@ __all__ = [
     "git_branch_exists",
     "git_config_get",
     "git_ls_remote_contains",
+    "git_ls_remote_sha",
     "git_push",
     "git_remote_url",
     "git_rev_list_count",

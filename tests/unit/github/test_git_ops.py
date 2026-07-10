@@ -445,14 +445,29 @@ def test_git_unmerged_files_splits_conflict_output() -> None:
     completed = subprocess.CompletedProcess(
         ["git"],
         0,
-        stdout=" a.py\n\nsubdir/b.py \n",
+        stdout="a.py\0subdir/b.py\0",
         stderr="",
     )
     with patch("hephaestus.utils.git.run_git", return_value=completed) as mock_run:
         assert git_unmerged_files(Path("/repo")) == ["a.py", "subdir/b.py"]
 
     mock_run.assert_called_once_with(
-        ["diff", "--name-only", "--diff-filter=U"],
+        ["diff", "--name-only", "--diff-filter=U", "-z"],
+        cwd=Path("/repo"),
+        timeout=METADATA_TIMEOUT,
+    )
+
+
+def test_git_unmerged_files_preserves_nul_delimited_paths() -> None:
+    """Conflict paths retain whitespace and newlines through Git's -z output."""
+    completed = subprocess.CompletedProcess(
+        ["git"], 0, stdout=" leading.py \0docs/read me\n\0", stderr=""
+    )
+    with patch("hephaestus.utils.git.run_git", return_value=completed) as mock_run:
+        assert git_unmerged_files(Path("/repo")) == [" leading.py ", "docs/read me\n"]
+
+    mock_run.assert_called_once_with(
+        ["diff", "--name-only", "--diff-filter=U", "-z"],
         cwd=Path("/repo"),
         timeout=METADATA_TIMEOUT,
     )
@@ -478,6 +493,23 @@ def test_git_ls_remote_contains_checks_ref_stdout() -> None:
     with patch("hephaestus.utils.git.run_git", side_effect=[found, missing]):
         assert git_ls_remote_contains(Path("/repo"), "origin", "feature") is True
         assert git_ls_remote_contains(Path("/repo"), "origin", "missing") is False
+
+
+def test_git_ls_remote_sha_returns_exact_matching_ref_sha() -> None:
+    """The remote probe exposes the SHA for an exact branch ref."""
+    found = subprocess.CompletedProcess(
+        ["git"], 0, stdout="rebased-sha\trefs/heads/feature\n", stderr=""
+    )
+    with patch("hephaestus.utils.git.run_git", return_value=found) as mock_run:
+        assert shared_git.git_ls_remote_sha(Path("/repo"), "origin", "feature") == "rebased-sha"
+
+    mock_run.assert_called_once_with(
+        ["ls-remote", "origin", "feature"],
+        cwd=Path("/repo"),
+        timeout=NETWORK_TIMEOUT,
+        check=True,
+        log_on_error=False,
+    )
 
 
 def test_git_ls_remote_contains_rejects_partial_ref_matches() -> None:
@@ -567,3 +599,4 @@ def test_github_git_ops_reexports_shared_helpers() -> None:
     """GitHub callers keep their old import path while using the utils implementation."""
     assert github_git_ops.run_git is shared_git.run_git
     assert github_git_ops.git_ls_remote_contains is shared_git.git_ls_remote_contains
+    assert github_git_ops.git_ls_remote_sha is shared_git.git_ls_remote_sha

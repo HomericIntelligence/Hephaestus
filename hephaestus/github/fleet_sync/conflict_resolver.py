@@ -22,7 +22,7 @@ from hephaestus.github.fleet_sync.git_ops import (
 from hephaestus.github.fleet_sync.gpg import get_resign_email, get_resign_exec
 from hephaestus.github.fleet_sync.models import UNICODE_SYMBOLS, PRInfo, Symbols
 from hephaestus.github.git_ops import (
-    git_ls_remote_contains,
+    git_ls_remote_sha,
     git_rev_list_count,
     git_unmerged_files,
     run_git,
@@ -74,7 +74,7 @@ def _run_conflict_agent(agent: str, prompt: str, work: Path, pr_number: int) -> 
             sandbox="workspace-write",
         )
         if result.stdout:
-            logger.debug("  agent: %s", result.stdout[:200])
+            logger.debug("  agent: %r", result.stdout[:200])
         return True
 
     try:
@@ -87,13 +87,18 @@ def _run_conflict_agent(agent: str, prompt: str, work: Path, pr_number: int) -> 
         )
         return False
 
-    options = ClaudeCodeOptions(max_turns=30, cwd=str(work))
+    options = ClaudeCodeOptions(
+        max_turns=30,
+        cwd=str(work),
+        allowed_tools=["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
+        permission_mode="dontAsk",
+    )
 
     async def _drain() -> None:
         async for message in query(prompt=prompt, options=options):
             text = getattr(message, "text", None) or str(message)
             if text:
-                logger.debug("  agent: %s", text[:200])
+                logger.debug("  agent: %r", text[:200])
 
     import asyncio
 
@@ -110,7 +115,7 @@ def _start_conflict_rebase(
     """Prepare the conflict worktree and return unresolved conflict files."""
     repo_clone = ensure_repo_clone(pr.repo, org, repo_clone.parent, dry_run=False)
     add_pr_worktree(repo_clone, work, pr.head_ref, pr.base_ref, dry_run=False)
-    run_git(
+    rebase_result = run_git(
         ["rebase", f"origin/{pr.base_ref}"],
         cwd=work,
         capture_output=True,
@@ -118,7 +123,10 @@ def _start_conflict_rebase(
         check=False,
         timeout=NETWORK_TIMEOUT,
     )
-    return repo_clone, git_unmerged_files(work)
+    conflict_files = git_unmerged_files(work)
+    if rebase_result.returncode != 0 and not conflict_files:
+        raise RuntimeError(f"rebase failed without reported conflicts for PR #{pr.number}")
+    return repo_clone, conflict_files
 
 
 def _build_conflict_prompt(
@@ -188,7 +196,7 @@ def _resolve_conflict_files(
 
     if dry_run:
         logger.info("  [dry-run] Would spawn agent to resolve conflicts in %s", conflict_files)
-        _git(["rebase", "--abort"], cwd=work, dry_run=False, check=False)
+        _git(["rebase", "--abort"], cwd=work, dry_run=dry_run, check=False)
         return False
 
     prompt = _build_conflict_prompt(pr, org, work, conflict_files)
@@ -206,28 +214,44 @@ def resolve_conflict_with_agent(
     symbols: Symbols = UNICODE_SYMBOLS,
 ) -> bool:
     """Spawn the selected agent to semantically resolve merge conflicts, then re-sign."""
+    if dry_run:
+        logger.info("  [dry-run] Would inspect and resolve conflicts for PR #%d", pr.number)
+        return False
+
     work = repo_clone.parent / f"{pr.repo}-{pr.number}-conflict"
 
     try:
         repo_clone, conflict_files = _start_conflict_rebase(pr, org, repo_clone, work)
         if not conflict_files:
-            _git(["rebase", "--continue"], cwd=work, dry_run=False, check=False)
+            continue_result = _git(["rebase", "--continue"], cwd=work, dry_run=False, check=False)
+            if continue_result.returncode != 0:
+                logger.warning("  Rebase continuation failed for PR #%d", pr.number)
+                return False
         elif not _resolve_conflict_files(pr, org, work, conflict_files, dry_run, agent):
             return False
 
         try:
-            remote_has_branch = git_ls_remote_contains(
-                work, "origin", pr.head_ref, raise_on_error=True
-            )
+            local_head = run_git(
+                ["rev-parse", "HEAD"], cwd=work, timeout=NETWORK_TIMEOUT
+            ).stdout.strip()
+            remote_head = git_ls_remote_sha(work, "origin", pr.head_ref, raise_on_error=True)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
             logger.warning("  Could not verify pushed branch for PR #%d: %s", pr.number, e)
             return False
 
-        if remote_has_branch:
+        if local_head and remote_head == local_head:
             logger.info("  %s Conflict resolved and pushed for PR #%d", symbols.check, pr.number)
             return True
 
-        logger.warning("  Agent did not push branch for PR #%d", pr.number)
+        if remote_head is None:
+            logger.warning("  Agent did not push branch for PR #%d", pr.number)
+        else:
+            logger.warning(
+                "  Remote branch for PR #%d is at %s, expected local HEAD %s",
+                pr.number,
+                remote_head,
+                local_head or "<unknown>",
+            )
         return False
 
     except Exception as e:

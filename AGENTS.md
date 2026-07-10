@@ -46,7 +46,9 @@ Codex. It provides:
 - `is_codex(agent_str)` — branches between the two providers.
 - `run_codex_text(...)`, `run_codex_session(...)`, `resume_codex_session(...)` —
   invoke Codex.
-- Claude is invoked via `hephaestus.automation.claude_invoke.invoke_claude_with_session`.
+- Claude is normally invoked via `hephaestus.automation.claude_invoke.invoke_claude_with_session`;
+  the library-only fleet-sync conflict fallback uses `claude_code_sdk` with the scoped call-site
+  controls below.
 
 Per-agent model/session/timeout configuration is centralised in
 `hephaestus.automation.agent_config`, all operator-tunable via explicit CLI flags
@@ -73,6 +75,12 @@ review before merge.
 | `_implement_phase.py:ImplementPhase._run_claude_impl_session` | `Read,Write,Edit,Glob,Grep,Bash` | Initial implementation runs in the isolated issue worktree and remains subject to review, CI, and branch protection. |
 | `_review_phase.py:ReviewPhase._resume_impl_with_feedback` | `Read,Write,Edit,Glob,Grep,Bash` | Review-feedback fixes resume the implementer in the isolated issue worktree and cannot bypass PR review or merge gates. |
 | `address_review_core.py:run_address_fix_session` | `Read,Write,Edit,Glob,Grep,Bash,Task,Skill` | Review-thread fixes run in the isolated issue worktree; `Task`/`Skill` support per-comment sub-agents and skill-advisor routing. |
+| `github/fleet_sync/conflict_resolver.py:_run_conflict_agent` | `Read,Write,Edit,Glob,Grep,Bash` | Claude SDK fallback runs only in a temporary per-PR conflict worktree with `permission_mode="dontAsk"`, nonce-fenced prompts, bounded turns, and no agent invocation in `--dry-run`. |
+
+Fleet-sync `--dry-run` is a preview contract: GitHub calls, Git subprocesses, pushes,
+merges, and agent calls are suppressed or logged. The CLI may still allocate an ephemeral
+temporary directory and pass Git actions through the dry-run logger so operators can see what
+would run; no clone, worktree, rebase, or other Git mutation is executed.
 
 ## Prompt safety
 

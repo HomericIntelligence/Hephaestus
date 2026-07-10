@@ -58,7 +58,7 @@ def _status_label(status: PRStatus) -> str:
 def _log_pr(pr: PRInfo) -> None:
     """Log one PR summary line."""
     logger.info(
-        "  PR #%d [%s] %s  (CI=%s mergeable=%s state=%s)",
+        "  PR #%d [%s] %r  (CI=%s mergeable=%s state=%s)",
         pr.number,
         _status_label(pr.status),
         pr.title[:60],
