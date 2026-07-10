@@ -1383,7 +1383,8 @@ class Coordinator:
             return False
         self._loops_run += 1
         logger.info("re-seeding: loop %d/%d", self._loops_run, self.config.loops)
-        return self._seed_pass() > 0
+        self._seed_pass()
+        return self._pass_work_count > 0
 
     # -- shutdown ---------------------------------------------------------------
 
