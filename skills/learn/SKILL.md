@@ -440,7 +440,57 @@ Agent(description="Create skill C", prompt="...skill C content...")
    - Referenced from main skill file via `history` frontmatter field
    - See Step 4 for format
 
-7. **Validate skill** (MUST pass before committing):
+7. **CRITICAL — Regenerate `.claude-plugin/marketplace.json`** (whenever a skill file is added, removed, or renamed):
+
+   The marketplace index at `.claude-plugin/marketplace.json` is a **stored artifact**, not a
+   test-time computed one. It carries `total_plugins`, per-`categories` counts, `last_updated`,
+   and the full `plugins` array. Adding a new `skills/<name>.md` without regenerating the index
+   makes the file counts diverge from reality, and CI's
+   `tests/test_schema_validation.py::TestMarketplaceSchema::test_total_plugins_matches_skill_files`
+   fails with `AssertionError: assert <index-count> == <files-count>`. This failure sinks
+   **both** the `validate` (Validate Plugins) and `unit-tests` (Required Checks) jobs, so a PR
+   whose skill file is otherwise perfect will still be `BLOCKED` and auto-merge will not fire.
+   `validate_plugins.py` and pre-commit do **not** catch this — only the pytest gate does.
+
+   Run the canonical generator from the worktree root **after** writing the skill file and
+   **before** validation:
+
+   ```bash
+   python3 scripts/generate_marketplace.py
+   ```
+
+   This rewrites `.claude-plugin/marketplace.json` from `skills/*.md`. Expected output:
+
+   ```text
+   Generated .claude-plugin/marketplace.json
+     Total skills: <N>
+     Last updated: <UTC timestamp>
+     Categories:
+       architecture: <count>
+       ci-cd: <count>
+       ...
+   ```
+
+   Confirm the numbers moved in the right direction:
+
+   ```bash
+   jq '{total_plugins, categories: .categories, plugins_len: (.plugins | length), last_updated}' \
+     .claude-plugin/marketplace.json
+   ```
+
+   For a new skill: `total_plugins` should be `+1`, the skill's `category` count should be `+1`,
+   and `plugins_len` should equal `total_plugins`. For an amendment: counts are unchanged but
+   `last_updated` bumps and the plugins-array entry for `<name>` reflects the new version/date.
+
+   **The `end-of-file-fixer` pre-commit hook will rewrite `marketplace.json` on first commit**
+   (the generator omits the trailing newline; the hook adds it). That's expected — when
+   pre-commit reports "Fixing .claude-plugin/marketplace.json", `git add` the file again and
+   re-run the same `git commit -S -m …`. Do NOT bypass with `--no-verify`.
+
+   `.claude-plugin/marketplace.json` MUST be staged and committed alongside `skills/<name>.md`
+   (and `<name>.history` for amendments). Step 9 (Commit and push) already includes it.
+
+8. **Validate skill** (MUST pass before committing):
 
    ### Pre-Commit Validation Checklist
 
@@ -463,7 +513,7 @@ Agent(description="Create skill C", prompt="...skill C content...")
    > header. Write inline pipes as `\|`. `validate_plugins.py` does **not** check this — only
    > the markdownlint gate does, so you MUST run markdownlint locally (below).
 
-   Run **all three** checks from the worktree root before committing, in this order
+   Run all required checks from the target worktree root before committing, in this order
    (markdownlint first — it is the gate most skill PRs fail on):
 
    ```bash
@@ -493,11 +543,16 @@ Agent(description="Create skill C", prompt="...skill C content...")
    # 2) plugin validator — note this lints the ENTIRE skills/ dir, not just your file (see below)
    python3 scripts/validate_plugins.py
 
-   # 3) pre-commit — runs the hooks CI also relies on (ruff, ruff-format, signed-commit check)
+   # 3) marketplace regression — proves the generated artifact matches the skill files
+   #    in the target repository. This is the invariant that catches stale metadata.
+   python3 -m pytest tests/test_generate_marketplace.py -q
+   #    Must exit 0 before the artifact is committed.
+
+   # 4) pre-commit — runs the hooks CI also relies on (ruff, ruff-format, signed-commit check)
    pre-commit run --files "skills/<name>.md" "skills/<name>.history"
    ```
 
-   If any of the three fails, fix errors and re-run. Do NOT commit until all pass.
+   If any check fails, fix errors and re-run. Do NOT commit until all pass.
 
    **Whole-repo validation (`validate_plugins.py` lints all of `skills/`):** if step 2 reports
    errors in files you did **not** touch, the `validate` gate is **already red on `main`** and
@@ -507,11 +562,13 @@ Agent(description="Create skill C", prompt="...skill C content...")
    claim `verified-ci`, and surface the pre-existing breakage to the user — it needs its own
    fix PR; your amendment did not cause it.
 
-8. **Commit and push**:
+9. **Commit and push**:
 
    ```bash
    # For new skills:
-   git add skills/<name>.md skills/<name>.notes.md 2>/dev/null || true
+   git add skills/<name>.md
+   git add .claude-plugin/marketplace.json
+   git add skills/<name>.notes.md 2>/dev/null || true
    git commit -S -m "feat: add <name> skill
 
    Documents <brief description of what was learned>.
@@ -528,7 +585,9 @@ Agent(description="Create skill C", prompt="...skill C content...")
 
    # For amendments
 
-   git add skills/<name>.md skills/<name>.history skills/<name>.notes.md 2>/dev/null || true
+   git add skills/<name>.md skills/<name>.history
+   git add .claude-plugin/marketplace.json
+   git add skills/<name>.notes.md 2>/dev/null || true
    git commit -S -m "feat: amend <name> skill (v<X.0.0>)
 
    <Brief description of what changed and why>.
@@ -547,7 +606,7 @@ Agent(description="Create skill C", prompt="...skill C content...")
 
    ```
 
-9. **Create PR** (only if push succeeded):
+10. **Create PR** (only if push succeeded):
 
     ```bash
     gh pr create --repo "$TARGET_SLUG" --base main \
@@ -604,7 +663,7 @@ Agent(description="Create skill C", prompt="...skill C content...")
     gh pr merge "$PR_NUMBER" --auto "$MERGE_FLAG" --repo "$TARGET_SLUG"
     ```
 
-10. **Cleanup worktree** (always clean up after PR creation):
+11. **Cleanup worktree** (always clean up after PR creation):
 
     ```bash
     # Remove the worktree (keeps the shared clone intact for future /advise)
@@ -612,7 +671,7 @@ Agent(description="Create skill C", prompt="...skill C content...")
     git -C "$MNEMOSYNE_DIR" worktree prune
     ```
 
-11. **Report honest status — enabling auto-merge is NOT "done":**
+12. **Report honest status — enabling auto-merge is NOT "done":**
 
     The PR merges only when the required gate (`validate` + `markdownlint`) goes green. Until
     then it is `BLOCKED`. When reporting status, report the **actual** state and any failing
@@ -625,7 +684,7 @@ Agent(description="Create skill C", prompt="...skill C content...")
     ```
 
     If `failing` is non-empty, the skill is at best `verified-local` — fix the checks (re-run
-    markdownlint/validate locally per Step 7) before claiming completion. (Mirrors the
+    markdownlint/validate locally per Step 8) before claiming completion. (Mirrors the
     auto-merge-after-go discipline: arming `--auto` does not by itself merge anything.)
 
 ## Amendment Workflow Summary
@@ -668,9 +727,10 @@ Existing skill found?
 | Skill not in marketplace | File not committed or in wrong location | Verify in `skills/<name>.md` (root of skills dir, not nested) |
 | markdownlint `MD056/table-column-count` "Too many cells" | An unescaped literal `\|` inside a table cell (regex, shell pipe, `a\|b`) is parsed as a column separator | Escape inline pipes as `\|`, or balance the row so its cell count matches the header. **Not caught by `validate_plugins.py`** — only the CI `markdownlint` gate; run markdownlint locally first |
 | markdownlint `MD012/no-multiple-blanks` | Two or more consecutive blank lines (often left between generated sections) | Collapse to a single blank line. Run markdownlint locally — it flags **all** rules (MD012, MD040, …), not just MD056 |
-| `validate` "Missing required section: ## X" on **your own new file** | `/learn` generated the skill without all 5 required sections | Generate from the full Step 6 template; run the Step 7 required-section self-check (grep for all 5 `##` headers) before committing |
+| `validate` "Missing required section: ## X" on **your own new file** | `/learn` generated the skill without all 5 required sections | Generate from the full Step 6 template; run the Step 8 required-section self-check (grep for all 5 `##` headers) before committing |
 | `validate` "Missing required section: ## Verified Workflow" despite the section looking present | The header was renamed to `## Proposed Workflow` for an unverified skill — but `validate_plugins.py` substring-matches the literal `## Verified Workflow` | Always keep the `## Verified Workflow` header; put the "not yet verified" warning as a blockquote inside the section, never in the header |
 | `validate`/`markdownlint` red on a file you didn't touch | A pre-existing broken file on `main` (the validator/linter scans the whole `skills/` dir) | Not your bug — surface it to the user as a separate fix PR; do not claim `verified-ci` while the gate is red |
+| `test_total_plugins_matches_skill_files` fails with `AssertionError: assert <N> == <N+1>` (sinks BOTH `validate` and `unit-tests`) | Skipped `scripts/generate_marketplace.py` after adding/removing the skill file; `.claude-plugin/marketplace.json` is stale (stored counter, not test-time computed). Not caught by `validate_plugins.py` or pre-commit — only pytest catches it. | Run `python3 scripts/generate_marketplace.py`, stage `.claude-plugin/marketplace.json`, re-commit. See Step 7. If pre-commit's `end-of-file-fixer` reformats the JSON, re-`git add` and re-commit — do NOT `--no-verify` |
 
 ### Issue: PR already exists
 

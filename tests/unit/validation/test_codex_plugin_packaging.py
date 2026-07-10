@@ -65,3 +65,24 @@ def test_codex_marketplace_payload_is_materialized_and_installable(tmp_path: Pat
     assert (installed_dir / "skills" / "advise" / "SKILL.md").is_file()
     assert (installed_dir / "skills" / "learn" / "SKILL.md").is_file()
     assert _skill_names(installed_dir / "skills") == shipped_skills
+
+
+def test_learn_skill_requires_marketplace_regression_and_atomic_staging() -> None:
+    """The learn workflow must verify and stage its generated marketplace artifact."""
+    canonical = (REPO_ROOT / "skills" / "learn" / "SKILL.md").read_text()
+    materialized = (
+        REPO_ROOT / "plugins" / "hephaestus" / "skills" / "learn" / "SKILL.md"
+    ).read_text()
+
+    assert materialized == canonical
+    assert "python3 scripts/generate_marketplace.py" in canonical
+    assert "python3 -m pytest tests/test_generate_marketplace.py -q" in canonical
+    assert canonical.index("python3 scripts/generate_marketplace.py") < canonical.index(
+        "python3 -m pytest tests/test_generate_marketplace.py -q"
+    )
+    marketplace_test = "python3 -m pytest tests/test_generate_marketplace.py -q"
+    assert canonical.index(marketplace_test) < canonical.index(
+        "python3 scripts/validate_plugins.py"
+    )
+    assert canonical.count("git add .claude-plugin/marketplace.json") >= 2
+    assert ".claude-plugin/marketplace.json 2>/dev/null || true" not in canonical
