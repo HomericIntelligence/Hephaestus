@@ -145,6 +145,33 @@ def test_automation_loop_architecture_has_interrupt_semantics_and_exit_codes() -
     )
 
 
+def test_automation_loop_architecture_documents_effective_item_semantics() -> None:
+    """The architecture contract documents terminalization and summary collapse."""
+    text = _arch_text()
+    normalized = " ".join(text.split())
+
+    assert "merged or closed" in normalized
+    assert "before branch adoption" in normalized
+    assert "latest effective logical item" in normalized
+    assert "Summary rows" in normalized
+    assert "preserved worktree guidance" in normalized
+    assert "exit-code calculation" in normalized
+
+
+def test_stage_github_pr_state_docstring_describes_shared_read_contract() -> None:
+    """The shared PR-state accessor must describe every pipeline consumer."""
+    from hephaestus.automation.pipeline.stages.base import StageGitHub
+
+    docstring = StageGitHub.gh_pr_state.__doc__ or ""
+    normalized = " ".join(docstring.split())
+
+    assert "repo" in normalized
+    assert "CI" in normalized
+    assert "implementation" in normalized
+    assert "merge_wait" in normalized
+    assert "terminal-state checks" in normalized
+
+
 def test_automation_loop_architecture_has_concurrency_cli_dry_run_and_glossary() -> None:
     """The architecture contract keeps concurrency, CLI, dry-run, and glossary details."""
     text = _arch_text()

@@ -663,11 +663,13 @@ class PipelineGitHub:
         return resolved
 
     def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
-        """Return the merge_wait PR-state read, or ``None`` on failure.
+        """Read shared PR state for seed, CI, implementation, and merge_wait.
 
-        Re-housed from ``ci_driver.CIDriver._gh_pr_state``: one ``gh pr view``
-        returning ``{state, headRefOid, mergedAt, mergeStateStatus,
-        baseRefName}``.
+        One ``gh pr view`` returns ``{state, headRefOid, mergedAt,
+        mergeStateStatus, baseRefName}``; ``None`` signals a read failure.
+        Seed, CI, and implementation paths use the result for terminal-state
+        checks before branch adoption or label routing, while merge_wait uses it
+        for head capture and merge-state polling.
         """
         try:
             result = self._gh(
