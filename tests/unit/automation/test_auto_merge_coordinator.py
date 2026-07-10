@@ -12,11 +12,11 @@ from hephaestus.automation.ci_run_coordinator import CIDriveRunCoordinator
 from hephaestus.automation.models import CIDriverOptions
 
 
-def _coordinator(gh_call: Any, gh_pr_state: Any) -> AutoMergeCoordinator:
+def _coordinator(gh_call: Any, gh_pr_state: Any, *, dry_run: bool = False) -> AutoMergeCoordinator:
     """Build the legacy coordinator with inert collaborators for containment tests."""
     return AutoMergeCoordinator(
-        options_provider=lambda: cast(CIDriverOptions, SimpleNamespace(dry_run=False)),
-        status_tracker_provider=lambda: SimpleNamespace(),
+        options_provider=lambda: cast(CIDriverOptions, SimpleNamespace(dry_run=dry_run)),
+        status_tracker_provider=lambda: SimpleNamespace(update_slot=lambda *_args: None),
         get_pr_branch=lambda _pr_number: "feature",
         is_bot_pr_mode=lambda _issue_number, _pr_number: False,
         gh_call=gh_call,
@@ -97,6 +97,90 @@ def test_legacy_drive_stops_after_verified_auto_merge_deferral() -> None:
     result = coordinator.drive_issue(issue_number=7, pr_number=42, slot_id=0)
 
     assert deferred == [42]
+    assert result.success is False
+    assert result.error == "strict_gate_unavailable"
+
+
+def test_legacy_dry_run_still_delegates_auto_merge_deferral() -> None:
+    """Dry-run records the would-defer action instead of returning before containment."""
+    deferred: list[int] = []
+
+    class _Status:
+        @contextmanager
+        def slot(self):
+            yield 0
+
+    def defer_auto_merge(pr_number: int) -> bool:
+        deferred.append(pr_number)
+        return True
+
+    coordinator = CIDriveRunCoordinator(
+        options_provider=lambda: SimpleNamespace(dry_run=True),
+        worktree_manager=SimpleNamespace(),
+        status_tracker=_Status(),
+        discovery=SimpleNamespace(),
+        check_inspector=SimpleNamespace(),
+        fix_flow=SimpleNamespace(),
+        auto_merge=SimpleNamespace(defer_auto_merge=defer_auto_merge),
+        arming=SimpleNamespace(),
+        set_shared_pr_issues=lambda _shared: None,
+    )
+
+    result = coordinator.drive_issue(issue_number=7, pr_number=42, slot_id=0)
+
+    assert deferred == [42]
+    assert result.error == "strict_gate_unavailable"
+
+
+def test_legacy_drive_reports_failed_auto_merge_deferral() -> None:
+    """Legacy CI returns the explicit containment failure rather than continuing."""
+
+    class _Status:
+        @contextmanager
+        def slot(self):
+            yield 0
+
+    coordinator = CIDriveRunCoordinator(
+        options_provider=lambda: SimpleNamespace(dry_run=False),
+        worktree_manager=SimpleNamespace(),
+        status_tracker=_Status(),
+        discovery=SimpleNamespace(),
+        check_inspector=SimpleNamespace(),
+        fix_flow=SimpleNamespace(),
+        auto_merge=SimpleNamespace(defer_auto_merge=lambda _pr_number: False),
+        arming=SimpleNamespace(),
+        set_shared_pr_issues=lambda _shared: None,
+    )
+
+    result = coordinator.drive_issue(issue_number=7, pr_number=42, slot_id=0)
+
+    assert result.success is False
+    assert result.error == "auto_merge_disable_failed"
+
+
+def test_legacy_coordinator_dry_run_deferral_avoids_gh_mutation() -> None:
+    """The compatibility defer seam logs a no-op rather than calling gh in dry-run."""
+    calls: list[list[str]] = []
+    coordinator = _coordinator(
+        lambda args, **_kwargs: calls.append(args),
+        lambda _pr_number: {"state": "OPEN"},
+        dry_run=True,
+    )
+
+    assert coordinator.defer_auto_merge(42) is True
+    assert calls == []
+
+
+def test_legacy_arm_and_wait_refuses_even_during_dry_run() -> None:
+    """The retired compatibility entry reports the unavailable strict gate, never success."""
+    coordinator = _coordinator(
+        lambda _args, **_kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+        lambda _pr_number: {"state": "OPEN"},
+        dry_run=True,
+    )
+
+    result = coordinator.arm_and_wait_for_merge(issue_number=7, pr_number=42, acquired_slot=0)
+
     assert result.success is False
     assert result.error == "strict_gate_unavailable"
 

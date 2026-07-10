@@ -987,6 +987,25 @@ class TestCommitPushAndPrCreate:
         assert "Closes #9" in github.prs[1001]["body"]
         assert github.prs[1001]["title"] == "Add the widget"
 
+    def test_pr_create_fails_explicitly_when_auto_merge_deferral_cannot_be_verified(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Fresh PR creation exposes a failed containment read-back to routing."""
+
+        class DeferFailsGitHub(FakeStageGitHub):
+            def defer_auto_merge(self, pr_number: int) -> None:
+                raise RuntimeError(f"PR #{pr_number} remains armed")
+
+        stage = ImplementationStage()
+        ctx = make_ctx(github=DeferFailsGitHub())
+        item = make_work_item(issue=9, state="PR_CREATE")
+        item.branch = "9-auto-impl"
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "auto_merge_disable_failed"
+        )
+        assert item.pr == 1001
+
     def test_pr_create_is_idempotent_for_existing_pr(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

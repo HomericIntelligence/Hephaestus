@@ -485,7 +485,17 @@ jobs:
           gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
             --json autoMergeRequest,labels,state \
             > pr.json
-          pr_state=$(jq -r '.state // ""' pr.json)
+          if ! jq -e '
+              type == "object"
+              and has("state")
+              and has("autoMergeRequest")
+              and (.state | type == "string")
+              and (.state == "OPEN" or .state == "MERGED" or .state == "CLOSED")
+            ' pr.json > /dev/null; then
+            echo "::error::Incomplete PR state response; cannot verify auto-merge is disabled."
+            exit 1
+          fi
+          pr_state=$(jq -r '.state' pr.json)
           if [ "$pr_state" != "OPEN" ]; then
             echo "OK: PR state is $pr_state; auto-merge policy is terminal"
             exit 0

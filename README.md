@@ -465,8 +465,11 @@ hephaestus-check-complexity --help
 
 ## Contributing
 
-The `main` branch is protected; all changes go through a pull request. CI enforces
-three rules — a PR that violates any of them is blocked:
+The `main` branch is protected; all changes go through a pull request. CI blocks
+PRs that fail its issue-reference, signature, and DCO checks. During #2054,
+auto-merge remains disabled through pipeline containment and reviewer control;
+the `auto-merge-policy` check reports armed PRs but is advisory so it does not
+block the independently reviewed manual bootstrap merge.
 
 1. Create a feature branch named `<issue-number>-description`
    (`git checkout -b 123-amazing-feature`).

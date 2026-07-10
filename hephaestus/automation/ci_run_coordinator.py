@@ -238,13 +238,6 @@ class CIDriveRunCoordinator:
                     error="Failed to acquire worker slot",
                 )
             try:
-                if getattr(self._options(), "dry_run", False):
-                    return WorkerResult(
-                        issue_number=issue_number,
-                        success=False,
-                        pr_number=pr_number,
-                        error="strict_gate_unavailable",
-                    )
                 if not self._auto_merge.defer_auto_merge(pr_number):
                     return WorkerResult(
                         issue_number=issue_number,

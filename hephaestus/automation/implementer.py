@@ -193,7 +193,7 @@ Examples:
     parser.add_argument(
         "--no-auto-merge",
         action="store_true",
-        help="Don't enable auto-merge after implementation-review GO",
+        help="(Deprecated, ignored) auto-merge stays disabled pending the strict-review gate",
     )
     parser.add_argument(
         "--no-learn",

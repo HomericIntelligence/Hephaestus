@@ -512,6 +512,27 @@ class TestEvalVerdicts:
         assert "armed auto-merge" not in github.comments[1001][0]
         assert item.attempts["pr_review_iter"] == 1  # real verdict counted
 
+    def test_clean_go_recheck_fails_closed_when_auto_merge_deferral_cannot_be_verified(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The final clean-GO recheck cannot publish an artifact after a failed read-back."""
+
+        class DeferFailsGitHub(FakeStageGitHub):
+            def defer_auto_merge(self, pr_number: int) -> None:
+                raise RuntimeError(f"PR #{pr_number} remains armed")
+
+        stage = PrReviewStage()
+        github = DeferFailsGitHub(unresolved=[(0, 0)])
+        ctx = make_ctx(github=github)
+        ctx.config.enable_follow_up = False
+        item = make_work_item(issue=1, pr=1001, state="EVAL")
+        item.payload["review_verdict"] = _verdict("GO")
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "auto_merge_disable_failed"
+        )
+        assert 1001 not in github.comments
+
     def test_clean_go_only_records_pending_strict_review(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

@@ -128,7 +128,7 @@ def _build_parser() -> argparse.ArgumentParser:
     pinned callers and the loop runner's child-phase argv keep working.
     """
     parser = build_automation_parser(
-        description="Drive PRs to green CI: fix failures and enable auto-merge",
+        description="Drive PRs to green CI while preserving the strict-review auto-merge gate",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:

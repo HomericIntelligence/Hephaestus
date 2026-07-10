@@ -7,7 +7,7 @@ import logging
 import subprocess
 import time
 from collections.abc import Callable
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 from hephaestus.constants import read_timeout_env
 from hephaestus.github.auto_merge import defer_auto_merge
@@ -66,6 +66,9 @@ class AutoMergeCoordinator:
 
     def defer_auto_merge(self, pr_number: int) -> bool:
         """Fail closed by disabling and reading back auto-merge for one PR."""
+        if self._options().dry_run:
+            logger.info("[dry-run] would defer auto-merge on PR #%s", pr_number)
+            return True
         return defer_auto_merge(pr_number, lambda args: self._gh_call(args, check=False))
 
     def arm_all_unarmed_open_prs(self, open_prs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -98,53 +101,23 @@ class AutoMergeCoordinator:
     def arm_and_wait_for_merge(
         self, issue_number: int, pr_number: int, acquired_slot: int
     ) -> WorkerResult:
-        """Enable auto-merge, record arming, and route the terminal outcome."""
-        self._status().update_slot(acquired_slot, f"{pr_ref(pr_number)}: enabling auto-merge")
-        if self._options().dry_run:
-            logger.info(
-                "[dry_run] Would enable auto-merge for PR #%s (issue #%s)",
-                pr_number,
-                issue_number,
-            )
-            return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
-        merge_ok = self.enable_auto_merge(
-            pr_number, is_bot_pr=self._is_bot_pr_mode(issue_number, pr_number)
+        """Contain a legacy PR and stop until the strict-review gate exists."""
+        self._status().update_slot(
+            acquired_slot, f"{pr_ref(pr_number)}: verifying auto-merge is disabled"
         )
-        if not merge_ok:
+        if not self.defer_auto_merge(pr_number):
             return WorkerResult(
                 issue_number=issue_number,
                 success=False,
                 pr_number=pr_number,
-                error=f"auto-merge failed for PR {pr_ref(pr_number)}",
+                error=f"auto-merge containment failed for PR {pr_ref(pr_number)}",
             )
-        self._status().update_slot(
-            acquired_slot, f"{pr_ref(pr_number)}: arming for post-merge /learn"
+        return WorkerResult(
+            issue_number=issue_number,
+            success=False,
+            pr_number=pr_number,
+            error="strict_gate_unavailable",
         )
-        gh_state = self._gh_pr_state(pr_number)
-        pr_head_sha = (gh_state or {}).get("headRefOid", "") or ""
-        self._arming.record_arming(pr_number, self._get_pr_branch(pr_number), pr_head_sha)
-        outcome = self.wait_for_pr_terminal(issue_number, pr_number)
-        if outcome == "FAILING":
-            fix_result = self._fix_flow.attempt_ci_fixes(issue_number, pr_number, acquired_slot)
-            if fix_result is not None and fix_result.success:
-                return (
-                    self._recheck_and_arm_after_fix(issue_number, pr_number, acquired_slot)
-                    or fix_result
-                )
-            return fix_result or WorkerResult(
-                issue_number=issue_number,
-                success=False,
-                pr_number=pr_number,
-                error=f"CI fix failed after {self._options().max_fix_iterations} attempt(s)",
-            )
-        if outcome == "DIRTY":
-            return self.resolve_dirty_pr(issue_number, pr_number, acquired_slot)
-        if outcome == "BLOCKED":
-            return cast(
-                WorkerResult,
-                self._review_threads.resolve_blocked_pr(issue_number, pr_number, acquired_slot),
-            )
-        return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
 
     def wait_for_pr_terminal(self, issue_number: int, pr_number: int) -> TerminalOutcome:
         """Poll an armed PR until it reaches a terminal or actionable state."""

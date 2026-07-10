@@ -250,7 +250,9 @@ class TestStrictGateBootstrapWorkflow:
         """GitHub clears autoMergeRequest after merge, so merged PRs still pass."""
         text = REQUIRED_WORKFLOW.read_text(encoding="utf-8")
         assert "--json autoMergeRequest,labels,state" in text
-        assert "pr_state=$(jq -r '.state // \"\"' pr.json)" in text
+        assert "Incomplete PR state response" in text
+        assert 'has("state")' in text
+        assert 'has("autoMergeRequest")' in text
         assert "auto-merge policy is terminal" in text
 
     def test_pr_policy_remains_independent_from_auto_merge_state(self) -> None:

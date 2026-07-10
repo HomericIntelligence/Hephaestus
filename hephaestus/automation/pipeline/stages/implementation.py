@@ -900,7 +900,16 @@ class ImplementationStage(Stage):
             logger.info("implementation:%d: created PR #%d", item.issue, pr_number)
         # Load-bearing legacy order (runner :623): defer auto-merge right
         # after ensuring the PR exists — never armed before implementation GO.
-        ctx.github.defer_auto_merge(item.pr)
+        try:
+            ctx.github.defer_auto_merge(item.pr)
+        except Exception as exc:
+            logger.error(
+                "implementation:%d: could not verify PR #%d auto-merge disabled: %s",
+                item.issue,
+                item.pr,
+                exc,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_disable_failed")
         return StageOutcome(Disposition.ADVANCE, f"PR #{item.pr} ready for review")
 
     @staticmethod
