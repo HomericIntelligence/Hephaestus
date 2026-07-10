@@ -30,8 +30,9 @@ class CiConclusion(enum.Enum):
 
 
 #: The legacy ``all_green`` conclusion set (``ci_driver._drive_issue`` /
-#: ``CIDriveRunCoordinator.drive_issue``): a PR is GREEN — and may be armed —
-#: only when every required check concluded in one of these.
+#: ``CIDriveRunCoordinator.drive_issue``): a PR is GREEN only when every
+#: required check concluded in one of these. #2054 still contains any existing
+#: auto-merge request and terminates until the strict-review gate exists.
 GREEN_CONCLUSIONS: frozenset[str] = frozenset({"success", "skipped", "neutral"})
 
 
@@ -41,8 +42,8 @@ def classify_ci_state(checks: list[dict[str, Any]]) -> CiConclusion:
     Extracted from poll_ci_until_concluded (issue #1816) so a pipeline stage
     can classify in one sub-second call and timer-park on PENDING. GREEN
     mirrors the legacy ``all_green`` semantics EXACTLY (conclusions all in
-    :data:`GREEN_CONCLUSIONS`) — the pipeline must never arm a PR the legacy
-    driver would not have armed. Returns:
+    :data:`GREEN_CONCLUSIONS`). The pipeline then contains auto-merge and stops
+    until the strict-review gate exists. Returns:
         NO_CHECKS: empty list — no CI configured; caller treats as success.
         PENDING:   at least one required check has status != "completed".
         GREEN:     all required completed, conclusions all in
@@ -66,7 +67,7 @@ def classify_ci_state(checks: list[dict[str, Any]]) -> CiConclusion:
 
 
 class PrMergeState(enum.Enum):
-    """Pure classification of an armed PR's merge state (issue #1816)."""
+    """Pure classification of a legacy PR's merge state (issue #1816)."""
 
     MERGED = "merged"
     CLOSED = "closed"

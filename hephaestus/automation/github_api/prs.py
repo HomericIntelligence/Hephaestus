@@ -159,8 +159,11 @@ def _find_open_pr_for_head(branch: str, base: str) -> int | None:
                 "10",
             ]
         )
-        prs = json.loads(result.stdout or "[]")
-    except (subprocess.CalledProcessError, json.JSONDecodeError, TypeError) as e:
+        stdout = result.stdout
+        if not isinstance(stdout, str) or not stdout.strip():
+            raise ValueError("existing PR lookup returned empty output")
+        prs = json.loads(stdout)
+    except (subprocess.CalledProcessError, json.JSONDecodeError, TypeError, ValueError) as e:
         raise RuntimeError(f"could not verify existing PR state for head {branch!r}") from e
     if not isinstance(prs, list):
         raise RuntimeError(f"could not verify existing PR state for head {branch!r}")

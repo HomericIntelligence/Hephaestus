@@ -1455,6 +1455,14 @@ class TestGhPrCreate:
     """Tests for gh_pr_create function."""
 
     @patch("hephaestus.automation.github_api._gh_call")
+    def test_existing_pr_lookup_rejects_empty_successful_output(self, mock_gh_call: Any) -> None:
+        """An empty successful discovery response cannot be reinterpreted as no PR."""
+        mock_gh_call.return_value = Mock(stdout="")
+
+        with pytest.raises(RuntimeError, match="could not verify existing PR state"):
+            _github_api_module._find_open_pr_for_head("768-auto-impl", "main")
+
+    @patch("hephaestus.automation.github_api._gh_call")
     def test_existing_pr_lookup_rejects_a_different_base_branch(self, mock_gh_call: Any) -> None:
         """A head-only lookup cannot reuse a PR targeting another base branch."""
         mock_gh_call.return_value = Mock(

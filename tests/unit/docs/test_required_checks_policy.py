@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -22,6 +23,20 @@ def _reapply_section() -> str:
     match = _REAPPLY_SECTION_RE.search(_policy_text())
     assert match is not None, "required-checks.md must contain the reapply runbook"
     return match.group(1)
+
+
+def _runbook_contexts(variable: str) -> list[str]:
+    """Return one single-quoted JSON context array from the policy runbook."""
+    match = re.search(
+        rf"^{re.escape(variable)}='(?P<contexts>\[.*?\])'$",
+        _reapply_section(),
+        re.MULTILINE | re.DOTALL,
+    )
+    assert match is not None, f"required-checks runbook is missing {variable}"
+    contexts = json.loads(match.group("contexts"))
+    assert isinstance(contexts, list)
+    assert all(isinstance(context, str) for context in contexts)
+    return contexts
 
 
 def test_strict_policy_has_operational_reason() -> None:
@@ -95,6 +110,26 @@ def test_runbook_audits_rulesets_and_preserves_bindings() -> None:
     )
     for marker in required_markers:
         assert marker in section, f"required-checks runbook is missing {marker!r}"
+
+
+def test_runbook_validates_exact_live_context_inventories() -> None:
+    """The runbook's assertions cannot drift from the documented live contract."""
+    assert _runbook_contexts("expected_classic") == [
+        "required-checks-gate",
+        "test (ubuntu-latest, 3.12, unit)",
+        "test (ubuntu-latest, 3.12, integration)",
+    ]
+    assert _runbook_contexts("expected_ruleset") == [
+        "lint",
+        "unit-tests",
+        "integration-tests",
+        "security/dependency-scan",
+        "security/secrets-scan",
+        "build",
+        "schema-validation",
+        "deps/version-sync",
+        "pr-policy",
+    ]
 
 
 def test_successor_adr_records_dual_required_check_surfaces() -> None:

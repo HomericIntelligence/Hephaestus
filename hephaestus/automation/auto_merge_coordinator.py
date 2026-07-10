@@ -77,25 +77,24 @@ class AutoMergeCoordinator:
         The historical name is kept for compatibility, but #2054 reverses its
         behavior: an existing arm is disabled and a new arm is never created.
         Open PRs remain in the result so callers report that manual action is
-        still required.
+        still required. A malformed record or failed disable/readback raises so
+        callers cannot report an unverified arm as ordinary remaining work.
+
+        Raises:
+            RuntimeError: If a PR record is malformed or containment cannot be
+                verified.
+
         """
         contained_prs: list[dict[str, Any]] = []
-        disable_failures: list[int] = []
         for pr in open_prs:
             number = pr.get("number")
-            if not isinstance(number, int) or number < 0:
-                contained_prs.append(pr)
-                continue
+            if not isinstance(number, int) or number <= 0:
+                raise RuntimeError("cannot verify auto-merge disabled: invalid PR number")
             if not self.defer_auto_merge(number):
-                disable_failures.append(number)
-                contained_prs.append(pr)
-                continue
+                raise RuntimeError(
+                    f"could not verify auto-merge disabled for legacy open PR #{number}"
+                )
             contained_prs.append({**pr, "autoMergeRequest": None})
-        if disable_failures:
-            logger.error(
-                "Could not verify auto-merge disabled for legacy open PR(s): %s",
-                sorted(disable_failures),
-            )
         return contained_prs
 
     def arm_and_wait_for_merge(
@@ -120,7 +119,7 @@ class AutoMergeCoordinator:
         )
 
     def wait_for_pr_terminal(self, issue_number: int, pr_number: int) -> TerminalOutcome:
-        """Poll an armed PR until it reaches a terminal or actionable state."""
+        """Poll a legacy PR until it reaches a terminal or actionable state."""
         if self._options().dry_run:
             return "TIMEOUT"
         max_wait = read_timeout_env("HEPH_PR_MERGE_MAX_WAIT", 1800)

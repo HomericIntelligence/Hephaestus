@@ -14,8 +14,8 @@ sweep via ``drive_green_all``), and dispatches to
 :func:`~hephaestus.automation.pipeline.coordinator.run_pipeline`.
 
 The per-issue drive-green orchestration the legacy ``CIDriver`` used to own
-(discover → rebase → poll → fix → push → arm → wait-for-merge → post-merge
-``/learn``) now lives entirely in ``pipeline/stages/ci.py`` and
+(discover → rebase → poll → fix → push → contain auto-merge → stop until the
+strict-review gate exists) now lives entirely in ``pipeline/stages/ci.py`` and
 ``pipeline/stages/merge_wait.py``. The pure classifiers those stages share with
 the legacy loop live in ``ci_run_coordinator.py`` (``classify_ci_state`` /
 ``classify_pr_merge_state``); the PR-discovery semantics live in
@@ -66,10 +66,10 @@ logger = logging.getLogger(__name__)
 # ``loop_repo_manager._count_failing_prs`` both consume it from here.
 
 #: Contiguous stage subset the CI-driver CLI runs: the CI drive-green loop
-#: (CI) followed by the arm + wait-for-merge + post-merge /learn loop
-#: (MERGE_WAIT). CiStage's ADVANCE target (MERGE_WAIT) is in scope, so a
-#: green PR flows straight into merge_wait; merge_wait's terminal simply
-#: finishes.
+#: (CI) followed by the containment-only merge-wait stage (MERGE_WAIT).
+#: CiStage's ADVANCE target (MERGE_WAIT) is in scope, so a green PR flows
+#: straight into merge_wait; that stage verifies auto-merge is disabled and
+#: finishes with ``strict_gate_unavailable`` until #2055 supplies the gate.
 _CI_DRIVER_SCOPE_STAGES: frozenset[StageName] = frozenset({StageName.CI, StageName.MERGE_WAIT})
 
 

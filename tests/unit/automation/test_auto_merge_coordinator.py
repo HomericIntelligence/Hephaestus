@@ -7,6 +7,8 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
+
 from hephaestus.automation.auto_merge_coordinator import AutoMergeCoordinator
 from hephaestus.automation.ci_run_coordinator import CIDriveRunCoordinator
 from hephaestus.automation.models import CIDriverOptions
@@ -67,6 +69,50 @@ def test_legacy_open_pr_sweep_disables_prearmed_auto_merge() -> None:
         ["pr", "merge", "42", "--disable-auto"],
         ["pr", "view", "42", "--json", "state,autoMergeRequest"],
     ]
+
+
+def test_legacy_open_pr_sweep_raises_when_containment_cannot_be_verified() -> None:
+    """A failed disable/readback cannot be reported as ordinary remaining work."""
+    coordinator = _coordinator(
+        lambda _args, **_kwargs: SimpleNamespace(returncode=1, stdout="", stderr="gh failed"),
+        lambda _pr_number: {"state": "OPEN"},
+    )
+
+    with pytest.raises(RuntimeError, match="could not verify auto-merge disabled"):
+        coordinator.arm_all_unarmed_open_prs([{"number": 42}])
+
+
+def test_legacy_open_pr_sweep_rejects_a_pr_without_a_positive_number() -> None:
+    """A malformed sweep record fails closed instead of skipping containment."""
+    coordinator = _coordinator(
+        lambda _args, **_kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+        lambda _pr_number: {"state": "OPEN"},
+    )
+
+    with pytest.raises(RuntimeError, match="invalid PR number"):
+        coordinator.arm_all_unarmed_open_prs([{"number": None}])
+
+
+def test_legacy_final_sweep_propagates_containment_failure() -> None:
+    """The final sweep cannot complete after its containment seam fails."""
+
+    def containment_failure(_prs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        raise RuntimeError("could not verify auto-merge disabled for legacy open PR #42")
+
+    coordinator = CIDriveRunCoordinator(
+        options_provider=lambda: SimpleNamespace(dry_run=False, issues=[]),
+        worktree_manager=SimpleNamespace(),
+        status_tracker=SimpleNamespace(),
+        discovery=SimpleNamespace(list_open_prs_remaining=lambda: [{"number": 42}]),
+        check_inspector=SimpleNamespace(),
+        fix_flow=SimpleNamespace(),
+        auto_merge=SimpleNamespace(arm_all_unarmed_open_prs=containment_failure),
+        arming=SimpleNamespace(),
+        set_shared_pr_issues=lambda _shared: None,
+    )
+
+    with pytest.raises(RuntimeError, match="could not verify auto-merge disabled"):
+        coordinator._final_open_prs({})
 
 
 def test_legacy_drive_stops_after_verified_auto_merge_deferral() -> None:
