@@ -75,14 +75,14 @@ def test_learn_skill_requires_marketplace_regression_and_atomic_staging() -> Non
     ).read_text()
 
     assert materialized == canonical
-    assert "python3 scripts/generate_marketplace.py" in canonical
-    assert "python3 -m pytest tests/test_generate_marketplace.py -q" in canonical
-    assert canonical.index("python3 scripts/generate_marketplace.py") < canonical.index(
-        "python3 -m pytest tests/test_generate_marketplace.py -q"
-    )
-    marketplace_test = "python3 -m pytest tests/test_generate_marketplace.py -q"
-    assert canonical.index(marketplace_test) < canonical.index(
-        "python3 scripts/validate_plugins.py"
-    )
+    generator_command = "\n   python3 scripts/generate_marketplace.py"
+    marketplace_command = "\n   python3 -m pytest tests/test_generate_marketplace.py -q"
+    validator_command = "\n   python3 scripts/validate_plugins.py"
+    assert generator_command in canonical
+    assert marketplace_command in canonical
+    assert canonical.index(generator_command) < canonical.index(marketplace_command)
+    assert validator_command in canonical
     assert canonical.count("git add .claude-plugin/marketplace.json") >= 2
     assert ".claude-plugin/marketplace.json 2>/dev/null || true" not in canonical
+    assert 'pre-commit run --files "skills/<name>.md" "skills/<name>.history" \\' in canonical
+    assert '     ".claude-plugin/marketplace.json"' in canonical

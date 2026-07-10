@@ -549,7 +549,8 @@ Agent(description="Create skill C", prompt="...skill C content...")
    #    Must exit 0 before the artifact is committed.
 
    # 4) pre-commit — runs the hooks CI also relies on (ruff, ruff-format, signed-commit check)
-   pre-commit run --files "skills/<name>.md" "skills/<name>.history"
+   pre-commit run --files "skills/<name>.md" "skills/<name>.history" \
+     ".claude-plugin/marketplace.json"
    ```
 
    If any check fails, fix errors and re-run. Do NOT commit until all pass.
