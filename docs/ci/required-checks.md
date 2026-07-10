@@ -16,9 +16,11 @@ checks** are green:
 | `test (ubuntu-latest, 3.12, unit)` | `.github/workflows/test.yml` matrix |
 | `test (ubuntu-latest, 3.12, integration)` | `.github/workflows/test.yml` matrix |
 
-Branch protection also has **`strict: true`** (a branch must be up to date with
-`main` before it can merge), which prevents a stale PR from merging around a
-gate that newer `main` would fail.
+Classic branch protection uses **`strict: true`**, and every active
+`required_status_checks` ruleset that applies to `main` must use
+`strict_required_status_checks_policy: true`. Requiring the PR head to be
+tested with current `main` prevents a stale PR from merging around a gate that
+newer `main` would fail.
 
 ## Why a single aggregator gate
 
@@ -72,29 +74,132 @@ forgotten.
 
 ## (Re-)applying branch protection
 
-Branch protection is stored on GitHub, not in git. To apply or restore the
-required-checks contract above, an admin runs:
+GitHub can combine classic branch protection with repository and inherited
+organization rulesets. Inspect both before changing either policy surface.
 
 ```bash
-gh api -X PUT \
-  repos/HomericIntelligence/ProjectHephaestus/branches/main/protection/required_status_checks \
-  -f strict=true \
-  -f 'checks[][context]=required-checks-gate' \
-  -f 'checks[][context]=test (ubuntu-latest, 3.12, unit)' \
-  -f 'checks[][context]=test (ubuntu-latest, 3.12, integration)'
+set -euo pipefail
+
+repo=HomericIntelligence/ProjectHephaestus
+branch=main
+state_dir=/tmp/projecthephaestus-issue-2025
+install -d -m 700 "$state_dir"
+
+gh api \
+  -H "Accept: application/vnd.github+json" \
+  "repos/$repo/branches/$branch/protection/required_status_checks" \
+  > "$state_dir/branch.before.json"
+
+gh api --paginate --slurp \
+  -H "Accept: application/vnd.github+json" \
+  "repos/$repo/rulesets?includes_parents=true&targets=branch&per_page=100" \
+  | jq 'add' > "$state_dir/rulesets.before.json"
+
+gh api --paginate --slurp \
+  -H "Accept: application/vnd.github+json" \
+  "repos/$repo/rules/branches/$branch?per_page=100" \
+  | jq 'add' > "$state_dir/rules.before.json"
+
+gh ruleset check --default --repo "$repo"
 ```
 
-Verify with:
+The branch snapshot must expose every classic check's `app_id`. The applicable
+rules snapshot retains every ruleset check's optional `integration_id`. Abort
+rather than rebuilding either array when the response shape or effective
+contract is unexpected:
 
 ```bash
-gh api repos/HomericIntelligence/ProjectHephaestus/branches/main/protection/required_status_checks
+expected='[
+  "required-checks-gate",
+  "test (ubuntu-latest, 3.12, unit)",
+  "test (ubuntu-latest, 3.12, integration)"
+]'
+
+jq -e --argjson expected "$expected" '
+  ((.checks | type) == "array")
+  and all(.checks[]; has("context") and has("app_id"))
+  and (([.checks[].context] | sort) == ($expected | sort))
+' "$state_dir/branch.before.json"
+
+jq -e --argjson expected "$expected" '
+  [.[] | select(.type == "required_status_checks")] as $status_rules
+  | all(
+      $status_rules[];
+      .parameters.strict_required_status_checks_policy == true
+    )
+    and (
+      (
+        $expected
+        + [$status_rules[].parameters.required_status_checks[].context]
+        | unique
+        | sort
+      ) == ($expected | sort)
+    )
+' "$state_dir/rules.before.json"
 ```
 
-Expect `strict: true` and exactly the three contexts above.
+Once both assertions pass, patch only the strict-mode field. Do not send
+`contexts` or `checks`; omitting them preserves the existing context and
+GitHub App bindings:
+
+```bash
+gh api -X PATCH \
+  -H "Accept: application/vnd.github+json" \
+  "repos/$repo/branches/$branch/protection/required_status_checks" \
+  -F strict=true \
+  > "$state_dir/branch.patch-response.json"
+```
+
+Read back every policy surface and prove that the repair changed no checks or
+rulesets:
+
+```bash
+gh api \
+  -H "Accept: application/vnd.github+json" \
+  "repos/$repo/branches/$branch/protection/required_status_checks" \
+  > "$state_dir/branch.after.json"
+
+gh api --paginate --slurp \
+  -H "Accept: application/vnd.github+json" \
+  "repos/$repo/rulesets?includes_parents=true&targets=branch&per_page=100" \
+  | jq 'add' > "$state_dir/rulesets.after.json"
+
+gh api --paginate --slurp \
+  -H "Accept: application/vnd.github+json" \
+  "repos/$repo/rules/branches/$branch?per_page=100" \
+  | jq 'add' > "$state_dir/rules.after.json"
+
+jq -e '.strict == true' "$state_dir/branch.after.json"
+
+jq -S '.checks | sort_by(.context)' \
+  "$state_dir/branch.before.json" > "$state_dir/checks.before.json"
+jq -S '.checks | sort_by(.context)' \
+  "$state_dir/branch.after.json" > "$state_dir/checks.after.json"
+cmp -s "$state_dir/checks.before.json" "$state_dir/checks.after.json"
+
+jq -S 'sort_by(.ruleset_id, .type, .ruleset_source_type, .ruleset_source)' \
+  "$state_dir/rules.before.json" > "$state_dir/applicable-rules.before.json"
+jq -S 'sort_by(.ruleset_id, .type, .ruleset_source_type, .ruleset_source)' \
+  "$state_dir/rules.after.json" > "$state_dir/applicable-rules.after.json"
+cmp -s \
+  "$state_dir/applicable-rules.before.json" \
+  "$state_dir/applicable-rules.after.json"
+
+jq -S 'sort_by(.id)' \
+  "$state_dir/rulesets.before.json" > "$state_dir/rulesets-normalized.before.json"
+jq -S 'sort_by(.id)' \
+  "$state_dir/rulesets.after.json" > "$state_dir/rulesets-normalized.after.json"
+cmp -s \
+  "$state_dir/rulesets-normalized.before.json" \
+  "$state_dir/rulesets-normalized.after.json"
+```
+
+Any failed assertion or comparison stops the operation. Do not weaken, replace,
+or hand-reconstruct a check or inherited ruleset to make the command pass.
 
 > **Order matters:** the `required-checks-gate` context only becomes selectable
 > after the workflow containing it has run at least once on a commit. Land the
-> workflow change first, let it report, then apply the protection PUT.
+> workflow change first, let it report, then apply the protection patch.
 
 ## Related
 
