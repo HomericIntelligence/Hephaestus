@@ -64,7 +64,7 @@ class TestFormatPreservedWorktrees:
         assert format_preserved_worktrees([], "script.py") == []
 
     def test_line_sequence_matches_legacy(self) -> None:
-        preserved = [(101, "/wt/issue-101"), (202, "/wt/issue-202")]
+        preserved = [("repo-a", 101, "/wt/issue-101"), ("repo-b", 202, "/wt/issue-202")]
 
         lines = format_preserved_worktrees(preserved, "impl.py")
 
@@ -161,7 +161,7 @@ class TestPrintSummaryRows:
     def test_preserved_footer_present(self, caplog: pytest.LogCaptureFixture) -> None:
         """The preserved-worktree footer prints via the shared helper."""
         with caplog.at_level(logging.INFO):
-            print_summary([], _stats(exit_code=1), [(9, "/wt/9")], json_out=False)
+            print_summary([], _stats(exit_code=1), [("repo-a", 9, "/wt/9")], json_out=False)
 
         assert "Preserved worktrees (contain uncommitted changes):" in caplog.text
         assert "git worktree remove --force /wt/9" in caplog.text
@@ -180,7 +180,7 @@ class TestJsonEnvelope:
         print_summary(
             items,
             _stats(exit_code=130, loops_run=3),
-            [(2, "/wt/2")],
+            [("repo-a", 2, "/wt/2")],
             json_out=True,
         )
 
