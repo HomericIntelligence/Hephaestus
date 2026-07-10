@@ -675,6 +675,23 @@ class TestSyncWorktreeToRemoteBranch:
             "FETCH_HEAD",
         ]
 
+    def test_non_missing_fetch_failure_propagates_with_pr_number(
+        self, git_utils_mocks: Any
+    ) -> None:
+        """Authentication and transport failures must not use the PR-ref fallback."""
+        fetch_error = subprocess.CalledProcessError(
+            128,
+            ["git", "fetch"],
+            output="",
+            stderr="fatal: authentication failed for remote\n",
+        )
+        git_utils_mocks.run.side_effect = [fetch_error]
+
+        with pytest.raises(subprocess.CalledProcessError):
+            sync_worktree_to_remote_branch(Path("/tmp/worktree-xyz"), "feature", pr_number=42)
+
+        assert git_utils_mocks.run.call_count == 1
+
     def test_timeout_threads_through_fetch_and_reset(self, git_utils_mocks: Any) -> None:
         """sync_worktree_to_remote_branch bounds fetch and reset."""
         git_utils_mocks.run.return_value = Mock(returncode=0)

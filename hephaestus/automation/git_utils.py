@@ -534,8 +534,8 @@ def sync_worktree_to_remote_branch(
     logger.info("Syncing worktree at %s to %s/%s before agent run", cwd, remote, branch)
     try:
         run(["git", "fetch", remote, branch], cwd=cwd, **_timeout_kw(timeout))
-    except subprocess.CalledProcessError:
-        if pr_number is None:
+    except subprocess.CalledProcessError as error:
+        if pr_number is None or not _is_missing_remote_ref_error(error):
             raise
         pull_ref = f"refs/pull/{pr_number}/head"
         logger.info(
@@ -549,6 +549,21 @@ def sync_worktree_to_remote_branch(
         run(["git", "reset", "--hard", "FETCH_HEAD"], cwd=cwd, **_timeout_kw(timeout))
         return
     run(["git", "reset", "--hard", f"{remote}/{branch}"], cwd=cwd, **_timeout_kw(timeout))
+
+
+def _is_missing_remote_ref_error(error: subprocess.CalledProcessError) -> bool:
+    """Return whether a fetch failed because the requested branch ref is absent."""
+    diagnostics = "\n".join(
+        str(value) for value in (error.stdout, error.stderr) if value is not None
+    ).lower()
+    return any(
+        marker in diagnostics
+        for marker in (
+            "couldn't find remote ref",
+            "could not find remote ref",
+            "remote ref does not exist",
+        )
+    )
 
 
 def _remove_untracked_files_tracked_by_ref(
