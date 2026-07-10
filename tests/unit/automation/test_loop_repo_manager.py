@@ -8,6 +8,7 @@ loop_runner namespace (preserved via explicit re-exports).
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -24,7 +25,58 @@ from hephaestus.automation.loop_repo_manager import (
     _resolve_repo_dir,
     _sort_repos_by_open_count,
 )
-from hephaestus.utils.helpers import METADATA_TIMEOUT
+from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
+
+
+class TestListOpenPrMeta:
+    """Tests for open pull-request metadata discovery."""
+
+    def test_returns_sorted_author_metadata_from_paginated_rows(self) -> None:
+        pages = [
+            [{"number": 9, "user": {"login": "depbot", "type": "Bot"}}],
+            [{"number": 3, "user": {"login": "alice", "type": "User"}}],
+        ]
+        with patch(
+            "hephaestus.automation.loop_repo_manager.gh_call",
+            return_value=MagicMock(stdout=json.dumps(pages)),
+        ) as mock_gh:
+            result = loop_repo_manager._list_open_pr_meta("acme", "widget")
+
+        assert result == [
+            {"number": 3, "user": {"login": "alice", "type": "User"}},
+            {"number": 9, "user": {"login": "depbot", "type": "Bot"}},
+        ]
+        assert mock_gh.call_args.args[0] == [
+            "api",
+            "/repos/acme/widget/pulls?state=open&per_page=100",
+            "--paginate",
+            "--slurp",
+        ]
+        assert mock_gh.call_args.kwargs["timeout"] == NETWORK_TIMEOUT
+
+    def test_normalizes_malformed_user_metadata(self) -> None:
+        pages = [[{"number": 7, "user": "unexpected"}, {"number": 8, "user": None}]]
+        with patch(
+            "hephaestus.automation.loop_repo_manager.gh_call",
+            return_value=MagicMock(stdout=json.dumps(pages)),
+        ):
+            result = loop_repo_manager._list_open_pr_meta("acme", "widget")
+
+        assert result == [
+            {"number": 7, "user": {"login": None, "type": None}},
+            {"number": 8, "user": {"login": None, "type": None}},
+        ]
+
+    @pytest.mark.parametrize("stdout", ["not-json", "{}"])
+    def test_rejects_malformed_response(self, stdout: str) -> None:
+        with (
+            patch(
+                "hephaestus.automation.loop_repo_manager.gh_call",
+                return_value=MagicMock(stdout=stdout),
+            ),
+            pytest.raises(RuntimeError, match="failed to list open PRs"),
+        ):
+            loop_repo_manager._list_open_pr_meta("acme", "widget")
 
 
 class TestDetectCwdRepo:

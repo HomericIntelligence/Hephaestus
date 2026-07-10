@@ -34,7 +34,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from hephaestus.automation import loop_repo_manager as _repo_manager
+from hephaestus.automation import loop_repo_manager as _repo_manager, pr_discovery as _pr_discovery
 from hephaestus.automation.pipeline import seeding as _seeding
 from hephaestus.automation.state_labels import partition_epics
 
@@ -55,6 +55,22 @@ from .base import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _drive_green_pr_is_in_scope(
+    pr: dict[str, Any], *, include_bot_prs: bool, viewer_login: str
+) -> bool:
+    """Return whether an orphan PR belongs to the configured author scope."""
+    if not include_bot_prs and _pr_discovery._is_bot_pr_author(pr):
+        return False
+    if not _pr_discovery._is_viewer_authored(pr, viewer_login):
+        if (pr.get("user") or {}).get("login") is None:
+            logger.warning(
+                "PR #%s has no user.login; skipping under author filter (#821)",
+                pr.get("number"),
+            )
+        return False
+    return True
 
 
 def _repo_checkout_path(item: WorkItem, ctx: StageContext) -> Path:
@@ -235,13 +251,21 @@ class RepoStage(Stage):
 
         # --drive-green-all: orphan PRs (no tracked issue) -> ci stage.
         if getattr(ctx.config, "drive_green_all", False):
+            include_bot_prs = bool(getattr(ctx.config, "include_bot_prs", True))
+            include_all_authors = bool(getattr(ctx.config, "include_all_authors", False))
             try:
-                open_pr_numbers = _repo_manager._list_open_pr_numbers(ctx.org, item.repo)
+                open_prs = _repo_manager._list_open_pr_meta(ctx.org, item.repo)
+                viewer_login = "" if include_all_authors else _pr_discovery._resolve_viewer_login()
             except Exception as exc:
                 logger.warning("repo:%s: PR discovery failed: %s", item.repo, exc)
                 return StageOutcome(Disposition.FINISH_FAIL, note=f"discovery failed: {exc}")
-            for pr_number in open_pr_numbers:
+            for pr in open_prs:
+                pr_number = int(pr["number"])
                 if pr_number in covered_prs:
+                    continue
+                if not _drive_green_pr_is_in_scope(
+                    pr, include_bot_prs=include_bot_prs, viewer_login=viewer_login
+                ):
                     continue
                 products.append(
                     {

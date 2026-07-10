@@ -588,6 +588,8 @@ def _build_pipeline_config(
         no_advise=cfg.no_advise,
         nitpick=cfg.nitpick,
         drive_green_all=cfg.drive_green_all,
+        include_bot_prs=True,
+        include_all_authors=cfg.drive_green_all,
         run_pre_pr_tests=cfg.run_pre_pr_tests,
         budget_overrides={"merge": cfg.max_merge_attempts},
         serialize_file_overlap=cfg.serialize_file_overlap,
