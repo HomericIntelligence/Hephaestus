@@ -117,7 +117,12 @@ from hephaestus.automation.pipeline.stages import (
 from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARGV
 from hephaestus.automation.pipeline.stages.repo import product_to_work_item
 from hephaestus.automation.pipeline.summary import RunStats, latest_logical_items, print_summary
-from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkItem
+from hephaestus.automation.pipeline.work_item import (
+    ItemKind,
+    ItemResult,
+    PreservedWorktree,
+    WorkItem,
+)
 from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_GO
 
 logger = logging.getLogger(__name__)
@@ -332,7 +337,7 @@ class Coordinator:
         self.in_flight: dict[JobHandle, WorkItem] = {}
         self.inflight_per_repo: Counter[str] = Counter()
         self.ledger: list[ItemResult] = []
-        self.preserved: list[tuple[int, str]] = []
+        self.preserved: list[PreservedWorktree] = []
         self.items: list[WorkItem] = []
         self.event_log: list[tuple[Any, ...]] = []
         self._event_log_disabled = False
@@ -530,18 +535,18 @@ class Coordinator:
         """Return latest logical items, collapsing superseded re-seed attempts."""
         return latest_logical_items(self.items)
 
-    def _active_preserved_worktrees(self) -> list[tuple[int, str]]:
+    def _active_preserved_worktrees(self) -> list[PreservedWorktree]:
         """Return preserved worktrees for latest failed items that still exist."""
-        failed_numbers = {
-            item.issue or item.pr or 0
+        failed_items = {
+            (item.repo, item.issue or item.pr or 0)
             for item in self._effective_items()
             if item.result is not None and not item.result.passed
         }
-        active: list[tuple[int, str]] = []
-        seen: set[tuple[int, str]] = set()
-        for issue_or_pr, path in self.preserved:
-            entry = (issue_or_pr, path)
-            if entry in seen or issue_or_pr not in failed_numbers or not Path(path).exists():
+        active: list[PreservedWorktree] = []
+        seen: set[PreservedWorktree] = set()
+        for repo, issue_or_pr, path in self.preserved:
+            entry = (repo, issue_or_pr, path)
+            if entry in seen or (repo, issue_or_pr) not in failed_items or not Path(path).exists():
                 continue
             seen.add(entry)
             active.append(entry)

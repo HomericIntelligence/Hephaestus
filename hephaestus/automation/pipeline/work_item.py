@@ -10,12 +10,15 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, TypeAlias
 
 from .routing import StageName, budget_keys
 
 #: Maximum retained history events per item (oldest dropped first).
 HISTORY_CAP = 200
+
+PreservedWorktree: TypeAlias = tuple[str, int, str]
+"""Repository, issue/PR number, and path for a preserved worktree."""
 
 
 def _utcnow() -> datetime:

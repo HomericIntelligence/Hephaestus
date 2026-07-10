@@ -229,7 +229,7 @@ class TestExitCode:
             passed=True, reason="merged", final_stage=StageName.FINISHED
         )
         coordinator.items = [failed, passed]
-        coordinator.preserved.append((2009, str(preserved_path)))
+        coordinator.preserved.append(("repo-a", 2009, str(preserved_path)))
 
         assert coordinator._active_preserved_worktrees() == []
 
@@ -245,7 +245,28 @@ class TestExitCode:
             passed=False, reason="git_error", final_stage=StageName.FINISHED
         )
         coordinator.items = [failed]
-        coordinator.preserved.append((2009, str(missing_path)))
+        coordinator.preserved.append(("repo-a", 2009, str(missing_path)))
+
+        assert coordinator._active_preserved_worktrees() == []
+
+    def test_preserved_worktrees_keep_repository_identity_for_colliding_numbers(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed item in one repo must not preserve a passed repo's worktree."""
+        coordinator = _coordinator(tmp_path, monkeypatch)
+        preserved_path = tmp_path / "repo-b-issue-2009"
+        preserved_path.mkdir()
+        failed = _item(2009, StageName.FINISHED)
+        failed.result = work_item_mod.ItemResult(
+            passed=False, reason="git_error", final_stage=StageName.FINISHED
+        )
+        passed = _item(2009, StageName.FINISHED)
+        passed.repo = "repo-b"
+        passed.result = work_item_mod.ItemResult(
+            passed=True, reason="merged", final_stage=StageName.FINISHED
+        )
+        coordinator.items = [failed, passed]
+        coordinator.preserved.append(("repo-b", 2009, str(preserved_path)))
 
         assert coordinator._active_preserved_worktrees() == []
 
