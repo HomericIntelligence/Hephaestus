@@ -12,11 +12,10 @@ import pytest
 import hephaestus.github.client as client_module
 from hephaestus.github.client import (
     _GH_BREAKER,
-    _NON_TRANSIENT_PATTERNS,
-    _PER_TARGET_PATTERNS,
     ClaudeUsageCapError,
     GitHubRateLimitError,
     GitHubUnavailableError,
+    _is_non_transient_error,
     _is_per_target_error,
     _is_service_failure,
     gh_call,
@@ -77,17 +76,57 @@ class TestBreakerPredicateWiring:
 class TestPerTargetPatternInvariants:
     """``_PER_TARGET_PATTERNS`` must stay a strict subset of the non-transient set."""
 
-    def test_every_per_target_pattern_is_also_non_transient(self) -> None:
-        """A per-target error must already be non-transient, else it gets retried.
+    # Real gh stderr for each per-target pattern. Keep one sample per pattern.
+    PER_TARGET_SAMPLES: tuple[str, ...] = (
+        "gh: Not Found (HTTP 404)",
+        "failed to run git: HTTP 404: Not Found",
+        "gh: Could not resolve to an Issue with the number of 188.",
+        "gh: Could not resolve to a PullRequest with the number of 12.",
+        "Field 'addComment' doesn't accept argument 'foo'",
+        "Variable $owner is declared by query but not used",
+        'gh: Expected VALUE, actual: UNKNOWN_CHAR ("H") at [1, 24]',
+        "gh: Body is not editable",
+        "no checks reported on the '45-foo' branch",
+    )
 
-        The two lists answer different questions — "should we retry?" and "does
-        this indicate an outage?" — but per-target implies non-transient. If a
-        pattern lands only in the per-target list it would be retried 6x AND
-        excluded from the breaker: the worst of both.
+    @pytest.mark.parametrize("stderr", PER_TARGET_SAMPLES)
+    def test_per_target_samples_are_matched(self, stderr: str) -> None:
+        """Narrowing the patterns must not stop them matching real gh output."""
+        assert _is_per_target_error(stderr)
+
+    @pytest.mark.parametrize("stderr", PER_TARGET_SAMPLES)
+    def test_every_per_target_error_is_also_non_transient(self, stderr: str) -> None:
+        """Per-target implies non-transient — asserted on BEHAVIOUR, not on regex text.
+
+        The two lists answer different questions ("should we retry?" vs "is the
+        service healthy?") and are deliberately worded differently: the
+        per-target patterns are narrower, because over-matching there blinds the
+        breaker. So a set-comparison of regex *source strings* would be both
+        wrong and brittle. What must hold is the semantic implication: anything
+        classified per-target must already be non-transient. Otherwise the error
+        would be retried 6x AND excluded from the breaker — the worst of both.
         """
-        non_transient = {p.pattern for p in _NON_TRANSIENT_PATTERNS}
-        per_target = {p.pattern for p in _PER_TARGET_PATTERNS}
-        assert per_target <= non_transient, per_target - non_transient
+        assert _is_per_target_error(stderr)
+        assert _is_non_transient_error(stderr), (
+            f"{stderr!r} is per-target but would still be retried"
+        )
+
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            "gh: HTTP 401 Unauthorized",
+            "gh: HTTP 403 Forbidden",
+            "Resource not accessible by personal access token",
+        ],
+    )
+    def test_per_target_is_a_strict_subset_of_non_transient(self, stderr: str) -> None:
+        """There exist non-transient errors that are NOT per-target (auth).
+
+        Proves the two classifiers are genuinely distinct: these must skip the
+        retry loop AND still open the breaker.
+        """
+        assert _is_non_transient_error(stderr)
+        assert not _is_per_target_error(stderr)
 
     @pytest.mark.parametrize(
         "stderr",
@@ -102,6 +141,35 @@ class TestPerTargetPatternInvariants:
     def test_credential_and_request_errors_are_not_per_target(self, stderr: str) -> None:
         """These recur on every later call, so they must still open the breaker."""
         assert not _is_per_target_error(stderr)
+        assert _is_service_failure(_gh_error(stderr))
+
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            # The gh binary is absent — every call fails.
+            "gh: command not found",
+            # DNS failure — the service is unreachable.
+            "ssh: Could not resolve hostname github.com: Name or service not found",
+            "curl: (6) Could not resolve host: api.github.com",
+            # An actual outage page can contain the words "not found".
+            "GitHub is temporarily unavailable. Page not found.",
+            # A 502 HTML body fed to a JSON parser.
+            "error parsing HTTP 502 response body: invalid character '<'",
+            "Parse error on unexpected token at line 1 of the 502 body",
+        ],
+    )
+    def test_outage_shaped_stderr_is_not_treated_as_per_target(self, stderr: str) -> None:
+        """A breaker blinded by a substring match is worse than no breaker.
+
+        ``_NON_TRANSIENT_PATTERNS`` may match these loosely — there, over-matching
+        merely skips a retry, which is safe. Here over-matching would EXCLUDE a
+        genuine outage from the failure count, defeating the breaker entirely.
+        The per-target patterns must therefore be anchored to gh's actual
+        per-target phrasings, not bare substrings like "not found".
+        """
+        assert not _is_per_target_error(stderr), (
+            "outage-shaped stderr must still count toward the circuit breaker"
+        )
         assert _is_service_failure(_gh_error(stderr))
 
     @pytest.mark.parametrize(

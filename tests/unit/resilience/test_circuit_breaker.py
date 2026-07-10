@@ -107,6 +107,90 @@ class TestCircuitBreakerIgnoredExceptions:
 
         assert breaker.state is CircuitBreakerState.HALF_OPEN  # not re-OPENed
 
+    def test_ignored_exception_releases_its_half_open_slot(self) -> None:
+        """An ignored error must give its probe slot back, or recovery wedges.
+
+        Asserting only ``state is HALF_OPEN`` is NOT enough: the state does not
+        change on an ignored exception whether or not the slot was released, so
+        such a test stays green even if ``_release_half_open_slot`` is a no-op.
+        Prove the release by admitting a LATER probe through the single slot.
+        """
+        breaker = CircuitBreaker(
+            "ignore-slot",
+            failure_threshold=1,
+            recovery_timeout=0.0,
+            half_open_max_calls=1,  # exactly one probe may be in flight
+            ignore=lambda exc: isinstance(exc, KeyError),
+        )
+        with pytest.raises(ConnectionError):
+            breaker.call(lambda: (_ for _ in ()).throw(ConnectionError("down")))
+        assert breaker.state is CircuitBreakerState.HALF_OPEN
+
+        # Burn several probes on ignored errors. Each must return its slot.
+        for _ in range(3):
+            with pytest.raises(KeyError):
+                breaker.call(lambda: (_ for _ in ()).throw(KeyError("404")))
+
+        assert breaker._half_open_calls == 0, "ignored exception leaked its probe slot"
+
+        # A real probe must still be admitted, not rejected as HALF_OPEN_EXHAUSTED.
+        assert breaker.call(lambda: "recovered") == "recovered"
+        assert breaker.state is CircuitBreakerState.CLOSED
+
+    def test_ignored_exception_slot_release_is_thread_safe(self) -> None:
+        """Concurrent ignored errors must never drive the slot counter negative."""
+        breaker = CircuitBreaker(
+            "ignore-threads",
+            failure_threshold=1,
+            recovery_timeout=0.0,
+            half_open_max_calls=8,
+            ignore=lambda exc: isinstance(exc, KeyError),
+        )
+        with pytest.raises(ConnectionError):
+            breaker.call(lambda: (_ for _ in ()).throw(ConnectionError("down")))
+        assert breaker.state is CircuitBreakerState.HALF_OPEN
+
+        def hammer() -> None:
+            for _ in range(20):
+                with contextlib.suppress(Exception):
+                    breaker.call(lambda: (_ for _ in ()).throw(KeyError("404")))
+
+        threads = [threading.Thread(target=hammer) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert breaker._half_open_calls >= 0, "slot counter went negative"
+        assert breaker.state is CircuitBreakerState.HALF_OPEN
+
+    def test_factory_honors_ignore_for_a_fresh_name(self) -> None:
+        """``get_circuit_breaker(ignore=...)`` wires the predicate on creation."""
+        breaker = get_circuit_breaker(
+            "factory-ignore-fresh",
+            failure_threshold=1,
+            ignore=lambda exc: isinstance(exc, KeyError),
+        )
+        with pytest.raises(KeyError):
+            breaker.call(lambda: (_ for _ in ()).throw(KeyError("404")))
+        assert breaker.state is CircuitBreakerState.CLOSED
+
+    def test_factory_silently_drops_ignore_for_an_existing_name(self) -> None:
+        """Documented footgun: the registry is a singleton keyed by name.
+
+        A second ``get_circuit_breaker`` for an existing name returns the cached
+        instance and DISCARDS every construction kwarg, ``ignore`` included. Pin
+        the behaviour so the trap is visible rather than surprising (POLA).
+        """
+        first = get_circuit_breaker("factory-ignore-dup", failure_threshold=1)
+        assert first._ignore is None
+
+        second = get_circuit_breaker(
+            "factory-ignore-dup", ignore=lambda exc: isinstance(exc, KeyError)
+        )
+        assert second is first
+        assert second._ignore is None, "a later ignore= must not silently rebind"
+
     def test_default_ignores_nothing(self) -> None:
         """Back-compat: no ``ignore`` predicate → every exception counts."""
         breaker = CircuitBreaker("ignore-default", failure_threshold=2)

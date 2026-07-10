@@ -215,6 +215,11 @@ class CircuitBreaker:
             result = func(*args, **kwargs)
         except Exception as exc:
             if self._ignore is not None and self._ignore(exc):
+                # Leave a trace: an ignored error is invisible to the breaker, so
+                # without this a masked outage would have no breaker-level record.
+                logger.debug(
+                    "Circuit breaker '%s' ignoring non-service exception: %r", self.name, exc
+                )
                 self._release_half_open_slot()
                 raise
             self._record_failure()
@@ -302,6 +307,12 @@ def get_circuit_breaker(
 ) -> CircuitBreaker:
     """Get or create a named circuit breaker (singleton per name).
 
+    The registry is a singleton keyed by *name*. Every configuration argument is
+    applied ONLY when the breaker is first created; a later call for an existing
+    name returns the cached instance and SILENTLY DISCARDS the arguments — including
+    ``ignore``. Construct each named breaker exactly once (at its owning module's
+    import), or you will get a breaker whose predicate you did not install.
+
     Args:
         name: Unique identifier for the circuit breaker
         failure_threshold: Failures before opening (only used on creation)
@@ -310,7 +321,8 @@ def get_circuit_breaker(
             (only used on creation)
         success_threshold: Successes in HALF_OPEN to close (only used on creation)
         ignore: Predicate for exceptions that are not evidence of service
-            unavailability (only used on creation). See :meth:`CircuitBreaker.call`.
+            unavailability (only used on creation; silently dropped if *name*
+            already exists). See :meth:`CircuitBreaker.call`.
 
     Returns:
         CircuitBreaker instance for the given name
