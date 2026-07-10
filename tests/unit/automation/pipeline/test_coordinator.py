@@ -714,9 +714,36 @@ class TestDurableEventLog:
             "pr_review_zero_thread_nogo",
             "pr_review_zero_thread_nogo",
         ]
-        assert records[0]["fields"][0]["action"] == "retry_fresh_review"
-        assert records[1]["fields"][0]["action"] == "fail_back_agent_error"
-        assert all(record["fields"][0]["round_consumed"] is False for record in records)
+        assert records[0]["fields"] == [
+            {
+                "action": "retry_fresh_review",
+                "artifact_written": True,
+                "completed_rounds": 0,
+                "issue": 1985,
+                "posted_threads": 0,
+                "pr": 1984,
+                "repo": "repo-a",
+                "retry_attempt": 1,
+                "retry_cap": 2,
+                "round_consumed": False,
+                "unresolved_threads": 0,
+            }
+        ]
+        assert records[1]["fields"] == [
+            {
+                "action": "fail_back_agent_error",
+                "artifact_written": True,
+                "completed_rounds": 0,
+                "issue": 1985,
+                "posted_threads": 0,
+                "pr": 1984,
+                "repo": "repo-a",
+                "retry_attempt": 3,
+                "retry_cap": 2,
+                "round_consumed": False,
+                "unresolved_threads": 0,
+            }
+        ]
 
     def test_stage_event_rejects_foreign_raw_content_before_jsonl_write(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
