@@ -1164,10 +1164,11 @@ class TestFullWalks:
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
         """A failed artifact write is visible in the event but does not block retry."""
+        sensitive_details = "private provider diagnostics"
 
         class CommentFailsGitHub(FakeStageGitHub):
             def upsert_pr_comment(self, pr_number: int, marker_prefix: str, body: str) -> None:
-                raise RuntimeError("comment write failed")
+                raise RuntimeError(sensitive_details)
 
         events: list[Any] = []
         ctx = make_ctx(
@@ -1177,10 +1178,12 @@ class TestFullWalks:
         item = make_work_item(issue=26, pr=1001, state="EVAL")
         item.payload["review_verdict"] = _verdict("NOGO")
 
-        outcome = PrReviewStage().step(item, ctx)
+        with patch("hephaestus.automation.pipeline.stages.pr_review.logger") as logger:
+            outcome = PrReviewStage().step(item, ctx)
 
         assert isinstance(outcome, Continue)
         assert events[0].artifact_written is False
+        assert sensitive_details not in str(logger.warning.call_args)
 
     def test_zero_thread_summary_is_escaped_and_bounded(self) -> None:
         """Only a short escaped structured summary enters the PR artifact."""

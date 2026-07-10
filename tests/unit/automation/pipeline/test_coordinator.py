@@ -14,7 +14,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -683,8 +683,8 @@ class TestDurableEventLog:
 
         with pytest.raises(TypeError, match="unsupported stage event"):
             coordinator._ctx_for_repo("repo-a").emit_event(
-                UnsafeEvent("token=secret private-endpoint")
-            )  # type: ignore[arg-type]
+                cast(Any, UnsafeEvent("untrusted reviewer data"))
+            )
         assert not event_log_path.exists()
 
     def test_event_log_path_persists_job_completion_records(

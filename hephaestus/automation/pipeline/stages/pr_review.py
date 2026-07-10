@@ -910,11 +910,11 @@ class PrReviewStage(Stage):
         )
         try:
             ctx.github.upsert_pr_comment(pr_number, _ZERO_THREAD_NOGO_MARKER, body)
-        except Exception as exc:
+        except Exception as error:
             logger.warning(
-                "pr_review:%s: failed to upsert zero-thread NOGO artifact: %s",
+                "pr_review:%s: failed to upsert zero-thread NOGO artifact (%s)",
                 item.issue,
-                exc,
+                type(error).__name__,
             )
             return False
         return True
