@@ -47,8 +47,8 @@ class TestRequiredChecksGate:
     def test_gate_job_exists(self, jobs: dict[str, Any]) -> None:
         """_required.yml must define the required-checks-gate job."""
         assert GATE_JOB in jobs, (
-            f"{GATE_JOB} job missing from _required.yml — it is the single "
-            "branch-protection required check; see docs/ci/required-checks.md"
+            f"{GATE_JOB} job missing from _required.yml — aggregate workflow "
+            "coverage would be unavailable; see docs/ci/required-checks.md"
         )
 
     def test_gate_needs_every_non_exempt_job(self, workflow: dict[str, Any]) -> None:
@@ -59,8 +59,8 @@ class TestRequiredChecksGate:
         """
         missing = _unwired_jobs(workflow, EXEMPT_JOBS)
         assert not missing, (
-            f"These jobs are not gated by {GATE_JOB}.needs and would not block "
-            f"merges: {sorted(missing)}. Add them to the gate's needs list in "
+            f"These jobs are not included in {GATE_JOB}.needs and lack aggregate "
+            f"coverage: {sorted(missing)}. Add them to the gate's needs list in "
             ".github/workflows/_required.yml (see docs/ci/required-checks.md)."
         )
 

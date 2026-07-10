@@ -1,11 +1,11 @@
 """Single source of truth for the required-checks-gate fan-in invariant.
 
-The ``required-checks-gate`` job in ``.github/workflows/_required.yml`` is the
-only branch-protection required status check for that workflow. It must fan in
-every gating job via its ``needs:`` list; a job left out silently stops
-blocking merges (issue #1315). ``_unwired_jobs`` computes which jobs are *not*
-wired into the gate, and is shared by the structural guard tests so the guard
-and its negative-path test exercise one code path and cannot diverge
+The ``required-checks-gate`` job in ``.github/workflows/_required.yml`` is an
+aggregate workflow signal. It must fan in every gating job via its ``needs:``
+list so aggregate coverage remains complete; direct GitHub ruleset contexts
+remain the merge-enforcement source of truth. ``_unwired_jobs`` computes which
+jobs are *not* wired into the gate, and is shared by the structural guard tests
+so the guard and its negative-path test exercise one code path and cannot diverge
 (issue #1338).
 """
 

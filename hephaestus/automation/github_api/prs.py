@@ -153,8 +153,16 @@ def _find_open_pr_for_head(branch: str) -> int | None:
     if not isinstance(prs, list):
         raise RuntimeError(f"could not verify existing PR state for head {branch!r}")
     for pr in prs:
-        if str(pr.get("state", "")).upper() == "OPEN":
-            return cast(int, pr["number"])
+        if not isinstance(pr, dict):
+            raise RuntimeError(f"could not verify existing PR state for head {branch!r}")
+        state = pr.get("state")
+        if not isinstance(state, str):
+            raise RuntimeError(f"could not verify existing PR state for head {branch!r}")
+        if state.upper() == "OPEN":
+            number = pr.get("number")
+            if not isinstance(number, int) or number <= 0:
+                raise RuntimeError(f"could not verify existing PR state for head {branch!r}")
+            return number
     return None
 
 

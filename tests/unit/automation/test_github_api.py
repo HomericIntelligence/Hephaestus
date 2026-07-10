@@ -1486,10 +1486,40 @@ class TestGhPrCreate:
         mock_gh_call.side_effect = [
             Mock(stdout="[]"),
             Mock(stdout="https://github.com/owner/repo/pull/456"),
-            Mock(returncode=0, stdout=json.dumps({"state": "OPEN"})),
+            Mock(
+                returncode=0,
+                stdout=json.dumps({"state": "OPEN", "autoMergeRequest": {"enabledAt": "now"}}),
+            ),
+            Mock(returncode=0, stdout="", stderr=""),
+            Mock(
+                returncode=0,
+                stdout=json.dumps({"state": "OPEN", "autoMergeRequest": {"enabledAt": "still"}}),
+            ),
         ]
 
         with pytest.raises(RuntimeError, match="could not verify auto-merge disabled"):
+            gh_pr_create(branch="feature-branch", title="Test PR", body=_POLICY_BODY)
+
+    @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_existing_pr_lookup_rejects_an_open_pr_without_a_numeric_number(
+        self, mock_gh_call: Any, _mock_signed: Any
+    ) -> None:
+        """A malformed open-PR lookup cannot fall through to fresh creation."""
+        mock_gh_call.return_value = Mock(stdout=json.dumps([{"state": "OPEN", "number": None}]))
+
+        with pytest.raises(RuntimeError, match="could not verify existing PR state"):
+            gh_pr_create(branch="feature-branch", title="Test PR", body=_POLICY_BODY)
+
+    @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_existing_pr_lookup_rejects_a_record_without_state(
+        self, mock_gh_call: Any, _mock_signed: Any
+    ) -> None:
+        """A partially parsed existing PR cannot be reinterpreted as no PR."""
+        mock_gh_call.return_value = Mock(stdout=json.dumps([{"number": 962}]))
+
+        with pytest.raises(RuntimeError, match="could not verify existing PR state"):
             gh_pr_create(branch="feature-branch", title="Test PR", body=_POLICY_BODY)
 
     @patch("hephaestus.automation.github_api._assert_branch_commits_signed")

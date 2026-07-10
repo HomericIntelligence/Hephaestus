@@ -432,6 +432,23 @@ class TestEnsurePRCreated:
 class TestCreatePR:
     """Tests for create p r."""
 
+    def test_retired_pr_manager_armer_contains_before_refusing(self) -> None:
+        """The direct legacy armer follows view-disable-readback before rejecting."""
+        responses = iter(
+            [
+                _status('{"state": "OPEN", "autoMergeRequest": {"enabledAt": "now"}}'),
+                _status(""),
+                _status('{"state": "OPEN", "autoMergeRequest": null}'),
+            ]
+        )
+        with patch.object(
+            pr_manager,
+            "_gh_call",
+            side_effect=lambda *_args, **_kwargs: next(responses),
+        ):
+            with pytest.raises(RuntimeError, match="strict-review gate unavailable"):
+                pr_manager.enable_auto_merge_after_implementation_go(42)
+
     def test_invokes_gh_pr_create(self) -> None:
         issue = MagicMock(title="Add feature X")
         with (

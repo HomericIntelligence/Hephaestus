@@ -943,7 +943,13 @@ def ensure_pr_created(
         result = _gh_call(["pr", "list", "--head", branch_name, "--json", "number", "--limit", "1"])
         pr_data = json.loads(result.stdout)
         if pr_data and len(pr_data) > 0:
-            pr_number = cast(int, pr_data[0]["number"])
+            first_pr = pr_data[0]
+            if not isinstance(first_pr, dict):
+                raise RuntimeError("existing PR lookup returned an invalid entry")
+            number = first_pr.get("number")
+            if not isinstance(number, int) or number <= 0:
+                raise RuntimeError("existing PR lookup returned an invalid number")
+            pr_number = number
             logger.info("PR #%s already exists", pr_number)
     except Exception as e:
         raise RuntimeError(f"could not verify existing PR state for branch {branch_name!r}") from e

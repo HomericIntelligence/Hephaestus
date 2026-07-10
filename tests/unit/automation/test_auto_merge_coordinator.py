@@ -187,8 +187,23 @@ def test_legacy_arm_and_wait_refuses_even_during_dry_run() -> None:
 
 def test_legacy_arm_and_wait_reports_failed_auto_merge_containment() -> None:
     """The retired entry surfaces a failed disable/readback as a containment error."""
+    responses = iter(
+        [
+            SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"state": "OPEN", "autoMergeRequest": {"enabledAt": "now"}}),
+                stderr="",
+            ),
+            SimpleNamespace(returncode=0, stdout="", stderr=""),
+            SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"state": "OPEN", "autoMergeRequest": {"enabledAt": "still"}}),
+                stderr="",
+            ),
+        ]
+    )
     coordinator = _coordinator(
-        lambda _args, **_kwargs: SimpleNamespace(returncode=1, stdout="", stderr="failed"),
+        lambda _args, **_kwargs: next(responses),
         lambda _pr_number: {"state": "OPEN"},
     )
 
