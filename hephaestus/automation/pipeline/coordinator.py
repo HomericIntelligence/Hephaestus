@@ -809,16 +809,26 @@ class Coordinator:
         q = self.queues[StageName.IMPLEMENTATION]
         if not len(q):
             return
-        queued = q.snapshot()
-        issue_numbers = [it.issue for it in queued if it.issue is not None]
-        duplicate_issues = sorted(
-            issue for issue, count in Counter(issue_numbers).items() if count > 1
-        )
-        assert not duplicate_issues, (  # noqa: S101
-            f"implementation queue must not contain duplicate issue numbers: {duplicate_issues}"
-        )
-
         items = [q.pop() for _ in range(len(q))]
+        # A transient retry/fail-back can re-enqueue an issue while a prior copy
+        # is still queued, so the implementation queue may briefly hold two work
+        # items for the same issue. Building ``issue_items`` (and the downstream
+        # dispatch) requires unique issue numbers, so collapse duplicates here —
+        # keep the first-queued item and terminalize the rest as superseded —
+        # instead of crashing the whole org-wide run (was a hard assert, #1952).
+        seen_issues: set[int] = set()
+        deduped: list[WorkItem] = []
+        for it in items:
+            if it.issue is not None and it.issue in seen_issues:
+                logger.warning(
+                    "implementation #%s already queued; dropping duplicate work item", it.issue
+                )
+                self._finish(it, passed=True, reason=f"#{it.issue} superseded by queued duplicate")
+                continue
+            if it.issue is not None:
+                seen_issues.add(it.issue)
+            deduped.append(it)
+        items = deduped
         issue_items = {it.issue: it for it in items if it.issue is not None}
         infos = [
             IssueInfo(
