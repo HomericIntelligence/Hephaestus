@@ -23,6 +23,40 @@ from .github_api import GitHubUnavailableError, _gh_call
 logger = logging.getLogger(__name__)
 
 
+def _resolve_viewer_login() -> str:
+    """Resolve the authenticated GitHub login, failing closed on errors."""
+    try:
+        result = _gh_call(["api", "user", "-q", ".login"], check=True)
+    except (
+        subprocess.CalledProcessError,
+        FileNotFoundError,
+        GitHubUnavailableError,
+    ) as exc:
+        raise RuntimeError(
+            "Could not resolve viewer login via `gh api user`: "
+            f"{exc}. Re-authenticate with `gh auth login`, or pass "
+            "--all to opt out of the @me filter (#821)."
+        ) from exc
+    login = (result.stdout or "").strip()
+    if not login:
+        raise RuntimeError(
+            "Could not resolve viewer login via `gh api user`: "
+            "empty response. Re-authenticate with `gh auth login`, "
+            "or pass --all to opt out of the @me filter (#821)."
+        )
+    return login
+
+
+def _is_bot_pr_author(pr: dict[str, Any]) -> bool:
+    """Return whether a pull-request row was authored by a GitHub bot."""
+    return (pr.get("user") or {}).get("type") == "Bot"
+
+
+def _is_viewer_authored(pr: dict[str, Any], viewer_login: str) -> bool:
+    """Return whether a pull-request row belongs to the selected author scope."""
+    return not viewer_login or (pr.get("user") or {}).get("login") == viewer_login
+
+
 @dataclass(frozen=True)
 class PRWorkset:
     """Resolved PR workset for a drive-green run."""
@@ -219,27 +253,8 @@ class PRDiscovery:
         """
         if self._viewer_login:
             return self._viewer_login
-        try:
-            result = _gh_call(["api", "user", "-q", ".login"], check=True)
-        except (
-            subprocess.CalledProcessError,
-            FileNotFoundError,
-            GitHubUnavailableError,
-        ) as exc:
-            raise RuntimeError(
-                "Could not resolve viewer login via `gh api user`: "
-                f"{exc}. Re-authenticate with `gh auth login`, or pass "
-                "--all to opt out of the @me filter (#821)."
-            ) from exc
-        login = (result.stdout or "").strip()
-        if not login:
-            raise RuntimeError(
-                "Could not resolve viewer login via `gh api user`: "
-                "empty response. Re-authenticate with `gh auth login`, "
-                "or pass --all to opt out of the @me filter (#821)."
-            )
-        self._viewer_login = login
-        return login
+        self._viewer_login = _resolve_viewer_login()
+        return self._viewer_login
 
     def discover_bot_prs(self) -> dict[int, int]:
         """Enumerate every open ``is_bot=true`` PR on the repo (#848).
@@ -277,11 +292,10 @@ class PRDiscovery:
         viewer = "" if self._options().include_all_authors else self.resolve_viewer_login()
         bot_prs: dict[int, int] = {}
         for pr in raw_pulls:
-            user = pr.get("user") or {}
-            if user.get("type") != "Bot":
+            if not _is_bot_pr_author(pr):
                 continue
-            if viewer and user.get("login") != viewer:
-                if user.get("login") is None:
+            if not _is_viewer_authored(pr, viewer):
+                if (pr.get("user") or {}).get("login") is None:
                     logger.warning(
                         "PR #%s has no user.login; skipping under author filter (#821)",
                         pr.get("number"),

@@ -216,6 +216,8 @@ class PipelineConfig:
     no_advise: bool = False
     nitpick: bool = False
     drive_green_all: bool = False
+    include_bot_prs: bool = True
+    include_all_authors: bool = False
     # When False, the CI stage's pre-fix mechanical rebase is skipped and every
     # behind/conflicting PR falls through to the fix agent (``--no-mechanical-rebase``).
     # Read by ``stages/ci.py`` via ``ctx.config.enable_mechanical_rebase``.
@@ -265,6 +267,8 @@ class _StageRunConfig:
     dry_run: bool = False
     nitpick: bool = False
     drive_green_all: bool = False
+    include_bot_prs: bool = True
+    include_all_authors: bool = False
     enable_mechanical_rebase: bool = True
     poll_max_wait: int = DEFAULT_CI_POLL_MAX_WAIT
     pre_pr_test_argv: tuple[str, ...] = PRE_PR_TEST_ARGV
@@ -377,6 +381,8 @@ class Coordinator:
             dry_run=config.dry_run,
             nitpick=config.nitpick,
             drive_green_all=config.drive_green_all,
+            include_bot_prs=config.include_bot_prs,
+            include_all_authors=config.include_all_authors,
             enable_mechanical_rebase=config.enable_mechanical_rebase,
             poll_max_wait=config.poll_max_wait,
             pre_pr_test_argv=config.pre_pr_test_argv,

@@ -196,14 +196,9 @@ Examples:
         action="store_false",
         default=True,
         help=(
-            "Suppress the union of open bot-authored PRs (Dependabot, "
-            "github-actions, etc.) into the work set. By default the driver "
-            "unions every open is_bot=true PR with the issue-driven list so "
-            "Dependabot PRs are not architecturally invisible (#848). Pass "
-            "this flag only when you explicitly want issue-driven scope. "
-            "(NOT yet honored under the pipeline drive-green-all sweep, which "
-            "currently discovers every open PR regardless of author; tracked "
-            "in a follow-up.)"
+            "Exclude open bot-authored PRs (Dependabot, github-actions, etc.) "
+            "from the no-scope discovery sweep. Bot-authored PRs are included "
+            "by default so they are not architecturally invisible (#848)."
         ),
     )
     parser.add_argument(
@@ -212,14 +207,10 @@ Examples:
         action="store_true",
         default=False,
         help=(
-            "Include PRs opened by other actors (teammates, bots). Without "
-            "this flag, only PRs authored by the authenticated viewer "
-            "(`gh api user`) are driven (#821). NOTE: when scoped to issues "
-            "(--issues N), the resolved PR is processed regardless of "
-            "author — issue-scoped takes precedence. (The author filter is "
-            "NOT yet honored under the pipeline drive-green-all sweep, which "
-            "currently discovers every open PR regardless of author; tracked "
-            "in a follow-up.)"
+            "Include PRs opened by other actors (teammates and bots). Without "
+            "this flag, no-scope discovery drives only PRs authored by the "
+            "authenticated viewer (`gh api user`) (#821). Explicit --issues "
+            "and --prs scopes are processed regardless of author."
         ),
     )
     parser.add_argument(
@@ -335,6 +326,8 @@ def main() -> int:
             agent=agent,
             no_advise=args.no_advise,
             drive_green_all=drive_green_all,
+            include_bot_prs=args.include_bot_prs,
+            include_all_authors=args.include_all_authors,
             # --no-mechanical-rebase: the CI stage reads this off ctx.config to
             # skip the pre-fix mechanical rebase (#871).
             enable_mechanical_rebase=args.enable_mechanical_rebase,
