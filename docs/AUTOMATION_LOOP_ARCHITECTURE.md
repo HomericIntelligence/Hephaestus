@@ -394,8 +394,16 @@ pr_review → ci) remain globally bounded.
 
 One classifier serves both initial seeding (`--repos`, `--issues`, `--prs`) and
 restart reconstruction (at startup, scan GitHub for labels/PR state). Direct PR
-inputs enter the target repo's `pr_review` queue unless the PR already carries
-`state:implementation-go`, in which case they enter `ci`.
+inputs are terminalized at the seed boundary when their PR is already merged or
+closed: merged PRs become `finished(pass)` and closed PRs become
+`finished(fail)`, before branch adoption or label-based routing is attempted.
+Open direct PRs enter the target repo's `pr_review` queue unless the PR already
+carries `state:implementation-go`, in which case they enter `ci`.
+
+The same terminal-state check is repeated at the CI and implementation stage
+boundaries before branch adoption or implementation-label routing. This makes a
+PR that closes or merges between seeding and stage execution terminal without
+attempting to adopt its branch or run further work.
 Uses ordered label rank at-or-past comparisons (never equality):
 
 - `state:needs-plan` — rank 0 (lowest).
@@ -411,7 +419,8 @@ semantics.
 | GitHub state | Entry queue | Notes |
 |---|---|---|
 | state:skip or epic | excluded | Epic tagging is the one seeding write; done BEFORE excluding. |
-| PR merged | finished | pass, idempotent. |
+| Direct PR already merged | finished | pass, idempotent; terminalized before branch adoption. |
+| Direct PR already closed | finished | fail; terminalized before branch adoption. |
 | Open PR + PR carries state:implementation-go | ci | existing-PR advanced to merge-ready. |
 | Open PR, no impl-go | pr_review | existing-PR path; will be reviewed. |
 | No PR, at-or-past state:plan-go | implementation | plan approved; ready to implement. |
@@ -450,9 +459,17 @@ same way on shutdown. Resume is therefore label/PR/worktree reconstruction:
 rerun the same scoped command and seeding will classify each issue back into
 the correct entry queue. There is no persisted queue snapshot.
 
-Exit codes are stable: `130` for interrupted runs, `1` if any item failed,
-skipped, blocked, or the coordinator itself hit a fatal error, and `0` for a
-clean run. If an interrupt overlaps a non-passing ledger entry or fatal
+Summary rows, preserved worktree guidance, and exit-code calculation use the
+latest effective logical item for each issue, PR, or repository. When a logical
+item is re-seeded, superseded historical attempts are collapsed before these
+outputs are produced: an old failed attempt does not create a failure row,
+preserved-worktree hint, or non-zero exit code after a later effective attempt
+passes. The effective-item rule applies only to superseded attempts; the
+current item's own failed, skipped, or blocked result still counts.
+
+Exit codes are stable: `130` for interrupted runs, `1` if any effective item
+failed, skipped, blocked, or the coordinator itself hit a fatal error, and `0`
+for a clean run. If an interrupt overlaps a non-passing ledger entry or fatal
 coordinator error, `130` deliberately takes priority because the run did not
 complete.
 
