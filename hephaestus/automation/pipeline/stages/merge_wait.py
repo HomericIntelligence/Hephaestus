@@ -1,22 +1,30 @@
-"""Merge-wait stage: arm auto-merge durably, poll non-blocking, learn on merge.
+"""Merge-wait stage: fail closed while #2055 adds the strict-review gate.
 
 Re-houses ``ci_driver._arm_and_wait_for_merge`` (:584) /
 ``_wait_for_pr_terminal`` (:1492) / ``_resolve_dirty_pr`` (:923) /
 ``_resolve_blocked_pr`` (:986) as a pipeline stage
 (docs/AUTOMATION_LOOP_ARCHITECTURE.md section "7. merge_wait" is the
-binding contract):
+binding contract).
+
+For every open PR, ARM verifies auto-merge is disabled
+(``ctx.github.defer_auto_merge``) and finishes ``strict_gate_unavailable``. A
+disable read-back failure is terminal. The only active POLL path is for an
+already-merged PR, which preserves the existing exactly-once post-merge learn
+bookkeeping via the arming record (``ctx.github.drive_green_learn_terminal``
+— a terminal learn record finishes PASS immediately, firing ``/learn`` at
+most once per merged PR, the #848 contract).
+
+The former CI/dirty/blocked arming flow remains dormant compatibility code
+(the ``_poll``/``_route_dirty``/``_route_blocked`` methods and their
+DIRTY_REBASE_WAIT / DIRTY_PUSH_WAIT / BLOCKED_ADDRESS_WAIT /
+BLOCKED_PUSH_WAIT states below) until #2055 reintroduces it behind a
+head-bound strict-review proof:
 
 - States: ENTER -> ARM -> POLL -> DIRTY_REBASE_WAIT -> DIRTY_PUSH_WAIT |
   BLOCKED_ADDRESS_WAIT -> BLOCKED_PUSH_WAIT -> (POLL) -> LEARN_WAIT ->
   MW_FINISH. Budgets: ``blocked_address`` = 2, ``rebase`` = 2 (both consumed
   in ``on_job_done``, read from ROUTES via ``ctx.budget``); the ``merge``
   poll-window bound stays wall-clock (below), untouched by the pipeline.
-- ARM [M, durable]: arm squash auto-merge (``ctx.github.arm_auto_merge``)
-  and durably persist the drive-green arming record
-  (``ctx.github.arm_drive_green`` — the ``ArmingStateStore`` mirror)
-  BEFORE the first POLL, so a crash between arming and polling can never
-  lose the record the post-merge ``/learn`` dedupe keys off. Idempotent:
-  an already-armed item (``item.armed``) skips straight to POLL.
 - POLL [M], non-blocking: one PR-state read (``ctx.github.gh_pr_state`` +
   the required-check name reads, fetched with the legacy laziness) fed to
   the pure
@@ -25,9 +33,7 @@ binding contract):
   logic — the legacy loop itself now delegates to the same classifier):
 
   - MERGED -> the post-merge ``/learn`` leg, DEDUPED via the arming
-    record (``ctx.github.drive_green_learn_terminal`` — a terminal learn
-    record finishes PASS immediately, firing ``/learn`` at most once per
-    merged PR, the #848 contract);
+    record;
   - FAILING -> FAIL_BACK(``ci_red``) (routes to ci);
   - DIRTY -> mechanical rebase (op="rebase", never pushes on its own) then
     an explicit push of the clean result (budget ``rebase``), then
@@ -152,7 +158,7 @@ def build_drive_green_learn_prompt(issue_number: int, pr_number: int) -> str:
 
 
 class MergeWaitStage(Stage):
-    """Stage: arm durably, poll to terminal, resolve dirty/blocked, learn."""
+    """Stage: contain auto-merge until the strict-review gate is available."""
 
     def on_enter(self, item: WorkItem, ctx: StageContext) -> StageOutcome | None:
         """Initialize the mini-state; the durable arming lives in ARM.
@@ -209,47 +215,24 @@ class MergeWaitStage(Stage):
         return StageOutcome(Disposition.FINISH_FAIL, f"unknown state: {item.state}")
 
     def _arm(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """ARM [M, durable]: arm auto-merge + persist the arming record, then POLL.
-
-        Durable-order contract (the queue-push rule of :mod:`.base`): BOTH
-        writes — ``arm_auto_merge`` and the ``arm_drive_green`` arming
-        record — happen BEFORE the item ever reaches POLL, so a crash
-        between arming and polling cannot lose the record the post-merge
-        ``/learn`` dedupe keys off. Idempotent: ``item.armed`` short-circuits
-        (restart = re-run, no duplicate mutations); the wall-clock anchor
-        ``payload["merge_wait_started_at"]`` is stamped once (``ctx.now()``,
-        the injectable clock).
-
-        Failure semantics: a failed ``arm_auto_merge`` finishes
-        ``arm_failed`` (the legacy ``auto-merge failed`` terminal). A failed
-        arming-record write finishes ``arm_record_failed`` WITHOUT flipping
-        ``item.armed`` — the PR must never sit armed with no durable dedupe
-        record, or a crash could double-fire ``/learn``.
-        """
+        """Contain an open PR until #2055 provides a qualifying strict proof."""
         if item.pr is None:
             logger.warning("merge_wait:%s: no PR on item; finishing failed", item.issue)
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
-        if "merge_wait_started_at" not in item.payload:
-            item.payload["merge_wait_started_at"] = ctx.now()
-        if item.armed or ctx.dry_run:
+        pr_state = ctx.github.gh_pr_state(item.pr)
+        if ((pr_state or {}).get("state") or "").upper() == "MERGED":
+            item.payload.setdefault("merge_wait_started_at", ctx.now())
             return Continue(next_state=POLL)
         try:
-            ctx.github.arm_auto_merge(item.pr)
+            if not ctx.dry_run:
+                ctx.github.defer_auto_merge(item.pr)
         except Exception as e:
-            logger.warning("merge_wait: failed to arm auto-merge on PR #%d: %s", item.pr, e)
-            return StageOutcome(Disposition.FINISH_FAIL, "arm_failed")
-        pr_state = ctx.github.gh_pr_state(item.pr)
-        head_oid = str((pr_state or {}).get("headRefOid") or "")
-        if item.issue is not None:
-            try:
-                ctx.github.arm_drive_green(item.issue, item.pr, head_oid)
-            except Exception as e:
-                logger.warning(
-                    "merge_wait: failed to write arming record for PR #%d: %s", item.pr, e
-                )
-                return StageOutcome(Disposition.FINISH_FAIL, "arm_record_failed")
-        item.armed = True
-        return Continue(next_state=POLL)
+            logger.error(
+                "merge_wait: failed to verify auto-merge disabled on PR #%d: %s", item.pr, e
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_disable_failed")
+        item.armed = False
+        return StageOutcome(Disposition.FINISH_FAIL, "strict_gate_unavailable")
 
     def _poll(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """POLL [M]: one non-blocking PR-state read -> classify -> route.

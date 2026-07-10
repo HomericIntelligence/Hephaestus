@@ -13,6 +13,17 @@ invocations, build/test subprocesses, and git/network operations. GitHub labels
 and PR state are the persistent journal; queues are in-memory and reconstructed
 from labels at startup. An interrupt leaves items resumable, never failed.
 
+### Temporary strict-gate bootstrap (#2054)
+
+The current eight-stage topology is deliberately **fail closed** while #2055
+adds a ninth, head-bound `strict_review` stage. Internal `pr_review` GO results
+are informational only: they verify auto-merge is disabled and publish a
+pending-strict-review artifact. `merge_wait` also verifies an open PR is
+unarmed, then stops with `strict_gate_unavailable`; it does not poll or arm an
+open PR. The privileged label-event armer was removed. A bootstrap PR therefore
+requires an unconditional independent strict-review GO and a manual squash
+merge. This is a temporary safety state, not the intended steady-state route.
+
 ## Queue topology
 
 ### Mermaid
@@ -48,7 +59,7 @@ implementation → ci (`already_implementation_go_pr`), and ci → pr_review
 
 The main thread (coordinator) owns all eight in-memory stage queues and
 performs ONLY: arg parsing, queue seeding, queue draining, validation/logging,
-and GitHub API mutations (labels, comments, PR create/merge-arm — sub-second
+and GitHub API mutations (labels, comments, PR create/auto-merge disablement — sub-second
 calls). It never launches agent workflows, build/test subprocesses, or
 git-network operations.
 
@@ -248,13 +259,20 @@ ADDRESS_WAIT → PUSH_WAIT → EVAL → (loop) → FOLLOWUP_WAIT.
 7. [M] **EVAL**: invoke `_evaluate_go_verdict` (parse reviewerAgent verdict:
    GO, NOGO, AMBIGUOUS, ERROR, HUMAN_BLOCKED) + `count_unresolved_threads_by_severity`
    (returns `(blocking_automation, minor_automation, human)`, see
-   "Severity-aware GO gate" below); if GO + `human == 0` + `blocking_automation == 0`
-   → resolve any advisory (`minor_automation`) threads, apply
-   `state:implementation-go` label and arm auto-merge [durable] → ADVANCE; if
-   GO but `human > 0` → FINISH_FAIL (`human_blocked`); if NOGO/AMBIGUOUS/ERROR
-   and iteration < 3 → RETRY; if HUMAN_BLOCKED or iteration cap exhausted →
-   routes depend on iteration (hard cap 6) and unresolved-thread progress; on
-   exhaustion → apply `state:skip` label [durable] → SKIP.
+   "Severity-aware GO gate" below); an explicit NOGO with zero posted thread
+   IDs and zero unresolved automation or human threads is not a completed
+   round: upsert the bounded `<!-- hephaestus-pr-review-zero-thread-nogo -->`
+   artifact, emit the typed `pr_review_zero_thread_nogo` event, and re-enter
+   `REVIEW_WAIT` for a fresh reviewer invocation without consuming a round;
+   if GO + `human == 0` + `blocking_automation == 0` → resolve any advisory
+   (`minor_automation`) threads, then verify auto-merge is disabled and
+   publish an internal-GO artifact [durable] → ADVANCE; it does not apply
+   `state:implementation-go` or arm auto-merge until #2055's strict gate is
+   present. If GO but `human > 0` → FINISH_FAIL (`human_blocked`); if
+   NOGO/AMBIGUOUS/ERROR and iteration < 3 → RETRY; if HUMAN_BLOCKED or
+   iteration cap exhausted → routes depend on iteration (hard cap 6) and
+   unresolved-thread progress; on exhaustion → apply `state:skip` label
+   [durable] → SKIP.
 8. [W:A] **Follow-up step** (on GO only) — `prompts/follow_up.py:105
    get_follow_up_prompt`.
 
@@ -281,8 +299,8 @@ to a dead end (#2079). Stage-originated JSONL events use the closed schema in
 `pipeline/events.py`; raw reviewer text, GitHub bodies, and arbitrary event
 objects are rejected.
 
-**Owned labels**: `state:implementation-go` (GO verdict) [durable],
-`state:implementation-no-go` (NOGO verdict, before retry/regress) [durable],
+**Owned labels**: `state:implementation-no-go` (NOGO verdict, before
+retry/regress) [durable],
 `state:skip` (exhaustion) [durable].
 
 **Prompt functions**:
@@ -372,32 +390,25 @@ force_engagement), `rebase` = 2 (max mechanical rebase attempts).
 
 ### 7. merge_wait
 
-**States**: ENTER → ARM → POLL → DIRTY_REBASE_WAIT/BLOCKED_ADDRESS_WAIT →
-(POLL) → LEARN_WAIT.
+**States**: ENTER → ARM. Already-merged PRs may continue through POLL and
+LEARN_WAIT solely to preserve the existing post-merge learn dedupe.
 
 **Steps**:
 
-1. [M] **ARM**: ensure auto-merge is armed (via `pr_manager.mark_pr_*` and
-   `arming_state`) [durable]; if already armed, idempotent.
-2. [M] **POLL** (non-blocking): fetch PR state → MERGED, CLOSED, FAILING,
-   DIRTY, BLOCKED, or PENDING; if PENDING → RETRY with timer backoff.
-3. On MERGED → step 4; on FAILING → FAIL_BACK(ci_red); on DIRTY → step 5a; on
-   BLOCKED → step 5b; on CLOSED → finished(fail).
-4. [W:A] **Post-merge learn** (deduped via `arming_state`) — learn prompt.
-5a. [W:G]+[W:A] **Resolve dirty PR** — mechanical rebase + push (budget
-   rebase = 2); loop back to POLL.
-5b. [W:A] **Address blocked threads** (budget blocked_address = 2) —
-   `get_address_review_prompt`; [W:G] push → loop back to POLL.
+1. [M] **ARM**: for an open PR, disable auto-merge and read back that it is
+   disabled [durable]. Finish `strict_gate_unavailable`; do not arm, poll, or
+   write an arming record. A failed read-back finishes
+   `auto_merge_disable_failed`.
+2. [M] An already-merged PR continues to **POLL**, then [W:A] runs the existing
+   post-merge learn (deduped via `arming_state`).
 
-**Verdicts**: ADVANCE (MERGED), RETRY (PENDING, DIRTY, BLOCKED in-stage),
-FAIL_BACK(reason).
+**Verdicts**: FINISH_FAIL (`strict_gate_unavailable` or failed disable
+verification); FINISH_PASS only for a previously merged PR after learn.
 
-**Fail routes**: `ci_red` → ci (regress); `blocked_exhausted` → pr_review
-(regress); `timeout` → finished(fail); `closed` → finished(fail).
+**Fail routes**: all current bootstrap outcomes finish. #2055 restores the
+CI/dirty/blocked recovery routes only after strict proof owns eligibility.
 
-**Budgets**: `blocked_address` = 2 (max address attempts for blocked threads),
-`rebase` = 2 (max mechanical rebase attempts), `merge` = --max-merge-attempts
-(total merge-attempt timeout, not touched by pipeline).
+**Budgets**: retained for compatibility but inactive for open PRs during #2054.
 
 **Owned labels**: none (merge state is PR state).
 
@@ -436,9 +447,9 @@ pr_review → ci) remain globally bounded.
 | planning | plan_review | finished(fail) | plan=2 |
 | plan_review | implementation | planning (nogo, default), finished(fail) on plan_cycles_exhausted | plan_review_iter=3, plan_cycles=2 |
 | implementation | pr_review | plan_review (plan_not_go), ci (already_implementation_go_pr), finished(fail) on exhaustion | implement=2, test_fix=1 |
-| pr_review | ci | implementation (agent_error), finished(fail) on human_blocked, finished(skip) on exhaustion | pr_review_iter=3, pr_review_hard=6 |
+| pr_review | ci | implementation (agent_error), finished(fail) on human_blocked, finished(skip) on exhaustion | pr_review_iter=3, pr_review_hard=6; clean GO is internal only |
 | ci | merge_wait | implementation (fix_exhausted, missing_worktree), pr_review (not_implementation_go), finished(fail) on no_pr | ci_fix=1, rebase=2 |
-| merge_wait | finished(pass) | ci (ci_red), implementation (missing_worktree), pr_review (blocked_exhausted), finished(fail) on closed/timeout | blocked_address=2, rebase=2, merge=--max-merge-attempts |
+| merge_wait | finished(pass) | finished(fail) on `strict_gate_unavailable` or failed disable verification; existing merged PRs learn then pass | compatibility budgets inactive for open PRs |
 | finished | — | — | — |
 
 ## Seeding and reconstruction
@@ -449,7 +460,9 @@ inputs are terminalized at the seed boundary when their PR is already merged or
 closed: merged PRs become `finished(pass)` and closed PRs become
 `finished(fail)`, before branch adoption or label-based routing is attempted.
 Open direct PRs enter the target repo's `pr_review` queue unless the PR already
-carries `state:implementation-go`, in which case they enter `ci`.
+carries `state:implementation-go`, in which case they enter `ci`. During
+#2054 this is not merge readiness: `ci` immediately verifies auto-merge is
+disabled and `merge_wait` stops at `strict_gate_unavailable`.
 
 The same terminal-state check is repeated at the CI and implementation stage
 boundaries before branch adoption or implementation-label routing. This makes a
@@ -472,7 +485,7 @@ semantics.
 | state:skip or epic | excluded | Epic tagging is the one seeding write; done BEFORE excluding. |
 | Direct PR already merged | finished | pass, idempotent; terminalized before branch adoption. |
 | Direct PR already closed | finished | fail; terminalized before branch adoption. |
-| Open PR + PR carries state:implementation-go | ci | existing-PR advanced to merge-ready. |
+| Open PR + PR carries state:implementation-go | ci | Legacy route only; contained and stopped pending #2055. |
 | Open PR, no impl-go | pr_review | existing-PR path; will be reviewed. |
 | No PR, at-or-past state:plan-go | implementation | plan approved; ready to implement. |
 | No PR, state:plan-no-go | planning | plan rejected; amend with feedback. |

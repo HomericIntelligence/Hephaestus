@@ -475,8 +475,10 @@ three rules — a PR that violates any of them is blocked:
 3. Push the branch (`git push -u origin 123-amazing-feature`).
 4. Open a pull request whose body contains the literal line `Closes #123`
    (capital `C`, no colon, on its own line — `Fixes`/`Resolves` are **not** accepted).
-5. Keep auto-merge disabled until implementation review applies
-   `state:implementation-go`; then enable it with `gh pr merge --auto --squash`.
+5. Keep auto-merge disabled while #2054's fail-closed policy is active. A
+   bootstrap PR requires an unconditional independent strict-review GO before
+   a manual squash merge; #2055 restores queue-owned auto-merge after a
+   head-bound strict-review proof.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full process.
 

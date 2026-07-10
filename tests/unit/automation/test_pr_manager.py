@@ -410,7 +410,7 @@ class TestCreatePR:
         kwargs = gh_mock.call_args.kwargs
         assert kwargs["branch"] == "branch"
         assert "Add feature X" in kwargs["title"]
-        assert kwargs["auto_merge"] is True
+        assert kwargs["auto_merge"] is False
         assert kwargs["base"] == "main"
         assert "Closes #5" in kwargs["body"]
         assert "Automated implementation via Codex" in kwargs["body"]

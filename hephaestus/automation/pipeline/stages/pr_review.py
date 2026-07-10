@@ -40,11 +40,10 @@ contract):
   stands down, then finish failed with the PR left UNLABELED (a human must
   act; automation may not resolve their thread). GO + open automation
   thread -> downgraded to NOGO (address + re-review). Clean GO ->
-  ``_write_go_and_arm`` performs one final human-thread live-read before
-  GO writes; a late human thread posts HUMAN_BLOCKED and skips labels/arm.
-  Otherwise, durably ``mark_pr_implementation_go`` then ``arm_auto_merge``
-  [durable, in that order — the label authorizes the arming; arming is
-  skipped if the mark write fails] -> follow-up step -> ADVANCE. Every
+  ``_write_internal_go`` performs one final human-thread live-read, verifies
+  auto-merge is disabled, and posts an informational artifact. It does not
+  apply ``state:implementation-go`` or arm auto-merge until #2055 adds the
+  head-bound strict-review gate. Every
   real non-GO round durably writes ``state:implementation-no-go`` (doc
   section 5 owned label, "NOGO verdict, before retry/regress"; legacy
   ``_apply_impl_review_verdict`` -> ``mark_pr_implementation_no_go``
@@ -760,20 +759,38 @@ class PrReviewStage(Stage):
                 item.issue,
                 human_unresolved,
             )
-            self._post_human_blocked_comment(item.pr, human_unresolved, ctx)
-            return StageOutcome(Disposition.FINISH_FAIL, "human_blocked")
+            return self._handle_human_blocked(item.pr, human_unresolved, ctx)
 
         if verdict.is_go and blocking_auto == 0:
             return self._handle_clean_go(item, ctx, minor_auto)
 
-        # NOGO/AMBIGUOUS — or a GO downgraded by open automation threads
-        # (re-housed downgrade: address + re-review before GO can stand;
-        # the address leg runs NEXT round after POST live-checks the
-        # threads — the module docstring's deliberate 2-round divergence).
-        # Doc section 5 owned label: every real non-GO round durably records
-        # state:implementation-no-go BEFORE the retry/regress outcome
-        # (legacy mark_pr_implementation_no_go, _review_phase.py:248).
-        self._write_no_go(item.pr, ctx)
+        return self._handle_non_go(
+            item,
+            ctx,
+            verdict,
+            automation_unresolved,
+            unresolved,
+            round_done,
+            soft_cap,
+            hard_cap,
+        )
+
+    def _handle_non_go(
+        self,
+        item: WorkItem,
+        ctx: StageContext,
+        verdict: Any,
+        automation_unresolved: int,
+        unresolved: int,
+        round_done: int,
+        soft_cap: int,
+        hard_cap: int,
+    ) -> StepResult:
+        """Persist a non-GO round and choose its bounded retry or terminal route."""
+        if item.pr is None or item.issue is None:  # guarded by _eval; type narrowing
+            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        if not self._write_no_go(item.pr, ctx):
+            return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_disable_failed")
         # #1554 parity (m2): the progress trail counts AUTOMATION threads
         # only — a human resolving their own thread is not automation
         # progress and must not earn extension rounds.
@@ -782,7 +799,7 @@ class PrReviewStage(Stage):
         # pre-address vs post-address WITHIN the round being evaluated —
         # progress landing on the soft-cap round is no longer invisible
         # to a stale cross-round comparison.
-        prev_unresolved = payload.get("unresolved_auto")
+        prev_unresolved = item.payload.get("unresolved_auto")
         if round_done < soft_cap:
             logger.info(
                 "pr_review:%d: %s (round %d/%d, %d unresolved); re-reviewing",
@@ -977,21 +994,26 @@ class PrReviewStage(Stage):
         return self._fail_back_agent_error(item)
 
     def _handle_clean_go(self, item: WorkItem, ctx: StageContext, minor_auto: int) -> StepResult:
-        """Resolve advisory automation threads, write GO, and route onward."""
+        """Resolve advisory threads, record internal GO, and route onward."""
         if item.pr is None or item.issue is None:  # guarded by caller; narrowing
             return self._fail_back_agent_error(item)
         if minor_auto:
             # Automation owns these waved minor/nitpick threads; resolve them so
             # required_review_thread_resolution does not re-block at merge_wait.
             logger.info(
-                "pr_review:%d: GO with %d advisory minor thread(s); resolving before arm",
+                "pr_review:%d: GO with %d advisory minor thread(s); resolving before strict gate",
                 item.issue,
                 minor_auto,
             )
             ctx.github.resolve_automation_threads(item.pr)
-        logger.info("pr_review:%d: clean GO; marking PR #%d and arming", item.issue, item.pr)
-        if not self._write_go_and_arm(item.pr, ctx):
-            return StageOutcome(Disposition.FINISH_FAIL, "human_blocked")
+        logger.info(
+            "pr_review:%d: clean GO; strict review remains pending for PR #%d",
+            item.issue,
+            item.pr,
+        )
+        blocked_reason = self._write_internal_go(item.pr, ctx)
+        if blocked_reason is not None:
+            return StageOutcome(Disposition.FINISH_FAIL, blocked_reason)
         if getattr(ctx.config, "enable_follow_up", True):
             return Continue(next_state=FOLLOWUP_WAIT)
         return StageOutcome(Disposition.ADVANCE, "GO with zero blocking threads")
@@ -1100,8 +1122,8 @@ class PrReviewStage(Stage):
         return StageOutcome(Disposition.FAIL_BACK, "agent_error")
 
     @staticmethod
-    def _write_no_go(pr_number: int, ctx: StageContext) -> None:
-        """Durably mark implementation NO-GO, non-fatally (legacy warn pattern).
+    def _write_no_go(pr_number: int, ctx: StageContext) -> bool:
+        """Durably mark implementation NO-GO and verify auto-merge is deferred.
 
         Doc section 5 owned label ("NOGO verdict, before retry/regress"):
         written on EVERY real non-GO round so the PR durably reflects the
@@ -1112,6 +1134,9 @@ class PrReviewStage(Stage):
             pr_number: GitHub PR number that earned the non-GO round.
             ctx: Stage context carrying the GitHub accessor.
 
+        Returns:
+            ``True`` when auto-merge is known disabled, else ``False``.
+
         """
         try:
             ctx.github.mark_pr_implementation_no_go(pr_number)
@@ -1121,6 +1146,21 @@ class PrReviewStage(Stage):
                 pr_number,
                 e,
             )
+        return PrReviewStage._ensure_auto_merge_deferred(pr_number, ctx)
+
+    @staticmethod
+    def _ensure_auto_merge_deferred(pr_number: int, ctx: StageContext) -> bool:
+        """Return whether the accessor verified an open PR has auto-merge disabled."""
+        try:
+            ctx.github.defer_auto_merge(pr_number)
+        except Exception as e:
+            logger.error(
+                "pr_review: failed to verify auto-merge disabled on PR #%d: %s",
+                pr_number,
+                e,
+            )
+            return False
+        return True
 
     @staticmethod
     def _post_human_blocked_comment(
@@ -1158,76 +1198,58 @@ class PrReviewStage(Stage):
             )
 
     @staticmethod
-    def _write_go_and_arm(pr_number: int, ctx: StageContext) -> bool:
-        """Durably mark implementation GO, then arm auto-merge (that order).
+    def _handle_human_blocked(
+        pr_number: int, human_unresolved: int, ctx: StageContext
+    ) -> StageOutcome:
+        """Contain an armed PR before recording a human-review stand-down."""
+        if not PrReviewStage._ensure_auto_merge_deferred(pr_number, ctx):
+            return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_disable_failed")
+        PrReviewStage._post_human_blocked_comment(pr_number, human_unresolved, ctx)
+        return StageOutcome(Disposition.FINISH_FAIL, "human_blocked")
 
-        Returns ``False`` only when a fresh human-thread read inside this
-        helper finds a late human block before GO writes. GitHub has no atomic
-        check-unresolved-threads-and-arm primitive, so this closes the EVAL to
-        helper gap without changing the existing non-fatal write semantics.
+    @staticmethod
+    def _write_internal_go(pr_number: int, ctx: StageContext) -> str | None:
+        """Record clean internal review while preserving the strict-review gate.
 
-        Each write is non-fatal (legacy warn pattern), but arming is SKIPPED
-        when the mark write fails: auto-merge must never be armed on a PR
-        that did not durably receive ``state:implementation-go`` (the
-        pr-policy gate would fail such a PR).
+        The temporary #2054 baseline neither applies ``state:implementation-go``
+        nor arms auto-merge. It proves the PR is unarmed before publishing the
+        internal result, so a stale label cannot merge it before #2055 lands.
 
         Args:
             pr_number: GitHub PR number that earned the clean GO.
             ctx: Stage context carrying the GitHub accessor.
 
         Returns:
-            ``False`` when a late human thread blocks arming; otherwise ``True``.
+            ``None`` on success, otherwise a terminal outcome reason.
 
         """
         _, _, human_unresolved = ctx.github.count_unresolved_threads_by_severity(pr_number)
         if human_unresolved:
             logger.info(
-                "pr_review: clean GO recheck found %d late human thread(s) on PR #%d; not arming",
+                "pr_review: clean GO recheck found %d late human thread(s) on PR #%d; "
+                "not advancing",
                 human_unresolved,
                 pr_number,
             )
+            if not PrReviewStage._ensure_auto_merge_deferred(pr_number, ctx):
+                return "auto_merge_disable_failed"
             PrReviewStage._post_human_blocked_comment(pr_number, human_unresolved, ctx)
-            return False
+            return "human_blocked"
 
-        try:
-            ctx.github.mark_pr_implementation_go(pr_number)
-        except Exception as e:
-            logger.warning(
-                "pr_review: failed to mark PR #%d implementation-go (non-fatal, "
-                "auto-merge NOT armed): %s",
-                pr_number,
-                e,
-            )
-            return True
-        auto_merge_armed = False
-        try:
-            ctx.github.arm_auto_merge(pr_number)
-            auto_merge_armed = True
-        except Exception as e:
-            logger.warning(
-                "pr_review: failed to arm auto-merge on PR #%d (non-fatal): %s", pr_number, e
-            )
-        PrReviewStage._upsert_clean_go_comment(pr_number, ctx, auto_merge_armed=auto_merge_armed)
-        return True
+        if not PrReviewStage._ensure_auto_merge_deferred(pr_number, ctx):
+            return "auto_merge_disable_failed"
+        PrReviewStage._upsert_clean_go_comment(pr_number, ctx)
+        return None
 
     @staticmethod
-    def _upsert_clean_go_comment(
-        pr_number: int, ctx: StageContext, *, auto_merge_armed: bool
-    ) -> None:
-        """Leave a durable public artifact for clean automated GO reviews."""
-        arm_sentence = (
-            "The pipeline marked this PR `state:implementation-go` and armed auto-merge."
-            if auto_merge_armed
-            else (
-                "The pipeline marked this PR `state:implementation-go`. Auto-merge arming "
-                "failed; a later run will retry."
-            )
-        )
+    def _upsert_clean_go_comment(pr_number: int, ctx: StageContext) -> None:
+        """Leave a durable internal-GO artifact without granting merge eligibility."""
         body = (
             "<!-- hephaestus-pr-review-go -->\n"
             "Automated PR review result: GO.\n\n"
             "No unresolved blocking review threads were found by the automation reviewer. "
-            f"{arm_sentence}"
+            "This is an internal review result only; independent strict review remains "
+            "required and auto-merge remains disabled."
         )
         try:
             ctx.github.upsert_pr_comment(pr_number, "<!-- hephaestus-pr-review-go -->", body)

@@ -700,6 +700,80 @@ class ImplementationStage(Stage):
         logger.info("implementation:%d: state:skip; skipping", issue)
         return StageOutcome(Disposition.SKIP, "state:skip")
 
+    @staticmethod
+    def _defer_gate(issue: int, pr_number: int, ctx: StageContext) -> StageOutcome | None:
+        """Contain an adopted existing PR: verify auto-merge is disabled.
+
+        Split out of :meth:`_gate` for the same readability reason as
+        :meth:`_skip_gate`. Existing PRs may have been armed by the
+        pre-#2054 policy; a failed read-back must stop adoption before
+        worktree preparation or late CI routing (#2054 fail-closed).
+
+        Args:
+            issue: The GitHub issue number (for log messages).
+            pr_number: The adopted PR's number.
+            ctx: Stage context carrying the GitHub accessor.
+
+        Returns:
+            A FINISH_FAIL outcome when the disable read-back fails, else None.
+
+        """
+        try:
+            ctx.github.defer_auto_merge(pr_number)
+        except Exception as e:
+            logger.error(
+                "implementation:%d: could not verify PR #%d auto-merge disabled: %s",
+                issue,
+                pr_number,
+                e,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_disable_failed")
+        return None
+
+    @staticmethod
+    def _impl_go_route(item: WorkItem, ctx: StageContext, existing_pr: int) -> StepResult | None:
+        """Route an adopted PR that already carries ``state:implementation-go``.
+
+        Split out of :meth:`_gate` for the same readability reason as
+        :meth:`_skip_gate`. A late-stage entry that only knew the PR (no
+        worktree yet) must prepare one before the legacy ``ci`` route (m7);
+        an entry that already has a worktree can fail back to ``ci`` directly.
+
+        Args:
+            item: The work item under evaluation (``item.pr``/``item.branch``
+                are already set by the caller).
+            ctx: Stage context (unused; kept for signature symmetry with the
+                other extracted gate helpers).
+            existing_pr: The adopted PR's number.
+
+        Returns:
+            A routing result when the PR already carries
+            ``state:implementation-go``, else None (not this PR's route).
+
+        """
+        has_go, _has_no_go = ctx.github.pr_has_implementation_state_label(existing_pr)
+        if not has_go:
+            return None
+        # item.pr/item.branch are set above so the ci stage receives
+        # a fully-identified PR (m7). CI also needs a per-item
+        # worktree for any mutating git job; prepare one first when
+        # this is a late-stage entry that only knew the PR.
+        if item.worktree:
+            logger.info(
+                "implementation:%d: PR #%d already implementation-go; routing to ci",
+                item.issue,
+                existing_pr,
+            )
+            return StageOutcome(Disposition.FAIL_BACK, "already_implementation_go_pr")
+        item.payload["existing_pr"] = True
+        item.payload["existing_pr_impl_go"] = True
+        logger.info(
+            "implementation:%d: PR #%d already implementation-go; preparing worktree before ci",
+            item.issue,
+            existing_pr,
+        )
+        return Continue(next_state=WORKTREE_WAIT)
+
     def _gate(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """GATE [M]: existing-PR fast path, then the plan-review verdict gate.
 
@@ -740,31 +814,15 @@ class ImplementationStage(Stage):
             terminal = _terminal_pr_outcome(ctx.github.gh_pr_state(existing_pr), existing_pr)
             if terminal is not None:
                 return terminal
+            defer_failed = self._defer_gate(item.issue, existing_pr, ctx)
+            if defer_failed is not None:
+                return defer_failed
             head_branch = ctx.github.get_pr_head_branch(existing_pr)
             if head_branch:
                 item.branch = head_branch
-            has_go, _has_no_go = ctx.github.pr_has_implementation_state_label(existing_pr)
-            if has_go:
-                # item.pr/item.branch are set above so the ci stage receives
-                # a fully-identified PR (m7). CI also needs a per-item
-                # worktree for any mutating git job; prepare one first when
-                # this is a late-stage entry that only knew the PR.
-                if item.worktree:
-                    logger.info(
-                        "implementation:%d: PR #%d already implementation-go; routing to ci",
-                        item.issue,
-                        existing_pr,
-                    )
-                    return StageOutcome(Disposition.FAIL_BACK, "already_implementation_go_pr")
-                item.payload["existing_pr"] = True
-                item.payload["existing_pr_impl_go"] = True
-                logger.info(
-                    "implementation:%d: PR #%d already implementation-go; "
-                    "preparing worktree before ci",
-                    item.issue,
-                    existing_pr,
-                )
-                return Continue(next_state=WORKTREE_WAIT)
+            impl_go_route = self._impl_go_route(item, ctx, existing_pr)
+            if impl_go_route is not None:
+                return impl_go_route
             if agent_error_reentry:
                 # M1: consume the implement budget at GATE-adoption so the
                 # pr_review agent_error -> re-adopt cycle is bounded.
@@ -784,11 +842,9 @@ class ImplementationStage(Stage):
                     )
                     return StageOutcome(Disposition.FINISH_FAIL, "agent_error_exhausted")
             # Adopt the PR's REAL head branch — never assume {issue}-auto-impl
-            # (the _review_existing_pr branch-assumption bug) — and re-ensure
-            # auto-merge stays deferred on the adopted PR [durable]: it must
-            # never be armed before state:implementation-go.
+            # (the _review_existing_pr branch-assumption bug). Auto-merge was
+            # already verified disabled above before the branch was inspected.
             item.payload["existing_pr"] = True
-            ctx.github.defer_auto_merge(existing_pr)
             logger.info(
                 "implementation:%d: existing PR #%d (branch %r); preparing adopted worktree",
                 item.issue,

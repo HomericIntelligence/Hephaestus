@@ -595,12 +595,14 @@ def _pr_auto_merge_enabled(pr_number: int) -> bool:
 
 
 def ensure_pr_auto_merge_deferred(pr_number: int) -> None:
-    """Disable premature auto-merge before implementation review reaches GO."""
+    """Disable auto-merge and verify it remains disabled while the PR is open."""
     if not _pr_auto_merge_enabled(pr_number):
         return
     _gh_call(["pr", "merge", str(pr_number), "--disable-auto"])
+    if _pr_auto_merge_enabled(pr_number):
+        raise RuntimeError(f"auto-merge is still enabled for PR #{pr_number}")
     logger.warning(
-        "Disabled premature auto-merge for PR #%s; implementation review has not reached GO yet",
+        "Disabled auto-merge for PR #%s pending the strict-review gate",
         pr_number,
     )
 
@@ -733,9 +735,10 @@ def pr_has_implementation_state_label(pr_number: int) -> tuple[bool, bool]:
 
 
 def enable_auto_merge_after_implementation_go(pr_number: int) -> None:
-    """Arm auto-merge after implementation review has labeled the PR GO."""
-    _gh_call(["pr", "merge", str(pr_number), "--auto", "--squash"])
-    logger.info("Enabled auto-merge for implementation-GO PR #%s", pr_number)
+    """Refuse legacy auto-merge arming until #2055 supplies strict proof."""
+    raise RuntimeError(
+        f"refusing to arm auto-merge for PR #{pr_number}: strict-review gate unavailable"
+    )
 
 
 def commit_changes(
@@ -992,7 +995,7 @@ def create_pr(
     Args:
         issue_number: Issue number
         branch_name: Git branch name
-        auto_merge: Whether to enable auto-merge on the PR
+        auto_merge: Deprecated compatibility flag; ignored while #2054 is active.
         agent: Selected implementation agent for generated PR metadata.
         base: Base branch used for changed-file and commit context.
         worktree_path: Optional worktree path used to invoke the lightweight
@@ -1025,10 +1028,15 @@ def create_pr(
         generated_by=f"{_agent_display_name(agent)} via Hephaestus automation.",
     )
 
+    if auto_merge:
+        logger.warning(
+            "Ignoring auto_merge=True for branch %s while the strict-review gate is unavailable",
+            branch_name,
+        )
     return gh_pr_create(
         branch=branch_name,
         title=pr_title,
         body=pr_body,
-        auto_merge=auto_merge,
+        auto_merge=False,
         base=base,
     )

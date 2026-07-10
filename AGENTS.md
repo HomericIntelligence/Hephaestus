@@ -14,6 +14,12 @@ pool. Each agent job runs either **Claude Code** or **Codex**, chosen via the
 optional `--agent` CLI flag or auto-detected with a Claude preference when
 omitted (see `hephaestus.agents.runtime.add_agent_argument`).
 
+**Temporary merge policy (#2054):** all automatic auto-merge armers are
+fail-closed while #2055 adds the head-bound `strict_review` queue stage. The
+pipeline verifies auto-merge is disabled for open PRs and stops at
+`strict_gate_unavailable`; bootstrap PRs require an unconditional independent
+strict-review GO and a manual squash merge.
+
 | Queue stage | Module | Purpose |
 |-------------|--------|---------|
 | repo | `hephaestus.automation.pipeline.stages.repo` | Clone/discover, classify issues/PRs, and seed entry queues |

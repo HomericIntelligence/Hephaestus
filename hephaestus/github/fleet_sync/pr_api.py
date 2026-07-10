@@ -129,17 +129,9 @@ def list_prs(repo: str, org: str) -> list[PRInfo]:
 
 
 def merge_pr(pr: PRInfo, org: str, dry_run: bool = False) -> bool:
-    """Merge a ready PR via merge commit."""
-    logger.info("  Merging PR #%d via merge commit...", pr.number)
-    try:
-        _gh(
-            ["pr", "merge", str(pr.number), "--merge", "--auto"],
-            repo=pr.repo,
-            org=org,
-            dry_run=dry_run,
-        )
-        return True
-    except (subprocess.CalledProcessError, RuntimeError) as e:
-        stderr = getattr(e, "stderr", "") or str(e)
-        logger.error("  Failed to merge PR #%d: %s", pr.number, stderr)
-        return False
+    """Refuse fleet-sync automatic merging until the strict-review gate exists."""
+    del org, dry_run
+    logger.error(
+        "  Refusing to merge PR #%d while the strict-review gate is unavailable", pr.number
+    )
+    return False

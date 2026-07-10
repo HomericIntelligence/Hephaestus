@@ -1008,29 +1008,48 @@ class PipelineGitHub:
             return
         pr_manager.mark_pr_implementation_go(pr_number)
 
+    def _read_auto_merge_state(self, pr_number: int) -> tuple[str, bool]:
+        """Read a PR's terminal/open state and auto-merge status without fail-open defaults."""
+        result = self._gh(
+            ["pr", "view", str(pr_number), "--json", "autoMergeRequest,state"],
+            check=False,
+        )
+        if getattr(result, "returncode", 0) != 0:
+            raise RuntimeError(f"could not read auto-merge state for PR #{pr_number}")
+        try:
+            data = json.loads(result.stdout or "{}")
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"invalid auto-merge state for PR #{pr_number}") from e
+        if not isinstance(data, dict):
+            raise RuntimeError(f"invalid auto-merge state for PR #{pr_number}")
+        state = str(data.get("state") or "").upper()
+        if state not in {"OPEN", "CLOSED", "MERGED"}:
+            raise RuntimeError(f"unknown PR state while deferring auto-merge for PR #{pr_number}")
+        return state, data.get("autoMergeRequest") is not None
+
     def defer_auto_merge(self, pr_number: int) -> None:
-        """Keep auto-merge disabled until implementation GO (``pr_manager``)."""
+        """Disable auto-merge and verify it remains disabled while the PR is open."""
         if self._skip(f"defer auto-merge on PR #{pr_number}"):
             return
         if self._repo_slug is not None:
-            result = self._gh(
-                ["pr", "view", str(pr_number), "--json", "autoMergeRequest"],
-                check=False,
-            )
-            data = json.loads(result.stdout or "{}")
-            if data.get("autoMergeRequest") is not None:
+            state, armed = self._read_auto_merge_state(pr_number)
+            if state != "OPEN":
+                return
+            if armed:
                 self._gh(["pr", "merge", str(pr_number), "--disable-auto"], check=False)
+            verified_state, verified_armed = self._read_auto_merge_state(pr_number)
+            if verified_state == "OPEN" and verified_armed:
+                raise RuntimeError(f"auto-merge is still enabled for open PR #{pr_number}")
             return
         pr_manager.ensure_pr_auto_merge_deferred(pr_number)
 
     def arm_auto_merge(self, pr_number: int) -> None:
-        """Arm squash auto-merge after implementation GO (``pr_manager``)."""
+        """Reject direct arming until #2055 installs the strict-review gate."""
         if self._skip(f"arm auto-merge on PR #{pr_number}"):
             return
-        if self._repo_slug is not None:
-            self._gh(["pr", "merge", str(pr_number), "--auto", "--squash"], check=False)
-            return
-        pr_manager.enable_auto_merge_after_implementation_go(pr_number)
+        raise RuntimeError(
+            f"refusing to arm auto-merge for PR #{pr_number}: strict-review gate unavailable"
+        )
 
     def post_review_threads(
         self, pr_number: int, threads: list[dict[str, Any]], summary: str

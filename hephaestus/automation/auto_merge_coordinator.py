@@ -254,30 +254,15 @@ class AutoMergeCoordinator:
         )
 
     def enable_auto_merge(self, pr_number: int, is_bot_pr: bool = False) -> bool:
-        """Enable auto-merge for a PR, with existing bot and force-merge fallbacks."""
-        try:
-            self._gh_call(["pr", "merge", str(pr_number), "--auto", "--squash"])
-            logger.info("Enabled auto-merge for PR #%s", pr_number)
-            return True
-        except subprocess.CalledProcessError as exc:
-            logger.warning("Could not enable auto-merge for PR #%s: %s", pr_number, exc)
-        if is_bot_pr:
-            try:
-                self._gh_call(["pr", "merge", str(pr_number), "--auto"])
-                logger.info("Enabled auto-merge (strategy-agnostic) for bot PR #%s", pr_number)
-                return True
-            except subprocess.CalledProcessError as exc:
-                logger.warning("Could not enable strategy-agnostic auto-merge: %s", exc)
-        if not self._options().force_merge_on_stall:
-            logger.error("PR #%s: auto-merge failed and force_merge_on_stall is not set", pr_number)
-            return False
-        try:
-            self._gh_call(["pr", "merge", str(pr_number), "--squash", "--delete-branch"])
-            logger.info("Squash-merged PR #%s via fallback", pr_number)
-            return True
-        except subprocess.CalledProcessError as exc:
-            logger.error("PR #%s: both auto-merge and squash fallback failed: %s", pr_number, exc)
-            return False
+        """Refuse legacy automatic arming until the strict-review gate exists.
+
+        The queue pipeline is the production entry point, but compatibility
+        callers must be fail-closed too: a stale implementation-GO label must
+        never reactivate auto-merge through this legacy coordinator.
+        """
+        del is_bot_pr
+        logger.error("Refusing to arm auto-merge for PR #%s until #2055 lands", pr_number)
+        return False
 
     def pr_has_implementation_go(self, pr_number: int) -> bool:
         """Return whether a PR has the implementation-review GO label."""

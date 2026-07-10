@@ -1376,12 +1376,13 @@ class TestCloneReuseAndWorktrees:
 class TestMergePr:
     """Merge-path error handling."""
 
-    def test_merge_pr_handles_runtime_errors_from_gh_call(self) -> None:
-        """Circuit-breaker/runtime failures return False like gh CLI failures."""
+    def test_merge_pr_is_fail_closed_without_calling_gh(self) -> None:
+        """Fleet sync cannot bypass the temporary strict-review gate."""
         pr = _pr(42, PRStatus.READY)
 
-        with patch.object(fleet_pr_api, "_gh", side_effect=RuntimeError("breaker open")):
+        with patch.object(fleet_pr_api, "_gh") as gh:
             assert fleet_pr_api.merge_pr(pr, "HomericIntelligence") is False
+        gh.assert_not_called()
 
 
 class TestListPrs:

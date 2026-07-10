@@ -171,9 +171,9 @@ def gh_pr_create(
     1. *body* must contain a literal ``Closes #N`` line.
     2. Every commit on *branch* (vs *base*) must be cryptographically signed.
 
-    When ``auto_merge=True`` the helper also arms auto-merge immediately. The
-    implementation pipeline deliberately passes ``False`` until the in-loop
-    implementation review marks the PR GO.
+    ``auto_merge`` is retained for API compatibility but ignored during #2054's
+    fail-closed bootstrap. #2055 restores automatic arming only after a
+    head-bound strict-review proof.
 
     The CI gate (``.github/workflows/_required.yml`` job ``pr-policy``) and the
     PR review prompt re-check the same three properties, so a slip past one
@@ -183,7 +183,7 @@ def gh_pr_create(
         branch: Branch name
         title: PR title
         body: PR description
-        auto_merge: Whether to enable auto-merge immediately (default False)
+        auto_merge: Deprecated compatibility flag; ignored while #2054 is active.
         base: Base branch to compare against for signed-commit validation
 
     Returns:
@@ -191,8 +191,7 @@ def gh_pr_create(
 
     Raises:
         ValueError: If *body* lacks ``Closes #N`` or *branch* has unsigned commits.
-        RuntimeError: If the underlying ``gh`` CLI call fails, or immediate
-            auto-merge cannot be enabled when ``auto_merge=True``.
+        RuntimeError: If the underlying ``gh`` CLI call fails.
 
     """
     # Policy gate #1: PR body must reference the closing issue.
@@ -244,16 +243,10 @@ def gh_pr_create(
         _api.logger.info("Created PR #%s", pr_number)
 
         if auto_merge:
-            try:
-                _api._gh_call(["pr", "merge", str(pr_number), "--auto", "--squash"])
-                _api.logger.info("Enabled auto-merge for PR #%s", pr_number)
-            except Exception as e:
-                _api.logger.error("Failed to enable auto-merge for PR #%s: %s", pr_number, e)
-                raise RuntimeError(
-                    f"Auto-merge could not be enabled for PR #{pr_number}: {e}. "
-                    "Resolve the underlying issue (e.g. branch protection, merge method) "
-                    "and re-run."
-                ) from e
+            _api.logger.warning(
+                "Ignoring auto_merge=True for PR #%s while the strict-review gate is unavailable",
+                pr_number,
+            )
 
         return pr_number
 

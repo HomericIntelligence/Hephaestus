@@ -1,14 +1,15 @@
 # Runbook: CI-Driver Stall (Green-but-BLOCKED PR)
 
-Use this when the CI/merge stage keeps running but PRs never merge — they sit
-armed for auto-merge with all checks green, yet stay un-mergeable. The queue
-pipeline handles this in `hephaestus/automation/pipeline/stages/merge_wait.py`; the
-`hephaestus-drive-prs-green` console script is a thin queue-pipeline wrapper for
-the ci/merge_wait slice.
+This runbook is dormant during #2054's fail-closed bootstrap: no PR may remain
+armed for auto-merge. If `autoMergeRequest` is present, disable it and verify
+the result before continuing. After #2055 restores a head-bound strict-review
+gate, use this runbook when an independently gated PR is armed, green, and
+still un-mergeable. The queue pipeline handles that path in
+`hephaestus/automation/pipeline/stages/merge_wait.py`.
 
 ## Symptom
 
-- In the default pipeline, `=== Pipeline summary ===` shows the affected issue
+- After #2055, `=== Pipeline summary ===` shows the affected issue
   cycling through or ending around `merge_wait`, `ci`, or `pr_review`, but the
   PR remains open and armed.
 - Pipeline logs show one of the `merge_wait` routes:
@@ -62,8 +63,7 @@ gh pr view <N> --json reviewDecision,reviewRequests
    review threads, then the armed auto-merge proceeds on its own.
 
 After the gate is satisfied, the already-armed PR merges without re-running the
-driver; re-run `hephaestus-automation-loop` only if you need to
-drive other issues, continue a regressed item, or refresh the pipeline summary.
+driver. This behavior is suspended by #2054 and resumes only after #2055.
 
 ## See also
 

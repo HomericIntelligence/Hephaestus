@@ -66,11 +66,7 @@ from .github_api import (
     gh_pr_list_unresolved_threads,
 )
 from .models import PLAN_COMMENT_MARKER, ImplementationState
-from .pr_manager import (
-    enable_auto_merge_after_implementation_go,
-    mark_pr_implementation_go,
-    mark_pr_implementation_no_go,
-)
+from .pr_manager import mark_pr_implementation_go, mark_pr_implementation_no_go
 from .pr_reviewer import gather_impl_review_context, review_pr_inline
 from .prompts import get_impl_loop_review_prompt, get_impl_resume_feedback_prompt
 from .review_validator import validate_prior_comments_addressed
@@ -206,21 +202,19 @@ class ReviewPhase(StageMixin):
         slot_id: int | None,
         thread_id: int | None,
     ) -> None:
-        """Label a PR from the review loop's final verdict and arm auto-merge.
+        """Label a PR from the review loop's final verdict without arming auto-merge.
 
         Shared by both the fresh-implementation path and the existing-PR review
-        path so the GO → ``mark_pr_implementation_go`` (+ auto-merge) /
-        non-GO → ``mark_pr_implementation_no_go`` mapping cannot drift between
-        them.
+        path. #2054 removes the legacy automatic armer; #2055 replaces this
+        provisional GO label with a head-bound strict-review result.
 
         An ``ERROR`` verdict (reviewer-infrastructure failure) or a
         ``HUMAN_BLOCKED`` verdict (review reached GO but an unresolved human
         review thread remains) applies **neither** label: the PR is not settled,
         so it must be left unlabeled for the "no go/no-go label → re-review" path
         to pick it up next loop (#911 / PR #1069). Labeling it no-go would falsely
-        record a converged failure; labeling it go would arm auto-merge on a PR
-        that was never reviewed (ERROR) or still has open human threads
-        (HUMAN_BLOCKED).
+        record a converged failure; provisional GO labels cannot arm
+        auto-merge during #2054 and are replaced by strict proof in #2055.
         """
         impl = self.impl
         if last_verdict in ("ERROR", "HUMAN_BLOCKED"):
@@ -239,12 +233,6 @@ class ReviewPhase(StageMixin):
             return
         if last_verdict == "GO":
             mark_pr_implementation_go(pr_number)
-            if self.options.auto_merge:
-                if slot_id is not None:
-                    self.status_tracker.update_slot(
-                        slot_id, f"{pr_ref(pr_number)}: enabling auto-merge"
-                    )
-                enable_auto_merge_after_implementation_go(pr_number)
         else:
             mark_pr_implementation_no_go(pr_number)
             impl._log(

@@ -59,7 +59,6 @@ _MUTATOR_CASES = [
     ("mark_pr_implementation_go", (7,), "pr_manager", "mark_pr_implementation_go"),
     ("mark_pr_implementation_no_go", (7,), "pr_manager", "mark_pr_implementation_no_go"),
     ("defer_auto_merge", (7,), "pr_manager", "ensure_pr_auto_merge_deferred"),
-    ("arm_auto_merge", (7,), "pr_manager", "enable_auto_merge_after_implementation_go"),
     ("post_review_threads", (7, [], "sum"), "github_api", "gh_pr_review_post"),
     ("skip_epics", ({5: ["epic"]},), "github_api", "skip_epics"),
     ("ensure_state_labels", (), "github_api", "_ensure_labels_exist"),
@@ -689,18 +688,25 @@ class TestRepoReviewThreadsForReview:
 class TestRepoScopedAutoMerge:
     """Repo-scoped auto-merge mutations are idempotent under racing workers."""
 
-    def test_defer_auto_merge_disables_with_check_false(
+    def test_defer_auto_merge_disables_and_reads_back(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         calls: list[tuple[list[str], dict[str, object]]] = []
 
         def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
             calls.append((argv, kwargs))
+            if (
+                argv[:2] == ["pr", "view"]
+                and len([call for call, _ in calls if call[:2] == ["pr", "view"]]) == 1
+            ):
+                return SimpleNamespace(
+                    stdout=json.dumps({"state": "OPEN", "autoMergeRequest": {"enabledAt": "now"}})
+                )
             if argv[:2] == ["pr", "view"]:
                 return SimpleNamespace(
-                    stdout=json.dumps({"autoMergeRequest": {"enabledAt": "now"}})
+                    stdout=json.dumps({"state": "OPEN", "autoMergeRequest": None})
                 )
-            return SimpleNamespace(stdout="", returncode=1, stderr="already disabled")
+            return SimpleNamespace(stdout="", returncode=0, stderr="")
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
 
@@ -708,16 +714,66 @@ class TestRepoScopedAutoMerge:
 
         assert calls == [
             (
-                ["pr", "view", "7", "--json", "autoMergeRequest", "--repo", "org/repo-a"],
+                [
+                    "pr",
+                    "view",
+                    "7",
+                    "--json",
+                    "autoMergeRequest,state",
+                    "--repo",
+                    "org/repo-a",
+                ],
                 {"check": False},
             ),
             (
                 ["pr", "merge", "7", "--disable-auto", "--repo", "org/repo-a"],
                 {"check": False},
             ),
+            (
+                [
+                    "pr",
+                    "view",
+                    "7",
+                    "--json",
+                    "autoMergeRequest,state",
+                    "--repo",
+                    "org/repo-a",
+                ],
+                {"check": False},
+            ),
         ]
 
-    def test_arm_auto_merge_arms_with_check_false(
+    def test_defer_auto_merge_rejects_open_pr_that_remains_armed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed disable read-back is surfaced to the calling stage."""
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            del argv, kwargs
+            return SimpleNamespace(
+                stdout=json.dumps({"state": "OPEN", "autoMergeRequest": {"enabledAt": "now"}})
+            )
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        with pytest.raises(RuntimeError, match="still enabled"):
+            pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).defer_auto_merge(7)
+
+    def test_defer_auto_merge_rejects_unreadable_pr_state(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed GitHub read cannot be interpreted as a safely terminal PR."""
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            del argv, kwargs
+            return SimpleNamespace(stdout="", returncode=1)
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        with pytest.raises(RuntimeError, match="could not read auto-merge state"):
+            pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).defer_auto_merge(7)
+
+    def test_arm_auto_merge_rejects_direct_arming(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         calls: list[tuple[list[str], dict[str, object]]] = []
@@ -728,14 +784,10 @@ class TestRepoScopedAutoMerge:
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
 
-        pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).arm_auto_merge(7)
+        with pytest.raises(RuntimeError, match="strict-review gate unavailable"):
+            pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).arm_auto_merge(7)
 
-        assert calls == [
-            (
-                ["pr", "merge", "7", "--auto", "--squash", "--repo", "org/repo-a"],
-                {"check": False},
-            )
-        ]
+        assert calls == []
 
 
 class TestCreatePr:

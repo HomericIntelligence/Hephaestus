@@ -571,7 +571,7 @@ class TestCiWalks:
         git_jobs = [h.job for h in pool.submitted if isinstance(h.job, GitJob)]
         assert [j.op for j in git_jobs] == ["rebase", "push"]
         assert item.attempts["rebase"] == 1
-        assert github.mutation_log == []  # ci owns no labels
+        assert github.mutation_log == [("defer_auto_merge", (501,))]
 
     def test_fix_path_reaches_green(self, make_ctx: Any, make_work_item: Any) -> None:
         """FAILING -> fix agent -> push (real commit) -> re-poll green -> ADVANCE."""

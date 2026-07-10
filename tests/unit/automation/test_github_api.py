@@ -1578,28 +1578,27 @@ class TestGhPrCreate:
 
     @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
     @patch("hephaestus.automation.github_api._gh_call")
-    def test_pr_creation_auto_merge_failure_raises(
+    def test_pr_creation_with_auto_merge_flag_remains_unarmed(
         self, mock_gh_call: Any, _mock_signed: Any
     ) -> None:
-        """Immediate auto-merge remains available for non-implementation callers."""
+        """The deprecated compatibility flag cannot bypass the strict gate."""
         list_result = Mock()
         list_result.stdout = "[]"  # no existing PR on the head
         mock_create_result = Mock()
         mock_create_result.stdout = "https://github.com/owner/repo/pull/456"
 
-        mock_gh_call.side_effect = [
-            list_result,
-            mock_create_result,
-            subprocess.CalledProcessError(1, "gh"),
-        ]
+        mock_gh_call.side_effect = [list_result, mock_create_result]
 
-        with pytest.raises(RuntimeError, match="Auto-merge could not be enabled"):
+        assert (
             gh_pr_create(
                 branch="feature-branch",
                 title="Test PR",
                 body=_POLICY_BODY,
                 auto_merge=True,
             )
+            == 456
+        )
+        assert mock_gh_call.call_count == 2
 
     @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
     @patch("hephaestus.automation.github_api._gh_call")

@@ -60,20 +60,6 @@ class _FifoStateGitHub(FakeStageGitHub):
         return self._states[0]
 
 
-class _ArmFailGitHub(FakeStageGitHub):
-    """arm_auto_merge raises (auto-merge arming rejected)."""
-
-    def arm_auto_merge(self, pr_number: int) -> None:
-        raise RuntimeError("auto-merge rejected")
-
-
-class _RecordFailGitHub(FakeStageGitHub):
-    """arm_drive_green raises (arming-record write failed)."""
-
-    def arm_drive_green(self, issue_number: int, pr_number: int, head_sha: str) -> None:
-        raise OSError("disk full")
-
-
 class _MarkFailGitHub(FakeStageGitHub):
     """mark_drive_green_learn_result raises (learn-record write failed)."""
 
@@ -121,17 +107,12 @@ def _armed_item(make_work_item: Any, *, with_anchor: bool = True, **kwargs: Any)
 
 
 class TestMergeWaitArm:
-    """ARM: durable arming record BEFORE POLL, idempotent, failure terminals."""
+    """ARM: temporary fail-closed behavior before #2055 lands."""
 
-    def test_arm_writes_record_before_poll_and_learn_marks_after(
+    def test_merged_pr_reaches_existing_learn_path(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """Durable-order oracle: arm_auto_merge -> arm_drive_green -> learn mark.
-
-        Mutation probe (b): swapping the arming-record write past POLL would
-        break this exact mutation_log order (the record must exist before
-        the first POLL classification can dispatch anything).
-        """
+        """A pre-existing merge still records its learn result exactly once."""
         stage = MergeWaitStage()
         github = FakeStageGitHub(pr_state=MERGED_STATE)
         ctx = make_ctx(github=github)
@@ -141,90 +122,70 @@ class TestMergeWaitArm:
         outcome = _drive(stage, item, ctx, pool)
 
         assert outcome == StageOutcome(Disposition.FINISH_PASS, "merged")
-        names = [name for name, _ in github.mutation_log]
-        assert names == ["arm_auto_merge", "arm_drive_green", "mark_drive_green_learn_result"]
-        assert github.arming_records[1] == (601, "abc123")
-        # The learn session ran (once) and its result was durably marked.
-        assert github.learn_results[1] is True
-        learn_jobs = [h.job for h in pool.submitted if isinstance(h.job, AgentJob)]
-        assert len(learn_jobs) == 1
-        assert learn_jobs[0].descr == "drive_green_learn"
+        assert github.mutation_log == [("mark_drive_green_learn_result", (1, True))]
 
-    def test_arming_record_is_durable_before_the_first_poll_park(
+    def test_arm_disables_and_stops_until_the_strict_gate_exists(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """The arming record exists by the time the first POLL merely parks.
-
-        Mutation probe (b), crash-safety form: a mutant that defers the
-        ``arm_drive_green`` write past POLL (e.g. into the MERGED leg) leaves
-        a parked-PENDING item armed with NO durable record — a crash there
-        would lose the /learn dedupe key. The walk parks on PENDING and the
-        record must already be on disk (in the fake: recorded+logged).
-        """
+        """No legacy implementation-GO label can arm the bootstrap baseline."""
         stage = MergeWaitStage()
         github = FakeStageGitHub(pr_state=OPEN_STATE)
         ctx = make_ctx(github=github)
-        pool = FakeWorkerPool()
-        item = _item(make_work_item, state="")
+        item = _item(make_work_item, state=ARM)
 
-        outcome = _drive(stage, item, ctx, pool)
+        result = stage.step(item, ctx)
 
-        assert outcome == StageOutcome(Disposition.RETRY, "merge_pending")
-        names = [name for name, _ in github.mutation_log]
-        assert names == ["arm_auto_merge", "arm_drive_green"]
-        assert github.arming_records[1] == (601, "abc123")
-        assert item.armed is True
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "strict_gate_unavailable")
+        assert github.mutation_log == [("defer_auto_merge", (601,))]
+        assert item.armed is False
 
-    def test_arm_is_idempotent_when_already_armed(self, make_ctx: Any, make_work_item: Any) -> None:
-        """An armed item skips straight to POLL with zero mutations."""
+    def test_already_armed_item_is_disarmed_and_stopped(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Restart recovery cannot keep polling a legacy armed PR."""
         stage = MergeWaitStage()
         github = FakeStageGitHub(pr_state=OPEN_STATE)
         ctx = make_ctx(github=github)
         item = _item(make_work_item, state=ARM)
         item.armed = True
 
-        result = stage.step(item, ctx)
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "strict_gate_unavailable"
+        )
+        assert github.mutation_log == [("defer_auto_merge", (601,))]
+        assert item.armed is False
 
-        assert result == Continue(next_state=POLL)
-        assert github.mutation_log == []
+    def test_disable_verification_failure_is_terminal(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A failure to prove disablement must not fall through to polling."""
 
-    def test_dry_run_never_arms(self, make_ctx: Any, make_work_item: Any) -> None:
-        """Dry-run proceeds to POLL without any durable write."""
+        class DeferFailsGitHub(FakeStageGitHub):
+            def defer_auto_merge(self, pr_number: int) -> None:
+                raise RuntimeError("auto-merge remains enabled")
+
+        stage = MergeWaitStage()
+        ctx = make_ctx(github=DeferFailsGitHub(pr_state=OPEN_STATE))
+        item = _item(make_work_item, state=ARM)
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "auto_merge_disable_failed"
+        )
+        assert item.armed is False
+
+    def test_dry_run_reports_unavailable_gate_without_mutation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Dry-run makes no GitHub mutation but still exposes the unavailable gate."""
         stage = MergeWaitStage()
         github = FakeStageGitHub(pr_state=OPEN_STATE)
         ctx = make_ctx(github=github, dry_run=True)
         item = _item(make_work_item, state=ARM)
 
-        result = stage.step(item, ctx)
-
-        assert result == Continue(next_state=POLL)
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "strict_gate_unavailable"
+        )
         assert github.mutation_log == []
-        assert item.armed is False
-
-    def test_arm_failure_finishes_failed(self, make_ctx: Any, make_work_item: Any) -> None:
-        """A rejected auto-merge arm is terminal (legacy auto-merge-failed)."""
-        stage = MergeWaitStage()
-        ctx = make_ctx(github=_ArmFailGitHub())
-        item = _item(make_work_item, state=ARM)
-
-        result = stage.step(item, ctx)
-
-        assert result == StageOutcome(Disposition.FINISH_FAIL, "arm_failed")
-        assert item.armed is False
-
-    def test_record_failure_never_flips_armed(self, make_ctx: Any, make_work_item: Any) -> None:
-        """A failed arming-record write must not leave the item armed.
-
-        An armed PR with no durable dedupe record could double-fire /learn
-        after a crash — the stage stops instead.
-        """
-        stage = MergeWaitStage()
-        ctx = make_ctx(github=_RecordFailGitHub(pr_state=OPEN_STATE))
-        item = _item(make_work_item, state=ARM)
-
-        result = stage.step(item, ctx)
-
-        assert result == StageOutcome(Disposition.FINISH_FAIL, "arm_record_failed")
         assert item.armed is False
 
     def test_arm_without_pr_finishes_no_pr(self, make_ctx: Any, make_work_item: Any) -> None:
@@ -236,19 +197,6 @@ class TestMergeWaitArm:
         result = stage.step(item, ctx)
 
         assert result == StageOutcome(Disposition.FINISH_FAIL, "no_pr")
-
-    def test_wall_clock_anchor_stamped_once(self, make_ctx: Any, make_work_item: Any) -> None:
-        """merge_wait_started_at is stamped on first ARM and never re-stamped."""
-        stage = MergeWaitStage()
-        ctx = make_ctx(github=FakeStageGitHub(pr_state=OPEN_STATE))
-        item = _item(make_work_item, state=ARM)
-
-        stage.step(item, ctx)
-        first = item.payload["merge_wait_started_at"]
-        item.state = ARM  # simulate a re-entry
-        stage.step(item, ctx)
-
-        assert item.payload["merge_wait_started_at"] == first
 
     def test_on_enter_and_dispatch(self, make_ctx: Any, make_work_item: Any) -> None:
         """on_enter initializes ENTER; ENTER routes to ARM; unknown state stops."""

@@ -425,7 +425,7 @@ class TestAgentErrorPingPongBound:
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.FINISH_FAIL
         assert result.note == "agent_error_exhausted"
-        assert github.mutation_log == []  # no labels, no deferral on the dead path
+        assert github.mutation_log == [("defer_auto_merge", (1001,))]
 
     def test_flag_never_survives_the_fresh_implement_path(
         self, make_ctx: Any, make_work_item: Any

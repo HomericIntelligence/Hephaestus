@@ -229,71 +229,34 @@ jobs:
         assert validate_workflow(wf) == []
 
 
-class TestEnableAutoMergeOnImplementationGoWorkflow:
-    """Regression tests for the implementation-GO auto-merge workflow."""
+class TestStrictGateBootstrapWorkflow:
+    """Regression tests for the temporary fail-closed auto-merge policy."""
 
-    def _workflow_text(self) -> str:
-        return AUTO_MERGE_ON_GO_WORKFLOW.read_text(encoding="utf-8")
+    def test_label_triggered_auto_merge_workflow_is_removed(self) -> None:
+        """No privileged label-event workflow can bypass the strict gate."""
+        assert not AUTO_MERGE_ON_GO_WORKFLOW.exists()
 
-    def test_runs_only_on_pull_request_target_label_events(self) -> None:
-        """Privileged workflow is limited to PR label events."""
-        text = self._workflow_text()
-        assert "pull_request_target:" in text
-        assert "types: [labeled]" in text
-        assert "state:implementation-go" in text
-
-    def test_does_not_checkout_pr_controlled_code(self) -> None:
-        """pull_request_target workflow must not execute code from the PR."""
-        text = self._workflow_text()
-        assert "actions/checkout" not in text
-        assert "github.event.pull_request.head" not in text
-        assert validate_workflow(AUTO_MERGE_ON_GO_WORKFLOW) == []
-
-    def test_enables_squash_auto_merge_with_numeric_pr_guard(self) -> None:
-        """The workflow validates PR_NUMBER and uses repo-required squash auto-merge."""
-        text = self._workflow_text()
-        assert "''|*[!0-9]*)" in text
-        assert 'gh pr merge "$PR_NUMBER" --repo "$REPO" --auto --squash' in text
-
-    def test_skips_if_auto_merge_is_already_armed(self) -> None:
-        """Re-labeling an already armed PR is a no-op."""
-        text = self._workflow_text()
-        assert "autoMergeRequest" in text
-        assert 'if [ "$auto_merge" != "null" ] && [ -n "$auto_merge" ]; then' in text
-        assert "already has auto-merge enabled" in text
-
-    def test_auto_merge_policy_waits_for_label_workflow_to_converge(self) -> None:
-        """The auto-merge-policy job must not race the label-triggered workflow.
-
-        The auto-merge ↔ implementation-go state machine was split out of the
-        required ``pr-policy`` gate into the advisory ``auto-merge-policy`` job
-        (#1080); the convergence behavior moved with it.
-        """
+    def test_advisory_policy_requires_auto_merge_to_remain_disabled(self) -> None:
+        """The baseline warns on every open armed PR without waiting or arming."""
         text = REQUIRED_WORKFLOW.read_text(encoding="utf-8")
         assert "auto-merge-policy" in text
-        assert "Waiting for label-triggered auto-merge workflow" in text
-        assert 'gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY"' in text
-        assert "--json autoMergeRequest,labels,state" in text
-        assert "sleep 10" in text
+        assert "strict-review gate is unavailable" in text
+        assert "auto-merge is disabled pending the queue-owned strict-review gate" in text
+        assert "Waiting for label-triggered auto-merge workflow" not in text
+        assert "gh pr merge $PR_NUMBER --auto --squash" not in text
+        assert "sleep 10" not in text
 
     def test_auto_merge_policy_treats_merged_prs_as_terminal(self) -> None:
-        """GitHub clears autoMergeRequest after merge, so merged PRs must pass."""
+        """GitHub clears autoMergeRequest after merge, so merged PRs still pass."""
         text = REQUIRED_WORKFLOW.read_text(encoding="utf-8")
         assert "--json autoMergeRequest,labels,state" in text
         assert "pr_state=$(jq -r '.state // \"\"' pr.json)" in text
         assert "auto-merge policy is terminal" in text
 
-    def test_pr_policy_no_longer_blocks_on_auto_merge_state(self) -> None:
-        """pr-policy keeps only the hard gates; auto-merge moved to its own job.
-
-        The split (#1080) makes the auto-merge verdict non-blocking: pr-policy
-        fetches only the body it needs and no longer reads auto-merge/labels.
-        """
+    def test_pr_policy_remains_independent_from_auto_merge_state(self) -> None:
+        """The hard PR policy keeps its body-only metadata check."""
         text = REQUIRED_WORKFLOW.read_text(encoding="utf-8")
-        # pr-policy's own metadata fetch is body-only now.
         assert "--json body\n" in text or "--json body \\" in text
-        # The auto-merge error lives in the advisory job, which is present.
-        assert "Auto-merge is enabled before implementation review GO." in text
 
 
 class TestRequiredPixiCheckWorkflow:

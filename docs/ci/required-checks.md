@@ -67,8 +67,8 @@ lets those legitimately-gated-off events pass while still failing on any real
 job failure.
 
 `auto-merge-policy` is deliberately **excluded** from the gate: it is advisory
-(it checks that auto-merge arming matches the `state:implementation-go` label)
-and must not block merges.
+and, during #2054's fail-closed bootstrap, flags any open PR with auto-merge
+enabled. It must not block the independently reviewed manual bootstrap merge.
 
 ## Adding a new gating job (runbook)
 
