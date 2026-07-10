@@ -258,6 +258,7 @@ Lazy-loaded symbols (accessible via `hephaestus.<name>`): `add_logging_args`,
 | `git_branch_exists` | TBD | Check whether a local branch exists through the shared Git adapter |
 | `git_config_get` | TBD | Read Git config values through the shared Git adapter |
 | `git_ls_remote_contains` | TBD | Check exact advertised remote refs with retry-protected `ls-remote` |
+| `git_ls_remote_sha` | TBD | Read the SHA for an exact advertised remote ref with retry-protected `ls-remote` |
 | `git_push` | TBD | Push a refspec through the retry-protected shared Git adapter |
 | `git_remote_url` | TBD | Read a remote URL through the shared Git adapter |
 | `git_rev_list_count` | TBD | Count revisions for a revspec through the shared Git adapter |
