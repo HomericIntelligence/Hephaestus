@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from hephaestus.automation.pipeline.events import StageEvent
 from hephaestus.automation.pipeline.routing import ROUTES, StageName
 from hephaestus.automation.pipeline.stages import StageContext, StageGitHub
 from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARGV
@@ -353,6 +354,7 @@ def make_ctx() -> Callable[..., StageContext]:
         github: FakeStageGitHub | None = None,
         paths: Any = None,
         budget_fn: Callable[[str], int] | None = None,
+        event_fn: Callable[[StageEvent], None] | None = None,
     ) -> StageContext:
         ticks = [0]
 
@@ -368,6 +370,7 @@ def make_ctx() -> Callable[..., StageContext]:
             paths=paths if paths is not None else _Paths(),
             now_fn=now_fn,
             budget_fn=budget_fn if budget_fn is not None else _budget_fn,
+            event_fn=event_fn,
         )
 
     return _make_ctx

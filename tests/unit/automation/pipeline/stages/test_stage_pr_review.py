@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -9,6 +10,7 @@ from unittest.mock import patch
 import pytest
 
 from hephaestus.automation.claude_invoke import ReviewVerdict, parse_review_verdict
+from hephaestus.automation.pipeline.events import ZeroThreadNogoAction
 from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
@@ -1106,26 +1108,88 @@ class TestFullWalks:
         assert item.attempts["pr_review_iter"] == 3
         assert github.mutation_log[-1] == ("gh_issue_add_labels", (22, (STATE_SKIP,)))
 
-    def test_nogo_without_durable_artifact_retries_without_skip(
+    def test_zero_thread_nogo_retries_without_skip(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """NOGO with no posted findings is infrastructure loss, not terminal skip."""
+        """A zero-thread NOGO is durable and requests a fresh review."""
+        events: list[Any] = []
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(0, 0)], by_severity=[(0, 0, 0)])
-        ctx = make_ctx(github=github)
+        ctx = make_ctx(github=github, event_fn=events.append)
         item = make_work_item(issue=24, pr=1001, state="EVAL")
         item.payload["review_verdict"] = _verdict("NOGO")
-        item.payload["review_text"] = "Verdict: NOGO"
+        item.payload["review_text"] = '```json\n{"summary":"No actionable location."}\n```'
         item.payload["raw_review_threads"] = []
         item.payload["review_threads"] = []
 
         outcome = stage.step(item, ctx)
 
-        assert isinstance(outcome, StageOutcome)
-        assert outcome.disposition == Disposition.RETRY
-        assert outcome.note == "nogo_without_artifact"
+        assert isinstance(outcome, Continue)
+        assert outcome.next_state == "REVIEW_WAIT"
         assert item.attempts["pr_review_iter"] == 0
         assert not any(entry[0] == "gh_issue_add_labels" for entry in github.mutation_log)
+        assert events[0].action is ZeroThreadNogoAction.RETRY_FRESH_REVIEW
+        assert github.comments[1001][0].startswith("<!-- hephaestus-pr-review-zero-thread-nogo -->")
+
+    def test_zero_thread_nogo_cap_fails_back_without_rounds_or_skip(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Repeated zero-thread NOGOs fail back without exhausting review rounds."""
+        events: list[Any] = []
+        stage = PrReviewStage()
+        github = FakeStageGitHub(unresolved=[(0, 0)], by_severity=[(0, 0, 0)])
+        ctx = make_ctx(github=github, event_fn=events.append)
+        item = make_work_item(issue=25, pr=1001, state="ENTER")
+        pool = FakeWorkerPool()
+        anomaly = (
+            JobResult(ok=True, value=_verdict("NOGO")),
+            JobResult(ok=True, value='{"unaddressed": []}'),
+        )
+        pool.script(*(anomaly * (REVIEW_ERROR_RETRY_CAP + 1)))
+
+        outcome = _drive(stage, item, ctx, pool)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.FAIL_BACK
+        assert outcome.note == "agent_error"
+        assert [handle.job.descr for handle in pool.submitted].count("review") == (
+            REVIEW_ERROR_RETRY_CAP + 1
+        )
+        assert item.attempts["pr_review_iter"] == 0
+        assert item.payload["pr_review_round"] == 0
+        assert events[-1].action is ZeroThreadNogoAction.FAIL_BACK_AGENT_ERROR
+        assert not any(entry[0] == "mark_pr_implementation_no_go" for entry in github.mutation_log)
+
+    def test_zero_thread_nogo_comment_failure_still_retries(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A failed artifact write is visible in the event but does not block retry."""
+
+        class CommentFailsGitHub(FakeStageGitHub):
+            def upsert_pr_comment(self, pr_number: int, marker_prefix: str, body: str) -> None:
+                raise RuntimeError("comment write failed")
+
+        events: list[Any] = []
+        ctx = make_ctx(
+            github=CommentFailsGitHub(unresolved=[(0, 0)], by_severity=[(0, 0, 0)]),
+            event_fn=events.append,
+        )
+        item = make_work_item(issue=26, pr=1001, state="EVAL")
+        item.payload["review_verdict"] = _verdict("NOGO")
+
+        outcome = PrReviewStage().step(item, ctx)
+
+        assert isinstance(outcome, Continue)
+        assert events[0].artifact_written is False
+
+    def test_zero_thread_summary_is_escaped_and_bounded(self) -> None:
+        """Only a short escaped structured summary enters the PR artifact."""
+        raw = f"```json\n{json.dumps({'summary': '<secret> ' + 'x' * 300})}\n```"
+        summary = PrReviewStage._structured_review_summary(raw)
+
+        assert len(summary) == 200
+        assert summary.startswith("&lt;secret&gt;")
+        assert summary.endswith("...")
 
     def test_reviewer_error_walk_burns_nothing(self, make_ctx: Any, make_work_item: Any) -> None:
         """A failed review job walks straight to EVAL's ERROR path: RETRY.
