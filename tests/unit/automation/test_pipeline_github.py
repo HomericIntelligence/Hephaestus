@@ -738,6 +738,101 @@ class TestRepoScopedAutoMerge:
         ]
 
 
+class TestStrictReviewGoRecord:
+    """record_strict_review_go / has_qualifying_strict_review_go (#2053)."""
+
+    def test_repo_scoped_record_upserts_marker_comment(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[list[str]] = []
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            if argv == ["api", "/repos/org/repo-a/issues/7/comments", "--paginate", "--slurp"]:
+                return SimpleNamespace(stdout=json.dumps([[]]))
+            return SimpleNamespace(stdout="")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).record_strict_review_go(
+            7, "abc123"
+        )
+
+        assert any(call[:2] == ["issue", "comment"] for call in calls)
+
+    def test_repo_scoped_has_qualifying_go_matches_current_head(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        marker = pg.STRICT_REVIEW_GO_MARKER
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            if argv == ["api", "/repos/org/repo-a/issues/7/comments", "--paginate", "--slurp"]:
+                payload = [[{"databaseId": 1, "body": f"{marker}\nGO for head `abc123`."}]]
+                return SimpleNamespace(stdout=json.dumps(payload))
+            return SimpleNamespace(stdout="")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+
+        assert adapter.has_qualifying_strict_review_go(7, "abc123") is True
+        assert adapter.has_qualifying_strict_review_go(7, "otherhead") is False
+
+    def test_repo_scoped_has_qualifying_go_false_without_any_record(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(pg, "gh_call", lambda argv, **kw: SimpleNamespace(stdout="[[]]"))
+
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+
+        assert adapter.has_qualifying_strict_review_go(7, "abc123") is False
+
+    def test_delegate_record_uses_gh_issue_upsert_comment(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple[int, str, str]] = []
+        monkeypatch.setattr(
+            github_api_mod,
+            "gh_issue_upsert_comment",
+            lambda n, marker, body: calls.append((n, marker, body)),
+        )
+
+        adapter.record_strict_review_go(7, "abc123")
+
+        assert len(calls) == 1
+        assert calls[0][0] == 7
+        assert calls[0][1] == pg.STRICT_REVIEW_GO_MARKER
+        assert "abc123" in calls[0][2]
+
+    def test_delegate_has_qualifying_go_uses_fetch_issue_comment_ids(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        marker = pg.STRICT_REVIEW_GO_MARKER
+        monkeypatch.setattr(
+            github_api_mod,
+            "_fetch_issue_comment_ids",
+            lambda n: [{"databaseId": 1, "body": f"{marker}\nGO for head `abc123`."}],
+        )
+
+        assert adapter.has_qualifying_strict_review_go(7, "abc123") is True
+        assert adapter.has_qualifying_strict_review_go(7, "otherhead") is False
+
+    def test_dry_run_record_skips(
+        self, dry_adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        called = False
+
+        def fake_upsert(*args: object, **kwargs: object) -> None:
+            nonlocal called
+            called = True
+
+        monkeypatch.setattr(github_api_mod, "gh_issue_upsert_comment", fake_upsert)
+
+        dry_adapter.record_strict_review_go(7, "abc123")
+
+        assert called is False
+
+
 class TestCreatePr:
     """create_pr: idempotent reuse, given-body create, dry-run neutral."""
 

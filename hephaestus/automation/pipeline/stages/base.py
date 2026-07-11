@@ -291,6 +291,26 @@ class StageGitHub(Protocol):
         """
         ...
 
+    def record_strict_review_go(self, pr_number: int, head_sha: str) -> None:
+        """Durably record an independent strict-review GO for a specific head SHA.
+
+        A marker-keyed PR comment binding the verdict to ``head_sha``, so a
+        later push invalidates the record automatically —
+        :meth:`has_qualifying_strict_review_go` only honors a record whose
+        stored head matches the PR's CURRENT ``headRefOid`` (#2053).
+        """
+        ...
+
+    def has_qualifying_strict_review_go(self, pr_number: int, head_sha: str) -> bool:
+        """Return True iff a durable strict-review GO exists for ``head_sha``.
+
+        The sole authorization :meth:`~.merge_wait.MergeWaitStage._arm` checks
+        before arming auto-merge (#2053 AC2): a clean internal PR-review GO
+        alone must never arm auto-merge. A record for any OTHER head (stale,
+        from a prior push) does not qualify.
+        """
+        ...
+
     # -- merge_wait surface (#1816) ------------------------------------------
 
     def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:

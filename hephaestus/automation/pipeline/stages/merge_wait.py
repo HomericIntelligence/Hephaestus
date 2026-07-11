@@ -11,9 +11,14 @@ binding contract):
   MW_FINISH. Budgets: ``blocked_address`` = 2, ``rebase`` = 2 (both consumed
   in ``on_job_done``, read from ROUTES via ``ctx.budget``); the ``merge``
   poll-window bound stays wall-clock (below), untouched by the pipeline.
-- ARM [M, durable]: arm squash auto-merge (``ctx.github.arm_auto_merge``)
-  and durably persist the drive-green arming record
-  (``ctx.github.arm_drive_green`` — the ``ArmingStateStore`` mirror)
+- ARM [M, durable]: the SOLE auto-merge authority (#2053) — ``pr_review``'s
+  internal implementation-GO never arms. Gated behind a durable, head-bound
+  independent strict-review GO (``ctx.github.has_qualifying_strict_review_go``
+  for the PR's CURRENT ``headRefOid``); missing it keeps auto-merge disabled
+  (``ctx.github.defer_auto_merge``) and finishes ``strict_gate_unavailable``
+  (a later pass re-checks). Once qualified: arm squash auto-merge
+  (``ctx.github.arm_auto_merge``) and durably persist the drive-green arming
+  record (``ctx.github.arm_drive_green`` — the ``ArmingStateStore`` mirror)
   BEFORE the first POLL, so a crash between arming and polling can never
   lose the record the post-merge ``/learn`` dedupe keys off. Idempotent:
   an already-armed item (``item.armed``) skips straight to POLL.
@@ -210,6 +215,16 @@ class MergeWaitStage(Stage):
     def _arm(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """ARM [M, durable]: arm auto-merge + persist the arming record, then POLL.
 
+        Gated behind a durable, head-bound independent strict-review GO
+        (#2053 AC2): a clean internal PR-review GO alone (the label
+        ``pr_review`` durably writes) is NEVER sufficient to arm auto-merge.
+        This stage reads the PR's CURRENT head SHA and checks
+        ``ctx.github.has_qualifying_strict_review_go`` for THAT head before
+        arming — a record for a stale (pre-push) head does not qualify.
+        Missing the record keeps auto-merge disabled (``defer_auto_merge``,
+        verify-and-disable) and finishes ``strict_gate_unavailable``; a later
+        automation pass re-enters ARM and re-checks once the record exists.
+
         Durable-order contract (the queue-push rule of :mod:`.base`): BOTH
         writes — ``arm_auto_merge`` and the ``arm_drive_green`` arming
         record — happen BEFORE the item ever reaches POLL, so a crash
@@ -232,13 +247,30 @@ class MergeWaitStage(Stage):
             item.payload["merge_wait_started_at"] = ctx.now()
         if item.armed or ctx.dry_run:
             return Continue(next_state=POLL)
+        pr_state = ctx.github.gh_pr_state(item.pr)
+        head_oid = str((pr_state or {}).get("headRefOid") or "")
+        if not head_oid or not ctx.github.has_qualifying_strict_review_go(item.pr, head_oid):
+            logger.info(
+                "merge_wait:%s: PR #%d has no qualifying strict-review GO for head %r; "
+                "keeping auto-merge disabled",
+                item.issue,
+                item.pr,
+                head_oid,
+            )
+            try:
+                ctx.github.defer_auto_merge(item.pr)
+            except Exception as e:
+                logger.warning(
+                    "merge_wait: failed to verify auto-merge disabled on PR #%d: %s",
+                    item.pr,
+                    e,
+                )
+            return StageOutcome(Disposition.FINISH_FAIL, "strict_gate_unavailable")
         try:
             ctx.github.arm_auto_merge(item.pr)
         except Exception as e:
             logger.warning("merge_wait: failed to arm auto-merge on PR #%d: %s", item.pr, e)
             return StageOutcome(Disposition.FINISH_FAIL, "arm_failed")
-        pr_state = ctx.github.gh_pr_state(item.pr)
-        head_oid = str((pr_state or {}).get("headRefOid") or "")
         if item.issue is not None:
             try:
                 ctx.github.arm_drive_green(item.issue, item.pr, head_oid)

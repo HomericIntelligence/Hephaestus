@@ -134,6 +134,7 @@ class TestMergeWaitArm:
         """
         stage = MergeWaitStage()
         github = FakeStageGitHub(pr_state=MERGED_STATE)
+        github.record_strict_review_go(601, "abc123")
         ctx = make_ctx(github=github)
         pool = FakeWorkerPool()
         item = _item(make_work_item, state="")
@@ -141,7 +142,7 @@ class TestMergeWaitArm:
         outcome = _drive(stage, item, ctx, pool)
 
         assert outcome == StageOutcome(Disposition.FINISH_PASS, "merged")
-        names = [name for name, _ in github.mutation_log]
+        names = [name for name, _ in github.mutation_log if name != "record_strict_review_go"]
         assert names == ["arm_auto_merge", "arm_drive_green", "mark_drive_green_learn_result"]
         assert github.arming_records[1] == (601, "abc123")
         # The learn session ran (once) and its result was durably marked.
@@ -163,6 +164,7 @@ class TestMergeWaitArm:
         """
         stage = MergeWaitStage()
         github = FakeStageGitHub(pr_state=OPEN_STATE)
+        github.record_strict_review_go(601, "abc123")
         ctx = make_ctx(github=github)
         pool = FakeWorkerPool()
         item = _item(make_work_item, state="")
@@ -170,7 +172,7 @@ class TestMergeWaitArm:
         outcome = _drive(stage, item, ctx, pool)
 
         assert outcome == StageOutcome(Disposition.RETRY, "merge_pending")
-        names = [name for name, _ in github.mutation_log]
+        names = [name for name, _ in github.mutation_log if name != "record_strict_review_go"]
         assert names == ["arm_auto_merge", "arm_drive_green"]
         assert github.arming_records[1] == (601, "abc123")
         assert item.armed is True
@@ -204,7 +206,9 @@ class TestMergeWaitArm:
     def test_arm_failure_finishes_failed(self, make_ctx: Any, make_work_item: Any) -> None:
         """A rejected auto-merge arm is terminal (legacy auto-merge-failed)."""
         stage = MergeWaitStage()
-        ctx = make_ctx(github=_ArmFailGitHub())
+        github = _ArmFailGitHub(pr_state=OPEN_STATE)
+        github.record_strict_review_go(601, "abc123")
+        ctx = make_ctx(github=github)
         item = _item(make_work_item, state=ARM)
 
         result = stage.step(item, ctx)
@@ -219,7 +223,9 @@ class TestMergeWaitArm:
         after a crash — the stage stops instead.
         """
         stage = MergeWaitStage()
-        ctx = make_ctx(github=_RecordFailGitHub(pr_state=OPEN_STATE))
+        github = _RecordFailGitHub(pr_state=OPEN_STATE)
+        github.record_strict_review_go(601, "abc123")
+        ctx = make_ctx(github=github)
         item = _item(make_work_item, state=ARM)
 
         result = stage.step(item, ctx)
@@ -240,7 +246,9 @@ class TestMergeWaitArm:
     def test_wall_clock_anchor_stamped_once(self, make_ctx: Any, make_work_item: Any) -> None:
         """merge_wait_started_at is stamped on first ARM and never re-stamped."""
         stage = MergeWaitStage()
-        ctx = make_ctx(github=FakeStageGitHub(pr_state=OPEN_STATE))
+        github = FakeStageGitHub(pr_state=OPEN_STATE)
+        github.record_strict_review_go(601, "abc123")
+        ctx = make_ctx(github=github)
         item = _item(make_work_item, state=ARM)
 
         stage.step(item, ctx)

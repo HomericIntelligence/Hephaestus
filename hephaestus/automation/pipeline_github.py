@@ -156,6 +156,12 @@ def _thread_severity_is_blocking(thread: dict[str, Any]) -> bool:
     return True
 
 
+#: Marker for the durable, head-bound independent strict-review GO record
+#: (#2053). ``merge_wait`` is the sole reader/gate; ``pr_review``'s own
+#: internal implementation-review GO never satisfies this marker.
+STRICT_REVIEW_GO_MARKER = "<!-- hephaestus-strict-review-go -->"
+
+
 class PipelineGitHub:
     """Coordinator-owned GitHub accessor implementing ``StageGitHub``.
 
@@ -1031,6 +1037,35 @@ class PipelineGitHub:
             self._gh(["pr", "merge", str(pr_number), "--auto", "--squash"], check=False)
             return
         pr_manager.enable_auto_merge_after_implementation_go(pr_number)
+
+    def record_strict_review_go(self, pr_number: int, head_sha: str) -> None:
+        """Durably upsert the strict-review-GO marker comment, keyed to head_sha (#2053)."""
+        if self._skip(f"record strict-review GO on PR #{pr_number} at {head_sha}"):
+            return
+        body = f"{STRICT_REVIEW_GO_MARKER}\nIndependent strict review: GO for head `{head_sha}`."
+        self.upsert_pr_comment(pr_number, STRICT_REVIEW_GO_MARKER, body)
+
+    def has_qualifying_strict_review_go(self, pr_number: int, head_sha: str) -> bool:
+        """Return True iff the strict-review-GO marker comment records head_sha (#2053).
+
+        Reuses the same dual-path read every other ``PipelineGitHub`` method
+        uses: :meth:`_repo_issue_comments` for the explicit-repo path,
+        ``github_api._fetch_issue_comment_ids`` for the delegate path. The
+        newest matching comment wins (mirrors the upsert's "one marker
+        comment, latest write" contract); a record for any OTHER head does
+        not qualify — a push after the recorded GO invalidates it.
+        """
+        if self._repo_slug is not None:
+            comments = self._repo_issue_comments(pr_number)
+        else:
+            comments = github_api._fetch_issue_comment_ids(pr_number)
+        matching = [
+            c for c in comments if str(c.get("body", "")).startswith(STRICT_REVIEW_GO_MARKER)
+        ]
+        if not matching:
+            return False
+        newest_body = str(matching[-1].get("body", ""))
+        return f"`{head_sha}`" in newest_body
 
     def post_review_threads(
         self, pr_number: int, threads: list[dict[str, Any]], summary: str

@@ -439,13 +439,14 @@ class TestPrReviewRestartSafetyGuards:
 class TestEvalVerdicts:
     """EVAL: re-housed _evaluate_go_verdict semantics + the budget gate."""
 
-    def test_go_with_zero_threads_marks_arms_and_advances(
+    def test_go_with_zero_threads_marks_go_and_never_arms(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """Clean GO durably marks implementation-go THEN arms auto-merge.
+        """Clean GO durably marks implementation-go; auto-merge is NEVER armed here (#2053).
 
-        Durable-order oracle: mark before arm in the mutation_log, both
-        recorded before the advancing outcome exists.
+        A clean internal PR-review GO alone is not sufficient authorization
+        to arm auto-merge — that is merge_wait's sole responsibility, gated
+        behind an independent strict-review GO.
         """
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(0, 0)])
@@ -460,13 +461,13 @@ class TestEvalVerdicts:
         assert result.disposition == Disposition.ADVANCE
         assert github.mutation_log == [
             ("mark_pr_implementation_go", (1001,)),
-            ("arm_auto_merge", (1001,)),
             ("gh_issue_upsert_comment", (1001, "<!-- hephaestus-pr-review-go -->")),
         ]
+        assert ("arm_auto_merge", (1001,)) not in github.mutation_log
         assert "<!-- hephaestus-pr-review-go -->" in github.comments[1001][0]
         assert "Automated PR review result: GO" in github.comments[1001][0]
         assert "marked this PR `state:implementation-go`" in github.comments[1001][0]
-        assert "armed auto-merge" in github.comments[1001][0]
+        assert "Auto-merge stays disabled" in github.comments[1001][0]
         assert item.attempts["pr_review_iter"] == 1  # real verdict counted
 
     def test_go_clean_artifact_is_upserted_not_duplicated(
@@ -523,14 +524,13 @@ class TestEvalVerdicts:
         assert isinstance(result, Continue)
         assert result.next_state == "FOLLOWUP_WAIT"
         assert github.mutation_log[0] == ("mark_pr_implementation_go", (1001,))
-        assert github.mutation_log[1] == ("arm_auto_merge", (1001,))
+        assert ("arm_auto_merge", (1001,)) not in github.mutation_log
 
-    def test_failed_mark_write_skips_arming(self, make_ctx: Any, make_work_item: Any) -> None:
-        """If the implementation-go mark fails, auto-merge is NOT armed.
+    def test_failed_mark_write_skips_comment(self, make_ctx: Any, make_work_item: Any) -> None:
+        """If the implementation-go mark fails, the clean-GO comment is skipped.
 
-        Auto-merge armed on a PR without state:implementation-go would fail
-        the pr-policy gate — the pair is ordered and the arm is gated on
-        the mark's success (non-fatal beyond that).
+        Non-fatal beyond that: the stage still proceeds (Continue), since
+        this stage never arms auto-merge regardless of the mark's outcome.
         """
 
         class MarkFailsGitHub(FakeStageGitHub):
@@ -550,29 +550,6 @@ class TestEvalVerdicts:
         assert ("gh_issue_upsert_comment", (1001, "<!-- hephaestus-pr-review-go -->")) not in (
             github.mutation_log
         )
-
-    def test_failed_arm_write_is_non_fatal(self, make_ctx: Any, make_work_item: Any) -> None:
-        """A failing arm_auto_merge write is swallowed; the GO still proceeds."""
-
-        class ArmFailsGitHub(FakeStageGitHub):
-            def arm_auto_merge(self, pr_number: int) -> None:
-                raise RuntimeError("gh merge --auto failed")
-
-        stage = PrReviewStage()
-        github = ArmFailsGitHub(unresolved=[(0, 0)])
-        ctx = make_ctx(github=github)
-        item = make_work_item(issue=1, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = _verdict("GO")
-
-        result = stage.step(item, ctx)  # must not raise
-
-        assert isinstance(result, Continue)
-        assert github.mutation_log == [
-            ("mark_pr_implementation_go", (1001,)),
-            ("gh_issue_upsert_comment", (1001, "<!-- hephaestus-pr-review-go -->")),
-        ]
-        assert "Auto-merge arming failed" in github.comments[1001][0]
-        assert "armed auto-merge" not in github.comments[1001][0]
 
     def test_go_with_human_thread_is_human_blocked_and_unlabeled(
         self, make_ctx: Any, make_work_item: Any
@@ -669,11 +646,12 @@ class TestEvalVerdicts:
     def test_go_with_only_minor_automation_thread_arms(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """GO with only minor/nitpick automation threads resolves and arms.
+        """GO with only minor/nitpick automation threads resolves and marks GO.
 
         This is the regression case from #1856: previously a GO with minor
         automation threads would deadlock to skip because `unresolved == 0`
-        never held. Now severity filtering allows the GO to arm.
+        never held. Now severity filtering allows the GO to be marked. This
+        stage never arms auto-merge (#2053) — that is merge_wait's job.
         """
         stage = PrReviewStage()
         github = FakeStageGitHub(by_severity=[(0, 2, 0)])  # 0 blocking, 2 minor, 0 human
@@ -686,10 +664,10 @@ class TestEvalVerdicts:
 
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.ADVANCE
-        # Should resolve the minor threads AND arm
+        # Should resolve the minor threads AND mark GO, but never arm.
         assert ("resolve_automation_threads", (1001,)) in github.mutation_log
         assert ("mark_pr_implementation_go", (1001,)) in github.mutation_log
-        assert ("arm_auto_merge", (1001,)) in github.mutation_log
+        assert ("arm_auto_merge", (1001,)) not in github.mutation_log
 
     def test_go_with_blocking_automation_thread_downgrades(
         self, make_ctx: Any, make_work_item: Any
@@ -1096,11 +1074,12 @@ class TestFullWalks:
     """Full pool-driven walks of the whole stage (canonical FakeWorkerPool)."""
 
     def test_nogo_round_then_clean_go_walk(self, make_ctx: Any, make_work_item: Any) -> None:
-        """ENTER -> NOGO round (address leg) -> GO round -> mark+arm -> follow-up.
+        """ENTER -> NOGO round (address leg) -> GO round -> mark GO -> follow-up.
 
         Round 1: review NOGO, 2 automation threads open -> difficulty ->
         address -> push -> EVAL loops. Round 2: review GO, all threads
-        resolved -> mark + arm [durable] -> follow-up -> ADVANCE.
+        resolved -> mark GO [durable] (never arms; #2053) -> follow-up ->
+        ADVANCE.
         """
         stage = PrReviewStage()
         # POST calls count_unresolved_threads once per round; EVAL calls the
@@ -1146,7 +1125,6 @@ class TestFullWalks:
         assert github.mutation_log == [
             ("mark_pr_implementation_no_go", (1001,)),  # round 1 NOGO recorded (M2)
             ("mark_pr_implementation_go", (1001,)),
-            ("arm_auto_merge", (1001,)),
             ("gh_issue_upsert_comment", (1001, "<!-- hephaestus-pr-review-go -->")),
         ]
 

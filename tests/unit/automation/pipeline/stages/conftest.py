@@ -113,6 +113,7 @@ class FakeStageGitHub(FakeGitHub):
         self._resolve_count = resolve_count
         self.arming_records: dict[int, tuple[int, str]] = {}
         self.learn_results: dict[int, bool] = {}
+        self.strict_review_go: dict[int, str] = {}
 
     def _issue_labels(self, issue_number: int) -> set[str]:
         """Return the issue's label set, seeding it on first access."""
@@ -253,6 +254,15 @@ class FakeStageGitHub(FakeGitHub):
     def arm_auto_merge(self, pr_number: int) -> None:
         """Mirror pr_manager.enable_auto_merge_after_implementation_go."""
         self._log("arm_auto_merge", pr_number)
+
+    def record_strict_review_go(self, pr_number: int, head_sha: str) -> None:
+        """Mirror PipelineGitHub.record_strict_review_go (records the head-bound GO)."""
+        self.strict_review_go[pr_number] = head_sha
+        self._log("record_strict_review_go", pr_number, head_sha)
+
+    def has_qualifying_strict_review_go(self, pr_number: int, head_sha: str) -> bool:
+        """Mirror PipelineGitHub.has_qualifying_strict_review_go (exact-head match)."""
+        return self.strict_review_go.get(pr_number) == head_sha
 
     def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
         """Mirror ci_driver.CIDriver._gh_pr_state (canned answer)."""

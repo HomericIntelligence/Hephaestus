@@ -252,11 +252,14 @@ ADDRESS_WAIT → PUSH_WAIT → EVAL → (loop) → FOLLOWUP_WAIT.
    `<!-- hephaestus-pr-review-zero-thread-nogo -->` artifact, emit the typed
    `pr_review_zero_thread_nogo` event, and re-enter `REVIEW_WAIT` for a fresh
    reviewer invocation without consuming a round;
-   if GO + 0 unresolved threads → apply `state:implementation-go` label and
-   arm auto-merge [durable] → ADVANCE; if NOGO/AMBIGUOUS/ERROR and iteration
+   if GO + 0 unresolved threads → apply `state:implementation-go` label
+   [durable] → ADVANCE; if NOGO/AMBIGUOUS/ERROR and iteration
    < 3 → RETRY; if HUMAN_BLOCKED or iteration cap exhausted → routes depend on
    iteration (hard cap 6) and unresolved-thread progress; on exhaustion →
-   apply `state:skip` label [durable] → SKIP.
+   apply `state:skip` label [durable] → SKIP. **This stage never arms
+   auto-merge** (#2053): a clean internal PR-review GO alone is not
+   sufficient authorization — see `merge_wait` step 1, the sole arming
+   authority.
 8. [W:A] **Follow-up step** (on GO only) — `prompts/follow_up.py:105
    get_follow_up_prompt`.
 
@@ -343,8 +346,17 @@ force_engagement), `rebase` = 2 (max mechanical rebase attempts).
 
 **Steps**:
 
-1. [M] **ARM**: ensure auto-merge is armed (via `pr_manager.mark_pr_*` and
-   `arming_state`) [durable]; if already armed, idempotent.
+1. [M] **ARM**: the SOLE auto-merge arming authority (#2053) — a clean
+   `pr_review` implementation-GO never arms by itself. Reads the PR's
+   current head SHA and requires a durable, head-bound independent
+   strict-review GO record (`has_qualifying_strict_review_go`) for that
+   head before arming; a record for a stale (pre-push) head does not
+   qualify. Missing the record → verify auto-merge stays disabled
+   (`defer_auto_merge`) → finished(fail, `strict_gate_unavailable`); a
+   later automation pass re-enters ARM and re-checks. Otherwise: arm
+   auto-merge and persist the drive-green arming record (via
+   `pr_manager.mark_pr_*` and `arming_state`) [durable]; if already armed,
+   idempotent.
 2. [M] **POLL** (non-blocking): fetch PR state → MERGED, CLOSED, FAILING,
    DIRTY, BLOCKED, or PENDING; if PENDING → RETRY with timer backoff.
 3. On MERGED → step 4; on FAILING → FAIL_BACK(ci_red); on DIRTY → step 5a; on
@@ -359,7 +371,9 @@ force_engagement), `rebase` = 2 (max mechanical rebase attempts).
 FAIL_BACK(reason).
 
 **Fail routes**: `ci_red` → ci (regress); `blocked_exhausted` → pr_review
-(regress); `timeout` → finished(fail); `closed` → finished(fail).
+(regress); `timeout` → finished(fail); `closed` → finished(fail);
+`strict_gate_unavailable` → finished(fail) (no durable independent
+strict-review GO yet for the current head; a later pass re-checks).
 
 **Budgets**: `blocked_address` = 2 (max address attempts for blocked threads),
 `rebase` = 2 (max mechanical rebase attempts), `merge` = --max-merge-attempts
@@ -404,7 +418,7 @@ pr_review → ci) remain globally bounded.
 | implementation | pr_review | plan_review (plan_not_go), ci (already_implementation_go_pr), finished(fail) on exhaustion | implement=2, test_fix=1 |
 | pr_review | ci | implementation (agent_error), finished(fail) on human_blocked, finished(skip) on exhaustion | pr_review_iter=3, pr_review_hard=6 |
 | ci | merge_wait | implementation (fix_exhausted, missing_worktree), pr_review (not_implementation_go), finished(fail) on no_pr | ci_fix=1, rebase=2 |
-| merge_wait | finished(pass) | ci (ci_red), implementation (missing_worktree), pr_review (blocked_exhausted), finished(fail) on closed/timeout | blocked_address=2, rebase=2, merge=--max-merge-attempts |
+| merge_wait | finished(pass) | ci (ci_red), implementation (missing_worktree), pr_review (blocked_exhausted), finished(fail) on closed/timeout/strict_gate_unavailable | blocked_address=2, rebase=2, merge=--max-merge-attempts |
 | finished | — | — | — |
 
 ## Seeding and reconstruction

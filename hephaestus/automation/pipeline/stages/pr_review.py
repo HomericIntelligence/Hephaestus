@@ -41,10 +41,13 @@ contract):
   act; automation may not resolve their thread). GO + open automation
   thread -> downgraded to NOGO (address + re-review). Clean GO ->
   ``_write_go_and_arm`` performs one final human-thread live-read before
-  GO writes; a late human thread posts HUMAN_BLOCKED and skips labels/arm.
-  Otherwise, durably ``mark_pr_implementation_go`` then ``arm_auto_merge``
-  [durable, in that order — the label authorizes the arming; arming is
-  skipped if the mark write fails] -> follow-up step -> ADVANCE. Every
+  GO writes; a late human thread posts HUMAN_BLOCKED and skips the label.
+  Otherwise, durably ``mark_pr_implementation_go`` [durable] -> follow-up
+  step -> ADVANCE. This stage NEVER calls ``arm_auto_merge`` (#2053): a
+  clean internal PR-review GO alone is not sufficient authorization to
+  arm auto-merge. Arming is the ``merge_wait`` stage's sole responsibility
+  (route ``pr_review -> ci -> merge_wait``), gated there behind a durable,
+  head-bound independent strict-review GO record. Every
   real non-GO round durably writes ``state:implementation-no-go`` (doc
   section 5 owned label, "NOGO verdict, before retry/regress"; legacy
   ``_apply_impl_review_verdict`` -> ``mark_pr_implementation_no_go``
@@ -1159,24 +1162,28 @@ class PrReviewStage(Stage):
 
     @staticmethod
     def _write_go_and_arm(pr_number: int, ctx: StageContext) -> bool:
-        """Durably mark implementation GO, then arm auto-merge (that order).
+        """Durably mark implementation GO. Never arms auto-merge (#2053).
 
         Returns ``False`` only when a fresh human-thread read inside this
         helper finds a late human block before GO writes. GitHub has no atomic
         check-unresolved-threads-and-arm primitive, so this closes the EVAL to
         helper gap without changing the existing non-fatal write semantics.
 
-        Each write is non-fatal (legacy warn pattern), but arming is SKIPPED
-        when the mark write fails: auto-merge must never be armed on a PR
-        that did not durably receive ``state:implementation-go`` (the
-        pr-policy gate would fail such a PR).
+        A clean internal PR-review GO is NOT sufficient authorization to arm
+        auto-merge (#2053 AC1): arming is the ``merge_wait`` stage's sole
+        responsibility, gated there behind a durable, head-bound independent
+        strict-review GO (``ctx.github.has_qualifying_strict_review_go``).
+        This helper only durably marks ``state:implementation-go`` and leaves
+        auto-merge untouched, so ``pr_review -> ci -> merge_wait`` remains the
+        single documented route to an armed PR.
 
         Args:
             pr_number: GitHub PR number that earned the clean GO.
             ctx: Stage context carrying the GitHub accessor.
 
         Returns:
-            ``False`` when a late human thread blocks arming; otherwise ``True``.
+            ``False`` when a late human thread blocks the GO write; otherwise
+            ``True``.
 
         """
         _, _, human_unresolved = ctx.github.count_unresolved_threads_by_severity(pr_number)
@@ -1193,41 +1200,24 @@ class PrReviewStage(Stage):
             ctx.github.mark_pr_implementation_go(pr_number)
         except Exception as e:
             logger.warning(
-                "pr_review: failed to mark PR #%d implementation-go (non-fatal, "
-                "auto-merge NOT armed): %s",
+                "pr_review: failed to mark PR #%d implementation-go (non-fatal): %s",
                 pr_number,
                 e,
             )
             return True
-        auto_merge_armed = False
-        try:
-            ctx.github.arm_auto_merge(pr_number)
-            auto_merge_armed = True
-        except Exception as e:
-            logger.warning(
-                "pr_review: failed to arm auto-merge on PR #%d (non-fatal): %s", pr_number, e
-            )
-        PrReviewStage._upsert_clean_go_comment(pr_number, ctx, auto_merge_armed=auto_merge_armed)
+        PrReviewStage._upsert_clean_go_comment(pr_number, ctx)
         return True
 
     @staticmethod
-    def _upsert_clean_go_comment(
-        pr_number: int, ctx: StageContext, *, auto_merge_armed: bool
-    ) -> None:
+    def _upsert_clean_go_comment(pr_number: int, ctx: StageContext) -> None:
         """Leave a durable public artifact for clean automated GO reviews."""
-        arm_sentence = (
-            "The pipeline marked this PR `state:implementation-go` and armed auto-merge."
-            if auto_merge_armed
-            else (
-                "The pipeline marked this PR `state:implementation-go`. Auto-merge arming "
-                "failed; a later run will retry."
-            )
-        )
         body = (
             "<!-- hephaestus-pr-review-go -->\n"
             "Automated PR review result: GO.\n\n"
             "No unresolved blocking review threads were found by the automation reviewer. "
-            f"{arm_sentence}"
+            "The pipeline marked this PR `state:implementation-go`. Auto-merge stays "
+            "disabled until an independent strict-review GO is durably recorded for this "
+            "PR's current head; `merge_wait` arms it once that record exists."
         )
         try:
             ctx.github.upsert_pr_comment(pr_number, "<!-- hephaestus-pr-review-go -->", body)
