@@ -18,9 +18,13 @@ workflow_dispatch (Auto Tag Release)
   └─ workflow_dispatch (Release workflow, tag=vX.Y.Z)
          ├─ test job (pytest)
          ├─ type-check job (mypy)
-         └─ build-and-publish job
+         ├─ publish-testpypi job
+         │      ├─ build wheel + sdist
+         │      ├─ publish to TestPyPI (trusted publishing)
+         │      └─ smoke-install from TestPyPI (retries for index propagation)
+         └─ build-and-publish job (after publish-testpypi succeeds)
               ├─ verify tag == package version
-              ├─ build wheel + sdist
+              ├─ reuse dist built by publish-testpypi
               ├─ publish to PyPI (trusted publishing)
               └─ create GitHub Release with auto-generated notes
 ```
@@ -69,6 +73,26 @@ gh workflow run release.yml -f tag=vX.Y.Z   # the exact tag auto-tag pushed
 Never dispatch with a blank `tag` input in this state. Blank means "latest tag", which is only
 correct until another tag lands between the failure and your recovery — always name the
 stranded tag.
+
+## TestPyPI Trusted Publishing
+
+Before this staging gate can pass, a `testpypi` GitHub Environment must exist on this
+repository with its own trusted publisher registered on
+[test.pypi.org](https://test.pypi.org) (a separate index from pypi.org, requiring its
+own trusted-publisher registration — the `pypi` trusted publisher below does not cover
+it). One-time setup:
+
+1. On test.pypi.org, register a pending trusted publisher for this project: owner
+   `HomericIntelligence`, repository `Hephaestus`, workflow `release.yml`, environment
+   name `testpypi`.
+2. In the GitHub repo, create an environment named `testpypi` (Settings → Environments).
+   A required reviewer is optional here (unlike `pypi`) since a bad TestPyPI publish is
+   not user-facing.
+3. No secrets are needed — like `pypi`, this uses OIDC trusted publishing.
+
+Until this one-time setup is complete, `publish-testpypi` fails at the OIDC-publish step
+with an authorization error, and `build-and-publish` (which needs `publish-testpypi`)
+never runs.
 
 ## PyPI Trusted Publishing
 
