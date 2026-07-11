@@ -494,6 +494,7 @@ def sync_worktree_to_remote_branch(
     branch: str,
     *,
     remote: str = "origin",
+    pr_number: int | None = None,
     timeout: int | None = None,
 ) -> None:
     """Reset ``cwd`` to ``<remote>/<branch>`` so the agent starts from the PR head.
@@ -508,9 +509,10 @@ def sync_worktree_to_remote_branch(
     This runs in two steps in ``cwd``:
 
     1. ``git fetch <remote> <branch>`` — updates the remote-tracking ref so the
-       reset has a current target.
-    2. ``git reset --hard <remote>/<branch>`` — moves HEAD to the PR's actual
-       head, discarding any divergent local commits or working-tree edits.
+       reset has a current target. If that branch ref is unavailable and
+       ``pr_number`` is supplied, fetch GitHub's ``refs/pull/N/head`` instead.
+    2. ``git reset --hard <remote>/<branch>`` (or ``FETCH_HEAD`` for the pull
+       ref fallback) moves HEAD to the PR's actual head.
 
     The worktree is throwaway (the driver removes it after each issue), so
     ``reset --hard`` is safe here: there is no human work to preserve.
@@ -519,6 +521,8 @@ def sync_worktree_to_remote_branch(
         cwd: Worktree path.
         branch: Remote branch name (the PR's head).
         remote: Remote name (default ``origin``).
+        pr_number: Optional PR number used to fall back to GitHub's pull ref
+            when the head branch is not available on ``remote``.
         timeout: Optional timeout in seconds for each git command.
 
     Raises:
@@ -528,8 +532,38 @@ def sync_worktree_to_remote_branch(
 
     """
     logger.info("Syncing worktree at %s to %s/%s before agent run", cwd, remote, branch)
-    run(["git", "fetch", remote, branch], cwd=cwd, **_timeout_kw(timeout))
+    try:
+        run(["git", "fetch", remote, branch], cwd=cwd, **_timeout_kw(timeout))
+    except subprocess.CalledProcessError as error:
+        if pr_number is None or not _is_missing_remote_ref_error(error):
+            raise
+        pull_ref = f"refs/pull/{pr_number}/head"
+        logger.info(
+            "Branch %s is unavailable on %s; syncing worktree at %s from %s",
+            branch,
+            remote,
+            cwd,
+            pull_ref,
+        )
+        run(["git", "fetch", remote, pull_ref], cwd=cwd, **_timeout_kw(timeout))
+        run(["git", "reset", "--hard", "FETCH_HEAD"], cwd=cwd, **_timeout_kw(timeout))
+        return
     run(["git", "reset", "--hard", f"{remote}/{branch}"], cwd=cwd, **_timeout_kw(timeout))
+
+
+def _is_missing_remote_ref_error(error: subprocess.CalledProcessError) -> bool:
+    """Return whether a fetch failed because the requested branch ref is absent."""
+    diagnostics = "\n".join(
+        str(value) for value in (error.stdout, error.stderr) if value is not None
+    ).lower()
+    return any(
+        marker in diagnostics
+        for marker in (
+            "couldn't find remote ref",
+            "could not find remote ref",
+            "remote ref does not exist",
+        )
+    )
 
 
 def _remove_untracked_files_tracked_by_ref(
