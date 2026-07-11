@@ -1,6 +1,6 @@
 """Tests for hephaestus.github.mnemosyne_repo.
 
-The resolver picks which ``owner/ProjectMnemosyne`` to clone, push to, and PR
+The resolver picks which ``owner/Mnemosyne`` to clone, push to, and PR
 against. All ``gh`` calls are mocked at the module namespace so no live network
 or ``gh`` auth is required.
 """
@@ -64,15 +64,15 @@ class TestRemoteRepoExists:
 
     def test_exists(self) -> None:
         with patch.object(mnemosyne_repo, "gh_call", return_value=_completed(0, '{"name":"x"}')):
-            assert remote_repo_exists("me/ProjectMnemosyne") is True
+            assert remote_repo_exists("me/Mnemosyne") is True
 
     def test_missing(self) -> None:
         with patch.object(mnemosyne_repo, "gh_call", return_value=_completed(1, "", "not found")):
-            assert remote_repo_exists("me/ProjectMnemosyne") is False
+            assert remote_repo_exists("me/Mnemosyne") is False
 
     def test_exception_returns_false(self) -> None:
         with patch.object(mnemosyne_repo, "gh_call", side_effect=RuntimeError("boom")):
-            assert remote_repo_exists("me/ProjectMnemosyne") is False
+            assert remote_repo_exists("me/Mnemosyne") is False
 
 
 class TestForkUpstream:
@@ -122,7 +122,7 @@ class TestResolveMnemosyneTarget:
             patch.object(mnemosyne_repo, "fork_upstream") as fork,
         ):
             target = resolve_mnemosyne_target()
-        assert target.slug == "mvillmow/ProjectMnemosyne"
+        assert target.slug == "mvillmow/Mnemosyne"
         assert target.is_fork_of_upstream is True
         fork.assert_not_called()
 
@@ -133,7 +133,7 @@ class TestResolveMnemosyneTarget:
             patch.object(mnemosyne_repo, "fork_upstream", return_value=True) as fork,
         ):
             target = resolve_mnemosyne_target()
-        assert target.slug == "mvillmow/ProjectMnemosyne"
+        assert target.slug == "mvillmow/Mnemosyne"
         assert target.is_fork_of_upstream is True
         fork.assert_called_once_with("mvillmow")
 
@@ -171,7 +171,7 @@ class TestResolveMnemosyneTarget:
             target = resolve_mnemosyne_target(override_owner="acme")
         assert target == MnemosyneTarget(
             owner="acme",
-            slug="acme/ProjectMnemosyne",
+            slug="acme/Mnemosyne",
             is_fork_of_upstream=True,
         )
         login.assert_not_called()
@@ -181,7 +181,7 @@ class TestResolveMnemosyneTarget:
         monkeypatch.setenv(mnemosyne_repo.OWNER_ENV_VAR, "acme")
         with patch.object(mnemosyne_repo, "gh_authenticated_login") as login:
             target = resolve_mnemosyne_target()
-        assert target.slug == "acme/ProjectMnemosyne"
+        assert target.slug == "acme/Mnemosyne"
         login.assert_not_called()
 
     def test_override_equal_to_upstream_is_not_marked_fork(self) -> None:

@@ -111,7 +111,7 @@ class PlanPhase(StageMixin):
             )
             return
 
-        # Legacy fallback: local scripts/plan_issues.py (ProjectScylla layout)
+        # Legacy fallback: local scripts/plan_issues.py (Scylla layout)
         plan_script = self.repo_root / "scripts" / "plan_issues.py"
         if plan_script.exists():
             run(

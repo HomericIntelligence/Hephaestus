@@ -316,7 +316,7 @@ class TestEndToEndSessionResume:
     def test_create_then_resume_same_uuid_distinct_prompts(self, fake_home: Path) -> None:
         cwd = fake_home / "work"
         cwd.mkdir()
-        expected_sid = session_uuid("ProjectScylla", 1944, AGENT_PLANNER, "sonnet")
+        expected_sid = session_uuid("Scylla", 1944, AGENT_PLANNER, "sonnet")
 
         # First call writes the transcript so the second call's probe finds it.
         def _side_effect(*args: Any, **kwargs: Any) -> MagicMock:
@@ -327,7 +327,7 @@ class TestEndToEndSessionResume:
             "hephaestus.automation.claude_invoke.subprocess.run", side_effect=_side_effect
         ) as m:
             _, sid1 = invoke_claude_with_session(
-                repo="ProjectScylla",
+                repo="Scylla",
                 issue=1944,
                 agent=AGENT_PLANNER,
                 prompt="iter 0",
@@ -335,7 +335,7 @@ class TestEndToEndSessionResume:
                 cwd=cwd,
             )
             _, sid2 = invoke_claude_with_session(
-                repo="ProjectScylla",
+                repo="Scylla",
                 issue=1944,
                 agent=AGENT_PLANNER,
                 prompt="iter 1",

@@ -398,7 +398,7 @@ def gather_impl_review_context(
         plan_text: The implementation PLAN comment body (or "" if absent).
         plan_review_text: The PLAN_REVIEW comment body (or "" if absent).
         diff_text: ``gh pr diff`` / cumulative branch diff for the impl.
-        advise_findings: Prior ProjectMnemosyne findings from the advise step.
+        advise_findings: Prior Mnemosyne findings from the advise step.
         include_nitpicks: Forwarded into the context so the reviewer prompt
             emits nitpick-severity comments only when ``--nitpick`` is set
             (#1083).

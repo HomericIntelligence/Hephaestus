@@ -45,19 +45,19 @@ _LEARN_RATE_LIMIT_MAX_RETRIES = 5
 _LEARN_UNKNOWN_RESET_BACKOFF_SECONDS = 300
 
 # Owner-agnostic: the Mnemosyne target may be the upstream
-# (HomericIntelligence/ProjectMnemosyne) or any user's fork
-# (<login>/ProjectMnemosyne). Only the repo name is fixed.
+# (HomericIntelligence/Mnemosyne) or any user's fork
+# (<login>/Mnemosyne). Only the repo name is fixed.
 _MNEMOSYNE_URL_RE = re.compile(
-    r"https://github\.com/[A-Za-z0-9._-]+/ProjectMnemosyne/(?:pull|commit)/[A-Za-z0-9._/-]+"
+    r"https://github\.com/[A-Za-z0-9._-]+/Mnemosyne/(?:pull|commit)/[A-Za-z0-9._/-]+"
 )
-_MNEMOSYNE_PR_REF_RE = re.compile(r"\b[A-Za-z0-9._-]+/ProjectMnemosyne#(?P<number>\d+)\b")
+_MNEMOSYNE_PR_REF_RE = re.compile(r"\b[A-Za-z0-9._-]+/Mnemosyne#(?P<number>\d+)\b")
 
 
 def mnemosyne_update_evidence(output: str) -> dict[str, Any]:
-    """Extract ProjectMnemosyne update evidence from a ``/learn`` response.
+    """Extract Mnemosyne update evidence from a ``/learn`` response.
 
-    A successful agent turn is not proof that ProjectMnemosyne changed. Treat
-    concrete ProjectMnemosyne PR/commit URLs or owner/repo issue-style PR refs
+    A successful agent turn is not proof that Mnemosyne changed. Treat
+    concrete Mnemosyne PR/commit URLs or owner/repo issue-style PR refs
     as confirmation; otherwise mark the update as unverified.
     """
     text = output if isinstance(output, str) else str(output or "")
@@ -114,10 +114,10 @@ def build_learn_prompt(context: str) -> str:
     suffix = f" {detail}" if detail else ""
     return (
         "/learn"
-        " EXECUTE the /learn skill-creation workflow for ProjectMnemosyne."
+        " EXECUTE the /learn skill-creation workflow for Mnemosyne."
         " Do NOT return a plan. Do NOT ask for approval."
         " Commit the results and create a PR."
-        " IMPORTANT: Only push skills to the resolved ProjectMnemosyne"
+        " IMPORTANT: Only push skills to the resolved Mnemosyne"
         " repository (the gh user's own fork when available, else upstream),"
         " and open the PR against that same repository."
         " Do NOT create files under .claude-plugin/ in this repo."

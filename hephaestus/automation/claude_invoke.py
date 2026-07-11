@@ -191,7 +191,7 @@ def invoke_claude_with_session(
     existing quota/overload handling takes over.
 
     Args:
-        repo: Repository slug (e.g. ``"ProjectScylla"``).
+        repo: Repository slug (e.g. ``"Scylla"``).
         issue: Issue number — leading ``#`` is stripped by
             :func:`session_naming.session_name`.
         agent: One of the ``AGENT_*`` constants in

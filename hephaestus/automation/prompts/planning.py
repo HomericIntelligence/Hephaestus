@@ -289,7 +289,7 @@ def get_plan_loop_review_prompt(
         iteration: Iteration index (0, 1, or 2).
         prior_review: Previous iteration's review text, or ``None`` on iter 0.
         advise_findings: Prior team learnings from the advise step to give the
-            reviewer the same ProjectMnemosyne context the planner received.
+            reviewer the same Mnemosyne context the planner received.
 
     Returns:
         Formatted prompt for a fresh reviewer session.

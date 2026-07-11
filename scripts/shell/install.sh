@@ -575,9 +575,9 @@ else
     fi
 fi
 
-# Mojo (ProjectOdyssey) — installed via pixi, not as a system binary
-# The mojo binary lives in ProjectOdyssey/.pixi/envs/default/bin/mojo
-ODYSSEY_DIR="${ODYSSEY_DIR:-$HOME/ProjectOdyssey}"
+# Mojo (Odyssey) — installed via pixi, not as a system binary
+# The mojo binary lives in Odyssey/.pixi/envs/default/bin/mojo
+ODYSSEY_DIR="${ODYSSEY_DIR:-$HOME/Odyssey}"
 if has_cmd mojo; then
     check_pass "mojo $(get_version mojo --version)"
 elif [[ -x "$ODYSSEY_DIR/.pixi/envs/default/bin/mojo" ]]; then
@@ -592,12 +592,12 @@ elif [[ -d "$ODYSSEY_DIR" ]]; then
             || check_warn "mojo — pixi install failed (check $ODYSSEY_DIR/pixi.toml)"
     fi
 else
-    check_skip "mojo — $ODYSSEY_DIR not found (clone ProjectOdyssey first)"
+    check_skip "mojo — $ODYSSEY_DIR not found (clone Odyssey first)"
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Section 4: Go (Atlas dashboard — worker role)
-# Required by: infrastructure/ProjectArgus/dashboard (Atlas, port 3002)
+# Required by: infrastructure/Argus/dashboard (Atlas, port 3002)
 # ═════════════════════════════════════════════════════════════════════════════
 if should_check_worker; then
     section "Go (Atlas Dashboard)"
@@ -996,11 +996,11 @@ for pytool in pre-commit ruff mypy; do
     fi
 done
 
-# Dagger CLI (ProjectProteus pipeline engine)
+# Dagger CLI (Proteus pipeline engine)
 if has_cmd dagger; then
     check_pass "dagger $(get_version dagger version 2>/dev/null || echo installed)"
 else
-    check_warn "dagger — NOT FOUND (required by ProjectProteus)"
+    check_warn "dagger — NOT FOUND (required by Proteus)"
     if $INSTALL; then
         echo -e "    ${BLUE}→${NC} Installing Dagger CLI..."
         sha=""; goos=""; goarch=""
@@ -1033,11 +1033,11 @@ else
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Section 10: Observability stack (worker role — ProjectArgus)
+# Section 10: Observability stack (worker role — Argus)
 # Checks that container images are available for the monitoring stack
 # ═════════════════════════════════════════════════════════════════════════════
 if should_check_worker; then
-    section "Observability (ProjectArgus)"
+    section "Observability (Argus)"
 
     # The observability stack runs via podman/docker compose — just verify
     # the container runtime is available (already checked in Section 6).

@@ -10,15 +10,15 @@ Hephaestus is the shared utilities and tooling repository of the HomericIntellig
 
 **Role in Ecosystem**:
 
-- ProjectOdyssey → Training and capability development
-- ProjectKeystone → Automated task DAG execution
-- ProjectScylla → Testing, measurement, and optimization
-- ProjectMnemosyne → Knowledge, skills, and memory preservation
-- ProjectHermes → Agent communication and message routing
-- ProjectArgus → Observability, monitoring, and alerting
-- ProjectProteus → Dynamic configuration and environment adaptation
-- ProjectMyrmidons → Agent swarm coordination and task distribution
-- ProjectAchaeanFleet → Multi-agent fleet orchestration
+- Odyssey → Training and capability development
+- Keystone → Automated task DAG execution
+- Scylla → Testing, measurement, and optimization
+- Mnemosyne → Knowledge, skills, and memory preservation
+- Hermes → Agent communication and message routing
+- Argus → Observability, monitoring, and alerting
+- Proteus → Dynamic configuration and environment adaptation
+- Myrmidons → Agent swarm coordination and task distribution
+- AchaeanFleet → Multi-agent fleet orchestration
 - **Hephaestus → Shared utilities, tooling, and foundational components**
 
 ## Repository Structure
@@ -254,8 +254,8 @@ takes no argument.
 | Skill | Arguments | When to Use |
 |-------|-----------|-------------|
 | `skill-advisor` | `<task description>` | Before any task — routes to the correct skill |
-| `advise` | `<task description>` | Before starting work — search ProjectMnemosyne for prior learnings |
-| `learn` | — | After completing work — capture session learnings in ProjectMnemosyne |
+| `advise` | `<task description>` | Before starting work — search Mnemosyne for prior learnings |
+| `learn` | — | After completing work — capture session learnings in Mnemosyne |
 | `myrmidon-swarm` | `<task description>` | Complex multi-step tasks requiring parallel agent coordination |
 | `brainstorm` | `<idea or feature description>` | Before implementing a new feature — design before code |
 | `test-driven-development` | `<feature or bugfix description>` | Before writing implementation code — RED-GREEN-REFACTOR |

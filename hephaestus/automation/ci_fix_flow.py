@@ -58,7 +58,7 @@ class CIFixFlow:
         self._get_pr_branch = get_pr_branch
 
     def run_advise(self, issue_number: int) -> str:
-        """Pull prior learnings from ProjectMnemosyne before a CI-fix loop."""
+        """Pull prior learnings from Mnemosyne before a CI-fix loop."""
         issue_data = self._gh_issue_json(issue_number)
         issue_title = issue_data.get("title", f"Issue #{issue_number}")
         issue_body = issue_data.get("body", "")

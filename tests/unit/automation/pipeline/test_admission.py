@@ -158,7 +158,7 @@ class TestAdmissionRepoScoping:
         """
         repo_of = {
             188: ("HomericIntelligence", "Myrmidons"),
-            121: ("HomericIntelligence", "ProjectNestor"),
+            121: ("HomericIntelligence", "Nestor"),
         }
         with patch(
             "hephaestus.automation.pipeline.admission._fetch_issue_comment_ids",

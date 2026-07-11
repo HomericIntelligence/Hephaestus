@@ -7,7 +7,7 @@ from hephaestus.agents.runtime import uses_direct_agent_runner
 from ._shared import _TERSE_OUTPUT_DIRECTIVE, _relativize_path
 
 ADVISE_PROMPT = """
-Search ProjectMnemosyne for relevant prior learnings before this automation stage.
+Search Mnemosyne for relevant prior learnings before this automation stage.
 
 **Issue:** #{issue_number}: {issue_title}
 
@@ -57,7 +57,7 @@ DIRECT_AGENT_ADVISE_PROMPT = (
 
 **Direct-agent automation constraints:**
 - Do not invoke `$advise`; this prompt is already the advise step.
-- Do not clone or update ProjectMnemosyne yourself; use the marketplace path above.
+- Do not clone or update Mnemosyne yourself; use the marketplace path above.
 - Do not implement, commit, push, create a PR, or modify files.
 """
 )

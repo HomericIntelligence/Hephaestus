@@ -64,27 +64,25 @@ class TestRunLearn:
 
     def test_mnemosyne_update_evidence_extracts_pr_url_and_ref(self) -> None:
         evidence = mnemosyne_update_evidence(
-            "Opened https://github.com/HomericIntelligence/ProjectMnemosyne/pull/45 "
-            "and referenced HomericIntelligence/ProjectMnemosyne#46"
+            "Opened https://github.com/HomericIntelligence/Mnemosyne/pull/45 "
+            "and referenced HomericIntelligence/Mnemosyne#46"
         )
 
         assert evidence["mnemosyne_update_status"] == "confirmed"
         assert evidence["mnemosyne_update_urls"] == [
-            "https://github.com/HomericIntelligence/ProjectMnemosyne/pull/45"
+            "https://github.com/HomericIntelligence/Mnemosyne/pull/45"
         ]
         assert evidence["mnemosyne_update_pr_numbers"] == [46]
 
     def test_mnemosyne_update_evidence_recognizes_fork_owner(self) -> None:
-        """A push to a user's fork (<login>/ProjectMnemosyne) still counts."""
+        """A push to a user's fork (<login>/Mnemosyne) still counts."""
         evidence = mnemosyne_update_evidence(
-            "Opened https://github.com/mvillmow/ProjectMnemosyne/pull/7 "
-            "and referenced mvillmow/ProjectMnemosyne#8"
+            "Opened https://github.com/mvillmow/Mnemosyne/pull/7 "
+            "and referenced mvillmow/Mnemosyne#8"
         )
 
         assert evidence["mnemosyne_update_status"] == "confirmed"
-        assert evidence["mnemosyne_update_urls"] == [
-            "https://github.com/mvillmow/ProjectMnemosyne/pull/7"
-        ]
+        assert evidence["mnemosyne_update_urls"] == ["https://github.com/mvillmow/Mnemosyne/pull/7"]
         assert evidence["mnemosyne_update_pr_numbers"] == [8]
 
     def test_build_learn_prompt_uses_user_facing_command(self) -> None:
@@ -93,7 +91,7 @@ class TestRunLearn:
         assert prompt.startswith("/learn EXECUTE")
         assert "Capture what happened." in prompt
         assert "/skills-registry-commands:learn" not in prompt
-        assert "Only push skills to the resolved ProjectMnemosyne" in prompt
+        assert "Only push skills to the resolved Mnemosyne" in prompt
         # Directives must appear before the context detail
         assert prompt.index("Do NOT return a plan") < prompt.index("Capture what happened.")
 

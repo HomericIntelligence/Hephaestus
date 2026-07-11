@@ -1,7 +1,7 @@
-"""Resolve which ProjectMnemosyne repository to clone, push to, and PR against.
+"""Resolve which Mnemosyne repository to clone, push to, and PR against.
 
-Historically every path that touched ProjectMnemosyne hardcoded
-``HomericIntelligence/ProjectMnemosyne`` as the remote, which meant only
+Historically every path that touched Mnemosyne hardcoded
+``HomericIntelligence/Mnemosyne`` as the remote, which meant only
 members of that org could use the ``/advise`` and ``/learn`` skills (and the
 automation pipeline) against a knowledge base.
 
@@ -11,9 +11,9 @@ This module makes the target portable. The resolution ladder is:
    always wins.
 2. Otherwise use the ``gh``-authenticated login. If that login *is*
    ``HomericIntelligence`` (the upstream itself), clone upstream directly — you
-   cannot fork a repo into its own org. If ``<login>/ProjectMnemosyne`` already
+   cannot fork a repo into its own org. If ``<login>/Mnemosyne`` already
    exists on GitHub, use it. Otherwise fork
-   ``HomericIntelligence/ProjectMnemosyne`` into the login's namespace and use
+   ``HomericIntelligence/Mnemosyne`` into the login's namespace and use
    the resulting fork.
 3. If the login cannot be determined, fall back to the upstream slug.
 
@@ -39,7 +39,7 @@ from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
 logger = logging.getLogger(__name__)
 
 UPSTREAM_OWNER = "HomericIntelligence"
-MNEMOSYNE_REPO = "ProjectMnemosyne"
+MNEMOSYNE_REPO = "Mnemosyne"
 UPSTREAM_SLUG = f"{UPSTREAM_OWNER}/{MNEMOSYNE_REPO}"
 
 #: Environment variable that overrides the resolved owner. Mirrored by the
@@ -49,12 +49,12 @@ OWNER_ENV_VAR = "HEPH_MNEMOSYNE_OWNER"
 
 @dataclass(frozen=True)
 class MnemosyneTarget:
-    """The resolved ProjectMnemosyne repository to clone, push to, and PR against.
+    """The resolved Mnemosyne repository to clone, push to, and PR against.
 
     Attributes:
         owner: The resolved owner (the ``gh`` login, an override, or
             ``HomericIntelligence`` when falling back to upstream).
-        slug: ``owner/ProjectMnemosyne`` — the clone / push / PR target.
+        slug: ``owner/Mnemosyne`` — the clone / push / PR target.
         is_fork_of_upstream: True when ``owner`` is a fork of the upstream repo
             (i.e. not ``HomericIntelligence`` itself).
 
@@ -66,7 +66,7 @@ class MnemosyneTarget:
 
 
 def _slug_for(owner: str) -> str:
-    """Return ``owner/ProjectMnemosyne`` for the given owner."""
+    """Return ``owner/Mnemosyne`` for the given owner."""
     return f"{owner}/{MNEMOSYNE_REPO}"
 
 
@@ -126,7 +126,7 @@ def remote_repo_exists(slug: str, *, timeout: int = METADATA_TIMEOUT) -> bool:
 
 
 def fork_upstream(owner: str, *, timeout: int = NETWORK_TIMEOUT) -> bool:
-    """Fork ``HomericIntelligence/ProjectMnemosyne`` into the gh user's namespace.
+    """Fork ``HomericIntelligence/Mnemosyne`` into the gh user's namespace.
 
     ``gh repo fork`` always forks into the *authenticated* user's account, so
     ``owner`` is used only for logging/sanity — the caller is expected to pass
@@ -180,7 +180,7 @@ def resolve_mnemosyne_target(
     override_owner: str | None = None,
     allow_fork: bool = True,
 ) -> MnemosyneTarget:
-    """Decide which ProjectMnemosyne repository to clone, push to, and PR against.
+    """Decide which Mnemosyne repository to clone, push to, and PR against.
 
     See the module docstring for the full precedence ladder.
 
@@ -190,7 +190,7 @@ def resolve_mnemosyne_target(
             to ``HomericIntelligence`` (or any owner) is used verbatim, with no
             fork attempt.
         allow_fork: When True (default), fork the upstream repo if the gh user
-            has no existing ``<login>/ProjectMnemosyne``. When False, skip
+            has no existing ``<login>/Mnemosyne``. When False, skip
             forking and fall back to upstream.
 
     Returns:

@@ -3,8 +3,8 @@
 #
 # Usage:
 #   . "<path>/scripts/choose_merge_flag.sh"
-#   MERGE_FLAG=$(choose_merge_flag [--gh-bin hephaestus-gh] HomericIntelligence/ProjectMnemosyne) || exit 1
-#   gh pr merge "$PR" --auto "$MERGE_FLAG" --repo HomericIntelligence/ProjectMnemosyne
+#   MERGE_FLAG=$(choose_merge_flag [--gh-bin hephaestus-gh] HomericIntelligence/Mnemosyne) || exit 1
+#   gh pr merge "$PR" --auto "$MERGE_FLAG" --repo HomericIntelligence/Mnemosyne
 #
 # Preference order: rebase (linear history) -> squash -> merge commit.
 # Exit codes:

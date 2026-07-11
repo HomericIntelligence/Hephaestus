@@ -449,7 +449,7 @@ def session_name(repo: str, issue: int | str, agent: str, model: str | None = No
     every time main advances (#841).
 
     Args:
-        repo: Repository slug without owner (e.g. ``"ProjectScylla"``).
+        repo: Repository slug without owner (e.g. ``"Scylla"``).
         issue: Issue number; leading ``#`` is stripped.
         agent: One of the ``AGENT_*`` constants in this module.
         model: Optional model id; appended to the key when given so sessions

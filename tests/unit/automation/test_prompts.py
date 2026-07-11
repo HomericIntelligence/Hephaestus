@@ -323,7 +323,7 @@ class TestAdvisePrompt:
         assert not out.startswith("$advise ")
         assert "/mp.json" in out
         assert "Do not invoke `$advise`" in out
-        assert "Do not clone or update ProjectMnemosyne yourself" in out
+        assert "Do not clone or update Mnemosyne yourself" in out
         assert "/advise" not in out
         assert "#7: t" in out
         assert '"skills"' in out

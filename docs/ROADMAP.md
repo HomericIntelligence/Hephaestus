@@ -30,17 +30,17 @@ Assuming audit remediation is complete:
    GitHub Pages on each release (pdoc). Remaining: ensure every public function carries a
    complete docstring, including stable subpackage surfaces and a full CLI reference.
 
-4. **Observability and Health Checks** — Add structured health reporting for long-running components (e.g., NATSSubscriberThread), supporting the broader ProjectArgus (observability) initiative.
+4. **Observability and Health Checks** — Add structured health reporting for long-running components (e.g., NATSSubscriberThread), supporting the broader Argus (observability) initiative.
 
 ## Long-term (4+ Quarters Out)
 
 Conservative, directional items:
 
-1. **Agent Coordination Framework** — Explore deeper integration with ProjectMyrmidons for agent swarm coordination patterns, building on existing entry points for orchestration.
+1. **Agent Coordination Framework** — Explore deeper integration with Myrmidons for agent swarm coordination patterns, building on existing entry points for orchestration.
 
 2. **Benchmark Suite Expansion** — Enhance the benchmark comparison utilities to support cross-project performance tracking and regression detection.
 
-3. **Configuration Ecosystem** — Investigate dynamic configuration patterns (ProjectProteus integration) and configuration composition across multiple environments.
+3. **Configuration Ecosystem** — Investigate dynamic configuration patterns (Proteus integration) and configuration composition across multiple environments.
 
 ## How We Plan
 
@@ -48,7 +48,7 @@ Hephaestus uses an Epic-and-children issue pattern for project planning. Major i
 
 **Exemplar:** Epic #310 (Strict audit 2026-04-28, now closed) contained 29 child issues spanning all 15 audit dimensions, with clear scoping and evidence-based requirements.
 
-We also capture session learnings in ProjectMnemosyne via the `/learn` skill, preserving team knowledge about patterns, anti-patterns, and decisions across the ecosystem.
+We also capture session learnings in Mnemosyne via the `/learn` skill, preserving team knowledge about patterns, anti-patterns, and decisions across the ecosystem.
 
 ## Updating This Roadmap
 

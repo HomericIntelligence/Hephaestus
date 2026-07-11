@@ -168,7 +168,7 @@ class TestMain:
         # ``gh repo view`` discovers the repo; then one create per label runs.
         n = len(STATE_LABEL_SPECS)
         mock_gh_call.side_effect = [
-            _ok_proc(stdout="HomericIntelligence/ProjectScylla"),  # gh repo view
+            _ok_proc(stdout="HomericIntelligence/Scylla"),  # gh repo view
             *(_ok_proc() for _ in range(n)),  # one create per label
         ]
         rc = main([])

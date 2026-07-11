@@ -200,7 +200,7 @@ def _fetch_issue_comments_graphql(issue_number: int) -> list[dict[str, Any]]:
         Returns an empty list on any failure.
 
     """
-    # get_repo_slug returns only the short repo name (e.g. "ProjectMnemosyne");
+    # get_repo_slug returns only the short repo name (e.g. "Mnemosyne");
     # GraphQL needs the (owner, name) pair, which get_repo_info supplies.
     # PR #575 fixed this in plan_reviewer.py but missed the identical bug here,
     # crashing every implementer-side GO-gate check (#588).
