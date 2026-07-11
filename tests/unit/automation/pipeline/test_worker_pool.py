@@ -656,6 +656,7 @@ class TestGitOps:
                 "branch_name": "7-existing",
                 "refresh_base": False,
                 "sync_to_remote": True,
+                "pr_number": 70,
             },
         )
         instance = MagicMock()
@@ -675,7 +676,7 @@ class TestGitOps:
             timeout=60,
         )
         mock_clean.assert_called_once_with(Path("/tmp/wt"), timeout=60)
-        mock_sync.assert_called_once_with(Path("/tmp/wt"), "7-existing", timeout=60)
+        mock_sync.assert_called_once_with(Path("/tmp/wt"), "7-existing", pr_number=70, timeout=60)
         assert result.ok is True
         assert result.value == {"path": "/tmp/wt", "dirty": False, "status": "", "diff": ""}
 

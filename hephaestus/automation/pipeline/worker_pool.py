@@ -558,6 +558,7 @@ class WorkerPool:
         manager = WorktreeManager()
         kwargs = dict(job.kwargs)
         sync_to_remote = bool(kwargs.pop("sync_to_remote", False))
+        pr_number = kwargs.pop("pr_number", None)
         created = manager.create_worktree(**kwargs, timeout=job.timeout_s)
         if created is None:
             return JobResult(ok=True)
@@ -590,6 +591,7 @@ class WorkerPool:
             git_utils.sync_worktree_to_remote_branch(
                 worktree_path,
                 branch_name,
+                pr_number=int(pr_number) if pr_number is not None else None,
                 timeout=job.timeout_s,
             )
         return JobResult(

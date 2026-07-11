@@ -316,6 +316,7 @@ class ImplementationStage(Stage):
         }
         if adopted:
             kwargs["sync_to_remote"] = True
+            kwargs["pr_number"] = item.pr
         worktree_job = GitJob(
             repo=item.repo,
             op="create_worktree",

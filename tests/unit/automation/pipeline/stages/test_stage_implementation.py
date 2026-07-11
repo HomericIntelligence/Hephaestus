@@ -291,6 +291,7 @@ class TestGate:
             "branch_name": "1-some-real-branch",
             "refresh_base": False,
             "sync_to_remote": True,
+            "pr_number": 1001,
         }
 
     def test_adopted_clean_worktree_advances_to_pr_review(
