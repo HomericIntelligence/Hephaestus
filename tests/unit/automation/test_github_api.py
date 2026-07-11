@@ -176,6 +176,34 @@ class TestParseIssueDependencies:
         assert len(deps) == 1
         assert 123 in deps
 
+    def test_no_dependencies_prose_with_hash_ref_not_captured(self) -> None:
+        """A '#N' ref sharing a line with 'no dependencies' prose is not harvested (#1830)."""
+        body = "Part of epic #1809. First issue of the epic — no dependencies."
+        deps = parse_issue_dependencies(body)
+
+        assert deps == []
+
+    def test_epic_ref_and_depends_on_same_line_only_captures_depends_on_target(self) -> None:
+        """A '#N' ref preceding the keyword is excluded; only refs after it are harvested."""
+        body = "Part of epic #1809. Depends on #1811."
+        deps = parse_issue_dependencies(body)
+
+        assert deps == [1811]
+
+    def test_dependencies_heading_section_still_parsed(self) -> None:
+        """The '## Dependencies' list-item scan (Pattern 2) is unaffected by the fix (#1830)."""
+        body = """
+        Part of epic #1809. No inline dependency mentions here.
+
+        ## Dependencies
+        - #100
+        - #200
+        """
+        deps = parse_issue_dependencies(body)
+
+        assert set(deps) == {100, 200}
+        assert 1809 not in deps
+
 
 class TestFetchIssueInfo:
     """Tests for fetch_issue_info function."""
