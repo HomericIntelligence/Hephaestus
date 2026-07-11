@@ -17,6 +17,7 @@ from hephaestus.agents.runtime import (
 from hephaestus.automation.agent_config import normalize_claude_model
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 from hephaestus.io.utils import write_secure
+from hephaestus.utils.terminal import install_sigtstp_only, terminal_guard
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -210,11 +211,23 @@ def run_agent(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run the agent stage command-line interface."""
+    """Run the agent stage command-line interface.
+
+    This entrypoint makes a single blocking agent call with no internal
+    polling loop, so it deliberately does NOT install the cooperative
+    double-Ctrl+C handler (:func:`install_signal_handlers`) — that would
+    replace Python's default SIGINT disposition (instant ``KeyboardInterrupt``)
+    with a handler whose first press only sets a flag, silently absorbing a
+    single Ctrl+C instead of killing the blocking ``claude``/``gh`` subprocess.
+    Only SIGTSTP (Ctrl+Z) is wired here, plus bare terminal restoration.
+    """
     parser = build_parser()
     args = parser.parse_args(argv)
     validate_agent_flags(parser, args)
-    exit_code = run_agent(args)
+
+    install_sigtstp_only()
+    with terminal_guard():
+        exit_code = run_agent(args)
     if args.json:
         emit_json_status(exit_code, stage=args.stage, agent=args.agent)
     return exit_code

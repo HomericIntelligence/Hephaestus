@@ -464,9 +464,12 @@ def main() -> int:
     # — and the ``from hephaestus.automation.implementer import main`` import-cycle
     # smoke test — stays free of the coordinator's heavier import surface until
     # the CLI actually runs.
+    from hephaestus.utils.terminal import install_sigtstp_only
+
     from .pipeline.coordinator import PipelineConfig, run_pipeline
     from .pipeline.routing import PipelineScope, StageName
 
+    install_sigtstp_only()
     args = _parse_args()
     configure_github_throttle_from_args(args)
     agent = resolve_agent(args.agent)

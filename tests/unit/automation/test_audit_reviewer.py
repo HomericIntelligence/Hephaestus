@@ -439,6 +439,63 @@ class TestAuditReviewerRun:
         assert reviewer.state_dir == tmp_path / DEFAULT_STATE_DIR
         assert reviewer.state_dir.is_dir()
 
+    @mock.patch("hephaestus.automation.audit_reviewer.fetch_open_prs")
+    @mock.patch("hephaestus.automation.audit_reviewer.run_audit_coordinator")
+    @mock.patch("hephaestus.automation.audit_reviewer.gh_pr_review_post")
+    def test_shutdown_event_stops_remaining_postings(
+        self, mock_post: mock.Mock, mock_coord: mock.Mock, mock_fetch: mock.Mock
+    ) -> None:
+        """A set shutdown_event stops posting further PR reviews mid-loop."""
+        import threading
+
+        mock_fetch.return_value = [{"number": 100}, {"number": 101}]
+        mock_coord.return_value = [
+            {"pr_number": 100, "verdict": "GO", "summary": "a"},
+            {"pr_number": 101, "verdict": "GO", "summary": "b"},
+        ]
+        shutdown = threading.Event()
+        shutdown.set()
+        reviewer = AuditReviewer(shutdown_event=shutdown)
+        rc, audits = reviewer.run()
+        assert rc == 0
+        assert len(audits) == 2  # audits themselves still returned
+        mock_post.assert_not_called()  # but posting loop stopped immediately
+
+    @mock.patch("hephaestus.automation.audit_reviewer.fetch_open_prs")
+    @mock.patch("hephaestus.automation.audit_reviewer.run_audit_coordinator")
+    @mock.patch("hephaestus.automation.audit_reviewer.gh_pr_review_post")
+    def test_unset_shutdown_event_posts_all(
+        self, mock_post: mock.Mock, mock_coord: mock.Mock, mock_fetch: mock.Mock
+    ) -> None:
+        """An unset shutdown_event does not interrupt the posting loop."""
+        import threading
+
+        mock_fetch.return_value = [{"number": 100}]
+        mock_coord.return_value = [{"pr_number": 100, "verdict": "GO", "summary": "a"}]
+        reviewer = AuditReviewer(shutdown_event=threading.Event())
+        rc, _audits = reviewer.run()
+        assert rc == 0
+        mock_post.assert_called_once()
+
+
+class TestAuditReviewerMainSignalWiring:
+    """main() wraps the reviewer in terminal_guard(shutdown.set)."""
+
+    @mock.patch("hephaestus.automation.audit_reviewer.fetch_open_prs")
+    @mock.patch("hephaestus.automation.audit_reviewer.run_audit_coordinator")
+    @mock.patch("hephaestus.automation.audit_reviewer.gh_pr_review_post")
+    def test_main_installs_cooperative_terminal_guard(
+        self, mock_post: mock.Mock, mock_coord: mock.Mock, mock_fetch: mock.Mock
+    ) -> None:
+        from hephaestus.automation.audit_reviewer import main
+
+        mock_fetch.return_value = []
+        with mock.patch("hephaestus.automation.audit_reviewer.terminal_guard") as mock_guard:
+            assert main(["--dry-run"]) == 0
+            mock_guard.assert_called_once()
+            (shutdown_fn,), _ = mock_guard.call_args
+            assert callable(shutdown_fn)
+
 
 class TestParser:
     """Test CLI argument parsing."""

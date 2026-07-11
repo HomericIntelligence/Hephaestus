@@ -3,6 +3,7 @@
 Provides:
 - restore_terminal(): Run stty sane to fix terminal corruption
 - install_signal_handlers(): Double-Ctrl+C escalation pattern
+- install_sigtstp_only(): Ctrl+Z (SIGTSTP) handling independent of SIGINT/SIGTERM
 - terminal_guard(): Context manager combining both
 """
 
@@ -10,6 +11,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import os
 import signal
 import subprocess
 import sys
@@ -42,14 +44,40 @@ atexit.register(restore_terminal)
 _shutdown_requested: list[bool] = [False]
 
 
+def install_sigtstp_only() -> None:
+    """Install a SIGTSTP (Ctrl+Z) handler independent of SIGINT/SIGTERM.
+
+    Restores the terminal, then genuinely suspends the process (SIG_DFL +
+    self-SIGSTOP) so shell job control (``fg``/``bg``) works, then re-arms
+    itself. Safe to call alongside Python's *default* SIGINT disposition —
+    unlike :func:`install_signal_handlers`, this does not touch SIGINT/SIGTERM,
+    so a single blocking call still dies immediately on the first Ctrl+C.
+
+    No-ops on platforms without ``SIGTSTP`` (e.g. Windows).
+    """
+
+    def _sigtstp_handler(signum: int, frame: object) -> None:
+        restore_terminal()
+        signal.signal(signal.SIGTSTP, signal.SIG_DFL)
+        os.kill(os.getpid(), signal.SIGSTOP)
+        signal.signal(signal.SIGTSTP, _sigtstp_handler)
+
+    if hasattr(signal, "SIGTSTP"):
+        with contextlib.suppress(ValueError):
+            signal.signal(signal.SIGTSTP, _sigtstp_handler)
+
+
 def install_signal_handlers(shutdown_fn: Callable[[], None]) -> None:
-    """Install SIGINT/SIGTERM handlers with double-Ctrl+C escalation.
+    """Install SIGINT/SIGTERM handlers with double-Ctrl+C escalation, plus SIGTSTP.
 
     First signal: calls shutdown_fn() and prints a "press Ctrl+C again"
     message — cooperative shutdown.
 
     Second signal: restores terminal and calls sys.exit(128 + signum) —
     forceful exit.
+
+    Also installs a SIGTSTP (Ctrl+Z) handler via :func:`install_sigtstp_only`
+    so shell job control keeps working for looping entrypoints.
 
     Args:
         shutdown_fn: Callable that requests graceful shutdown (sets a flag,
@@ -75,9 +103,7 @@ def install_signal_handlers(shutdown_fn: Callable[[], None]) -> None:
 
     signal.signal(signal.SIGINT, _handler)
     signal.signal(signal.SIGTERM, _handler)
-    # Note: SIGTSTP (Ctrl+Z) is intentionally NOT handled here.
-    # It is a job-control signal; callers (e.g., cmd_run) register their
-    # own SIGTSTP handler for forceful process-group kill.
+    install_sigtstp_only()
 
 
 @contextlib.contextmanager

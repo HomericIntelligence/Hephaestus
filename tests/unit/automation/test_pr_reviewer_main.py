@@ -104,3 +104,12 @@ def test_parse_args_requires_issues() -> None:
     """The reviewer CLI requires --issues (build_review_parser sets required=True)."""
     with pytest.raises(SystemExit):
         pr_reviewer_mod._parse_args([])
+
+
+def test_main_installs_sigtstp_handler() -> None:
+    """main() fixes Ctrl+Z (#1784) via the shared install_sigtstp_only helper."""
+    with patch("hephaestus.utils.terminal.install_sigtstp_only") as mock_tstp:
+        captured = _run_main_capturing_config(["--issues", "5", "--dry-run"])
+
+    assert captured["rc"] == 0
+    mock_tstp.assert_called_once_with()

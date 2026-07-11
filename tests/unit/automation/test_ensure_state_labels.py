@@ -264,3 +264,27 @@ class TestCircuitBreakerBoundary:
 
         source = Path(ensure_state_labels.__file__).read_text(encoding="utf-8")
         assert not re.search(r"subprocess\.run\(\s*\[\s*[\"']gh[\"']", source)
+
+
+class TestSignalWiring:
+    """main() must wrap the per-repo loop in terminal_guard for Ctrl+C/Ctrl+Z."""
+
+    def test_main_installs_cooperative_terminal_guard(self, mock_gh_call: MagicMock) -> None:
+        mock_gh_call.side_effect = [_ok_proc() for _ in range(len(STATE_LABEL_SPECS))]
+        with patch("hephaestus.automation.ensure_state_labels.terminal_guard") as mock_guard:
+            rc = main(["--repo", "owner/name"])
+        assert rc == 0
+        mock_guard.assert_called_once()
+        (shutdown_fn,), _ = mock_guard.call_args
+        assert callable(shutdown_fn)
+
+    def test_shutdown_event_stops_remaining_repos(self, mock_gh_call: MagicMock) -> None:
+        """A shutdown_event set before the loop starts skips all repos."""
+        import threading
+
+        real_event = threading.Event()
+        real_event.set()
+        with patch("threading.Event", return_value=real_event):
+            rc = main(["--repo", "owner/name"])
+        assert rc == 0
+        mock_gh_call.assert_not_called()

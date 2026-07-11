@@ -803,6 +803,30 @@ class TestMain:
         assert plan_reviewer.main() == 0
         assert seen_issues == [[5]]
 
+    def test_installs_cooperative_terminal_guard(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """main() wraps the review workflow in terminal_guard(shutdown.set).
+
+        This wires up both the cooperative double-Ctrl+C escalation and the
+        SIGTSTP (Ctrl+Z) handler (#1784) for this looping, multi-issue entrypoint.
+        """
+        from hephaestus.automation import plan_reviewer
+        from hephaestus.automation.models import WorkerResult
+
+        monkeypatch.setattr(
+            "sys.argv",
+            ["plan-reviewer", "--issues", "1", "--no-ui", "--dry-run", "--agent", "claude"],
+        )
+
+        def fake_run(self: object) -> dict[int, WorkerResult]:
+            return {1: WorkerResult(issue_number=1, success=True)}
+
+        monkeypatch.setattr(plan_reviewer.PlanReviewer, "run", fake_run)
+        with patch("hephaestus.automation.plan_reviewer.terminal_guard") as mock_guard:
+            assert plan_reviewer.main() == 0
+            mock_guard.assert_called_once()
+            (shutdown_fn,), _ = mock_guard.call_args
+            assert callable(shutdown_fn)
+
 
 class TestPlanReviewerAlreadyReviewedFlag:
     """Tests for WorkerResult.already_reviewed flag (#613).

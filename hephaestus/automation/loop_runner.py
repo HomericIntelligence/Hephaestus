@@ -709,6 +709,9 @@ def main(argv: list[str] | None = None) -> int:
     if cfg.prs:
         LOG.info("PRs: %s", ",".join(str(n) for n in cfg.prs))
 
+    from hephaestus.utils.terminal import install_sigtstp_only
+
+    install_sigtstp_only()
     return _dispatch_pipeline(args, cfg, org, repos)
 
 

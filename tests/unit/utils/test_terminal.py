@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import hephaestus.utils.terminal as terminal_module
 from hephaestus.utils.terminal import (
     install_signal_handlers,
+    install_sigtstp_only,
     restore_terminal,
     terminal_guard,
 )
@@ -82,6 +83,61 @@ class TestInstallSignalHandlers:
         terminal_module._shutdown_requested[0] = True
         install_signal_handlers(MagicMock())
         assert terminal_module._shutdown_requested[0] is False
+
+    def test_installs_sigtstp_handler(self) -> None:
+        """install_signal_handlers also wires up SIGTSTP via install_sigtstp_only."""
+        import signal as signal_module
+
+        with patch("signal.signal") as mock_signal:
+            install_signal_handlers(MagicMock())
+            registered = {call.args[0] for call in mock_signal.call_args_list}
+            assert signal_module.SIGTSTP in registered
+
+
+class TestInstallSigtstpOnly:
+    """Tests for install_sigtstp_only."""
+
+    def test_registers_only_sigtstp(self) -> None:
+        """Registers a handler for SIGTSTP and touches no other signal."""
+        import signal as signal_module
+
+        with patch("signal.signal") as mock_signal:
+            install_sigtstp_only()
+            registered = {call.args[0] for call in mock_signal.call_args_list}
+            assert registered == {signal_module.SIGTSTP}
+
+    def test_handler_restores_terminal_then_sigstops_self(self) -> None:
+        """The handler restores the terminal, self-SIGSTOPs, then re-arms."""
+        import signal as signal_module
+        from collections.abc import Callable
+
+        captured: dict[int, Callable[[int, object], None]] = {}
+
+        def fake_signal(sig: int, handler: Callable[[int, object], None]) -> None:
+            captured[sig] = handler
+
+        with (
+            patch("signal.signal", side_effect=fake_signal),
+            patch("hephaestus.utils.terminal.restore_terminal") as mock_restore,
+            patch("os.kill") as mock_kill,
+            patch("os.getpid", return_value=4242),
+        ):
+            install_sigtstp_only()
+            captured[signal_module.SIGTSTP](signal_module.SIGTSTP, None)
+            mock_restore.assert_called_once()
+            mock_kill.assert_called_once_with(4242, signal_module.SIGSTOP)
+            # Re-armed: signal.signal was called for SIGTSTP more than once
+            # (initial install + SIG_DFL + re-arm inside the handler).
+            assert captured[signal_module.SIGTSTP] is not None
+
+    def test_noop_when_sigtstp_unavailable(self) -> None:
+        """Does not raise or call signal.signal when SIGTSTP is unavailable."""
+        with (
+            patch("signal.signal") as mock_signal,
+            patch("hephaestus.utils.terminal.hasattr", return_value=False, create=True),
+        ):
+            install_sigtstp_only()
+            mock_signal.assert_not_called()
 
 
 class TestTerminalGuard:

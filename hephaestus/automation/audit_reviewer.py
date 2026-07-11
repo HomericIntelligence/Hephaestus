@@ -15,6 +15,7 @@ import json
 import logging
 import re
 import subprocess
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,6 +33,7 @@ from hephaestus.cli.utils import (
     emit_json_status,
 )
 from hephaestus.io.utils import write_secure
+from hephaestus.utils.terminal import terminal_guard
 
 from ._review_utils import build_automation_parser, ensure_state_dir
 from .agent_config import DEFAULT_AGENT_TIMEOUT
@@ -203,6 +205,7 @@ class AuditReviewer:
     state_dir: Path | None = None
     dry_run: bool = False
     timeout: int = DEFAULT_AGENT_TIMEOUT
+    shutdown_event: threading.Event | None = None
 
     def __post_init__(self) -> None:
         """Set default state_dir if not provided."""
@@ -234,6 +237,9 @@ class AuditReviewer:
             logger.info("Audit report written to %s", report)
         print_audit_summary(audits)
         for a in audits:
+            if self.shutdown_event is not None and self.shutdown_event.is_set():
+                logger.warning("Interrupted; stopping before remaining PR postings.")
+                break
             try:
                 gh_pr_review_post(
                     pr_number=int(a["pr_number"]),
@@ -274,15 +280,24 @@ def main(argv: list[str] | None = None) -> int:
     configure_cli_logging(verbose=args.verbose)
     selected_agent = "codex" if args.codex else args.agent
     agent = (selected_agent or "claude") if args.dry_run else resolve_agent(selected_agent)
-    reviewer = AuditReviewer(
-        agent=agent,
-        pr_numbers=args.pr_numbers,
-        dry_run=args.dry_run,
-    )
-    rc, audits = reviewer.run()
-    if getattr(args, "json", False):
-        emit_json_status(rc, audits=len(audits))
-    return rc
+
+    shutdown = threading.Event()
+    with terminal_guard(shutdown.set):
+        try:
+            reviewer = AuditReviewer(
+                agent=agent,
+                pr_numbers=args.pr_numbers,
+                dry_run=args.dry_run,
+                shutdown_event=shutdown,
+            )
+            rc, audits = reviewer.run()
+            if getattr(args, "json", False):
+                emit_json_status(rc, audits=len(audits))
+            return rc
+        except KeyboardInterrupt:
+            if getattr(args, "json", False):
+                emit_json_status(130, message="interrupted")
+            return 130
 
 
 if __name__ == "__main__":
