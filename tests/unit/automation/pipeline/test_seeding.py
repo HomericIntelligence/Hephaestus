@@ -578,6 +578,36 @@ class TestSeedFromCli:
             entries = seed_from_cli([], [], [79])
         assert entries[0].stage is StageName.PR_REVIEW
 
+    def test_prs_arm_uses_repo_scoped_accessor_when_given(self) -> None:
+        """A repo-scoped github accessor routes the --prs label read through it.
+
+        Not the ambient gh_pr_label_names, closing the multi-repo misclassification (#1864).
+        """
+        github = MagicMock()
+        github.pr_has_implementation_state_label.return_value = (True, False)
+        with patch(
+            "hephaestus.automation.pipeline.seeding.gh_pr_label_names",
+            side_effect=AssertionError("must not call ambient label read when github is given"),
+        ):
+            entries = seed_from_cli([], [], [77], github=github)
+        github.pr_has_implementation_state_label.assert_called_once_with(77)
+        assert entries == [
+            SeedEntry(
+                kind="pr",
+                identifier=77,
+                stage=StageName.CI,
+                reason=f"PR #77 carries {STATE_IMPLEMENTATION_GO}",
+                pr_number=77,
+            )
+        ]
+
+    def test_prs_arm_repo_scoped_no_go_routes_to_pr_review(self) -> None:
+        """Repo-scoped accessor without impl-GO seeds into pr_review."""
+        github = MagicMock()
+        github.pr_has_implementation_state_label.return_value = (False, True)
+        entries = seed_from_cli([], [], [78], github=github)
+        assert entries[0].stage is StageName.PR_REVIEW
+
     def test_order_repos_then_issues_then_prs(self) -> None:
         """Entries preserve CLI order: repos, then issues, then prs."""
         facts = _facts(number=5)
