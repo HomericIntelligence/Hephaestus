@@ -1,4 +1,4 @@
-"""Benchmark comparison utilities for ProjectHephaestus."""
+"""Benchmark comparison utilities for Hephaestus."""
 
 from hephaestus.benchmarks.compare import (
     Regression,

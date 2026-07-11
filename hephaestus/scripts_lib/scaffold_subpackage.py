@@ -24,7 +24,7 @@ from hephaestus.cli.utils import add_json_arg, add_version_arg
 _VALID_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 
 _PKG_INIT = '''\
-"""{title} utilities for ProjectHephaestus."""
+"""{title} utilities for Hephaestus."""
 '''
 
 _PKG_MODULE = '''\

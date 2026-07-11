@@ -5,21 +5,21 @@
 # the HomericIntelligence org, with structured per-repo logging.
 #
 # Workaround for the structural bugs filed as #818–#821 in
-# HomericIntelligence/ProjectHephaestus:
+# HomericIntelligence/Hephaestus:
 #   - the CI driver has no --repos / --org flag (this script loops)
 #   - issue-driven discovery only: PRs without `Closes #<open-issue>` are invisible
 #
 # Pre-reqs:
 #   - gh authenticated (`gh auth status`)
 #   - Repos cloned under $PROJECTS_ROOT (default /home/mvillmow/Projects)
-#   - pixi env initialized in ProjectHephaestus
+#   - pixi env initialized in Hephaestus
 #
 # Usage:
 #   ~/drive-prs-green-ecosystem.sh                     # real run, logs to ~/drive-prs-green-logs/<utc-ts>/
 #   ~/drive-prs-green-ecosystem.sh --log-dir DIR       # write logs under DIR/<utc-ts>/
 #   ~/drive-prs-green-ecosystem.sh --dry-run           # forward --dry-run to driver
 #   ~/drive-prs-green-ecosystem.sh --org HomericIntelligence
-#   ~/drive-prs-green-ecosystem.sh --project-root /path/to/ProjectHephaestus
+#   ~/drive-prs-green-ecosystem.sh --project-root /path/to/Hephaestus
 #   ~/drive-prs-green-ecosystem.sh --gh-bin hephaestus-gh
 #   ~/drive-prs-green-ecosystem.sh --gh-global-rate 5  # tune shared gh throttle
 #   ~/drive-prs-green-ecosystem.sh --gh-global-burst 20
@@ -125,7 +125,7 @@ hephaestus_gh() {
 
 # ── Sanity checks ────────────────────────────────────────────────────────────
 if [[ ! -f "$PROJECT_ROOT/pyproject.toml" ]]; then
-  echo "ERROR: ProjectHephaestus root not found at $PROJECT_ROOT" >&2
+  echo "ERROR: Hephaestus root not found at $PROJECT_ROOT" >&2
   exit 1
 fi
 if ! hephaestus_gh --version >/dev/null 2>&1; then

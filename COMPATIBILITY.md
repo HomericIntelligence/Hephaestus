@@ -1,6 +1,6 @@
 # Compatibility Policy
 
-ProjectHephaestus follows [Semantic Versioning](https://semver.org/).
+Hephaestus follows [Semantic Versioning](https://semver.org/).
 
 - **MAJOR** version: backwards-incompatible API changes
 - **MINOR** version: new backwards-compatible functionality
@@ -10,18 +10,18 @@ Upgrading across a major version? See the [migration guide](docs/MIGRATION.md).
 
 ## Supported Python Versions
 
-ProjectHephaestus supports **Python 3.10+** (`requires-python = ">=3.10"` in
+Hephaestus supports **Python 3.10+** (`requires-python = ">=3.10"` in
 `pyproject.toml`). CI exercises the package on 3.10, 3.11, 3.12, and 3.13. Dropping
 support for a Python minor version is treated as a backwards-incompatible change and
 follows the deprecation policy below.
 
 ## Versioning: Python Package vs Agent Plugins
 
-ProjectHephaestus ships **independently versioned artifacts**:
+Hephaestus ships **independently versioned artifacts**:
 
 - **The Python package** (`homericintelligence-hephaestus`) — version is **tag-driven**
   via hatch-vcs (derived from the latest `vX.Y.Z` git tag; see
-  [latest release](https://github.com/HomericIntelligence/ProjectHephaestus/releases/latest)).
+  [latest release](https://github.com/HomericIntelligence/Hephaestus/releases/latest)).
   This is the version the Semantic Versioning guarantees in this document apply to.
 - **The Claude Code plugin** (`hephaestus`, declared in `.claude-plugin/`) — carries its
   own `version` field (declared in
@@ -39,7 +39,7 @@ says nothing about the Python package version and vice versa. See
 
 ## Stability Tiers
 
-ProjectHephaestus ships 20 documented subpackages with different maturity levels. Only the
+Hephaestus ships 20 documented subpackages with different maturity levels. Only the
 **stable** subpackages below are covered by the [deprecation policy](#deprecation-policy);
 **provisional** subpackages may change without notice, even across minor versions.
 
@@ -81,7 +81,7 @@ may change incompatibly in a minor release.
 
 ## Console-Script Stability Tiers
 
-ProjectHephaestus installs 53 console scripts via `[project.scripts]` in
+Hephaestus installs 53 console scripts via `[project.scripts]` in
 `pyproject.toml`. Each is classified into one of three tiers:
 
 - **Stable** — covered by the [deprecation policy](#deprecation-policy). CLI

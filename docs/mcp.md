@@ -1,6 +1,6 @@
 # Model Context Protocol (MCP) Configuration
 
-ProjectHephaestus ships a project-scoped `.mcp.json` at the repository root
+Hephaestus ships a project-scoped `.mcp.json` at the repository root
 with an empty `mcpServers` map. No MCP servers are configured yet — the file
 exists so the configuration surface is explicit and version-controlled for the
 whole team, per the Claude Code project-scope convention.

@@ -16,7 +16,7 @@ from pathlib import Path
 # Override via HEPHAESTUS_PLUGIN_SKILLS_DIR for non-default deployments
 # (CI, containers, alternate $HOME). Falls back to the standard Claude
 # Code plugin layout under the current user's home directory.
-_DEFAULT_PLUGIN_SKILLS_SUBPATH = Path(".claude/plugins/marketplaces/ProjectHephaestus/skills")
+_DEFAULT_PLUGIN_SKILLS_SUBPATH = Path(".claude/plugins/marketplaces/Hephaestus/skills")
 _STRICT_SKILL_NAME = "review-pr-strict"
 
 

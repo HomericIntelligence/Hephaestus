@@ -1,4 +1,4 @@
-# Pre-commit hooks for ProjectHephaestus
+# Pre-commit hooks for Hephaestus
 # Install: pixi run pre-commit install
 # Run manually: pixi run pre-commit run --all-files
 #

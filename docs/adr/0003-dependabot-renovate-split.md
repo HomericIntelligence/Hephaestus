@@ -6,7 +6,7 @@
 
 ## Context
 
-ProjectHephaestus has two distinct dependency ecosystems. The Python wheel
+Hephaestus has two distinct dependency ecosystems. The Python wheel
 dependencies and the GitHub Actions pins are expressible in formats Dependabot
 understands (`pip`, `github-actions`). The pixi/conda-forge dependencies live
 in `pixi.toml`, which Dependabot cannot parse at all.

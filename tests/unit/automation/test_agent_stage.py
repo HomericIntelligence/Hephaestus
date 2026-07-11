@@ -40,7 +40,7 @@ def test_read_prompt_prepends_skill_instructions(tmp_path: Path) -> None:
 
     prompt = agent_stage.read_prompt(prompt_file, skill_file, "review")
 
-    assert "ProjectHephaestus agent stage `review`" in prompt
+    assert "Hephaestus agent stage `review`" in prompt
     assert "strict instructions" in prompt
     assert prompt.endswith("do the work")
 

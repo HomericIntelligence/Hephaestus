@@ -1,8 +1,0 @@
-{
-  "name": "hephaestus",
-  "description": "Shared tooling plugin for the HomericIntelligence ecosystem. Ships 23 skills: skill-advisor, advise, learn, myrmidon-swarm, brainstorm, test-driven-development, systematic-debugging, verification, git-worktrees, finish-branch, code-review, repo-analyze, repo-analyze-quick, repo-analyze-strict, repo-analyze-full, repo-analyze-quick-full, repo-analyze-strict-full, review-pr-strict, worktree-cleanup, tidy, create-reusable-utilities, github-actions-python-cicd, and python-repo-modernization.",
-  "version": "3.0.0",
-  "author": {
-    "name": "HomericIntelligence"
-  }
-}

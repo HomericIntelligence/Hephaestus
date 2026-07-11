@@ -1,4 +1,4 @@
-"""System information utilities for ProjectHephaestus."""
+"""System information utilities for Hephaestus."""
 
 from .info import (
     format_system_info,

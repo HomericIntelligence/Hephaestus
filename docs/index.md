@@ -1,10 +1,10 @@
-# ProjectHephaestus Documentation
+# Hephaestus Documentation
 
-Welcome to the official documentation for ProjectHephaestus.
+Welcome to the official documentation for Hephaestus.
 
 ## Overview
 
-ProjectHephaestus is the shared utilities and tooling library for the HomericIntelligence ecosystem.
+Hephaestus is the shared utilities and tooling library for the HomericIntelligence ecosystem.
 
 ## Subpackages
 
@@ -32,7 +32,7 @@ ProjectHephaestus is the shared utilities and tooling library for the HomericInt
 
 Auto-generated API documentation is published to GitHub Pages on every release:
 
-- **Browse online:** <https://homericintelligence.github.io/ProjectHephaestus/>
+- **Browse online:** <https://homericintelligence.github.io/Hephaestus/>
 
 The published reference covers full function signatures, docstrings, and type
 annotations for documented first-level subpackages, excluding the

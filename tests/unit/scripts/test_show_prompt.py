@@ -46,7 +46,7 @@ class TestBuildParser:
         args = parser.parse_args(["--issue", "42", "--stage", "planning"])
         assert args.issue == 42
         assert args.stage == "planning"
-        assert args.repo == "HomericIntelligence/ProjectHephaestus"
+        assert args.repo == "HomericIntelligence/Hephaestus"
 
     def test_optional_args(self) -> None:
         parser = build_parser()

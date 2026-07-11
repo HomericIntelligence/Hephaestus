@@ -1,8 +1,8 @@
-# ProjectHephaestus Roadmap
+# Hephaestus Roadmap
 
 ## Vision
 
-ProjectHephaestus is the foundational utilities and tooling repository of the HomericIntelligence ecosystem, providing standardized components that support development across all other projects. We prioritize modularity, reliability, and consistency across a diverse set of cross-cutting concerns: configuration management, logging, GitHub automation, and agent coordination.
+Hephaestus is the foundational utilities and tooling repository of the HomericIntelligence ecosystem, providing standardized components that support development across all other projects. We prioritize modularity, reliability, and consistency across a diverse set of cross-cutting concerns: configuration management, logging, GitHub automation, and agent coordination.
 
 ## Current Focus (Q2 2026)
 
@@ -44,7 +44,7 @@ Conservative, directional items:
 
 ## How We Plan
 
-ProjectHephaestus uses an Epic-and-children issue pattern for project planning. Major initiatives are tracked as Epic issues (labeled `epic`), with breakdown into concrete child issues tagged by audit section and severity.
+Hephaestus uses an Epic-and-children issue pattern for project planning. Major initiatives are tracked as Epic issues (labeled `epic`), with breakdown into concrete child issues tagged by audit section and severity.
 
 **Exemplar:** Epic #310 (Strict audit 2026-04-28, now closed) contained 29 child issues spanning all 15 audit dimensions, with clear scoping and evidence-based requirements.
 

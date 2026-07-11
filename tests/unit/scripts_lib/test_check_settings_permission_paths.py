@@ -28,14 +28,14 @@ class TestFindViolations:
 
     def test_double_slash_prefix_is_flagged(self) -> None:
         """The exact issue case: a ``Read(//home/...)`` prefix is a violation."""
-        settings = {"permissions": {"allow": ["Read(//home/mvillmow/ProjectHephaestus/**)"]}}
+        settings = {"permissions": {"allow": ["Read(//home/mvillmow/Hephaestus/**)"]}}
         violations = find_violations(settings)
         assert len(violations) == 1
         assert "//home" in violations[0]
 
     def test_canonical_path_is_clean(self) -> None:
         """A canonical single-slash POSIX path produces no violation."""
-        settings = {"permissions": {"allow": ["Read(/home/mvillmow/ProjectHephaestus/**)"]}}
+        settings = {"permissions": {"allow": ["Read(/home/mvillmow/Hephaestus/**)"]}}
         assert find_violations(settings) == []
 
     def test_embedded_double_slash_is_flagged(self) -> None:
@@ -98,7 +98,7 @@ class TestMain:
         claude_dir = tmp_path / ".claude"
         claude_dir.mkdir()
         (claude_dir / "settings.json").write_text(
-            json.dumps({"permissions": {"allow": ["Read(//home/mvillmow/ProjectHephaestus/**)"]}})
+            json.dumps({"permissions": {"allow": ["Read(//home/mvillmow/Hephaestus/**)"]}})
         )
         monkeypatch.setattr(mod, "repo_root", lambda: tmp_path)
         assert main() == 1
