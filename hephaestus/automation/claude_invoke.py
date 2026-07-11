@@ -38,7 +38,7 @@ from hephaestus.automation.agent_config import (
     session_jsonl_path,
     session_name,
 )
-from hephaestus.github.client import ClaudeUsageCapError
+from hephaestus.github.client import ClaudeUsageCapError, PromptTooLongError
 from hephaestus.github.rate_limit import resolve_quota_reset_epoch
 from hephaestus.utils.helpers import strip_null_bytes
 
@@ -388,25 +388,33 @@ def _envelope_error_text(stdout: str) -> str | None:
     return str(data.get("result") or "")
 
 
+_PROMPT_TOO_LONG_MARKER = "Prompt is too long"
+
+
 def raise_for_error_envelope(stdout: str) -> None:
     """Raise if ``stdout`` is an ``is_error: true`` Claude JSON envelope.
 
     The Claude CLI can exit 0 while returning a JSON envelope whose
-    ``is_error`` is true — e.g. a 429 quota cap or another fatal API error
-    surfaced inside the ``result`` field. Callers that pass
-    ``output_format="json"`` and would otherwise treat that envelope as a real
-    result (``pr_reviewer``, ``review_validator``) call this to fail loudly
-    instead of forwarding the cap message downstream (#1528 follow-up).
+    ``is_error`` is true — e.g. a 429 quota cap, an oversized prompt, or
+    another fatal API error surfaced inside the ``result`` field. Callers that
+    pass ``output_format="json"`` and would otherwise treat that envelope as a
+    real result (``pr_reviewer``, ``review_validator``) call this to fail
+    loudly instead of forwarding the cap message downstream (#1528 follow-up).
 
-    A quota cap becomes a :class:`ClaudeUsageCapError` carrying the reset epoch
-    (a ``RuntimeError`` subclass, so existing ``except RuntimeError`` handlers
-    still catch it); any other ``is_error`` envelope becomes a plain
-    ``RuntimeError``. Non-JSON or non-error stdout is left untouched.
+    An oversized prompt becomes a :class:`PromptTooLongError` so callers can
+    retry with a smaller diff budget instead of recording a plain ERROR
+    (#1847). A quota cap becomes a :class:`ClaudeUsageCapError` carrying the
+    reset epoch (a ``RuntimeError`` subclass, so existing
+    ``except RuntimeError`` handlers still catch it); any other ``is_error``
+    envelope becomes a plain ``RuntimeError``. Non-JSON or non-error stdout is
+    left untouched.
 
     Args:
         stdout: The raw stdout returned by :func:`invoke_claude_with_session`.
 
     Raises:
+        PromptTooLongError: If the envelope reports the prompt exceeded model
+            context.
         ClaudeUsageCapError: If the envelope signals a 429 quota cap.
         RuntimeError: If the envelope is ``is_error`` for any other reason.
 
@@ -414,6 +422,8 @@ def raise_for_error_envelope(stdout: str) -> None:
     err_text = _envelope_error_text(stdout)
     if err_text is None:
         return
+    if _PROMPT_TOO_LONG_MARKER in err_text:
+        raise PromptTooLongError(err_text)
     reset_epoch = resolve_quota_reset_epoch(err_text)
     if reset_epoch is not None:
         raise ClaudeUsageCapError(
