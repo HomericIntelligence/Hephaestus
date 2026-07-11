@@ -400,13 +400,13 @@ def test_resolve_org_and_repos_cwd_default_uses_remote_repo_not_worktree_dir() -
             return subprocess.CompletedProcess(
                 args=argv,
                 returncode=0,
-                stdout="/tmp/ProjectHephaestus/build/.worktrees/issue-1442\n",
+                stdout="/tmp/Hephaestus/build/.worktrees/issue-1442\n",
                 stderr="",
             )
         return subprocess.CompletedProcess(
             args=argv,
             returncode=0,
-            stdout="git@github.com:HomericIntelligence/ProjectHephaestus.git\n",
+            stdout="git@github.com:HomericIntelligence/Hephaestus.git\n",
             stderr="",
         )
 
@@ -414,7 +414,7 @@ def test_resolve_org_and_repos_cwd_default_uses_remote_repo_not_worktree_dir() -
         org, repos, err = loop_runner._resolve_org_and_repos(args)
     assert err is None
     assert org == "HomericIntelligence"
-    assert repos == ["ProjectHephaestus"]
+    assert repos == ["Hephaestus"]
 
 
 # ---------------------------------------------------------------------------

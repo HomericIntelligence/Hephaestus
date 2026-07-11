@@ -1,4 +1,4 @@
-"""Shared constants for the ProjectHephaestus package."""
+"""Shared constants for the Hephaestus package."""
 
 from __future__ import annotations
 
@@ -156,7 +156,7 @@ def pre_pr_test_timeout() -> int:
 
 
 def repo_root() -> Path:
-    """Resolve the ProjectHephaestus repo root.
+    """Resolve the Hephaestus repo root.
 
     Priority:
       1. ``$HEPHAESTUS_REPO_ROOT`` env var, IFF that directory contains a

@@ -1,4 +1,4 @@
-"""Resilience utilities for ProjectHephaestus.
+"""Resilience utilities for Hephaestus.
 
 Provides circuit breaker and retry-with-resilience patterns for external calls.
 """

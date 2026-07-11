@@ -1418,7 +1418,7 @@ class TestListPrs:
             return MagicMock(stdout=json.dumps({"statusCheckRollup": []}))
 
         monkeypatch.setattr(fleet_pr_api, "_gh", fake_gh)
-        prs = fleet_pr_api.list_prs("ProjectHephaestus", "HomericIntelligence")
+        prs = fleet_pr_api.list_prs("Hephaestus", "HomericIntelligence")
         json_idx = captured["list_args"].index("--json")
         json_fields = captured["list_args"][json_idx + 1]
         assert "statusCheckRollup" not in json_fields
@@ -1454,7 +1454,7 @@ class TestListPrs:
             )
 
         monkeypatch.setattr(fleet_pr_api, "_gh", fake_gh)
-        prs = fleet_pr_api.list_prs("ProjectHephaestus", "HomericIntelligence")
+        prs = fleet_pr_api.list_prs("Hephaestus", "HomericIntelligence")
         assert view_calls and view_calls[0][:3] == ["pr", "view", "7"]
         assert prs[0].ci_state == "SUCCESS"
         assert prs[0].status == PRStatus.READY
@@ -1482,7 +1482,7 @@ class TestListPrs:
             raise RuntimeError("504 on pr view")
 
         monkeypatch.setattr(fleet_pr_api, "_gh", fake_gh)
-        prs = fleet_pr_api.list_prs("ProjectHephaestus", "HomericIntelligence")
+        prs = fleet_pr_api.list_prs("Hephaestus", "HomericIntelligence")
         assert prs[0].ci_state == "UNKNOWN"
 
     def test_list_failure_raises_not_swallowed(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1493,7 +1493,7 @@ class TestListPrs:
 
         monkeypatch.setattr(fleet_pr_api, "_gh", fake_gh)
         with pytest.raises(RuntimeError, match="could not list PRs"):
-            fleet_pr_api.list_prs("ProjectHephaestus", "HomericIntelligence")
+            fleet_pr_api.list_prs("Hephaestus", "HomericIntelligence")
 
     def test_empty_list_returns_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """An actually-empty repo returns [] (distinct from a list failure)."""
@@ -1502,7 +1502,7 @@ class TestListPrs:
             return MagicMock(stdout="[]")
 
         monkeypatch.setattr(fleet_pr_api, "_gh", fake_gh)
-        assert fleet_pr_api.list_prs("ProjectHephaestus", "HomericIntelligence") == []
+        assert fleet_pr_api.list_prs("Hephaestus", "HomericIntelligence") == []
 
 
 class TestPrClassification:
@@ -1544,7 +1544,7 @@ class TestPrClassification:
             return MagicMock(stdout=json.dumps({"statusCheckRollup": rollup}))
 
         monkeypatch.setattr(fleet_pr_api, "_gh", fake_gh)
-        return fleet_pr_api.list_prs("ProjectHephaestus", "HomericIntelligence")[0].status
+        return fleet_pr_api.list_prs("Hephaestus", "HomericIntelligence")[0].status
 
     def test_blocked_mergeable_failing_is_outdated(self, monkeypatch) -> None:
         """BLOCKED+MERGEABLE with red CI = stale failure → rebase (OUTDATED)."""

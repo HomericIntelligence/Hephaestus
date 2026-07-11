@@ -1,4 +1,4 @@
-"""GitHub utilities for ProjectHephaestus.
+"""GitHub utilities for Hephaestus.
 
 Provides utilities for working with GitHub repositories, PRs, and automation.
 

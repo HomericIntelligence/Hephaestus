@@ -1,6 +1,6 @@
-# Security Context for ProjectHephaestus
+# Security Context for Hephaestus
 
-This file outlines security considerations for developing utilities in ProjectHephaestus.
+This file outlines security considerations for developing utilities in Hephaestus.
 
 ## Key Principles
 

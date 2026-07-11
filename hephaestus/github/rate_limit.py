@@ -1,7 +1,7 @@
 """GitHub rate-limit detection and wait utilities.
 
 Parses GitHub CLI rate-limit messages and provides blocking waits
-with countdown display. Subprocess probes route through ProjectHephaestus's
+with countdown display. Subprocess probes route through Hephaestus's
 shared helper for consistent timeout handling.
 
 Usage:

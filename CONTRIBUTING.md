@@ -1,6 +1,6 @@
-# Contributing to ProjectHephaestus
+# Contributing to Hephaestus
 
-Thank you for considering contributing to ProjectHephaestus! We welcome contributions from the community.
+Thank you for considering contributing to Hephaestus! We welcome contributions from the community.
 
 ## Code of Conduct
 
@@ -43,7 +43,7 @@ Before opening a PR, locate the work in:
   — the PR scaffolding (`Closes #N` line is enforced by the
   `pr-policy` CI gate).
 
-ProjectHephaestus uses trunk-based development: create one short-lived feature
+Hephaestus uses trunk-based development: create one short-lived feature
 branch per issue, open a pull request, squash-merge it back to `main`, and cut
 releases from signed `vX.Y.Z` tags; there are no release branches.
 

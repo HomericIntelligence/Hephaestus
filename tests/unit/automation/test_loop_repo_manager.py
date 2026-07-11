@@ -129,15 +129,15 @@ class TestDetectCwdRepo:
         def fake_run(cmd: list[str], **kwargs: object) -> MagicMock:
             m = MagicMock()
             if "rev-parse" in cmd:
-                m.stdout = "/home/user/repos/ProjectHephaestus/build/.worktrees/issue-1442\n"
+                m.stdout = "/home/user/repos/Hephaestus/build/.worktrees/issue-1442\n"
             else:
-                m.stdout = "https://github.com/HomericIntelligence/ProjectHephaestus.git\n"
+                m.stdout = "https://github.com/HomericIntelligence/Hephaestus.git\n"
             return m
 
         with patch("hephaestus.automation.loop_repo_manager.subprocess.run", side_effect=fake_run):
             org, repo = _detect_cwd_repo()
         assert org == "HomericIntelligence"
-        assert repo == "ProjectHephaestus"
+        assert repo == "Hephaestus"
 
     def test_parses_ssh_scp_url(self) -> None:
         def fake_run(cmd: list[str], **kwargs: object) -> MagicMock:
@@ -159,15 +159,15 @@ class TestDetectCwdRepo:
         def fake_run(cmd: list[str], **kwargs: object) -> MagicMock:
             m = MagicMock()
             if "rev-parse" in cmd:
-                m.stdout = "/home/user/repos/ProjectHephaestus/build/.worktrees/issue-1442\n"
+                m.stdout = "/home/user/repos/Hephaestus/build/.worktrees/issue-1442\n"
             else:
-                m.stdout = "git@github.com:HomericIntelligence/ProjectHephaestus.git\n"
+                m.stdout = "git@github.com:HomericIntelligence/Hephaestus.git\n"
             return m
 
         with patch("hephaestus.automation.loop_repo_manager.subprocess.run", side_effect=fake_run):
             org, repo = _detect_cwd_repo()
         assert org == "HomericIntelligence"
-        assert repo == "ProjectHephaestus"
+        assert repo == "Hephaestus"
 
     def test_returns_none_org_for_non_github_remote(self) -> None:
         def fake_run(cmd: list[str], **kwargs: object) -> MagicMock:

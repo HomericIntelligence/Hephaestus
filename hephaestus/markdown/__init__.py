@@ -1,4 +1,4 @@
-"""Markdown utilities for ProjectHephaestus."""
+"""Markdown utilities for Hephaestus."""
 
 from hephaestus.markdown.anchors import (
     check_anchors,

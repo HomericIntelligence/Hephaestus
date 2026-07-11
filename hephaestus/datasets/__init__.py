@@ -1,4 +1,4 @@
-"""Dataset utilities for ProjectHephaestus."""
+"""Dataset utilities for Hephaestus."""
 
 from .downloader import DatasetDownloader
 

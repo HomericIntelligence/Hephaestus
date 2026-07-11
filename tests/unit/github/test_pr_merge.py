@@ -32,9 +32,9 @@ class TestDetectRepoFromRemote:
     @patch("hephaestus.github.pr_merge.git_remote_url")
     def test_detects_ssh_url(self, mock_remote_url) -> None:
         """Parses SSH-style github.com:owner/repo.git."""
-        mock_remote_url.return_value = "git@github.com:HomericIntelligence/ProjectHephaestus.git"
+        mock_remote_url.return_value = "git@github.com:HomericIntelligence/Hephaestus.git"
         result = detect_repo_from_remote()
-        assert result == "HomericIntelligence/ProjectHephaestus"
+        assert result == "HomericIntelligence/Hephaestus"
 
     @patch("hephaestus.github.pr_merge.git_remote_url")
     def test_detects_https_url(self, mock_remote_url) -> None:

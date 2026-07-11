@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cross-process advisory file lock for ProjectHephaestus.
+"""Cross-process advisory file lock for Hephaestus.
 
 Provides :func:`file_lock`, a context manager that serializes a critical
 section across separate processes using ``fcntl.flock`` on a sentinel file.

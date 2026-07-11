@@ -1,10 +1,10 @@
-# ProjectHephaestus
+# Hephaestus
 
-[![Test](https://github.com/HomericIntelligence/ProjectHephaestus/actions/workflows/test.yml/badge.svg)](https://github.com/HomericIntelligence/ProjectHephaestus/actions/workflows/test.yml)
-[![Pre-commit](https://github.com/HomericIntelligence/ProjectHephaestus/actions/workflows/pre-commit.yml/badge.svg)](https://github.com/HomericIntelligence/ProjectHephaestus/actions/workflows/pre-commit.yml)
-[![Security](https://github.com/HomericIntelligence/ProjectHephaestus/actions/workflows/security.yml/badge.svg)](https://github.com/HomericIntelligence/ProjectHephaestus/actions/workflows/security.yml)
-[![Release](https://github.com/HomericIntelligence/ProjectHephaestus/actions/workflows/release.yml/badge.svg)](https://github.com/HomericIntelligence/ProjectHephaestus/actions/workflows/release.yml)
-[![Auto Tag](https://github.com/HomericIntelligence/ProjectHephaestus/actions/workflows/auto-tag.yml/badge.svg)](https://github.com/HomericIntelligence/ProjectHephaestus/actions/workflows/auto-tag.yml)
+[![Test](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/test.yml/badge.svg)](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/test.yml)
+[![Pre-commit](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/pre-commit.yml/badge.svg)](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/pre-commit.yml)
+[![Security](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/security.yml/badge.svg)](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/security.yml)
+[![Release](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/release.yml/badge.svg)](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/release.yml)
+[![Auto Tag](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/auto-tag.yml/badge.svg)](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/auto-tag.yml)
 [![PyPI](https://img.shields.io/pypi/v/HomericIntelligence-Hephaestus.svg)](https://pypi.org/project/HomericIntelligence-Hephaestus/)
 [![Python](https://img.shields.io/pypi/pyversions/HomericIntelligence-Hephaestus.svg)](https://pypi.org/project/HomericIntelligence-Hephaestus/)
 [![License: BSD-3-Clause](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](LICENSE)
@@ -13,7 +13,7 @@ Shared utilities and tooling for the HomericIntelligence ecosystem, powered by [
 
 ## Overview
 
-ProjectHephaestus provides standardized utility functions and tools that can be shared across all HomericIntelligence repositories. Following the principles in [CLAUDE.md](CLAUDE.md), this project emphasizes:
+Hephaestus provides standardized utility functions and tools that can be shared across all HomericIntelligence repositories. Following the principles in [CLAUDE.md](CLAUDE.md), this project emphasizes:
 
 - **Modularity**: Well-defined, reusable components
 - **Simplicity**: KISS (Keep It Simple, Stupid) principle
@@ -26,7 +26,7 @@ ProjectHephaestus provides standardized utility functions and tools that can be 
 
 ### From PyPI
 
-ProjectHephaestus is published to PyPI under the ecosystem-branded distribution name **`HomericIntelligence-Hephaestus`**. The import name, however, is the short lowercase `hephaestus`:
+Hephaestus is published to PyPI under the ecosystem-branded distribution name **`HomericIntelligence-Hephaestus`**. The import name, however, is the short lowercase `hephaestus`:
 
 ```bash
 pip install HomericIntelligence-Hephaestus
@@ -40,7 +40,7 @@ print(hephaestus.__version__)
 > **Upgrading?** When moving across a major version, read the
 > [migration guide](docs/MIGRATION.md) for required consumer changes.
 >
-> **Note on naming.** `pip install hephaestus` and `pip install project-hephaestus` will **not** find this package — both names are unowned on PyPI. The `HomericIntelligence-<Project>` prefix is the deliberate naming convention shared across the HomericIntelligence ecosystem (ProjectKeystone, ProjectOdyssey, etc.) to avoid PyPI namespace collisions. Wheel filenames are PEP 625 normalized to lowercase, so you will see `homericintelligence_hephaestus-<version>-py3-none-any.whl` on disk and in release assets.
+> **Note on naming.** `pip install hephaestus` and `pip install hephaestus` will **not** find this package — both names are unowned on PyPI. The `HomericIntelligence-<Project>` prefix is the deliberate naming convention shared across the HomericIntelligence ecosystem (ProjectKeystone, ProjectOdyssey, etc.) to avoid PyPI namespace collisions. Wheel filenames are PEP 625 normalized to lowercase, so you will see `homericintelligence_hephaestus-<version>-py3-none-any.whl` on disk and in release assets.
 
 ### Optional dependencies
 
@@ -75,7 +75,7 @@ the full workflow, including the manual fallback if you do not have `just`.
 
 ## Library vs product layer
 
-ProjectHephaestus ships two layers from one distribution:
+Hephaestus ships two layers from one distribution:
 
 - **Library** — `hephaestus.{utils, io, config, logging, cli, system,
   github, validation, resilience, markdown, ci, benchmarks, datasets,
@@ -96,7 +96,7 @@ ProjectHephaestus ships two layers from one distribution:
 ## Directory Structure
 
 ```
-ProjectHephaestus/
+Hephaestus/
 ├── pixi.toml          # Pixi configuration
 ├── pyproject.toml     # Python package configuration
 ├── hephaestus/        # Main package
@@ -204,10 +204,10 @@ print(size_str)  # Output: 1.0 MB
 
 ### As a Claude Code Plugin
 
-ProjectHephaestus also ships as a Claude Code plugin, providing slash commands for repository auditing, agent orchestration, and knowledge management.
+Hephaestus also ships as a Claude Code plugin, providing slash commands for repository auditing, agent orchestration, and knowledge management.
 
 ```bash
-claude plugin install HomericIntelligence/ProjectHephaestus
+claude plugin install HomericIntelligence/Hephaestus
 ```
 
 Then enable it in your project's `.claude/settings.json`:
@@ -215,7 +215,7 @@ Then enable it in your project's `.claude/settings.json`:
 ```json
 {
   "enabledPlugins": {
-    "hephaestus@ProjectHephaestus": true
+    "hephaestus@Hephaestus": true
   }
 }
 ```
@@ -224,18 +224,18 @@ See [docs/plugin-installation.md](docs/plugin-installation.md) for the full inst
 
 ### As a Codex Plugin
 
-ProjectHephaestus also ships Codex plugin metadata for the same `hephaestus` skill set.
+Hephaestus also ships Codex plugin metadata for the same `hephaestus` skill set.
 
 ```bash
-codex plugin marketplace add HomericIntelligence/ProjectHephaestus --ref main
-codex plugin add hephaestus@project-hephaestus
+codex plugin marketplace add HomericIntelligence/Hephaestus --ref main
+codex plugin add hephaestus@hephaestus
 ```
 
 The Codex manifest lives in [`.codex-plugin/plugin.json`](.codex-plugin/plugin.json), and the marketplace entry lives in [`.agents/plugins/marketplace.json`](.agents/plugins/marketplace.json).
 
 ### Installing in Another Project
 
-ProjectHephaestus is published to PyPI as `homericintelligence-hephaestus`.
+Hephaestus is published to PyPI as `homericintelligence-hephaestus`.
 The wheel is pure-Python and installs on Linux, macOS, and Windows
 (see `requires-python` in [`pyproject.toml`](pyproject.toml)). This is
 the supported install path for non-Linux platforms.
@@ -272,7 +272,7 @@ After 1.0 ships, bump these constraints to `>=1.0,<2`.
 
 ```toml
 [pypi-dependencies]
-homericintelligence-hephaestus = { path = "../ProjectHephaestus", editable = true }
+homericintelligence-hephaestus = { path = "../Hephaestus", editable = true }
 ```
 
 ## Key Features
@@ -393,8 +393,8 @@ sync (#993).
 | Command | Description |
 |---|---|
 | `hephaestus-agent-stats` | Agent statistics aggregation and reporting |
-| `hephaestus-download-dataset` | Dataset downloading utilities for ProjectHephaestus |
-| `hephaestus-system-info` | System information collection utilities for ProjectHephaestus |
+| `hephaestus-download-dataset` | Dataset downloading utilities for Hephaestus |
+| `hephaestus-system-info` | System information collection utilities for Hephaestus |
 
 ### Debugging & Forensics
 
@@ -435,7 +435,7 @@ sync (#993).
 | Command | Description |
 |---|---|
 | `hephaestus-check-links` | Fix or validate invalid absolute path links in markdown files |
-| `hephaestus-fix-markdown` | Markdown linting fixer utilities for ProjectHephaestus |
+| `hephaestus-fix-markdown` | Markdown linting fixer utilities for Hephaestus |
 | `hephaestus-validate-anchors` | Validate anchor fragments in markdown links against actual headings |
 
 ### CI / Pre-commit

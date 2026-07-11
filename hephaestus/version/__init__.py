@@ -1,4 +1,4 @@
-"""Version management utilities for ProjectHephaestus."""
+"""Version management utilities for Hephaestus."""
 
 from hephaestus.version.consistency import (
     bump_version,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""System information collection utilities for ProjectHephaestus.
+"""System information collection utilities for Hephaestus.
 
 Collects comprehensive system information for debugging, reporting, and environment analysis.
 Gathers OS details, Python versions, Git information, and environment variables.

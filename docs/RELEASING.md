@@ -1,4 +1,4 @@
-# Releasing ProjectHephaestus
+# Releasing Hephaestus
 
 ## One-Click Release (normal path)
 

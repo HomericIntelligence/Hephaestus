@@ -1,1 +1,1 @@
-"""Integration tests for ProjectHephaestus."""
+"""Integration tests for Hephaestus."""

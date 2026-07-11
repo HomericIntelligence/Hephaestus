@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared test fixtures for ProjectHephaestus tests."""
+"""Shared test fixtures for Hephaestus tests."""
 
 import json
 

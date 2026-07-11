@@ -1,4 +1,4 @@
-"""Validation utilities for ProjectHephaestus."""
+"""Validation utilities for Hephaestus."""
 
 from hephaestus.validation.audit import (
     filter_audit_results,

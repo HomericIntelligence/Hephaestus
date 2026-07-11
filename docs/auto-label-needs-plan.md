@@ -9,7 +9,7 @@ source of truth for an issue's plan-review status:
 | `state:plan-no-go` | Reviewer's latest verdict was NOGO; re-plan next loop. |
 | `state:plan-go` | Plan approved; implementer may proceed. |
 
-ProjectHephaestus self-tags its own newly-opened issues via
+Hephaestus self-tags its own newly-opened issues via
 [`.github/workflows/auto-label-needs-plan.yml`](../.github/workflows/auto-label-needs-plan.yml).
 That workflow is also a **reusable workflow** (`workflow_call`-callable), so
 every other HomericIntelligence repo gets the same behaviour by adding a
@@ -28,7 +28,7 @@ permissions:
 
 jobs:
   call:
-    uses: HomericIntelligence/ProjectHephaestus/.github/workflows/auto-label-needs-plan.yml@main
+    uses: HomericIntelligence/Hephaestus/.github/workflows/auto-label-needs-plan.yml@main
 ```
 
 ## Issue intake (forms → labels)
@@ -47,7 +47,7 @@ The issue forms
   pattern (`epic` label, see [ROADMAP.md](ROADMAP.md)). **Reference only:**
   triage links it; it is not auto-consumed (free-text parsing into pipeline
   state is deliberately avoided).
-- **Audit-section** is intentionally **not** a form field. ProjectHephaestus has
+- **Audit-section** is intentionally **not** a form field. Hephaestus has
   no per-audit-section label vocabulary (only `audit-finding`), so maintainers
   tag audit section during triage rather than via the form — avoiding an inert
   field with no consumer.

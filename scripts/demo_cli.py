@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Demonstration of the enhanced CLI utilities in ProjectHephaestus."""
+"""Demonstration of the enhanced CLI utilities in Hephaestus."""
 
 import sys
 

@@ -1,4 +1,4 @@
-ProjectHephaestus
+Hephaestus
 Copyright (c) 2025, Micah Villmow
 
 This product is distributed under the BSD 3-Clause License (see LICENSE).
@@ -39,14 +39,14 @@ These packages are installed only when the corresponding extra is requested
     PyGithub    LGPL-3.0-only
                 SPDX: https://spdx.org/licenses/LGPL-3.0-only.html
 
-                ProjectHephaestus declares PyGithub as an optional pip
+                Hephaestus declares PyGithub as an optional pip
                 dependency under the `[github]` extra. We do not vendor,
                 modify, redistribute, or statically embed PyGithub's
                 source; the wheel we publish contains zero PyGithub code.
                 Users who install the extra obtain PyGithub directly from
                 PyPI under its own LGPL-3.0-only terms, and may substitute
                 a different version (e.g. `pip install <fork>`) without
-                rebuilding ProjectHephaestus. The authoritative analysis
+                rebuilding Hephaestus. The authoritative analysis
                 of LGPL-3.0 obligations on combining works is in the
                 LGPLv3 license text itself, which PyPI distributes with
                 every PyGithub release.

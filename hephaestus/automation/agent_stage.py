@@ -60,7 +60,7 @@ def read_prompt(prompt_file: Path, skill_file: Path | None, stage: str) -> str:
         return prompt
     skill_text = skill_file.read_text(encoding="utf-8")
     return (
-        f"You are running ProjectHephaestus agent stage `{stage}`.\n\n"
+        f"You are running Hephaestus agent stage `{stage}`.\n\n"
         "Use these skill instructions as authoritative context for this stage:\n\n"
         f"{skill_text}\n\n"
         "---\n\n"

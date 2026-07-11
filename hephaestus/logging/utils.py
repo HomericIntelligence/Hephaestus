@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Enhanced logging utilities for ProjectHephaestus.
+"""Enhanced logging utilities for Hephaestus.
 
 Standardized logging interface with configurable output formats,
 multiple destinations, and context management.

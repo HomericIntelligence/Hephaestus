@@ -1,1 +1,1 @@
-"""Test suite for ProjectHephaestus."""
+"""Test suite for Hephaestus."""

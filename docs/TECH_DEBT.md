@@ -1,6 +1,6 @@
 # Tech-Debt Tracking Convention
 
-Tech debt in ProjectHephaestus is tracked exclusively as GitHub issues
+Tech debt in Hephaestus is tracked exclusively as GitHub issues
 labelled `tech-debt`. We do not use undocumented "fix later" markers:
 every `# TODO`, `# FIXME`, or `# HACK` comment in the source MUST reference
 a tracking issue using the `# TODO(#N): explanation` form (for example,

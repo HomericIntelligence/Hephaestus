@@ -1,6 +1,6 @@
-# Workflow Context for ProjectHephaestus
+# Workflow Context for Hephaestus
 
-This file describes the typical development workflow for ProjectHephaestus.
+This file describes the typical development workflow for Hephaestus.
 
 ## Development Cycle
 

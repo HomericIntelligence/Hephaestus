@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-ProjectHephaestus supports **Python 3.10–3.13** (`requires-python = ">=3.10"` in
+Hephaestus supports **Python 3.10–3.13** (`requires-python = ">=3.10"` in
 `pyproject.toml`; CI exercises 3.10, 3.11, 3.12, and 3.13). See
 [COMPATIBILITY.md](COMPATIBILITY.md) for the full compatibility policy.
 
@@ -29,7 +29,7 @@ We will coordinate disclosure timing with you once a fix is available.
 
 ### Threat Model
 
-ProjectHephaestus is a **library and CLI utility repository**, not a
+Hephaestus is a **library and CLI utility repository**, not a
 network-facing service. Its security posture reflects that scope:
 
 - **Assets**: source-controlled utility code, the optional `automation`
