@@ -509,10 +509,16 @@ class TestFailBackRouting:
 class TestImplementationAdmission:
     """Topological order + file-overlap reuse for the implementation queue."""
 
-    def test_duplicate_issue_numbers_assert_before_dispatch(
+    def test_duplicate_issue_numbers_collapse_to_first_queued(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Duplicate issue-number work items assert before dict indexing."""
+        """A duplicate issue work item is dropped, not fatal (#1952 regression).
+
+        A transient retry/fail-back can re-enqueue an issue while a prior copy
+        is still queued. The drain must keep the first-queued item, terminalize
+        the later duplicate as superseded, and dispatch normally — never crash
+        the whole org-wide run.
+        """
         coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
         ran: list[int] = []
 
@@ -526,14 +532,18 @@ class TestImplementationAdmission:
         duplicate = _issue_item(21, StageName.IMPLEMENTATION)
         coordinator._push_item(first, StageName.IMPLEMENTATION, enter=True)
         coordinator._push_item(duplicate, StageName.IMPLEMENTATION, enter=True)
-        coordinator.event_log.clear()
 
-        with pytest.raises(AssertionError, match=r"duplicate issue numbers: \[21\]"):
-            coordinator._drain_implementation()
+        coordinator._drain_implementation()
 
-        assert ran == []
-        assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == [first, duplicate]
-        assert coordinator.event_log == []
+        # First-queued item dispatched exactly once; duplicate never ran.
+        assert ran == [21]
+        # The duplicate was terminalized as superseded (kept out of dispatch).
+        assert duplicate.stage is StageName.FINISHED
+        assert duplicate.result is not None
+        assert duplicate.result.passed
+        assert "superseded" in duplicate.result.reason
+        # Implementation queue is drained — no duplicate left behind.
+        assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == []
 
     def test_topo_order_and_overlap_reuse(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
