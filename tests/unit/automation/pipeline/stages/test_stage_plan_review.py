@@ -118,6 +118,43 @@ class TestPlanReviewStageOnEnter:
         assert item.payload == snapshot
         assert github.mutation_log == []
 
+    def test_on_enter_resets_error_retries_for_new_cycle(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A fresh plan cycle also clears a stale review_error_retries count (#1869).
+
+        Without this reset, a count left over from a prior transient
+        reviewer failure (persisted across the FAIL_BACK -> planning ->
+        plan_review round-trip) would let the very first ERROR of the new
+        cycle immediately exceed REVIEW_ERROR_RETRY_CAP.
+        """
+        stage = PlanReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=4, state="ENTER")
+        item.attempts["plan_cycles"] = 1  # fail-back happened; new cycle
+        item.payload["review_cycle"] = 0
+        item.payload["review_round"] = 3
+        item.payload["review_error_retries"] = 2  # stale from prior cycle's ERRORs
+
+        stage.on_enter(item, ctx)
+
+        assert item.payload.get("review_error_retries", 0) == 0
+
+    def test_on_enter_same_cycle_keeps_error_retries(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Same-cycle re-entry (e.g. the ERROR-path RETRY) keeps the count."""
+        stage = PlanReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=5, state="ENTER")
+        item.payload["review_cycle"] = 0
+        item.payload["review_round"] = 1
+        item.payload["review_error_retries"] = 1  # one ERROR already this cycle
+
+        stage.on_enter(item, ctx)
+
+        assert item.payload["review_error_retries"] == 1  # preserved
+
 
 class TestPlanReviewStageStep:
     """step state machine: ENTER -> REVIEW_WAIT -> EVAL -> AMEND/LEARN."""
@@ -712,6 +749,39 @@ class TestCycleRelativeBudget:
         assert second.note == "plan_cycles_exhausted"
         assert item.attempts["plan_review_iter"] == 6  # lifetime audit trail
         assert item.attempts["plan_cycles"] == 2
+
+    def test_new_cycle_gets_full_error_retry_budget(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A fresh cycle's first ERROR does not FINISH_FAIL on a stale count (#1869).
+
+        Reproduces the bug scenario: review_error_retries is left at
+        REVIEW_ERROR_RETRY_CAP - 1 from transient ERRORs in a prior cycle
+        (no real verdict ever reset it), then FAIL_BACK -> planning ->
+        plan_review re-enters for a new cycle. The single ERROR in the new
+        cycle must RETRY, not immediately exceed the cap.
+        """
+        stage = PlanReviewStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=36, state="ENTER")
+        item.attempts["plan_cycles"] = 0
+        item.payload["review_cycle"] = 0
+        item.payload["review_error_retries"] = REVIEW_ERROR_RETRY_CAP - 1
+
+        # Simulate the fail-back into a new cycle.
+        item.attempts["plan_cycles"] = 1
+        assert stage.on_enter(item, ctx) is None
+        assert item.payload.get("review_error_retries", 0) == 0
+
+        item.state = "EVAL"
+        item.payload["review_verdict"] = _verdict("ERROR")
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.RETRY  # not FINISH_FAIL
+        assert item.payload["review_error_retries"] == 1
+        assert github.mutation_log == []
 
 
 class TestNonFatalLabelWrites:
