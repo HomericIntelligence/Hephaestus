@@ -1726,6 +1726,38 @@ class TestGhPrCreate:
 
     @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
     @patch("hephaestus.automation.github_api._gh_call")
+    def test_gh_pr_create_contains_later_siblings_after_a_failed_readback(
+        self, mock_gh_call: Any, _mock_signed: Any
+    ) -> None:
+        """A failed sibling containment still probes every known PR on the head."""
+        mock_gh_call.side_effect = [
+            Mock(
+                stdout=json.dumps(
+                    [
+                        {"number": 962, "state": "OPEN", "baseRefName": "main"},
+                        {"number": 963, "state": "OPEN", "baseRefName": "release"},
+                    ]
+                )
+            ),
+            Mock(
+                returncode=0,
+                stdout=json.dumps({"state": "OPEN", "autoMergeRequest": {"enabledAt": "now"}}),
+            ),
+            Mock(returncode=1, stdout="", stderr="disable failed"),
+            Mock(returncode=0, stdout=json.dumps({"state": "OPEN", "autoMergeRequest": None})),
+        ]
+
+        with pytest.raises(RuntimeError, match="#962"):
+            gh_pr_create(branch="768-auto-impl", title="Test PR", body=_POLICY_BODY)
+
+        assert [call.args[0][:3] for call in mock_gh_call.call_args_list[1:]] == [
+            ["pr", "view", "962"],
+            ["pr", "merge", "962"],
+            ["pr", "view", "963"],
+        ]
+
+    @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
+    @patch("hephaestus.automation.github_api._gh_call")
     def test_gh_pr_create_proceeds_when_only_closed_pr_exists(
         self, mock_gh_call: Any, _mock_signed: Any
     ) -> None:

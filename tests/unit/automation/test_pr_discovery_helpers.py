@@ -220,6 +220,32 @@ class TestListOpenPrsRemaining:
         assert remaining[0]["headRefName"] == ""
         assert remaining[0]["labels"] == []
 
+    def test_mixed_malformed_rows_preserve_valid_prs_and_an_unknown_sentinel(
+        self, discovery: PRDiscovery
+    ) -> None:
+        """A malformed sibling cannot hide known PRs from final containment."""
+        discovery._options().include_all_authors = True
+        discovery._pr_merge_state_fn = lambda _number: ("", "")
+        raw_pr = {
+            "number": 42,
+            "title": "armed PR",
+            "head": {"ref": "feature"},
+            "labels": [],
+            "user": {"login": "viewer", "type": "User"},
+            "auto_merge": {"enabledAt": "now"},
+        }
+        with (
+            patch("hephaestus.automation.pr_discovery.get_repo_info", return_value=("o", "r")),
+            patch(
+                "hephaestus.automation.pr_discovery._gh_call",
+                return_value=MagicMock(returncode=0, stdout=json.dumps([raw_pr, "malformed"])),
+            ),
+        ):
+            remaining = discovery.list_open_prs_remaining()
+
+        assert [pr["number"] for pr in remaining] == [42, -1]
+        assert remaining[-1]["title"] == "(unknown: malformed gh api pull row)"
+
     def test_explicit_direct_pr_scope_keeps_other_author_for_containment(
         self, discovery: PRDiscovery
     ) -> None:

@@ -10,8 +10,9 @@ Re-houses the fused implementation-review loop from ``_review_phase.py``
 contract):
 
 - States: ENTER -> REVIEW_WAIT -> VALIDATE_WAIT -> POST -> DIFFICULTY_WAIT
-  -> ADDRESS_WAIT -> PUSH_WAIT -> EVAL -> (loop to REVIEW_WAIT) ->
-  FOLLOWUP_WAIT.
+  -> ADDRESS_WAIT -> PUSH_WAIT -> EVAL -> (loop to REVIEW_WAIT) or terminal
+  ``strict_gate_unavailable``. ``FOLLOWUP_WAIT`` remains only to drain legacy
+  persisted work; a #2054 clean GO never enters it.
 - Budgets: ``pr_review_iter`` = 3 (soft cap), ``pr_review_hard`` = 6 (hard
   cap; rounds 4-6 are admitted ONLY while the unresolved-thread count
   strictly decreases — the #1554 progress-aware extension, legacy
@@ -102,7 +103,7 @@ contract):
   exemption mirrors plan_review's). REVIEW_WAIT clears all stale
   round-scoped payload at submission so a failed later round can never
   replay an earlier round's verdict or threads.
-- FOLLOWUP_WAIT intentionally stores nothing in ``on_job_done``: the
+- Legacy FOLLOWUP_WAIT intentionally stores nothing in ``on_job_done``: the
   follow-up job's output is a side effect (follow-up issues filed by the
   agent), not a payload value any later state consumes.
 """
@@ -333,7 +334,7 @@ def _surviving_threads(
 
 
 class PrReviewStage(Stage):
-    """Stage: review -> validate -> post -> address -> EVAL -> follow-up.
+    """Stage: review -> validate -> post -> address -> EVAL.
 
     State machine (doc section "5. pr_review"):
 
@@ -352,8 +353,9 @@ class PrReviewStage(Stage):
     - PUSH_WAIT: commit+push the addressing changes.
     - EVAL [M]: re-housed ``_evaluate_go_verdict`` + budget gate (see
       module docstring).
-    - FOLLOWUP_WAIT (GO only): submit the follow-up job, then PR_FINISH ->
-      ADVANCE.
+    - FOLLOWUP_WAIT (legacy persisted work only): submit the follow-up job,
+      then PR_FINISH -> FINISHED. A #2054 clean GO terminates at EVAL with
+      ``strict_gate_unavailable`` instead.
     """
 
     def on_enter(self, item: WorkItem, ctx: StageContext) -> StageOutcome | None:
@@ -547,7 +549,7 @@ class PrReviewStage(Stage):
         return JobRequest(git_job, on_done_state=EVAL)
 
     def _followup_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """FOLLOWUP_WAIT submits the follow-up job before PR_FINISH advances."""
+        """Drain a legacy follow-up item without granting merge eligibility."""
         issue = _issue_number(item)
         logger.info("pr_review:%d: requesting follow-up job", issue)
         job = AgentJob(
@@ -565,10 +567,10 @@ class PrReviewStage(Stage):
         return JobRequest(job, on_done_state=PR_FINISH)
 
     def _finish(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """PR_FINISH advances after the follow-up job completes."""
+        """Finish a legacy follow-up item after its side-effect job completes."""
         issue = _issue_number(item)
-        logger.info("pr_review:%d: follow-up completed; advancing", issue)
-        return StageOutcome(Disposition.ADVANCE, "implementation review approved")
+        logger.info("pr_review:%d: legacy follow-up completed; advancing to finished", issue)
+        return StageOutcome(Disposition.ADVANCE, "legacy_followup_completed")
 
     def on_job_done(self, item: WorkItem, result: JobResult, ctx: StageContext) -> None:
         """Store job results on the item payload (state is still the WAIT state).

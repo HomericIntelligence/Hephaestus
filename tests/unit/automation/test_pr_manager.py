@@ -373,6 +373,37 @@ class TestEnsurePRCreated:
                 pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt"))
         create_pr.assert_not_called()
 
+    def test_existing_pr_containment_attempts_later_siblings_after_a_failure(self) -> None:
+        """A failed readback cannot stop containment of a later same-head PR."""
+        run_mock = MagicMock(
+            side_effect=[
+                _status("abc1234 commit msg"),
+                _status("origin/master"),
+                _status("2"),
+                _status("refs/heads/branch"),
+            ]
+        )
+        deferred: list[int] = []
+
+        def defer(pr_number: int) -> None:
+            deferred.append(pr_number)
+            if pr_number == 99:
+                raise RuntimeError("PR #99 remains armed")
+
+        with (
+            patch.object(
+                pr_manager,
+                "_find_open_prs_for_head",
+                return_value=[(99, "master"), (100, "release")],
+            ),
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "ensure_pr_auto_merge_deferred", side_effect=defer),
+        ):
+            with pytest.raises(RuntimeError, match="PR #99 remains armed"):
+                pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt"))
+
+        assert deferred == [99, 100]
+
     def test_existing_pr_contains_every_open_pr_on_the_head(self) -> None:
         """A target-base PR is reused only after every head PR is contained."""
         run_mock = MagicMock(

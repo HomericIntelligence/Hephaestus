@@ -92,8 +92,8 @@ def _dedupe_issue_prs(raw_map: dict[int, int]) -> PRWorkset:
     return PRWorkset(pr_map=deduped, shared_pr_issues=shared)
 
 
-def _fetch_open_pulls(repo_root: Any, *, purpose: str) -> list[dict[str, Any]] | None:
-    """Fetch open REST pull rows, returning None on lookup or parse failure."""
+def _fetch_open_pulls(repo_root: Any, *, purpose: str) -> tuple[list[dict[str, Any]], bool] | None:
+    """Fetch open REST rows plus whether malformed rows were discarded."""
     try:
         owner, repo = get_repo_info(repo_root)
     except RuntimeError as exc:
@@ -127,10 +127,14 @@ def _fetch_open_pulls(repo_root: Any, *, purpose: str) -> list[dict[str, Any]] |
     except (subprocess.TimeoutExpired, OSError) as exc:
         logger.info("%s skipped: gh api failed (%s)", purpose, exc)
         return None
-    if not isinstance(raw_pulls, list) or not all(isinstance(pr, dict) for pr in raw_pulls):
+    if not isinstance(raw_pulls, list):
         logger.error("Could not list open PRs for %s: invalid response shape", purpose)
         return None
-    return raw_pulls
+    pulls = [pr for pr in raw_pulls if isinstance(pr, dict)]
+    malformed_rows = len(pulls) != len(raw_pulls)
+    if malformed_rows:
+        logger.error("Could not fully list open PRs for %s: malformed pull row", purpose)
+    return pulls, malformed_rows
 
 
 def _normalise_open_pr(
@@ -317,9 +321,10 @@ class PRDiscovery:
                 resolver entirely.
 
         """
-        raw_pulls = _fetch_open_pulls(self._repo_root(), purpose="Bot-PR discovery")
-        if raw_pulls is None:
+        fetched_pulls = _fetch_open_pulls(self._repo_root(), purpose="Bot-PR discovery")
+        if fetched_pulls is None:
             return {}
+        raw_pulls, _malformed_rows = fetched_pulls
         viewer = "" if self._options().include_all_authors else self.resolve_viewer_login()
         bot_prs: dict[int, int] = {}
         for pr in raw_pulls:
@@ -469,10 +474,11 @@ class PRDiscovery:
             treating an unverified repository as clean.
 
         """
-        raw_pulls = _fetch_open_pulls(self._repo_root(), purpose="open-PR done-state")
-        if raw_pulls is None:
+        fetched_pulls = _fetch_open_pulls(self._repo_root(), purpose="open-PR done-state")
+        if fetched_pulls is None:
             return [{"number": -1, "title": "(unknown: gh api pulls failed)"}]
-        if not raw_pulls:
+        raw_pulls, malformed_rows = fetched_pulls
+        if not raw_pulls and not malformed_rows:
             return []
 
         options = self._options()
@@ -500,6 +506,8 @@ class PRDiscovery:
             # fall back to the local method when unwired.
             merge_state_fn = self._pr_merge_state_fn or self.pr_merge_state
             normalised.append(_normalise_open_pr(pr, merge_state_fn=merge_state_fn))
+        if malformed_rows:
+            normalised.append({"number": -1, "title": "(unknown: malformed gh api pull row)"})
         return normalised
 
     def pr_merge_state(self, pr_number: Any) -> tuple[str, str]:

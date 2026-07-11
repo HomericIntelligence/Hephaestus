@@ -66,7 +66,7 @@ from hephaestus.automation.state_labels import (
     is_plan_go,
 )
 from hephaestus.constants import read_timeout_env
-from hephaestus.github.auto_merge import defer_auto_merge
+from hephaestus.github.auto_merge import defer_auto_merge, defer_auto_merge_batch
 from hephaestus.github.client import gh_call
 
 logger = logging.getLogger(__name__)
@@ -331,9 +331,15 @@ class PipelineGitHub:
 
     def _contain_open_prs_for_branch(self, branch_name: str) -> list[tuple[int, str]]:
         """Contain every open PR on ``branch_name`` before selecting any one of them."""
-        open_prs = github_api._find_open_prs_for_head(branch_name, lambda args: self._gh(args))
-        for pr_number, _base_ref_name in open_prs:
-            self.defer_auto_merge(pr_number)
+        open_prs = github_api._find_open_prs_for_head(branch_name, self._gh)
+        containment_failures = defer_auto_merge_batch(
+            (pr_number for pr_number, _base_ref_name in open_prs), self.defer_auto_merge
+        )
+        if containment_failures:
+            raise RuntimeError(
+                "could not verify auto-merge disabled for existing PR(s): "
+                + "; ".join(containment_failures)
+            )
         return open_prs
 
     def _find_open_pr_for_branch(self, branch_name: str) -> int | None:

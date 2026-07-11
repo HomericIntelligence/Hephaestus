@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -60,3 +60,22 @@ def defer_auto_merge(pr_number: int, run: Callable[[list[str]], Any]) -> bool:
     except Exception as exc:
         logger.error("Could not verify auto-merge disabled for PR #%s: %s", pr_number, exc)
         return False
+
+
+def defer_auto_merge_batch(
+    pr_numbers: Iterable[int], defer: Callable[[int], bool | None]
+) -> list[str]:
+    """Attempt containment for every known PR and return failed numbers.
+
+    A failure for one same-head PR must not leave later PRs unexamined: they
+    may have independent auto-merge requests. Callers raise only after this
+    function has attempted every supplied number.
+    """
+    failures: list[str] = []
+    for pr_number in pr_numbers:
+        try:
+            if defer(pr_number) is False:
+                failures.append(f"#{pr_number}")
+        except Exception as exc:
+            failures.append(f"#{pr_number}: {exc}")
+    return failures

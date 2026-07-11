@@ -10,7 +10,7 @@ from collections.abc import Callable
 from typing import Any, cast
 
 import hephaestus.automation.github_api as _api
-from hephaestus.github.auto_merge import defer_auto_merge
+from hephaestus.github.auto_merge import defer_auto_merge, defer_auto_merge_batch
 from hephaestus.utils.helpers import strip_null_bytes
 
 _ACCEPTABLE_SIG_STATUSES = frozenset({"G", "U"})
@@ -267,11 +267,17 @@ def gh_pr_create(
     # still gets a fresh PR — the issue may legitimately need new work, and the
     # worktree manager already extends the remote branch's history.
     open_prs = _api._find_open_prs_for_head(branch)
-    for open_pr_number, _open_pr_base in open_prs:
-        if not defer_auto_merge(open_pr_number, lambda args: _api._gh_call(args, check=False)):
-            raise RuntimeError(
-                f"could not verify auto-merge disabled for existing PR #{open_pr_number}"
-            )
+    containment_failures = defer_auto_merge_batch(
+        (open_pr_number for open_pr_number, _open_pr_base in open_prs),
+        lambda pr_number: defer_auto_merge(
+            pr_number, lambda args: _api._gh_call(args, check=False)
+        ),
+    )
+    if containment_failures:
+        raise RuntimeError(
+            "could not verify auto-merge disabled for existing PR(s): "
+            + "; ".join(containment_failures)
+        )
     existing_open_pr = _api._select_open_pr_for_base(open_prs, base)
     if existing_open_pr is not None:
         _api.logger.info("Reusing existing open PR #%s on head %s", existing_open_pr, branch)

@@ -417,7 +417,7 @@ class TestPrReviewStageStep:
         assert result.on_done_state == "EVAL"
 
     def test_followup_wait_requests_follow_up(self, make_ctx: Any, make_work_item: Any) -> None:
-        """FOLLOWUP_WAIT submits the follow-up job, then PR_FINISH advances."""
+        """Legacy FOLLOWUP_WAIT submits the follow-up job, then finishes."""
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state="FOLLOWUP_WAIT")

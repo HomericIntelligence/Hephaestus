@@ -363,7 +363,7 @@ def test_legacy_drive_stops_after_verified_auto_merge_deferral() -> None:
         return True
 
     coordinator = CIDriveRunCoordinator(
-        options_provider=lambda: SimpleNamespace(),
+        options_provider=SimpleNamespace,
         worktree_manager=SimpleNamespace(),
         status_tracker=_Status(),
         discovery=SimpleNamespace(),

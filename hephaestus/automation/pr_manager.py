@@ -22,7 +22,7 @@ from hephaestus.agents.runtime import (
     run_agent_text,
     uses_direct_agent_runner,
 )
-from hephaestus.github.auto_merge import defer_auto_merge
+from hephaestus.github.auto_merge import defer_auto_merge, defer_auto_merge_batch
 
 from .agent_config import DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT
 from .ci_check_inspector import FAILING_CHECK_CONCLUSIONS
@@ -944,8 +944,15 @@ def ensure_pr_created(
         open_prs = _find_open_prs_for_head(branch_name)
     except Exception as e:
         raise RuntimeError(f"could not verify existing PR state for branch {branch_name!r}") from e
-    for open_pr_number, _open_pr_base in open_prs:
-        ensure_pr_auto_merge_deferred(open_pr_number)
+    containment_failures = defer_auto_merge_batch(
+        (open_pr_number for open_pr_number, _open_pr_base in open_prs),
+        ensure_pr_auto_merge_deferred,
+    )
+    if containment_failures:
+        raise RuntimeError(
+            "could not verify auto-merge disabled for existing PR(s): "
+            + "; ".join(containment_failures)
+        )
     try:
         pr_number = _select_open_pr_for_base(open_prs, base_branch)
     except Exception as e:

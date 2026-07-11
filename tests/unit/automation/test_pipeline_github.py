@@ -420,6 +420,31 @@ class TestRepoScoping:
             ["pr", "view", "6"],
         ]
 
+    def test_repo_scoped_pr_lookup_contains_later_siblings_after_a_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed sibling readback cannot stop later same-head containment."""
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        deferred: list[int] = []
+
+        monkeypatch.setattr(
+            github_api_mod,
+            "_find_open_prs_for_head",
+            lambda _branch, _runner: [(5, "main"), (6, "release")],
+        )
+
+        def defer(pr_number: int) -> None:
+            deferred.append(pr_number)
+            if pr_number == 5:
+                raise RuntimeError("PR #5 remains armed")
+
+        monkeypatch.setattr(adapter, "defer_auto_merge", defer)
+
+        with pytest.raises(RuntimeError, match="PR #5 remains armed"):
+            adapter._contain_open_prs_for_branch("branch")
+
+        assert deferred == [5, 6]
+
     def test_repo_scoped_closing_pr_lookup_contains_every_fallback_head_sibling(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

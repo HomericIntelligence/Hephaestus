@@ -6,7 +6,7 @@ import json
 from types import SimpleNamespace
 from typing import Any
 
-from hephaestus.github.auto_merge import defer_auto_merge
+from hephaestus.github.auto_merge import defer_auto_merge, defer_auto_merge_batch
 
 
 def _result(*, state: dict[str, Any] | None = None, returncode: int = 0) -> SimpleNamespace:
@@ -76,3 +76,15 @@ def test_defer_auto_merge_disables_an_existing_arm_and_verifies_it() -> None:
         ["pr", "merge", "42", "--disable-auto"],
         ["pr", "view", "42", "--json", "state,autoMergeRequest"],
     ]
+
+
+def test_defer_auto_merge_batch_attempts_later_prs_after_a_failure() -> None:
+    """One unverified sibling must not prevent containment of later PRs."""
+    attempted: list[int] = []
+
+    def defer(pr_number: int) -> bool:
+        attempted.append(pr_number)
+        return pr_number != 41
+
+    assert defer_auto_merge_batch([41, 42], defer) == ["#41"]
+    assert attempted == [41, 42]
