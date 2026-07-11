@@ -113,7 +113,7 @@ _RAW_RULES: list[tuple[str, Severity, str, str]] = [
         (
             "gh pr merge must use manual --squash without --auto while the "
             "strict-review gate is unavailable. --merge and --rebase are "
-            "rejected as merge-strategy flags."
+            "rejected as merge-strategy flags; --disable-auto is containment."
         ),
         # Flag any ``gh pr merge`` invocation that carries ``--auto`` or a
         # rejected strategy flag, or that omits the required manual squash
@@ -125,8 +125,9 @@ _RAW_RULES: list[tuple[str, Severity, str, str]] = [
         # rejected merge-strategy flags
         r"(?=.*--merge\b)"
         r"|(?=.*--rebase\b)"
-        # OR missing the required manual squash flag
-        r"|(?!.*--squash\b)"
+        # OR missing the required manual squash flag, except the containment
+        # command that disables an existing auto-merge arm without merging.
+        r"|(?!.*--squash\b)(?!.*--disable-auto\b)"
         r")",
     ),
     (

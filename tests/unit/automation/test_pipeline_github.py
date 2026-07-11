@@ -340,7 +340,15 @@ class TestRepoScoping:
 
         def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
             calls.append(argv)
-            return SimpleNamespace(stdout=json.dumps([{"number": 5}]))
+            if argv[:2] == ["pr", "list"]:
+                return SimpleNamespace(
+                    stdout=json.dumps([{"number": 5, "state": "OPEN", "baseRefName": "main"}])
+                )
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"state": "OPEN", "autoMergeRequest": None}),
+                stderr="",
+            )
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
 
@@ -353,16 +361,87 @@ class TestRepoScoping:
                 "list",
                 "--head",
                 "branch-7",
-                "--state",
-                "open",
                 "--json",
-                "number",
+                "number,state,baseRefName",
                 "--limit",
-                "1",
+                "1000",
                 "--repo",
                 "org/repo-a",
-            ]
+            ],
+            [
+                "pr",
+                "view",
+                "5",
+                "--json",
+                "state,autoMergeRequest",
+                "--repo",
+                "org/repo-a",
+            ],
         ]
+
+    def test_repo_scoped_pr_lookup_contains_every_same_head_pr(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Repo-scoped discovery contains every head PR before selecting main."""
+        calls: list[list[str]] = []
+        responses = iter(
+            [
+                SimpleNamespace(
+                    stdout=json.dumps(
+                        [
+                            {"number": 5, "state": "OPEN", "baseRefName": "main"},
+                            {"number": 6, "state": "OPEN", "baseRefName": "release"},
+                        ]
+                    )
+                ),
+                SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps({"state": "OPEN", "autoMergeRequest": None}),
+                    stderr="",
+                ),
+                SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps({"state": "OPEN", "autoMergeRequest": None}),
+                    stderr="",
+                ),
+            ]
+        )
+
+        def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            return next(responses)
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        assert adapter.find_pr_for_issue(5) == 5
+        assert [call[:3] for call in calls[1:]] == [
+            ["pr", "view", "5"],
+            ["pr", "view", "6"],
+        ]
+
+    def test_repo_scoped_pr_lookup_rejects_empty_successful_output(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Blank discovery output cannot become an invented no-PR state."""
+        monkeypatch.setattr(pg, "gh_call", lambda _argv, **_kwargs: SimpleNamespace(stdout=""))
+
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        with pytest.raises(RuntimeError, match="could not verify existing PR state"):
+            adapter.find_pr_for_issue(5)
+
+    def test_repo_scoped_merged_pr_lookup_preserves_head_branch_fallback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Merged lookup still finds a PR on the canonical issue branch."""
+        monkeypatch.setattr(
+            pg,
+            "gh_call",
+            lambda _argv, **_kwargs: SimpleNamespace(stdout=json.dumps([{"number": 5}])),
+        )
+
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        assert adapter.find_merged_pr_for_issue(5) == 5
 
     def test_repo_scoped_unresolved_threads_counts_automation_and_human(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

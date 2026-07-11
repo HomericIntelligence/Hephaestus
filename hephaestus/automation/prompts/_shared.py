@@ -148,5 +148,5 @@ GitHub-posted review bodies, PR descriptions, and issue comments retain full det
 - Skip preamble, postamble, restating the task, narrating tool calls, or end-of-turn summaries.
 - Return verdicts as a single line: `Verdict: <result> | Reason: <one line>`.
 - Prefer bullet lists over prose; cite `file.py:line` instead of quoting blocks; reference issue/PR numbers, not their bodies.
-- Do NOT exit early while a *transient* external dependency is still in progress (CI runs queued/in_progress, auto-merge waiting on green). On permanent failures (4xx, auth errors, missing required reviews), return immediately with the failure reason.
+- Do NOT exit early while a *transient* external dependency is still in progress (for example, CI runs queued or in progress). On permanent failures (4xx, auth errors, missing required reviews), return immediately with the failure reason.
 """  # noqa: E501

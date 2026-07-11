@@ -206,7 +206,9 @@ class CIDriveRunCoordinator:
         remaining = cast(list[dict[str, Any]], self._discovery.list_open_prs_remaining())
         if self._options().issues and remaining:
             scoped_prs = set(pr_map.values())
-            remaining = [pr for pr in remaining if pr.get("number") in scoped_prs]
+            remaining = [
+                pr for pr in remaining if pr.get("number") == -1 or pr.get("number") in scoped_prs
+            ]
         if remaining:
             remaining = cast(
                 list[dict[str, Any]],

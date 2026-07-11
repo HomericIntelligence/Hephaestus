@@ -330,8 +330,15 @@ class PipelineGitHub:
                 exc,
             )
 
-    def _find_pr_for_issue(self, issue_number: int, *, state: str) -> int | None:
-        branch_name = issue_auto_impl_branch_name(issue_number)
+    def _find_open_pr_for_branch(self, branch_name: str) -> int | None:
+        """Contain all open head PRs and select the unique ``main`` target."""
+        open_prs = github_api._find_open_prs_for_head(branch_name, lambda args: self._gh(args))
+        for pr_number, _base_ref_name in open_prs:
+            self.defer_auto_merge(pr_number)
+        return github_api._select_open_pr_for_base(open_prs, "main")
+
+    def _find_pr_on_branch(self, branch_name: str, state: str, issue_number: int) -> int | None:
+        """Return one validated non-open PR on the canonical issue branch."""
         result = self._gh(
             [
                 "pr",
@@ -346,10 +353,24 @@ class PipelineGitHub:
                 "1",
             ]
         )
-        pr_data = json.loads(result.stdout or "[]")
-        if pr_data:
-            return int(pr_data[0]["number"])
+        stdout = result.stdout
+        if not isinstance(stdout, str) or not stdout.strip():
+            raise RuntimeError(f"could not verify existing PR state for issue #{issue_number}")
+        pr_data = json.loads(stdout)
+        if not isinstance(pr_data, list):
+            raise RuntimeError(f"could not verify existing PR state for issue #{issue_number}")
+        if not pr_data:
+            return None
+        first_pr = pr_data[0]
+        if not isinstance(first_pr, dict):
+            raise RuntimeError(f"could not verify existing PR state for issue #{issue_number}")
+        number = first_pr.get("number")
+        if not isinstance(number, int) or number <= 0:
+            raise RuntimeError(f"could not verify existing PR state for issue #{issue_number}")
+        return number
 
+    def _find_closing_pr(self, issue_number: int, state: str) -> int | None:
+        """Return a validated PR with an exact ``Closes #issue`` line."""
         result = self._gh(
             [
                 "pr",
@@ -361,14 +382,41 @@ class PipelineGitHub:
                 "--json",
                 "number,body",
                 "--limit",
-                "10",
+                "1000",
             ]
         )
+        stdout = result.stdout
+        if not isinstance(stdout, str) or not stdout.strip():
+            raise RuntimeError(f"could not verify existing PR state for issue #{issue_number}")
+        candidates = json.loads(stdout)
+        if not isinstance(candidates, list) or len(candidates) >= 1000:
+            raise RuntimeError(f"could not verify existing PR state for issue #{issue_number}")
         closes_pattern = re.compile(rf"^Closes #{issue_number}\b", re.MULTILINE)
-        for candidate in json.loads(result.stdout or "[]"):
-            if closes_pattern.search(candidate.get("body") or ""):
-                return int(candidate["number"])
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                raise RuntimeError(f"could not verify existing PR state for issue #{issue_number}")
+            body = candidate.get("body")
+            number = candidate.get("number")
+            if not isinstance(body, str) or not isinstance(number, int) or number <= 0:
+                raise RuntimeError(f"could not verify existing PR state for issue #{issue_number}")
+            if closes_pattern.search(body):
+                if state.lower() == "open":
+                    self.defer_auto_merge(number)
+                return number
         return None
+
+    def _find_pr_for_issue(self, issue_number: int, *, state: str) -> int | None:
+        if state.lower() == "open":
+            selected_pr = self._find_open_pr_for_branch(issue_auto_impl_branch_name(issue_number))
+            if selected_pr is not None:
+                return selected_pr
+        else:
+            selected_pr = self._find_pr_on_branch(
+                issue_auto_impl_branch_name(issue_number), state, issue_number
+            )
+            if selected_pr is not None:
+                return selected_pr
+        return self._find_closing_pr(issue_number, state)
 
     def _repo_unresolved_threads(self, pr_number: int) -> list[dict[str, Any]]:
         """List unresolved PR review threads for this accessor's explicit repo."""

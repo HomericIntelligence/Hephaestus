@@ -6,8 +6,9 @@ fed now lives in the pipeline stages, epic #1809).
 cycle (#28/#1083/#1152): each iteration runs a fresh reviewer that posts inline
 PR threads, validates that prior comments were truly addressed, gates GO on
 zero unresolved threads, and resumes the implementer session to fix what
-remains. It also owns the diff/changed-file collectors, the review-log
-persistence helpers, and the per-PR labeling of the final verdict.
+remains. It also owns the diff/changed-file collectors and review-log
+persistence helpers. During #2054, an internal GO is informational only and
+does not label or arm the PR.
 
 The module-level helper ``_is_automation_owned_thread`` lives here because the
 GO-gate thread accounting is its only caller.
@@ -68,7 +69,6 @@ from .github_api import (
 from .models import PLAN_COMMENT_MARKER, ImplementationState
 from .pr_manager import (
     ensure_pr_auto_merge_deferred,
-    mark_pr_implementation_go,
     mark_pr_implementation_no_go,
 )
 from .pr_reviewer import gather_impl_review_context, review_pr_inline
@@ -209,16 +209,17 @@ class ReviewPhase(StageMixin):
         """Label a PR from the review loop's final verdict without arming auto-merge.
 
         Shared by both the fresh-implementation path and the existing-PR review
-        path. #2054 removes the legacy automatic armer; #2055 replaces this
-        provisional GO label with a head-bound strict-review result.
+        path. #2054 removes the legacy automatic armer and makes an internal GO
+        informational only; #2055 replaces it with a head-bound strict-review
+        result.
 
         An ``ERROR`` verdict (reviewer-infrastructure failure) or a
         ``HUMAN_BLOCKED`` verdict (review reached GO but an unresolved human
         review thread remains) applies **neither** label: the PR is not settled,
         so it must be left unlabeled for the "no go/no-go label → re-review" path
         to pick it up next loop (#911 / PR #1069). Labeling it no-go would falsely
-        record a converged failure; provisional GO labels cannot arm
-        auto-merge during #2054 and are replaced by strict proof in #2055.
+        record a converged failure; internal GO labels are also unavailable until
+        strict proof exists in #2055.
         """
         impl = self.impl
         try:
@@ -247,7 +248,13 @@ class ReviewPhase(StageMixin):
             )
             return
         if last_verdict == "GO":
-            mark_pr_implementation_go(pr_number)
+            impl._log(
+                "info",
+                f"{issue_ref(issue_number)}: implementation review reached internal GO; "
+                f"auto-merge remains disabled for {pr_ref(pr_number)} pending strict review",
+                thread_id,
+            )
+            return
         else:
             mark_pr_implementation_no_go(pr_number)
             impl._log(

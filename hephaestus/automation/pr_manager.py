@@ -942,11 +942,14 @@ def ensure_pr_created(
     _update_slot(f"{issue_ref(issue_number)}: Creating PR")
     try:
         open_prs = _find_open_prs_for_head(branch_name)
-        pr_number = _select_open_pr_for_base(open_prs, base_branch)
     except Exception as e:
         raise RuntimeError(f"could not verify existing PR state for branch {branch_name!r}") from e
     for open_pr_number, _open_pr_base in open_prs:
         ensure_pr_auto_merge_deferred(open_pr_number)
+    try:
+        pr_number = _select_open_pr_for_base(open_prs, base_branch)
+    except Exception as e:
+        raise RuntimeError(f"could not verify existing PR state for branch {branch_name!r}") from e
     if pr_number is not None:
         logger.info("PR #%s already exists", pr_number)
         return pr_number

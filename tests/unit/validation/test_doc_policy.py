@@ -277,6 +277,21 @@ class TestScanFilePassesCleanExamples:
         )
         assert scan_file(md, tmp_path) == []
 
+    def test_passes_auto_merge_containment_command(self, tmp_path: Path) -> None:
+        """Disabling an existing arm is containment, not a merge strategy."""
+        md = make_md(
+            tmp_path,
+            "good.md",
+            """\
+            # Doc
+
+            ```bash
+            gh pr merge 42 --disable-auto
+            ```
+            """,
+        )
+        assert scan_file(md, tmp_path) == []
+
     def test_passes_manual_squash_merge_with_extra_safe_flag(self, tmp_path: Path) -> None:
         """A manual squash merge may include unrelated non-strategy flags."""
         md = make_md(

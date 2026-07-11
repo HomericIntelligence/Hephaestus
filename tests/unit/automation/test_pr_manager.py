@@ -396,6 +396,30 @@ class TestEnsurePRCreated:
 
         assert [call.args[0] for call in defer.call_args_list] == [99, 100]
 
+    def test_ambiguous_target_prs_are_contained_before_legacy_creation_refuses(self) -> None:
+        """The legacy caller contains ambiguous PRs before surfacing the ambiguity."""
+        run_mock = MagicMock(
+            side_effect=[
+                _status("abc1234 commit msg"),
+                _status("origin/master"),
+                _status("2"),
+                _status("refs/heads/branch"),
+            ]
+        )
+        with (
+            patch.object(
+                pr_manager,
+                "_find_open_prs_for_head",
+                return_value=[(99, "master"), (100, "master")],
+            ),
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "ensure_pr_auto_merge_deferred") as defer,
+        ):
+            with pytest.raises(RuntimeError, match="could not verify existing PR state"):
+                pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt"))
+
+        assert [call.args[0] for call in defer.call_args_list] == [99, 100]
+
     def test_auto_merge_deferral_rejects_an_incomplete_open_pr_state(self) -> None:
         """Legacy review containment requires an explicit autoMergeRequest field."""
         with patch.object(pr_manager, "_gh_call", return_value=_status('{"state": "OPEN"}')):

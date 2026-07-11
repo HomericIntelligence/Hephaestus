@@ -115,6 +115,30 @@ def test_legacy_final_sweep_propagates_containment_failure() -> None:
         coordinator._final_open_prs({})
 
 
+def test_legacy_scoped_final_sweep_preserves_the_unknown_discovery_sentinel() -> None:
+    """Issue scoping cannot turn a failed discovery into an empty final sweep."""
+    unknown = [{"number": -1, "title": "(unknown: gh api pulls failed)"}]
+
+    def containment_failure(prs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        assert prs == unknown
+        raise RuntimeError("cannot verify auto-merge disabled: invalid PR number")
+
+    coordinator = CIDriveRunCoordinator(
+        options_provider=lambda: SimpleNamespace(dry_run=False, issues=[2054]),
+        worktree_manager=SimpleNamespace(),
+        status_tracker=SimpleNamespace(),
+        discovery=SimpleNamespace(list_open_prs_remaining=lambda: unknown),
+        check_inspector=SimpleNamespace(),
+        fix_flow=SimpleNamespace(),
+        auto_merge=SimpleNamespace(arm_all_unarmed_open_prs=containment_failure),
+        arming=SimpleNamespace(),
+        set_shared_pr_issues=lambda _shared: None,
+    )
+
+    with pytest.raises(RuntimeError, match="cannot verify auto-merge disabled"):
+        coordinator._final_open_prs({2054: 42})
+
+
 def test_legacy_drive_stops_after_verified_auto_merge_deferral() -> None:
     """A legacy drive must not poll or wait on a pre-existing auto-merge arm."""
     deferred: list[int] = []

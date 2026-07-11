@@ -6,6 +6,7 @@ import contextlib
 import json
 import re
 import subprocess
+from collections.abc import Callable
 from typing import Any, cast
 
 import hephaestus.automation.github_api as _api
@@ -13,6 +14,7 @@ from hephaestus.github.auto_merge import defer_auto_merge
 from hephaestus.utils.helpers import strip_null_bytes
 
 _ACCEPTABLE_SIG_STATUSES = frozenset({"G", "U"})
+_PULL_REQUEST_STATES = frozenset({"OPEN", "CLOSED", "MERGED"})
 
 
 def _gh_commit_is_verified(oid: str) -> bool:
@@ -128,7 +130,10 @@ def _assert_branch_commits_signed(branch: str, base: str = "main") -> None:
         )
 
 
-def _find_open_prs_for_head(branch: str) -> list[tuple[int, str]]:
+def _find_open_prs_for_head(
+    branch: str,
+    run_gh: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
+) -> list[tuple[int, str]]:
     """Return every validated OPEN PR number and base branch for ``branch``.
 
     Used by :func:`gh_pr_create` as an idempotency guard so a re-run on a
@@ -138,13 +143,16 @@ def _find_open_prs_for_head(branch: str) -> list[tuple[int, str]]:
 
     Args:
         branch: Head branch name to look up.
+        run_gh: Optional repo-scoped ``gh`` runner. Defaults to the shared
+            GitHub API runner.
 
     Returns:
         Every open PR as ``(number, base_ref_name)``.
 
     """
     try:
-        result = _api._gh_call(
+        runner = run_gh or _api._gh_call
+        result = runner(
             [
                 "pr",
                 "list",
@@ -164,6 +172,8 @@ def _find_open_prs_for_head(branch: str) -> list[tuple[int, str]]:
         raise RuntimeError(f"could not verify existing PR state for head {branch!r}") from e
     if not isinstance(prs, list):
         raise RuntimeError(f"could not verify existing PR state for head {branch!r}")
+    if len(prs) >= 1000:
+        raise RuntimeError(f"could not verify existing PR state for head {branch!r}")
     open_prs: list[tuple[int, str]] = []
     for pr in prs:
         if not isinstance(pr, dict):
@@ -172,7 +182,10 @@ def _find_open_prs_for_head(branch: str) -> list[tuple[int, str]]:
         base_ref_name = pr.get("baseRefName")
         if not isinstance(state, str) or not isinstance(base_ref_name, str):
             raise RuntimeError(f"could not verify existing PR state for head {branch!r}")
-        if state.upper() == "OPEN":
+        state = state.upper()
+        if state not in _PULL_REQUEST_STATES:
+            raise RuntimeError(f"could not verify existing PR state for head {branch!r}")
+        if state == "OPEN":
             number = pr.get("number")
             if not isinstance(number, int) or number <= 0:
                 raise RuntimeError(f"could not verify existing PR state for head {branch!r}")
@@ -251,12 +264,12 @@ def gh_pr_create(
     # still gets a fresh PR — the issue may legitimately need new work, and the
     # worktree manager already extends the remote branch's history.
     open_prs = _api._find_open_prs_for_head(branch)
-    existing_open_pr = _api._select_open_pr_for_base(open_prs, base)
     for open_pr_number, _open_pr_base in open_prs:
         if not defer_auto_merge(open_pr_number, lambda args: _api._gh_call(args, check=False)):
             raise RuntimeError(
                 f"could not verify auto-merge disabled for existing PR #{open_pr_number}"
             )
+    existing_open_pr = _api._select_open_pr_for_base(open_prs, base)
     if existing_open_pr is not None:
         _api.logger.info("Reusing existing open PR #%s on head %s", existing_open_pr, branch)
         return existing_open_pr

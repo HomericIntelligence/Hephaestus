@@ -1510,6 +1510,53 @@ class TestGhPrCreate:
 
     @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
     @patch("hephaestus.automation.github_api._gh_call")
+    def test_ambiguous_target_prs_are_contained_before_creation_is_refused(
+        self, mock_gh_call: Any, _mock_signed: Any
+    ) -> None:
+        """Ambiguity never skips containment of the already-open PRs."""
+        mock_gh_call.side_effect = [
+            Mock(
+                stdout=json.dumps(
+                    [
+                        {"number": 962, "state": "OPEN", "baseRefName": "main"},
+                        {"number": 963, "state": "OPEN", "baseRefName": "main"},
+                    ]
+                )
+            ),
+            _unarmed_pr_state(),
+            _unarmed_pr_state(),
+        ]
+
+        with pytest.raises(RuntimeError, match="could not verify existing PR state"):
+            gh_pr_create(branch="768-auto-impl", title="Test PR", body=_POLICY_BODY)
+
+        assert [call.args[0][:3] for call in mock_gh_call.call_args_list[1:]] == [
+            ["pr", "view", "962"],
+            ["pr", "view", "963"],
+        ]
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_existing_pr_lookup_rejects_unknown_state(self, mock_gh_call: Any) -> None:
+        """An unrecognised PR state cannot be reinterpreted as non-open."""
+        mock_gh_call.return_value = Mock(
+            stdout=json.dumps([{"number": 962, "state": "OPNE", "baseRefName": "main"}])
+        )
+
+        with pytest.raises(RuntimeError, match="could not verify existing PR state"):
+            _github_api_module._find_open_pr_for_head("768-auto-impl", "main")
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_existing_pr_lookup_rejects_a_full_page(self, mock_gh_call: Any) -> None:
+        """A capped head query cannot claim every existing PR was contained."""
+        mock_gh_call.return_value = Mock(
+            stdout=json.dumps([{"state": "CLOSED", "baseRefName": "release"}] * 1000)
+        )
+
+        with pytest.raises(RuntimeError, match="could not verify existing PR state"):
+            _github_api_module._find_open_pr_for_head("768-auto-impl", "main")
+
+    @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
+    @patch("hephaestus.automation.github_api._gh_call")
     def test_successful_pr_creation_defers_auto_merge(
         self, mock_gh_call: Any, _mock_signed: Any
     ) -> None:
