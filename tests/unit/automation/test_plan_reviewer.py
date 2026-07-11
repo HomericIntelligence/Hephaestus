@@ -630,7 +630,7 @@ class TestFetchIssueCommentsCache:
         with (
             patch(
                 "hephaestus.automation.plan_reviewer.get_repo_info",
-                return_value=("HomericIntelligence", "ProjectMnemosyne"),
+                return_value=("HomericIntelligence", "Mnemosyne"),
             ) as mock_info,
             patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh,
         ):
@@ -641,7 +641,7 @@ class TestFetchIssueCommentsCache:
         gh_args = mock_gh.call_args[0][0]
         joined = " ".join(gh_args)
         assert "owner=HomericIntelligence" in joined
-        assert "name=ProjectMnemosyne" in joined
+        assert "name=Mnemosyne" in joined
 
 
 class TestMain:

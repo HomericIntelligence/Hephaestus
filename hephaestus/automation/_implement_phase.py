@@ -79,7 +79,7 @@ class ImplementPhase(StageMixin):
         self.ctx = ctx
 
     def _run_advise(self, issue_number: int, issue_title: str, issue_body: str) -> str:
-        """Select ProjectMnemosyne skills and return prompt-ready context."""
+        """Select Mnemosyne skills and return prompt-ready context."""
 
         def _invoke(prompt: str) -> str:
             if uses_direct_agent_runner(self.options.agent):

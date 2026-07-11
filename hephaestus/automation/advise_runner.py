@@ -1,7 +1,7 @@
 """Shared advise runner for every pipeline stage.
 
 Each of the three session-stable stages (plan, implement, drive-green) begins
-with an advise step that searches ProjectMnemosyne for relevant prior
+with an advise step that searches Mnemosyne for relevant prior
 learnings before doing any work. The Mnemosyne clone/refresh, prompt
 construction, and skip-marker conventions are identical across stages, so they
 live here once (DRY) rather than being copied into each stage's advise step.
@@ -12,7 +12,7 @@ prompt and returns the agent's JSON output; this module owns everything around
 it.
 
 Each stage gets the same result shape: a bounded ``## Selected Team Skills``
-context block assembled from local ProjectMnemosyne skill files and injected
+context block assembled from local Mnemosyne skill files and injected
 explicitly into the downstream prompt.
 """
 
@@ -79,17 +79,17 @@ def advise_skipped(reason: str) -> str:
 
 
 def default_mnemosyne_root() -> Path:
-    """Return the shared ProjectMnemosyne checkout root."""
-    return Path.home() / ".agent-brain" / "ProjectMnemosyne"
+    """Return the shared Mnemosyne checkout root."""
+    return Path.home() / ".agent-brain" / "Mnemosyne"
 
 
 def _clone_mnemosyne(mnemosyne_root: Path) -> bool:
-    """Clone the resolved ProjectMnemosyne repository into ``mnemosyne_root``.
+    """Clone the resolved Mnemosyne repository into ``mnemosyne_root``.
 
     The clone target is resolved via
     :func:`hephaestus.github.mnemosyne_repo.resolve_mnemosyne_target`, which
     prefers the gh-authenticated user's own fork (creating it if needed) and
-    falls back to the upstream ``HomericIntelligence/ProjectMnemosyne``.
+    falls back to the upstream ``HomericIntelligence/Mnemosyne``.
     """
     timeout_s = agent_clone_timeout()
     target = resolve_mnemosyne_target()
@@ -109,20 +109,20 @@ def _clone_mnemosyne(mnemosyne_root: Path) -> bool:
         return True
     except subprocess.TimeoutExpired:
         logger.warning(
-            "gh repo clone timed out after %s s; ProjectMnemosyne unavailable this run",
+            "gh repo clone timed out after %s s; Mnemosyne unavailable this run",
             timeout_s,
         )
         return False
     except subprocess.CalledProcessError as e:
-        logger.warning("Failed to clone ProjectMnemosyne: %s", e.stderr or e)
+        logger.warning("Failed to clone Mnemosyne: %s", e.stderr or e)
         return False
     except (RuntimeError, OSError) as e:
-        logger.warning("Failed to clone ProjectMnemosyne: %s", e)
+        logger.warning("Failed to clone Mnemosyne: %s", e)
         return False
 
 
 def _is_valid_mnemosyne_checkout(mnemosyne_root: Path) -> bool:
-    """Return True when an existing ProjectMnemosyne path is a usable git checkout."""
+    """Return True when an existing Mnemosyne path is a usable git checkout."""
     timeout_s = agent_git_timeout()
     try:
         result = subprocess.run(
@@ -133,11 +133,11 @@ def _is_valid_mnemosyne_checkout(mnemosyne_root: Path) -> bool:
             timeout=timeout_s,
         )
     except (subprocess.SubprocessError, OSError) as e:
-        logger.warning("Failed to validate ProjectMnemosyne checkout at %s: %s", mnemosyne_root, e)
+        logger.warning("Failed to validate Mnemosyne checkout at %s: %s", mnemosyne_root, e)
         return False
     if result.returncode != 0 or result.stdout.strip() != "true":
         logger.warning(
-            "ProjectMnemosyne checkout at %s is invalid; stderr=%s",
+            "Mnemosyne checkout at %s is invalid; stderr=%s",
             mnemosyne_root,
             (result.stderr or "").strip(),
         )
@@ -146,13 +146,13 @@ def _is_valid_mnemosyne_checkout(mnemosyne_root: Path) -> bool:
 
 
 def ensure_mnemosyne(mnemosyne_root: Path) -> bool:
-    """Clone ProjectMnemosyne if absent, else fast-forward the existing clone.
+    """Clone Mnemosyne if absent, else fast-forward the existing clone.
 
     Uses an in-process lock plus a POSIX ``fcntl`` file lock so that multiple
     parallel workers (and multiple stages) never race on the shared checkout.
 
     Args:
-        mnemosyne_root: Expected local path for ProjectMnemosyne.
+        mnemosyne_root: Expected local path for Mnemosyne.
 
     Returns:
         True if the directory exists (or was cloned successfully), else False.
@@ -173,7 +173,7 @@ def ensure_mnemosyne(mnemosyne_root: Path) -> bool:
                 if mnemosyne_root.exists():
                     if not _is_valid_mnemosyne_checkout(mnemosyne_root):
                         logger.warning(
-                            "Removing invalid ProjectMnemosyne checkout at %s before re-clone",
+                            "Removing invalid Mnemosyne checkout at %s before re-clone",
                             mnemosyne_root,
                         )
                         shutil.rmtree(mnemosyne_root, ignore_errors=True)
@@ -187,10 +187,10 @@ def ensure_mnemosyne(mnemosyne_root: Path) -> bool:
                                 text=True,
                                 timeout=timeout_s,
                             )
-                            logger.debug("ProjectMnemosyne refreshed at %s", mnemosyne_root)
+                            logger.debug("Mnemosyne refreshed at %s", mnemosyne_root)
                         except Exception as e:
                             logger.warning(
-                                "Failed to refresh ProjectMnemosyne (using existing clone): %s",
+                                "Failed to refresh Mnemosyne (using existing clone): %s",
                                 e,
                             )
                         return True
@@ -220,14 +220,14 @@ def resolve_marketplace(mnemosyne_root: Path) -> tuple[Path | None, str]:
 
     """
     if not mnemosyne_root.exists() and not ensure_mnemosyne(mnemosyne_root):
-        return None, "ProjectMnemosyne unavailable"
+        return None, "Mnemosyne unavailable"
 
     marketplace_path = mnemosyne_root / ".claude-plugin" / "marketplace.json"
     if marketplace_path.exists():
         return marketplace_path, ""
 
     logger.warning(
-        "Marketplace file not found at %s; attempting recovery re-clone of ProjectMnemosyne",
+        "Marketplace file not found at %s; attempting recovery re-clone of Mnemosyne",
         marketplace_path,
     )
     shutil.rmtree(mnemosyne_root, ignore_errors=True)
@@ -298,7 +298,7 @@ def marketplace_prompt_payload(marketplace_path: Path) -> str:
     try:
         data = json.loads(marketplace_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        logger.warning("Failed to read ProjectMnemosyne marketplace %s: %s", marketplace_path, exc)
+        logger.warning("Failed to read Mnemosyne marketplace %s: %s", marketplace_path, exc)
         return '{"plugins": []}'
 
     plugins = data.get("plugins")
@@ -339,7 +339,7 @@ def _validate_skill_source(mnemosyne_root: Path, source: str) -> Path | None:
     """Return a safe local skill path for a marketplace source, or ``None``."""
     source_path = Path(source)
     if source_path.is_absolute() or ".." in source_path.parts:
-        logger.warning("Ignoring unsafe ProjectMnemosyne skill source: %s", source)
+        logger.warning("Ignoring unsafe Mnemosyne skill source: %s", source)
         return None
 
     try:
@@ -347,11 +347,11 @@ def _validate_skill_source(mnemosyne_root: Path, source: str) -> Path | None:
         candidate = (mnemosyne_root / source_path).resolve(strict=False)
         candidate.relative_to(skills_root)
     except ValueError:
-        logger.warning("Ignoring non-skill ProjectMnemosyne source: %s", source)
+        logger.warning("Ignoring non-skill Mnemosyne source: %s", source)
         return None
 
     if not candidate.is_file():
-        logger.warning("Ignoring missing ProjectMnemosyne skill source: %s", candidate)
+        logger.warning("Ignoring missing Mnemosyne skill source: %s", candidate)
         return None
     return candidate
 
@@ -406,7 +406,7 @@ def format_selected_skill_context(
         [
             "## Selected Team Skills",
             "",
-            "These ProjectMnemosyne skills were selected for this issue. "
+            "These Mnemosyne skills were selected for this issue. "
             + "Apply only the relevant guidance.",
         ]
     )
@@ -424,7 +424,7 @@ def format_selected_skill_context(
         try:
             content = skill.path.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
-            logger.warning("Failed to read selected ProjectMnemosyne skill %s: %s", skill.path, exc)
+            logger.warning("Failed to read selected Mnemosyne skill %s: %s", skill.path, exc)
             continue
 
         separator_len = 1
@@ -457,7 +457,7 @@ def run_advise(
 ) -> str:
     """Run skill selection and return prompt-ready context (or a skip marker).
 
-    Locates ProjectMnemosyne (cloning/refreshing as needed), builds a compact
+    Locates Mnemosyne (cloning/refreshing as needed), builds a compact
     marketplace-selection prompt, invokes the selected agent, validates the JSON
     response, then reads the selected skill files locally. Any failure degrades
     to an :func:`advise_skipped` marker so a stage never aborts just because

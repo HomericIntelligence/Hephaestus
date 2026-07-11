@@ -140,7 +140,7 @@ def get_pr_review_analysis_prompt(
         issue_body: Issue body/description
         ci_status: CI check status summary
         pr_description: PR description body
-        advise_findings: Prior team learnings from ProjectMnemosyne to give the
+        advise_findings: Prior team learnings from Mnemosyne to give the
             reviewer continuity with the advise-first implementation turn.
         include_nitpicks: When False (default), the reviewer is told to OMIT
             ``nitpick``-severity comments entirely. When True (``--nitpick``),

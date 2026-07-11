@@ -39,9 +39,9 @@ class TestDetectRepoFromRemote:
     @patch("hephaestus.github.pr_merge.git_remote_url")
     def test_detects_https_url(self, mock_remote_url) -> None:
         """Parses HTTPS github.com/owner/repo.git."""
-        mock_remote_url.return_value = "https://github.com/HomericIntelligence/ProjectScylla.git"
+        mock_remote_url.return_value = "https://github.com/HomericIntelligence/Scylla.git"
         result = detect_repo_from_remote()
-        assert result == "HomericIntelligence/ProjectScylla"
+        assert result == "HomericIntelligence/Scylla"
 
     @patch("hephaestus.github.pr_merge.git_remote_url")
     def test_detects_url_without_git_suffix(self, mock_remote_url) -> None:

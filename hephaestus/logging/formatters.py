@@ -3,7 +3,7 @@
 
 Provides a ``logging.Formatter`` subclass that outputs each log record as a
 single JSON line, suitable for ingestion by log aggregation systems such as
-Loki/Promtail in the ProjectArgus observability stack.
+Loki/Promtail in the Argus observability stack.
 
 Usage:
     import logging
