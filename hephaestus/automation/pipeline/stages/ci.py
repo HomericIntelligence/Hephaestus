@@ -88,6 +88,7 @@ from .base import (
     StageOutcome,
     StepResult,
     WorkItem,
+    _build_rebase_job,
     _require_item_worktree,
     _terminal_pr_outcome,
     _worktree_path,
@@ -334,16 +335,7 @@ class CiStage(Stage):
         missing_worktree = _require_item_worktree(item, "ci", "mechanical rebase")
         if missing_worktree is not None:
             return missing_worktree
-        rebase_job = GitJob(
-            repo=item.repo,
-            op="rebase",
-            timeout_s=GIT_JOB_TIMEOUT_S,
-            kwargs={
-                "cwd": _worktree_path(item, ctx),
-                "base_branch": str(item.payload.get("base_branch") or "main"),
-            },
-            descr="mechanical_rebase",
-        )
+        rebase_job = _build_rebase_job(item, ctx, descr="mechanical_rebase")
         return JobRequest(rebase_job, on_done_state=POLL)
 
     def _poll(self, item: WorkItem, ctx: StageContext) -> StepResult:

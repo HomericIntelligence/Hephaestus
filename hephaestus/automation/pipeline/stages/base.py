@@ -524,6 +524,27 @@ def _require_item_worktree(item: WorkItem, stage_name: str, action: str) -> Stag
     return StageOutcome(Disposition.FAIL_BACK, "missing_worktree")
 
 
+def _build_rebase_job(item: WorkItem, ctx: StageContext, *, descr: str) -> GitJob:
+    """Build the mechanical rebase-onto-base GitJob (shared base-ref capture).
+
+    Both ``ci`` (best-effort mechanical rebase) and ``merge_wait`` (DIRTY
+    resolution) rebase the item's worktree onto the same captured
+    ``item.payload["base_branch"]`` (defaulting to ``main``) via the same
+    worker ``op="rebase"`` (``git_utils.rebase_worktree_onto``) — single home
+    so the two stages cannot diverge on this mechanic (#1861).
+    """
+    return GitJob(
+        repo=item.repo,
+        op="rebase",
+        timeout_s=GIT_JOB_TIMEOUT_S,
+        kwargs={
+            "cwd": _worktree_path(item, ctx),
+            "base_branch": str(item.payload.get("base_branch") or "main"),
+        },
+        descr=descr,
+    )
+
+
 def _terminal_pr_outcome(pr_state: dict[str, Any] | None, pr_number: int) -> StageOutcome | None:
     """Return a terminal outcome for PRs already merged/closed, if known."""
     if not pr_state:

@@ -93,6 +93,7 @@ from .base import (
     StageOutcome,
     StepResult,
     WorkItem,
+    _build_rebase_job,
     _require_item_worktree,
     _worktree_path,
     agent_provider,
@@ -414,16 +415,7 @@ class MergeWaitStage(Stage):
         missing_worktree = _require_item_worktree(item, "merge_wait", "dirty rebase")
         if missing_worktree is not None:
             return missing_worktree
-        rebase_job = GitJob(
-            repo=item.repo,
-            op="rebase",
-            timeout_s=GIT_JOB_TIMEOUT_S,
-            kwargs={
-                "cwd": _worktree_path(item, ctx),
-                "base_branch": str(item.payload.get("base_branch") or "main"),
-            },
-            descr="resolve_dirty_rebase",
-        )
+        rebase_job = _build_rebase_job(item, ctx, descr="resolve_dirty_rebase")
         return JobRequest(rebase_job, on_done_state=DIRTY_PUSH_WAIT)
 
     def _request_dirty_push(self, item: WorkItem, ctx: StageContext) -> StepResult:
