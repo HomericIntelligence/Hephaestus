@@ -29,7 +29,7 @@ from hephaestus.automation.pipeline.events import (
     PrReviewZeroThreadNogoEvent,
     ZeroThreadNogoAction,
 )
-from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
+from hephaestus.automation.pipeline.jobs import AgentJob, JobHandle, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
 from hephaestus.automation.pipeline.seeding import SeedEntry
 from hephaestus.automation.pipeline.stages import Continue
@@ -271,6 +271,91 @@ class TestQuiescence:
         reasons = sorted(result.reason for result in coordinator.ledger)
         assert any(reason.startswith("poisoned: boom") for reason in reasons)
         assert any(reason == "fine" for reason in reasons)
+
+
+def _fake_in_flight_item(coordinator: Coordinator, item: WorkItem) -> JobHandle:
+    """Register *item* as in-flight under a synthetic handle (no real submit)."""
+    handle = JobHandle(
+        job=AgentJob(
+            repo=item.repo,
+            issue=item.issue or 0,
+            agent="claude",
+            model="m",
+            prompt_builder=lambda **_kw: "p",
+            cwd=Path("."),
+            timeout_s=1,
+        ),
+        on_done_state=item.stage,
+    )
+    coordinator.in_flight[handle] = item
+    coordinator.inflight_per_repo[item.repo] += 1
+    return handle
+
+
+class TestFatalTeardown:
+    """Fatal-exception exit must reap the pool + park in-flight items (#2059)."""
+
+    def test_fatal_exception_shuts_down_pool_and_parks_in_flight(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A fatal (non-signal) exit cancels the pool and never leaks in-flight work.
+
+        Before #2059, ``run()``'s finally only reaped on the signal path
+        (``self.shutdown`` set), so a fatal exception left the executor and its
+        in-flight AgentJob subprocesses running.
+        """
+        coordinator, pool, _ = make_coordinator(tmp_path, monkeypatch)
+        in_flight = _issue_item(42, StageName.IMPLEMENTATION)
+        _fake_in_flight_item(coordinator, in_flight)
+
+        def boom() -> None:
+            raise RuntimeError("fatal boom")
+
+        # Raise OUTSIDE _run_item's per-item guard so it reaches run()'s except.
+        monkeypatch.setattr(coordinator, "_drain_queues", boom)
+
+        exit_code = coordinator.run()
+
+        # Fatal, not interrupt: shutdown must NOT be set (would mis-report 130).
+        assert not coordinator.shutdown.is_set()
+        assert coordinator._fatal is True
+        assert exit_code == 1
+        # Pool reaped exactly once; in-flight maps cleared.
+        assert pool.shutdown_calls == 1
+        assert coordinator.in_flight == {}
+        assert not coordinator.inflight_per_repo
+        # The in-flight item was parked RESUMABLE (never silently dropped).
+        assert in_flight.result is not None
+        assert not in_flight.result.passed
+        assert in_flight.result.reason == "resumable at implementation"
+
+    def test_signal_teardown_shuts_down_pool_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Signal path + finally must not double-shutdown the pool (idempotent guard)."""
+        coordinator, pool, _ = make_coordinator(tmp_path, monkeypatch)
+        in_flight = _issue_item(7, StageName.IMPLEMENTATION)
+        _fake_in_flight_item(coordinator, in_flight)
+
+        # Trip an immediate (second-signal) shutdown before the first tick's
+        # top-of-loop check, so _teardown_immediate runs and breaks the loop.
+        original_seed = coordinator._seed_pass
+
+        def seed_then_immediate() -> int:
+            pushed = original_seed()
+            coordinator._immediate = True
+            return pushed
+
+        monkeypatch.setattr(coordinator, "_seed_pass", seed_then_immediate)
+
+        exit_code = coordinator.run()
+
+        assert coordinator.shutdown.is_set()
+        assert exit_code == 130  # interrupt
+        assert pool.shutdown_calls == 1  # _teardown_immediate + finally == once
+        assert coordinator.in_flight == {}
+        assert in_flight.result is not None
+        assert in_flight.result.reason == "resumable at implementation"
 
 
 class TestJournalOrder:

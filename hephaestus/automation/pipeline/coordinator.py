@@ -371,6 +371,7 @@ class Coordinator:
         self._progress = False
         self._stalled_ticks = 0
         self._fatal = False
+        self._pool_shut_down = False
         self._seen_item_ids: set[int] = set()
         self._stage_config = _StageRunConfig(
             enable_advise=not config.no_advise,
@@ -520,6 +521,11 @@ class Coordinator:
             logger.exception("pipeline run failed")
             self._fatal = True
         finally:
+            # Reap the pool on EVERY exit path — a fatal exception never sets
+            # self.shutdown, so without this the executor and in-flight AgentJob
+            # subprocesses (e.g. claude reviewers) would leak (#2059). Idempotent
+            # via _pool_shut_down, so the signal path's earlier call is a no-op.
+            self._shutdown_pool()
             self._finalize_resumable()
             exit_code = self._exit_code()
             stats = RunStats(
@@ -1435,6 +1441,21 @@ class Coordinator:
     def _teardown_immediate(self) -> None:
         """Cancel the pool and synthesize interrupted results for in-flight items."""
         self.shutdown.set()
+        self._shutdown_pool()
+
+    def _shutdown_pool(self) -> None:
+        """Cancel the pool and park in-flight items RESUMABLE. Idempotent.
+
+        Called on BOTH exit paths: the signal path (via
+        :meth:`_teardown_immediate`) and — critically — the ``run()`` ``finally``
+        block, so a fatal exception (which never sets ``self.shutdown``) still
+        cancels the executor and reaps in-flight ``AgentJob`` subprocesses
+        instead of leaking them (#2059). Guarded by ``_pool_shut_down`` so a
+        signal-then-fatal (or double ``finally``) sequence shuts down once.
+        """
+        if self._pool_shut_down:
+            return
+        self._pool_shut_down = True
         try:
             self.pool.shutdown()
         except Exception:  # pragma: no cover - defensive
@@ -1446,7 +1467,7 @@ class Coordinator:
 
     def _finalize_resumable(self) -> None:
         """Mark every still-live item RESUMABLE at its stage (never FAILED)."""
-        if not self.shutdown.is_set():
+        if not self.shutdown.is_set() and not self._fatal:
             return
         leftovers: list[WorkItem] = [item for _, _, item in self.timers]
         for stage_name, q in self.queues.items():
