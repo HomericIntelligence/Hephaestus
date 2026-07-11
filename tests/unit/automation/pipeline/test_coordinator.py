@@ -734,7 +734,7 @@ class TestDurableEventLog:
 
         item.payload["review_error_retries"] = REVIEW_ERROR_RETRY_CAP
         second = stage.step(item, ctx)
-        assert second == StageOutcome(Disposition.FAIL_BACK, "agent_error")
+        assert second == StageOutcome(Disposition.SKIP, "zero_thread_nogo_exhausted")
 
         records = [json.loads(line) for line in event_log_path.read_text().splitlines()]
         assert [record["event"] for record in records] == [
@@ -758,7 +758,7 @@ class TestDurableEventLog:
         ]
         assert records[1]["fields"] == [
             {
-                "action": "fail_back_agent_error",
+                "action": "escalate_skip",
                 "artifact_written": True,
                 "completed_rounds": 0,
                 "issue": 1985,

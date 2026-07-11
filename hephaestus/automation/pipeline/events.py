@@ -15,7 +15,7 @@ class ZeroThreadNogoAction(str, Enum):
     """Action taken after a zero-thread NOGO anomaly."""
 
     RETRY_FRESH_REVIEW = "retry_fresh_review"
-    FAIL_BACK_AGENT_ERROR = "fail_back_agent_error"
+    ESCALATE_SKIP = "escalate_skip"
 
 
 @dataclass(frozen=True)
@@ -57,10 +57,10 @@ def encode_stage_event(event: StageEvent) -> tuple[str, dict[str, EventField]]:
     ):
         raise ValueError("fresh-review action exceeds retry cap")
     if (
-        event.action is ZeroThreadNogoAction.FAIL_BACK_AGENT_ERROR
+        event.action is ZeroThreadNogoAction.ESCALATE_SKIP
         and event.retry_attempt <= event.retry_cap
     ):
-        raise ValueError("fail-back action has not exceeded retry cap")
+        raise ValueError("escalate action has not exceeded retry cap")
     return (
         "pr_review_zero_thread_nogo",
         {
