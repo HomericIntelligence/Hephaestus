@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -155,3 +156,28 @@ class TestBanditConfig:
                     assert hook.get("id") != "check-shell-injection", (
                         "check-shell-injection hook must be removed (bandit supersedes it)"
                     )
+
+    def test_bandit_low_baseline_file_exists_and_parses(self) -> None:
+        """The LOW-severity baseline JSON must exist and parse as {test_id: int}."""
+        repo_root = self._get_repo_root()
+        baseline = repo_root / "hephaestus" / "ci" / "bandit_low_baseline.json"
+        assert baseline.exists()
+        data = json.loads(baseline.read_text(encoding="utf-8"))
+        assert "counts" in data
+        assert all(isinstance(v, int) for v in data["counts"].values())
+
+    def test_security_workflow_runs_low_severity_baseline_check(self) -> None:
+        """The weekly security.yml sast job must run the baseline-drift check."""
+        repo_root = self._get_repo_root()
+        security_yml = repo_root / ".github" / "workflows" / "security.yml"
+        content = security_yml.read_text(encoding="utf-8")
+        assert "sast-audit-trail" in content
+
+    def test_pixi_sast_audit_trail_task_wired_to_baseline_check(self) -> None:
+        """The sast-audit-trail task must invoke bandit_baseline_check.py at severity-level low."""
+        repo_root = self._get_repo_root()
+        pixi_toml = repo_root / "pixi.toml"
+        content = pixi_toml.read_text(encoding="utf-8")
+        assert "sast-audit-trail" in content
+        assert "bandit_baseline_check.py" in content
+        assert "--severity-level low" in content

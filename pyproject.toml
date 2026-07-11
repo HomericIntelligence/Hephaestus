@@ -318,10 +318,27 @@ exclude_lines = [
 
 [tool.bandit]
 exclude_dirs = ["tests", "build", ".pixi"]
-# The pixi `sast` task passes `-l medium` (report MEDIUM+ severity only).
-# LOW findings (B404 import-subprocess, B603 subprocess-list, B607 partial-path,
-# B403 import-pickle, B101 assert, B311 random, B112 try-except-continue) are
-# noise for an automation codebase that legitimately calls system tools (git, gh,
-# claude) via subprocess with fixed literal argument lists and non-cryptographic
-# random for retry jitter.  Genuine injection risk (shell=True) is HIGH severity
-# and is unaffected by this threshold.
+# The pixi `sast` task passes `--severity-level medium` for PR/pre-commit gating
+# (issue #1481). LOW findings are pre-triaged noise for an automation codebase
+# that legitimately shells out to system tools with fixed literal argument
+# lists. Each suppressed test ID below is reviewed, not silently dropped:
+#
+#   B404/B403 (import subprocess/pickle) - subprocess and pickle are core to
+#     this repo's CLI-orchestration and cache-format helpers; use is scoped by
+#     the more specific B603/B301 checks below, not this import-level flag.
+#   B603/B607 (subprocess call / partial executable path) - all call sites use
+#     git, gh, gpg, or claude with fixed literal argument lists (no shell=True,
+#     no untrusted input in argv[0]); genuine shell-injection risk (shell=True)
+#     is HIGH severity and is unaffected by this threshold.
+#   B101 (assert) - internal invariant checks, not security boundaries.
+#   B105 (hardcoded password string) - false positives on non-secret constant
+#     strings; audited individually, see hephaestus/ci/bandit_low_baseline.json.
+#   B112 (try/except/continue) - intentional retry-loop control flow.
+#   B311 (random) - non-cryptographic random for retry jitter
+#     (hephaestus/utils/retry.py:80); any future security-sensitive use of
+#     `random` would raise this repo's suppressed count, which the weekly
+#     bandit-low-baseline job (.github/workflows/security.yml) catches as
+#     drift against hephaestus/ci/bandit_low_baseline.json.
+#
+# Re-review: quarterly, or whenever the weekly bandit-low-baseline job reports
+# drift (new test ID or increased count vs. hephaestus/ci/bandit_low_baseline.json).
