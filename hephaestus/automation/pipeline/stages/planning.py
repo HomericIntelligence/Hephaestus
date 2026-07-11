@@ -157,8 +157,8 @@ class PlanningStage(Stage):
     - PLAN_WAIT: submit the plan agent job (planner session); plan text
       lands in ``item.payload["plan_text"]``; the plan comment posted by the
       pipeline is the durable artifact.
-    - VERIFY: check the plan comment exists -> ADVANCE, else RETRY within
-      the ``plan`` budget, then FINISH_FAIL.
+    - VERIFY: check the plan comment exists -> ADVANCE, else reset to
+      ``PLAN_WAIT`` and RETRY within the ``plan`` budget, then FINISH_FAIL.
 
     on_enter idempotency guards (re-housed from ``Planner._pr_coverage_skip``
     and ``Planner._has_existing_plan``, all ordered at-or-past checks):
@@ -346,6 +346,9 @@ class PlanningStage(Stage):
                     attempt,
                     budget,
                 )
+                # RETRY requeues this stage without calling on_enter(), so the
+                # next step must request a fresh planner job rather than VERIFY again.
+                item.state = "PLAN_WAIT"
                 return StageOutcome(Disposition.RETRY, f"plan not found, retry {attempt}/{budget}")
             logger.error(
                 "planning:%d: plan not found after %d attempts; exhausted", item.issue, budget
