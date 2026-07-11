@@ -603,22 +603,27 @@ class PipelineGitHub:
         return pr_manager.pr_has_implementation_state_label(pr_number)
 
     def _unresolved_threads(self, pr_number: int) -> list[dict[str, Any]]:
-        """Fetch unresolved threads (repo-scoped or legacy). Fails open to []."""
+        """Fetch unresolved threads (repo-scoped or legacy).
+
+        Fail-closed: a fetch error (subprocess, JSON, or GraphQL error)
+        propagates to the caller on BOTH paths (#1868). The pipeline
+        coordinator already isolates a raised exception to the single
+        work item mid-step (routes it to finished(fail)) rather than
+        crashing the run, so failing closed here costs one item, not a
+        silent GO on unreviewed human threads.
+        """
         if self._repo_slug is not None:
             return self._repo_unresolved_threads(pr_number)
-        try:
-            return github_api.gh_pr_list_unresolved_threads(pr_number, dry_run=False)
-        except Exception as exc:  # legacy path fails open (parity with existing code)
-            logger.warning("PR #%s: could not list unresolved threads: %s", pr_number, exc)
-            return []
+        return github_api.gh_pr_list_unresolved_threads(pr_number, dry_run=False)
 
     def count_unresolved_threads(self, pr_number: int) -> tuple[int, int]:
         """Return ``(automation_unresolved, human_unresolved)`` thread counts.
 
         Mirrors ``_review_phase._count_unresolved_threads_blocking_go``
-        (#1152): resolves nothing. Current-repo legacy helpers still fail
-        open on fetch errors; repo-scoped pipeline runs query the configured
-        repo directly so unresolved human threads are not hidden.
+        (#1152): resolves nothing. Both repo-scoped and legacy fetch paths
+        fail closed (#1868): a fetch error propagates rather than being
+        swallowed, so unresolved human threads are never hidden by a
+        transient GraphQL/API blip.
         """
         return _split_threads(self._unresolved_threads(pr_number))
 

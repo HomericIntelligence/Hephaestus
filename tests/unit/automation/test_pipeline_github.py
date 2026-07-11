@@ -414,6 +414,20 @@ class TestRepoScoping:
         assert "owner=org" in calls[0]
         assert "name=repo-a" in calls[0]
 
+    def test_repo_scoped_fetch_error_fails_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#1868: repo-scoped path must propagate GraphQL errors, matching legacy."""
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            raise RuntimeError("gh: GraphQL: Head sha can't be blank")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        with pytest.raises(RuntimeError, match="Head sha"):
+            adapter.count_unresolved_threads(7)
+
     def test_repo_scoped_upsert_plan_comment_updates_marker_comment(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -750,17 +764,23 @@ class TestUnresolvedThreads:
 
         assert adapter.count_unresolved_threads(7) == (1, 2)
 
-    def test_empty_and_error_fail_open(
+    def test_empty_result_returns_zero(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(github_api_mod, "gh_pr_list_unresolved_threads", lambda n, dry_run: [])
         assert adapter.count_unresolved_threads(7) == (0, 0)
 
+    def test_legacy_fetch_error_fails_closed(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#1868: legacy path must propagate fetch errors, not fail open to (0, 0)."""
+
         def boom(n: int, dry_run: bool) -> list[dict[str, Any]]:
             raise RuntimeError("api")
 
         monkeypatch.setattr(github_api_mod, "gh_pr_list_unresolved_threads", boom)
-        assert adapter.count_unresolved_threads(7) == (0, 0)
+        with pytest.raises(RuntimeError, match="api"):
+            adapter.count_unresolved_threads(7)
 
 
 class TestGhPrState:
