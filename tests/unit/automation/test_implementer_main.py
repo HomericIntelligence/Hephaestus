@@ -121,6 +121,15 @@ def test_main_returns_run_pipeline_exit_code(tmp_path: Path) -> None:
     assert captured["rc"] == 1
 
 
+def test_main_installs_sigtstp_handler(tmp_path: Path) -> None:
+    """main() fixes Ctrl+Z (#1784) via the shared install_sigtstp_only helper."""
+    with patch("hephaestus.utils.terminal.install_sigtstp_only") as mock_tstp:
+        captured = _run_main_capturing_config(["--issues", "5", "--dry-run"], tmp_path)
+
+    assert captured["rc"] == 0
+    mock_tstp.assert_called_once_with()
+
+
 def test_main_discovers_open_issues_when_none_given(tmp_path: Path) -> None:
     """With no --issues/--epic, main() seeds the discovered open-issue list."""
     with (

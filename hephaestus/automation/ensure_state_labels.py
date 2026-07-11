@@ -32,6 +32,7 @@ import json
 import logging
 import subprocess
 import sys
+import threading
 
 from hephaestus.cli.utils import (
     configure_cli_logging,
@@ -39,6 +40,7 @@ from hephaestus.cli.utils import (
     emit_json_status,
 )
 from hephaestus.github.client import gh_call
+from hephaestus.utils.terminal import terminal_guard
 
 from ._review_utils import build_automation_parser
 from .state_labels import STATE_LABEL_SPECS
@@ -187,43 +189,53 @@ def main(argv: list[str] | None = None) -> int:
     configure_github_throttle_from_args(args)
     configure_cli_logging(verbose=args.verbose)
 
-    if args.org:
-        repos = _gh_list_org_repos(args.org)
-        if not repos:
-            logger.warning("No repos returned for org %s — nothing to do.", args.org)
-            if args.json:
-                emit_json_status(0, "no-repos", org=args.org)
-            return 0
-        slugs = [f"{args.org}/{name}" for name in repos]
-        logger.info("Ensuring state:* labels on %d repos in %s", len(slugs), args.org)
-    elif args.repo:
-        slugs = [args.repo]
-    else:
-        slugs = [_detect_current_repo_slug()]
+    shutdown = threading.Event()
+    with terminal_guard(shutdown.set):
+        try:
+            if args.org:
+                repos = _gh_list_org_repos(args.org)
+                if not repos:
+                    logger.warning("No repos returned for org %s — nothing to do.", args.org)
+                    if args.json:
+                        emit_json_status(0, "no-repos", org=args.org)
+                    return 0
+                slugs = [f"{args.org}/{name}" for name in repos]
+                logger.info("Ensuring state:* labels on %d repos in %s", len(slugs), args.org)
+            elif args.repo:
+                slugs = [args.repo]
+            else:
+                slugs = [_detect_current_repo_slug()]
 
-    total_issued = 0
-    for slug in slugs:
-        total_issued += ensure_labels_on_repo(slug, dry_run=args.dry_run)
-    if args.dry_run:
-        logger.info(
-            "[dry-run] Would ensure %d labels across %d repo(s).",
-            len(STATE_LABEL_SPECS) * len(slugs),
-            len(slugs),
-        )
-    else:
-        logger.info(
-            "Ensured %d label(s) across %d repo(s).",
-            total_issued,
-            len(slugs),
-        )
-    if args.json:
-        emit_json_status(
-            0,
-            "dry-run" if args.dry_run else "ok",
-            repos=len(slugs),
-            labels_ensured=total_issued,
-        )
-    return 0
+            total_issued = 0
+            for slug in slugs:
+                if shutdown.is_set():
+                    logger.warning("Interrupted; stopping before remaining repos.")
+                    break
+                total_issued += ensure_labels_on_repo(slug, dry_run=args.dry_run)
+            if args.dry_run:
+                logger.info(
+                    "[dry-run] Would ensure %d labels across %d repo(s).",
+                    len(STATE_LABEL_SPECS) * len(slugs),
+                    len(slugs),
+                )
+            else:
+                logger.info(
+                    "Ensured %d label(s) across %d repo(s).",
+                    total_issued,
+                    len(slugs),
+                )
+            if args.json:
+                emit_json_status(
+                    0,
+                    "dry-run" if args.dry_run else "ok",
+                    repos=len(slugs),
+                    labels_ensured=total_issued,
+                )
+            return 0
+        except KeyboardInterrupt:
+            if args.json:
+                emit_json_status(130, message="interrupted")
+            return 130
 
 
 if __name__ == "__main__":

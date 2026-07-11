@@ -33,6 +33,7 @@ from hephaestus.automation._review_utils import (
 )
 from hephaestus.cli.utils import add_agent_timeout_arg, configure_cli_logging, emit_json_status
 from hephaestus.github.rate_limit import wait_until
+from hephaestus.utils.terminal import terminal_guard
 
 from .agent_config import DEFAULT_AGENT_TIMEOUT
 from .claude_invoke import invoke_claude_with_session, parse_review_verdict, scan_quota_reset
@@ -669,7 +670,8 @@ def main() -> int:
     log.info("Starting plan review for issues: %s", args.issues)
 
     work_units = 0
-    with work_report_context(lambda: work_units):
+    shutdown = threading.Event()
+    with work_report_context(lambda: work_units), terminal_guard(shutdown.set):
         try:
             options = PlanReviewerOptions(
                 issues=args.issues,

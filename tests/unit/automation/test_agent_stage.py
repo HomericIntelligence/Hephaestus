@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -285,6 +286,47 @@ def test_main_allows_approval_with_codex_agent(
         "on-request",
     ]
     assert agent_stage.main(argv) == 0
+
+
+def test_main_installs_sigtstp_only_not_cooperative_sigint_handler(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """main() must fix Ctrl+Z without swallowing a single blocking-call Ctrl+C.
+
+    agent_stage.main() makes one blocking agent call with no polling loop, so
+    it must not install the cooperative double-Ctrl+C handler (which would
+    absorb the first Ctrl+C instead of letting default SIGINT kill the
+    blocking subprocess). It must still fix Ctrl+Z via install_sigtstp_only.
+    """
+
+    def fake_run_claude_text(*a: object, **kw: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(["claude"], 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(agent_stage, "run_claude_text", fake_run_claude_text)
+    monkeypatch.setattr(agent_stage, "resolve_agent", lambda x: "claude")
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("p", encoding="utf-8")
+    argv = [
+        "--prompt-file",
+        str(prompt_file),
+        "--repo-root",
+        str(tmp_path),
+        "--stage",
+        "x",
+        "--output",
+        str(tmp_path / "out.txt"),
+        "--agent",
+        "claude",
+    ]
+
+    with (
+        patch("hephaestus.automation.agent_stage.install_sigtstp_only") as mock_tstp,
+        patch("hephaestus.automation.agent_stage.terminal_guard") as mock_guard,
+    ):
+        assert agent_stage.main(argv) == 0
+        mock_tstp.assert_called_once_with()
+        mock_guard.assert_called_once_with()
 
 
 def test_main_rejects_approval_with_pi_agent(
