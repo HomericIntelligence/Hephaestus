@@ -445,13 +445,18 @@ def parse_issue_dependencies(issue_body: str) -> list[int]:
     """
     dependencies = []
 
-    # Pattern 1: Find all #numbers after dependency keywords
+    # Pattern 1: Find all #numbers after dependency keywords on the same
+    # line. Only refs at-or-after the keyword match are harvested — a #N
+    # that precedes the keyword (e.g. "Part of epic #1809. Depends on
+    # #1811.") must not be treated as a dependency, and a line that merely
+    # *mentions* the keyword with no following ref (e.g. "no dependencies.")
+    # must yield nothing (#1830).
     dep_keywords = r"(?:depends on|blocked by|requires|dependencies?:?)"
-    # Find all #123 patterns in lines containing dependency keywords
+    keyword_re = re.compile(dep_keywords, re.IGNORECASE)
     for line in issue_body.split("\n"):
-        if re.search(dep_keywords, line, re.IGNORECASE):
-            # Find all #number patterns in this line
-            for match in re.finditer(r"#(\d+)", line):
+        keyword_match = keyword_re.search(line)
+        if keyword_match:
+            for match in re.finditer(r"#(\d+)", line[keyword_match.start() :]):
                 dependencies.append(int(match.group(1)))
 
     # Pattern 2: Find issue references in lists under Dependencies heading

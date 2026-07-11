@@ -276,3 +276,33 @@ class TestLoadDependenciesIterative:
         assert 9 in resolver.graph.issues
         assert 8 in resolver.graph.issues
         assert 7 in resolver.graph.issues
+
+    def test_epic_labeled_dependency_is_excluded_from_graph(self) -> None:
+        """A dependency labeled 'epic' is marked complete, not admitted to the graph (#1830).
+
+        Mirrors the planning-loop epic exclusion (#1669) at the implementer's
+        dependency-resolution chokepoint: even a legitimately-worded
+        "Depends on #<epic-number>" line must not pull an epic/roadmap issue
+        (and transitively its own dependency mentions) into the graph.
+        """
+        from unittest.mock import patch
+
+        resolver = DependencyResolver(skip_closed=False)
+        root = IssueInfo(number=10, title="Root", dependencies=[1809])
+        epic_issue = IssueInfo(
+            number=1809,
+            title="Epic: pipeline rework",
+            labels=["epic"],
+            dependencies=[1422],
+        )
+
+        with patch(
+            "hephaestus.automation.dependency_resolver.fetch_issue_info",
+            return_value=epic_issue,
+        ) as mock_fetch:
+            resolver._load_dependencies(root, {})
+
+        mock_fetch.assert_called_once_with(1809)
+        assert 1809 in resolver.completed
+        assert 1809 not in resolver.graph.issues
+        assert 1422 not in resolver.graph.issues
