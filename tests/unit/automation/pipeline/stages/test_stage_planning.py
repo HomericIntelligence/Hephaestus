@@ -91,6 +91,23 @@ class TestPlanningStageEnter:
         assert outcome.disposition == Disposition.SKIP
         assert github.mutation_log == []
 
+    def test_skip_wins_over_plan_go_with_warning(
+        self, make_ctx: Any, make_work_item: Any, caplog: Any
+    ) -> None:
+        """state:skip + state:plan-go -> SKIP (not ADVANCE), with a loud WARN (#1835)."""
+        stage = PlanningStage()
+        github = FakeStageGitHub(labels=[STATE_SKIP, STATE_PLAN_GO])
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=5)
+
+        with caplog.at_level("WARNING"):
+            outcome = stage.on_enter(item, ctx)
+
+        assert outcome is not None
+        assert outcome.disposition == Disposition.SKIP
+        assert github.mutation_log == []
+        assert any("state:skip AND state:plan-go" in record.message for record in caplog.records)
+
     def test_merged_pr_closes_issue(self, make_ctx: Any, make_work_item: Any) -> None:
         """A merged closing PR closes the issue as covered (gate A)."""
         stage = PlanningStage()
