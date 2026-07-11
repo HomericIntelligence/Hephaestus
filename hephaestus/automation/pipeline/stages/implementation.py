@@ -16,8 +16,11 @@ binding contract):
   agent_error retries — the doc's "agent_error -> RETRY (consumes the
   implement budget)"), ``test_fix`` = 1 (one fix attempt on red pre-PR
   tests). Both read from ROUTES via ``ctx.budget``, never hardcoded here.
-- GATE [M]: existing-PR fast path first (``_review_existing_pr``
-  semantics): a PR already carrying ``state:implementation-go`` fails back
+- GATE [M]: ``state:skip`` check first (operator-only, absolute — #1835);
+  skips the item regardless of plan-go/implementation-go, before either the
+  existing-PR fast path or the fresh-implement plan-go gate below. Then the
+  existing-PR fast path (``_review_existing_pr`` semantics): a PR already
+  carrying ``state:implementation-go`` fails back
   ``already_implementation_go_pr`` (routes to ci) with ``item.pr`` /
   ``item.branch`` set for the ci stage; a PR without it adopts the PR's
   REAL head branch, re-ensures the auto-merge deferral [durable], cuts a
@@ -84,9 +87,12 @@ from hephaestus.automation.session_naming import (
     issue_auto_impl_branch_name,
 )
 from hephaestus.automation.state_labels import (
+    STATE_IMPLEMENTATION_GO,
+    STATE_PLAN_GO,
     STATE_SKIP,
     is_implementation_go,
     is_plan_go,
+    is_skipped,
 )
 
 from .base import (
@@ -660,6 +666,38 @@ class ImplementationStage(Stage):
             part for part in (result.stdout_tail, result.stderr_tail, result.error) if part
         )
 
+    @staticmethod
+    def _skip_gate(issue: int, labels: list[str]) -> StageOutcome | None:
+        """Operator override: state:skip -> SKIP, warning on a GO contradiction.
+
+        Split out of :meth:`_gate` so the top-of-GATE check (#1835) stays a
+        single readable branch regardless of the existing-PR/fresh-implement
+        logic below it.
+
+        Args:
+            issue: The GitHub issue number (for log messages).
+            labels: The issue's current labels (already refreshed by caller).
+
+        Returns:
+            A SKIP outcome when ``state:skip`` is present, else None.
+
+        """
+        if not is_skipped(labels):
+            return None
+        if is_plan_go(labels) or is_implementation_go(labels):
+            contradicting = (
+                STATE_IMPLEMENTATION_GO if is_implementation_go(labels) else STATE_PLAN_GO
+            )
+            logger.warning(
+                "implementation:%d: state:skip AND %s both present — "
+                "skip wins; see docs/runbooks/state-skip-revival.md if "
+                "this issue should be revived",
+                issue,
+                contradicting,
+            )
+        logger.info("implementation:%d: state:skip; skipping", issue)
+        return StageOutcome(Disposition.SKIP, "state:skip")
+
     def _gate(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """GATE [M]: existing-PR fast path, then the plan-review verdict gate.
 
@@ -677,6 +715,17 @@ class ImplementationStage(Stage):
         """
         if item.issue is None:  # guarded by step(); kept for type narrowing
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
+
+        # Operator override: state:skip -> SKIP, checked before either the
+        # existing-PR fast path or the fresh-implement plan-go gate (#1835 —
+        # the existing-PR path previously adopted PRs unconditionally with no
+        # label read at all; closes the reachable gap even though the 11
+        # incidents that raised #1835 were all confirmed skip-after-PR races,
+        # not this chokepoint).
+        gate_labels = _issue_labels(item, ctx)
+        skip_outcome = self._skip_gate(item.issue, gate_labels)
+        if skip_outcome is not None:
+            return skip_outcome
 
         # Pop the fail-back marker unconditionally: on the fresh-implement
         # path below the budget is consumed by the implement job itself, so
@@ -746,10 +795,9 @@ class ImplementationStage(Stage):
             )
             return Continue(next_state=WORKTREE_WAIT)
 
-        labels = _issue_labels(item, ctx)
         # At-or-past (never equality): plan-go OR already implementation-go
         # both satisfy the gate; anything earlier fails back to plan_review.
-        if not (is_plan_go(labels) or is_implementation_go(labels)):
+        if not (is_plan_go(gate_labels) or is_implementation_go(gate_labels)):
             logger.info("implementation:%d: plan not GO; failing back", item.issue)
             return StageOutcome(Disposition.FAIL_BACK, "plan_not_go")
 

@@ -15,7 +15,7 @@ from hephaestus.automation.pipeline.stages.implementation import (
     build_implementation_prompt,
     build_test_fix_prompt,
 )
-from hephaestus.automation.state_labels import STATE_SKIP
+from hephaestus.automation.state_labels import STATE_PLAN_GO, STATE_SKIP
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
@@ -327,6 +327,44 @@ class TestGate:
         assert isinstance(result, JobRequest)
         assert result.job.descr == "dirty_decision"
         assert result.on_done_state == "ADOPTED"
+
+
+class TestImplementationStateSkipGate:
+    """GATE checks state:skip before either the existing-PR or plan-go path (#1835)."""
+
+    def test_skip_with_existing_pr_skips_without_adoption(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """state:skip on an issue with an open PR skips before any adoption write."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub(labels=[STATE_SKIP], open_pr=42)
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, state="GATE")
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.SKIP
+        assert result.note == "state:skip"
+        assert github.mutation_log == []  # no defer_auto_merge call
+
+    def test_skip_with_plan_go_skips_and_warns(
+        self, make_ctx: Any, make_work_item: Any, caplog: Any
+    ) -> None:
+        """state:skip + state:plan-go, no existing PR -> SKIP with a loud WARN."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub(labels=[STATE_SKIP, STATE_PLAN_GO])
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=2, state="GATE")
+
+        with caplog.at_level("WARNING"):
+            result = stage.step(item, ctx)
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.SKIP
+        assert result.note == "state:skip"
+        assert github.mutation_log == []
+        assert any("state:skip AND state:plan-go" in record.message for record in caplog.records)
 
 
 class TestAgentErrorPingPongBound:
