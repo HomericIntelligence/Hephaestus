@@ -66,11 +66,6 @@ next `vX.Y.Z` tag by bumping the requested component (`patch` / `minor` /
 `major`) from the highest existing tag, then pushes it — which in turn triggers
 `release.yml`.
 
-### HOL Plugin Scanner Workflow (`workflows/hol-plugin-scanner.yml`)
-
-Runs the HOL AI Plugin Scanner on pushes and pull requests so the Codex plugin
-meets the listing requirements for `awesome-codex-plugins`.
-
 ## Maintenance
 
 To update a workflow:

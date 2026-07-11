@@ -323,7 +323,7 @@ config = merge_with_env({}, convert_bools=True)
 <!-- CLI table generated from pyproject.toml [project.scripts]. Keep in sync via
      `python3 -m hephaestus.scripts_lib.check_cli_table_sync` (also enforced in pre-commit). -->
 
-53 console scripts are installed when you install the package.  Run any command
+51 console scripts are installed when you install the package.  Run any command
 with `--help` to see full usage.
 
 ### Automation
@@ -417,8 +417,6 @@ sync (#993).
 | `hephaestus-check-docstrings` | Check Python docstrings for genuine sentence fragments |
 | `hephaestus-check-python-version` | Check Python version consistency across project configuration files |
 | `hephaestus-check-readmes` | Markdown validation utilities for HomericIntelligence projects |
-| `hephaestus-check-skill-catalog` | Ensure `docs/plugin-installation.md` lists every skill shipped under `skills/` and validates skill frontmatter |
-| `hephaestus-check-repo-analyze-skills` | Regenerate the six `skills/repo-analyze*/SKILL.md` from `skills/_repo_analyze_common/` partials; `--check` (default) enforces drift, `--write` updates in place |
 | `hephaestus-check-stale-scripts` | Detect scripts in `scripts/` with no references in CI configs or other scripts |
 | `hephaestus-check-test-structure` | Validate unit test directory structure |
 | `hephaestus-check-tier-labels` | Enforce tier label consistency across all project Markdown files |

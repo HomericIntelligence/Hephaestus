@@ -48,7 +48,6 @@ SANCTIONED_EXTRA_TEST_DIRS: frozenset[str] = frozenset(
     {
         "constants",  # -> hephaestus/constants.py (module, not a subpackage)
         "docs",  # -> top-level docs/ tree
-        "plugins",  # -> top-level Codex plugin marketplace wrapper
         "scripts",  # -> top-level scripts/*.py
         "shell",  # -> shell installer scripts
     }

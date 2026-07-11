@@ -36,7 +36,7 @@ Auto-generated API documentation is published to GitHub Pages on every release:
 
 The published reference covers full function signatures, docstrings, and type
 annotations for documented first-level subpackages, excluding the
-`hephaestus.automation` product layer, plus 53 CLI entry points, regenerated
+`hephaestus.automation` product layer, plus 51 CLI entry points, regenerated
 from the released package via [pdoc](https://pdoc.dev/).
 
 To build the same reference locally (output to the git-ignored `docs/api/`):

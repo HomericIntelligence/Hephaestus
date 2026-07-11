@@ -145,30 +145,6 @@ repos:
         pass_filenames: false
         files: ^\.claude/settings\.json$
 
-  # Skill catalog sync check
-  - repo: local
-    hooks:
-      - id: hephaestus-check-skill-catalog
-        name: hephaestus check skill catalog
-        description: Ensure skill catalog docs list every shipped skill, CLAUDE.md Arguments column stays in sync, and skill frontmatter is valid
-        # --environment default is explicit because the pre-commit CI job runs
-        # in the lint env; the hephaestus-* console scripts live in default.
-        entry: pixi run --environment default hephaestus-check-skill-catalog
-        language: system
-        files: '^(CLAUDE\.md|docs/plugin-installation\.md|skills/)'
-        pass_filenames: false
-
-  # repo-analyze* skill generator drift check
-  - repo: local
-    hooks:
-      - id: hephaestus-check-repo-analyze-skills
-        name: hephaestus check repo-analyze skill generation
-        description: Ensure skills/repo-analyze*/SKILL.md are regenerated from skills/_repo_analyze_common/ partials
-        entry: pixi run --environment default hephaestus-check-repo-analyze-skills
-        language: system
-        files: '^skills/(repo-analyze[^/]*|_repo_analyze_common)/.*$'
-        pass_filenames: false
-
   # Test structure enforcement
   - repo: local
     hooks:
@@ -344,17 +320,6 @@ repos:
         stages: [commit-msg]
         pass_filenames: true
 
-
-  # Skill merge method check: skills must not hardcode merge flags
-  - repo: local
-    hooks:
-      - id: skill-merge-method
-        name: Skill files use choose_merge_flag (no hardcoded merge method)
-        description: Forbid hardcoded `gh pr merge --auto --(rebase|squash|merge)` in skills/**/SKILL.md
-        entry: pixi run python -m hephaestus.validation.skill_merge_method
-        language: system
-        files: ^skills/.*/SKILL\.md$
-        pass_filenames: false
 
   # Dependency-sync check: requirements*.txt entries must exist in pixi.toml
   # and fall within the declared range. See hephaestus.config.dep_sync.

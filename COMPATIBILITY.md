@@ -130,7 +130,6 @@ bypass a misfiring hook locally use
 | `hephaestus-validate-schemas` | Provisional | JSON-Schema validator |
 | `hephaestus-validate-links` | Internal | Repo CI markdown link check |
 | `hephaestus-check-readmes` | Internal | Repo CI README validator |
-| `hephaestus-check-skill-catalog` | Internal | Repo CI skill-catalog validator |
 | `hephaestus-check-type-aliases` | Internal | Repo CI type-alias validator |
 | `hephaestus-check-docstrings` | Internal | Repo CI docstring validator |
 | `hephaestus-check-tier-labels` | Internal | Repo CI tier-label validator |
@@ -156,7 +155,6 @@ bypass a misfiring hook locally use
 | `hephaestus-github-stats` | Provisional | GitHub repo-stats helper |
 | `hephaestus-agent-stats` | Provisional | Agent-stats helper |
 | `hephaestus-validate-agents` | Internal | Repo CI agent-frontmatter validator |
-| `hephaestus-check-repo-analyze-skills` | Internal | Repo CI repo-analyze skill generator validator |
 | `hephaestus-check-cli-tier-docs` | Internal | Enforces this very table; added in #766 |
 | `hephaestus-check-api-table-docs` | Internal | Enforces per-symbol `__all__` documentation in COMPATIBILITY.md |
 | `hephaestus-check-api-reference` | Internal | Verifies generated pdoc API reference output before Pages upload |
