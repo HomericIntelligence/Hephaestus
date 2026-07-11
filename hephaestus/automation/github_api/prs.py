@@ -17,6 +17,15 @@ _ACCEPTABLE_SIG_STATUSES = frozenset({"G", "U"})
 _PULL_REQUEST_STATES = frozenset({"OPEN", "CLOSED", "MERGED"})
 
 
+class OpenPrDiscoveryIncompleteError(RuntimeError):
+    """A head lookup that retained known PRs but could not prove completeness."""
+
+    def __init__(self, branch: str, open_prs: list[tuple[int, str]], reason: str) -> None:
+        """Record the known PRs that must be contained before failing closed."""
+        super().__init__(f"could not verify existing PR state for head {branch!r}: {reason}")
+        self.open_prs = open_prs
+
+
 def _gh_commit_is_verified(oid: str) -> bool:
     """Return True if GitHub reports *oid*'s signature as verified.
 
@@ -172,27 +181,33 @@ def _find_open_prs_for_head(
         raise RuntimeError(f"could not verify existing PR state for head {branch!r}") from e
     if not isinstance(prs, list):
         raise RuntimeError(f"could not verify existing PR state for head {branch!r}")
-    if len(prs) >= 1000:
-        raise RuntimeError(f"could not verify existing PR state for head {branch!r}")
     open_prs: list[tuple[int, str]] = []
+    incomplete_reason = "head lookup reached the 1000-PR cap" if len(prs) >= 1000 else ""
     for pr in prs:
         if not isinstance(pr, dict):
-            raise RuntimeError(f"could not verify existing PR state for head {branch!r}")
+            incomplete_reason = incomplete_reason or "head lookup returned a malformed PR row"
+            continue
         state = pr.get("state")
         base_ref_name = pr.get("baseRefName")
         if not isinstance(state, str) or not isinstance(base_ref_name, str):
-            raise RuntimeError(f"could not verify existing PR state for head {branch!r}")
+            incomplete_reason = incomplete_reason or "head lookup returned an incomplete PR row"
+            continue
         base_ref_name = base_ref_name.strip()
         if not base_ref_name:
-            raise RuntimeError(f"could not verify existing PR state for head {branch!r}")
+            incomplete_reason = incomplete_reason or "head lookup returned a blank base branch"
+            continue
         state = state.upper()
         if state not in _PULL_REQUEST_STATES:
-            raise RuntimeError(f"could not verify existing PR state for head {branch!r}")
+            incomplete_reason = incomplete_reason or "head lookup returned an unknown PR state"
+            continue
         if state == "OPEN":
             number = pr.get("number")
             if not isinstance(number, int) or number <= 0:
-                raise RuntimeError(f"could not verify existing PR state for head {branch!r}")
+                incomplete_reason = incomplete_reason or "head lookup returned an invalid PR number"
+                continue
             open_prs.append((number, base_ref_name))
+    if incomplete_reason:
+        raise OpenPrDiscoveryIncompleteError(branch, open_prs, incomplete_reason)
     return open_prs
 
 
@@ -266,7 +281,12 @@ def gh_pr_create(
     # failure observed on issue #768 (issue #1018). A closed/merged-only head
     # still gets a fresh PR — the issue may legitimately need new work, and the
     # worktree manager already extends the remote branch's history.
-    open_prs = _api._find_open_prs_for_head(branch)
+    discovery_error: OpenPrDiscoveryIncompleteError | None = None
+    try:
+        open_prs = _api._find_open_prs_for_head(branch)
+    except _api.OpenPrDiscoveryIncompleteError as exc:
+        open_prs = exc.open_prs
+        discovery_error = exc
     containment_failures = defer_auto_merge_batch(
         (open_pr_number for open_pr_number, _open_pr_base in open_prs),
         lambda pr_number: defer_auto_merge(
@@ -278,6 +298,10 @@ def gh_pr_create(
             "could not verify auto-merge disabled for existing PR(s): "
             + "; ".join(containment_failures)
         )
+    if discovery_error is not None:
+        raise RuntimeError(
+            f"could not verify existing PR state for head {branch!r}"
+        ) from discovery_error
     existing_open_pr = _api._select_open_pr_for_base(open_prs, base)
     if existing_open_pr is not None:
         _api.logger.info("Reusing existing open PR #%s on head %s", existing_open_pr, branch)

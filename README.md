@@ -1,7 +1,6 @@
 # Hephaestus
 
 [![Test](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/test.yml/badge.svg)](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/test.yml)
-[![Pre-commit](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/pre-commit.yml/badge.svg)](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/pre-commit.yml)
 [![Security](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/security.yml/badge.svg)](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/security.yml)
 [![Release](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/release.yml/badge.svg)](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/release.yml)
 [![Auto Tag](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/auto-tag.yml/badge.svg)](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/auto-tag.yml)

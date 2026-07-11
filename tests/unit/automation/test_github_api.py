@@ -1556,6 +1556,42 @@ class TestGhPrCreate:
             _github_api_module._find_open_prs_for_head("768-auto-impl")
 
     @patch("hephaestus.automation.github_api._gh_call")
+    def test_existing_pr_lookup_retains_valid_rows_on_a_malformed_sibling(
+        self, mock_gh_call: Any
+    ) -> None:
+        """Known PRs survive an incomplete lookup so callers can contain them."""
+        mock_gh_call.return_value = Mock(
+            stdout=json.dumps(
+                [
+                    {"number": 962, "state": "OPEN", "baseRefName": "main"},
+                    "malformed",
+                ]
+            )
+        )
+
+        with pytest.raises(_github_api_module.OpenPrDiscoveryIncompleteError) as excinfo:
+            _github_api_module._find_open_prs_for_head("768-auto-impl")
+
+        assert excinfo.value.open_prs == [(962, "main")]
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_existing_pr_lookup_retains_known_rows_at_the_page_cap(self, mock_gh_call: Any) -> None:
+        """A capped lookup remains incomplete but does not discard known PRs."""
+        mock_gh_call.return_value = Mock(
+            stdout=json.dumps(
+                [
+                    {"number": number, "state": "OPEN", "baseRefName": "main"}
+                    for number in range(1, 1001)
+                ]
+            )
+        )
+
+        with pytest.raises(_github_api_module.OpenPrDiscoveryIncompleteError) as excinfo:
+            _github_api_module._find_open_prs_for_head("768-auto-impl")
+
+        assert excinfo.value.open_prs == [(number, "main") for number in range(1, 1001)]
+
+    @patch("hephaestus.automation.github_api._gh_call")
     def test_existing_pr_lookup_rejects_a_full_page(self, mock_gh_call: Any) -> None:
         """A capped head query cannot claim every existing PR was contained."""
         mock_gh_call.return_value = Mock(
@@ -1754,6 +1790,31 @@ class TestGhPrCreate:
             ["pr", "view", "962"],
             ["pr", "merge", "962"],
             ["pr", "view", "963"],
+        ]
+
+    @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_gh_pr_create_contains_valid_prs_before_rejecting_malformed_discovery(
+        self, mock_gh_call: Any, _mock_signed: Any
+    ) -> None:
+        """An incomplete head lookup cannot hide a known PR from containment."""
+        mock_gh_call.side_effect = [
+            Mock(
+                stdout=json.dumps(
+                    [
+                        {"number": 962, "state": "OPEN", "baseRefName": "main"},
+                        "malformed",
+                    ]
+                )
+            ),
+            _unarmed_pr_state(),
+        ]
+
+        with pytest.raises(RuntimeError, match="could not verify existing PR state"):
+            gh_pr_create(branch="768-auto-impl", title="Test PR", body=_POLICY_BODY)
+
+        assert [call.args[0][:3] for call in mock_gh_call.call_args_list[1:]] == [
+            ["pr", "view", "962"],
         ]
 
     @patch("hephaestus.automation.github_api._assert_branch_commits_signed")

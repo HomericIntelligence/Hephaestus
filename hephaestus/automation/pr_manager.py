@@ -30,6 +30,7 @@ from .claude_invoke import invoke_claude_with_session
 from .claude_models import git_message_model, implementer_model
 from .git_utils import get_repo_slug, issue_ref, run
 from .github_api import (
+    OpenPrDiscoveryIncompleteError,
     _find_open_prs_for_head,
     _gh_call,
     _select_open_pr_for_base,
@@ -596,6 +597,35 @@ def ensure_pr_auto_merge_deferred(pr_number: int) -> None:
         raise RuntimeError(f"could not verify auto-merge disabled for PR #{pr_number}")
 
 
+def _find_and_contain_open_prs(branch_name: str) -> list[tuple[int, str]]:
+    """Contain known head PRs before rejecting an incomplete discovery result."""
+    discovery_error: OpenPrDiscoveryIncompleteError | None = None
+    try:
+        open_prs = _find_open_prs_for_head(branch_name)
+    except OpenPrDiscoveryIncompleteError as exc:
+        open_prs = exc.open_prs
+        discovery_error = exc
+    except Exception as exc:
+        raise RuntimeError(
+            f"could not verify existing PR state for branch {branch_name!r}"
+        ) from exc
+
+    containment_failures = defer_auto_merge_batch(
+        (open_pr_number for open_pr_number, _open_pr_base in open_prs),
+        ensure_pr_auto_merge_deferred,
+    )
+    if containment_failures:
+        raise RuntimeError(
+            "could not verify auto-merge disabled for existing PR(s): "
+            + "; ".join(containment_failures)
+        )
+    if discovery_error is not None:
+        raise RuntimeError(
+            f"could not verify existing PR state for branch {branch_name!r}"
+        ) from discovery_error
+    return open_prs
+
+
 def mark_pr_implementation_go(pr_number: int) -> None:
     """Mark a PR as implementation-review GO."""
     gh_issue_add_labels(pr_number, [STATE_IMPLEMENTATION_GO])
@@ -940,19 +970,7 @@ def ensure_pr_created(
 
     # Check if PR exists, if not create it
     _update_slot(f"{issue_ref(issue_number)}: Creating PR")
-    try:
-        open_prs = _find_open_prs_for_head(branch_name)
-    except Exception as e:
-        raise RuntimeError(f"could not verify existing PR state for branch {branch_name!r}") from e
-    containment_failures = defer_auto_merge_batch(
-        (open_pr_number for open_pr_number, _open_pr_base in open_prs),
-        ensure_pr_auto_merge_deferred,
-    )
-    if containment_failures:
-        raise RuntimeError(
-            "could not verify auto-merge disabled for existing PR(s): "
-            + "; ".join(containment_failures)
-        )
+    open_prs = _find_and_contain_open_prs(branch_name)
     try:
         pr_number = _select_open_pr_for_base(open_prs, base_branch)
     except Exception as e:

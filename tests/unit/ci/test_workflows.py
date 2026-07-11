@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -121,6 +122,18 @@ class TestWorkflowInventoryLiveTree:
         undocumented, missing = check_inventory(REPO_ROOT)
         assert undocumented == []
         assert missing == []
+
+    def test_public_workflow_references_resolve_to_existing_files(self) -> None:
+        """Public badges and workflow docs cannot advertise deleted workflows."""
+        pattern = re.compile(r"(?:actions/)?workflows/([A-Za-z0-9_.-]+\.ya?ml)")
+        workflow_dir = REPO_ROOT / ".github" / "workflows"
+
+        for document in (REPO_ROOT / "README.md", REPO_ROOT / ".github" / "README.md"):
+            references = pattern.findall(document.read_text(encoding="utf-8"))
+            missing = [name for name in references if not (workflow_dir / name).is_file()]
+            assert missing == [], (
+                f"{document.relative_to(REPO_ROOT)} references missing workflows: {missing}"
+            )
 
     def test_workflow_inventory_hook_is_wired_in_precommit(self) -> None:
         from hephaestus.ci.precommit import load_precommit_config

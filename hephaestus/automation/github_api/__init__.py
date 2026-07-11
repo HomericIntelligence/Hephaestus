@@ -86,6 +86,7 @@ from .labels import (  # noqa: E402
     skip_epics as skip_epics,
 )
 from .prs import (  # noqa: E402
+    OpenPrDiscoveryIncompleteError as OpenPrDiscoveryIncompleteError,
     _assert_branch_commits_signed as _assert_branch_commits_signed,
     _find_open_pr_for_head as _find_open_pr_for_head,
     _find_open_prs_for_head as _find_open_prs_for_head,
@@ -123,6 +124,7 @@ __all__ = [
     "GitHubUnavailableError",
     "IssueInfo",
     "IssueState",
+    "OpenPrDiscoveryIncompleteError",
     "ReviewCommentIndexKey",
     "_assert_body_has_closes",
     "_assert_branch_commits_signed",

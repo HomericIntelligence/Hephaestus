@@ -26,9 +26,10 @@ Continuous Integration pipeline that runs on every push and pull request to `mai
 ![Test](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/test.yml/badge.svg)
 ```
 
-### Pre-commit Workflow (`workflows/pre-commit.yml`)
+### Lint Job (`workflows/_required.yml`)
 
-Runs all pre-commit hooks (ruff, mypy, security checks) on pull requests.
+Runs the full pre-commit hook suite (ruff, mypy, security checks) as the
+required `lint` job on pull requests.
 
 ### Security Workflow (`workflows/security.yml`)
 

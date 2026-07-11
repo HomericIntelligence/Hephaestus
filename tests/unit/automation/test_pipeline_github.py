@@ -445,6 +445,38 @@ class TestRepoScoping:
 
         assert deferred == [5, 6]
 
+    def test_repo_scoped_lookup_contains_valid_prs_before_rejecting_malformed_discovery(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A malformed sibling cannot prevent repo-scoped containment of a valid PR."""
+        calls: list[list[str]] = []
+
+        def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            if argv[:2] == ["pr", "list"]:
+                return SimpleNamespace(
+                    stdout=json.dumps(
+                        [
+                            {"number": 5, "state": "OPEN", "baseRefName": "main"},
+                            "malformed",
+                        ]
+                    )
+                )
+            assert argv[:2] == ["pr", "view"]
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"state": "OPEN", "autoMergeRequest": None}),
+                stderr="",
+            )
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+
+        with pytest.raises(RuntimeError, match="could not verify existing PR state"):
+            adapter._contain_open_prs_for_branch("branch")
+
+        assert [call[:3] for call in calls[1:]] == [["pr", "view", "5"]]
+
     def test_repo_scoped_closing_pr_lookup_contains_every_fallback_head_sibling(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

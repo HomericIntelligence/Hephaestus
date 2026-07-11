@@ -331,7 +331,12 @@ class PipelineGitHub:
 
     def _contain_open_prs_for_branch(self, branch_name: str) -> list[tuple[int, str]]:
         """Contain every open PR on ``branch_name`` before selecting any one of them."""
-        open_prs = github_api._find_open_prs_for_head(branch_name, self._gh)
+        discovery_error: github_api.OpenPrDiscoveryIncompleteError | None = None
+        try:
+            open_prs = github_api._find_open_prs_for_head(branch_name, self._gh)
+        except github_api.OpenPrDiscoveryIncompleteError as exc:
+            open_prs = exc.open_prs
+            discovery_error = exc
         containment_failures = defer_auto_merge_batch(
             (pr_number for pr_number, _base_ref_name in open_prs), self.defer_auto_merge
         )
@@ -340,6 +345,10 @@ class PipelineGitHub:
                 "could not verify auto-merge disabled for existing PR(s): "
                 + "; ".join(containment_failures)
             )
+        if discovery_error is not None:
+            raise RuntimeError(
+                f"could not verify existing PR state for head {branch_name!r}"
+            ) from discovery_error
         return open_prs
 
     def _find_open_pr_for_branch(self, branch_name: str) -> int | None:

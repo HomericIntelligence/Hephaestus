@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hephaestus.automation import pr_manager
+from hephaestus.automation.github_api import OpenPrDiscoveryIncompleteError
 from hephaestus.automation.session_naming import AGENT_COMMIT_MESSAGE, AGENT_PR_MESSAGE
 
 
@@ -400,6 +401,35 @@ class TestEnsurePRCreated:
             patch.object(pr_manager, "ensure_pr_auto_merge_deferred", side_effect=defer),
         ):
             with pytest.raises(RuntimeError, match="PR #99 remains armed"):
+                pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt"))
+
+        assert deferred == [99, 100]
+
+    def test_existing_pr_contains_valid_rows_before_rejecting_incomplete_discovery(self) -> None:
+        """A legacy lookup error cannot prevent containment of known sibling PRs."""
+        run_mock = MagicMock(
+            side_effect=[
+                _status("abc1234 commit msg"),
+                _status("origin/master"),
+                _status("2"),
+                _status("refs/heads/branch"),
+            ]
+        )
+        deferred: list[int] = []
+        incomplete = OpenPrDiscoveryIncompleteError(
+            "branch", [(99, "master"), (100, "release")], "malformed PR row"
+        )
+
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "_find_open_prs_for_head", side_effect=incomplete),
+            patch.object(
+                pr_manager,
+                "ensure_pr_auto_merge_deferred",
+                side_effect=lambda pr_number: deferred.append(pr_number),
+            ),
+        ):
+            with pytest.raises(RuntimeError, match="could not verify existing PR state"):
                 pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt"))
 
         assert deferred == [99, 100]
