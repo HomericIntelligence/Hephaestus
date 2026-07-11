@@ -202,37 +202,6 @@ size_str = human_readable_size(1048576)
 print(size_str)  # Output: 1.0 MB
 ```
 
-### As a Claude Code Plugin
-
-Hephaestus also ships as a Claude Code plugin, providing slash commands for repository auditing, agent orchestration, and knowledge management.
-
-```bash
-claude plugin install HomericIntelligence/Hephaestus
-```
-
-Then enable it in your project's `.claude/settings.json`:
-
-```json
-{
-  "enabledPlugins": {
-    "hephaestus@Hephaestus": true
-  }
-}
-```
-
-See [docs/plugin-installation.md](docs/plugin-installation.md) for the full installation guide and skill reference.
-
-### As a Codex Plugin
-
-Hephaestus also ships Codex plugin metadata for the same `hephaestus` skill set.
-
-```bash
-codex plugin marketplace add HomericIntelligence/Hephaestus --ref main
-codex plugin add hephaestus@hephaestus
-```
-
-The Codex manifest lives in [`.codex-plugin/plugin.json`](.codex-plugin/plugin.json), and the marketplace entry lives in [`.agents/plugins/marketplace.json`](.agents/plugins/marketplace.json).
-
 ### Installing in Another Project
 
 Hephaestus is published to PyPI as `homericintelligence-hephaestus`.
