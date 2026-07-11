@@ -15,9 +15,7 @@ VALIDATION_MODULES = {
     "markdown.py": 2,
     "mypy_per_file.py": 1,
     "python_version.py": 1,
-    "repo_analyze_skills.py": 1,
     "schema.py": 1,
-    "skill_catalog.py": 1,
     "stale_scripts.py": 1,
     "test_structure.py": 1,
     "tier_labels.py": 1,
@@ -27,7 +25,7 @@ VALIDATION_MODULES = {
 # Modules skipped by the resolver guard are those without a
 # "create_validation_parser(" call or with "include_repo_root=False"
 # (no --repo-root flag means no resolver duplication is possible).
-# 11 of the 17 modules above currently qualify; the floor guards against
+# Most of the modules above currently qualify; the floor guards against
 # API drift (e.g. a rename of create_validation_parser) silently turning
 # the resolver check into a no-op that passes vacuously.
 MIN_RESOLVER_CHECKED_MODULES = 10

@@ -2,8 +2,7 @@
 
 This file is a single-page map of the AI-agent topology and conventions used by
 Hephaestus and the wider HomericIntelligence ecosystem. For project-specific
-rules (commit policy, branch naming, version model) see [`CLAUDE.md`](CLAUDE.md);
-for the catalog of skills the agents invoke, see the [`skills/`](skills/) directory.
+rules (commit policy, branch naming, version model) see [`CLAUDE.md`](CLAUDE.md).
 
 ## Agents the codebase orchestrates
 
@@ -94,39 +93,12 @@ instructions that bypass the strict review loop. See the tests in
 
 ## Human-in-the-loop checkpoints
 
-Several skills mandate human gates that the agents must wait on:
-
-- `skills/myrmidon-swarm/SKILL.md` — explicit Phase 1 "STOP HERE. Ask the user…"
-  before any swarm deploys.
-- `skills/skill-advisor/SKILL.md` — invoked at the start of any substantive task
-  with `allowed-tools: []`, so it can route but never act autonomously.
-- `skills/finish-branch/SKILL.md`, `skills/code-review/SKILL.md` — explicit confirm
-  steps before tagging, force-pushing, or merging.
-
 Every PR opened by the automation pipeline goes through GitHub's normal branch
 protection and the `pr-policy` required-check gate
 (see [`CLAUDE.md`](CLAUDE.md#pr-policy)) — a human still reviews and merges.
 
-## Skill catalog
-
-`skills/` contains 23 reusable skills the agents can invoke. See
-[`CLAUDE.md`](CLAUDE.md#skill-catalog) for the full table. Highlights:
-
-- **Workflow**: `skill-advisor`, `advise`, `brainstorm`, `test-driven-development`,
-  `systematic-debugging`, `verification`, `finish-branch`, `code-review`.
-- **Repo audits**: `repo-analyze` and its `-quick`, `-strict`, `-full`, and
-  `*-full` variants.
-- **Worktrees**: `git-worktrees`, `worktree-cleanup`, `tidy`.
-- **Orchestration**: `myrmidon-swarm` for hierarchical multi-agent fan-out.
-- **Knowledge capture**: `learn` (writes back to the Mnemosyne marketplace).
-
 ## Configuration / boundaries
 
-- Hooks and per-skill `allowed-tools` are declared in each skill's frontmatter
-  (`skills/<name>/SKILL.md`) — these are the agent permission boundaries.
-- `.claude/settings.json` carries project-level plugin enablement.
-- `.claude-plugin/` ships the marketplace manifests (the project itself is a
-  Claude Code plugin); see also [`docs/plugin-installation.md`](docs/plugin-installation.md).
 - **MCP** (Model Context Protocol): `.mcp.json` at the repo root is the
   project-scoped, version-controlled MCP config. Its `mcpServers` map is empty
   — ecosystem integration runs through plugin marketplaces (Mnemosyne), NATS

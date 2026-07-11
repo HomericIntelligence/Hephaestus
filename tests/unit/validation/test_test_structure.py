@@ -229,7 +229,7 @@ class TestCheckNoUnsanctionedTestDirs:
 
     def test_real_repo_extras_are_sanctioned(self) -> None:
         """The real tests/unit/ extras are all in the shipped allowlist."""
-        assert {"constants", "docs", "plugins", "scripts", "shell"} <= SANCTIONED_EXTRA_TEST_DIRS
+        assert {"constants", "docs", "scripts", "shell"} <= SANCTIONED_EXTRA_TEST_DIRS
 
 
 class TestCheckNoGhostPackages:

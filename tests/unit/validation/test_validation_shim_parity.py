@@ -85,27 +85,6 @@ EXPECTED_PUBLIC_NAMES = {
         "load_pyproject_scripts",
         "main",
     ),
-    "hephaestus.validation.skill_catalog": (
-        "check_claude_skill_arguments",
-        "check_skill_catalog",
-        "check_skill_frontmatter",
-        "extract_claude_skill_arguments",
-        "extract_skill_table_rows",
-        "main",
-    ),
-    "hephaestus.validation.repo_analyze_skills": (
-        "COMMON_DIR",
-        "REPO_ROOT",
-        "SKILLS_DIR",
-        "main",
-    ),
-    "hephaestus.validation.skill_merge_method": (
-        "FENCE",
-        "HARDCODED",
-        "MARKER",
-        "main",
-        "scan",
-    ),
 }
 
 
