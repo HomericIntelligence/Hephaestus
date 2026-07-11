@@ -57,10 +57,21 @@ class DependencyResolver:
     def add_issue(self, issue: IssueInfo) -> None:
         """Add an issue to the dependency graph.
 
+        Refuses (and marks completed) any issue that is closed or tagged
+        ``state:skip`` when ``skip_closed`` is set — a belt-and-braces check
+        so a future call site that forgets its own closed-state check can't
+        silently reintroduce #1832 (cache-miss admission of a closed
+        dependency).
+
         Args:
             issue: IssueInfo to add
 
         """
+        if self.skip_closed and (issue.state.is_done or is_skipped(issue.labels)):
+            logger.info("Refusing to admit closed/skipped issue #%s to graph", issue.number)
+            self.mark_completed(issue.number)
+            return
+
         self.graph.add_issue(issue)
         for dep in issue.dependencies:
             self.add_dependency(issue.number, dep)
