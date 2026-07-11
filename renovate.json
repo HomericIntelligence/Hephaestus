@@ -1,13 +1,14 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "description": [
-    "Renovate owns ONLY conda-forge / pixi dependencies in pixi.toml — the ecosystem Dependabot cannot parse.",
+    "Renovate owns ONLY conda-forge / pixi dependencies in pixi.toml — the ecosystem Dependabot cannot parse. This is enforced by enabledManagers:[\"pixi\"].",
     "GitHub Actions are managed exclusively by .github/dependabot.yml (github-actions ecosystem). Do NOT add a matchManagers:[github-actions] rule here: having both bump actions produces duplicate PRs (see #687). Renovate's default GitHub Actions manager is disabled below."
   ],
   "extends": [
     "config:recommended",
     ":pixi"
   ],
+  "enabledManagers": ["pixi"],
   "labels": ["dependencies"],
   "schedule": ["every week on monday"],
   "prConcurrentLimit": 5,
