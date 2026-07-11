@@ -221,3 +221,12 @@ def test_main_handles_keyboard_interrupt() -> None:
         rc = ci_driver_mod.main()
 
     assert rc == 130
+
+
+def test_main_installs_sigtstp_handler() -> None:
+    """main() fixes Ctrl+Z (#1784) via the shared install_sigtstp_only helper."""
+    with patch("hephaestus.utils.terminal.install_sigtstp_only") as mock_tstp:
+        captured = _run_main_capturing_config(["--issues", "5", "--dry-run"])
+
+    assert captured["rc"] == 0
+    mock_tstp.assert_called_once_with()

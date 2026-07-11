@@ -529,6 +529,26 @@ def test_main_disables_phase_timeout_when_zero(monkeypatch: pytest.MonkeyPatch) 
     assert config.phase_timeout_s is None  # type: ignore[attr-defined]
 
 
+def test_main_installs_sigtstp_handler(monkeypatch: pytest.MonkeyPatch) -> None:
+    """main() fixes Ctrl+Z (#1784) via the shared install_sigtstp_only helper.
+
+    The pipeline's Coordinator already installs its own cooperative
+    SIGINT/SIGTERM/SIGHUP handlers on entry, but never wired SIGTSTP — this
+    wrapper installs it independently before dispatching to the coordinator.
+    """
+    from hephaestus.automation.pipeline import coordinator as coordinator_mod
+
+    monkeypatch.setattr(loop_runner, "_resolve_org_and_repos", lambda args: ("Org", ["Repo"], None))
+    monkeypatch.setattr(loop_runner, "_preflight_token_scopes", lambda *a, **k: None)
+    monkeypatch.setattr(coordinator_mod, "run_pipeline", lambda config: 0)
+
+    with patch("hephaestus.utils.terminal.install_sigtstp_only") as mock_tstp:
+        rc = main(["--repos", "Repo", "--dry-run", "--loops", "1", "--agent", "claude"])
+
+    assert rc == 0
+    mock_tstp.assert_called_once_with()
+
+
 def test_main_prefers_current_checkout_parent_for_projects_dir_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
