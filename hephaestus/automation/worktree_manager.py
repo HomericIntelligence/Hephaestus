@@ -78,16 +78,27 @@ class WorktreeManager:
     Allows parallel issue implementation in isolated worktrees.
     """
 
-    def __init__(self, base_dir: Path | None = None, base_branch: str | None = None) -> None:
+    def __init__(
+        self,
+        base_dir: Path | None = None,
+        base_branch: str | None = None,
+        repo_root: Path | None = None,
+    ) -> None:
         """Initialize worktree manager.
 
         Args:
             base_dir: Base directory for worktrees (default: repo_root/build/.worktrees)
             base_branch: Base branch for worktrees (default: auto-detect from origin/HEAD
                 lazily on first use)
+            repo_root: Repository checkout to operate in (default: ambient CWD's
+                checkout via ``get_repo_root()``). Pass explicitly whenever the
+                caller may be handling a repo other than its own CWD (e.g. a
+                multi-repo pipeline worker) — every git subprocess this class
+                shells out to (``worktree add``, ``fetch``, ``prune``, ...) runs
+                with this as ``cwd``.
 
         """
-        self.repo_root = get_repo_root()
+        self.repo_root = repo_root if repo_root is not None else get_repo_root()
         if base_dir is None:
             base_dir = self.repo_root / "build" / ".worktrees"
         self.base_dir = base_dir

@@ -555,14 +555,25 @@ class WorkerPool:
 
     def _git_create_worktree(self, job: GitJob) -> JobResult:
         """Create a worktree and optionally sync an adopted PR branch."""
-        manager = WorktreeManager()
         kwargs = dict(job.kwargs)
         sync_to_remote = bool(kwargs.pop("sync_to_remote", False))
         pr_number = kwargs.pop("pr_number", None)
+        repo_root_kwarg = kwargs.pop("repo_root", None)
+        repo_root = Path(repo_root_kwarg) if repo_root_kwarg else get_repo_root()
+        base_dir = repo_root / "build" / ".worktrees"
+        manager = WorktreeManager(base_dir=base_dir, repo_root=repo_root)
         created = manager.create_worktree(**kwargs, timeout=job.timeout_s)
         if created is None:
             return JobResult(ok=True)
         worktree_path = Path(created)
+        if repo_root not in worktree_path.parents and worktree_path != repo_root:
+            return JobResult(
+                ok=False,
+                error=(
+                    f"worktree {worktree_path} escaped resolved repo root {repo_root} "
+                    f"for job.repo={job.repo!r}"
+                ),
+            )
         branch_name = str(kwargs.get("branch_name") or "")
         if not sync_to_remote:
             return JobResult(ok=True, value=str(worktree_path))
@@ -620,7 +631,8 @@ class WorkerPool:
                 timeout=job.timeout_s,
             )
             return JobResult(ok=True)
-        manager = WorktreeManager()
+        fallback_root = Path(str(job.kwargs.get("repo_root") or get_repo_root()))
+        manager = WorktreeManager(repo_root=fallback_root)
         manager.remove_worktree(**job.kwargs, timeout=job.timeout_s)
         return JobResult(ok=True)
 

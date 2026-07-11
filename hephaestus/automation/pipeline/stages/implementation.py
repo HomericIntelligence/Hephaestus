@@ -313,6 +313,7 @@ class ImplementationStage(Stage):
             # _prepare_worktree_for_existing_pr :649/:693, so re-running
             # never discards pushed commits). Values coordinator-vetted.
             "refresh_base": not adopted,
+            "repo_root": str(ctx.paths.repo_root),
         }
         if adopted:
             kwargs["sync_to_remote"] = True

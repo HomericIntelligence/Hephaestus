@@ -42,6 +42,19 @@ class TestWorktreeManager:
 
         assert manager.base_dir == custom_dir
 
+    def test_initialization_explicit_repo_root(self, worktree_mocks: Any, tmp_path: Any) -> None:
+        """An explicit repo_root is used verbatim and get_repo_root is never consulted."""
+        worktree_mocks.repo_root.side_effect = AssertionError(
+            "get_repo_root() must not be called when repo_root is explicit"
+        )
+        other_repo = tmp_path / "other-repo"
+
+        manager = WorktreeManager(repo_root=other_repo)
+
+        assert manager.repo_root == other_repo
+        assert manager.base_dir == other_repo / "build" / ".worktrees"
+        worktree_mocks.repo_root.assert_not_called()
+
     def test_create_worktree_success(self, worktree_mocks: Any, tmp_path: Any) -> None:
         """Test successful worktree creation."""
         worktree_mocks.repo_root.return_value = tmp_path

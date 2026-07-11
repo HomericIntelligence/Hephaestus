@@ -310,6 +310,7 @@ class TestGate:
             "issue_number": 1,
             "branch_name": "1-some-real-branch",
             "refresh_base": False,
+            "repo_root": "/tmp/repo",
             "sync_to_remote": True,
             "pr_number": 1001,
         }
@@ -538,6 +539,7 @@ class TestWorktreeAndAdvise:
             "issue_number": 1,
             "branch_name": "1-auto-impl",
             "refresh_base": True,
+            "repo_root": "/tmp/repo",
         }
         assert result.on_done_state == "DIRTY_DECISION_WAIT"
 
