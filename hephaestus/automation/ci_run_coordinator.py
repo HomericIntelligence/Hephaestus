@@ -155,6 +155,7 @@ class CIDriveRunCoordinator:
                 "No open PRs found for the specified issues (and no open bot PRs) "
                 "- nothing to drive"
             )
+            self.open_prs_remaining = self._final_open_prs(pr_map)
             return {}
         logger.info("Found %s PR(s) to drive to green: %s", len(pr_map), pr_map)
         try:
@@ -204,10 +205,24 @@ class CIDriveRunCoordinator:
         if self._options().dry_run:
             return []
         remaining = cast(list[dict[str, Any]], self._discovery.list_open_prs_remaining())
-        if self._options().issues and remaining:
+        if self._options().issues and pr_map and remaining:
             scoped_prs = set(pr_map.values())
+            scoped_heads = {
+                head_ref_name.strip()
+                for pr in remaining
+                if pr.get("number") in scoped_prs
+                and isinstance((head_ref_name := pr.get("headRefName")), str)
+                and head_ref_name.strip()
+            }
             remaining = [
-                pr for pr in remaining if pr.get("number") == -1 or pr.get("number") in scoped_prs
+                pr
+                for pr in remaining
+                if pr.get("number") == -1
+                or pr.get("number") in scoped_prs
+                or (
+                    isinstance(pr.get("headRefName"), str)
+                    and pr["headRefName"].strip() in scoped_heads
+                )
             ]
         if remaining:
             remaining = cast(

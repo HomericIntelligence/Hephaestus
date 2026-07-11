@@ -139,6 +139,102 @@ def test_legacy_scoped_final_sweep_preserves_the_unknown_discovery_sentinel() ->
         coordinator._final_open_prs({2054: 42})
 
 
+def test_legacy_scoped_final_sweep_contains_same_head_siblings() -> None:
+    """Issue filtering retains every open PR sharing a scoped PR's head."""
+    remaining = [
+        {"number": 42, "headRefName": "2054-auto-impl"},
+        {"number": 43, "headRefName": "2054-auto-impl"},
+    ]
+    contained: list[dict[str, Any]] = []
+
+    def contain(prs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        contained.extend(prs)
+        return prs
+
+    coordinator = CIDriveRunCoordinator(
+        options_provider=lambda: SimpleNamespace(dry_run=False, issues=[2054]),
+        worktree_manager=SimpleNamespace(),
+        status_tracker=SimpleNamespace(),
+        discovery=SimpleNamespace(list_open_prs_remaining=lambda: remaining),
+        check_inspector=SimpleNamespace(),
+        fix_flow=SimpleNamespace(),
+        auto_merge=SimpleNamespace(arm_all_unarmed_open_prs=contain),
+        arming=SimpleNamespace(),
+        set_shared_pr_issues=lambda _shared: None,
+    )
+
+    assert coordinator._final_open_prs({2054: 42}) == remaining
+    assert contained == remaining
+
+
+def test_legacy_empty_workset_still_runs_the_final_containment_sweep() -> None:
+    """A failed direct-PR discovery must not bypass final open-PR containment."""
+    remaining = [{"number": 42, "headRefName": "2054-auto-impl"}]
+    contained: list[dict[str, Any]] = []
+
+    def contain(prs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        contained.extend(prs)
+        return prs
+
+    coordinator = CIDriveRunCoordinator(
+        options_provider=lambda: SimpleNamespace(
+            dry_run=False,
+            issues=[],
+            prs=[42],
+            include_bot_prs=False,
+            max_workers=1,
+        ),
+        worktree_manager=SimpleNamespace(),
+        status_tracker=SimpleNamespace(),
+        discovery=SimpleNamespace(
+            discover_workset=lambda _issues: SimpleNamespace(pr_map={}, shared_pr_issues={}),
+            list_open_prs_remaining=lambda: remaining,
+        ),
+        check_inspector=SimpleNamespace(),
+        fix_flow=SimpleNamespace(),
+        auto_merge=SimpleNamespace(arm_all_unarmed_open_prs=contain),
+        arming=SimpleNamespace(sweep_orphaned_records=lambda: None),
+        set_shared_pr_issues=lambda _shared: None,
+    )
+
+    assert coordinator.run() == {}
+    assert contained == remaining
+
+
+def test_legacy_empty_issue_workset_does_not_filter_away_final_containment() -> None:
+    """An empty issue discovery result cannot prove that unrelated PRs are safe."""
+    remaining = [{"number": 42, "headRefName": "2054-auto-impl"}]
+    contained: list[dict[str, Any]] = []
+
+    def contain(prs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        contained.extend(prs)
+        return prs
+
+    coordinator = CIDriveRunCoordinator(
+        options_provider=lambda: SimpleNamespace(
+            dry_run=False,
+            issues=[2054],
+            prs=[],
+            include_bot_prs=False,
+            max_workers=1,
+        ),
+        worktree_manager=SimpleNamespace(),
+        status_tracker=SimpleNamespace(),
+        discovery=SimpleNamespace(
+            discover_workset=lambda _issues: SimpleNamespace(pr_map={}, shared_pr_issues={}),
+            list_open_prs_remaining=lambda: remaining,
+        ),
+        check_inspector=SimpleNamespace(),
+        fix_flow=SimpleNamespace(),
+        auto_merge=SimpleNamespace(arm_all_unarmed_open_prs=contain),
+        arming=SimpleNamespace(sweep_orphaned_records=lambda: None),
+        set_shared_pr_issues=lambda _shared: None,
+    )
+
+    assert coordinator.run() == {}
+    assert contained == remaining
+
+
 def test_legacy_drive_stops_after_verified_auto_merge_deferral() -> None:
     """A legacy drive must not poll or wait on a pre-existing auto-merge arm."""
     deferred: list[int] = []

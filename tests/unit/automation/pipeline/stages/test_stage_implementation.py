@@ -7,7 +7,12 @@ from unittest.mock import patch
 
 from hephaestus.automation.pipeline.jobs import AgentJob, BuildTestJob, GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition
-from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
+from hephaestus.automation.pipeline.stages import (
+    Continue,
+    JobRequest,
+    StageOutcome,
+    implementation as implementation_module,
+)
 from hephaestus.automation.pipeline.stages.implementation import (
     GIT_ERROR_RETRY_CAP,
     PRE_PR_TEST_ARGV,
@@ -63,6 +68,13 @@ class TestComposedPromptBuilders:
 
         assert "## Prior Learnings from Team Knowledge Base" in prompt
         assert prompt.endswith("Use the retry helper.")
+
+    def test_stage_contract_does_not_make_implementation_go_a_merge_boundary(self) -> None:
+        """The module contract must describe the bootstrap containment semantics."""
+        contract = implementation_module.__doc__ or ""
+
+        assert "until ``state:implementation-go``" not in contract
+        assert "does not create merge eligibility" in contract
 
     def test_test_fix_prompt_carries_failure_output(self) -> None:
         """The test-fix resume prompt embeds the failing pytest output."""

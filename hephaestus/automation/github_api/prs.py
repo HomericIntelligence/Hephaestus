@@ -182,6 +182,9 @@ def _find_open_prs_for_head(
         base_ref_name = pr.get("baseRefName")
         if not isinstance(state, str) or not isinstance(base_ref_name, str):
             raise RuntimeError(f"could not verify existing PR state for head {branch!r}")
+        base_ref_name = base_ref_name.strip()
+        if not base_ref_name:
+            raise RuntimeError(f"could not verify existing PR state for head {branch!r}")
         state = state.upper()
         if state not in _PULL_REQUEST_STATES:
             raise RuntimeError(f"could not verify existing PR state for head {branch!r}")

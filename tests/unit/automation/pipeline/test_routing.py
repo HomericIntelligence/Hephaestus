@@ -222,6 +222,15 @@ class TestROUTES:
         }
         assert expected == ROUTES
 
+    def test_legacy_implementation_go_docs_match_ci_maintenance_behavior(self) -> None:
+        """The architecture doc must not claim CI immediately terminates legacy GO work."""
+        root = Path(__file__).resolve().parents[4]
+        text = (root / "docs" / "AUTOMATION_LOOP_ARCHITECTURE.md").read_text(encoding="utf-8")
+        normalized = " ".join(text.split())
+
+        assert "`ci` may perform bounded rebase, polling, and CI-fix work" in normalized
+        assert "`ci` immediately verifies auto-merge is" not in normalized
+
     def test_merge_budget_provenance_uses_stable_source_references(self) -> None:
         """#1902: merge-budget provenance should not pin volatile line numbers."""
         assert routing.__file__ is not None

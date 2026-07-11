@@ -51,8 +51,9 @@ binding contract):
   runner's runtime-error handler), non-fatally.
 - PR_CREATE [M]: ``ctx.github.create_pr`` (idempotent ensure semantics)
   with a ``prompts/pr_review.py get_pr_description`` body [durable], then
-  ``ctx.github.defer_auto_merge`` — the load-bearing legacy order (runner
-  :623): auto-merge stays disabled until ``state:implementation-go``.
+  ``ctx.github.defer_auto_merge`` — the load-bearing #2054 containment
+  boundary: auto-merge stays disabled regardless of legacy labels, and
+  ``state:implementation-go`` does not create merge eligibility.
 - Prompt functions (imported, never re-authored):
   ``prompts/implementation.py get_implementation_prompt`` (composed with
   the advise-findings block by :func:`build_implementation_prompt`),

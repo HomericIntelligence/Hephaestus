@@ -420,6 +420,51 @@ class TestRepoScoping:
             ["pr", "view", "6"],
         ]
 
+    def test_repo_scoped_closing_pr_lookup_contains_every_fallback_head_sibling(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A noncanonical ``Closes`` fallback contains every PR on its head."""
+        calls: list[list[str]] = []
+
+        def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            if argv[:2] == ["pr", "list"] and "--head" in argv:
+                head = argv[argv.index("--head") + 1]
+                if head == "7-auto-impl":
+                    return SimpleNamespace(stdout="[]")
+                assert head == "legacy-7-head"
+                return SimpleNamespace(
+                    stdout=json.dumps(
+                        [
+                            {"number": 8, "state": "OPEN", "baseRefName": "release"},
+                            {"number": 9, "state": "OPEN", "baseRefName": "main"},
+                        ]
+                    )
+                )
+            if argv[:2] == ["pr", "list"] and "--search" in argv:
+                return SimpleNamespace(stdout=json.dumps([{"number": 8, "body": "Closes #7\n"}]))
+            if argv[:3] == ["pr", "view", "8"] and "headRefName" in argv:
+                return SimpleNamespace(stdout=json.dumps({"headRefName": "legacy-7-head"}))
+            if argv[:2] == ["pr", "view"] and "state,autoMergeRequest" in argv:
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps({"state": "OPEN", "autoMergeRequest": None}),
+                    stderr="",
+                )
+            raise AssertionError(f"unexpected gh invocation: {argv}")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        assert adapter.find_pr_for_issue(7) == 8
+
+        contained = [
+            call[2]
+            for call in calls
+            if call[:2] == ["pr", "view"] and "state,autoMergeRequest" in call
+        ]
+        assert contained == ["8", "9"]
+
     def test_repo_scoped_pr_lookup_rejects_empty_successful_output(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

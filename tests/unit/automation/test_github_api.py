@@ -1546,6 +1546,16 @@ class TestGhPrCreate:
             _github_api_module._find_open_pr_for_head("768-auto-impl", "main")
 
     @patch("hephaestus.automation.github_api._gh_call")
+    def test_existing_pr_lookup_rejects_blank_base_name(self, mock_gh_call: Any) -> None:
+        """A blank base cannot be used to select or contain an existing PR."""
+        mock_gh_call.return_value = Mock(
+            stdout=json.dumps([{"number": 962, "state": "OPEN", "baseRefName": "  "}])
+        )
+
+        with pytest.raises(RuntimeError, match="could not verify existing PR state"):
+            _github_api_module._find_open_prs_for_head("768-auto-impl")
+
+    @patch("hephaestus.automation.github_api._gh_call")
     def test_existing_pr_lookup_rejects_a_full_page(self, mock_gh_call: Any) -> None:
         """A capped head query cannot claim every existing PR was contained."""
         mock_gh_call.return_value = Mock(

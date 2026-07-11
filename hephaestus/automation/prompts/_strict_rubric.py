@@ -134,10 +134,11 @@ D1 — Correctness & completeness (HIGHEST PRIORITY / NOGO gate).
     Does the diff correctly and completely do what the issue asks, without
     introducing bugs, regressions, or security holes? A genuine correctness
     defect forces an overall NOGO verdict regardless of every other dimension.
-    NOTE: repo PR policy (Closes #N / deferred auto-merge / signed commits) is
-    NOT graded here — the GitHub CI gates ``pr-policy`` (required) and
-    ``auto-merge-policy`` (advisory) enforce it authoritatively. Do not re-check
-    policy; focus on whether the code is correct and complete.
+    NOTE: repo PR policy (Closes #N / signed commits) is NOT graded here — the
+    GitHub CI gate ``pr-policy`` enforces it authoritatively. During #2054,
+    ``auto-merge-policy`` is advisory; pipeline containment and human strict
+    review are the effective bootstrap controls. Do not re-check policy; focus
+    on whether the code is correct and complete.
 
 D2 — Diff review of CHANGED lines only.
     Restrict findings to lines actually modified in the PR diff above.

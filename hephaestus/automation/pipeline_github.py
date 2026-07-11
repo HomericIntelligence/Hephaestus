@@ -330,12 +330,36 @@ class PipelineGitHub:
                 exc,
             )
 
-    def _find_open_pr_for_branch(self, branch_name: str) -> int | None:
-        """Contain all open head PRs and select the unique ``main`` target."""
+    def _contain_open_prs_for_branch(self, branch_name: str) -> list[tuple[int, str]]:
+        """Contain every open PR on ``branch_name`` before selecting any one of them."""
         open_prs = github_api._find_open_prs_for_head(branch_name, lambda args: self._gh(args))
         for pr_number, _base_ref_name in open_prs:
             self.defer_auto_merge(pr_number)
+        return open_prs
+
+    def _find_open_pr_for_branch(self, branch_name: str) -> int | None:
+        """Contain all open head PRs and select the unique ``main`` target."""
+        open_prs = self._contain_open_prs_for_branch(branch_name)
         return github_api._select_open_pr_for_base(open_prs, "main")
+
+    def _verified_open_pr_head_branch(self, pr_number: int, issue_number: int) -> str:
+        """Return the nonblank head branch of an open fallback PR or fail closed."""
+        try:
+            result = self._gh(["pr", "view", str(pr_number), "--json", "headRefName"])
+            stdout = result.stdout
+            if not isinstance(stdout, str) or not stdout.strip():
+                raise ValueError("empty PR-head response")
+            data = json.loads(stdout)
+            if not isinstance(data, dict):
+                raise ValueError("PR-head response was not an object")
+            head_ref_name = data.get("headRefName")
+            if not isinstance(head_ref_name, str) or not head_ref_name.strip():
+                raise ValueError("PR-head response omitted a usable head")
+        except (AttributeError, OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"could not verify existing PR state for issue #{issue_number}"
+            ) from exc
+        return head_ref_name.strip()
 
     def _find_pr_on_branch(self, branch_name: str, state: str, issue_number: int) -> int | None:
         """Return one validated non-open PR on the canonical issue branch."""
@@ -392,6 +416,7 @@ class PipelineGitHub:
         if not isinstance(candidates, list) or len(candidates) >= 1000:
             raise RuntimeError(f"could not verify existing PR state for issue #{issue_number}")
         closes_pattern = re.compile(rf"^Closes #{issue_number}\b", re.MULTILINE)
+        matching_pr: int | None = None
         for candidate in candidates:
             if not isinstance(candidate, dict):
                 raise RuntimeError(f"could not verify existing PR state for issue #{issue_number}")
@@ -401,9 +426,15 @@ class PipelineGitHub:
                 raise RuntimeError(f"could not verify existing PR state for issue #{issue_number}")
             if closes_pattern.search(body):
                 if state.lower() == "open":
-                    self.defer_auto_merge(number)
-                return number
-        return None
+                    head_branch = self._verified_open_pr_head_branch(number, issue_number)
+                    open_prs = self._contain_open_prs_for_branch(head_branch)
+                    if number not in {open_pr_number for open_pr_number, _base in open_prs}:
+                        raise RuntimeError(
+                            f"could not verify existing PR state for issue #{issue_number}"
+                        )
+                if matching_pr is None:
+                    matching_pr = number
+        return matching_pr
 
     def _find_pr_for_issue(self, issue_number: int, *, state: str) -> int | None:
         if state.lower() == "open":

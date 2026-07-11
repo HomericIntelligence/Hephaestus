@@ -462,8 +462,9 @@ closed: merged PRs become `finished(pass)` and closed PRs become
 `finished(fail)`, before branch adoption or label-based routing is attempted.
 Open direct PRs enter the target repo's `pr_review` queue unless the PR already
 carries `state:implementation-go`, in which case they enter `ci`. During #2054
-this is not merge readiness: `ci` immediately verifies auto-merge is
-disabled and `merge_wait` stops at `strict_gate_unavailable`.
+this is not merge readiness: `ci` may perform bounded rebase, polling, and
+CI-fix work, but it cannot arm auto-merge. Every path verifies auto-merge is
+disabled, and `merge_wait` stops at `strict_gate_unavailable`.
 
 The same terminal-state check is repeated at the CI and implementation stage
 boundaries before branch adoption or implementation-label routing. This makes a
@@ -486,7 +487,7 @@ semantics.
 | state:skip or epic | excluded | Epic tagging is the one seeding write; done BEFORE excluding. |
 | Direct PR already merged | finished | pass, idempotent; terminalized before branch adoption. |
 | Direct PR already closed | finished | fail; terminalized before branch adoption. |
-| Open PR + PR carries state:implementation-go | ci | Legacy route only; contained and stopped pending #2055. |
+| Open PR + PR carries state:implementation-go | ci | Legacy route only; may perform bounded non-merge maintenance, then is contained and stopped pending #2055. |
 | Open PR, no impl-go | pr_review | existing-PR path; will be reviewed. |
 | No PR, at-or-past state:plan-go | implementation | plan approved; ready to implement. |
 | No PR, state:plan-no-go | planning | plan rejected; amend with feedback. |

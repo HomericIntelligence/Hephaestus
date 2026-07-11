@@ -37,10 +37,11 @@ Analyze PR #{pr_number} linked to issue #{issue_number}.
 
 **Code-quality review:**
 
-> Note: repo PR policies (`Closes #N`, signed commits, deferred auto-merge) are
-> enforced authoritatively by the GitHub CI gates `pr-policy` (required) and
-> `auto-merge-policy` (advisory). Do NOT re-check them here — focus solely on
-> code correctness, completeness, and quality.
+> Note: `Closes #N` and signed-commit policy are enforced by the required
+> GitHub CI gate `pr-policy`. `auto-merge-policy` is advisory during #2054;
+> pipeline containment keeps auto-merge disabled and human strict review is
+> the effective bootstrap merge control. Do NOT re-check policy here — focus
+> solely on code correctness, completeness, and quality.
 
 Review the PR for correctness, completeness, and code quality. Identify any issues that should
 be addressed as inline review comments.
