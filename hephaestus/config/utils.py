@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Enhanced configuration management utilities for ProjectHephaestus.
+"""Enhanced configuration management utilities for Hephaestus.
 
 This module provides utilities for loading, validating, and managing
 configuration settings across the HomericIntelligence ecosystem with

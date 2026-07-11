@@ -155,9 +155,9 @@ hephaestus-check-api-reference = "hephaestus.validation.api_reference:main"
 hephaestus-check-unlinked-todo = "hephaestus.validation.unlinked_todo:main"
 
 [project.urls]
-Homepage = "https://github.com/HomericIntelligence/ProjectHephaestus"
-Repository = "https://github.com/HomericIntelligence/ProjectHephaestus"
-Issues = "https://github.com/HomericIntelligence/ProjectHephaestus/issues"
+Homepage = "https://github.com/HomericIntelligence/Hephaestus"
+Repository = "https://github.com/HomericIntelligence/Hephaestus"
+Issues = "https://github.com/HomericIntelligence/Hephaestus/issues"
 
 [tool.hatch.version]
 source = "vcs"

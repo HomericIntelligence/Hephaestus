@@ -1,4 +1,4 @@
-# Contributing to ProjectHephaestus
+# Contributing to Hephaestus
 
 > **Canonical source:** The root [`CONTRIBUTING.md`](../CONTRIBUTING.md) is the authoritative
 > contributing guide. All setup, code style, testing, PR process, and dependency update

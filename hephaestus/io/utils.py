@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Input/output utilities for ProjectHephaestus.
+"""Input/output utilities for Hephaestus.
 
 Standardized interfaces for file operations, data serialization,
 and resource management.

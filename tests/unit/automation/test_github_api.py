@@ -2087,7 +2087,7 @@ class TestFetchIssueCommentIdsRepoScoping:
 
     The multi-repo loop calls this helper with issue numbers belonging to other
     repositories. Resolving the repo from the process CWD sent every query to
-    ProjectHephaestus, producing 404s (or, where issue numbers collide, silently
+    Hephaestus, producing 404s (or, where issue numbers collide, silently
     reading an unrelated issue/PR in the wrong repo).
     """
 
@@ -2102,7 +2102,7 @@ class TestFetchIssueCommentIdsRepoScoping:
         self, mock_gh_call: Any, mock_repo_info: Any
     ) -> None:
         """An explicit ``repo=`` scopes the query and bypasses ambient resolution."""
-        mock_repo_info.return_value = ("HomericIntelligence", "ProjectHephaestus")
+        mock_repo_info.return_value = ("HomericIntelligence", "Hephaestus")
         mock_gh_call.return_value = Mock(
             stdout=json.dumps({"data": {"repository": {"issue": {"comments": {"nodes": []}}}}})
         )
@@ -2124,7 +2124,7 @@ class TestFetchIssueCommentIdsRepoScoping:
         self, mock_gh_call: Any, mock_repo_info: Any
     ) -> None:
         """Back-compat: no ``repo=`` keeps the historical ambient behaviour."""
-        mock_repo_info.return_value = ("HomericIntelligence", "ProjectHephaestus")
+        mock_repo_info.return_value = ("HomericIntelligence", "Hephaestus")
         mock_gh_call.return_value = Mock(
             stdout=json.dumps({"data": {"repository": {"issue": {"comments": {"nodes": []}}}}})
         )
@@ -2132,7 +2132,7 @@ class TestFetchIssueCommentIdsRepoScoping:
         _github_api_module._fetch_issue_comment_ids(42)
 
         variables = self._graphql_vars(mock_gh_call.call_args[0][0])
-        assert variables["name"] == "ProjectHephaestus"
+        assert variables["name"] == "Hephaestus"
         mock_repo_info.assert_called_once()
 
 

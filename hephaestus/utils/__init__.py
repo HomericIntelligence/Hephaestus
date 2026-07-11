@@ -1,4 +1,4 @@
-"""Utility functions for ProjectHephaestus."""
+"""Utility functions for Hephaestus."""
 
 # Import from cache
 from .cache import ThreadSafeCache

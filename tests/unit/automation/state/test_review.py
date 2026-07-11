@@ -507,7 +507,7 @@ class TestFetchAllIssueLabelsGraphql:
             patch("hephaestus.automation.state.review.get_repo_root", return_value="/tmp/repo"),
             patch(
                 "hephaestus.automation.state.review.get_repo_info",
-                return_value=("HomericIntelligence", "ProjectHephaestus"),
+                return_value=("HomericIntelligence", "Hephaestus"),
             ),
             patch("hephaestus.automation.state.review._gh_call") as mock_gh,
         ):
@@ -518,12 +518,12 @@ class TestFetchAllIssueLabelsGraphql:
         query_arg = next(a for a in argv if a.startswith("query="))
         # No single-quoted GraphQL string literals (invalid GraphQL).
         assert "'HomericIntelligence'" not in query_arg
-        assert "'ProjectHephaestus'" not in query_arg
+        assert "'Hephaestus'" not in query_arg
         # owner/name supplied as declared variables, passed via -F.
         assert query_arg.startswith("query=query($owner:String!,$name:String!")
         assert "$owner" in query_arg and "$name" in query_arg
         assert "owner=HomericIntelligence" in argv
-        assert "name=ProjectHephaestus" in argv
+        assert "name=Hephaestus" in argv
         # Issue numbers are GraphQL variables too, not interpolated inline.
         assert "owner:'" not in query_arg
         assert "n0=10" in argv and "n1=11" in argv
@@ -594,7 +594,7 @@ class TestFetchAllIssueTitlesGraphql:
             patch("hephaestus.automation.state.review.get_repo_root", return_value="/tmp/repo"),
             patch(
                 "hephaestus.automation.state.review.get_repo_info",
-                return_value=("HomericIntelligence", "ProjectHephaestus"),
+                return_value=("HomericIntelligence", "Hephaestus"),
             ),
             patch("hephaestus.automation.state.review._gh_call") as mock_gh,
         ):
@@ -606,7 +606,7 @@ class TestFetchAllIssueTitlesGraphql:
         assert "'HomericIntelligence'" not in query_arg
         assert query_arg.startswith("query=query($owner:String!,$name:String!")
         assert "owner=HomericIntelligence" in argv
-        assert "name=ProjectHephaestus" in argv
+        assert "name=Hephaestus" in argv
         assert "n0=10" in argv and "n1=11" in argv
         assert "issue(number:$n0)" in query_arg
 
@@ -624,7 +624,7 @@ class TestFetchAllIssueCommentsGraphqlVars:
             patch("hephaestus.automation.state.review.get_repo_root", return_value="/tmp/repo"),
             patch(
                 "hephaestus.automation.state.review.get_repo_info",
-                return_value=("HomericIntelligence", "ProjectHephaestus"),
+                return_value=("HomericIntelligence", "Hephaestus"),
             ),
             patch("hephaestus.automation.state.review._gh_call") as mock_gh,
         ):
@@ -637,7 +637,7 @@ class TestFetchAllIssueCommentsGraphqlVars:
         assert query_arg.startswith("query=query($owner:String!,$name:String!")
         assert "$owner" in query_arg and "$name" in query_arg
         assert "owner=HomericIntelligence" in argv
-        assert "name=ProjectHephaestus" in argv
+        assert "name=Hephaestus" in argv
         # Issue number passed as a variable, not interpolated inline.
         assert "owner:'" not in query_arg
         assert "n0=10" in argv

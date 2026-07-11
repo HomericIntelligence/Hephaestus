@@ -3,7 +3,7 @@
 This subpackage is the Claude/Codex automation pipeline (queue-based
 coordinator, Implementer, CIDriver, reviewers, loop runner, curses TUI).
 It is the
-product layer of ProjectHephaestus; the rest of `hephaestus.*` is a
+product layer of Hephaestus; the rest of `hephaestus.*` is a
 utility library. Install with
 ``pip install HomericIntelligence-Hephaestus[automation]`` to opt in.
 

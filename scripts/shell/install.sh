@@ -536,11 +536,11 @@ else
     fi
 fi
 
-# pixi (Python environment manager for Hermes + ProjectHephaestus)
+# pixi (Python environment manager for Hermes + Hephaestus)
 if has_cmd pixi; then
     check_pass "pixi $(get_version pixi --version)"
 else
-    check_fail "pixi — NOT FOUND (required by Hermes bridge and ProjectHephaestus)"
+    check_fail "pixi — NOT FOUND (required by Hermes bridge and Hephaestus)"
     if $INSTALL; then
         echo -e "    ${BLUE}→${NC} Installing pixi..."
         sha=""; tgt=""
@@ -881,7 +881,7 @@ if has_cmd claude; then
     declare -A MARKETPLACES=(
         [claude-plugins-official]="anthropics/claude-plugins-official"
         [cc-marketplace]="kenryu42/cc-marketplace"
-        [ProjectHephaestus]="HomericIntelligence/ProjectHephaestus"
+        [Hephaestus]="HomericIntelligence/Hephaestus"
     )
     for mkt_name in "${!MARKETPLACES[@]}"; do
         mkt_source="${MARKETPLACES[$mkt_name]}"
@@ -925,7 +925,7 @@ if has_cmd claude; then
 
     # Project-scoped plugins (installed per-project in the repo's .claude-plugin)
     declare -A PROJECT_PLUGINS=(
-        [hephaestus]="ProjectHephaestus"
+        [hephaestus]="Hephaestus"
     )
     for plugin_name in "${!PROJECT_PLUGINS[@]}"; do
         mkt="${PROJECT_PLUGINS[$plugin_name]}"

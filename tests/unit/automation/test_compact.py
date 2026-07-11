@@ -41,7 +41,7 @@ class TestCompactSession:
         with patch("hephaestus.automation.learn.subprocess.run") as mock_run:
             mock_run.return_value = Mock(returncode=0, stderr="")
 
-            repo = "ProjectHephaestus"
+            repo = "Hephaestus"
             issue = 842
             agent = AGENT_CI_DRIVER
 

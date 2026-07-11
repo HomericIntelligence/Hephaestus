@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Example usage of ProjectHephaestus utilities.
+"""Example usage of Hephaestus utilities.
 
 This script demonstrates how to use the various utility modules
-in ProjectHephaestus.
+in Hephaestus.
 """
 
 import tempfile
@@ -26,7 +26,7 @@ def main():
     logger.info("Starting example script")
 
     # Demonstrate CLI utilities
-    parser = create_parser(prog_name="ProjectHephaestus example script")
+    parser = create_parser(prog_name="Hephaestus example script")
     add_logging_args(parser)
     parser.add_argument("--output", "-o", default="output.txt", help="Output file path")
     parser.parse_args()
@@ -46,7 +46,7 @@ def main():
 
         # Write data
         sample_data = {
-            "name": "ProjectHephaestus",
+            "name": "Hephaestus",
             "version": hephaestus.__version__,
             "modules": ["config", "logging", "io", "utils", "cli"],
         }

@@ -303,7 +303,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--repo",
-        default="HomericIntelligence/ProjectHephaestus",
+        default="HomericIntelligence/Hephaestus",
         help="GitHub repo (owner/name)",
     )
     parser.add_argument(

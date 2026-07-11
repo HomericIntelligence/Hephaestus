@@ -1,4 +1,4 @@
-"""Helper functions for ProjectHephaestus.
+"""Helper functions for Hephaestus.
 
 General utility functions that don't fit in other specific modules.
 """
@@ -258,7 +258,7 @@ def get_proj_root(proj_name: str) -> str:
     filesystem for a git repository with matching name.
 
     Args:
-        proj_name: Name of the project (e.g., 'ProjectHephaestus')
+        proj_name: Name of the project (e.g., 'Hephaestus')
 
     Returns:
         Absolute path to project root

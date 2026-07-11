@@ -1,4 +1,4 @@
-"""Crash-forensics utilities for ProjectHephaestus.
+"""Crash-forensics utilities for Hephaestus.
 
 Two project-agnostic tools for capturing real core dumps from crashes that
 are otherwise hard to observe:

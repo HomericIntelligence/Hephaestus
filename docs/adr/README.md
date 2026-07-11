@@ -1,6 +1,6 @@
 # Architecture Decision Records
 
-This directory records significant architectural decisions for ProjectHephaestus
+This directory records significant architectural decisions for Hephaestus
 using the [Nygard ADR format](https://github.com/joelparkerhenderson/architecture-decision-record).
 Each ADR is immutable once Accepted; supersede rather than edit.
 

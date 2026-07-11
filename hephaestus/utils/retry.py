@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Enhanced retry utilities with exponential backoff for ProjectHephaestus.
+"""Enhanced retry utilities with exponential backoff for Hephaestus.
 
 Provides automatic retry logic with configurable parameters:
 - Exponential backoff with jitter

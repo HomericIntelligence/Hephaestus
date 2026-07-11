@@ -73,7 +73,7 @@ def test_prefer_cwd_parent_uses_current_checkout_parent(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path: Path
 ) -> None:
     """Loop callers can default to the projects root that owns the cwd checkout."""
-    checkout = tmp_path / "projects" / "ProjectHephaestus"
+    checkout = tmp_path / "projects" / "Hephaestus"
     checkout.mkdir(parents=True)
     monkeypatch.delenv("PROJECTS_ROOT", raising=False)
     result_mock = MagicMock(stdout=f"{checkout}\n")
@@ -92,7 +92,7 @@ def test_prefer_cwd_parent_unwraps_automation_issue_worktree(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path: Path
 ) -> None:
     """Loop defaults must not treat build/.worktrees as the projects root."""
-    checkout = tmp_path / "projects" / "ProjectHephaestus"
+    checkout = tmp_path / "projects" / "Hephaestus"
     issue_worktree = checkout / "build" / ".worktrees" / "issue-1442"
     issue_worktree.mkdir(parents=True)
     monkeypatch.delenv("PROJECTS_ROOT", raising=False)

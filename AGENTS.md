@@ -1,7 +1,7 @@
 # AGENTS.md
 
 This file is a single-page map of the AI-agent topology and conventions used by
-ProjectHephaestus and the wider HomericIntelligence ecosystem. For project-specific
+Hephaestus and the wider HomericIntelligence ecosystem. For project-specific
 rules (commit policy, branch naming, version model) see [`CLAUDE.md`](CLAUDE.md);
 for the catalog of skills the agents invoke, see the [`skills/`](skills/) directory.
 

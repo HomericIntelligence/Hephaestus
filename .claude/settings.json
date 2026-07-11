@@ -1,6 +1,6 @@
 {
   "enabledPlugins": {
-    "hephaestus@ProjectHephaestus": true,
+    "hephaestus@Hephaestus": true,
     "safety-net@cc-marketplace": true
   },
   "permissions": {

@@ -71,4 +71,4 @@ will now raise `ImportError`/`AttributeError`. Migrate to the canonical replacem
 ### Questions
 
 If an upgrade surfaces an unexpected change in documented public-API behavior, please
-[open an issue](https://github.com/HomericIntelligence/ProjectHephaestus/issues).
+[open an issue](https://github.com/HomericIntelligence/Hephaestus/issues).

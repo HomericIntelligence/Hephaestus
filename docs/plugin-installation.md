@@ -1,12 +1,12 @@
-# ProjectHephaestus Agent Plugin — Installation Guide
+# Hephaestus Agent Plugin — Installation Guide
 
-ProjectHephaestus ships as a Claude Code plugin and a Codex plugin in addition to a Python package. Installing the plugin gives any repository in your ecosystem access to the `hephaestus` skill set.
+Hephaestus ships as a Claude Code plugin and a Codex plugin in addition to a Python package. Installing the plugin gives any repository in your ecosystem access to the `hephaestus` skill set.
 
 > **Note on versions:** The plugin version (declared in
 > [`.claude-plugin/plugin.json`](../.claude-plugin/plugin.json) and
 > [`.codex-plugin/plugin.json`](../.codex-plugin/plugin.json)) and the Python package
 > version (tag-driven via hatch-vcs; see
-> [latest release](https://github.com/HomericIntelligence/ProjectHephaestus/releases/latest))
+> [latest release](https://github.com/HomericIntelligence/Hephaestus/releases/latest))
 > are **separate artifacts** with independent version numbers — they are not coupled and
 > will not match. See
 > [`COMPATIBILITY.md`](../COMPATIBILITY.md#versioning-python-package-vs-agent-plugins)
@@ -23,10 +23,10 @@ adding or removing a skill without updating this table, or shipping a skill with
 | advise | Search team knowledge before starting work. Use when starting experiments, debugging unfamiliar errors, or before implementing features with unknowns. |
 | brainstorm | Use before any creative work — creating features, building components, adding functionality, or modifying behavior. Explores user intent and requirements before implementation. |
 | code-review | Use when completing tasks, implementing major features, or before merging — dispatches a Sonnet code reviewer and guides reception of feedback with technical rigor |
-| create-reusable-utilities | Port and generalize utility scripts from one project into ProjectHephaestus for cross-project reuse |
+| create-reusable-utilities | Port and generalize utility scripts from one project into Hephaestus for cross-project reuse |
 | finish-branch | Use when implementation is complete and all tests pass — guides branch completion by presenting structured options for merge, PR creation, or cleanup |
 | git-worktrees | Use when starting feature work that needs isolation from current workspace — creates isolated git worktrees with safety verification |
-| github-actions-python-cicd | Set up a GitHub Actions CI/CD pipeline for a Python project on the ProjectHephaestus reference stack (pixi + pyproject.toml + ruff + mypy + hatch-vcs), Python 3.10-3.13 |
+| github-actions-python-cicd | Set up a GitHub Actions CI/CD pipeline for a Python project on the Hephaestus reference stack (pixi + pyproject.toml + ruff + mypy + hatch-vcs), Python 3.10-3.13 |
 | learn | Save session learnings as a skill plugin — amends existing skills when the topic matches, creates new ones otherwise. Use after experiments, debugging sessions, or when you want to preserve team knowledge. |
 | myrmidon-swarm | Summon the Myrmidon swarm — hierarchical agent delegation with Opus/Sonnet/Haiku model tiers for the HomericIntelligence ecosystem |
 | python-repo-modernization | Bring a partially modernized Python repo to production-grade quality: fix bugs, restructure tests, enhance CI/pre-commit, prepare for PyPI publishing |
@@ -49,27 +49,27 @@ adding or removing a skill without updating this table, or shipping a skill with
 ### Claude Code From GitHub
 
 ```bash
-claude plugin install HomericIntelligence/ProjectHephaestus
+claude plugin install HomericIntelligence/Hephaestus
 ```
 
 ### Claude Code From a Local Clone
 
 ```bash
-claude plugin install /path/to/ProjectHephaestus
+claude plugin install /path/to/Hephaestus
 ```
 
 ### Codex From GitHub
 
 ```bash
-codex plugin marketplace add HomericIntelligence/ProjectHephaestus --ref main
-codex plugin add hephaestus@project-hephaestus
+codex plugin marketplace add HomericIntelligence/Hephaestus --ref main
+codex plugin add hephaestus@hephaestus
 ```
 
 ### Codex From a Local Clone
 
 ```bash
-codex plugin marketplace add /path/to/ProjectHephaestus
-codex plugin add hephaestus@project-hephaestus
+codex plugin marketplace add /path/to/Hephaestus
+codex plugin add hephaestus@hephaestus
 ```
 
 The Codex marketplace entry is declared in
@@ -87,7 +87,7 @@ After installing, enable the plugin in your project's `.claude/settings.json`:
 ```json
 {
   "enabledPlugins": {
-    "hephaestus@ProjectHephaestus": true
+    "hephaestus@Hephaestus": true
   }
 }
 ```
@@ -100,7 +100,7 @@ Check that the plugin appears in your project's enabled plugins:
 cat .claude/settings.json
 ```
 
-You should see `hephaestus@ProjectHephaestus` listed under `enabledPlugins`. Skills will then be available as both `/repo-analyze` and the fully-qualified `hephaestus:repo-analyze` form.
+You should see `hephaestus@Hephaestus` listed under `enabledPlugins`. Skills will then be available as both `/repo-analyze` and the fully-qualified `hephaestus:repo-analyze` form.
 
 ## Verifying Codex Installation
 
@@ -108,10 +108,10 @@ Check that Codex can see the configured marketplace:
 
 ```bash
 codex plugin marketplace list
-codex plugin list --marketplace project-hephaestus
+codex plugin list --marketplace hephaestus
 ```
 
-After installation, `hephaestus@project-hephaestus` should show as installed and
+After installation, `hephaestus@hephaestus` should show as installed and
 enabled.
 
 ## Usage Examples

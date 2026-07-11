@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Enhanced CLI utilities for ProjectHephaestus.
+"""Enhanced CLI utilities for Hephaestus.
 
 This module provides advanced command line interface utilities including
 argument parsing, command registration, and output formatting.
@@ -254,7 +254,7 @@ DRY_RUN_HELP_CAVEAT = (
 def add_dry_run_arg(parser: argparse.ArgumentParser, *, prefix: str | None = None) -> None:
     """Add the standard ``--dry-run`` flag with the canonical help-text contract.
 
-    Every ProjectHephaestus CLI that invokes Claude must surface the same
+    Every Hephaestus CLI that invokes Claude must surface the same
     contract: GitHub/git mutations are suppressed, but Claude is still called
     and tokens are still spent.
 

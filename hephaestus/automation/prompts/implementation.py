@@ -90,7 +90,7 @@ Implement GitHub issue #{issue_number}.
 
 **Git Boundary (MANDATORY — non-negotiable policy):**
 Your job is to edit files and run the relevant local tests. The
-ProjectHephaestus orchestrator owns all git and GitHub mutation after this
+Hephaestus orchestrator owns all git and GitHub mutation after this
 agent turn returns.
 
 - DO NOT run `git commit`, `git push`, `gh pr create`, `gh pr merge`, or any

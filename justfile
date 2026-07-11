@@ -1,4 +1,4 @@
-# ProjectHephaestus command runner — wraps pixi commands for consistent developer experience.
+# Hephaestus command runner — wraps pixi commands for consistent developer experience.
 # All path variables are configurable at the top of the file.
 
 # Source directories for linting, formatting, and type checking

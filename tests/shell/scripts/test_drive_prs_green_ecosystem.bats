@@ -47,7 +47,7 @@ setup() {
     [ "$status" -eq 0 ]
     run grep -F -- '--org HomericIntelligence' "$SCRIPT"
     [ "$status" -eq 0 ]
-    run grep -F -- '--project-root /path/to/ProjectHephaestus' "$SCRIPT"
+    run grep -F -- '--project-root /path/to/Hephaestus' "$SCRIPT"
     [ "$status" -eq 0 ]
 }
 

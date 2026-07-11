@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Markdown linting fixer utilities for ProjectHephaestus.
+"""Markdown linting fixer utilities for Hephaestus.
 
 This module provides functionality to automatically fix common markdown
 linting issues across repositories.

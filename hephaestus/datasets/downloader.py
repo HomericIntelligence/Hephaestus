@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dataset downloading utilities for ProjectHephaestus.
+"""Dataset downloading utilities for Hephaestus.
 
 Provides functionality to download and manage common machine learning datasets
 with proper error handling, progress tracking, and decompression support.
@@ -133,7 +133,7 @@ class DatasetDownloader:
     def __init__(
         self,
         base_url: str,
-        user_agent: str = "Mozilla/5.0 (compatible; ProjectHephaestus/1.0)",
+        user_agent: str = "Mozilla/5.0 (compatible; Hephaestus/1.0)",
         max_retries: int = 3,
         retry_delays: list[float] | None = None,
     ):

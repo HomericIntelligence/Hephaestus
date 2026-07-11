@@ -354,7 +354,7 @@ def get_pr_description(
     summary: str,
     changes: str,
     testing: str,
-    generated_by: str = "ProjectHephaestus automation",
+    generated_by: str = "Hephaestus automation",
 ) -> str:
     """Generate a PR description.
 

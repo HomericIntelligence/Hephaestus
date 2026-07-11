@@ -4,7 +4,7 @@ This directory holds **component-scoped operational notes** that ride along with
 a specific PR or PR bundle — one-time migration warnings, behavior-change
 call-outs, and "what to run after this lands" guidance for fleet operators.
 
-> These are **not** the project's user-facing release notes. ProjectHephaestus
+> These are **not** the project's user-facing release notes. Hephaestus
 > generates those from commit history at tag time via
 > `gh release create --generate-notes` (see [`../RELEASING.md`](../RELEASING.md)).
 > There is intentionally **no `CHANGELOG.md`** in this repo.

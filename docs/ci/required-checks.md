@@ -80,7 +80,7 @@ organization rulesets. Inspect both before changing either policy surface.
 ```bash
 set -euo pipefail
 
-repo=HomericIntelligence/ProjectHephaestus
+repo=HomericIntelligence/Hephaestus
 branch=main
 umask 077
 state_dir=$(mktemp -d "${TMPDIR:-/tmp}/projecthephaestus-issue-2025.XXXXXX")

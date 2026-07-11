@@ -1,4 +1,4 @@
-"""Path resolution helpers for ProjectHephaestus utilities.
+"""Path resolution helpers for Hephaestus utilities.
 
 This module centralizes lookup of the "projects root" directory — the
 parent directory under which sibling HomericIntelligence repositories

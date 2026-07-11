@@ -1,6 +1,6 @@
 # Definition of Done
 
-ProjectHephaestus's Definition of Done is the union of (a) what the PR template
+Hephaestus's Definition of Done is the union of (a) what the PR template
 enforces socially, and (b) what CI enforces mechanically. This document is the
 single, discoverable place where both lists live. If you change the PR template
 or a CI gate, also update the corresponding row here.

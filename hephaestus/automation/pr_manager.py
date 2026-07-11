@@ -997,7 +997,7 @@ def create_pr(
         summary=pr_message.summary,
         changes=pr_message.changes,
         testing=pr_message.testing,
-        generated_by=f"{_agent_display_name(agent)} via ProjectHephaestus automation.",
+        generated_by=f"{_agent_display_name(agent)} via Hephaestus automation.",
     )
 
     return gh_pr_create(

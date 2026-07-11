@@ -1,6 +1,6 @@
 # Scripts Directory
 
-Shell helpers and standalone maintenance scripts for ProjectHephaestus. Most
+Shell helpers and standalone maintenance scripts for Hephaestus. Most
 Python command-line interfaces live in `hephaestus.*` modules and are exposed
 through installed `hephaestus-*` console scripts.
 

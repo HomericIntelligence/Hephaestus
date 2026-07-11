@@ -1,6 +1,6 @@
 # GitHub Configuration
 
-This directory contains GitHub-specific configuration files for ProjectHephaestus.
+This directory contains GitHub-specific configuration files for Hephaestus.
 
 ## Workflows
 
@@ -23,7 +23,7 @@ Continuous Integration pipeline that runs on every push and pull request to `mai
 **Status Badge:**
 
 ```markdown
-![Test](https://github.com/HomericIntelligence/ProjectHephaestus/actions/workflows/test.yml/badge.svg)
+![Test](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/test.yml/badge.svg)
 ```
 
 ### Pre-commit Workflow (`workflows/pre-commit.yml`)

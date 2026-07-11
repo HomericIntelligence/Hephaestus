@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-ProjectHephaestus is the shared utilities and tooling repository of the HomericIntelligence ecosystem. Named after Hephaestus, the Greek god of craftsmanship, forging, and ingenious invention, this project provides the foundational scripts, helpers, and infrastructure that support development across all other repositories.
+Hephaestus is the shared utilities and tooling repository of the HomericIntelligence ecosystem. Named after Hephaestus, the Greek god of craftsmanship, forging, and ingenious invention, this project provides the foundational scripts, helpers, and infrastructure that support development across all other repositories.
 
 **Purpose**: Centralize and maintain Python utilities, helper functions, and common abstractions used throughout the HomericIntelligence suite.
 
@@ -19,12 +19,12 @@ ProjectHephaestus is the shared utilities and tooling repository of the HomericI
 - ProjectProteus → Dynamic configuration and environment adaptation
 - ProjectMyrmidons → Agent swarm coordination and task distribution
 - ProjectAchaeanFleet → Multi-agent fleet orchestration
-- **ProjectHephaestus → Shared utilities, tooling, and foundational components**
+- **Hephaestus → Shared utilities, tooling, and foundational components**
 
 ## Repository Structure
 
 ```text
-ProjectHephaestus/
+Hephaestus/
 ├── hephaestus/                 # Python source code (20 documented subpackages)
 │   ├── agents/                 # Agent frontmatter + loader + runtime
 │   ├── automation/             # Queue-based issue planning / implementation / PR review pipeline
@@ -97,7 +97,7 @@ agent or GitHub CLIs.
 
 ### Language Preference
 
-**Python 3.10+** is the implementation language for all ProjectHephaestus code:
+**Python 3.10+** is the implementation language for all Hephaestus code:
 
 - Shared utility scripts and helpers
 - Configuration management tools
@@ -320,7 +320,7 @@ gh issue comment <number> --body "Completed implementation of new logging utilit
 
 **IMPORTANT**: The `main` branch is protected. All changes must go through a pull request.
 
-ProjectHephaestus uses trunk-based development: create one short-lived feature
+Hephaestus uses trunk-based development: create one short-lived feature
 branch per issue, open a pull request, squash-merge it back to `main`, and cut
 releases from signed `vX.Y.Z` tags; there are no release branches.
 

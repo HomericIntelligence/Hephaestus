@@ -1,4 +1,4 @@
-"""ProjectHephaestus - Centralized utility library for HomericIntelligence ecosystem."""
+"""Hephaestus - Centralized utility library for HomericIntelligence ecosystem."""
 
 from __future__ import annotations
 
