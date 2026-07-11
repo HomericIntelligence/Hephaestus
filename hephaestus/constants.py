@@ -131,7 +131,7 @@ def agent_git_timeout() -> int:
 
 
 def agent_clone_timeout() -> int:
-    """Return the timeout for ProjectMnemosyne clone setup in seconds."""
+    """Return the timeout for Mnemosyne clone setup in seconds."""
     return read_timeout_env("HEPH_AGENT_CLONE_TIMEOUT", AGENT_CLONE_TIMEOUT)
 
 

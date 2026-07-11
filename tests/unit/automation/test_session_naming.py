@@ -89,7 +89,7 @@ class TestSessionName:
     """
 
     def test_basic(self) -> None:
-        assert session_name("ProjectScylla", 1944, AGENT_PLANNER) == "ProjectScylla_1944_planner"
+        assert session_name("Scylla", 1944, AGENT_PLANNER) == "Scylla_1944_planner"
 
     def test_strips_hash_prefix_from_issue(self) -> None:
         assert session_name("R", "#42", AGENT_PLANNER) == "R_42_planner"
@@ -117,12 +117,12 @@ class TestSessionUUID:
     """Deterministic UUIDv5 derivation from (repo, issue, agent)."""
 
     def test_deterministic(self) -> None:
-        a = session_uuid("ProjectScylla", 1944, AGENT_PLANNER)
-        b = session_uuid("ProjectScylla", 1944, AGENT_PLANNER)
+        a = session_uuid("Scylla", 1944, AGENT_PLANNER)
+        b = session_uuid("Scylla", 1944, AGENT_PLANNER)
         assert a == b
 
     def test_returns_valid_uuid(self) -> None:
-        sid = session_uuid("ProjectScylla", 1944, AGENT_PLANNER)
+        sid = session_uuid("Scylla", 1944, AGENT_PLANNER)
         # uuid.UUID raises ValueError on invalid input.
         uuid.UUID(sid)
 

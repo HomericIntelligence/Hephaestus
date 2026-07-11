@@ -16,7 +16,7 @@ Usage examples::
     hephaestus-ensure-state-labels
 
     # A specific repo:
-    hephaestus-ensure-state-labels --repo HomericIntelligence/ProjectScylla
+    hephaestus-ensure-state-labels --repo HomericIntelligence/Scylla
 
     # Every non-archived, non-fork repo in an org (with confirmation):
     hephaestus-ensure-state-labels --org HomericIntelligence

@@ -37,10 +37,7 @@ class TestAdviseSkipped:
 
     def test_default_mnemosyne_root_uses_agent_brain(self, tmp_path: Path) -> None:
         with patch.object(Path, "home", return_value=tmp_path):
-            assert (
-                advise_runner.default_mnemosyne_root()
-                == tmp_path / ".agent-brain" / "ProjectMnemosyne"
-            )
+            assert advise_runner.default_mnemosyne_root() == tmp_path / ".agent-brain" / "Mnemosyne"
 
 
 # ---------------------------------------------------------------------------
@@ -49,10 +46,10 @@ class TestAdviseSkipped:
 
 
 class TestEnsureMnemosyne:
-    """ProjectMnemosyne checkout setup and recovery."""
+    """Mnemosyne checkout setup and recovery."""
 
     def test_existing_valid_checkout_is_pulled(self, tmp_path: Path) -> None:
-        mnemosyne_root = tmp_path / "ProjectMnemosyne"
+        mnemosyne_root = tmp_path / "Mnemosyne"
         mnemosyne_root.mkdir()
         calls: list[list[str]] = []
 
@@ -73,7 +70,7 @@ class TestEnsureMnemosyne:
     ) -> None:
         """Git validation/refresh calls use the centralized call-time timeout."""
         monkeypatch.setenv("HEPH_AGENT_GIT_TIMEOUT", "44")
-        mnemosyne_root = tmp_path / "ProjectMnemosyne"
+        mnemosyne_root = tmp_path / "Mnemosyne"
         mnemosyne_root.mkdir()
         timeouts: list[object] = []
 
@@ -91,12 +88,12 @@ class TestEnsureMnemosyne:
     def test_clone_uses_env_configured_clone_timeout(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """ProjectMnemosyne clone calls use the centralized clone timeout."""
+        """Mnemosyne clone calls use the centralized clone timeout."""
         monkeypatch.setenv("HEPH_AGENT_CLONE_TIMEOUT", "55")
-        mnemosyne_root = tmp_path / "ProjectMnemosyne"
+        mnemosyne_root = tmp_path / "Mnemosyne"
         target = MnemosyneTarget(
             owner="HomericIntelligence",
-            slug="HomericIntelligence/ProjectMnemosyne",
+            slug="HomericIntelligence/Mnemosyne",
             is_fork_of_upstream=False,
         )
 
@@ -117,14 +114,14 @@ class TestEnsureMnemosyne:
         assert gh_call.call_args[0][0][:3] == ["repo", "clone", target.slug]
 
     def test_existing_corrupt_checkout_is_removed_and_recloned(self, tmp_path: Path) -> None:
-        mnemosyne_root = tmp_path / "ProjectMnemosyne"
+        mnemosyne_root = tmp_path / "Mnemosyne"
         mnemosyne_root.mkdir()
         (mnemosyne_root / ".git").mkdir()
         calls: list[list[str]] = []
         gh_calls: list[list[str]] = []
         target = MnemosyneTarget(
             owner="HomericIntelligence",
-            slug="HomericIntelligence/ProjectMnemosyne",
+            slug="HomericIntelligence/Mnemosyne",
             is_fork_of_upstream=False,
         )
 
@@ -165,7 +162,7 @@ class TestResolveMarketplace:
     def test_returns_path_when_present(self) -> None:
         with patch.object(Path, "exists", return_value=True):
             path, reason = advise_runner.resolve_marketplace(
-                Path("/home/user/.agent-brain/ProjectMnemosyne")
+                Path("/home/user/.agent-brain/Mnemosyne")
             )
         assert path is not None
         assert path.name == "marketplace.json"
@@ -177,10 +174,10 @@ class TestResolveMarketplace:
             patch.object(advise_runner, "ensure_mnemosyne", return_value=False) as ensure,
         ):
             path, reason = advise_runner.resolve_marketplace(
-                Path("/home/user/.agent-brain/ProjectMnemosyne")
+                Path("/home/user/.agent-brain/Mnemosyne")
             )
         assert path is None
-        assert reason == "ProjectMnemosyne unavailable"
+        assert reason == "Mnemosyne unavailable"
         ensure.assert_called_once()
 
     def test_missing_marketplace_reclone_succeeds(self) -> None:
@@ -188,7 +185,7 @@ class TestResolveMarketplace:
 
         def exists(self: Path) -> bool:
             calls.append(self)
-            if self.name == "ProjectMnemosyne":
+            if self.name == "Mnemosyne":
                 return True
             # marketplace.json: absent first, present after reclone
             return calls.count(self) > 1
@@ -199,7 +196,7 @@ class TestResolveMarketplace:
             patch.object(advise_runner, "ensure_mnemosyne", return_value=True) as ensure,
         ):
             path, reason = advise_runner.resolve_marketplace(
-                Path("/home/user/.agent-brain/ProjectMnemosyne")
+                Path("/home/user/.agent-brain/Mnemosyne")
             )
         assert path is not None
         assert reason == ""
@@ -208,7 +205,7 @@ class TestResolveMarketplace:
 
     def test_missing_marketplace_reclone_fails(self) -> None:
         def exists(self: Path) -> bool:
-            if self.name == "ProjectMnemosyne":
+            if self.name == "Mnemosyne":
                 return True
             return self.name != "marketplace.json"
 
@@ -218,7 +215,7 @@ class TestResolveMarketplace:
             patch.object(advise_runner, "ensure_mnemosyne", return_value=False) as ensure,
         ):
             path, reason = advise_runner.resolve_marketplace(
-                Path("/home/user/.agent-brain/ProjectMnemosyne")
+                Path("/home/user/.agent-brain/Mnemosyne")
             )
         assert path is None
         assert "marketplace.json missing" in reason
@@ -235,7 +232,7 @@ class TestRunAdvise:
     """run_advise orchestration: success, skip, and fail-safe degradation."""
 
     def test_returns_selected_skill_context_on_success(self, tmp_path: Path) -> None:
-        mnemosyne_root = tmp_path / "ProjectMnemosyne"
+        mnemosyne_root = tmp_path / "Mnemosyne"
         skills_dir = mnemosyne_root / "skills"
         skills_dir.mkdir(parents=True)
         skill_file = skills_dir / "debugging.md"
@@ -278,7 +275,7 @@ class TestRunAdvise:
 
     def test_retries_once_on_unparseable_selector_output(self, tmp_path: Path) -> None:
         """#1587: a non-JSON first selector response is re-asked once, then parsed."""
-        mnemosyne_root = tmp_path / "ProjectMnemosyne"
+        mnemosyne_root = tmp_path / "Mnemosyne"
         skills_dir = mnemosyne_root / "skills"
         skills_dir.mkdir(parents=True)
         (skills_dir / "debugging.md").write_text("# Debugging\n", encoding="utf-8")
@@ -316,7 +313,7 @@ class TestRunAdvise:
 
     def test_unparseable_twice_degrades_to_skip(self, tmp_path: Path) -> None:
         """#1587: if the retry is ALSO unparseable, degrade to a skip (no abort)."""
-        mnemosyne_root = tmp_path / "ProjectMnemosyne"
+        mnemosyne_root = tmp_path / "Mnemosyne"
         (mnemosyne_root / "skills").mkdir(parents=True)
         with (
             patch.object(advise_runner, "get_repo_root", return_value=Path("/repo")),
@@ -342,7 +339,7 @@ class TestRunAdvise:
             patch.object(
                 advise_runner,
                 "resolve_marketplace",
-                return_value=(None, "ProjectMnemosyne unavailable"),
+                return_value=(None, "Mnemosyne unavailable"),
             ),
         ):
             called = False
@@ -359,7 +356,7 @@ class TestRunAdvise:
                 invoke=invoke,
                 build_prompt=_build_prompt,
             )
-        assert result == "<!-- advise step skipped: ProjectMnemosyne unavailable -->"
+        assert result == "<!-- advise step skipped: Mnemosyne unavailable -->"
         assert called is False
 
     def test_degrades_to_skip_on_exception(self) -> None:
@@ -447,7 +444,7 @@ class TestRunAdvise:
         assert "No conversation found" in result
 
     def test_rejects_selected_skill_outside_skills_tree(self, tmp_path: Path) -> None:
-        mnemosyne_root = tmp_path / "ProjectMnemosyne"
+        mnemosyne_root = tmp_path / "Mnemosyne"
         (mnemosyne_root / "skills").mkdir(parents=True)
         outside = mnemosyne_root / "README.md"
         outside.write_text("not a skill", encoding="utf-8")
@@ -460,7 +457,7 @@ class TestRunAdvise:
         assert selected == []
 
     def test_rejects_selected_skill_parent_traversal(self, tmp_path: Path) -> None:
-        mnemosyne_root = tmp_path / "ProjectMnemosyne"
+        mnemosyne_root = tmp_path / "Mnemosyne"
         (mnemosyne_root / "skills").mkdir(parents=True)
 
         selected = advise_runner.parse_selected_skills(
@@ -471,7 +468,7 @@ class TestRunAdvise:
         assert selected == []
 
     def test_selected_skill_context_is_bounded(self, tmp_path: Path) -> None:
-        mnemosyne_root = tmp_path / "ProjectMnemosyne"
+        mnemosyne_root = tmp_path / "Mnemosyne"
         skills_dir = mnemosyne_root / "skills"
         skills_dir.mkdir(parents=True)
         skill_file = skills_dir / "large.md"

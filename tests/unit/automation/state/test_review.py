@@ -305,7 +305,7 @@ class TestIsPlanReviewGoWithFetch:
         with (
             patch(
                 "hephaestus.automation.state.review.get_repo_info",
-                return_value=("HomericIntelligence", "ProjectMnemosyne"),
+                return_value=("HomericIntelligence", "Mnemosyne"),
             ) as mock_info,
             patch(
                 "hephaestus.automation.state.review._gh_call",
@@ -318,7 +318,7 @@ class TestIsPlanReviewGoWithFetch:
         gh_args = mock_gh.call_args[0][0]
         joined = " ".join(gh_args)
         assert "owner=HomericIntelligence" in joined
-        assert "name=ProjectMnemosyne" in joined
+        assert "name=Mnemosyne" in joined
 
     def test_fetch_issue_comments_returns_empty_on_gh_failure(self) -> None:
         """#1426: a ``_gh_call`` failure is logged and yields an empty list.
@@ -329,7 +329,7 @@ class TestIsPlanReviewGoWithFetch:
         with (
             patch(
                 "hephaestus.automation.state.review.get_repo_info",
-                return_value=("HomericIntelligence", "ProjectMnemosyne"),
+                return_value=("HomericIntelligence", "Mnemosyne"),
             ),
             patch(
                 "hephaestus.automation.state.review._gh_call",
@@ -420,7 +420,7 @@ def test_fetch_all_comments_returns_empty_map_on_gh_failure() -> None:
         patch("hephaestus.automation.state.review.get_repo_root", return_value="/tmp/repo"),
         patch(
             "hephaestus.automation.state.review.get_repo_info",
-            return_value=("HomericIntelligence", "ProjectMnemosyne"),
+            return_value=("HomericIntelligence", "Mnemosyne"),
         ),
         patch(
             "hephaestus.automation.state.review._gh_call",
