@@ -105,6 +105,15 @@ def classify_pr_merge_state(
     return PrMergeState.PENDING
 
 
+def _contain_remaining_prs(
+    auto_merge: Any, remaining: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Contain every retained final-sweep PR or preserve an empty result."""
+    if not remaining:
+        return remaining
+    return cast(list[dict[str, Any]], auto_merge.arm_all_unarmed_open_prs(remaining))
+
+
 class CIDriveRunCoordinator:
     """Coordinates a full drive-green run across discovered PR work items."""
 
@@ -224,7 +233,7 @@ class CIDriveRunCoordinator:
             if complete_returned_identity:
                 scoped_rows = [pr for pr in remaining if pr.get("number") in scoped_prs]
                 if {pr["number"] for pr in scoped_rows} != scoped_prs:
-                    return self._contain_remaining_prs(remaining)
+                    return _contain_remaining_prs(self._auto_merge, remaining)
                 scoped_heads = {str(pr["headRefName"]).strip() for pr in scoped_rows}
                 remaining = [
                     pr
@@ -236,7 +245,7 @@ class CIDriveRunCoordinator:
                         and pr["headRefName"].strip() in scoped_heads
                     )
                 ]
-        remaining = self._contain_remaining_prs(remaining)
+        remaining = _contain_remaining_prs(self._auto_merge, remaining)
         if remaining:
             logger.warning("%d open PR(s) remain on the repo - not done:", len(remaining))
             for pr in remaining:
@@ -253,12 +262,6 @@ class CIDriveRunCoordinator:
                     am_state,
                 )
         return remaining
-
-    def _contain_remaining_prs(self, remaining: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Contain every retained final-sweep PR or preserve an empty result."""
-        if not remaining:
-            return remaining
-        return cast(list[dict[str, Any]], self._auto_merge.arm_all_unarmed_open_prs(remaining))
 
     def drive_issue(self, issue_number: int, pr_number: int, slot_id: int) -> WorkerResult:
         """Contain a legacy PR and stop until the strict-review gate exists."""
