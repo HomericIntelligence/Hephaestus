@@ -1348,6 +1348,18 @@ class ReviewPhase(StageMixin):
             # any wait, still record ERROR so a transient infra failure re-reviews
             # next loop and is never mistaken for a NOGO.
             _handle_reviewer_quota_or_overload(e, issue_number=issue_number, iteration=iteration)
+            if "reason=prompt_too_long" in str(e):
+                logger.error(
+                    "#%s R%s: in-loop PR review failed — prompt too long even at "
+                    "aggressive diff budget; recording ERROR (reason=prompt_too_long) "
+                    "so operators can see why this PR needs manual review",
+                    issue_number,
+                    iteration,
+                )
+                return (
+                    f"In-loop reviewer invocation failed at iteration {iteration}: {e}\n\n"
+                    f"{INFRA_ERROR_REVIEW_TEXT}"
+                ), []
             logger.error(
                 "#%s R%s: in-loop PR review failed: %s; recording ERROR (re-review next "
                 "loop, no skip/label) so an infra failure isn't mistaken for a NOGO",

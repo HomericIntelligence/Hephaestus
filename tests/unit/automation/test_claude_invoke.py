@@ -263,6 +263,23 @@ class TestRaiseForErrorEnvelope:
         raise_for_error_envelope("just some prose")
         raise_for_error_envelope("")
 
+    def test_prompt_too_long_envelope_raises_distinct_error(self) -> None:
+        """A 'Prompt is too long' envelope raises PromptTooLongError, not RuntimeError (#1847)."""
+        import json
+
+        from hephaestus.automation.claude_invoke import raise_for_error_envelope
+        from hephaestus.github.client import ClaudeUsageCapError, PromptTooLongError
+
+        stdout = json.dumps({"is_error": True, "result": "Prompt is too long"})
+        with pytest.raises(PromptTooLongError):
+            raise_for_error_envelope(stdout)
+
+        # Also confirm it's not misclassified as a quota cap.
+        try:
+            raise_for_error_envelope(stdout)
+        except PromptTooLongError as exc:
+            assert not isinstance(exc, ClaudeUsageCapError)
+
 
 class TestFormatCalledProcessError:
     """Edge cases for the bounded stdout/stderr formatter (#1799)."""
