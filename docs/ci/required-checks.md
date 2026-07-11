@@ -92,7 +92,7 @@ set -euo pipefail
 repo=HomericIntelligence/Hephaestus
 branch=main
 umask 077
-state_dir=$(mktemp -d "${TMPDIR:-/tmp}/projecthephaestus-issue-2025.XXXXXX")
+state_dir=$(mktemp -d "${TMPDIR:-/tmp}/hephaestus-issue-2025.XXXXXX")
 
 gh api \
   -H "Accept: application/vnd.github+json" \
