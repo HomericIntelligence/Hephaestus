@@ -25,12 +25,17 @@ def _reapply_section() -> str:
 
 
 def test_strict_policy_has_operational_reason() -> None:
-    """Require the documented strict policy to explain its purpose."""
+    """Require the documented strict policy to explain its purpose.
+
+    The repo runs ``strict: false`` deliberately (see the doc): required checks
+    still gate merges, but PRs are NOT required to be up to date with ``main``,
+    which avoids the rebase churn a fast-moving ``main`` would otherwise cause.
+    """
     text = _policy_text().lower()
 
-    assert "strict: true" in text
-    assert "stale pr" in text
-    assert "newer `main`" in text
+    assert "strict: false" in text
+    assert "churn" in text
+    assert "up to date" in text
 
 
 def test_repair_patches_only_strict_mode() -> None:
@@ -38,7 +43,7 @@ def test_repair_patches_only_strict_mode() -> None:
     section = _reapply_section().lower()
 
     assert "-x patch" in section
-    assert "-f strict=true" in section
+    assert "-f strict=false" in section
     assert "-x put" not in section
     assert "checks[][context]" not in section
 
