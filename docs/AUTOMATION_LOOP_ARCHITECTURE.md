@@ -246,17 +246,15 @@ ADDRESS_WAIT → PUSH_WAIT → EVAL → (loop) → FOLLOWUP_WAIT.
    get_address_review_prompt`.
 6. [W:G] Push (commit+force-push addressing changes).
 7. [M] **EVAL**: invoke `_evaluate_go_verdict` (parse reviewerAgent verdict:
-   GO, NOGO, AMBIGUOUS, ERROR, HUMAN_BLOCKED) + count unresolved threads;
-   an explicit NOGO with zero posted thread IDs and zero unresolved automation
-   or human threads is not a completed round: upsert the bounded
-   `<!-- hephaestus-pr-review-zero-thread-nogo -->` artifact, emit the typed
-   `pr_review_zero_thread_nogo` event, and re-enter `REVIEW_WAIT` for a fresh
-   reviewer invocation without consuming a round;
-   if GO + 0 unresolved threads → apply `state:implementation-go` label and
-   arm auto-merge [durable] → ADVANCE; if NOGO/AMBIGUOUS/ERROR and iteration
-   < 3 → RETRY; if HUMAN_BLOCKED or iteration cap exhausted → routes depend on
-   iteration (hard cap 6) and unresolved-thread progress; on exhaustion →
-   apply `state:skip` label [durable] → SKIP.
+   GO, NOGO, AMBIGUOUS, ERROR, HUMAN_BLOCKED) + `count_unresolved_threads_by_severity`
+   (returns `(blocking_automation, minor_automation, human)`, see
+   "Severity-aware GO gate" below); if GO + `human == 0` + `blocking_automation == 0`
+   → resolve any advisory (`minor_automation`) threads, apply
+   `state:implementation-go` label and arm auto-merge [durable] → ADVANCE; if
+   GO but `human > 0` → FINISH_FAIL (`human_blocked`); if NOGO/AMBIGUOUS/ERROR
+   and iteration < 3 → RETRY; if HUMAN_BLOCKED or iteration cap exhausted →
+   routes depend on iteration (hard cap 6) and unresolved-thread progress; on
+   exhaustion → apply `state:skip` label [durable] → SKIP.
 8. [W:A] **Follow-up step** (on GO only) — `prompts/follow_up.py:105
    get_follow_up_prompt`.
 
@@ -295,6 +293,42 @@ objects are rejected.
 - `prompts/implementation.py:336 get_impl_resume_feedback_prompt`
 - `prompts/address_review.py:181 get_address_review_prompt`
 - `prompts/follow_up.py:105 get_follow_up_prompt`
+
+**Severity-aware GO gate** (#1856; recovers detail from the orphaned
+`automation-pr-severity-aware-gate-implementation` skill draft, #2067):
+
+The GO gate does not treat all unresolved automation threads as equally
+blocking. Each posted review comment carries a fail-safe severity marker
+(`<!-- hephaestus-severity: X -->`, `X` in `critical|major|minor|nitpick`)
+prepended to its body at post time (`hephaestus/automation/prompts/pr_review.py`
+defines `BLOCKING_SEVERITIES = {"critical", "major"}`,
+`VALID_SEVERITIES`, `SEVERITY_MARKER_PREFIX`). Extraction
+(`_thread_severity_is_blocking`, `hephaestus/automation/pipeline_github.py:148`)
+uses line-prefix anchoring (`stripped.startswith(prefix) and
+stripped.endswith("-->")`) to avoid substring false positives, and defaults
+an unmarked or unparseable thread to blocking.
+
+`count_unresolved_threads_by_severity` (`hephaestus/automation/pipeline_github.py:625`)
+returns `(blocking_automation, minor_automation, human)`: human-authored
+threads are never downgraded regardless of marker; only automation-owned
+threads are split by severity. The gate
+(`hephaestus/automation/pipeline/stages/pr_review.py:723`) requires
+`human == 0` and `blocking_automation == 0` to arm a GO; if
+`minor_automation > 0` it calls `resolve_automation_threads`
+(`hephaestus/automation/pipeline_github.py:647`) to resolve the waved
+advisory threads before arming, so `required_review_thread_resolution`
+does not re-block the PR at the merge stage.
+
+Integration checklist for applying this pattern elsewhere: define the
+three severity constants; embed the marker with a fail-safe (unknown ⇒
+blocking) default and idempotency guard (don't double-prepend if already
+marked); extract with line-prefix anchoring; return a 3-tuple from the
+counter; gate on `blocking == 0`, not `total == 0`; resolve advisory
+threads before arming; test marker idempotency, substring false
+positives, and the fail-safe default explicitly.
+
+Related: #1554 (original minor-thread deadlock this replaces), #1575
+(no-commit detection, related thread-management work).
 
 ### 6. ci
 
