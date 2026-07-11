@@ -12,21 +12,32 @@ from __future__ import annotations
 import json
 from collections import deque
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
+from hephaestus.automation.claude_invoke import ReviewVerdict
 from hephaestus.automation.pipeline import seeding as seeding_mod
 from hephaestus.automation.pipeline.coordinator import (
     _FAIL_BACK_CAP,
     Coordinator,
     PipelineConfig,
 )
+from hephaestus.automation.pipeline.events import (
+    PrReviewZeroThreadNogoEvent,
+    ZeroThreadNogoAction,
+)
 from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
 from hephaestus.automation.pipeline.seeding import SeedEntry
+from hephaestus.automation.pipeline.stages import Continue
 from hephaestus.automation.pipeline.stages.base import JobRequest
+from hephaestus.automation.pipeline.stages.pr_review import (
+    REVIEW_ERROR_RETRY_CAP,
+    PrReviewStage,
+)
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
@@ -605,6 +616,161 @@ class TestDurableEventLog:
         assert records[-1]["event"] == "push"
         assert records[-1]["fields"] == ["planning", "repo-a#44"]
         assert coordinator.event_log[-1] == ("push", "planning", "repo-a#44")
+
+    def test_zero_thread_nogo_event_is_durable_and_bounded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Stage events persist the fixed zero-thread audit fields."""
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            loops=1,
+            projects_dir=tmp_path,
+            event_log_path=event_log_path,
+        )
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        )
+
+        coordinator._ctx_for_repo("repo-a").emit_event(
+            PrReviewZeroThreadNogoEvent(
+                repo="repo-a",
+                issue=1985,
+                pr=1984,
+                completed_rounds=0,
+                retry_attempt=1,
+                retry_cap=2,
+                action=ZeroThreadNogoAction.RETRY_FRESH_REVIEW,
+                artifact_written=True,
+            )
+        )
+
+        record = json.loads(event_log_path.read_text().splitlines()[-1])
+        assert record["event"] == "pr_review_zero_thread_nogo"
+        assert record["fields"] == [
+            {
+                "action": "retry_fresh_review",
+                "artifact_written": True,
+                "completed_rounds": 0,
+                "issue": 1985,
+                "posted_threads": 0,
+                "pr": 1984,
+                "repo": "repo-a",
+                "retry_attempt": 1,
+                "retry_cap": 2,
+                "round_consumed": False,
+                "unresolved_threads": 0,
+            }
+        ]
+        assert "summary" not in record["fields"][0]
+
+    def test_pr_review_stage_event_uses_coordinator_encoder(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The real stage callback reaches the coordinator's closed JSONL schema."""
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            loops=1,
+            projects_dir=tmp_path,
+            event_log_path=event_log_path,
+        )
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(by_severity=[(0, 0, 0)]),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        item = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.PR,
+            issue=1985,
+            pr=1984,
+            stage=StageName.PR_REVIEW,
+            state="EVAL",
+        )
+        item.payload["review_verdict"] = ReviewVerdict(
+            grade="B",
+            verdict="NOGO",
+            raw='```json\n{"summary":"No actionable location."}\n```',
+        )
+        stage = PrReviewStage()
+        ctx = coordinator._ctx_for_repo("repo-a")
+
+        first = stage.step(item, ctx)
+        assert isinstance(first, Continue)
+        assert first.next_state == "REVIEW_WAIT"
+
+        item.payload["review_error_retries"] = REVIEW_ERROR_RETRY_CAP
+        second = stage.step(item, ctx)
+        assert second == StageOutcome(Disposition.FAIL_BACK, "agent_error")
+
+        records = [json.loads(line) for line in event_log_path.read_text().splitlines()]
+        assert [record["event"] for record in records] == [
+            "pr_review_zero_thread_nogo",
+            "pr_review_zero_thread_nogo",
+        ]
+        assert records[0]["fields"] == [
+            {
+                "action": "retry_fresh_review",
+                "artifact_written": True,
+                "completed_rounds": 0,
+                "issue": 1985,
+                "posted_threads": 0,
+                "pr": 1984,
+                "repo": "repo-a",
+                "retry_attempt": 1,
+                "retry_cap": 2,
+                "round_consumed": False,
+                "unresolved_threads": 0,
+            }
+        ]
+        assert records[1]["fields"] == [
+            {
+                "action": "fail_back_agent_error",
+                "artifact_written": True,
+                "completed_rounds": 0,
+                "issue": 1985,
+                "posted_threads": 0,
+                "pr": 1984,
+                "repo": "repo-a",
+                "retry_attempt": 3,
+                "retry_cap": 2,
+                "round_consumed": False,
+                "unresolved_threads": 0,
+            }
+        ]
+
+    def test_stage_event_rejects_foreign_raw_content_before_jsonl_write(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Foreign event objects cannot inject reviewer text into the log."""
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            loops=1,
+            projects_dir=tmp_path,
+            event_log_path=event_log_path,
+        )
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        )
+
+        @dataclass(frozen=True)
+        class UnsafeEvent:
+            reviewer_summary: str
+
+        with pytest.raises(TypeError, match="unsupported stage event"):
+            coordinator._ctx_for_repo("repo-a").emit_event(
+                cast(Any, UnsafeEvent("untrusted reviewer data"))
+            )
+        assert not event_log_path.exists()
 
     def test_event_log_path_persists_job_completion_records(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

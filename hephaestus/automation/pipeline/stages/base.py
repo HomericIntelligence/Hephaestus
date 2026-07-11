@@ -59,6 +59,7 @@ from typing import Any, Protocol, TypeAlias, runtime_checkable
 from hephaestus.agents.runtime import DEFAULT_AGENT
 from hephaestus.automation.state_labels import STATE_SKIP
 
+from ..events import StageEvent
 from ..jobs import AgentJob, BuildTestJob, GitJob, JobHandle, JobResult
 from ..routing import ROUTES, Disposition, StageName, StageOutcome
 from ..work_item import ItemKind, WorkItem
@@ -77,6 +78,7 @@ __all__ = [
     "JobResult",
     "Stage",
     "StageContext",
+    "StageEvent",
     "StageGitHub",
     "StageName",
     "StageOutcome",
@@ -235,7 +237,7 @@ class StageGitHub(Protocol):
         """
         pass
 
-    def upsert_pr_comment(self, pr_number: int, marker_prefix: str, body: str) -> None:
+    def upsert_pr_comment(self, pr_number: int, marker_prefix: str, body: str) -> bool:
         """Durably create-or-update a marker-keyed PR conversation comment.
 
         PRs share the issue comment channel, so the coordinator maps this onto
@@ -447,6 +449,7 @@ class StageContext:
     paths: Any  # coordinator-owned path accessor (repo_root, worktree)
     now_fn: Callable[[], float] | None = None  # injectable clock (tests pass a fake)
     budget_fn: Callable[[str], int] | None = None  # injected overrides; falls back to ROUTES
+    event_fn: Callable[[StageEvent], None] | None = None
 
     def now(self) -> float:
         """Return the current time in seconds since epoch (injectable for tests)."""
@@ -462,6 +465,11 @@ class StageContext:
             if name in route.budgets:
                 return route.budgets[name]
         return 1  # conservative default for unknown keys
+
+    def emit_event(self, event: StageEvent) -> None:
+        """Emit a runtime-validated stage event when coordinator wiring exists."""
+        if self.event_fn is not None:
+            self.event_fn(event)
 
 
 def agent_provider(ctx: StageContext) -> str:

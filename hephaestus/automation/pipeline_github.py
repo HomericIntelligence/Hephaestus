@@ -927,14 +927,15 @@ class PipelineGitHub:
             return
         github_api.gh_issue_comment(pr_number, body)
 
-    def upsert_pr_comment(self, pr_number: int, marker_prefix: str, body: str) -> None:
+    def upsert_pr_comment(self, pr_number: int, marker_prefix: str, body: str) -> bool:
         """Create-or-update a marker-keyed PR comment (issue comment channel)."""
         if self._skip(f"upsert comment on PR #{pr_number}"):
-            return
+            return False
         if self._repo_slug is None:
             github_api.gh_issue_upsert_comment(pr_number, marker_prefix, body)
-            return
+            return True
         self._upsert_repo_issue_comment(pr_number, marker_prefix, body)
+        return True
 
     def _upsert_repo_issue_comment(
         self, issue_number: int, marker_prefix: str, body: str

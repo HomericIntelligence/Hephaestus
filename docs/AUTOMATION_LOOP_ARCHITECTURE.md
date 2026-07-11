@@ -247,6 +247,11 @@ ADDRESS_WAIT → PUSH_WAIT → EVAL → (loop) → FOLLOWUP_WAIT.
 6. [W:G] Push (commit+force-push addressing changes).
 7. [M] **EVAL**: invoke `_evaluate_go_verdict` (parse reviewerAgent verdict:
    GO, NOGO, AMBIGUOUS, ERROR, HUMAN_BLOCKED) + count unresolved threads;
+   an explicit NOGO with zero posted thread IDs and zero unresolved automation
+   or human threads is not a completed round: upsert the bounded
+   `<!-- hephaestus-pr-review-zero-thread-nogo -->` artifact, emit the typed
+   `pr_review_zero_thread_nogo` event, and re-enter `REVIEW_WAIT` for a fresh
+   reviewer invocation without consuming a round;
    if GO + 0 unresolved threads → apply `state:implementation-go` label and
    arm auto-merge [durable] → ADVANCE; if NOGO/AMBIGUOUS/ERROR and iteration
    < 3 → RETRY; if HUMAN_BLOCKED or iteration cap exhausted → routes depend on
@@ -265,6 +270,13 @@ finished(fail, human_blocked); default → pr_review (RETRY).
 **Budgets**: `pr_review_iter` = 3 (soft; max iterations while threads
 decrease), `pr_review_hard` = 6 (hard cap; iterations 4-6 only if
 unresolved-thread count decreases).
+
+Zero-thread NOGO anomalies use the bounded reviewer-error retry cap and
+consume neither `pr_review_iter` nor `pr_review_hard`; cap exhaustion fails
+back through `agent_error` without writing `state:implementation-no-go` or
+`state:skip`. Stage-originated JSONL events use the closed schema in
+`pipeline/events.py`; raw reviewer text, GitHub bodies, and arbitrary event
+objects are rejected.
 
 **Owned labels**: `state:implementation-go` (GO verdict) [durable],
 `state:implementation-no-go` (NOGO verdict, before retry/regress) [durable],
