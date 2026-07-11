@@ -64,7 +64,7 @@ from hephaestus.automation.prompts.planning import (
     get_plan_loop_review_prompt,
 )
 from hephaestus.automation.session_naming import AGENT_PLAN_REVIEWER, AGENT_PLANNER
-from hephaestus.automation.state_labels import apply_plan_verdict
+from hephaestus.automation.state_labels import apply_plan_verdict, is_plan_go
 
 from .base import (
     AgentJob,
@@ -77,6 +77,7 @@ from .base import (
     StageOutcome,
     StepResult,
     WorkItem,
+    _issue_labels,
     agent_provider,
     stage_model,
 )
@@ -151,8 +152,11 @@ class PlanReviewStage(Stage):
 
     State machine (doc section "3. plan_review"):
 
-    - ENTER: reset the cycle-relative review counter when a new plan cycle
-      begins, then route to REVIEW_WAIT.
+    - ENTER: fast-forward at-or-past ``state:plan-go`` -> ADVANCE (mirrors
+      planning's on_enter guard, defends against a restart re-seeding the
+      item directly into plan_review); otherwise reset the cycle-relative
+      review counter when a new plan cycle begins, then route to
+      REVIEW_WAIT.
     - REVIEW_WAIT: clear any stale verdict, then submit the reviewer job;
       the verdict is parsed in-worker by ``parse_review_verdict`` and lands
       in ``item.payload["review_verdict"]``.
@@ -175,7 +179,14 @@ class PlanReviewStage(Stage):
     """
 
     def on_enter(self, item: WorkItem, ctx: StageContext) -> StageOutcome | None:
-        """Reset the cycle-relative review counter on a new plan cycle.
+        """Fast-forward at-or-past state:plan-go, else reset the cycle-relative review counter.
+
+        A restart can re-seed an item directly into plan_review carrying
+        state:plan-go (product_to_work_item classifies issues into arbitrary
+        entry stages), bypassing planning's on_enter guard entirely. Without
+        this check the item would run a full reviewer job again instead of
+        fast-forwarding, wasting an invocation and risking a spurious
+        re-verdict (#1870).
 
         ``attempts["plan_review_iter"]`` is per-lifetime (routing.py:
         attempts are never reset), so the per-cycle review budget is
@@ -185,19 +196,21 @@ class PlanReviewStage(Stage):
         (e.g. the ERROR-path RETRY) matches the recorded cycle and keeps its
         round count. Idempotent — a literal double on_enter is a no-op.
 
-        No durable entry work: the doc defines no [M] entry step here, and
-        nothing is written. Label fast-forward for items already at-or-past
-        ``state:plan-go`` happens in the planning stage's on_enter before
-        the item is ever routed here.
-
         Args:
             item: The work item being processed.
             ctx: The stage context.
 
         Returns:
-            None (always proceed to step()).
+            A StageOutcome to fast-forward past review, or None to proceed
+            to step().
 
         """
+        if item.issue is not None:
+            labels = _issue_labels(item, ctx)
+            if is_plan_go(labels):
+                logger.info("plan_review:%d: already plan-go; advancing", item.issue)
+                return StageOutcome(Disposition.ADVANCE, "plan already approved")
+
         cycle = item.attempts.get("plan_cycles", 0)
         if item.payload.get("review_cycle") != cycle:
             item.payload["review_cycle"] = cycle
