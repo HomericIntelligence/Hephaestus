@@ -105,6 +105,7 @@ import json
 import logging
 import re
 from collections.abc import Callable
+from html import escape
 from typing import Any, cast
 
 from hephaestus.automation.agent_config import (
@@ -132,6 +133,7 @@ from hephaestus.automation.session_naming import (
 )
 from hephaestus.automation.state_labels import STATE_SKIP
 
+from ..events import PrReviewZeroThreadNogoEvent, ZeroThreadNogoAction
 from .base import (
     GIT_JOB_TIMEOUT_S,
     AgentJob,
@@ -194,6 +196,9 @@ def _issue_number(item: WorkItem) -> int:
 #: plan_review.REVIEW_ERROR_RETRY_CAP). Reset whenever a real verdict
 #: arrives.
 REVIEW_ERROR_RETRY_CAP = 2
+
+_ZERO_THREAD_NOGO_MARKER = "<!-- hephaestus-pr-review-zero-thread-nogo -->"
+_NO_STRUCTURED_SUMMARY = "No structured reviewer summary was provided."
 
 #: Round-scoped payload keys cleared at REVIEW_WAIT submission so a failed
 #: later round can never replay an earlier round's results.
@@ -725,8 +730,8 @@ class PrReviewStage(Stage):
         automation_unresolved = blocking_auto + minor_auto  # progress-trail parity (#1554)
         unresolved = automation_unresolved + human_unresolved
 
-        if self._nogo_without_durable_artifact(verdict, payload, automation_unresolved):
-            return self._handle_lost_review_artifact(item)
+        if self._is_zero_thread_nogo(verdict, payload, unresolved):
+            return self._handle_zero_thread_nogo(item, ctx, verdict)
 
         # Real verdict: this round counts. Reset the consecutive-failure
         # cap; advance the cycle-relative gate and the lifetime audit trail.
@@ -803,41 +808,117 @@ class PrReviewStage(Stage):
         return StageOutcome(Disposition.SKIP, "exhaustion")
 
     @staticmethod
-    def _nogo_without_durable_artifact(
-        verdict: Any, payload: dict[str, Any], automation_unresolved: int
-    ) -> bool:
-        """Return True for a NOGO verdict that left no durable review artifact."""
-        if getattr(verdict, "verdict", "").upper() != "NOGO" or automation_unresolved:
-            return False
-        artifact_keys = (
-            "raw_review_threads",
-            "review_threads",
-            "posted_thread_ids",
-            "unaddressed_findings",
+    def _is_zero_thread_nogo(verdict: Any, payload: dict[str, Any], total_unresolved: int) -> bool:
+        """Return whether an explicit NOGO has no durable actionable threads."""
+        return (
+            getattr(verdict, "verdict", "").upper() == "NOGO"
+            and total_unresolved == 0
+            and not payload.get("posted_thread_ids")
         )
-        return not any(payload.get(key) for key in artifact_keys)
 
-    def _handle_lost_review_artifact(self, item: WorkItem) -> StageOutcome:
-        """Retry an artifactless NOGO without burning a review round."""
-        payload = item.payload
-        retries = payload.get("review_error_retries", 0) + 1
-        payload["review_error_retries"] = retries
-        if retries > REVIEW_ERROR_RETRY_CAP:
-            logger.error(
-                "pr_review:%s: NOGO produced no durable findings; %d consecutive "
-                "artifact failures (cap %d) — failing back to implementation",
+    @staticmethod
+    def _structured_review_summary(raw: object) -> str:
+        """Extract and bound the final JSON summary without exposing raw prose."""
+        if not isinstance(raw, str):
+            return _NO_STRUCTURED_SUMMARY
+        blocks = re.findall(r"```(?:json)?\s*(.*?)```", raw, flags=re.DOTALL | re.IGNORECASE)
+        for candidate in reversed(blocks):
+            try:
+                parsed = json.loads(candidate.strip())
+            except (json.JSONDecodeError, ValueError):
+                continue
+            summary = parsed.get("summary") if isinstance(parsed, dict) else None
+            if isinstance(summary, str) and (compact := " ".join(summary.split())):
+                escaped = escape(compact, quote=False)
+                return escaped if len(escaped) <= 200 else f"{escaped[:197]}..."
+        return _NO_STRUCTURED_SUMMARY
+
+    def _handle_zero_thread_nogo(
+        self, item: WorkItem, ctx: StageContext, verdict: Any
+    ) -> Continue | StageOutcome:
+        """Persist the anomaly and force a new reviewer invocation."""
+        if item.pr is None:
+            return self._fail_back_agent_error(item)
+        pr_number = item.pr
+        retries = int(item.payload.get("review_error_retries", 0)) + 1
+        item.payload["review_error_retries"] = retries
+        action = (
+            ZeroThreadNogoAction.RETRY_FRESH_REVIEW
+            if retries <= REVIEW_ERROR_RETRY_CAP
+            else ZeroThreadNogoAction.FAIL_BACK_AGENT_ERROR
+        )
+        artifact_written = self._upsert_zero_thread_nogo_comment(
+            item,
+            ctx,
+            summary=self._structured_review_summary(getattr(verdict, "raw", "")),
+            retry_attempt=retries,
+            action=action,
+        )
+        ctx.emit_event(
+            PrReviewZeroThreadNogoEvent(
+                repo=item.repo,
+                issue=_issue_number(item),
+                pr=pr_number,
+                completed_rounds=int(item.payload.get("pr_review_round", 0)),
+                retry_attempt=retries,
+                retry_cap=REVIEW_ERROR_RETRY_CAP,
+                action=action,
+                artifact_written=artifact_written,
+            )
+        )
+        if action is ZeroThreadNogoAction.RETRY_FRESH_REVIEW:
+            logger.warning(
+                "pr_review:%s: zero-thread NOGO; retry %d/%d without consuming a round",
                 item.issue,
                 retries,
                 REVIEW_ERROR_RETRY_CAP,
             )
-            return self._fail_back_agent_error(item)
-        logger.warning(
-            "pr_review:%s: NOGO produced no durable findings; retry %d/%d (no round burned)",
+            return Continue(next_state=REVIEW_WAIT)
+        logger.error(
+            "pr_review:%s: zero-thread NOGO retry cap exhausted; failing back",
             item.issue,
-            retries,
-            REVIEW_ERROR_RETRY_CAP,
         )
-        return StageOutcome(Disposition.RETRY, "nogo_without_artifact")
+        return self._fail_back_agent_error(item)
+
+    @staticmethod
+    def _upsert_zero_thread_nogo_comment(
+        item: WorkItem,
+        ctx: StageContext,
+        *,
+        summary: str,
+        retry_attempt: int,
+        action: ZeroThreadNogoAction,
+    ) -> bool:
+        """Upsert one bounded PR artifact describing the anomaly."""
+        if item.pr is None:
+            return False
+        pr_number = item.pr
+        action_text = (
+            "A fresh reviewer invocation will be requested without consuming a review round."
+            if action is ZeroThreadNogoAction.RETRY_FRESH_REVIEW
+            else "The reviewer retry cap is exhausted; the item will fail back as an agent error."
+        )
+        body = (
+            f"{_ZERO_THREAD_NOGO_MARKER}\n"
+            "**Automated PR review anomaly: NOGO without actionable threads.**\n\n"
+            f"Reviewer summary:\n> {summary}\n\n"
+            "No postable or unresolved review thread accompanied this verdict, so "
+            "`state:implementation-no-go` is not being applied. "
+            f"{action_text}\n\n"
+            f"Artifactless reviewer attempt: {retry_attempt}/{REVIEW_ERROR_RETRY_CAP}."
+        )
+        try:
+            artifact_written = ctx.github.upsert_pr_comment(
+                pr_number, _ZERO_THREAD_NOGO_MARKER, body
+            )
+        except Exception as error:
+            logger.warning(
+                "pr_review:%s: failed to upsert zero-thread NOGO artifact (%s)",
+                item.issue,
+                type(error).__name__,
+            )
+            return False
+        return artifact_written
 
     def _handle_address_error(self, item: WorkItem) -> StageOutcome | None:
         """Fail back hard address/push errors with explicit retry cleanup."""

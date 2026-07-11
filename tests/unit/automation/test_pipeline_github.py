@@ -117,6 +117,19 @@ class TestMutatorMapping:
         mock.assert_not_called()
         assert any("[dry-run] would" in record.message for record in caplog.records)
 
+    def test_dry_run_pr_comment_upsert_reports_not_written(
+        self,
+        dry_adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Dry-run artifacts must be reported as absent in durable stage events."""
+        mock = _patch_target(monkeypatch, "github_api", "gh_issue_upsert_comment")
+
+        written = dry_adapter.upsert_pr_comment(7, "<!-- marker -->", "body")
+
+        assert written is False
+        mock.assert_not_called()
+
     def test_upsert_plan_comment_keys_on_marker(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:

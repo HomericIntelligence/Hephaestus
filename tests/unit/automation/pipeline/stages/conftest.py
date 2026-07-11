@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from hephaestus.automation.pipeline.events import StageEvent
 from hephaestus.automation.pipeline.routing import ROUTES, StageName
 from hephaestus.automation.pipeline.stages import StageContext, StageGitHub
 from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARGV
@@ -244,9 +245,10 @@ class FakeStageGitHub(FakeGitHub):
         """
         self.gh_issue_comment(pr_number, body)
 
-    def upsert_pr_comment(self, pr_number: int, marker_prefix: str, body: str) -> None:
+    def upsert_pr_comment(self, pr_number: int, marker_prefix: str, body: str) -> bool:
         """Mirror the coordinator PR-comment upsert (delegates to issue comments)."""
         self.gh_issue_upsert_comment(pr_number, marker_prefix, body)
+        return True
 
     def arm_auto_merge(self, pr_number: int) -> None:
         """Mirror pr_manager.enable_auto_merge_after_implementation_go."""
@@ -353,6 +355,7 @@ def make_ctx() -> Callable[..., StageContext]:
         github: FakeStageGitHub | None = None,
         paths: Any = None,
         budget_fn: Callable[[str], int] | None = None,
+        event_fn: Callable[[StageEvent], None] | None = None,
     ) -> StageContext:
         ticks = [0]
 
@@ -368,6 +371,7 @@ def make_ctx() -> Callable[..., StageContext]:
             paths=paths if paths is not None else _Paths(),
             now_fn=now_fn,
             budget_fn=budget_fn if budget_fn is not None else _budget_fn,
+            event_fn=event_fn,
         )
 
     return _make_ctx

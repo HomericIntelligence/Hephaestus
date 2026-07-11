@@ -88,6 +88,7 @@ from typing import Any, TypeAlias
 from hephaestus.automation.agent_config import DEFAULT_CI_POLL_MAX_WAIT
 from hephaestus.automation.models import IssueInfo
 from hephaestus.automation.pipeline import admission as _admission, seeding as _seeding
+from hephaestus.automation.pipeline.events import StageEvent, encode_stage_event
 from hephaestus.automation.pipeline.jobs import AgentJob, JobHandle, JobResult
 from hephaestus.automation.pipeline.queues import CompletionQueue, StageQueue
 from hephaestus.automation.pipeline.routing import (
@@ -425,6 +426,7 @@ class Coordinator:
                     projects_dir=Path(self.config.projects_dir),
                 ),
                 budget_fn=self._budget_for,
+                event_fn=self._record_stage_event,
             )
             self._ctx_cache[repo] = ctx
         return ctx
@@ -444,6 +446,11 @@ class Coordinator:
         if override is not None:
             return override
         return _budget_lookup(name)
+
+    def _record_stage_event(self, event: StageEvent) -> None:
+        """Validate and persist a closed-schema event emitted by a stage."""
+        event_name, fields = encode_stage_event(event)
+        self._record_event(event_name, fields)
 
     def _record_event(self, event: str, *fields: Any) -> None:
         """Append an event to memory and, when configured, to JSONL on disk."""
