@@ -2,16 +2,22 @@
 """Tests for hephaestus.github.client.gh_call public contract."""
 
 import subprocess
+import sys
 from collections.abc import Generator
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
 
+import hephaestus.github.client as client_module
 from hephaestus.github.client import (
     _GH_BREAKER,
     ClaudeUsageCapError,
     GitHubRateLimitError,
     GitHubUnavailableError,
+    _is_non_transient_error,
+    _is_per_target_error,
+    _is_service_failure,
     gh_call,
     gh_cli_timeout,
 )
@@ -23,6 +29,252 @@ def _reset_breaker() -> Generator[None, None, None]:
     _GH_BREAKER.reset()
     yield
     _GH_BREAKER.reset()
+
+
+def _gh_error(stderr: str) -> subprocess.CalledProcessError:
+    """Build a CalledProcessError shaped like a failed ``gh`` invocation."""
+    return subprocess.CalledProcessError(1, ["gh"], output="", stderr=stderr)
+
+
+class TestBreakerPredicateWiring:
+    """The ``ignore`` predicate must be defined before ``_GH_BREAKER`` uses it."""
+
+    def test_module_imports_in_a_fresh_interpreter(self) -> None:
+        """``ignore=`` is evaluated at import: a forward reference is a NameError.
+
+        No in-process test can catch this — importing this test module already
+        imported ``client``. A lint autofix once rewrote
+        ``ignore=lambda exc: _breaker_should_ignore(exc)`` into a direct
+        reference while the predicate was still defined ~130 lines BELOW
+        ``_GH_BREAKER``, making the module unimportable and failing every test
+        job on every Python version.
+        """
+        proc = subprocess.run(
+            [sys.executable, "-c", "import hephaestus.github.client"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert proc.returncode == 0, proc.stderr
+
+    def test_predicate_is_defined_before_the_breaker(self) -> None:
+        """Guard the ordering invariant directly, with a readable failure."""
+        source = Path(client_module.__file__).read_text(encoding="utf-8")
+        predicate_def = source.index("def _breaker_should_ignore")
+        breaker_use = source.index("_GH_BREAKER = get_circuit_breaker")
+        assert predicate_def < breaker_use, (
+            "_breaker_should_ignore must be defined before _GH_BREAKER references it"
+        )
+
+    def test_breaker_actually_uses_the_predicate(self) -> None:
+        """The live breaker carries the ignore predicate, not a stale None."""
+        assert _GH_BREAKER._ignore is not None
+        assert _GH_BREAKER._ignore(_gh_error("gh: Not Found (HTTP 404)")) is True
+        assert _GH_BREAKER._ignore(_gh_error("gh: HTTP 401: Bad credentials")) is False
+
+
+class TestPerTargetPatternInvariants:
+    """``_PER_TARGET_PATTERNS`` must stay a strict subset of the non-transient set."""
+
+    # Real gh stderr for each per-target pattern. Keep one sample per pattern.
+    PER_TARGET_SAMPLES: tuple[str, ...] = (
+        "gh: Not Found (HTTP 404)",
+        "failed to run git: HTTP 404: Not Found",
+        "gh: Could not resolve to an Issue with the number of 188.",
+        "gh: Could not resolve to a PullRequest with the number of 12.",
+        "Field 'addComment' doesn't accept argument 'foo'",
+        "Variable $owner is declared by query but not used",
+        'gh: Expected VALUE, actual: UNKNOWN_CHAR ("H") at [1, 24]',
+        "gh: Body is not editable",
+        "no checks reported on the '45-foo' branch",
+    )
+
+    @pytest.mark.parametrize("stderr", PER_TARGET_SAMPLES)
+    def test_per_target_samples_are_matched(self, stderr: str) -> None:
+        """Narrowing the patterns must not stop them matching real gh output."""
+        assert _is_per_target_error(stderr)
+
+    @pytest.mark.parametrize("stderr", PER_TARGET_SAMPLES)
+    def test_every_per_target_error_is_also_non_transient(self, stderr: str) -> None:
+        """Per-target implies non-transient — asserted on BEHAVIOUR, not on regex text.
+
+        The two lists answer different questions ("should we retry?" vs "is the
+        service healthy?") and are deliberately worded differently: the
+        per-target patterns are narrower, because over-matching there blinds the
+        breaker. So a set-comparison of regex *source strings* would be both
+        wrong and brittle. What must hold is the semantic implication: anything
+        classified per-target must already be non-transient. Otherwise the error
+        would be retried 6x AND excluded from the breaker — the worst of both.
+        """
+        assert _is_per_target_error(stderr)
+        assert _is_non_transient_error(stderr), (
+            f"{stderr!r} is per-target but would still be retried"
+        )
+
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            "gh: HTTP 401 Unauthorized",
+            "gh: HTTP 403 Forbidden",
+            "Resource not accessible by personal access token",
+        ],
+    )
+    def test_per_target_is_a_strict_subset_of_non_transient(self, stderr: str) -> None:
+        """There exist non-transient errors that are NOT per-target (auth).
+
+        Proves the two classifiers are genuinely distinct: these must skip the
+        retry loop AND still open the breaker.
+        """
+        assert _is_non_transient_error(stderr)
+        assert not _is_per_target_error(stderr)
+
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            "gh: HTTP 401: Bad credentials",
+            "gh: HTTP 403: Forbidden",
+            "gh: HTTP 422: Unprocessable Entity",
+            "gh: HTTP 400: Bad Request",
+            "Resource not accessible by personal access token",
+        ],
+    )
+    def test_credential_and_request_errors_are_not_per_target(self, stderr: str) -> None:
+        """These recur on every later call, so they must still open the breaker."""
+        assert not _is_per_target_error(stderr)
+        assert _is_service_failure(_gh_error(stderr))
+
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            # The gh binary is absent — every call fails.
+            "gh: command not found",
+            # DNS failure — the service is unreachable.
+            "ssh: Could not resolve hostname github.com: Name or service not found",
+            "curl: (6) Could not resolve host: api.github.com",
+            # An actual outage page can contain the words "not found".
+            "GitHub is temporarily unavailable. Page not found.",
+            # A 502 HTML body fed to a JSON parser.
+            "error parsing HTTP 502 response body: invalid character '<'",
+            "Parse error on unexpected token at line 1 of the 502 body",
+        ],
+    )
+    def test_outage_shaped_stderr_is_not_treated_as_per_target(self, stderr: str) -> None:
+        """A breaker blinded by a substring match is worse than no breaker.
+
+        ``_NON_TRANSIENT_PATTERNS`` may match these loosely — there, over-matching
+        merely skips a retry, which is safe. Here over-matching would EXCLUDE a
+        genuine outage from the failure count, defeating the breaker entirely.
+        The per-target patterns must therefore be anchored to gh's actual
+        per-target phrasings, not bare substrings like "not found".
+        """
+        assert not _is_per_target_error(stderr), (
+            "outage-shaped stderr must still count toward the circuit breaker"
+        )
+        assert _is_service_failure(_gh_error(stderr))
+
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            "gh: Could not resolve to an Issue with the number of 188.",
+            "gh: Not Found (HTTP 404)",
+            "no checks reported on the 'main' branch",
+            "Body is not editable",
+        ],
+    )
+    def test_target_errors_are_not_service_failures(self, stderr: str) -> None:
+        assert _is_per_target_error(stderr)
+        assert not _is_service_failure(_gh_error(stderr))
+
+    def test_non_calledprocess_exceptions_are_service_failures(self) -> None:
+        """A ConnectionError carries no stderr — assume the service is down."""
+        assert _is_service_failure(ConnectionError("reset by peer"))
+        assert _is_service_failure(TimeoutError())
+
+
+class TestBreakerIgnoresPerTargetErrors:
+    """Deterministic per-target errors must not open the breaker (#2048).
+
+    Regression for the #1795 cascade: six wrong-repo ``Could not resolve`` 404s
+    opened the ``github-api`` breaker (``failure_threshold=5``), poisoning 236
+    items across 9 repos and aborting the run with ``agent_jobs=0``.
+
+    A 404 proves the service is UP and answering correctly about a target that
+    does not exist. An auth failure (401/403) proves every later call will fail
+    too, so that must still open the breaker.
+    """
+
+    PER_TARGET: tuple[str, ...] = (
+        "gh: Could not resolve to an Issue with the number of 188.",
+        "gh: Not Found (HTTP 404)",
+        "no checks reported on the 'main' branch",
+        "Body is not editable",
+    )
+
+    @pytest.mark.parametrize("stderr", PER_TARGET)
+    @patch("hephaestus.github.client._gh_call_impl")
+    def test_per_target_errors_never_open_breaker(self, mock_impl: Mock, stderr: str) -> None:
+        """Well past failure_threshold=5, the breaker stays closed."""
+        mock_impl.side_effect = _gh_error(stderr)
+
+        for _ in range(10):
+            with pytest.raises(subprocess.CalledProcessError):
+                gh_call(["api", "graphql"], log_on_error=False)
+
+        # The 11th call must still reach gh, not be short-circuited.
+        with pytest.raises(subprocess.CalledProcessError):
+            gh_call(["api", "graphql"], log_on_error=False)
+        assert mock_impl.call_count == 11
+
+    @patch("hephaestus.github.client._gh_call_impl")
+    def test_swallowed_404s_do_not_poison_a_later_unrelated_call(self, mock_impl: Mock) -> None:
+        """The exact #1795 shape: caller catches each 404; a later call still succeeds.
+
+        Catching the exception never prevented the breaker from counting it,
+        because the breaker records the failure before the caller's ``except``
+        runs. This is what turned 6 bad lookups into a whole-run abort.
+        """
+        ok = Mock(returncode=0, stdout="{}", stderr="")
+        mock_impl.side_effect = [
+            *[_gh_error("gh: Could not resolve to an Issue with the number of 188.")] * 6,
+            ok,
+        ]
+
+        for _ in range(6):
+            with pytest.raises(subprocess.CalledProcessError):
+                gh_call(["api", "graphql"], log_on_error=False)
+
+        assert gh_call(["api", "graphql"]) is ok  # would raise GitHubUnavailableError before
+
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            "gh: HTTP 401: Bad credentials",
+            "gh: HTTP 403: Forbidden",
+        ],
+    )
+    @patch("hephaestus.github.client._gh_call_impl")
+    def test_auth_errors_still_open_breaker(self, mock_impl: Mock, stderr: str) -> None:
+        """401/403 are per-credential, not per-target: every later call fails too."""
+        mock_impl.side_effect = _gh_error(stderr)
+
+        for _ in range(5):
+            with pytest.raises(subprocess.CalledProcessError):
+                gh_call(["api", "graphql"], log_on_error=False)
+
+        with pytest.raises(GitHubUnavailableError):
+            gh_call(["api", "graphql"], log_on_error=False)
+
+    @patch("hephaestus.github.client._gh_call_impl")
+    def test_transient_failures_still_open_breaker(self, mock_impl: Mock) -> None:
+        """A genuinely unavailable service must still trip the breaker."""
+        mock_impl.side_effect = ConnectionError("connection reset by peer")
+
+        for _ in range(5):
+            with pytest.raises(ConnectionError):
+                gh_call(["api", "graphql"], log_on_error=False)
+
+        with pytest.raises(GitHubUnavailableError):
+            gh_call(["api", "graphql"], log_on_error=False)
 
 
 class TestGhCallCircuitBreaker:

@@ -24,6 +24,184 @@ def _clean_registry() -> None:
     reset_all_circuit_breakers()
 
 
+class TestCircuitBreakerIgnoredExceptions:
+    """``ignore`` excludes caller-classified exceptions from the failure count (#2048).
+
+    A circuit breaker exists to detect an unavailable SERVICE. Some exceptions
+    prove the opposite — the service answered, and answered correctly, about a
+    specific target (e.g. HTTP 404). Counting those toward the failure threshold
+    lets a handful of deterministic, per-target errors open the breaker and fail
+    every unrelated call behind it.
+    """
+
+    def test_ignored_exception_does_not_count_toward_threshold(self) -> None:
+        """N > threshold ignored failures never open the breaker."""
+        breaker = CircuitBreaker(
+            "ignore-probe", failure_threshold=2, ignore=lambda exc: isinstance(exc, KeyError)
+        )
+
+        def boom() -> None:
+            raise KeyError("404-ish: the service answered, the target is absent")
+
+        for _ in range(5):
+            with pytest.raises(KeyError):
+                breaker.call(boom)
+
+        assert breaker.state is CircuitBreakerState.CLOSED
+
+    def test_ignored_exception_still_propagates(self) -> None:
+        """Ignoring is about bookkeeping only — the caller still sees the error."""
+        breaker = CircuitBreaker("ignore-raise", ignore=lambda exc: isinstance(exc, KeyError))
+
+        with pytest.raises(KeyError, match="still raised"):
+            breaker.call(lambda: (_ for _ in ()).throw(KeyError("still raised")))
+
+    def test_non_ignored_exception_still_opens(self) -> None:
+        """Real failures are unaffected by the exclusion predicate."""
+        breaker = CircuitBreaker(
+            "ignore-mixed", failure_threshold=2, ignore=lambda exc: isinstance(exc, KeyError)
+        )
+
+        def down() -> None:
+            raise ConnectionError("service unreachable")
+
+        for _ in range(2):
+            with pytest.raises(ConnectionError):
+                breaker.call(down)
+
+        assert breaker.state is CircuitBreakerState.OPEN
+
+    def test_ignored_exception_does_not_reset_failure_count(self) -> None:
+        """An ignored error is neither a success nor a failure.
+
+        Recording a *success* instead would zero the accumulated failure count
+        and erase a genuine outage signal that was building.
+        """
+        breaker = CircuitBreaker(
+            "ignore-nosuccess", failure_threshold=2, ignore=lambda exc: isinstance(exc, KeyError)
+        )
+
+        with pytest.raises(ConnectionError):
+            breaker.call(lambda: (_ for _ in ()).throw(ConnectionError("down")))
+        with pytest.raises(KeyError):  # must NOT clear the failure above
+            breaker.call(lambda: (_ for _ in ()).throw(KeyError("404")))
+        with pytest.raises(ConnectionError):
+            breaker.call(lambda: (_ for _ in ()).throw(ConnectionError("down")))
+
+        assert breaker.state is CircuitBreakerState.OPEN
+
+    def test_ignored_exception_does_not_reopen_half_open_breaker(self) -> None:
+        """In HALF_OPEN a single failure re-opens; an ignored error must not."""
+        breaker = CircuitBreaker(
+            "ignore-halfopen",
+            failure_threshold=1,
+            recovery_timeout=0.0,  # immediately eligible for HALF_OPEN
+            ignore=lambda exc: isinstance(exc, KeyError),
+        )
+        with pytest.raises(ConnectionError):
+            breaker.call(lambda: (_ for _ in ()).throw(ConnectionError("down")))
+        assert breaker.state is CircuitBreakerState.HALF_OPEN  # recovery_timeout=0
+
+        with pytest.raises(KeyError):
+            breaker.call(lambda: (_ for _ in ()).throw(KeyError("404")))
+
+        assert breaker.state is CircuitBreakerState.HALF_OPEN  # not re-OPENed
+
+    def test_ignored_exception_releases_its_half_open_slot(self) -> None:
+        """An ignored error must give its probe slot back, or recovery wedges.
+
+        Asserting only ``state is HALF_OPEN`` is NOT enough: the state does not
+        change on an ignored exception whether or not the slot was released, so
+        such a test stays green even if ``_release_half_open_slot`` is a no-op.
+        Prove the release by admitting a LATER probe through the single slot.
+        """
+        breaker = CircuitBreaker(
+            "ignore-slot",
+            failure_threshold=1,
+            recovery_timeout=0.0,
+            half_open_max_calls=1,  # exactly one probe may be in flight
+            ignore=lambda exc: isinstance(exc, KeyError),
+        )
+        with pytest.raises(ConnectionError):
+            breaker.call(lambda: (_ for _ in ()).throw(ConnectionError("down")))
+        assert breaker.state is CircuitBreakerState.HALF_OPEN
+
+        # Burn several probes on ignored errors. Each must return its slot.
+        for _ in range(3):
+            with pytest.raises(KeyError):
+                breaker.call(lambda: (_ for _ in ()).throw(KeyError("404")))
+
+        assert breaker._half_open_calls == 0, "ignored exception leaked its probe slot"
+
+        # A real probe must still be admitted, not rejected as HALF_OPEN_EXHAUSTED.
+        assert breaker.call(lambda: "recovered") == "recovered"
+        assert breaker.state is CircuitBreakerState.CLOSED
+
+    def test_ignored_exception_slot_release_is_thread_safe(self) -> None:
+        """Concurrent ignored errors must never drive the slot counter negative."""
+        breaker = CircuitBreaker(
+            "ignore-threads",
+            failure_threshold=1,
+            recovery_timeout=0.0,
+            half_open_max_calls=8,
+            ignore=lambda exc: isinstance(exc, KeyError),
+        )
+        with pytest.raises(ConnectionError):
+            breaker.call(lambda: (_ for _ in ()).throw(ConnectionError("down")))
+        assert breaker.state is CircuitBreakerState.HALF_OPEN
+
+        def hammer() -> None:
+            for _ in range(20):
+                with contextlib.suppress(Exception):
+                    breaker.call(lambda: (_ for _ in ()).throw(KeyError("404")))
+
+        threads = [threading.Thread(target=hammer) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert breaker._half_open_calls >= 0, "slot counter went negative"
+        assert breaker.state is CircuitBreakerState.HALF_OPEN
+
+    def test_factory_honors_ignore_for_a_fresh_name(self) -> None:
+        """``get_circuit_breaker(ignore=...)`` wires the predicate on creation."""
+        breaker = get_circuit_breaker(
+            "factory-ignore-fresh",
+            failure_threshold=1,
+            ignore=lambda exc: isinstance(exc, KeyError),
+        )
+        with pytest.raises(KeyError):
+            breaker.call(lambda: (_ for _ in ()).throw(KeyError("404")))
+        assert breaker.state is CircuitBreakerState.CLOSED
+
+    def test_factory_silently_drops_ignore_for_an_existing_name(self) -> None:
+        """Documented footgun: the registry is a singleton keyed by name.
+
+        A second ``get_circuit_breaker`` for an existing name returns the cached
+        instance and DISCARDS every construction kwarg, ``ignore`` included. Pin
+        the behaviour so the trap is visible rather than surprising (POLA).
+        """
+        first = get_circuit_breaker("factory-ignore-dup", failure_threshold=1)
+        assert first._ignore is None
+
+        second = get_circuit_breaker(
+            "factory-ignore-dup", ignore=lambda exc: isinstance(exc, KeyError)
+        )
+        assert second is first
+        assert second._ignore is None, "a later ignore= must not silently rebind"
+
+    def test_default_ignores_nothing(self) -> None:
+        """Back-compat: no ``ignore`` predicate → every exception counts."""
+        breaker = CircuitBreaker("ignore-default", failure_threshold=2)
+
+        for _ in range(2):
+            with pytest.raises(KeyError):
+                breaker.call(lambda: (_ for _ in ()).throw(KeyError("x")))
+
+        assert breaker.state is CircuitBreakerState.OPEN
+
+
 class TestCircuitBreakerStates:
     """Tests for circuit breaker state transitions."""
 
