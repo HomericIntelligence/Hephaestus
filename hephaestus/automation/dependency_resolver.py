@@ -26,7 +26,7 @@ from collections import defaultdict, deque
 
 from .github_api import fetch_issue_info, prefetch_issue_states
 from .models import DependencyGraph, IssueInfo, IssueState
-from .state_labels import is_skipped
+from .state_labels import is_epic, is_skipped
 
 logger = logging.getLogger(__name__)
 
@@ -221,6 +221,14 @@ class DependencyResolver:
 
                 if is_skipped(dep_issue.labels):
                     logger.info("Dependency #%s is tagged state:skip, marking complete", dep_num)
+                    self.mark_completed(dep_num)
+                    continue
+
+                if is_epic(dep_issue.labels, dep_issue.title):
+                    logger.info(
+                        "Dependency #%s is an epic/roadmap issue, excluding from graph (#1830)",
+                        dep_num,
+                    )
                     self.mark_completed(dep_num)
                     continue
 
