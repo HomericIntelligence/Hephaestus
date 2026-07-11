@@ -16,14 +16,91 @@ import pytest
 
 from hephaestus.automation.claude_invoke import parse_review_verdict
 from hephaestus.automation.pr_review_core import (
+    AGGRESSIVE_DIFF_BUDGET_CHARS,
+    DEFAULT_DIFF_BUDGET_CHARS,
+    budget_diff_for_prompt,
     gather_impl_review_context,
     review_pr_inline,
     run_pr_review_analysis,
 )
+from hephaestus.github.client import PromptTooLongError
+
+
+def _make_diff_file(path: str, lines: int) -> str:
+    # Padded to ~43 chars/line to match this repo's measured diff density
+    # (git diff HEAD~15..HEAD -> 29,431 lines / 1,263,927 chars), so synthetic
+    # fixtures sized in "diff lines" translate to realistic char counts.
+    body = "\n".join(f"+line {i} {'x' * 30}" for i in range(lines))
+    return f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n{body}\n"
+
 
 # ---------------------------------------------------------------------------
 # Extracted in-loop cores (Stage 2, #28) shared with the implementer session
 # ---------------------------------------------------------------------------
+
+
+class TestBudgetDiffForPrompt:
+    """budget_diff_for_prompt trims whole files, largest-first, to fit a budget (#1847)."""
+
+    def test_returns_unchanged_when_under_budget(self) -> None:
+        diff = _make_diff_file("small.py", 5)
+        assert budget_diff_for_prompt(diff, max_chars=DEFAULT_DIFF_BUDGET_CHARS) == diff
+
+    def test_drops_largest_file_first_keeps_small_file(self) -> None:
+        small = _make_diff_file("small.py", 5)
+        large = _make_diff_file("large.py", 2000)
+        diff = small + large
+        # Budget only large enough for the small file plus fixed overhead slack.
+        result = budget_diff_for_prompt(diff, max_chars=len(small) + 12_000 + 200)
+        assert "small.py" in result
+        assert "+line 0 " in result  # small file body kept verbatim
+        assert "large.py (2003 diff lines, omitted)" in result
+        assert "largest file(s) omitted" in result
+        # The large file's actual body content must not appear in the kept diff.
+        assert result.count("diff --git") == 1
+
+    def test_preserves_preamble_before_first_file_header(self) -> None:
+        preamble = "[... diff truncated at 2000000 chars ...]\n"
+        large = _make_diff_file("large.py", 5000)
+        diff = preamble + large
+        result = budget_diff_for_prompt(diff, max_chars=12_500)
+        assert result.startswith(preamble)
+        assert "large.py" in result  # shows up in the skipped index, not the body
+
+    def test_skipped_file_label_is_clean_b_side_path(self) -> None:
+        large = _make_diff_file("pkg/mod.py", 3000)
+        result = budget_diff_for_prompt(large, max_chars=12_100)
+        assert "- pkg/mod.py (3003 diff lines, omitted)" in result
+        assert "a/pkg/mod.py b/pkg/mod.py" not in result.split("[...")[-1]
+
+    def test_no_file_headers_falls_back_to_flat_truncation(self) -> None:
+        diff = "x" * 100_000
+        result = budget_diff_for_prompt(diff, max_chars=12_500)
+        assert result.startswith("x" * 100)
+        assert "diff truncated at" in result
+
+    def test_composed_body_chars_shrinks_effective_budget(self) -> None:
+        diff = _make_diff_file("small.py", 5)
+        # A large composed body eats the entire nominal budget, forcing
+        # truncation even though the diff alone would have fit.
+        result = budget_diff_for_prompt(
+            diff, max_chars=DEFAULT_DIFF_BUDGET_CHARS, composed_body_chars=DEFAULT_DIFF_BUDGET_CHARS
+        )
+        assert "diff truncated at 0 chars" in result or "largest file(s) omitted" in result
+
+    def test_pr_1846_sized_diff_fits_default_budget(self) -> None:
+        """A diff sized like the issue's motivating PR (#1846) fits unchanged.
+
+        ~4,800 diff lines at this repo's measured ~43 chars/line density is
+        ~206,000 chars — well inside DEFAULT_DIFF_BUDGET_CHARS (350,000) even
+        after the fixed overhead and a modest composed body are subtracted.
+        """
+        diff = _make_diff_file("big_feature.py", 4800)
+        assert 190_000 <= len(diff) <= 220_000
+        result = budget_diff_for_prompt(
+            diff, max_chars=DEFAULT_DIFF_BUDGET_CHARS, composed_body_chars=10_000
+        )
+        assert result == diff  # unchanged: fits without truncation
 
 
 class TestGatherImplReviewContext:
@@ -73,6 +150,39 @@ class TestGatherImplReviewContext:
             advise_findings="prior team finding",
         )
         assert ctx["advise_findings"] == "prior team finding"
+
+    def test_large_diff_is_budgeted_by_default(self) -> None:
+        """A diff larger than the default budget is truncated, not embedded whole (#1847)."""
+        large_diff = _make_diff_file("huge.py", 20_000)
+        assert len(large_diff) > DEFAULT_DIFF_BUDGET_CHARS
+        ctx = gather_impl_review_context(
+            pr_number=42,
+            issue_number=1,
+            issue_title="t",
+            issue_body="b",
+            plan_text="",
+            plan_review_text="",
+            diff_text=large_diff,
+        )
+        assert len(ctx["pr_diff"]) < len(large_diff)
+        assert "largest file(s) omitted" in ctx["pr_diff"]
+
+    def test_large_plan_shrinks_diff_allowance(self) -> None:
+        """A large composed PLAN/PLAN_REVIEW body eats into the diff budget."""
+        diff = _make_diff_file("small.py", 5)
+        huge_plan = "x" * (DEFAULT_DIFF_BUDGET_CHARS)
+        ctx = gather_impl_review_context(
+            pr_number=42,
+            issue_number=1,
+            issue_title="t",
+            issue_body="b",
+            plan_text=huge_plan,
+            plan_review_text="",
+            diff_text=diff,
+        )
+        # The composed body alone consumes the whole nominal budget, so even
+        # this small diff gets truncated instead of embedded whole.
+        assert ctx["pr_diff"] != diff
 
 
 class TestRunPrReviewAnalysis:
@@ -310,6 +420,77 @@ class TestRunPrReviewAnalysis:
                 dry_run=False,
             )
         assert captured["input_via_stdin"] is True
+
+    def test_retries_with_aggressive_budget_and_succeeds(self, tmp_path: Path) -> None:
+        """PromptTooLongError triggers exactly one retry with a smaller diff, which succeeds."""
+        calls: list[dict[str, object]] = []
+
+        def _fake_invoke(*, prompt: str, **kwargs: object) -> tuple[str, str]:
+            calls.append({"prompt": prompt, **kwargs})
+            if len(calls) == 1:
+                return ('{"is_error": true, "result": "Prompt is too long"}', "")
+            return (
+                '{"result": "```json\\n{\\"comments\\": [], \\"summary\\": \\"ok\\"}\\n```"}',
+                "",
+            )
+
+        with (
+            patch("hephaestus.automation.pr_review_core.get_repo_root", return_value=tmp_path),
+            patch("hephaestus.automation.pr_review_core.get_repo_slug", return_value="Repo"),
+            patch(
+                "hephaestus.automation.pr_review_core.invoke_claude_with_session",
+                side_effect=_fake_invoke,
+            ),
+        ):
+            out = run_pr_review_analysis(
+                pr_number=1,
+                issue_number=1,
+                worktree_path=tmp_path,
+                context={"pr_diff": _make_diff_file("big.py", 20_000), "issue_body": "x"},
+                agent="claude",
+                state_dir=tmp_path,
+                dry_run=False,
+            )
+
+        assert len(calls) == 2
+        first_prompt = str(calls[0]["prompt"])
+        second_prompt = str(calls[1]["prompt"])
+        assert len(second_prompt) < len(first_prompt)
+        # The retry prompt's diff portion is bounded by the aggressive budget.
+        assert len(second_prompt) < AGGRESSIVE_DIFF_BUDGET_CHARS + 20_000
+        assert out["summary"] == "ok"
+        assert out["comments"] == []
+
+    def test_aggressive_retry_also_fails_raises_reason_prompt_too_long(
+        self, tmp_path: Path
+    ) -> None:
+        """If the aggressive retry ALSO reports too-long, raise once with a distinct reason."""
+
+        def _always_too_long(**_: object) -> tuple[str, str]:
+            return ('{"is_error": true, "result": "Prompt is too long"}', "")
+
+        with (
+            patch("hephaestus.automation.pr_review_core.get_repo_root", return_value=tmp_path),
+            patch("hephaestus.automation.pr_review_core.get_repo_slug", return_value="Repo"),
+            patch(
+                "hephaestus.automation.pr_review_core.invoke_claude_with_session",
+                side_effect=_always_too_long,
+            ),
+        ):
+            with pytest.raises(RuntimeError, match="reason=prompt_too_long"):
+                run_pr_review_analysis(
+                    pr_number=1,
+                    issue_number=1,
+                    worktree_path=tmp_path,
+                    context={"pr_diff": _make_diff_file("big.py", 20_000), "issue_body": "x"},
+                    agent="claude",
+                    state_dir=tmp_path,
+                    dry_run=False,
+                )
+
+    def test_prompt_too_long_not_confused_with_usage_cap(self) -> None:
+        """PromptTooLongError is a distinct type from ClaudeUsageCapError."""
+        assert issubclass(PromptTooLongError, RuntimeError)
 
 
 class TestReviewPrInline:

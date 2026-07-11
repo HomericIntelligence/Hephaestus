@@ -125,6 +125,18 @@ class ClaudeUsageCapError(RuntimeError):
         self.reset_epoch: int | None = reset_epoch
 
 
+class PromptTooLongError(RuntimeError):
+    """Raised when the Claude CLI reports the assembled prompt exceeds model context.
+
+    Distinguishes an oversized-prompt failure (recoverable by shrinking the
+    prompt and retrying) from a generic ``is_error`` envelope, so callers can
+    retry with a smaller diff budget instead of recording a plain ERROR
+    (#1847).
+    """
+
+    pass
+
+
 def _gh_throttle_wait() -> None:
     rate = float(os.environ.get("GH_RATE_LIMIT_PER_SEC", "5"))
     if rate <= 0:

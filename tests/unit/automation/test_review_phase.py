@@ -10,10 +10,16 @@ quota (issue #1528).
 from __future__ import annotations
 
 import time
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
+from unittest import mock
 
 import pytest
 
 from hephaestus.automation import _review_phase
+from hephaestus.automation._review_phase import ReviewPhase
+from hephaestus.automation._stage_context import StageContext
 
 
 class TestHandleReviewerQuotaOrOverload:
@@ -124,3 +130,84 @@ def test_overload_backoff_is_bounded(monkeypatch, backoff_iteration, expected_ma
 
     assert len(slept) == 1
     assert 0 < slept[0] <= expected_max
+
+
+def _make_ctx(tmp_path: Path) -> StageContext:
+    """Minimal StageContext stub for exercising ReviewPhase in isolation."""
+    options = SimpleNamespace(
+        agent="claude",
+        dry_run=False,
+        include_nitpicks=False,
+    )
+    impl = cast(
+        Any,
+        SimpleNamespace(
+            options=options,
+            state_dir=tmp_path,
+            repo_root=tmp_path,
+            _collect_diff=lambda *a, **k: "diff --git a/x b/x",
+            _log=lambda *a, **k: None,
+        ),
+    )
+    runner = cast(
+        Any,
+        SimpleNamespace(_fetch_plan_and_review=lambda *a, **k: ("plan", "plan review")),
+    )
+    return StageContext(impl=impl, runner=runner)
+
+
+class TestRunImplReviewStepPromptTooLong:
+    """_run_impl_review_step surfaces reason=prompt_too_long distinctly (#1847)."""
+
+    def test_prompt_too_long_error_records_error_with_distinct_reason(self, tmp_path: Path) -> None:
+        phase = ReviewPhase(_make_ctx(tmp_path))
+
+        def _raise_prompt_too_long(**_: object) -> tuple[str, list[str]]:
+            raise RuntimeError(
+                "reason=prompt_too_long: PR review prompt exceeds model context "
+                "even at aggressive budget for Repo#1"
+            )
+
+        with mock.patch(
+            "hephaestus.automation._review_phase.review_pr_inline",
+            side_effect=_raise_prompt_too_long,
+        ):
+            review_text, thread_ids = phase._run_impl_review_step(
+                issue_number=1,
+                issue_title="t",
+                issue_body="b",
+                branch_name="1-auto-impl",
+                worktree_path=tmp_path,
+                pr_number=99,
+                iteration=0,
+                prior_review=None,
+            )
+
+        assert thread_ids == []
+        assert "In-loop reviewer invocation failed" in review_text
+
+    def test_generic_error_still_recorded_as_plain_error(self, tmp_path: Path) -> None:
+        """A non-prompt_too_long failure keeps the original generic ERROR message."""
+        phase = ReviewPhase(_make_ctx(tmp_path))
+
+        def _raise_generic(**_: object) -> tuple[str, list[str]]:
+            raise RuntimeError("some other infra failure")
+
+        with mock.patch(
+            "hephaestus.automation._review_phase.review_pr_inline",
+            side_effect=_raise_generic,
+        ):
+            review_text, thread_ids = phase._run_impl_review_step(
+                issue_number=1,
+                issue_title="t",
+                issue_body="b",
+                branch_name="1-auto-impl",
+                worktree_path=tmp_path,
+                pr_number=99,
+                iteration=0,
+                prior_review=None,
+            )
+
+        assert thread_ids == []
+        assert "In-loop reviewer invocation failed" in review_text
+        assert "prompt_too_long" not in review_text
