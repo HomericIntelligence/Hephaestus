@@ -53,7 +53,7 @@ def test_runbook_audits_rulesets_and_preserves_bindings() -> None:
     section = _reapply_section()
 
     required_markers = (
-        'state_dir=$(mktemp -d "${TMPDIR:-/tmp}/projecthephaestus-issue-2025.XXXXXX")',
+        'state_dir=$(mktemp -d "${TMPDIR:-/tmp}/hephaestus-issue-2025.XXXXXX")',
         "rulesets?includes_parents=true&targets=branch",
         "rules/branches/$branch",
         "gh ruleset check --default",

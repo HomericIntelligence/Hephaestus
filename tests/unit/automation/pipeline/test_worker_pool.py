@@ -754,9 +754,9 @@ class TestGitOps:
         tmp_path: Path,
     ) -> None:
         """A worktree path outside the resolved repo_root is a hard failure."""
-        repo_root = tmp_path / "ProjectArgus"
+        repo_root = tmp_path / "Argus"
         job = GitJob(
-            repo="ProjectArgus",
+            repo="Argus",
             op="create_worktree",
             timeout_s=60,
             kwargs={
@@ -766,7 +766,7 @@ class TestGitOps:
             },
         )
         instance = MagicMock()
-        instance.create_worktree.return_value = tmp_path / "ProjectHephaestus" / "issue-107"
+        instance.create_worktree.return_value = tmp_path / "Hephaestus" / "issue-107"
         with patch(f"{_WP}.WorktreeManager", return_value=instance):
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
@@ -803,9 +803,9 @@ class TestGitOps:
         tmp_path: Path,
     ) -> None:
         """The manager-state fallback (no worktree_path) still scopes repo_root."""
-        other_repo = tmp_path / "ProjectArgus"
+        other_repo = tmp_path / "Argus"
         job = GitJob(
-            repo="ProjectArgus",
+            repo="Argus",
             op="remove_worktree",
             timeout_s=60,
             kwargs={"issue_number": 107, "force": True, "repo_root": str(other_repo)},
