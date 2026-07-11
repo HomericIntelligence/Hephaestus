@@ -11,10 +11,13 @@ contract):
   ROUTES via ``ctx.budget``, never hardcoded here.
 - DISCOVER [M]: resolve the PR when unset (``ctx.github.find_pr_for_issue``,
   the ``pr_discovery`` semantics) — none found finishes failed ``no_pr``;
-  adopt the PR's REAL head branch; verify the PR carries
-  ``state:implementation-go`` (``ctx.github.pr_has_implementation_state_label``,
-  the legacy ``_pr_has_implementation_go`` gate) — a PR without it fails
-  back ``not_implementation_go`` (routes to pr_review).
+  adopt the PR's REAL head branch; capture the PR's real base ref
+  (``baseRefName`` from the same ``gh_pr_state`` read) into
+  ``payload["base_branch"]`` for REBASE_WAIT, mirroring merge_wait's
+  ``_route_dirty``; verify the PR carries ``state:implementation-go``
+  (``ctx.github.pr_has_implementation_state_label``, the legacy
+  ``_pr_has_implementation_go`` gate) — a PR without it fails back
+  ``not_implementation_go`` (routes to pr_review).
 - REBASE_WAIT [W:G]: optional mechanical rebase (re-housed
   ``_attempt_mechanical_rebase`` :763 — the worker pool's ``op="rebase"``
   is ``git_utils.rebase_worktree_onto``), best-effort: skipped on dry-run,
@@ -288,7 +291,11 @@ class CiStage(Stage):
         (``pr_discovery`` semantics via ``ctx.github.find_pr_for_issue``) and
         the PR must already carry ``state:implementation-go`` (the legacy
         ``_pr_has_implementation_go`` gate) — a PR that lost or never had it
-        regresses to pr_review (``not_implementation_go``), never arms.
+        regresses to pr_review (``not_implementation_go``), never arms. The
+        PR's real base ref is captured into ``payload["base_branch"]`` from
+        the same ``gh_pr_state`` read (mirrors ``merge_wait._route_dirty``'s
+        ``baseRefName`` capture), so REBASE_WAIT targets the PR's actual
+        base instead of a hardcoded ``"main"``.
         """
         if item.pr is None:
             if item.issue is None:
@@ -299,7 +306,8 @@ class CiStage(Stage):
                 logger.info("ci:%d: no open PR found; finishing failed", item.issue)
                 return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
             item.pr = discovered
-        terminal = _terminal_pr_outcome(ctx.github.gh_pr_state(item.pr), item.pr)
+        gh_state = ctx.github.gh_pr_state(item.pr)
+        terminal = _terminal_pr_outcome(gh_state, item.pr)
         if terminal is not None:
             return terminal
         if not item.branch:
@@ -308,6 +316,9 @@ class CiStage(Stage):
             head_branch = ctx.github.get_pr_head_branch(item.pr)
             if head_branch:
                 item.branch = head_branch
+        # Capture the PR's real base ref for the mechanical rebase target
+        # (mirrors merge_wait._route_dirty's baseRefName read).
+        item.payload["base_branch"] = str((gh_state or {}).get("baseRefName") or "main")
         has_go, _has_no_go = ctx.github.pr_has_implementation_state_label(item.pr)
         if not has_go:
             logger.info(

@@ -183,6 +183,33 @@ class TestCiDiscover:
         assert item.pr == 777
         assert item.branch == "real-head"
 
+    def test_discovery_captures_pr_base_branch_from_baseref(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A PR based on a non-main branch seeds payload["base_branch"] from baseRefName."""
+        stage = CiStage()
+        ctx = make_ctx(github=_go_github(pr_state={"state": "OPEN", "baseRefName": "release/2.0"}))
+        item = _item(make_work_item, state=DISCOVER)
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, Continue)
+        assert result.next_state == REBASE_WAIT
+        assert item.payload["base_branch"] == "release/2.0"
+
+    def test_discovery_defaults_base_branch_to_main_without_baseref(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """No gh_pr_state / missing baseRefName still defaults to "main" (unchanged)."""
+        stage = CiStage()
+        ctx = make_ctx(github=_go_github())  # pr_state defaults to None
+        item = _item(make_work_item, state=DISCOVER)
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, Continue)
+        assert item.payload["base_branch"] == "main"
+
     def test_already_merged_pr_finishes_before_branch_adoption(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
