@@ -88,10 +88,130 @@ jobs:
       - name: Run mypy type checking
         run: pixi run mypy
 
-  build-and-publish:
+  publish-testpypi:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     needs: [test, type-check]
+    environment: testpypi
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        run: |
+          # Priority: explicit input > tag-push ref > latest tag
+          INPUT_TAG="${{ github.event.inputs.tag }}"
+          REF_TAG="${{ github.ref }}"
+          if [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+          elif [[ "$REF_TAG" == refs/tags/* ]]; then
+            TAG="${REF_TAG#refs/tags/}"
+          else
+            TAG=$(git tag --list 'v*' --sort=-v:refname | head -1)
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Releasing tag: ${TAG}"
+          git checkout "${TAG}"
+
+      - name: Install pixi
+        uses: prefix-dev/setup-pixi@5185adfbffb4bd703da3010310260805d89ebb11  # v0.9.6
+        with:
+          pixi-version: v0.69.0
+          locked: true
+          # setup-pixi already caches `.pixi` keyed exactly on the pixi.lock
+          # hash. A second actions/cache over `.pixi` with a lock-agnostic
+          # restore-keys prefix would restore a stale env on top of this
+          # --locked install, silently downgrading packages — do not add one.
+
+      - name: Build package
+        shell: bash
+        run: |
+          # This is the only build of the release dist. build-and-publish
+          # downloads the artifact produced here rather than rebuilding, so
+          # the bytes smoke-tested against TestPyPI are byte-identical to
+          # the bytes promoted to production PyPI.
+          #
+          # hatch-vcs derives the version from git; a dirty tree would taint it
+          # with a +dirty/.devN suffix and publish a wrong version.
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::Working tree is dirty — refusing to build"
+            git status --porcelain
+            exit 1
+          fi
+          pixi run python -m build
+          ls -1 dist/
+
+      - name: Upload dist for reuse by build-and-publish
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa0  # v4.6.2
+        with:
+          name: release-dist
+          path: dist/
+          retention-days: 1
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          verbose: true
+          # No skip-existing: a re-dispatch for the same tag must publish and
+          # smoke-test THIS run's freshly built dist, not silently pass by
+          # smoke-testing a stale artifact left on TestPyPI from an earlier
+          # partial run. If TestPyPI already has this exact version (e.g. a
+          # re-dispatch after a downstream failure with no code change), this
+          # step fails loudly — the fix is to yank the stale TestPyPI release
+          # or bump the version, not to skip and hope the old upload matches.
+
+      - name: Smoke-install from TestPyPI
+        shell: bash
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          EXPECTED_VERSION="${TAG#v}"
+          pixi run python -m venv /tmp/testpypi-smoke
+
+          # TestPyPI has an index-propagation delay after a successful upload
+          # before `pip` can resolve the new release. Retry on "no matching
+          # distribution" only; any other pip failure (bad deps, broken wheel)
+          # fails immediately rather than burning the full retry window.
+          ATTEMPTS=10
+          SLEEP_SECONDS=30
+          for i in $(seq 1 "$ATTEMPTS"); do
+            if OUTPUT=$(/tmp/testpypi-smoke/bin/pip install --no-cache-dir \
+                --index-url https://test.pypi.org/simple/ \
+                --extra-index-url https://pypi.org/simple/ \
+                "HomericIntelligence-Hephaestus==${EXPECTED_VERSION}" 2>&1); then
+              echo "$OUTPUT"
+              break
+            fi
+            echo "$OUTPUT"
+            if ! echo "$OUTPUT" | grep -qi "no matching distribution\|could not find a version"; then
+              echo "::error::pip install failed for a reason other than index propagation — not retrying"
+              exit 1
+            fi
+            if [ "$i" -eq "$ATTEMPTS" ]; then
+              echo "::error::TestPyPI release ${EXPECTED_VERSION} did not become installable after $((ATTEMPTS * SLEEP_SECONDS))s"
+              exit 1
+            fi
+            echo "Attempt $i/$ATTEMPTS: not yet propagated, retrying in ${SLEEP_SECONDS}s..."
+            sleep "$SLEEP_SECONDS"
+          done
+
+          INSTALLED_VERSION=$(/tmp/testpypi-smoke/bin/python -c "import hephaestus; print(hephaestus.__version__)")
+          if [ "$INSTALLED_VERSION" != "$EXPECTED_VERSION" ]; then
+            echo "::error::TestPyPI smoke-install version mismatch: expected ${EXPECTED_VERSION}, got ${INSTALLED_VERSION}"
+            exit 1
+          fi
+          echo "TestPyPI smoke-install passed: ${INSTALLED_VERSION}"
+
+  build-and-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: [test, type-check, publish-testpypi]
     environment: pypi
 
     steps:
@@ -145,18 +265,11 @@ jobs:
           fi
           echo "Version check passed: $TAG_VERSION"
 
-      - name: Build package
-        shell: bash
-        run: |
-          # hatch-vcs derives the version from git; a dirty tree would taint it
-          # with a +dirty/.devN suffix and publish a wrong version.
-          if [ -n "$(git status --porcelain)" ]; then
-            echo "::error::Working tree is dirty — refusing to build"
-            git status --porcelain
-            exit 1
-          fi
-          pixi run python -m build
-          ls -1 dist/
+      - name: Download dist built by publish-testpypi
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v6.0.0
+        with:
+          name: release-dist
+          path: dist/
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # release/v1
