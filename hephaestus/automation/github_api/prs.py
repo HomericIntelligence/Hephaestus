@@ -322,6 +322,34 @@ def gh_pr_label_names(pr_number: int) -> list[str]:
     return names
 
 
+def gh_pr_state(pr_number: int) -> dict[str, Any] | None:
+    """Return a PR's lifecycle state by number, best-effort (read-only).
+
+    Fetches ``gh pr view <n> --json state,mergedAt`` so callers can
+    distinguish merged/closed/open without importing the stage-runtime
+    ``PipelineGitHub.gh_pr_state``. Mirrors that method's read exactly so
+    pipeline seeding's ``--prs`` mapping shares its terminal-state semantics
+    (see ``_terminal_pr_outcome``, ``pipeline/stages/base.py``).
+
+    Args:
+        pr_number: GitHub PR number.
+
+    Returns:
+        ``{"state": ..., "mergedAt": ...}`` on success, ``None`` on any
+        fetch failure.
+
+    """
+    try:
+        result = _api._gh_call(
+            ["pr", "view", str(pr_number), "--json", "state,mergedAt"], check=False
+        )
+        data = cast(dict[str, Any], json.loads(result.stdout or "{}"))
+    except (json.JSONDecodeError, OSError, subprocess.SubprocessError) as exc:
+        _api.logger.warning("Could not fetch PR #%s state: %s", pr_number, exc)
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def gh_current_login() -> str | None:
     """Return the authenticated GitHub login for the current ``gh`` token."""
     try:
