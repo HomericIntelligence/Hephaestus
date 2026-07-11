@@ -57,12 +57,89 @@ def gh_cli_timeout() -> int:
         return 120
 
 
+# Facts about the REQUESTED TARGET, not about GitHub's health: the service was
+# reachable and answered correctly ("that issue does not exist", "that branch has
+# no checks yet"). They must not count toward the circuit breaker, which exists to
+# detect an unavailable service. Six wrong-repo "Could not resolve" 404s once
+# opened the github-api breaker (failure_threshold=5) and poisoned 236 items
+# across 9 repos (#1795).
+#
+# These are DELIBERATELY NARROWER than their _NON_TRANSIENT_PATTERNS counterparts
+# below. The two lists answer different questions and tolerate error in opposite
+# directions:
+#
+#   _NON_TRANSIENT_PATTERNS -> "should we retry?"  Over-matching merely skips a
+#       retry. Safe. So a bare `not found` alternation is fine there.
+#   _PER_TARGET_PATTERNS    -> "is the service healthy?"  Over-matching EXCLUDES a
+#       real outage from the failure count and blinds the breaker. Unsafe.
+#
+# `not found` alone matches `gh: command not found`, `Name or service not found`
+# (DNS failure), and outage pages containing "Page not found" — every one of which
+# means GitHub really is unreachable. Anchor to gh's actual per-target phrasings.
+#
+# Deliberately EXCLUDED — per-credential or per-request facts that WILL recur on
+# every subsequent call, so tripping the breaker is correct: 403/forbidden,
+# 401/unauthorized, token-scope, 400/bad request, 422/unprocessable entity,
+# invalid argument, unknown json field.
+_PER_TARGET_PATTERNS = [
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        # gh's own 404 renderings, anchored to an HTTP status or gh's own prefix
+        # so bare "not found" prose in an outage body cannot match.
+        r"HTTP 404\b",
+        r"\(HTTP 404\)",
+        r"^gh: Not Found\b",
+        r"^Not Found \(HTTP 404\)",
+        # The GraphQL "target does not exist" rendering (#1795). Requires the
+        # object kind, so `Could not resolve hostname` (DNS) cannot match.
+        # gh emits the GraphQL type name (`PullRequest`) as well as prose.
+        r"could not resolve to (?:an? )?(?:issue|pull ?request)\b",
+        # GraphQL schema/syntax errors: deterministic properties of the query
+        # this caller sent, not of the service (#1040, #1350). Anchored so a
+        # generic "Parse error" from a truncated 502 body cannot match.
+        r"doesn't accept argument",
+        r"is declared by .* but not used",
+        r"Expected VALUE, actual: UNKNOWN_CHAR",
+        # Editing another app's review comment: a property of that comment (#1327).
+        r"Body is not editable",
+        # The expected empty state right after a push, before checks register (#1587).
+        r"no checks reported on the",
+    )
+]
+
+
+def _is_per_target_error(stderr: str) -> bool:
+    """Report whether *stderr* describes the target, not GitHub's availability."""
+    return any(p.search(stderr) for p in _PER_TARGET_PATTERNS)
+
+
+def _is_service_failure(exc: BaseException) -> bool:
+    """Report whether *exc* is evidence that the GitHub API itself is unhealthy.
+
+    Only a ``CalledProcessError`` carries gh's stderr to classify. Anything else
+    (connection reset, timeout) is treated as a genuine service failure.
+    """
+    if isinstance(exc, subprocess.CalledProcessError):
+        return not _is_per_target_error(exc.stderr or "")
+    return True
+
+
+def _breaker_should_ignore(exc: BaseException) -> bool:
+    """Circuit-breaker predicate: exceptions that prove the service is UP (#2048)."""
+    return not _is_service_failure(exc)
+
+
 _GH_THROTTLE = threading.local()
+# NOTE: the predicate and its pattern table are defined ABOVE this call on
+# purpose. `ignore=` is evaluated at module import, so a forward reference here
+# raises NameError and makes this module unimportable.
 _GH_BREAKER = get_circuit_breaker(
     "github-api",
     failure_threshold=5,
     recovery_timeout=60,
     half_open_max_calls=2,
+    # A 404 means GitHub answered — not evidence of unavailability (#2048).
+    ignore=_breaker_should_ignore,
 )
 
 
@@ -153,7 +230,9 @@ _NON_TRANSIENT_PATTERNS = [
         r"(?:^|\s)403(?:\s|$)|forbidden|permission denied",
         r"(?:^|\s)404(?:\s|$)|not found",
         # gh sometimes phrases missing issue/PR targets without 404/not found.
-        r"could not resolve to (?:an? )?(?:issue|pull request)\b",
+        # It emits the GraphQL type name (`PullRequest`) as well as prose, so the
+        # space is optional — without it, a missing PR was retried 6x (#1806).
+        r"could not resolve to (?:an? )?(?:issue|pull ?request)\b",
         r"(?:^|\s)400(?:\s|$)|bad request",
         r"(?:^|\s)401(?:\s|$)|unauthorized",
         r"(?:^|\s)422(?:\s|$)|unprocessable entity",
