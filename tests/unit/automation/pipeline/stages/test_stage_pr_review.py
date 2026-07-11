@@ -1280,10 +1280,16 @@ class TestFullWalks:
         )
         assert any(entry[0] == "mark_pr_implementation_no_go" for entry in github.mutation_log)
 
-    def test_zero_thread_nogo_cap_fails_back_without_rounds_or_skip(
+    def test_zero_thread_nogo_cap_escalates_skip_without_rounds_or_failback(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """Repeated zero-thread NOGOs fail back without exhausting review rounds."""
+        """Repeated zero-thread NOGOs escalate to state:skip, never fail back (#2079).
+
+        A deterministic threadless NOGO cannot be fixed by re-adopting the PR
+        through implementation and re-reviewing it — the retry cap existing
+        specifically means re-review has already been exhausted. Escalating
+        directly avoids the implement-budget dead end the issue reports.
+        """
         events: list[Any] = []
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(0, 0)], by_severity=[(0, 0, 0)])
@@ -1299,15 +1305,17 @@ class TestFullWalks:
         outcome = _drive(stage, item, ctx, pool)
 
         assert isinstance(outcome, StageOutcome)
-        assert outcome.disposition == Disposition.FAIL_BACK
-        assert outcome.note == "agent_error"
+        assert outcome.disposition == Disposition.SKIP
+        assert outcome.note == "zero_thread_nogo_exhausted"
         assert [handle.job.descr for handle in pool.submitted].count("review") == (
             REVIEW_ERROR_RETRY_CAP + 1
         )
         assert item.attempts["pr_review_iter"] == 0
         assert item.payload["pr_review_round"] == 0
-        assert events[-1].action is ZeroThreadNogoAction.FAIL_BACK_AGENT_ERROR
+        assert "agent_error_failback" not in item.payload
+        assert events[-1].action is ZeroThreadNogoAction.ESCALATE_SKIP
         assert not any(entry[0] == "mark_pr_implementation_no_go" for entry in github.mutation_log)
+        assert github.mutation_log[-1] == ("gh_issue_add_labels", (25, (STATE_SKIP,)))
 
     def test_zero_thread_nogo_comment_failure_still_retries(
         self, make_ctx: Any, make_work_item: Any

@@ -272,9 +272,14 @@ decrease), `pr_review_hard` = 6 (hard cap; iterations 4-6 only if
 unresolved-thread count decreases).
 
 Zero-thread NOGO anomalies use the bounded reviewer-error retry cap and
-consume neither `pr_review_iter` nor `pr_review_hard`; cap exhaustion fails
-back through `agent_error` without writing `state:implementation-no-go` or
-`state:skip`. Stage-originated JSONL events use the closed schema in
+consume neither `pr_review_iter` nor `pr_review_hard`; cap exhaustion
+escalates directly with `state:skip` (never `agent_error`) and does not
+write `state:implementation-no-go`. A threadless NOGO can be a deliberate,
+deterministic reviewer verdict (prose-only, no line-anchored findings) —
+failing back through `agent_error` would re-adopt the same PR through
+implementation with nothing new to address and re-review cannot change a
+deterministic input, so cap exhaustion stands down instead of ping-ponging
+to a dead end (#2079). Stage-originated JSONL events use the closed schema in
 `pipeline/events.py`; raw reviewer text, GitHub bodies, and arbitrary event
 objects are rejected.
 

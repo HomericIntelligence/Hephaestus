@@ -83,6 +83,15 @@ contract):
   implementation GATE consumes the ``implement`` budget on re-adoption —
   the cross-stage ping-pong bound (M1). ``review_error_retries`` is reset
   by ``on_enter`` on each fresh implementation cycle.
+- Zero-thread NOGO (``_handle_zero_thread_nogo``) is the ONE exception to
+  the agent_error fail-back above: it retries in-stage (bounded by
+  ``REVIEW_ERROR_RETRY_CAP``, no round burned), but at the cap it escalates
+  directly with ``state:skip`` instead of failing back. A NOGO with no
+  postable/unresolved thread is often a deterministic reviewer verdict
+  (prose-only, no line-anchored findings); failing back would re-adopt the
+  same PR through implementation with nothing new to address, exhausting
+  the ``implement`` budget for a dead end the retry could never resolve
+  (#2079).
 - Prompt functions (imported, never re-authored):
   ``prompts/pr_review.py get_pr_review_analysis_prompt`` /
   ``get_review_validation_prompt`` / ``get_comment_difficulty_prompt``,
@@ -839,7 +848,18 @@ class PrReviewStage(Stage):
     def _handle_zero_thread_nogo(
         self, item: WorkItem, ctx: StageContext, verdict: Any
     ) -> Continue | StageOutcome:
-        """Persist the anomaly and force a new reviewer invocation."""
+        """Persist the anomaly, retry fresh, then escalate rather than fail back.
+
+        A zero-thread NOGO can be a transient parse/tooling artifact (worth a
+        bounded fresh-review retry) or a deliberate reviewer verdict with no
+        line-anchored findings, which is deterministic: re-review cannot
+        change it. Fail-back would re-adopt the same PR through
+        implementation with nothing concrete to address, exhausting the
+        ``implement`` budget for a dead end (#2079). Once the retry cap is
+        exhausted, escalate directly with ``state:skip`` instead — matching
+        the existing exhaustion convention at :func:`_eval`'s hard-cap path
+        and never re-entering implementation for an unchanged input.
+        """
         if item.pr is None:
             return self._fail_back_agent_error(item)
         pr_number = item.pr
@@ -848,7 +868,7 @@ class PrReviewStage(Stage):
         action = (
             ZeroThreadNogoAction.RETRY_FRESH_REVIEW
             if retries <= REVIEW_ERROR_RETRY_CAP
-            else ZeroThreadNogoAction.FAIL_BACK_AGENT_ERROR
+            else ZeroThreadNogoAction.ESCALATE_SKIP
         )
         artifact_written = self._upsert_zero_thread_nogo_comment(
             item,
@@ -878,10 +898,14 @@ class PrReviewStage(Stage):
             )
             return Continue(next_state=REVIEW_WAIT)
         logger.error(
-            "pr_review:%s: zero-thread NOGO retry cap exhausted; failing back",
+            "pr_review:%s: zero-thread NOGO retry cap exhausted with the same "
+            "artifactless verdict; escalating %s (re-adopting cannot fix a "
+            "deterministic input)",
             item.issue,
+            STATE_SKIP,
         )
-        return self._fail_back_agent_error(item)
+        write_skip_label(_issue_number(item), ctx)
+        return StageOutcome(Disposition.SKIP, "zero_thread_nogo_exhausted")
 
     @staticmethod
     def _upsert_zero_thread_nogo_comment(
@@ -899,7 +923,12 @@ class PrReviewStage(Stage):
         action_text = (
             "A fresh reviewer invocation will be requested without consuming a review round."
             if action is ZeroThreadNogoAction.RETRY_FRESH_REVIEW
-            else "The reviewer retry cap is exhausted; the item will fail back as an agent error."
+            else (
+                "The reviewer retry cap is exhausted with the same artifactless verdict on "
+                "every attempt; automation is standing down (`state:skip`) instead of "
+                "re-adopting this PR through implementation, since a deterministic verdict "
+                "cannot be changed by re-review."
+            )
         )
         body = (
             f"{_ZERO_THREAD_NOGO_MARKER}\n"

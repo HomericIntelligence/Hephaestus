@@ -83,7 +83,7 @@ def test_encoder_rejects_invalid_fixed_fields(field: str, value: Any, match: str
 
 
 def test_encoder_rejects_action_retry_invariant_violations() -> None:
-    """Retry and fail-back actions must agree with the bounded retry counter."""
+    """Retry and escalate actions must agree with the bounded retry counter."""
     event = PrReviewZeroThreadNogoEvent(
         repo="repo-a",
         issue=1985,
@@ -99,5 +99,5 @@ def test_encoder_rejects_action_retry_invariant_violations() -> None:
         encode_stage_event(replace(event, retry_attempt=3))
     with pytest.raises(ValueError, match="has not exceeded retry cap"):
         encode_stage_event(
-            replace(event, action=ZeroThreadNogoAction.FAIL_BACK_AGENT_ERROR, retry_attempt=2)
+            replace(event, action=ZeroThreadNogoAction.ESCALATE_SKIP, retry_attempt=2)
         )
