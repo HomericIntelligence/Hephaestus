@@ -22,9 +22,10 @@ stage too — see ``IssueImplementer.run`` for the canonical call shape.
 """
 
 import logging
+import re
 from collections import defaultdict, deque
 
-from .github_api import fetch_issue_info, prefetch_issue_states
+from .github_api import fetch_issue_info, gh_issue_json, prefetch_issue_states
 from .models import DependencyGraph, IssueInfo, IssueState
 from .state_labels import is_skipped
 
@@ -136,10 +137,6 @@ class DependencyResolver:
             List of sub-issue numbers
 
         """
-        import re
-
-        from .github_api import gh_issue_json
-
         sub_issues = []
 
         # Fetch full body from GitHub
