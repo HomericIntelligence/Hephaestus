@@ -25,7 +25,8 @@ re-pointed at the pipeline (#1820):
   labels untouched, bounded in-stage by
   ``item.payload["review_error_retries"]`` (cap
   ``REVIEW_ERROR_RETRY_CAP`` consecutive failures, reset on any real
-  verdict). At the cap the item FINISH_FAILs — a reviewer-infrastructure
+  verdict or on entry into a new plan cycle, #1869). At the cap the item
+  FINISH_FAILs — a reviewer-infrastructure
   failure is not fixed by replanning, so failing back to planning would
   only spend ``plan_cycles`` on more doomed reviews; labels stay untouched
   on the whole ERROR path.
@@ -183,7 +184,12 @@ class PlanReviewStage(Stage):
         ``attempts["plan_cycles"]`` (recorded in ``payload["review_cycle"]``)
         so it fires exactly once per fail-back cycle: a same-cycle re-entry
         (e.g. the ERROR-path RETRY) matches the recorded cycle and keeps its
-        round count. Idempotent — a literal double on_enter is a no-op.
+        round count. A fresh cycle also restarts the consecutive
+        reviewer-failure streak (``payload["review_error_retries"]``,
+        #1869) — otherwise a leftover count from a prior transient failure
+        could let the first ERROR of the new cycle immediately exceed
+        ``REVIEW_ERROR_RETRY_CAP``. Idempotent — a literal double on_enter
+        is a no-op.
 
         No durable entry work: the doc defines no [M] entry step here, and
         nothing is written. Label fast-forward for items already at-or-past
@@ -202,6 +208,11 @@ class PlanReviewStage(Stage):
         if item.payload.get("review_cycle") != cycle:
             item.payload["review_cycle"] = cycle
             item.payload["review_round"] = 0
+            # Fresh plan cycle: the consecutive reviewer-failure streak
+            # restarts too (#1869) — a leftover count from a prior
+            # transient reviewer failure must not let the first ERROR of
+            # a new cycle immediately exceed REVIEW_ERROR_RETRY_CAP.
+            item.payload.pop("review_error_retries", None)
         return None
 
     def step(self, item: WorkItem, ctx: StageContext) -> StepResult:
