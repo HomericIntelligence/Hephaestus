@@ -95,6 +95,10 @@ jobs:
         id: bandit
         run: pixi run --environment lint sast
 
+      - name: Run bandit LOW-severity baseline check
+        id: bandit-low
+        run: pixi run --environment lint sast-audit-trail
+
       - name: Post bandit summary
         if: always()
         env:

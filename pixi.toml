@@ -127,6 +127,11 @@ pip-audit = "pip-audit --ignore-vuln PYSEC-2025-183"
 # above without spawning a nested `pixi run` (the old top-level audit task did).
 audit = { depends-on = ["pip-audit"] }
 sast = "bandit -c pyproject.toml -r hephaestus scripts --severity-level medium"
+# Full-severity audit-trail scan (issue #1481) — run weekly in CI
+# (.github/workflows/security.yml) and manually before a quarterly re-review.
+sast-audit-trail = { depends-on = ["_sast-low-report", "_sast-baseline-diff"] }
+_sast-low-report = "bandit -c pyproject.toml -r hephaestus scripts --severity-level low -f json -o build/bandit_low.json || true"
+_sast-baseline-diff = "python hephaestus/ci/bandit_baseline_check.py build/bandit_low.json hephaestus/ci/bandit_low_baseline.json"
 
 [environments]
 default = { features = ["shared", "dev"], solve-group = "default" }
