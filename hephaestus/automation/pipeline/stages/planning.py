@@ -163,8 +163,9 @@ class PlanningStage(Stage):
     on_enter idempotency guards (re-housed from ``Planner._pr_coverage_skip``
     and ``Planner._has_existing_plan``, all ordered at-or-past checks):
 
+    - ``state:skip`` -> SKIP (checked BEFORE plan-go; skip wins over
+      everything, even a contradictory plan-go, logging a WARNing — #1835)
     - already at-or-past ``state:plan-go`` -> ADVANCE (zero jobs)
-    - ``state:skip`` -> SKIP
     - merged closing PR -> close issue as covered, SKIP
     - open PR -> SKIP (PR already covers implementation)
     - unlabeled entry -> idempotent bare add of ``state:needs-plan``; entry
@@ -196,15 +197,24 @@ class PlanningStage(Stage):
 
         labels = _issue_labels(item, ctx)
 
+        # Operator override: state:skip -> SKIP. Checked BEFORE the
+        # plan-go fast-forward — skip wins over everything (#1835), matching
+        # seeding.classify_issue's "skip wins over everything" precedent.
+        if is_skipped(labels):
+            if is_plan_go(labels):
+                logger.warning(
+                    "planning:%d: state:skip AND state:plan-go both present — "
+                    "skip wins; see docs/runbooks/state-skip-revival.md if "
+                    "this issue should be revived",
+                    item.issue,
+                )
+            logger.info("planning:%d: state:skip; skipping", item.issue)
+            return StageOutcome(Disposition.SKIP, "state:skip")
+
         # Fast-forward (at-or-past, never equality): already plan-go -> ADVANCE
         if is_plan_go(labels):
             logger.info("planning:%d: already plan-go; advancing", item.issue)
             return StageOutcome(Disposition.ADVANCE, "plan already approved")
-
-        # Operator override: state:skip -> SKIP
-        if is_skipped(labels):
-            logger.info("planning:%d: state:skip; skipping", item.issue)
-            return StageOutcome(Disposition.SKIP, "state:skip")
 
         # Re-housed _pr_coverage_skip gate A: merged closing PR covers the issue
         merged_pr = ctx.github.find_merged_closing_pr(item.issue)
