@@ -933,7 +933,7 @@ class TestCreatePr:
     def test_reuses_existing_open_pr(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(pg, "find_pr_for_issue", lambda issue: 77)
+        monkeypatch.setattr(adapter, "_find_pr_for_issue", lambda issue, state: 77)
         create = _patch_target(monkeypatch, "github_api", "gh_pr_create")
 
         assert adapter.create_pr(5, "branch", "t", "b") == 77
@@ -943,7 +943,7 @@ class TestCreatePr:
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """NOT pr_manager.ensure_pr_created — the stage's composed body wins."""
-        monkeypatch.setattr(pg, "find_pr_for_issue", lambda issue: None)
+        monkeypatch.setattr(adapter, "_find_pr_for_issue", lambda issue, state: None)
         create = MagicMock(return_value=88)
         monkeypatch.setattr(github_api_mod, "gh_pr_create", create)
 
@@ -953,7 +953,7 @@ class TestCreatePr:
     def test_dry_run_returns_zero(
         self, dry_adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(pg, "find_pr_for_issue", lambda issue: None)
+        monkeypatch.setattr(dry_adapter, "_find_pr_for_issue", lambda issue, state: None)
         create = _patch_target(monkeypatch, "github_api", "gh_pr_create")
 
         assert dry_adapter.create_pr(5, "b", "t", "x") == 0
@@ -971,6 +971,8 @@ class TestCreatePr:
 
         def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
             calls.append(argv)
+            if argv[:2] == ["pr", "list"]:
+                return SimpleNamespace(stdout="[]")
             return SimpleNamespace(stdout="https://github.com/org/repo-a/pull/1888\n")
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
@@ -981,6 +983,46 @@ class TestCreatePr:
 
         assert pr_number == 1888
         assert calls[0][-2:] == ["--repo", "org/repo-a"]
+
+    def test_repo_scoped_create_pr_contains_all_existing_head_prs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A custom branch cannot bypass all-head containment before PR reuse."""
+        calls: list[list[str]] = []
+        monkeypatch.setattr(pg.PipelineGitHub, "find_pr_for_issue", lambda self, issue: None)
+        monkeypatch.setattr(
+            github_api_mod, "_assert_branch_commits_signed", lambda branch, base: None
+        )
+
+        def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            if argv[:2] == ["pr", "list"] and "--head" in argv:
+                assert argv[argv.index("--head") + 1] == "custom-branch"
+                return SimpleNamespace(
+                    stdout=json.dumps(
+                        [
+                            {"number": 8, "state": "OPEN", "baseRefName": "release"},
+                            {"number": 9, "state": "OPEN", "baseRefName": "main"},
+                        ]
+                    )
+                )
+            if argv[:2] == ["pr", "view"] and "state,autoMergeRequest" in argv:
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps({"state": "OPEN", "autoMergeRequest": None}),
+                    stderr="",
+                )
+            raise AssertionError(f"unexpected gh invocation: {argv}")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        assert adapter.create_pr(7, "custom-branch", "title", "body\n\nCloses #7") == 9
+        assert [
+            call[2]
+            for call in calls
+            if call[:2] == ["pr", "view"] and "state,autoMergeRequest" in call
+        ] == ["8", "9"]
 
     @pytest.mark.parametrize(
         "stdout",
@@ -1000,7 +1042,13 @@ class TestCreatePr:
         monkeypatch.setattr(
             github_api_mod, "_assert_branch_commits_signed", lambda branch, base: None
         )
-        monkeypatch.setattr(pg, "gh_call", lambda argv, **kwargs: SimpleNamespace(stdout=stdout))
+
+        def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            if argv[:2] == ["pr", "list"]:
+                return SimpleNamespace(stdout="[]")
+            return SimpleNamespace(stdout=stdout)
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
 
         adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
 
@@ -1026,7 +1074,7 @@ class TestReadSurface:
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(pg, "find_merged_closing_pr", lambda n: 1)
-        monkeypatch.setattr(pg, "find_pr_for_issue", lambda n: 2)
+        monkeypatch.setattr(adapter, "_find_pr_for_issue", lambda n, state: 2)
         monkeypatch.setattr(pg, "get_pr_head_branch", lambda n: "head")
         monkeypatch.setattr(pg, "is_plan_review_go", lambda n: True)
 
@@ -1034,6 +1082,32 @@ class TestReadSurface:
         assert adapter.find_pr_for_issue(9) == 2
         assert adapter.get_pr_head_branch(9) == "head"
         assert adapter.has_existing_plan(9) is True
+
+    def test_unscoped_pr_lookup_contains_every_same_head_pr(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The optional unscoped accessor must use the same all-head guard."""
+        deferred: list[int] = []
+        monkeypatch.setattr(
+            pr_manager_mod,
+            "ensure_pr_auto_merge_deferred",
+            lambda pr_number: deferred.append(pr_number),
+        )
+        monkeypatch.setattr(
+            pg,
+            "gh_call",
+            lambda argv, **_kwargs: SimpleNamespace(
+                stdout=json.dumps(
+                    [
+                        {"number": 5, "state": "OPEN", "baseRefName": "main"},
+                        {"number": 6, "state": "OPEN", "baseRefName": "release"},
+                    ]
+                )
+            ),
+        )
+
+        assert adapter.find_pr_for_issue(5) == 5
+        assert deferred == [5, 6]
 
     def test_find_issue_for_pr_parses_exact_closes_line(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

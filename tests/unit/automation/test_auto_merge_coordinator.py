@@ -6,6 +6,7 @@ import json
 from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import patch
 
 import pytest
 
@@ -93,6 +94,25 @@ def test_legacy_open_pr_sweep_rejects_a_pr_without_a_positive_number() -> None:
         coordinator.arm_all_unarmed_open_prs([{"number": None}])
 
 
+def test_legacy_open_pr_sweep_contains_valid_prs_after_a_malformed_row() -> None:
+    """An invalid row cannot prevent containment of later valid PRs."""
+    deferred: list[int] = []
+    coordinator = _coordinator(
+        lambda _args, **_kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+        lambda _pr_number: {"state": "OPEN"},
+    )
+
+    def defer_auto_merge(pr_number: int) -> bool:
+        deferred.append(pr_number)
+        return True
+
+    with patch.object(coordinator, "defer_auto_merge", side_effect=defer_auto_merge):
+        with pytest.raises(RuntimeError, match="invalid PR number"):
+            coordinator.arm_all_unarmed_open_prs([{"number": None}, {"number": 42}])
+
+    assert deferred == [42]
+
+
 def test_legacy_final_sweep_propagates_containment_failure() -> None:
     """The final sweep cannot complete after its containment seam fails."""
 
@@ -144,6 +164,62 @@ def test_legacy_scoped_final_sweep_contains_same_head_siblings() -> None:
     remaining = [
         {"number": 42, "headRefName": "2054-auto-impl"},
         {"number": 43, "headRefName": "2054-auto-impl"},
+    ]
+    contained: list[dict[str, Any]] = []
+
+    def contain(prs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        contained.extend(prs)
+        return prs
+
+    coordinator = CIDriveRunCoordinator(
+        options_provider=lambda: SimpleNamespace(dry_run=False, issues=[2054]),
+        worktree_manager=SimpleNamespace(),
+        status_tracker=SimpleNamespace(),
+        discovery=SimpleNamespace(list_open_prs_remaining=lambda: remaining),
+        check_inspector=SimpleNamespace(),
+        fix_flow=SimpleNamespace(),
+        auto_merge=SimpleNamespace(arm_all_unarmed_open_prs=contain),
+        arming=SimpleNamespace(),
+        set_shared_pr_issues=lambda _shared: None,
+    )
+
+    assert coordinator._final_open_prs({2054: 42}) == remaining
+    assert contained == remaining
+
+
+def test_legacy_scoped_final_sweep_contains_all_when_head_identity_is_incomplete() -> None:
+    """A blank scoped head makes the target scope untrustworthy, so contain every row."""
+    remaining = [
+        {"number": 42, "headRefName": ""},
+        {"number": 43, "headRefName": "other-head"},
+    ]
+    contained: list[dict[str, Any]] = []
+
+    def contain(prs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        contained.extend(prs)
+        return prs
+
+    coordinator = CIDriveRunCoordinator(
+        options_provider=lambda: SimpleNamespace(dry_run=False, issues=[2054]),
+        worktree_manager=SimpleNamespace(),
+        status_tracker=SimpleNamespace(),
+        discovery=SimpleNamespace(list_open_prs_remaining=lambda: remaining),
+        check_inspector=SimpleNamespace(),
+        fix_flow=SimpleNamespace(),
+        auto_merge=SimpleNamespace(arm_all_unarmed_open_prs=contain),
+        arming=SimpleNamespace(),
+        set_shared_pr_issues=lambda _shared: None,
+    )
+
+    assert coordinator._final_open_prs({2054: 42}) == remaining
+    assert contained == remaining
+
+
+def test_legacy_scoped_final_sweep_contains_all_when_sibling_head_is_incomplete() -> None:
+    """An unscoped blank head may be a sibling, so it cannot be filtered away."""
+    remaining = [
+        {"number": 42, "headRefName": "2054-auto-impl"},
+        {"number": 43, "headRefName": ""},
     ]
     contained: list[dict[str, Any]] = []
 
@@ -232,6 +308,44 @@ def test_legacy_empty_issue_workset_does_not_filter_away_final_containment() -> 
     )
 
     assert coordinator.run() == {}
+    assert contained == remaining
+
+
+def test_legacy_discovery_error_still_runs_final_containment() -> None:
+    """A discovery exception cannot bypass the final whole-repository sweep."""
+    remaining = [{"number": 42, "headRefName": "2054-auto-impl"}]
+    contained: list[dict[str, Any]] = []
+
+    def contain(prs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        contained.extend(prs)
+        return prs
+
+    def discovery_error(_issues: list[int]) -> SimpleNamespace:
+        raise RuntimeError("malformed discovery response")
+
+    coordinator = CIDriveRunCoordinator(
+        options_provider=lambda: SimpleNamespace(
+            dry_run=False,
+            issues=[],
+            prs=[42],
+            include_bot_prs=False,
+            max_workers=1,
+        ),
+        worktree_manager=SimpleNamespace(),
+        status_tracker=SimpleNamespace(),
+        discovery=SimpleNamespace(
+            discover_workset=discovery_error,
+            list_open_prs_remaining=lambda: remaining,
+        ),
+        check_inspector=SimpleNamespace(),
+        fix_flow=SimpleNamespace(),
+        auto_merge=SimpleNamespace(arm_all_unarmed_open_prs=contain),
+        arming=SimpleNamespace(sweep_orphaned_records=lambda: None),
+        set_shared_pr_issues=lambda _shared: None,
+    )
+
+    with pytest.raises(RuntimeError, match="malformed discovery response"):
+        coordinator.run()
     assert contained == remaining
 
 

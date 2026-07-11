@@ -356,8 +356,11 @@ Related: #1554 (original minor-thread deadlock this replaces), #1575
 
 **Steps**:
 
-1. [M] **DISCOVER**: fetch PR state via `pr_discovery`; verify
-   `is_implementation_go` (fast-forward if not).
+1. [M] **DISCOVER**: resolve the PR, terminalize closed/merged PRs, then for
+   an open PR disable auto-merge and read back the disabled state before any
+   worktree or CI action. A failed read-back finishes
+   `auto_merge_disable_failed`. Adopt the real head branch and verify
+   `is_implementation_go`; a missing legacy GO fails back to `pr_review`.
 2. [W:G] **Mechanical rebase** (optional, if base changed): attempt rebase via
    git; on success, push.
 3. [M] **POLL** (non-blocking): call
@@ -373,11 +376,13 @@ Related: #1554 (original minor-thread deadlock this replaces), #1575
 5. [W:G] Push fix commit(s).
 6. Loop back to step 3 (POLL).
 
-**Verdicts**: ADVANCE (GREEN), RETRY (PENDING, fix needed), FAIL_BACK(reason).
+**Verdicts**: ADVANCE (GREEN), RETRY (PENDING, fix needed),
+FAIL_BACK(`not_implementation_go` or fix reason), FINISH_FAIL (`no_pr` or
+`auto_merge_disable_failed`).
 
 **Fail routes**: `fix_exhausted` → implementation (retry from implement);
-`not_implementation_go` → pr_review (regress); `no_pr` → finished(fail);
-default = ci (RETRY).
+`not_implementation_go` → pr_review (regress); `no_pr` and
+`auto_merge_disable_failed` → finished(fail); default = ci (RETRY).
 
 **Budgets**: `ci_fix` = 1 (max fix attempts; one escalation via
 force_engagement), `rebase` = 2 (max mechanical rebase attempts).
@@ -449,7 +454,7 @@ globally bounded.
 | plan_review | implementation | planning (nogo, default), finished(fail) on plan_cycles_exhausted | plan_review_iter=3, plan_cycles=2 |
 | implementation | pr_review | plan_review (plan_not_go), ci (already_implementation_go_pr), finished(fail) on exhaustion | implement=2, test_fix=1 |
 | pr_review | finished(fail) on internal GO (`strict_gate_unavailable`) | implementation (agent_error), finished(fail) on human_blocked or failed disable verification, finished(skip) on exhaustion | pr_review_iter=3, pr_review_hard=6; clean GO is internal only |
-| ci | merge_wait | implementation (fix_exhausted, missing_worktree), pr_review (not_implementation_go), finished(fail) on no_pr | ci_fix=1, rebase=2 |
+| ci | merge_wait | implementation (fix_exhausted, missing_worktree), pr_review (not_implementation_go), finished(fail) on no_pr or auto_merge_disable_failed | ci_fix=1, rebase=2 |
 | merge_wait | finished(pass) | finished(fail) on `strict_gate_unavailable` or failed disable verification; existing merged PRs learn then pass | compatibility budgets inactive for open PRs |
 | finished | — | — | — |
 

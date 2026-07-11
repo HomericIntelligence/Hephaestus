@@ -49,12 +49,14 @@ def _resolve_viewer_login() -> str:
 
 def _is_bot_pr_author(pr: dict[str, Any]) -> bool:
     """Return whether a pull-request row was authored by a GitHub bot."""
-    return (pr.get("user") or {}).get("type") == "Bot"
+    user = pr.get("user")
+    return isinstance(user, dict) and user.get("type") == "Bot"
 
 
 def _is_viewer_authored(pr: dict[str, Any], viewer_login: str) -> bool:
     """Return whether a pull-request row belongs to the selected author scope."""
-    return not viewer_login or (pr.get("user") or {}).get("login") == viewer_login
+    user = pr.get("user")
+    return not viewer_login or (isinstance(user, dict) and user.get("login") == viewer_login)
 
 
 @dataclass(frozen=True)
@@ -137,14 +139,19 @@ def _normalise_open_pr(
     merge_state_fn: Callable[[Any], tuple[str, str]],
 ) -> dict[str, Any]:
     """Normalise a REST pull row to the gh-CLI shape consumed downstream."""
-    labels = pr.get("labels") or []
+    labels_value = pr.get("labels")
+    labels = labels_value if isinstance(labels_value, list) else []
+    head_value = pr.get("head")
+    head = head_value if isinstance(head_value, dict) else {}
+    head_ref = head.get("ref")
+    user_value = pr.get("user")
+    user = user_value if isinstance(user_value, dict) else {}
     number = pr.get("number")
     merge_state, mergeable = merge_state_fn(number)
-    user = pr.get("user") or {}
     return {
         "number": number,
         "title": pr.get("title", ""),
-        "headRefName": (pr.get("head") or {}).get("ref", ""),
+        "headRefName": head_ref if isinstance(head_ref, str) else "",
         "autoMergeRequest": pr.get("auto_merge"),
         "mergeStateStatus": merge_state,
         "mergeable": mergeable,
@@ -246,9 +253,18 @@ class PRDiscovery:
                 ["pr", "view", str(pr_number), "--json", "number,state"],
                 check=False,
             )
+            if result.returncode != 0:
+                return False
             data = json.loads(result.stdout or "{}")
+            if not isinstance(data, dict):
+                return False
             return str(data.get("state", "")).upper() == "OPEN"
-        except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+        except (
+            AttributeError,
+            subprocess.CalledProcessError,
+            json.JSONDecodeError,
+            TypeError,
+        ) as exc:
             logger.debug("PR #%s validation failed: %s", pr_number, exc)
             return False
 
@@ -459,14 +475,17 @@ class PRDiscovery:
         if not raw_pulls:
             return []
 
-        viewer = "" if self._options().include_all_authors else self.resolve_viewer_login()
+        options = self._options()
+        viewer = "" if options.include_all_authors or options.prs else self.resolve_viewer_login()
         normalised: list[dict[str, Any]] = []
         for pr in raw_pulls:
-            user = pr.get("user") or {}
-            if viewer and user.get("login") != viewer:
-                if user.get("login") is None:
+            user_value = pr.get("user")
+            user = user_value if isinstance(user_value, dict) else {}
+            login = user.get("login")
+            if viewer and login != viewer:
+                if login is None:
                     logger.warning(
-                        "PR #%s has no user.login; skipping under author filter (#821)",
+                        "PR #%s has no usable user.login; retaining it for containment (#2054)",
                         pr.get("number"),
                         extra={
                             "missing_field": "user.login",
@@ -474,7 +493,8 @@ class PRDiscovery:
                             "pr_number": pr.get("number"),
                         },
                     )
-                continue  # #821: hide other-author PRs from the done-gate sweep
+                else:
+                    continue  # #821: hide known other-author PRs from the done-gate sweep
             # Route through the injected provider (lambda → driver stub) so
             # ``patch.object(driver, "_pr_merge_state")`` intercepts (#1357);
             # fall back to the local method when unwired.
@@ -514,8 +534,10 @@ class PRDiscovery:
                 ],
                 check=False,
             )
-            state = dict(json.loads(result.stdout or "{}"))
-        except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+            state = json.loads(result.stdout or "{}")
+            if not isinstance(state, dict):
+                raise ValueError("merge-state response was not an object")
+        except (subprocess.CalledProcessError, json.JSONDecodeError, TypeError, ValueError) as exc:
             logger.warning(
                 "Could not fetch PR #%s merge-state for done-gate; treating as unknown: %s",
                 pr_number,

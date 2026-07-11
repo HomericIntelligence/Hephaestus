@@ -36,7 +36,6 @@ from hephaestus.automation._review_utils import (
     ensure_state_dir,
     find_merged_closing_pr,
     find_merged_pr_for_issue,
-    find_pr_for_issue,
     get_pr_head_branch,
 )
 from hephaestus.automation.arming_state import ArmingStateStore
@@ -614,10 +613,8 @@ class PipelineGitHub:
         return find_merged_pr_for_issue(issue_number)
 
     def find_pr_for_issue(self, issue_number: int) -> int | None:
-        """Return an open PR covering this issue (``_review_utils``)."""
-        if self._repo_slug is not None:
-            return self._find_pr_for_issue(issue_number, state="open")
-        return find_pr_for_issue(issue_number)
+        """Return an open PR only after containing every PR on its head branch."""
+        return self._find_pr_for_issue(issue_number, state="open")
 
     def find_issue_for_pr(self, pr_number: int) -> int | None:
         """Return the PR's linked issue from its exact ``Closes #N`` body line."""
@@ -968,11 +965,17 @@ class PipelineGitHub:
     def create_pr(self, issue_number: int, branch: str, title: str, body: str) -> int:
         """Durably ensure the PR exists and return its number (idempotent).
 
-        ``find_pr_for_issue`` first (reuse an existing open PR), then
-        ``gh_pr_create`` with the *given* title/body — NOT
-        ``pr_manager.ensure_pr_created``, which would discard the stage's
-        composed body (protocol docstring). Dry-run returns 0 (no PR).
+        First contain and reuse any open PR on the supplied branch, then use
+        ``find_pr_for_issue`` as the issue-level fallback before creating a
+        PR with the *given* title/body — NOT ``pr_manager.ensure_pr_created``,
+        which would discard the stage's composed body (protocol docstring).
+        Dry-run returns 0 (no PR).
         """
+        if self._repo_slug is not None:
+            open_prs = self._contain_open_prs_for_branch(branch)
+            existing_on_branch = github_api._select_open_pr_for_base(open_prs, "main")
+            if existing_on_branch is not None:
+                return existing_on_branch
         existing = self.find_pr_for_issue(issue_number)
         if existing:
             return existing

@@ -86,15 +86,20 @@ class AutoMergeCoordinator:
 
         """
         contained_prs: list[dict[str, Any]] = []
+        failures: list[str] = []
         for pr in open_prs:
             number = pr.get("number")
             if not isinstance(number, int) or number <= 0:
-                raise RuntimeError("cannot verify auto-merge disabled: invalid PR number")
+                failures.append("invalid PR number")
+                continue
             if not self.defer_auto_merge(number):
-                raise RuntimeError(
+                failures.append(
                     f"could not verify auto-merge disabled for legacy open PR #{number}"
                 )
+                continue
             contained_prs.append({**pr, "autoMergeRequest": None})
+        if failures:
+            raise RuntimeError(f"cannot verify auto-merge disabled: {'; '.join(failures)}")
         return contained_prs
 
     def arm_and_wait_for_merge(

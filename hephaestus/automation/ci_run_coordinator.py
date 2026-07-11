@@ -147,7 +147,14 @@ class CIDriveRunCoordinator:
         if not options.issues and not options.prs and not options.include_bot_prs:
             logger.warning("No issues, no direct PRs, and bot-PR discovery disabled")
             return {}
-        workset = self._discovery.discover_workset(options.issues)
+        try:
+            workset = self._discovery.discover_workset(options.issues)
+        except Exception:
+            # Discovery is untrusted input to the containment boundary. A
+            # failure cannot prove the repository has no armed PRs, so run the
+            # full final sweep before propagating the discovery failure.
+            self.open_prs_remaining = self._final_open_prs({})
+            raise
         self._set_shared_pr_issues(workset.shared_pr_issues)
         pr_map = workset.pr_map
         if not pr_map:
@@ -207,28 +214,29 @@ class CIDriveRunCoordinator:
         remaining = cast(list[dict[str, Any]], self._discovery.list_open_prs_remaining())
         if self._options().issues and pr_map and remaining:
             scoped_prs = set(pr_map.values())
-            scoped_heads = {
-                head_ref_name.strip()
+            complete_returned_identity = all(
+                isinstance(pr.get("number"), int)
+                and pr["number"] > 0
+                and isinstance(pr.get("headRefName"), str)
+                and pr["headRefName"].strip()
                 for pr in remaining
-                if pr.get("number") in scoped_prs
-                and isinstance((head_ref_name := pr.get("headRefName")), str)
-                and head_ref_name.strip()
-            }
-            remaining = [
-                pr
-                for pr in remaining
-                if pr.get("number") == -1
-                or pr.get("number") in scoped_prs
-                or (
-                    isinstance(pr.get("headRefName"), str)
-                    and pr["headRefName"].strip() in scoped_heads
-                )
-            ]
-        if remaining:
-            remaining = cast(
-                list[dict[str, Any]],
-                self._auto_merge.arm_all_unarmed_open_prs(remaining),
             )
+            if complete_returned_identity:
+                scoped_rows = [pr for pr in remaining if pr.get("number") in scoped_prs]
+                if {pr["number"] for pr in scoped_rows} != scoped_prs:
+                    return self._contain_remaining_prs(remaining)
+                scoped_heads = {str(pr["headRefName"]).strip() for pr in scoped_rows}
+                remaining = [
+                    pr
+                    for pr in remaining
+                    if pr.get("number") == -1
+                    or pr.get("number") in scoped_prs
+                    or (
+                        isinstance(pr.get("headRefName"), str)
+                        and pr["headRefName"].strip() in scoped_heads
+                    )
+                ]
+        remaining = self._contain_remaining_prs(remaining)
         if remaining:
             logger.warning("%d open PR(s) remain on the repo - not done:", len(remaining))
             for pr in remaining:
@@ -245,6 +253,12 @@ class CIDriveRunCoordinator:
                     am_state,
                 )
         return remaining
+
+    def _contain_remaining_prs(self, remaining: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Contain every retained final-sweep PR or preserve an empty result."""
+        if not remaining:
+            return remaining
+        return cast(list[dict[str, Any]], self._auto_merge.arm_all_unarmed_open_prs(remaining))
 
     def drive_issue(self, issue_number: int, pr_number: int, slot_id: int) -> WorkerResult:
         """Contain a legacy PR and stop until the strict-review gate exists."""

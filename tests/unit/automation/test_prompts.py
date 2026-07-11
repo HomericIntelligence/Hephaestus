@@ -106,6 +106,9 @@ class TestPRReviewAnalysisPrompt:
         assert "pr-policy" in out
         assert "pipeline containment" in out
         assert "human strict review" in out
+        assert "acceptable to merge" not in out
+        assert "eligible for independent strict review" in out
+        assert "pipeline containment" in (prompts.get_pr_review_analysis_prompt.__doc__ or "")
         # The code-quality verdict contract stays intact.
         assert "Verdict: NOGO" in out
         assert "Verdict: GO" in out
