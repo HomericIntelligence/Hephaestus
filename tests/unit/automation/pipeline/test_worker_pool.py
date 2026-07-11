@@ -619,32 +619,42 @@ class TestGitOps:
         self,
         pool: WorkerPool,
         completion_q: CompletionQueue,
+        tmp_path: Path,
     ) -> None:
         """create_worktree forwards kwargs to WorktreeManager.create_worktree."""
         job = GitJob(
             repo="test/repo",
             op="create_worktree",
             timeout_s=60,
-            kwargs={"issue_number": 7, "branch_name": "7-auto"},
+            kwargs={
+                "issue_number": 7,
+                "branch_name": "7-auto",
+                "repo_root": str(tmp_path),
+            },
         )
         instance = MagicMock()
-        instance.create_worktree.return_value = Path("/tmp/wt")
-        with patch(f"{_WP}.WorktreeManager", return_value=instance):
+        instance.create_worktree.return_value = tmp_path / "wt"
+        with patch(f"{_WP}.WorktreeManager", return_value=instance) as mock_manager:
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
+        mock_manager.assert_called_once_with(
+            base_dir=tmp_path / "build" / ".worktrees",
+            repo_root=tmp_path,
+        )
         instance.create_worktree.assert_called_once_with(
             issue_number=7,
             branch_name="7-auto",
             timeout=60,
         )
         assert result.ok is True
-        assert result.value == "/tmp/wt"
+        assert result.value == str(tmp_path / "wt")
 
     def test_create_worktree_syncs_adopted_clean_branch(
         self,
         pool: WorkerPool,
         completion_q: CompletionQueue,
+        tmp_path: Path,
     ) -> None:
         """sync_to_remote is a worker concern, not leaked into WorktreeManager."""
         job = GitJob(
@@ -655,12 +665,13 @@ class TestGitOps:
                 "issue_number": 7,
                 "branch_name": "7-existing",
                 "refresh_base": False,
+                "repo_root": str(tmp_path),
                 "sync_to_remote": True,
                 "pr_number": 70,
             },
         )
         instance = MagicMock()
-        instance.create_worktree.return_value = Path("/tmp/wt")
+        instance.create_worktree.return_value = tmp_path / "wt"
         with (
             patch(f"{_WP}.WorktreeManager", return_value=instance),
             patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True) as mock_clean,
@@ -675,10 +686,72 @@ class TestGitOps:
             refresh_base=False,
             timeout=60,
         )
-        mock_clean.assert_called_once_with(Path("/tmp/wt"), timeout=60)
-        mock_sync.assert_called_once_with(Path("/tmp/wt"), "7-existing", pr_number=70, timeout=60)
+        mock_clean.assert_called_once_with(tmp_path / "wt", timeout=60)
+        mock_sync.assert_called_once_with(tmp_path / "wt", "7-existing", pr_number=70, timeout=60)
         assert result.ok is True
-        assert result.value == {"path": "/tmp/wt", "dirty": False, "status": "", "diff": ""}
+        assert result.value == {
+            "path": str(tmp_path / "wt"),
+            "dirty": False,
+            "status": "",
+            "diff": "",
+        }
+
+    def test_create_worktree_defaults_repo_root_to_ambient_cwd(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+    ) -> None:
+        """No repo_root kwarg falls back to get_repo_root() (single-repo callers)."""
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={"issue_number": 7, "branch_name": "7-auto"},
+        )
+        instance = MagicMock()
+        ambient_root = get_repo_root()
+        instance.create_worktree.return_value = ambient_root / "build" / ".worktrees" / "issue-7"
+        with (
+            patch(f"{_WP}.WorktreeManager", return_value=instance) as mock_manager,
+            patch(f"{_WP}.get_repo_root", return_value=ambient_root),
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        mock_manager.assert_called_once_with(
+            base_dir=ambient_root / "build" / ".worktrees",
+            repo_root=ambient_root,
+        )
+        assert result.ok is True
+
+    def test_create_worktree_escaped_repo_root_fails(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A worktree path outside the resolved repo_root is a hard failure."""
+        repo_root = tmp_path / "ProjectArgus"
+        job = GitJob(
+            repo="ProjectArgus",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 107,
+                "branch_name": "107-auto-impl",
+                "repo_root": str(repo_root),
+            },
+        )
+        instance = MagicMock()
+        instance.create_worktree.return_value = tmp_path / "ProjectHephaestus" / "issue-107"
+        with patch(f"{_WP}.WorktreeManager", return_value=instance):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error is not None
+        assert "escaped resolved repo root" in result.error
+        assert str(repo_root) in result.error
 
     def test_remove_worktree_dispatch(
         self,
@@ -698,6 +771,28 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         instance.remove_worktree.assert_called_once_with(issue_number=7, force=True, timeout=60)
+        assert result.ok is True
+
+    def test_remove_worktree_fallback_honors_repo_root_kwarg(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """The manager-state fallback (no worktree_path) still scopes repo_root."""
+        other_repo = tmp_path / "ProjectArgus"
+        job = GitJob(
+            repo="ProjectArgus",
+            op="remove_worktree",
+            timeout_s=60,
+            kwargs={"issue_number": 107, "force": True, "repo_root": str(other_repo)},
+        )
+        instance = MagicMock()
+        with patch(f"{_WP}.WorktreeManager", return_value=instance) as mock_manager:
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        mock_manager.assert_called_once_with(repo_root=other_repo)
         assert result.ok is True
 
     def test_remove_worktree_path_dispatch(
@@ -1098,7 +1193,9 @@ class TestGitLocking:
         """A completed GitJob does not leave an idle repo lock cached forever."""
         job = GitJob(repo="test/repo", op="create_worktree", timeout_s=60, kwargs={})
 
-        with patch(f"{_WP}.WorktreeManager", return_value=MagicMock()):
+        instance = MagicMock()
+        instance.create_worktree.return_value = None
+        with patch(f"{_WP}.WorktreeManager", return_value=instance):
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
@@ -1163,7 +1260,9 @@ class TestGitLocking:
     ) -> None:
         """Running a GitJob creates the per-repo sentinel file in lock_dir."""
         job = GitJob(repo="test/repo", op="create_worktree", timeout_s=60, kwargs={})
-        with patch(f"{_WP}.WorktreeManager", return_value=MagicMock()):
+        instance = MagicMock()
+        instance.create_worktree.return_value = None
+        with patch(f"{_WP}.WorktreeManager", return_value=instance):
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
