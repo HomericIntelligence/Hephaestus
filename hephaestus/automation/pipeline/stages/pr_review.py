@@ -366,7 +366,6 @@ class PrReviewStage(Stage):
         if item.payload.get("pr_review_cycle") != cycle:
             item.payload["pr_review_cycle"] = cycle
             item.payload["pr_review_round"] = 0
-            item.payload.pop("prev_unresolved", None)
             # Fresh implementation cycle: the consecutive reviewer-failure
             # streak restarts too (M1 — a re-entry after an agent_error
             # fail-back gets a fresh error budget; the implement budget,
@@ -764,8 +763,12 @@ class PrReviewStage(Stage):
         # #1554 parity (m2): the progress trail counts AUTOMATION threads
         # only — a human resolving their own thread is not automation
         # progress and must not earn extension rounds.
-        prev_unresolved = payload.get("prev_unresolved")
-        payload["prev_unresolved"] = automation_unresolved
+        # #1863: prev_unresolved is THIS round's pre-address snapshot
+        # (POST's unresolved_auto) so the extension gate compares
+        # pre-address vs post-address WITHIN the round being evaluated —
+        # progress landing on the soft-cap round is no longer invisible
+        # to a stale cross-round comparison.
+        prev_unresolved = payload.get("unresolved_auto")
         if round_done < soft_cap:
             logger.info(
                 "pr_review:%d: %s (round %d/%d, %d unresolved); re-reviewing",

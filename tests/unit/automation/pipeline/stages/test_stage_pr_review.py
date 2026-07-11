@@ -74,13 +74,11 @@ class TestPrReviewStageOnEnter:
         item.attempts["implement"] = 2  # agent_error fail-back re-implemented
         item.payload["pr_review_cycle"] = 1
         item.payload["pr_review_round"] = 3  # cycle 1 exhausted its rounds
-        item.payload["prev_unresolved"] = 4
 
         stage.on_enter(item, ctx)
 
         assert item.payload["pr_review_cycle"] == 2
         assert item.payload["pr_review_round"] == 0  # cycle 2 gets a full budget
-        assert "prev_unresolved" not in item.payload  # progress trail reset
 
     def test_on_enter_same_cycle_keeps_round(self, make_ctx: Any, make_work_item: Any) -> None:
         """Same-cycle re-entry (e.g. the ERROR-path RETRY) keeps the round count."""
@@ -614,7 +612,6 @@ class TestEvalVerdicts:
         # No GO labels while threads open; the downgraded round durably
         # records NO-GO (doc section 5: "NOGO verdict, before retry/regress").
         assert github.mutation_log == [("mark_pr_implementation_no_go", (1001,))]
-        assert item.payload["prev_unresolved"] == 2
 
     def test_nogo_within_soft_budget_loops_to_re_review(
         self, make_ctx: Any, make_work_item: Any
@@ -832,9 +829,26 @@ class TestEvalErrorNoBurn:
 class TestProgressAwareBudget:
     """Soft cap 3; rounds 4-6 admitted ONLY while threads strictly decrease."""
 
-    def _eval_round(self, stage: Any, item: Any, ctx: Any, verdict: str = "NOGO") -> Any:
-        """Run one EVAL with a fresh verdict (state machine loop shortcut)."""
+    def _eval_round(
+        self,
+        stage: Any,
+        item: Any,
+        ctx: Any,
+        verdict: str = "NOGO",
+        *,
+        pre_address: int | None = None,
+    ) -> Any:
+        """Run one EVAL with a fresh verdict (state machine loop shortcut).
+
+        ``pre_address`` mirrors what POST would have written to
+        ``payload["unresolved_auto"]`` THIS round (the pre-address
+        snapshot) — EVAL's progress gate now compares it against this
+        same round's post-address count instead of a value carried from
+        the previous round (#1863).
+        """
         item.payload["review_verdict"] = _verdict(verdict)
+        if pre_address is not None:
+            item.payload["unresolved_auto"] = pre_address
         item.state = "EVAL"
         return stage.step(item, ctx)
 
@@ -854,7 +868,7 @@ class TestProgressAwareBudget:
 
         assert isinstance(self._eval_round(stage, item, ctx), Continue)  # round 1
         assert isinstance(self._eval_round(stage, item, ctx), Continue)  # round 2
-        outcome = self._eval_round(stage, item, ctx)  # round 3: no progress
+        outcome = self._eval_round(stage, item, ctx, pre_address=3)  # round 3: 3==3 plateau
 
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition == Disposition.SKIP
@@ -874,16 +888,25 @@ class TestProgressAwareBudget:
     ) -> None:
         """Strictly decreasing threads admit rounds 4+ until the plateau."""
         stage = PrReviewStage()
+        # by_severity/unresolved FIFO supplies each round's POST-ADDRESS count
+        # (EVAL's automation_unresolved): r1=5, r2=3, r3=2, r4=1, r5=1(repeats).
+        # pre_address seeds each round's PRE-ADDRESS count (POST's
+        # unresolved_auto) so soft_cap+ rounds prove progress WITHIN
+        # themselves (#1863): r3 pre=4>post=2, r4 pre=2>post=1, r5 pre=1==post=1.
         github = FakeStageGitHub(unresolved=[(5, 0), (3, 0), (2, 0), (1, 0), (1, 0)])
         ctx = make_ctx(github=github)
         item = make_work_item(issue=13, pr=1001, state="EVAL")
         assert stage.on_enter(item, ctx) is None
 
-        assert isinstance(self._eval_round(stage, item, ctx), Continue)  # r1: 5 open
-        assert isinstance(self._eval_round(stage, item, ctx), Continue)  # r2: 3 open
-        assert isinstance(self._eval_round(stage, item, ctx), Continue)  # r3: 2<3 -> r4 earned
-        assert isinstance(self._eval_round(stage, item, ctx), Continue)  # r4: 1<2 -> r5 earned
-        outcome = self._eval_round(stage, item, ctx)  # r5: 1==1 plateau
+        assert isinstance(self._eval_round(stage, item, ctx), Continue)  # r1: 5 (< soft_cap)
+        assert isinstance(self._eval_round(stage, item, ctx), Continue)  # r2: 3 (< soft_cap)
+        assert isinstance(
+            self._eval_round(stage, item, ctx, pre_address=4), Continue
+        )  # r3 == soft_cap: pre=4, post=2 -> progress, r4 earned
+        assert isinstance(
+            self._eval_round(stage, item, ctx, pre_address=2), Continue
+        )  # r4: pre=2, post=1 -> progress, r5 earned
+        outcome = self._eval_round(stage, item, ctx, pre_address=1)  # r5: pre=1, post=1 -> plateau
 
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition == Disposition.SKIP
@@ -900,13 +923,58 @@ class TestProgressAwareBudget:
         item = make_work_item(issue=14, pr=1001, state="EVAL")
         assert stage.on_enter(item, ctx) is None
 
-        outcomes = [self._eval_round(stage, item, ctx) for _ in range(6)]
+        # post-address per round (FIFO): r1=9 r2=8 r3=7 r4=6 r5=5 r6=4.
+        # pre_address seeded 1 higher than that round's own post-address
+        # so r3-r5 each prove within-round progress; r6's pre_address is
+        # irrelevant -- the hard cap stops it regardless (#1863).
+        pre_addresses = [None, None, 8, 7, 6, 5]
+        outcomes = [
+            self._eval_round(stage, item, ctx, pre_address=pre_addresses[i]) for i in range(6)
+        ]
 
         assert all(isinstance(o, Continue) for o in outcomes[:5])  # rounds 1-5 loop
         final = outcomes[5]
         assert isinstance(final, StageOutcome)
         assert final.disposition == Disposition.SKIP  # 6 == hard cap: stop
         assert item.payload["pr_review_round"] == 6
+
+    def test_progress_within_soft_cap_round_earns_extension(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """#1863: address work landing ON the soft-cap round earns an extension.
+
+        Round 3 (soft cap) starts with 6 pre-address unresolved (POST's
+        unresolved_auto) and the address leg drives it down to 3
+        post-address (EVAL's automation_unresolved) -- progress made
+        WITHIN round 3. Round 2 ALSO ended at 3 post-address, so the OLD
+        cross-round comparison (round 3 post=3 vs round 2's stored
+        post=3) would see a plateau and strand the PR at the soft cap.
+        The fix reads round 3's OWN pre-address snapshot (6), so 3 < 6
+        is recognized as progress and round 4 is earned. Round 4 then
+        plateaus (pre=3, post=3) and the PR exhausts at round 4.
+        """
+        stage = PrReviewStage()
+        # by_severity supplies each round's POST-ADDRESS count (EVAL read):
+        # r1=5, r2=3, r3=3, r4=3.
+        github = FakeStageGitHub(by_severity=[(5, 0, 0), (3, 0, 0), (3, 0, 0), (3, 0, 0)])
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=16, pr=1001, state="EVAL")
+        assert stage.on_enter(item, ctx) is None
+
+        assert isinstance(self._eval_round(stage, item, ctx), Continue)  # r1: post=5 (< soft_cap)
+        assert isinstance(self._eval_round(stage, item, ctx), Continue)  # r2: post=3 (< soft_cap)
+        r3 = self._eval_round(
+            stage, item, ctx, pre_address=6
+        )  # r3 == soft_cap: pre=6, post=3 -> progress WITHIN round 3, r4 earned
+        assert isinstance(r3, Continue)
+        outcome = self._eval_round(
+            stage, item, ctx, pre_address=3
+        )  # r4: pre=3, post=3 -> plateau, exhausted
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.SKIP
+        assert item.payload["pr_review_round"] == 4
+        assert item.attempts["pr_review_hard"] == 1  # only round 4 is > soft_cap (3)
 
     def test_budgets_come_from_routes(self, make_ctx: Any) -> None:
         """The soft/hard budgets are ROUTES data, not stage constants."""
@@ -1503,8 +1571,12 @@ class TestSurvivingThreads:
 class TestProgressCountsAutomationOnly:
     """m2: human-resolved threads never earn extension rounds (legacy parity)."""
 
-    def _eval_round(self, stage: Any, item: Any, ctx: Any) -> Any:
+    def _eval_round(
+        self, stage: Any, item: Any, ctx: Any, *, pre_address: int | None = None
+    ) -> Any:
         item.payload["review_verdict"] = _verdict("NOGO")
+        if pre_address is not None:
+            item.payload["unresolved_auto"] = pre_address
         item.state = "EVAL"
         return stage.step(item, ctx)
 
@@ -1521,9 +1593,11 @@ class TestProgressCountsAutomationOnly:
         item = make_work_item(issue=51, pr=1001, state="EVAL")
         assert stage.on_enter(item, ctx) is None
 
-        assert isinstance(self._eval_round(stage, item, ctx), Continue)  # r1
-        assert isinstance(self._eval_round(stage, item, ctx), Continue)  # r2
-        outcome = self._eval_round(stage, item, ctx)  # r3: automation plateau
+        assert isinstance(self._eval_round(stage, item, ctx), Continue)  # r1 (< soft_cap)
+        assert isinstance(self._eval_round(stage, item, ctx), Continue)  # r2 (< soft_cap)
+        outcome = self._eval_round(
+            stage, item, ctx, pre_address=3
+        )  # r3 == soft_cap: 3==3 plateau (automation)
 
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition == Disposition.SKIP
@@ -1539,10 +1613,12 @@ class TestProgressCountsAutomationOnly:
         item = make_work_item(issue=52, pr=1001, state="EVAL")
         assert stage.on_enter(item, ctx) is None
 
-        assert isinstance(self._eval_round(stage, item, ctx), Continue)  # r1: 5 auto
-        assert isinstance(self._eval_round(stage, item, ctx), Continue)  # r2: 4 auto
-        assert isinstance(self._eval_round(stage, item, ctx), Continue)  # r3: 3<4 -> r4
-        outcome = self._eval_round(stage, item, ctx)  # r4: 3==3 plateau
+        assert isinstance(self._eval_round(stage, item, ctx), Continue)  # r1: 5 auto (< soft_cap)
+        assert isinstance(self._eval_round(stage, item, ctx), Continue)  # r2: 4 auto (< soft_cap)
+        assert isinstance(
+            self._eval_round(stage, item, ctx, pre_address=4), Continue
+        )  # r3 == soft_cap: pre=4, post=3 -> progress, r4 earned
+        outcome = self._eval_round(stage, item, ctx, pre_address=3)  # r4: pre=3, post=3 -> plateau
 
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition == Disposition.SKIP
