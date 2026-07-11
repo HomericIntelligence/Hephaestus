@@ -229,6 +229,23 @@ class TestQuiescence:
         assert exit_code == 1  # SKIP counts as non-passing (fail-skip-blocked)
         assert [result.reason for result in coordinator.ledger] == ["skip: skip", "skip: skip"]
 
+    def test_reseed_with_only_repo_seeds_is_zero_work_convergence(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Repo pushes do not keep a zero-work reseed alive."""
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch, loops=2)
+        coordinator._loops_run = 1
+        coordinator._pass_work_count = 1
+
+        def reseed_repo_only() -> int:
+            coordinator._pass_work_count = 0
+            return 1
+
+        monkeypatch.setattr(coordinator, "_seed_pass", reseed_repo_only)
+
+        assert coordinator._reseed_if_converged() is False
+        assert coordinator._loops_run == 2
+
     def test_poisoned_item_routes_finished_fail_and_loop_survives(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
