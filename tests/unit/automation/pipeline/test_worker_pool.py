@@ -27,7 +27,7 @@ from hephaestus.automation.pipeline.jobs import (
 from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.worker_pool import WorkerPool, _repo_lock_path
-from hephaestus.resilience import CircuitBreakerOpenError
+from hephaestus.resilience import CircuitBreakerOpenError, get_circuit_breaker
 from hephaestus.utils.file_lock import LockUnavailableError
 from hephaestus.utils.helpers import get_repo_root
 
@@ -60,9 +60,8 @@ def pool(
 def _agent_job(model: str = "opus-4-8", **overrides: object) -> AgentJob:
     """Build an AgentJob with test defaults.
 
-    Failing-path tests pass a unique ``model`` so each exercises its own
-    circuit breaker (breaker names include the model) and cannot trip a
-    breaker shared with other tests.
+    Failing-path tests pass a unique ``model`` to keep their invocation
+    details distinct while the runtime circuit breaker remains shared.
     """
     defaults: dict[str, object] = {
         "repo": "test/repo",
@@ -305,6 +304,30 @@ class TestWorkerPoolSubmitComplete:
 
 class TestAgentErrorHandling:
     """Tests for agent-job error handling paths."""
+
+    def test_agent_breaker_is_shared_across_models(
+        self,
+        pool: WorkerPool,
+    ) -> None:
+        """Failures for one model open the runtime breaker for every model."""
+        get_circuit_breaker("agent:claude", failure_threshold=2)
+        jobs = [_agent_job(model=model) for model in ("opus", "sonnet")]
+
+        with (
+            patch(f"{_WP}.resolve_agent", return_value="claude"),
+            patch(
+                f"{_WP}.claude_invoke.invoke_claude_with_session",
+                side_effect=RuntimeError("runtime unavailable"),
+            ) as invoke,
+        ):
+            first = pool._run_agent(jobs[0])
+            second = pool._run_agent(jobs[0])
+            blocked = pool._run_agent(jobs[1])
+
+        assert first.error == "RuntimeError: runtime unavailable"
+        assert second.error == "RuntimeError: runtime unavailable"
+        assert blocked.error == "circuit_open"
+        assert invoke.call_count == 2
 
     def test_circuit_breaker_open_returns_error(
         self,
