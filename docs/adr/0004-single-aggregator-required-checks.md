@@ -22,7 +22,10 @@ job:
    `needs:` list. It PASSES when every needed job is `success` or `skipped`
    (skipped = legitimately gated off) and FAILS on `failure`/`cancelled`.
 2. Branch protection requires only that single context (alongside the two
-   `test (...)` contexts from `test.yml`), with `strict: true`.
+   `test (...)` contexts from `test.yml`), with `strict: false` — the checks
+   gate every merge, but PRs are not required to be up to date with `main`
+   (avoids rebase churn under a fast-moving `main`; see
+   `docs/ci/required-checks.md`).
 3. `if: always()` is mandatory so the gate reports a definite
    success/failure even when heavy jobs skip on label / auto-merge events.
 

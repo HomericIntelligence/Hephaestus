@@ -16,11 +16,20 @@ checks** are green:
 | `test (ubuntu-latest, 3.12, unit)` | `.github/workflows/test.yml` matrix |
 | `test (ubuntu-latest, 3.12, integration)` | `.github/workflows/test.yml` matrix |
 
-Classic branch protection uses **`strict: true`**, and every active
+Branch protection uses **`strict: false`**, and every active
 `required_status_checks` ruleset that applies to `main` must use
-`strict_required_status_checks_policy: true`. Requiring the PR head to be
-tested with current `main` prevents a stale PR from merging around a gate that
-newer `main` would fail.
+`strict_required_status_checks_policy: false`. The required checks (the
+aggregator gate plus the two `test (...)` contexts) still gate every merge, but
+the PR head is **not** required to be up to date with `main` before merging.
+
+Requiring up-to-date (`strict: true`) forces every green PR to be rebased onto
+the latest `main` before it can merge. With a fast-moving `main` (the automation
+loop merges PRs continuously) this causes constant churn: mergeable PRs stall as
+`BEHIND` and must be re-rebased every time `main` advances, often faster than
+their CI can finish. The protection this bought — catching a semantic conflict
+between two independently-green PRs — is rare and caught post-merge by CI on
+`main`, so it does not justify the churn. `strict: false` lets a green PR merge
+regardless of how far behind `main` it is.
 
 ## Why a single aggregator gate
 
@@ -128,7 +137,7 @@ jq -e --argjson expected "$expected" '
   | ($status_rules | length) > 0
     and all(
       $status_rules[];
-      .parameters.strict_required_status_checks_policy == true
+      .parameters.strict_required_status_checks_policy == false
       and (.parameters.required_status_checks | type) == "array"
       and (.parameters.required_status_checks | length) > 0
       and all(
@@ -147,7 +156,7 @@ GitHub App bindings:
 gh api -X PATCH \
   -H "Accept: application/vnd.github+json" \
   "repos/$repo/branches/$branch/protection/required_status_checks" \
-  -F strict=true \
+  -F strict=false \
   > "$state_dir/branch.patch-response.json"
 ```
 
@@ -170,7 +179,7 @@ gh api --paginate --slurp \
   "repos/$repo/rules/branches/$branch?per_page=100" \
   | jq 'add' > "$state_dir/rules.after.json"
 
-jq -e '.strict == true' "$state_dir/branch.after.json"
+jq -e '.strict == false' "$state_dir/branch.after.json"
 
 jq -S '.checks | sort_by(.context)' \
   "$state_dir/branch.before.json" > "$state_dir/checks.before.json"
