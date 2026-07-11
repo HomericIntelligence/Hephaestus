@@ -12,6 +12,7 @@ import pytest
 
 from hephaestus.automation.auto_merge_coordinator import AutoMergeCoordinator
 from hephaestus.automation.ci_run_coordinator import CIDriveRunCoordinator
+from hephaestus.automation.git_utils import pr_ref
 from hephaestus.automation.models import CIDriverOptions
 
 
@@ -490,7 +491,7 @@ def test_legacy_arm_and_wait_reports_failed_auto_merge_containment() -> None:
     result = coordinator.arm_and_wait_for_merge(issue_number=7, pr_number=42, acquired_slot=0)
 
     assert result.success is False
-    assert result.error == "auto-merge containment failed for PR ProjectHephaestus#42"
+    assert result.error == f"auto-merge containment failed for PR {pr_ref(42)}"
 
 
 def test_legacy_enable_auto_merge_contains_a_prearmed_pr_before_refusing() -> None:
