@@ -224,6 +224,26 @@ class TestGate:
 
         assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
 
+    def test_gate_existing_item_pr_with_merged_at_finishes_before_adoption(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A truthy mergedAt terminalizes even when state is not MERGED."""
+
+        class MergedGitHub(FakeStageGitHub):
+            def get_pr_head_branch(self, pr_number: int) -> str | None:
+                raise AssertionError("merged PRs should finish before branch adoption")
+
+            def pr_has_implementation_state_label(self, pr_number: int) -> tuple[bool, bool]:
+                raise AssertionError("merged PRs should finish before label routing")
+
+        stage = ImplementationStage()
+        ctx = make_ctx(github=MergedGitHub(pr_state={"state": "OPEN", "mergedAt": "2026-07-10"}))
+        item = make_work_item(issue=1, pr=1001, state="GATE")
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
+
     def test_gate_existing_item_pr_closed_finishes_before_adoption(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

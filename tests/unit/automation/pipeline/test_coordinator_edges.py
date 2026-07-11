@@ -270,6 +270,23 @@ class TestExitCode:
 
         assert coordinator._active_preserved_worktrees() == []
 
+    def test_preserved_worktrees_deduplicate_duplicate_entries(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A preserved worktree recorded more than once is reported once."""
+        coordinator = _coordinator(tmp_path, monkeypatch)
+        preserved_path = tmp_path / "issue-2009"
+        preserved_path.mkdir()
+        failed = _item(2009, StageName.FINISHED)
+        failed.result = work_item_mod.ItemResult(
+            passed=False, reason="git_error", final_stage=StageName.FINISHED
+        )
+        coordinator.items = [failed]
+        entry = ("repo-a", 2009, str(preserved_path))
+        coordinator.preserved.extend([entry, entry])
+
+        assert coordinator._active_preserved_worktrees() == [entry]
+
 
 class TestCompletionEdges:
     """_handle_completion bookkeeping branches."""

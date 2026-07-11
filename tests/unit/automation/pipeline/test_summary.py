@@ -140,6 +140,35 @@ class TestPrintSummaryRows:
         assert "'fail'" not in text
         assert "FAIL:git_error" not in text
 
+    def test_summary_supersedes_direct_pr_items_with_issue_context(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A direct PR seed with hydrated issue context uses one logical key."""
+        failed = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.PR,
+            issue=2009,
+            pr=2010,
+            stage=StageName.FINISHED,
+            result=ItemResult(passed=False, reason="git_error", final_stage=StageName.FINISHED),
+        )
+        passed = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.PR,
+            issue=2009,
+            pr=2010,
+            stage=StageName.FINISHED,
+            result=ItemResult(passed=True, reason="merged", final_stage=StageName.FINISHED),
+        )
+
+        with caplog.at_level(logging.INFO):
+            print_summary([failed, passed], _stats(), [], json_out=False)
+
+        text = caplog.text
+        assert "items: 1" in text
+        assert "'pass': 1" in text
+        assert "FAIL:git_error" not in text
+
     def test_nonzero_attempts_render(self, caplog: pytest.LogCaptureFixture) -> None:
         """Only non-zero attempt counters appear in the row."""
         item = _item(6, StageName.FINISHED, passed=True, reason="ok")
