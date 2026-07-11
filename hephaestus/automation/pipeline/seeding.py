@@ -415,6 +415,7 @@ def seed_from_cli(
     repos: Sequence[str],
     issues: Sequence[int],
     prs: Sequence[int],
+    github: Any | None = None,
 ) -> list[SeedEntry]:
     """Map CLI scope args (``--repos`` / ``--issues`` / ``--prs``) to queue pushes.
 
@@ -426,11 +427,22 @@ def seed_from_cli(
       ``state:implementation-go``, else :attr:`StageName.PR_REVIEW` —
       mirroring the legacy existing-PR review semantics: GO short-circuits
       review, and a failed label fetch reads as "not yet reviewed" (→ pr_review).
+      When *github* is given (a repo-scoped accessor, e.g.
+      :class:`~hephaestus.automation.pipeline_github.PipelineGitHub`), the
+      label read is scoped to that repo via
+      ``github.pr_has_implementation_state_label`` — the same accessor
+      :func:`seed_issue_from_github` uses for ``--issues`` — instead of the
+      module-level :func:`~hephaestus.automation.github_api.gh_pr_label_names`,
+      which resolves against the ambient/current repo and can misclassify a
+      PR number that collides across repos in a multi-repo run.
 
     Args:
         repos: Repository names to seed for discovery.
         issues: Issue numbers to classify directly.
         prs: PR numbers to route by implementation-review label.
+        github: Optional repo-scoped GitHub accessor for the ``prs`` label
+            read. When ``None``, falls back to the ambient
+            :func:`~hephaestus.automation.github_api.gh_pr_label_names`.
 
     Returns:
         Planned queue pushes, in the given order (repos, issues, prs).
@@ -457,8 +469,11 @@ def seed_from_cli(
             )
         )
     for pr in prs:
-        labels = gh_pr_label_names(pr)
-        if is_implementation_go(labels):
+        if github is not None:
+            has_go, _has_no_go = github.pr_has_implementation_state_label(pr)
+        else:
+            has_go = is_implementation_go(gh_pr_label_names(pr))
+        if has_go:
             entries.append(
                 SeedEntry(
                     kind="pr",
