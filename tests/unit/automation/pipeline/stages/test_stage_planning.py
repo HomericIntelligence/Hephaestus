@@ -500,8 +500,10 @@ class TestPlanningStageStep:
         assert "VERIFY ADVANCE gate" in doc
         assert "ctx.github.has_existing_plan(item.issue)" in doc
 
-    def test_verify_without_plan_retries(self, make_ctx: Any, make_work_item: Any) -> None:
-        """VERIFY without a plan retries while within the plan budget."""
+    def test_verify_without_plan_retries_by_requesting_fresh_plan(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A missing plan retries through PLAN_WAIT and requests a fresh plan job."""
         stage = PlanningStage()
         github = FakeStageGitHub(has_plan=False)
         ctx = make_ctx(github=github)
@@ -512,6 +514,14 @@ class TestPlanningStageStep:
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.RETRY
         assert item.attempts["plan"] == 1
+        assert item.state == "PLAN_WAIT"
+
+        retry_request = stage.step(item, ctx)
+
+        assert isinstance(retry_request, JobRequest)
+        assert isinstance(retry_request.job, AgentJob)
+        assert retry_request.job.descr == "plan"
+        assert retry_request.on_done_state == "VERIFY"
 
     def test_verify_exhausts_budget(self, make_ctx: Any, make_work_item: Any) -> None:
         """VERIFY fails after exhausting the plan budget (2)."""
