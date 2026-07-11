@@ -15,7 +15,6 @@ from hephaestus.validation import (
     docstrings,
     markdown,
     mypy_per_file,
-    skill_catalog,
 )
 
 
@@ -105,41 +104,6 @@ def test_mypy_per_file_preserves_unknown_flag_passthrough(
         "flags": ["--strict", "--python-version", "3.13"],
     }
     assert json.loads(capsys.readouterr().out)["files_checked"] == 1
-
-
-def test_skill_catalog_defaults_derive_from_repo_root_json(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """skill_catalog.main() still derives default paths from --repo-root."""
-    docs_dir = tmp_path / "docs"
-    docs_dir.mkdir()
-    (docs_dir / "plugin-installation.md").write_text(
-        "# Plugin\n\n"
-        "| Skill | Invocation | Description |\n"
-        "|-------|------------|-------------|\n"
-        "| alpha | `/alpha` | Test skill |\n",
-        encoding="utf-8",
-    )
-    skill_dir = tmp_path / "skills" / "alpha"
-    skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text(
-        "---\nname: alpha\ndescription: Test skill\n---\n\n# Alpha\n",
-        encoding="utf-8",
-    )
-    (tmp_path / "CLAUDE.md").write_text(
-        "# Agent Guide\n\n"
-        "| Skill | Arguments | When to Use |\n"
-        "|-------|-----------|-------------|\n"
-        "| `alpha` | — | Test skill |\n",
-        encoding="utf-8",
-    )
-
-    assert skill_catalog.main(["--repo-root", str(tmp_path), "--json"]) == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["status"] == "ok"
-    assert payload["missing"] == []
-    assert payload["extra"] == []
 
 
 def test_cli_tier_docs_main_accepts_argv_repo_root_json(

@@ -15,7 +15,6 @@ ISSUE_1418_FILES = [
     Path("hephaestus/validation/docstrings.py"),
     Path("hephaestus/validation/doc_config.py"),
     Path("hephaestus/validation/type_aliases.py"),
-    Path("hephaestus/validation/skill_catalog.py"),
     Path("hephaestus/validation/complexity.py"),
     Path("hephaestus/validation/audit.py"),
     Path("hephaestus/validation/stale_scripts.py"),
@@ -28,7 +27,6 @@ ISSUE_1418_FILES = [
     Path("hephaestus/validation/schema.py"),
     Path("hephaestus/validation/tier_labels.py"),
     Path("hephaestus/validation/markdown.py"),
-    Path("hephaestus/validation/repo_analyze_skills.py"),
     Path("hephaestus/version/consistency.py"),
 ]
 
