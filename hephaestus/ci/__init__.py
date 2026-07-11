@@ -1,5 +1,9 @@
 """CI utilities for GitHub Actions and local development workflows."""
 
+from hephaestus.ci.bandit_baseline_check import (
+    count_by_test_id,
+    diff_against_baseline,
+)
 from hephaestus.ci.docker_timing import (
     build_summary_table,
     compute_reduction,
@@ -35,7 +39,9 @@ __all__ = [
     "collect_workflow_files",
     "collect_yml_files",
     "compute_reduction",
+    "count_by_test_id",
     "count_cached_layers",
+    "diff_against_baseline",
     "emit_warning",
     "extract_external_hooks",
     "format_summary_table",
