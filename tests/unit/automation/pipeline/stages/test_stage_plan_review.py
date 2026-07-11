@@ -68,6 +68,37 @@ class TestBuildAmendPrompt:
 class TestPlanReviewStageOnEnter:
     """on_enter cycle-relative counter reset (attempts are per-lifetime)."""
 
+    def test_on_enter_plan_go_fast_forwards_advance(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A restart-reseeded item already state:plan-go advances with no job/writes."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub(labels=[STATE_PLAN_GO])
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, state="ENTER")
+
+        outcome = stage.on_enter(item, ctx)
+
+        assert outcome is not None
+        assert outcome.disposition == Disposition.ADVANCE
+        assert github.mutation_log == []  # no mutations on fast-forward
+
+    def test_on_enter_without_plan_go_proceeds_to_cycle_reset(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An item without state:plan-go is unaffected by the new guard."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, state="ENTER")
+
+        outcome = stage.on_enter(item, ctx)
+
+        assert outcome is None
+        assert item.payload["review_cycle"] == 0
+        assert item.payload["review_round"] == 0
+        assert github.mutation_log == []
+
     def test_on_enter_writes_nothing(self, make_ctx: Any, make_work_item: Any) -> None:
         """on_enter performs no durable writes and always proceeds."""
         stage = PlanReviewStage()
