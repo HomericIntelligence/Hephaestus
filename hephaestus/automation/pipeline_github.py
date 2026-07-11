@@ -446,7 +446,17 @@ class PipelineGitHub:
         return nodes
 
     def _repo_review_threads_for_review(self, pr_number: int, review_id: str) -> list[str]:
-        """Return unresolved review-thread ids created by one REST review."""
+        """Return unresolved review-thread ids created by one REST review.
+
+        ``review_id`` is the REST review POST response's ``node_id`` field —
+        the GraphQL global node id of the same ``PullRequestReview`` object
+        returned here as ``comments.nodes[0].pullRequestReview.id``. Both are
+        GraphQL-node-id space (not REST numeric ``id``), so they are directly
+        comparable at the ``review.get("id") != review_id`` check below; see
+        ``test_round_trips_rest_node_id_against_graphql_review_id`` for the
+        pinned invariant. Preserves the #375 guarantee: only threads created
+        by *this* review are returned.
+        """
         query = (
             "query($owner:String!,$name:String!,$number:Int!){"
             "  repository(owner:$owner,name:$name){"
@@ -1055,7 +1065,17 @@ class PipelineGitHub:
             if not review_node_id:
                 logger.warning("Posted PR review on #%s but no review node id returned", pr_number)
                 return []
-            return self._repo_review_threads_for_review(pr_number, str(review_node_id))
+            thread_ids = self._repo_review_threads_for_review(pr_number, str(review_node_id))
+            if review_comments and not thread_ids:
+                logger.warning(
+                    "Posted PR review %s (node id %r) on #%s with %d comment(s) but "
+                    "matched zero review threads; comments may be orphaned",
+                    review.get("id"),
+                    review_node_id,
+                    pr_number,
+                    len(review_comments),
+                )
+            return thread_ids
         return github_api.gh_pr_review_post(pr_number, threads, summary)
 
     def arm_drive_green(self, issue_number: int, pr_number: int, head_sha: str) -> None:

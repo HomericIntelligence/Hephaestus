@@ -502,6 +502,162 @@ class TestRepoScoping:
         assert posted == ["thread-1"]
         assert any("repos/org/repo-a/pulls/7/reviews" in call for call in calls)
 
+    def test_repo_scoped_review_post_warns_on_zero_matched_threads(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A posted review with comments that matches no GraphQL thread logs a warning.
+
+        The ``pr diff`` call below is unmatched by ``fake_gh_call`` and returns
+        empty stdout, so ``_filter_comments_to_diff`` fails open (diff.py:95-96)
+        and ``review_comments`` stays non-empty — required for the warning branch
+        (posted comments but zero matched threads) to trigger.
+        """
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            if argv[:2] == ["api", "graphql"]:
+                payload = {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "reviewThreads": {
+                                    "nodes": [
+                                        {
+                                            "id": "thread-1",
+                                            "isResolved": False,
+                                            "comments": {
+                                                "nodes": [
+                                                    {
+                                                        "pullRequestReview": {
+                                                            "id": "other-review-node"
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                        }
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                }
+                return SimpleNamespace(stdout=json.dumps(payload))
+            if "repos/org/repo-a/pulls/7/reviews" in argv:
+                return SimpleNamespace(stdout=json.dumps({"id": 999, "node_id": "review-node"}))
+            return SimpleNamespace(stdout="")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        with caplog.at_level("WARNING", logger=pg.__name__):
+            posted = pg.PipelineGitHub(
+                "org", repo="repo-a", repo_root=tmp_path
+            ).post_review_threads(7, [{"path": "a.py", "line": 1, "body": "x"}], "summary")
+
+        assert posted == []
+        assert any("matched zero review threads" in r.message for r in caplog.records)
+
+
+class TestRepoReviewThreadsForReview:
+    """_repo_review_threads_for_review: REST node_id vs GraphQL pullRequestReview.id."""
+
+    def test_round_trips_rest_node_id_against_graphql_review_id(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pins the domain-equality invariant: REST node_id IS the GraphQL id.
+
+        A realistic REST review POST response's ``node_id`` is used as the
+        GraphQL ``pullRequestReview.id`` filter against two independently
+        constructed thread fixtures — one whose review id matches, one whose
+        review id is unrelated. ``result == ["PRRT_matching"]`` only holds if
+        production's ``review.get("id") != review_id`` comparison
+        (pipeline_github.py:482) correctly equates the REST and GraphQL id
+        domains and correctly rejects the unrelated one; this IS the
+        "assert the id domains match" check the issue asks for — it exercises
+        real production comparison logic, not a restated literal.
+        """
+        rest_review_response: dict[str, Any] = {"id": 4242, "node_id": "PRR_kwDOA1b2c3M"}
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            if argv[:2] == ["api", "graphql"]:
+                payload = {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "reviewThreads": {
+                                    "nodes": [
+                                        {
+                                            "id": "PRRT_matching",
+                                            "isResolved": False,
+                                            "comments": {
+                                                "nodes": [
+                                                    {
+                                                        "pullRequestReview": {
+                                                            "id": rest_review_response["node_id"]
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                        },
+                                        {
+                                            "id": "PRRT_other_review",
+                                            "isResolved": False,
+                                            "comments": {
+                                                "nodes": [
+                                                    {"pullRequestReview": {"id": "PRR_unrelated"}}
+                                                ]
+                                            },
+                                        },
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                }
+                return SimpleNamespace(stdout=json.dumps(payload))
+            return SimpleNamespace(stdout="")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        gh = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        result = gh._repo_review_threads_for_review(7, str(rest_review_response["node_id"]))
+
+        assert result == ["PRRT_matching"]
+
+    def test_resolved_thread_from_same_review_is_excluded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            if argv[:2] == ["api", "graphql"]:
+                payload = {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "reviewThreads": {
+                                    "nodes": [
+                                        {
+                                            "id": "PRRT_resolved",
+                                            "isResolved": True,
+                                            "comments": {
+                                                "nodes": [
+                                                    {"pullRequestReview": {"id": "review-node"}}
+                                                ]
+                                            },
+                                        }
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                }
+                return SimpleNamespace(stdout=json.dumps(payload))
+            return SimpleNamespace(stdout="")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        gh = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        result = gh._repo_review_threads_for_review(7, "review-node")
+
+        assert result == []
+
 
 class TestRepoScopedAutoMerge:
     """Repo-scoped auto-merge mutations are idempotent under racing workers."""
