@@ -29,8 +29,9 @@ binding contract):
     record finishes PASS immediately, firing ``/learn`` at most once per
     merged PR, the #848 contract);
   - FAILING -> FAIL_BACK(``ci_red``) (routes to ci);
-  - DIRTY -> mechanical rebase+push (budget ``rebase``), then re-POLL;
-    exhaustion -> FINISH_FAIL(``rebase_exhausted``) (the legacy
+  - DIRTY -> mechanical rebase (op="rebase", never pushes on its own) then
+    an explicit push of the clean result (budget ``rebase``), then
+    re-POLL; exhaustion -> FINISH_FAIL(``rebase_exhausted``) (the legacy
     "unresolved merge conflict" terminal — never "timeout");
   - BLOCKED -> address unresolved threads (budget ``blocked_address``)
     then push and re-POLL; exhaustion -> FAIL_BACK(``blocked_exhausted``)
