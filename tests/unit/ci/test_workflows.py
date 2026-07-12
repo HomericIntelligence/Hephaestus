@@ -319,6 +319,51 @@ class TestRequiredPixiCheckWorkflow:
         assert "running unlocked" not in script
 
 
+class TestGitleaksSecretsScan:
+    """Regression tests for the required gitleaks secrets scan.
+
+    gitleaks is not published on conda-forge or PyPI, so it cannot be a
+    Pixi-managed dependency in this repo (channels are pinned to
+    conda-forge). The job instead runs a digest-addressed container image
+    via `docker run`, which removes the dependency on a transient GitHub
+    Releases tarball URL (audit #1483) without requiring an unlockable Pixi
+    package. `docker run` (not a job-level `container:`) keeps
+    actions/checkout running on the host runner, since the gitleaks image is
+    musl-based Alpine with no Node.js runtime.
+    """
+
+    def _gitleaks_step(self) -> dict[str, Any]:
+        with open(REQUIRED_WORKFLOW, encoding="utf-8") as f:
+            workflow = yaml.safe_load(f)
+        steps = workflow["jobs"]["security-secrets-scan"]["steps"]
+        return next(step for step in steps if step.get("name") == "Run Gitleaks")
+
+    def test_secrets_scan_uses_digest_pinned_image(self) -> None:
+        step = self._gitleaks_step()
+        image = step["env"]["GITLEAKS_IMAGE"]
+
+        assert image.startswith("ghcr.io/gitleaks/gitleaks:v8.30.0@sha256:")
+        digest = image.split("@sha256:", 1)[1]
+        assert len(digest) == 64
+        assert all(c in "0123456789abcdef" for c in digest)
+
+    def test_secrets_scan_runs_gitleaks_via_docker_run(self) -> None:
+        run_script = self._gitleaks_step()["run"]
+
+        assert "args=(detect --source=. --verbose --exit-code=1)" in run_script
+        assert "args+=(--config=.gitleaks.toml)" in run_script
+        assert 'docker run --rm -v "$PWD:/repo" -w /repo "$GITLEAKS_IMAGE"' in run_script
+
+    def test_secrets_scan_does_not_download_gitleaks_release_tarball(self) -> None:
+        run_script = self._gitleaks_step()["run"]
+
+        assert "github.com/gitleaks/gitleaks/releases" not in run_script
+        assert "wget" not in run_script
+        assert "sha256sum --check" not in run_script
+        assert "tar -xzf" not in run_script
+        assert "./gitleaks" not in run_script
+
+
 class TestPiCliSetup:
     """Regression tests for installing the real Pi CLI in test environments."""
 
