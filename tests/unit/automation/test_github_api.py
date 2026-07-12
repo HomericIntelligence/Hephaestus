@@ -1761,6 +1761,56 @@ class TestAssertBranchCommitsSignedApiFallback:
         # 'G' is locally good — no API round-trip needed.
         mock_verified.assert_not_called()
 
+    @patch("hephaestus.automation.github_api._gh_commit_is_verified")
+    @patch("hephaestus.automation.github_api.run")
+    def test_branch_only_resolvable_as_origin_ref_does_not_crash(
+        self, mock_run: Any, mock_verified: Any
+    ) -> None:
+        """Regression #2108: bare <branch> absent, origin/<branch> present."""
+        from hephaestus.automation.github_api import _assert_branch_commits_signed
+
+        fetch_result = Mock(returncode=0, stdout="", stderr="")
+        # First candidate origin/main..origin/branch resolves; commits are signed.
+        log_ok = Mock(returncode=0, stdout="5eb2be44 G\n", stderr="")
+        mock_run.side_effect = [fetch_result, log_ok]
+
+        # Must NOT raise CalledProcessError or ValueError.
+        _assert_branch_commits_signed("2107-auto-impl", base="main")
+        mock_verified.assert_not_called()
+
+    @patch("hephaestus.automation.github_api._gh_commit_is_verified")
+    @patch("hephaestus.automation.github_api.run")
+    def test_no_range_resolves_defers_without_crashing(
+        self, mock_run: Any, mock_verified: Any
+    ) -> None:
+        """Regression #2108: no candidate range resolves -> warn, no crash."""
+        from hephaestus.automation.github_api import _assert_branch_commits_signed
+
+        fetch_result = Mock(returncode=0, stdout="", stderr="")
+        fail = Mock(returncode=128, stdout="", stderr="fatal: ambiguous argument")
+        # fetch + 4 candidate ranges all fail.
+        mock_run.side_effect = [fetch_result, fail, fail, fail, fail]
+
+        # Must NOT raise; defers to GitHub verification.
+        _assert_branch_commits_signed("2107-auto-impl", base="main")
+        mock_verified.assert_not_called()
+
+    @patch("hephaestus.automation.github_api._gh_commit_is_verified")
+    @patch("hephaestus.automation.github_api.run")
+    def test_genuinely_unsigned_still_raises_after_resolution(
+        self, mock_run: Any, mock_verified: Any
+    ) -> None:
+        """Unsigned commits on a resolvable range still raise (unchanged)."""
+        from hephaestus.automation.github_api import _assert_branch_commits_signed
+
+        fetch_result = Mock(returncode=0, stdout="", stderr="")
+        log_bad = Mock(returncode=0, stdout="deadbeef N\n", stderr="")
+        mock_run.side_effect = [fetch_result, log_bad]
+        mock_verified.return_value = False
+
+        with pytest.raises(ValueError, match="Unsigned or invalid commits"):
+            _assert_branch_commits_signed("2107-auto-impl", base="main")
+
 
 class TestGhCommitIsVerified:
     """``_gh_commit_is_verified`` fail-safe behavior (#1426)."""
