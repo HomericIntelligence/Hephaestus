@@ -95,6 +95,12 @@ agent turn returns.
 
 - DO NOT run `git commit`, `git push`, `gh pr create`, `gh pr merge`, or any
   other command that writes to GitHub.
+- DO NOT run `git config user.email`, `git config user.name`, or otherwise
+  override the committer identity. The orchestrator inherits the operator's
+  configured, GitHub-verifiable identity and signs the commit; a fabricated
+  identity (e.g. an `@anthropic.com` address not linked to a GitHub account)
+  makes every commit unverifiable (`no_user`) and fails the signed-commit gate.
+  Express agent attribution only via the orchestrator's `Co-Authored-By:` trailer.
 - Leave the final implementation changes in the working tree.
 - When you finish, summarize what changed and what tests you ran.
 

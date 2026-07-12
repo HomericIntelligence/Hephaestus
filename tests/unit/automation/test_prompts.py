@@ -52,6 +52,14 @@ class TestImplementationPrompt:
         assert "git push -u origin" not in out
         assert "autoMergeRequest" not in out
 
+    def test_implementation_prompt_forbids_git_config_identity(self) -> None:
+        """Implementer prompt must forbid fabricating a committer identity (#2110)."""
+        out = prompts.get_implementation_prompt(issue_number=42)
+        assert "git config user.email" in out
+        assert "git config user.name" in out
+        # Attribution stays on the orchestrator's Co-Authored-By trailer.
+        assert "Co-Authored-By" in out
+
     def test_states_task_plan_review_context_model(self) -> None:
         """The implementer prompt must declare TASK/PLAN/PLAN-REVIEW context."""
         out = prompts.get_implementation_prompt(issue_number=42)
