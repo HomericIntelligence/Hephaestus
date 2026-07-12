@@ -226,7 +226,7 @@ class StageGitHub(Protocol):
         creation is the implementation stage's journal entry (doc section 4:
         "Owned labels: PR creation is the journal entry").
         """
-        raise NotImplementedError
+        ...
 
     def post_pr_comment(self, pr_number: int, body: str) -> None:
         """Durably post an explanatory comment on the PR conversation.
@@ -235,7 +235,7 @@ class StageGitHub(Protocol):
         issue comment channel). Used by pr_review's HUMAN_BLOCKED terminal
         path to record WHY automation stood down before finishing failed.
         """
-        pass
+        ...
 
     def upsert_pr_comment(self, pr_number: int, marker_prefix: str, body: str) -> bool:
         """Durably create-or-update a marker-keyed PR conversation comment.
