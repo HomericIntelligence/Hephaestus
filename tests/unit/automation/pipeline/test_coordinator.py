@@ -10,6 +10,7 @@ asserts-no-submit, poisoned-item isolation, and FAIL_BACK routing.
 from __future__ import annotations
 
 import json
+import logging
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -530,8 +531,16 @@ class TestImplementationAdmission:
         coordinator.stages[StageName.IMPLEMENTATION] = RecordingStage()
         first = _issue_item(21, StageName.IMPLEMENTATION)
         duplicate = _issue_item(21, StageName.IMPLEMENTATION)
-        coordinator._push_item(first, StageName.IMPLEMENTATION, enter=True)
-        coordinator._push_item(duplicate, StageName.IMPLEMENTATION, enter=True)
+        # Inject the collision BELOW the upstream idempotency guard (#2107):
+        # push straight onto the queue (the same raw API the drain uses to
+        # re-push deferred items, coordinator.py:873) so this test exercises
+        # the drain-level safety net for a duplicate that arrived by a path
+        # the upstream guard does not cover.
+        for it in (first, duplicate):
+            it.payload["_enter_pending"] = True
+            coordinator._seen_item_ids.add(id(it))
+            coordinator.items.append(it)
+            coordinator.queues[StageName.IMPLEMENTATION].push(it)
 
         coordinator._drain_implementation()
 
@@ -543,6 +552,63 @@ class TestImplementationAdmission:
         assert duplicate.result.passed
         assert "superseded" in duplicate.result.reason
         # Implementation queue is drained — no duplicate left behind.
+        assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == []
+
+    def test_reseed_while_queued_refuses_second_entry(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A new (repo, issue) already queued is refused upstream (#2107).
+
+        The drain-level dedup warning must NOT fire, proving the duplicate never
+        entered the queue in the first place.
+        """
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        first = _issue_item(21, StageName.IMPLEMENTATION, repo="repo-a")
+        reseed = _issue_item(21, StageName.IMPLEMENTATION, repo="repo-a")  # new object, same key
+        coordinator._push_item(first, StageName.IMPLEMENTATION, enter=True)
+
+        with caplog.at_level(logging.INFO):
+            coordinator._push_item(reseed, StageName.IMPLEMENTATION, enter=True)
+
+        assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == [first]
+        assert "already queued/in-flight" in caplog.text
+        # The drain-level dedup net was never exercised.
+        assert "dropping duplicate work item" not in caplog.text
+
+    def test_cross_repo_same_issue_number_both_enqueue(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(#2058) same issue number in different repos remain distinct work."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        a = _issue_item(21, StageName.IMPLEMENTATION, repo="repo-a")
+        b = _issue_item(21, StageName.IMPLEMENTATION, repo="repo-b")
+        coordinator._push_item(a, StageName.IMPLEMENTATION, enter=True)
+        coordinator._push_item(b, StageName.IMPLEMENTATION, enter=True)
+        assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == [a, b]
+
+    def test_same_item_repush_not_blocked_by_guard(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An already-tracked item re-pushing itself (retry/advance) is allowed."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        item = _issue_item(21, StageName.PLANNING, repo="repo-a")
+        coordinator._push_item(item, StageName.PLANNING, enter=True)
+        coordinator.queues[StageName.PLANNING].pop()  # simulate drain popping it
+        coordinator._push_item(item, StageName.PLANNING, enter=False)  # retry re-push
+        assert coordinator.queues[StageName.PLANNING].snapshot() == [item]
+
+    def test_reseed_while_in_flight_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A (repo, issue) held in in_flight blocks a new seed of the same key."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        live = _issue_item(21, StageName.IMPLEMENTATION, repo="repo-a")
+        coordinator.in_flight[cast(Any, "h1")] = live  # simulate dispatched/in-flight
+        reseed = _issue_item(21, StageName.IMPLEMENTATION, repo="repo-a")
+        coordinator._push_item(reseed, StageName.IMPLEMENTATION, enter=True)
         assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == []
 
     def test_topo_order_and_overlap_reuse(
