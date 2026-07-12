@@ -6,7 +6,7 @@ from hephaestus.automation.dependency_resolver import (
     CyclicDependencyError,
     DependencyResolver,
 )
-from hephaestus.automation.models import IssueInfo
+from hephaestus.automation.models import IssueInfo, IssueState
 
 
 class TestDependencyResolver:
@@ -34,6 +34,36 @@ class TestDependencyResolver:
         resolver.add_issue(issue)
 
         assert resolver.graph.get_dependencies(123) == [100, 101]
+
+    def test_add_issue_refuses_closed_issue(self) -> None:
+        """add_issue is a belt-and-braces guard against admitting closed issues (#1832)."""
+        resolver = DependencyResolver(skip_closed=True)
+        closed = IssueInfo(number=99, title="Closed", state=IssueState.CLOSED)
+
+        resolver.add_issue(closed)
+
+        assert 99 not in resolver.graph.issues
+        assert 99 in resolver.completed
+
+    def test_add_issue_refuses_state_skip_issue(self) -> None:
+        """add_issue also refuses state:skip issues directly, not just via BFS."""
+        resolver = DependencyResolver(skip_closed=True)
+        skipped = IssueInfo(number=98, title="Skipped", labels=["state:skip"])
+
+        resolver.add_issue(skipped)
+
+        assert 98 not in resolver.graph.issues
+        assert 98 in resolver.completed
+
+    def test_add_issue_admits_closed_issue_when_skip_closed_false(self) -> None:
+        """--no-skip-closed preserves legacy behavior at the add_issue guard too."""
+        resolver = DependencyResolver(skip_closed=False)
+        closed = IssueInfo(number=97, title="Closed", state=IssueState.CLOSED)
+
+        resolver.add_issue(closed)
+
+        assert 97 in resolver.graph.issues
+        assert 97 not in resolver.completed
 
     def test_add_dependency(self) -> None:
         """Test adding a dependency through the resolver public API."""

@@ -68,3 +68,22 @@ def test_no_skip_closed_keeps_closed_dependency_in_graph(tmp_path: Path) -> None
 
     assert 1818 not in implementer.resolver.completed
     assert 1818 in implementer.resolver.graph.issues
+
+
+def test_load_issues_dependency_absent_from_prefetch_cache_still_skipped(
+    tmp_path: Path,
+) -> None:
+    """Requesting B alone (A absent from prefetch) must not admit closed A (#1832).
+
+    Simulates the exact production failure: ``--issues 1819`` prefetches
+    states only for 1819, so the transitively-discovered dependency 1818 is
+    never in ``cached_states``. A cache miss must not bypass the closed check.
+    """
+    implementer = _implementer(tmp_path)
+    closed_dependency = IssueInfo(number=1818, title="Closed dep", state=IssueState.CLOSED)
+
+    _load_root_with_dependency(implementer, closed_dependency)
+
+    assert implementer.resolver.graph.issues.keys() == {1819}
+    assert 1818 in implementer.resolver.completed
+    assert 1818 not in implementer.resolver.graph.issues
