@@ -18,7 +18,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from hephaestus.agents.runtime import resolve_agent, run_agent_session
-from hephaestus.automation import claude_invoke, git_utils
+from hephaestus.automation import claude_invoke, git_utils, subprocess_registry
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.jobs import (
     AgentJob,
@@ -214,11 +214,16 @@ class WorkerPool:
     def shutdown(self) -> None:
         """Shut down the pool.
 
-        Sets the shutdown event and cancels pending futures. Running tasks
-        finish but post-check them for interruption.
+        Sets the shutdown event, cancels pending futures, and SIGTERMs every
+        in-flight agent process group. ``executor.shutdown(cancel_futures=True)``
+        only cancels UN-STARTED futures; a job already blocked in a ``claude``
+        subprocess would keep running and pin its non-daemon worker thread
+        (holding the interpreter open at exit — the #2059 leak). Terminating the
+        tracked process groups frees those workers promptly.
         """
         self._shutdown.set()
         self._executor.shutdown(wait=False, cancel_futures=True)
+        subprocess_registry.terminate_all()
 
     def _on_future_done(self, handle: JobHandle, future: Future[JobResult]) -> None:
         """Drain result to completion queue when a job future completes.
