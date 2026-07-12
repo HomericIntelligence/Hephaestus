@@ -93,6 +93,7 @@ from .prs import (  # noqa: E402
     gh_current_login as gh_current_login,
     gh_pr_create as gh_pr_create,
     gh_pr_label_names as gh_pr_label_names,
+    gh_pr_state as gh_pr_state,
 )
 from .reviews import (  # noqa: E402
     ReviewCommentIndexKey as ReviewCommentIndexKey,
@@ -166,6 +167,7 @@ __all__ = [
     "gh_pr_list_unresolved_threads",
     "gh_pr_resolve_thread",
     "gh_pr_review_post",
+    "gh_pr_state",
     "gh_pr_update_review_comment",
     "gh_pr_wont_fix_line_index",
     "gh_rate_limit_reset_epoch",
