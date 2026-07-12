@@ -545,9 +545,12 @@ class TestSeedFromCli:
 
     def test_prs_arm_impl_go_routes_to_ci(self) -> None:
         """A PR carrying state:implementation-go seeds into ci (GO short-circuit)."""
-        with patch(
-            "hephaestus.automation.pipeline.seeding.gh_pr_label_names",
-            return_value=[STATE_IMPLEMENTATION_GO],
+        with (
+            patch("hephaestus.automation.pipeline.seeding.gh_pr_state", return_value=None),
+            patch(
+                "hephaestus.automation.pipeline.seeding.gh_pr_label_names",
+                return_value=[STATE_IMPLEMENTATION_GO],
+            ),
         ):
             entries = seed_from_cli([], [], [77])
         assert entries == [
@@ -562,9 +565,12 @@ class TestSeedFromCli:
 
     def test_prs_arm_no_go_routes_to_pr_review(self) -> None:
         """A PR without impl-GO (e.g. NO-GO) seeds into pr_review."""
-        with patch(
-            "hephaestus.automation.pipeline.seeding.gh_pr_label_names",
-            return_value=[STATE_IMPLEMENTATION_NO_GO],
+        with (
+            patch("hephaestus.automation.pipeline.seeding.gh_pr_state", return_value=None),
+            patch(
+                "hephaestus.automation.pipeline.seeding.gh_pr_label_names",
+                return_value=[STATE_IMPLEMENTATION_NO_GO],
+            ),
         ):
             entries = seed_from_cli([], [], [78])
         assert entries[0].stage is StageName.PR_REVIEW
@@ -574,22 +580,34 @@ class TestSeedFromCli:
 
         Mirrors _review_existing_pr's (False, False) "not yet reviewed" semantics.
         """
-        with patch("hephaestus.automation.pipeline.seeding.gh_pr_label_names", return_value=[]):
+        with (
+            patch("hephaestus.automation.pipeline.seeding.gh_pr_state", return_value=None),
+            patch("hephaestus.automation.pipeline.seeding.gh_pr_label_names", return_value=[]),
+        ):
             entries = seed_from_cli([], [], [79])
         assert entries[0].stage is StageName.PR_REVIEW
 
     def test_prs_arm_uses_repo_scoped_accessor_when_given(self) -> None:
-        """A repo-scoped github accessor routes the --prs label read through it.
+        """A repo-scoped github accessor routes the --prs state/label reads through it.
 
-        Not the ambient gh_pr_label_names, closing the multi-repo misclassification (#1864).
+        Not the ambient gh_pr_state/gh_pr_label_names, closing the multi-repo
+        misclassification (#1864).
         """
         github = MagicMock()
+        github.gh_pr_state.return_value = None
         github.pr_has_implementation_state_label.return_value = (True, False)
-        with patch(
-            "hephaestus.automation.pipeline.seeding.gh_pr_label_names",
-            side_effect=AssertionError("must not call ambient label read when github is given"),
+        with (
+            patch(
+                "hephaestus.automation.pipeline.seeding.gh_pr_state",
+                side_effect=AssertionError("must not call ambient state read when github is given"),
+            ),
+            patch(
+                "hephaestus.automation.pipeline.seeding.gh_pr_label_names",
+                side_effect=AssertionError("must not call ambient label read when github is given"),
+            ),
         ):
             entries = seed_from_cli([], [], [77], github=github)
+        github.gh_pr_state.assert_called_once_with(77)
         github.pr_has_implementation_state_label.assert_called_once_with(77)
         assert entries == [
             SeedEntry(
@@ -604,15 +622,79 @@ class TestSeedFromCli:
     def test_prs_arm_repo_scoped_no_go_routes_to_pr_review(self) -> None:
         """Repo-scoped accessor without impl-GO seeds into pr_review."""
         github = MagicMock()
+        github.gh_pr_state.return_value = None
         github.pr_has_implementation_state_label.return_value = (False, True)
         entries = seed_from_cli([], [], [78], github=github)
         assert entries[0].stage is StageName.PR_REVIEW
+
+    def test_prs_arm_repo_scoped_merged_pr_routes_to_finished(self) -> None:
+        """Repo-scoped accessor: a merged PR classifies FINISHED via github.gh_pr_state (#1865)."""
+        github = MagicMock()
+        github.gh_pr_state.return_value = {"state": "MERGED", "mergedAt": "2026-01-01T00:00:00Z"}
+        entries = seed_from_cli([], [], [80], github=github)
+        assert entries == [
+            SeedEntry(
+                kind="pr",
+                identifier=80,
+                stage=StageName.FINISHED,
+                reason="PR #80 merged (idempotent)",
+                pr_number=80,
+            )
+        ]
+        github.pr_has_implementation_state_label.assert_not_called()
+
+    def test_prs_arm_repo_scoped_closed_pr_excluded(self) -> None:
+        """Repo-scoped accessor: a closed PR is excluded via github.gh_pr_state (#1865)."""
+        github = MagicMock()
+        github.gh_pr_state.return_value = {"state": "CLOSED", "mergedAt": None}
+        entries = seed_from_cli([], [], [81], github=github)
+        assert entries[0].stage is None
+        github.pr_has_implementation_state_label.assert_not_called()
+
+    def test_prs_arm_merged_pr_routes_to_finished(self) -> None:
+        """A merged PR passed via --prs classifies FINISHED, not PR_REVIEW (#1865)."""
+        with patch(
+            "hephaestus.automation.pipeline.seeding.gh_pr_state",
+            return_value={"state": "MERGED", "mergedAt": "2026-01-01T00:00:00Z"},
+        ):
+            entries = seed_from_cli([], [], [80])
+        assert entries == [
+            SeedEntry(
+                kind="pr",
+                identifier=80,
+                stage=StageName.FINISHED,
+                reason="PR #80 merged (idempotent)",
+                pr_number=80,
+            )
+        ]
+
+    def test_prs_arm_closed_pr_excluded(self) -> None:
+        """A closed (unmerged) PR passed via --prs is excluded, not re-reviewed (#1865)."""
+        with patch(
+            "hephaestus.automation.pipeline.seeding.gh_pr_state",
+            return_value={"state": "CLOSED", "mergedAt": None},
+        ):
+            entries = seed_from_cli([], [], [81])
+        assert entries[0].stage is None
+
+    def test_prs_arm_state_fetch_failure_falls_through_to_labels(self) -> None:
+        """A gh_pr_state read failure (None) falls through to label routing, not FINISHED."""
+        with (
+            patch("hephaestus.automation.pipeline.seeding.gh_pr_state", return_value=None),
+            patch(
+                "hephaestus.automation.pipeline.seeding.gh_pr_label_names",
+                return_value=[STATE_IMPLEMENTATION_GO],
+            ),
+        ):
+            entries = seed_from_cli([], [], [82])
+        assert entries[0].stage is StageName.CI
 
     def test_order_repos_then_issues_then_prs(self) -> None:
         """Entries preserve CLI order: repos, then issues, then prs."""
         facts = _facts(number=5)
         with (
             patch("hephaestus.automation.pipeline.seeding.seed_issue", return_value=facts),
+            patch("hephaestus.automation.pipeline.seeding.gh_pr_state", return_value=None),
             patch("hephaestus.automation.pipeline.seeding.gh_pr_label_names", return_value=[]),
         ):
             entries = seed_from_cli(["R"], [5], [6])

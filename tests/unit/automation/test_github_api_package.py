@@ -17,7 +17,13 @@ def test_public_reexports_match_canonical_submodules() -> None:
         "issue_states": ["prefetch_issue_states", "_fetch_batch_states"],
         "issues": ["gh_issue_json", "gh_issue_create", "fetch_issue_info"],
         "labels": ["gh_list_labels", "gh_create_label", "_ensure_labels_exist"],
-        "prs": ["gh_pr_create", "fetch_open_prs", "gh_current_login", "gh_pr_label_names"],
+        "prs": [
+            "gh_pr_create",
+            "fetch_open_prs",
+            "gh_current_login",
+            "gh_pr_label_names",
+            "gh_pr_state",
+        ],
         "reviews": ["gh_pr_review_post", "gh_pr_inline_comment_index"],
         "threads": ["gh_pr_list_unresolved_threads", "gh_pr_resolve_thread"],
     }
@@ -76,3 +82,28 @@ def test_gh_pr_label_names_non_list_labels_yields_empty() -> None:
     result = mock.Mock(stdout=json.dumps({"labels": "oops"}))
     with mock.patch.object(gha, "_gh_call", return_value=result):
         assert gha.gh_pr_label_names(77) == []
+
+
+def test_gh_pr_state_returns_state_dict() -> None:
+    """gh_pr_state returns the parsed state/mergedAt payload."""
+    payload = {"state": "MERGED", "mergedAt": "2026-01-01T00:00:00Z"}
+    result = mock.Mock(stdout=json.dumps(payload))
+
+    with mock.patch.object(gha, "_gh_call", return_value=result) as gh_call:
+        state = gha.gh_pr_state(80)
+
+    assert state == payload
+    gh_call.assert_called_once_with(["pr", "view", "80", "--json", "state,mergedAt"], check=False)
+
+
+def test_gh_pr_state_best_effort_none_on_failure() -> None:
+    """A fetch/JSON failure yields None (falls through to label routing)."""
+    with mock.patch.object(gha, "_gh_call", side_effect=OSError("gh down")):
+        assert gha.gh_pr_state(80) is None
+
+
+def test_gh_pr_state_non_dict_payload_yields_none() -> None:
+    """A malformed payload (not a dict) yields None rather than raising."""
+    result = mock.Mock(stdout=json.dumps(["oops"]))
+    with mock.patch.object(gha, "_gh_call", return_value=result):
+        assert gha.gh_pr_state(80) is None

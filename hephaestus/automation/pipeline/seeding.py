@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from hephaestus.automation._review_utils import find_merged_pr_for_issue, find_pr_for_issue
-from hephaestus.automation.github_api import fetch_issue_info, gh_pr_label_names
+from hephaestus.automation.github_api import fetch_issue_info, gh_pr_label_names, gh_pr_state
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.state_labels import (
     STATE_IMPLEMENTATION_GO,
@@ -423,25 +423,31 @@ def seed_from_cli(
 
     - ``repos`` → one :attr:`StageName.REPO` entry each (discovery seeds).
     - ``issues`` → :func:`seed_issue` + :func:`classify_issue` per issue.
-    - ``prs`` → :attr:`StageName.CI` when the PR carries
-      ``state:implementation-go``, else :attr:`StageName.PR_REVIEW` —
-      mirroring the legacy existing-PR review semantics: GO short-circuits
-      review, and a failed label fetch reads as "not yet reviewed" (→ pr_review).
+    - ``prs`` → tri-state classification mirroring ``classify_issue``'s
+      open-PR routing: merged PR -> FINISHED (idempotent), closed PR ->
+      excluded, open PR with ``state:implementation-go`` -> CI, open PR
+      without it -> PR_REVIEW. A failed state/label fetch reads as
+      "open, not yet reviewed" (-> pr_review), matching the legacy
+      ``_review_existing_pr`` fail-open-to-review semantics.
       When *github* is given (a repo-scoped accessor, e.g.
-      :class:`~hephaestus.automation.pipeline_github.PipelineGitHub`), the
-      label read is scoped to that repo via
-      ``github.pr_has_implementation_state_label`` — the same accessor
-      :func:`seed_issue_from_github` uses for ``--issues`` — instead of the
-      module-level :func:`~hephaestus.automation.github_api.gh_pr_label_names`,
-      which resolves against the ambient/current repo and can misclassify a
-      PR number that collides across repos in a multi-repo run.
+      :class:`~hephaestus.automation.pipeline_github.PipelineGitHub`), both
+      the state read and the label read are scoped to that repo via
+      ``github.gh_pr_state`` / ``github.pr_has_implementation_state_label``
+      — the same accessor :func:`seed_issue_from_github` uses for
+      ``--issues`` — instead of the module-level
+      :func:`~hephaestus.automation.github_api.gh_pr_state` /
+      :func:`~hephaestus.automation.github_api.gh_pr_label_names`, which
+      resolve against the ambient/current repo and can misclassify a PR
+      number that collides across repos in a multi-repo run.
 
     Args:
         repos: Repository names to seed for discovery.
         issues: Issue numbers to classify directly.
-        prs: PR numbers to route by implementation-review label.
-        github: Optional repo-scoped GitHub accessor for the ``prs`` label
-            read. When ``None``, falls back to the ambient
+        prs: PR numbers to route by merge/close state, then
+            implementation-review label.
+        github: Optional repo-scoped GitHub accessor for the ``prs`` state
+            and label reads. When ``None``, falls back to the ambient
+            :func:`~hephaestus.automation.github_api.gh_pr_state` /
             :func:`~hephaestus.automation.github_api.gh_pr_label_names`.
 
     Returns:
@@ -469,6 +475,31 @@ def seed_from_cli(
             )
         )
     for pr in prs:
+        pr_state = github.gh_pr_state(pr) if github is not None else gh_pr_state(pr)
+        state = str((pr_state or {}).get("state") or "").upper()
+        if state == "MERGED" or (pr_state or {}).get("mergedAt"):
+            entries.append(
+                SeedEntry(
+                    kind="pr",
+                    identifier=pr,
+                    stage=StageName.FINISHED,
+                    reason=f"PR #{pr} merged (idempotent)",
+                    pr_number=pr,
+                )
+            )
+            continue
+        if state == "CLOSED":
+            entries.append(
+                SeedEntry(
+                    kind="pr",
+                    identifier=pr,
+                    stage=None,
+                    reason=f"PR #{pr} closed (not merged) — excluded",
+                    pr_number=pr,
+                )
+            )
+            continue
+
         if github is not None:
             has_go, _has_no_go = github.pr_has_implementation_state_label(pr)
         else:
