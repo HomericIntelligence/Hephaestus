@@ -44,6 +44,8 @@ class TestCommitChanges:
                 _status(""),  # git add
                 _status("M\tsrc/foo.py\nM\tsrc/bar.py\n"),  # changed files context
                 _status(" src/foo.py | 1 +\n src/bar.py | 1 +\n"),  # stat context
+                _status(""),  # git config --unset user.email
+                _status(""),  # git config --unset user.name
                 _status(""),  # git commit
             ]
         )
@@ -70,6 +72,8 @@ class TestCommitChanges:
                 _status(""),  # git add
                 _status("M\thephaestus/automation/ci_driver.py\n"),  # changed files context
                 _status(" hephaestus/automation/ci_driver.py | 1 +\n"),  # stat context
+                _status(""),  # git config --unset user.email
+                _status(""),  # git config --unset user.name
                 _status(""),  # git commit
             ]
         )
@@ -101,6 +105,8 @@ class TestCommitChanges:
                 _status(""),  # git add
                 _status("M\tsrc/foo.py\n"),  # changed files context
                 _status(" src/foo.py | 1 +\n"),  # stat context
+                _status(""),  # git config --unset user.email
+                _status(""),  # git config --unset user.name
                 _status(""),  # git commit
             ]
         )
@@ -124,6 +130,8 @@ class TestCommitChanges:
                 _status(""),  # git add
                 _status("M\tsrc/foo.py\n"),  # changed files context
                 _status(" src/foo.py | 1 +\n"),  # stat context
+                _status(""),  # git config --unset user.email
+                _status(""),  # git config --unset user.name
                 _status(""),  # git commit
             ]
         )
@@ -141,6 +149,8 @@ class TestCommitChanges:
             42,
             42,
             42,
+            42,
+            42,
         ]
 
     def test_handles_renamed_files(self) -> None:
@@ -151,6 +161,8 @@ class TestCommitChanges:
                 _status(""),
                 _status("R\told.py\tnew.py\n"),
                 _status(" new.py | 1 +\n"),
+                _status(""),  # git config --unset user.email
+                _status(""),  # git config --unset user.name
                 _status(""),
             ]
         )
@@ -172,6 +184,8 @@ class TestCommitChanges:
                 _status(""),
                 _status("D\thephaestus/github/fleet_sync.py\n"),
                 _status(" hephaestus/github/fleet_sync.py | 10 ----------\n"),
+                _status(""),  # git config --unset user.email
+                _status(""),  # git config --unset user.name
                 _status(""),
             ]
         )
@@ -194,6 +208,8 @@ class TestCommitChanges:
                 _status(""),  # git add
                 _status("M\tLICENSE\nM\tNOTICE\n"),  # changed files context
                 _status(" LICENSE | 2 +-\n NOTICE | 2 +-\n"),  # stat context
+                _status(""),  # git config --unset user.email
+                _status(""),  # git config --unset user.name
                 _status(""),  # git commit
             ]
         )
@@ -230,6 +246,8 @@ class TestCommitChanges:
                 _status(""),  # git add
                 _status("M\tsrc/feature.py\n"),  # changed files context
                 _status(" src/feature.py | 3 +++\n"),  # stat context
+                _status(""),  # git config --unset user.email
+                _status(""),  # git config --unset user.name
                 _status(""),  # git commit
             ]
         )
@@ -245,6 +263,38 @@ class TestCommitChanges:
         commit_msg = run_mock.call_args_list[-1].args[0][-1]
         assert commit_msg.startswith("feat: Implement #10\n\nAdd feature\n")
         assert "Closes #10" in commit_msg
+
+    def test_commit_clears_local_committer_identity(self) -> None:
+        run_mock = MagicMock(
+            side_effect=[
+                _status(" M src/foo.py\n"),  # git status
+                _status(""),  # git add
+                _status("M\tsrc/foo.py\n"),  # changed files context
+                _status(" src/foo.py | 1 +\n"),  # stat context
+                _status(""),  # git config --unset user.email
+                _status(""),  # git config --unset user.name
+                _status(""),  # git commit
+            ]
+        )
+        issue = MagicMock(title="Add foo", body="Implement it.")
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "fetch_issue_info", return_value=issue),
+            patch.object(pr_manager, "_invoke_git_message_agent", return_value="not json"),
+        ):
+            pr_manager.commit_changes(3, Path("/tmp/wt"))
+
+        cmds = [c.args[0] for c in run_mock.call_args_list]
+        assert ["git", "config", "--unset", "--local", "user.email"] in cmds
+        assert ["git", "config", "--unset", "--local", "user.name"] in cmds
+        commit_idx = next(i for i, c in enumerate(cmds) if c[:2] == ["git", "commit"])
+        unset_idxs = [i for i, c in enumerate(cmds) if c[:3] == ["git", "config", "--unset"]]
+        assert all(i < commit_idx for i in unset_idxs)
+        # Expected exit-5 no-op is tolerated AND quiet (prior-review finding #2).
+        for call in run_mock.call_args_list:
+            if call.args[0][:3] == ["git", "config", "--unset"]:
+                assert call.kwargs.get("check") is False
+                assert call.kwargs.get("log_errors") is False
 
 
 class TestEnsurePRCreated:
@@ -538,6 +588,8 @@ class TestCoAuthorLine:
                 _status(""),  # git add
                 _status("M\tsrc/feature.py\n"),  # changed files context
                 _status(" src/feature.py | 1 +\n"),  # stat context
+                _status(""),  # git config --unset user.email
+                _status(""),  # git config --unset user.name
                 _status(""),  # git commit
             ]
         )
@@ -568,6 +620,8 @@ class TestCoAuthorLine:
                 _status(""),  # git add
                 _status("M\tsrc/feature.py\n"),  # changed files context
                 _status(" src/feature.py | 1 +\n"),  # stat context
+                _status(""),  # git config --unset user.email
+                _status(""),  # git config --unset user.name
                 _status(""),  # git commit
             ]
         )
@@ -593,6 +647,8 @@ class TestCoAuthorLine:
                 _status(""),  # git add
                 _status("M\tfoo.py\n"),  # changed files context
                 _status(" foo.py | 1 +\n"),  # stat context
+                _status(""),  # git config --unset user.email
+                _status(""),  # git config --unset user.name
                 _status(""),  # git commit
             ]
         )
@@ -622,6 +678,8 @@ class TestCoAuthorLine:
                 _status(""),  # git add
                 _status("M\tfoo.py\n"),  # changed files context
                 _status(" foo.py | 1 +\n"),  # stat context
+                _status(""),  # git config --unset user.email
+                _status(""),  # git config --unset user.name
                 _status(""),  # git commit
             ]
         )
@@ -652,6 +710,8 @@ class TestCoAuthorLine:
                 _status(""),  # git add
                 _status("M\tfoo.py\n"),  # changed files context
                 _status(" foo.py | 1 +\n"),  # stat context
+                _status(""),  # git config --unset user.email
+                _status(""),  # git config --unset user.name
                 _status(""),  # git commit
             ]
         )

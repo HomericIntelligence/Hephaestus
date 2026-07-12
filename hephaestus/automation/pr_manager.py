@@ -96,6 +96,27 @@ def _git_timeout_kw(timeout: int | None) -> dict[str, Any]:
     return {} if timeout is None else {"timeout": timeout}
 
 
+def _clear_local_committer_identity(worktree_path: Path, git_timeout: int | None) -> None:
+    """Drop any worktree/local ``user.email``/``user.name`` override before committing.
+
+    A sub-agent that ran ``git config user.email <fabricated>`` in the worktree
+    would otherwise poison the orchestrator's commit, since git resolves local
+    config ahead of the operator's global, GitHub-verifiable identity — producing
+    ``no_user`` commits that fail the signed-commit policy gate (issue #2110).
+    ``git config --unset --local`` returns exit 5 when the key is absent, the
+    expected no-op case, so ``check=False``; ``log_errors=False`` keeps that
+    common case from emitting spurious ERROR logs on every commit.
+    """
+    for key in ("user.email", "user.name"):
+        run(
+            ["git", "config", "--unset", "--local", key],
+            cwd=worktree_path,
+            check=False,
+            log_errors=False,
+            **_git_timeout_kw(git_timeout),
+        )
+
+
 def _normalize_conventional_type(subject: str, *, default: str = "chore") -> str:
     """Rewrite a subject's leading type to an allowlisted one if it is not already.
 
@@ -832,6 +853,10 @@ def commit_changes(
         git_message_timeout=git_message_timeout,
         git_timeout=git_timeout,
     )
+
+    # Defense-in-depth: strip any fabricated worktree-local identity a sub-agent
+    # may have set, so the commit inherits the operator's verifiable identity (#2110).
+    _clear_local_committer_identity(worktree_path, git_timeout)
 
     # Commit with cryptographic signature and DCO sign-off — required by repo policy.
     run(

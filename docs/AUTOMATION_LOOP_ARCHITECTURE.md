@@ -195,10 +195,10 @@ per-repo in-flight cap.
    fast path (per `_review_existing_pr` semantics) → skip to step 8.
 2. [W:G] Create/refresh worktree (`worktree_manager.create_worktree(
    refresh_base=True)`).
-3. [W:A] **Dirty worktree decision** — `prompts/implementation.py:293
+3. [W:A] **Dirty worktree decision** — `prompts/implementation.py:299
    get_dirty_reused_worktree_decision_prompt`.
 4. [W:A] **Advise step**.
-5. [W:A] **Implement step** — `prompts/implementation.py:211
+5. [W:A] **Implement step** — `prompts/implementation.py:217
    get_implementation_prompt`.
 6. [W:B] **Test step** (optional) — `_run_tests_in_worktree` (`pixi run
    pytest`); on failure, RETRY with budget test_fix.
@@ -206,7 +206,7 @@ per-repo in-flight cap.
    with test-failure feedback → repeat step 6.
 8. [W:G] Commit and push (or no-op if existing-PR).
 9. [M] **PR_CREATE**: call `gh pr create` (idempotent for existing) with
-   `prompts/pr_review.py:339 get_pr_description` [durable] → ADVANCE.
+   `prompts/pr_review.py:352 get_pr_description` [durable] → ADVANCE.
 
 **Verdicts**: ADVANCE, RETRY, FAIL_BACK(reason).
 
@@ -221,9 +221,9 @@ per-repo in-flight cap.
 
 **Prompt functions**:
 
-- `prompts/implementation.py:293 get_dirty_reused_worktree_decision_prompt`
-- `prompts/implementation.py:211 get_implementation_prompt`
-- `prompts/pr_review.py:339 get_pr_description`
+- `prompts/implementation.py:299 get_dirty_reused_worktree_decision_prompt`
+- `prompts/implementation.py:217 get_implementation_prompt`
+- `prompts/pr_review.py:352 get_pr_description`
 
 ### 5. pr_review
 
@@ -241,7 +241,7 @@ ADDRESS_WAIT → PUSH_WAIT → EVAL → (loop) → FOLLOWUP_WAIT.
 4. [W:A] **Difficulty step** — `prompts/pr_review.py:310
    get_comment_difficulty_prompt`.
 5. [W:A] **Address step**: if fresh PR → resume implementer with
-   `prompts/implementation.py:336 get_impl_resume_feedback_prompt`; if
+   `prompts/implementation.py:342 get_impl_resume_feedback_prompt`; if
    existing-PR path → `prompts/address_review.py:181
    get_address_review_prompt`.
 6. [W:G] Push (commit+force-push addressing changes).
@@ -290,7 +290,7 @@ objects are rejected.
 - `prompts/pr_review.py:104 get_pr_review_analysis_prompt`
 - `prompts/pr_review.py:232 get_review_validation_prompt`
 - `prompts/pr_review.py:310 get_comment_difficulty_prompt`
-- `prompts/implementation.py:336 get_impl_resume_feedback_prompt`
+- `prompts/implementation.py:342 get_impl_resume_feedback_prompt`
 - `prompts/address_review.py:181 get_address_review_prompt`
 - `prompts/follow_up.py:105 get_follow_up_prompt`
 
