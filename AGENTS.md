@@ -56,6 +56,35 @@ on each automation command (e.g., `--agent-timeout`, `--poll-max-wait`,
 `--git-message-timeout`, etc.). Legacy `claude_models`, `claude_timeouts`, and
 `session_naming` modules remain compatibility shims over `agent_config`.
 
+## Design Philosophy
+
+The agent topology above is not accidental — it follows a small set of design
+principles inherited from **ProjectOdyssey**, where the queue-based agent loop
+and strict plan/review gates were first incubated before being generalized into
+Hephaestus's shared tooling. Those principles, applied to agent design, are:
+
+- **Simplicity first (KISS / YAGNI).** Each queue stage owns one responsibility
+  and one reason to change; we do not add stages, providers, or abstractions
+  until a concrete workflow needs them. The deferred `AgentProtocol` and
+  resilience wiring (issues #468, #469) are intentionally *not* built yet.
+- **One-way dependencies (DRY / boundaries).** The dependency arrow points only
+  automation → library (see [`CLAUDE.md`](CLAUDE.md#library-vs-product-layer)).
+  Prompt construction lives in exactly one module (`hephaestus.automation.prompts`)
+  so untrusted-content fencing is defined once, not per call site.
+- **Substitutable providers (SOLID).** `hephaestus.agents.runtime` abstracts over
+  Claude Code and Codex behind a uniform `--agent` flag so either provider is
+  substitutable at a call site without changing orchestration logic.
+- **Least privilege, least astonishment (POLA).** Every agent call site declares
+  an explicit `--allowedTools` scope (see the permission-policy table below),
+  runs in a scoped worktree, and defers all irreversible actions (merge, tag,
+  force-push) to human-gated checkpoints.
+- **Human-in-the-loop by default.** Autonomy is bounded: skills that can act
+  destructively stop for a human gate, and every automation PR still passes
+  branch protection and the `pr-policy` check.
+
+For the full, non-agent-specific statement of these principles see
+[`CLAUDE.md`](CLAUDE.md#key-development-principles).
+
 ## Claude non-interactive permission policy
 
 Claude invocations that pass `permission_mode="dontAsk"` are non-interactive
