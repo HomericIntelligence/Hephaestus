@@ -23,15 +23,18 @@ What lives here:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import re
+import signal
 import subprocess
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from hephaestus.automation import subprocess_registry
 from hephaestus.automation.agent_config import (
     agent_default_timeout,
     fallback_model,
@@ -355,18 +358,72 @@ def _invoke_claude_once(
         sid,
         "create" if create else "resume",
     )
-    result = subprocess.run(
+    result = _run_tracked(
         cmd,
-        input=prompt if input_via_stdin else None,
-        capture_output=True,
-        text=True,
-        check=True,
+        stdin_text=prompt if input_via_stdin else None,
         timeout=timeout,
         env=env,
-        stdin=subprocess.DEVNULL if not input_via_stdin else None,
+        use_devnull_stdin=not input_via_stdin,
         cwd=str(cwd),
     )
     return result.stdout, sid
+
+
+def _run_tracked(
+    cmd: list[str],
+    *,
+    stdin_text: str | None,
+    timeout: int,
+    env: dict[str, str],
+    use_devnull_stdin: bool,
+    cwd: str,
+) -> subprocess.CompletedProcess[str]:
+    """Run *cmd* like ``subprocess.run(check=True, timeout=...)`` but killable.
+
+    Spawns the child in its OWN session (``start_new_session=True``) so it leads
+    its own process group, and registers that group with
+    :mod:`~hephaestus.automation.subprocess_registry` for the duration of the
+    call. A pipeline teardown (``WorkerPool.shutdown``) can then ``SIGTERM`` the
+    group and free the blocked worker thread instead of leaking a runaway
+    ``claude`` child (#2059). On timeout the group is killed before re-raising so
+    no orphan survives. The exception contract matches ``subprocess.run``:
+    :class:`subprocess.CalledProcessError` on non-zero exit,
+    :class:`subprocess.TimeoutExpired` on timeout.
+    """
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL if use_devnull_stdin else subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+        cwd=cwd,
+        start_new_session=True,
+    )
+    with subprocess_registry.track_process_group(proc.pid):
+        try:
+            stdout, stderr = proc.communicate(input=stdin_text, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_process_tree(proc)
+            proc.communicate()  # reap so no zombie remains
+            raise
+        except BaseException:
+            # Includes the SIGTERM-driven teardown path: never leave the child.
+            _kill_process_tree(proc)
+            raise
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd, output=stdout, stderr=stderr)
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout=stdout, stderr=stderr)
+
+
+def _kill_process_tree(proc: subprocess.Popen[str]) -> None:
+    """Best-effort kill of *proc*'s whole process group, falling back to the proc."""
+    if hasattr(os, "killpg") and hasattr(os, "getpgid"):
+        with contextlib.suppress(ProcessLookupError, OSError):
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            return
+    with contextlib.suppress(ProcessLookupError, OSError):  # pragma: no cover - already gone
+        proc.kill()
 
 
 def _envelope_error_text(stdout: str) -> str | None:

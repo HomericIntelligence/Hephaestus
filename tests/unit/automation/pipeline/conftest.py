@@ -66,6 +66,7 @@ class FakeWorkerPool:
         )
         self.submitted: list[JobHandle] = []
         self.submitted_claims: list[tuple[str, str]] = []
+        self.shutdown_calls = 0
         self._scripted: deque[JobResult | Exception] = deque()
 
     def script(self, *outcomes: JobResult | Exception) -> None:
@@ -130,6 +131,7 @@ class FakeWorkerPool:
 
     def shutdown(self) -> None:
         """Match the real pool's API (sets the shutdown event; nothing to cancel)."""
+        self.shutdown_calls += 1
         self.shutdown_event.set()
 
 

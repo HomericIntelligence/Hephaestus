@@ -6,12 +6,13 @@ import logging
 import os
 import queue
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Iterator
 from concurrent.futures import Future
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -1533,3 +1534,54 @@ class TestOnFutureDone:
         assert result.error is not None
         assert result.error.startswith("worker_crash: RuntimeError: ")
         assert len(result.error) == small_err_max
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "killpg"), reason="process-group termination unavailable on this platform"
+)
+class TestShutdownReapsSubprocess:
+    """WorkerPool.shutdown() SIGTERMs in-flight agent process groups (#2059)."""
+
+    def test_shutdown_terminates_running_agent_subprocess_fast(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+    ) -> None:
+        """A slow claude job is reaped by shutdown() instead of running to timeout.
+
+        Regression for the #2059 leak: before the fix, ``pool.shutdown()`` only
+        cancelled un-started futures — a job already blocked in a claude
+        subprocess kept running. Now the child is spawned via the real
+        ``_run_tracked`` (process group + registry) and SIGTERMed on shutdown.
+        """
+        from hephaestus.automation import claude_invoke
+
+        started = threading.Event()
+        real_run_tracked = claude_invoke._run_tracked
+        # A 60s sleeper stands in for a wedged claude reviewer.
+        sleeper = [sys.executable, "-c", "import time; time.sleep(60)"]
+
+        def fake_run_tracked(_cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            started.set()
+            # Swap the "claude" binary for a real long-lived Python sleeper but
+            # keep the REAL _run_tracked spawn (Popen + process-group tracking).
+            return real_run_tracked(list(sleeper), **kwargs)
+
+        job = _agent_job(model="reap-test", timeout_s=60, session_agent="implementer")
+        with (
+            patch(f"{_WP}.resolve_agent", return_value="claude"),
+            patch(f"{_WP}.claude_invoke._run_tracked", side_effect=fake_run_tracked),
+        ):
+            pool.submit(job, StageName.IMPLEMENTATION)
+            assert started.wait(timeout=10), "agent subprocess never started"
+            time.sleep(0.2)  # let the child settle inside communicate()
+
+            t0 = time.monotonic()
+            pool.shutdown()
+            _handle, result = completion_q.get(timeout=10)
+            elapsed = time.monotonic() - t0
+
+        # Reaped well under the 60s sleep (SIGTERM, not timeout).
+        assert elapsed < 15, f"shutdown did not reap the subprocess fast ({elapsed:.1f}s)"
+        assert result.ok is False
+        assert result.interrupted is True
