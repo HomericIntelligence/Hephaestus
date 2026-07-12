@@ -1108,12 +1108,44 @@ class Coordinator:
                 self._pass_work_count += 1
             self._push_item(new_item, new_item.stage, enter=True)
 
+    def _live_issue_keys(self) -> set[tuple[str, int]]:
+        """Return ``(repo, issue)`` keys currently queued (any stage) or in-flight.
+
+        The identity set the upstream idempotency guard consults: an ISSUE item is
+        "live" if a WorkItem for the same ``(repo, issue)`` sits in any stage queue
+        or in ``in_flight``. Cross-repo same-number issues are distinct (#2058).
+        """
+        keys: set[tuple[str, int]] = set()
+        for q in self.queues.values():
+            for it in q.snapshot():
+                if it.kind is ItemKind.ISSUE and it.issue is not None:
+                    keys.add((it.repo, it.issue))
+        for it in self.in_flight.values():
+            if it.kind is ItemKind.ISSUE and it.issue is not None:
+                keys.add((it.repo, it.issue))
+        return keys
+
     def _push_item(self, item: WorkItem, stage: StageName, enter: bool) -> None:
         """Push *item* into *stage*'s queue (the single push chokepoint).
 
         Every durable GitHub mutation for this transition already happened
         inside the stage, immediately before the outcome that got us here.
+
+        Upstream idempotency guard (#2107): a genuinely NEW ISSUE work item whose
+        ``(repo, issue)`` is already queued (any stage) or in-flight is refused —
+        it never enters the pipeline, so the drain-level dedup (#2058) is not even
+        exercised. Object identity (``_seen_item_ids``) distinguishes a new item
+        from an already-tracked item re-pushing itself on timer/retry/fail-back/
+        advance, which must always be allowed through.
         """
+        if (
+            id(item) not in self._seen_item_ids
+            and item.kind is ItemKind.ISSUE
+            and item.issue is not None
+            and (item.repo, item.issue) in self._live_issue_keys()
+        ):
+            logger.info("seed skipped: #%s already queued/in-flight in %s", item.issue, item.repo)
+            return
         item.stage = stage
         if enter:
             item.state = "ENTER"
