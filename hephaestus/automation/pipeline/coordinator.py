@@ -812,39 +812,29 @@ class Coordinator:
         touching the same files while a peer is dispatched, #1623 — only
         engaged when real parallelism is possible, mirroring the legacy
         ``serialize_file_overlap`` gate).
+
+        The queue is STAGE-keyed, so one drain round can hold issues from
+        several repos (#1795), and dependency ordering runs across the whole
+        round on a shared issue-number space (``IssueInfo`` docstring). Two
+        distinct work items therefore only conflict when they share the SAME
+        ``(repo, issue)`` — that is the transient retry/fail-back re-enqueue we
+        collapse below. Two DIFFERENT repos that happen to share an issue number
+        (``A#71`` vs ``B#71``) are NOT duplicates and must both dispatch; the
+        old code (and the pre-#2057 assert) keyed on issue number alone and
+        would have silently dropped one or crashed (#2057).
         """
         q = self.queues[StageName.IMPLEMENTATION]
         if not len(q):
             return
-        items = [q.pop() for _ in range(len(q))]
-        # A transient retry/fail-back can re-enqueue an issue while a prior copy
-        # is still queued, so the implementation queue may briefly hold two work
-        # items for the same issue. Building ``issue_items`` (and the downstream
-        # dispatch) requires unique issue numbers, so collapse duplicates here —
-        # keep the first-queued item and terminalize the rest as superseded —
-        # instead of crashing the whole org-wide run (was a hard assert, #1952).
-        seen_issues: set[int] = set()
-        deduped: list[WorkItem] = []
-        for it in items:
-            if it.issue is not None and it.issue in seen_issues:
-                logger.warning(
-                    "implementation #%s already queued; dropping duplicate work item", it.issue
-                )
-                self._finish(it, passed=True, reason=f"#{it.issue} superseded by queued duplicate")
-                continue
-            if it.issue is not None:
-                seen_issues.add(it.issue)
-            deduped.append(it)
-        items = deduped
-        issue_items = {it.issue: it for it in items if it.issue is not None}
+        items = self._dedup_implementation_items([q.pop() for _ in range(len(q))])
+        issue_items, ambiguous = self._index_issue_items(items)
         infos = [
             IssueInfo(
-                number=it.issue,
-                title=str(it.payload.get("issue_title", "")),
-                dependencies=list(it.payload.get("dependencies", [])),
+                number=number,
+                title=str(item.payload.get("issue_title", "")),
+                dependencies=list(item.payload.get("dependencies", [])),
             )
-            for it in items
-            if it.issue is not None
+            for number, item in issue_items.items()
         ]
         ordered = _admission.order_for_implementation(infos)
         dispatch = ordered
@@ -860,8 +850,11 @@ class Coordinator:
             for number in deferred:
                 logger.info("implementation #%s deferred (file overlap)", number)
         ran: set[int] = set()
-        for number in dispatch:
-            item = issue_items[number]
+        # Cross-repo same-number items bypass the number-keyed gates and dispatch
+        # directly — they are distinct work that the ordering model cannot rank.
+        dispatch_items = [issue_items[number] for number in dispatch]
+        dispatch_items.extend(it for group in ambiguous.values() for it in group)
+        for item in dispatch_items:
             if self.shutdown.is_set() or not self._admit(item):
                 continue  # stays queued (re-pushed below)
             ran.add(id(item))
@@ -871,6 +864,66 @@ class Coordinator:
         for it in items:
             if id(it) not in ran:
                 q.push(it)
+
+    def _dedup_implementation_items(self, items: list[WorkItem]) -> list[WorkItem]:
+        """Drop transient duplicate work items, keyed by ``(repo, issue)`` (#2057).
+
+        A retry/fail-back can re-enqueue an issue while a prior copy is still
+        queued, so the round may briefly hold two items for the same
+        ``(repo, issue)``. Keep the first-queued and terminalize the rest as
+        superseded (was a hard assert that crashed the whole run, #1952). Keyed
+        by ``(repo, issue)`` so a cross-repo same-number pair (``A#71``/``B#71``)
+        is preserved as distinct work. ``issue is None`` items never dedup.
+        """
+        seen: set[tuple[str, int]] = set()
+        deduped: list[WorkItem] = []
+        for it in items:
+            if it.issue is None:
+                deduped.append(it)
+                continue
+            key = (it.repo, it.issue)
+            if key in seen:
+                logger.warning(
+                    "implementation %s#%s already queued; dropping duplicate work item",
+                    it.repo,
+                    it.issue,
+                )
+                self._finish(
+                    it, passed=True, reason=f"{it.repo}#{it.issue} superseded by queued duplicate"
+                )
+                continue
+            seen.add(key)
+            deduped.append(it)
+        return deduped
+
+    @staticmethod
+    def _index_issue_items(
+        items: list[WorkItem],
+    ) -> tuple[dict[int, WorkItem], dict[int, list[WorkItem]]]:
+        """Index issue items by number for number-keyed topo/overlap dispatch.
+
+        Returns ``(issue_items, ambiguous)``. Dispatch is driven by ordered issue
+        NUMBERS, so items are indexed by number to look back up. A cross-repo
+        same-number pair collides in that dict — those numbers move to
+        ``ambiguous`` (issue number → its distinct items) and dispatch directly,
+        bypassing the number-keyed topo/overlap gates, which cannot represent two
+        items under one number. The ambiguity is inherent to the shared
+        issue-number-space dependency model (``IssueInfo``); dispatching both is
+        correct — neither is a duplicate (#2057). ``issue is None`` items are
+        skipped (dispatched elsewhere / re-queued).
+        """
+        issue_items: dict[int, WorkItem] = {}
+        ambiguous: dict[int, list[WorkItem]] = {}
+        for it in items:
+            if it.issue is None:
+                continue
+            if it.issue in ambiguous:
+                ambiguous[it.issue].append(it)
+            elif it.issue in issue_items:
+                ambiguous[it.issue] = [issue_items.pop(it.issue), it]
+            else:
+                issue_items[it.issue] = it
+        return issue_items, ambiguous
 
     def _admit(self, item: WorkItem) -> bool:
         """Admission control: per-repo in-flight cap (O(1) Counter lookup)."""

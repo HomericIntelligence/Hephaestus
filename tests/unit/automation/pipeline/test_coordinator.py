@@ -553,6 +553,99 @@ class TestImplementationAdmission:
         assert "superseded" in duplicate.result.reason
         # Implementation queue is drained — no duplicate left behind.
         assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == []
+        # Repo-scoped reason string (#2057).
+        assert duplicate.result.reason == "repo-a#21 superseded by queued duplicate"
+
+    def test_cross_repo_same_issue_number_both_dispatch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two repos sharing an issue number are DISTINCT work — never collapsed (#2057).
+
+        The implementation queue is stage-keyed, so one drain round can hold
+        ``A#71`` and ``B#71``. Dedup is per-repo: both must dispatch; neither may
+        be silently terminalized as a duplicate of the other.
+        """
+        coordinator, _pool, _ = make_coordinator(
+            tmp_path, monkeypatch, repos=["repo-a", "repo-b"], max_workers=2
+        )
+        ran: list[str] = []
+
+        class RecordingStage(StubStage):
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                ran.append(f"{item.repo}#{item.issue}")
+                return StageOutcome(Disposition.SKIP, "recorded")
+
+        coordinator.stages[StageName.IMPLEMENTATION] = RecordingStage()
+        a71 = _issue_item(71, StageName.IMPLEMENTATION, repo="repo-a")
+        b71 = _issue_item(71, StageName.IMPLEMENTATION, repo="repo-b")
+        coordinator._push_item(a71, StageName.IMPLEMENTATION, enter=True)
+        coordinator._push_item(b71, StageName.IMPLEMENTATION, enter=True)
+
+        coordinator._drain_implementation()
+
+        # BOTH ran — the cross-repo pair is not collapsed.
+        assert sorted(ran) == ["repo-a#71", "repo-b#71"]
+        # Neither was terminalized as a superseded duplicate.
+        assert a71.result is None or "superseded" not in (a71.result.reason or "")
+        assert b71.result is None or "superseded" not in (b71.result.reason or "")
+        assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == []
+
+    def test_three_duplicates_collapse_to_first(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """3+ copies of one issue: first dispatches, ALL later copies terminalize (#2057)."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        ran: list[int] = []
+
+        class RecordingStage(StubStage):
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                ran.append(item.issue or 0)
+                return StageOutcome(Disposition.SKIP, "recorded")
+
+        coordinator.stages[StageName.IMPLEMENTATION] = RecordingStage()
+        first = _issue_item(21, StageName.IMPLEMENTATION)
+        dup2 = _issue_item(21, StageName.IMPLEMENTATION)
+        dup3 = _issue_item(21, StageName.IMPLEMENTATION)
+        for it in (first, dup2, dup3):
+            coordinator._push_item(it, StageName.IMPLEMENTATION, enter=True)
+
+        coordinator._drain_implementation()
+
+        assert ran == [21]  # dispatched exactly once
+        for dup in (dup2, dup3):  # every later copy terminalized
+            assert dup.stage is StageName.FINISHED
+            assert dup.result is not None
+            assert dup.result.passed
+            assert "superseded" in dup.result.reason
+        assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == []
+
+    def test_issue_none_items_never_deduped_or_terminalized(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """issue=None items bypass issue-number dedup — never collapsed, never terminalized (#2057).
+
+        The number-keyed topo/overlap dispatch path only handles issue items, so
+        issue=None items are left queued (re-pushed) rather than dispatched here.
+        The invariant this guards: two issue=None items must NOT be treated as
+        duplicates of each other (``None == None``) and terminalized.
+        """
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        pr_a = WorkItem(
+            repo="repo-a", kind=ItemKind.PR, pr=500, stage=StageName.IMPLEMENTATION, state="ENTER"
+        )
+        pr_b = WorkItem(
+            repo="repo-a", kind=ItemKind.PR, pr=501, stage=StageName.IMPLEMENTATION, state="ENTER"
+        )
+        coordinator._push_item(pr_a, StageName.IMPLEMENTATION, enter=True)
+        coordinator._push_item(pr_b, StageName.IMPLEMENTATION, enter=True)
+
+        coordinator._drain_implementation()
+
+        # Neither was terminalized as a duplicate of the other.
+        assert pr_a.result is None
+        assert pr_b.result is None
+        # Both remain queued for their proper stage handling (order preserved).
+        assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == [pr_a, pr_b]
 
     def test_reseed_while_queued_refuses_second_entry(
         self,
