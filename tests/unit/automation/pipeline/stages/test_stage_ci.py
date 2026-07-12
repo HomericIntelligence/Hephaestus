@@ -16,6 +16,7 @@ from hephaestus.automation.pipeline.stages.ci import (
     POLL,
     POLL_DEADLINE,
     PUSH_WAIT,
+    REBASE_PUSH_WAIT,
     REBASE_WAIT,
     CiStage,
     build_ci_fix_prompt,
@@ -328,11 +329,12 @@ class TestCiRebase:
         assert isinstance(result.job, GitJob)
         assert result.job.op == "rebase"
         assert result.job.kwargs["base_branch"] == "develop"
-        assert result.on_done_state == POLL
+        assert result.on_done_state == REBASE_PUSH_WAIT
         assert item.attempts["rebase"] == 0  # not consumed at submission
 
         stage.on_job_done(item, JobResult(ok=True, value=True), ctx)
         assert item.attempts["rebase"] == 1  # consumed on completion
+        assert item.payload["rebase_clean"] is True
 
     def test_rebase_without_item_worktree_fails_back_before_git_job(
         self, make_ctx: Any, make_work_item: Any
@@ -348,7 +350,7 @@ class TestCiRebase:
         assert result == StageOutcome(Disposition.FAIL_BACK, "missing_worktree")
 
     def test_failed_rebase_is_best_effort(self, make_ctx: Any, make_work_item: Any) -> None:
-        """A failed rebase counts the budget but records no routing flag."""
+        """A failed rebase counts the budget, records not-clean, no routing flag."""
         stage = CiStage()
         ctx = make_ctx(github=_go_github())
         item = _item(make_work_item, state=REBASE_WAIT)
@@ -356,8 +358,54 @@ class TestCiRebase:
         stage.on_job_done(item, JobResult(ok=False, error="conflict"), ctx)
 
         assert item.attempts["rebase"] == 1
+        assert item.payload["rebase_clean"] is False
         assert "push_failed" not in item.payload
         assert "ci_fix_failed" not in item.payload
+
+
+class TestCiRebasePush:
+    """REBASE_PUSH_WAIT: push a clean rebase, or poll a conflicted one."""
+
+    def test_clean_rebase_pushes_then_polls(self, make_ctx: Any, make_work_item: Any) -> None:
+        """A clean rebase dispatches an op="push" GitJob targeting item.branch."""
+        stage = CiStage()
+        ctx = make_ctx(github=_go_github())
+        item = _item(make_work_item, state=REBASE_PUSH_WAIT)
+        item.payload["rebase_clean"] = True
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.op == "push"
+        assert result.job.kwargs["branch"] == item.branch
+        assert result.on_done_state == POLL
+        assert "rebase_clean" not in item.payload
+
+    def test_conflicting_rebase_never_pushes(self, make_ctx: Any, make_work_item: Any) -> None:
+        """A not-clean rebase has nothing to push and re-polls immediately."""
+        stage = CiStage()
+        ctx = make_ctx(github=_go_github())
+        item = _item(make_work_item, state=REBASE_PUSH_WAIT)
+        item.payload["rebase_clean"] = False
+
+        result = stage.step(item, ctx)
+
+        assert result == Continue(next_state=POLL)
+
+    def test_push_without_item_worktree_fails_back_before_git_job(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """CI must not push from the loop driver's shared checkout."""
+        stage = CiStage()
+        ctx = make_ctx(github=_go_github())
+        item = _item(make_work_item, state=REBASE_PUSH_WAIT)
+        item.payload["rebase_clean"] = True
+        item.worktree = ""
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FAIL_BACK, "missing_worktree")
 
 
 class TestCiPoll:
@@ -509,7 +557,7 @@ class TestCiWalks:
     """Pool-driven walks through the full state machine."""
 
     def test_green_path_advances_after_rebase(self, make_ctx: Any, make_work_item: Any) -> None:
-        """ENTER -> DISCOVER -> rebase job -> POLL green -> ADVANCE."""
+        """ENTER -> DISCOVER -> rebase job -> push job -> POLL green -> ADVANCE."""
         stage = CiStage()
         github = _go_github(checks=GREEN_CHECKS)
         ctx = make_ctx(github=github)
@@ -520,9 +568,8 @@ class TestCiWalks:
 
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition == Disposition.ADVANCE
-        assert len(pool.submitted) == 1
-        assert isinstance(pool.submitted[0].job, GitJob)
-        assert pool.submitted[0].job.op == "rebase"
+        git_jobs = [h.job for h in pool.submitted if isinstance(h.job, GitJob)]
+        assert [j.op for j in git_jobs] == ["rebase", "push"]
         assert item.attempts["rebase"] == 1
         assert github.mutation_log == []  # ci owns no labels
 

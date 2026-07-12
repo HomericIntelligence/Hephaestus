@@ -5,10 +5,10 @@ merge-wait, which is :mod:`.merge_wait` — as a pipeline stage
 (docs/AUTOMATION_LOOP_ARCHITECTURE.md section "6. ci" is the binding
 contract):
 
-- States: ENTER -> DISCOVER -> REBASE_WAIT -> POLL -> FIX_WAIT ->
-  PUSH_WAIT -> (POLL). Budgets: ``ci_fix`` = 1 (max fix attempts; one
-  extra escalation via force_engagement), ``rebase`` = 2. Both read from
-  ROUTES via ``ctx.budget``, never hardcoded here.
+- States: ENTER -> DISCOVER -> REBASE_WAIT -> REBASE_PUSH_WAIT -> POLL ->
+  FIX_WAIT -> PUSH_WAIT -> (POLL). Budgets: ``ci_fix`` = 1 (max fix
+  attempts; one extra escalation via force_engagement), ``rebase`` = 2.
+  Both read from ROUTES via ``ctx.budget``, never hardcoded here.
 - DISCOVER [M]: resolve the PR when unset (``ctx.github.find_pr_for_issue``,
   the ``pr_discovery`` semantics) — none found finishes failed ``no_pr``;
   adopt the PR's REAL head branch; capture the PR's real base ref
@@ -18,11 +18,15 @@ contract):
   (``ctx.github.pr_has_implementation_state_label``, the legacy
   ``_pr_has_implementation_go`` gate) — a PR without it fails back
   ``not_implementation_go`` (routes to pr_review).
-- REBASE_WAIT [W:G]: optional mechanical rebase (re-housed
-  ``_attempt_mechanical_rebase`` :763 — the worker pool's ``op="rebase"``
-  is ``git_utils.rebase_worktree_onto``), best-effort: skipped on dry-run,
-  when ``enable_mechanical_rebase`` is off, or once the ``rebase`` budget
-  (consumed in ``on_job_done``) is spent. POLL absorbs either outcome.
+- REBASE_WAIT [W:G] -> REBASE_PUSH_WAIT [W:G]: optional mechanical rebase
+  (re-housed ``_attempt_mechanical_rebase`` :1094 — the worker pool's
+  ``op="rebase"`` is ``git_utils.rebase_worktree_onto``, which never
+  pushes) followed by a push of the clean result (``op="push"``,
+  lease-guarded) to reach GitHub and re-trigger CI — the legacy
+  rebase+push pair. Best-effort: skipped on dry-run, when
+  ``enable_mechanical_rebase`` is off, or once the ``rebase`` budget
+  (consumed in ``on_job_done``) is spent. A conflicting rebase has
+  nothing to push and re-polls immediately. POLL absorbs either outcome.
 - POLL [M], non-blocking: one ``ctx.github.pr_checks`` read classified by
   the pure :func:`~hephaestus.automation.ci_run_coordinator.classify_ci_state`
   (the sleep-free extraction of ``poll_ci_until_concluded``'s conclusion
@@ -107,6 +111,7 @@ BACKOFF_CAP_S = _BACKOFF_CAP_S
 ENTER = "ENTER"
 DISCOVER = "DISCOVER"
 REBASE_WAIT = "REBASE_WAIT"
+REBASE_PUSH_WAIT = "REBASE_PUSH_WAIT"
 POLL = "POLL"
 FIX_WAIT = "FIX_WAIT"
 PUSH_WAIT = "PUSH_WAIT"
@@ -275,6 +280,8 @@ class CiStage(Stage):
             return self._discover(item, ctx)
         if item.state == REBASE_WAIT:
             return self._request_rebase(item, ctx)
+        if item.state == REBASE_PUSH_WAIT:
+            return self._request_rebase_push(item, ctx)
         if item.state == POLL:
             return self._poll(item, ctx)
         if item.state == FIX_WAIT:
@@ -330,13 +337,15 @@ class CiStage(Stage):
         return Continue(next_state=REBASE_WAIT)
 
     def _request_rebase(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """REBASE_WAIT [W:G]: best-effort mechanical rebase, then POLL.
+        """REBASE_WAIT [W:G]: best-effort mechanical rebase, then push-or-poll.
 
         Mirrors the ``_drive_issue`` gate (``enable_mechanical_rebase and not
         dry_run``); the ``rebase`` budget (consumed in ``on_job_done``) bounds
         the attempts across the item's lifetime. Skipping (option off,
         dry-run, or budget spent) is never an error — POLL classifies the PR
-        as it stands.
+        as it stands. A clean rebase must still be pushed
+        (``REBASE_PUSH_WAIT``) to reach GitHub and re-trigger CI — the
+        legacy ``_attempt_mechanical_rebase`` rebase+push pair.
         """
         if ctx.dry_run or not getattr(ctx.config, "enable_mechanical_rebase", True):
             return Continue(next_state=POLL)
@@ -346,8 +355,35 @@ class CiStage(Stage):
         missing_worktree = _require_item_worktree(item, "ci", "mechanical rebase")
         if missing_worktree is not None:
             return missing_worktree
+        item.payload.pop("rebase_clean", None)
         rebase_job = _build_rebase_job(item, ctx, descr="mechanical_rebase")
-        return JobRequest(rebase_job, on_done_state=POLL)
+        return JobRequest(rebase_job, on_done_state=REBASE_PUSH_WAIT)
+
+    def _request_rebase_push(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """REBASE_PUSH_WAIT [W:G]: push the clean rebase, or poll a conflicted one.
+
+        A clean mechanical rebase must be pushed (lease-guarded worker
+        ``op="push"``) to reach GitHub and re-trigger CI — the legacy
+        ``_attempt_mechanical_rebase`` rebase+push pair. A still-conflicting
+        rebase has nothing to push: POLL re-classifies the live PR state and
+        the ``rebase`` budget (already counted) bounds the loop.
+        """
+        if not item.payload.pop("rebase_clean", None):
+            return Continue(next_state=POLL)
+        missing_worktree = _require_item_worktree(item, "ci", "mechanical rebase push")
+        if missing_worktree is not None:
+            return missing_worktree
+        push_job = GitJob(
+            repo=item.repo,
+            op="push",
+            timeout_s=GIT_JOB_TIMEOUT_S,
+            kwargs={
+                "cwd": _worktree_path(item, ctx),
+                "branch": item.branch or None,
+            },
+            descr="push_mechanical_rebase",
+        )
+        return JobRequest(push_job, on_done_state=POLL)
 
     def _poll(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """POLL [M]: one non-blocking check read -> classify -> route.
@@ -514,9 +550,11 @@ class CiStage(Stage):
         implementation pattern: an interrupt never burns budget because
         interrupted results never reach this method).
 
-        - ``REBASE_WAIT``: count ``rebase``; best-effort — POLL re-classifies
-          unconditionally (a clean rebase re-triggers CI; a conflicting one
-          shows up as FAILING/DIRTY downstream).
+        - ``REBASE_WAIT``: count ``rebase``; record ``rebase_clean`` (the
+          worker's rebase result) so ``REBASE_PUSH_WAIT`` pushes only a
+          clean rebase (a clean rebase must be pushed to re-trigger CI; a
+          conflicting one has nothing to push and shows up as
+          FAILING/DIRTY downstream).
         - ``FIX_WAIT``: count ``ci_fix``; a hard job failure flags
           ``ci_fix_failed`` so PUSH_WAIT reroutes to POLL instead of pushing
           a fix that never landed.
@@ -534,6 +572,7 @@ class CiStage(Stage):
         """
         if item.state == REBASE_WAIT:
             item.attempts["rebase"] = item.attempts.get("rebase", 0) + 1
+            item.payload["rebase_clean"] = bool(result.ok and result.value)
             if not result.ok:
                 logger.warning(
                     "ci:%s: mechanical rebase failed (non-fatal): %s", item.issue, result.error
