@@ -606,8 +606,17 @@ class TestImplementationAdmission:
         first = _issue_item(21, StageName.IMPLEMENTATION)
         dup2 = _issue_item(21, StageName.IMPLEMENTATION)
         dup3 = _issue_item(21, StageName.IMPLEMENTATION)
+        # Inject the collisions BELOW the upstream idempotency guard (#2107):
+        # push straight onto the queue (the same raw API the drain uses to
+        # re-push deferred items, coordinator.py:873) so this test exercises
+        # the drain-level safety net for duplicates that arrived by a path the
+        # upstream guard does not cover. (The guard would otherwise drop dup2/
+        # dup3 at push time, so they'd never reach the drain-level collapse.)
         for it in (first, dup2, dup3):
-            coordinator._push_item(it, StageName.IMPLEMENTATION, enter=True)
+            it.payload["_enter_pending"] = True
+            coordinator._seen_item_ids.add(id(it))
+            coordinator.items.append(it)
+            coordinator.queues[StageName.IMPLEMENTATION].push(it)
 
         coordinator._drain_implementation()
 
