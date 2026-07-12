@@ -67,18 +67,41 @@ def _assert_branch_commits_signed(branch: str, base: str = "main") -> None:
             timeout=_api.gh_cli_timeout(),
         )
 
-    result = _api.run(
-        ["git", "log", "--format=%H %G?", f"origin/{base}..{branch}"],
-        check=False,
-        timeout=_api.gh_cli_timeout(),
+    # Enumerate commits over the branch range. At PR-create time the branch
+    # typically exists only as origin/<branch> (its checkout lives in a separate
+    # worktree), so vary BOTH the base and branch sides and take the first range
+    # that resolves. A bare local <branch> is not guaranteed to exist in the
+    # coordinator's CWD (#2108, same class as #1795/#2047).
+    candidate_ranges = (
+        f"origin/{base}..origin/{branch}",
+        f"origin/{base}..{branch}",
+        f"{base}..origin/{branch}",
+        f"{base}..{branch}",
     )
-    if result.returncode != 0:
-        # Fall back to a non-origin range if origin/<base> is unknown locally
-        result = _api.run(
-            ["git", "log", "--format=%H %G?", f"{base}..{branch}"],
-            check=True,
+    result = None
+    for rev_range in candidate_ranges:
+        attempt = _api.run(
+            ["git", "log", "--format=%H %G?", rev_range],
+            check=False,
             timeout=_api.gh_cli_timeout(),
         )
+        if attempt.returncode == 0:
+            result = attempt
+            break
+
+    if result is None:
+        # No range resolved locally — the branch ref is unavailable in this CWD
+        # (e.g. pushed to origin but checked out in a separate worktree). This is
+        # a resolution failure, NOT a policy violation: never crash create_pr and
+        # strand already-pushed, signed work. GitHub's server-side signature
+        # verification and the pr-policy gate remain the backstop. (#2108)
+        _api.logger.warning(
+            "Could not resolve any commit range for branch %r (vs %s); "
+            "skipping local sign check and deferring to GitHub verification.",
+            branch,
+            base,
+        )
+        return
 
     bad: list[tuple[str, str]] = []
     for line in (result.stdout or "").splitlines():
