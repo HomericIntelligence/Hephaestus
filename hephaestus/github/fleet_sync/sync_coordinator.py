@@ -133,6 +133,10 @@ def process_repo(
     counts = _initial_counts()
 
     logger.info("\n%s %s %s", symbols.banner, repo, symbols.banner)
+    if args.dry_run:
+        logger.info("  [dry-run] Would inspect open PRs for %s (GitHub reads suppressed)", repo)
+        return counts
+
     try:
         prs = list_prs(repo, org)
     except RuntimeError as e:

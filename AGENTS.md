@@ -81,9 +81,9 @@ review before merge.
 | `_implement_phase.py:ImplementPhase._run_claude_impl_session` | `Read,Write,Edit,Glob,Grep,Bash` | Initial implementation runs in the isolated issue worktree and remains subject to review, CI, and branch protection. |
 | `_review_phase.py:ReviewPhase._resume_impl_with_feedback` | `Read,Write,Edit,Glob,Grep,Bash` | Review-feedback fixes resume the implementer in the isolated issue worktree and cannot bypass PR review or merge gates. |
 | `address_review_core.py:run_address_fix_session` | `Read,Write,Edit,Glob,Grep,Bash,Task,Skill` | Review-thread fixes run in the isolated issue worktree; `Task`/`Skill` support per-comment sub-agents and skill-advisor routing. |
-| `github/fleet_sync/conflict_resolver.py:_run_conflict_agent` | `Read,Write,Edit,Glob,Grep,Bash` | Claude SDK fallback runs only in a temporary per-PR conflict worktree with `permission_mode="dontAsk"`, nonce-fenced prompts, bounded turns, and no agent invocation in `--dry-run`. |
+| `github/fleet_sync/conflict_resolver.py:_run_conflict_agent` | `none` | Claude-only conflict planner receives only nonce-fenced conflict text and returns JSON edits; direct runtimes are rejected because their tool surfaces cannot provide the zero-tool contract, no agent invocation occurs in `--dry-run`, and the host validates/writes only known paths, owns all Git continuation/signing/push, snapshots remote URLs, and pins the final lease to the discovered branch SHA. |
 
-Fleet-sync `--dry-run` is a preview contract: GitHub calls, Git subprocesses, pushes,
+Fleet-sync `--dry-run` is a preview contract: GitHub reads and writes, Git subprocesses, pushes,
 merges, and agent calls are suppressed or logged. The CLI may still allocate an ephemeral
 temporary directory and pass Git actions through the dry-run logger so operators can see what
 would run; no clone, worktree, rebase, or other Git mutation is executed.
