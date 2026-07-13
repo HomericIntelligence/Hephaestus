@@ -134,8 +134,8 @@ causes a queue push.
 
 1. [M] on_enter: fast-forward check (if at-or-past `state:plan-go` →
    ADVANCE; if `state:skip` → SKIP).
-2. [W:A] **Advise step** — `prompts/advise.py:130 get_advise_prompt_builder`.
-3. [W:A] **Plan step** — `prompts/planning.py:232 get_plan_prompt` (session:
+2. [W:A] **Advise step** — `prompts/advise.py get_advise_prompt_builder`.
+3. [W:A] **Plan step** — `prompts/planning.py get_plan_prompt` (session:
    repo, issue, planner model; plan comment = durable artifact).
 4. [M] Verify plan comment exists (check `PlannerStateManager`) → ADVANCE or
    RETRY.
@@ -150,8 +150,8 @@ causes a queue push.
 
 **Prompt functions**:
 
-- `prompts/advise.py:130 get_advise_prompt_builder`
-- `prompts/planning.py:232 get_plan_prompt`
+- `prompts/advise.py get_advise_prompt_builder`
+- `prompts/planning.py get_plan_prompt`
 
 ### 3. plan_review
 
@@ -159,7 +159,7 @@ causes a queue push.
 
 **Steps**:
 
-1. [W:A] **Review step** — `prompts/planning.py:270 get_plan_loop_review_prompt`;
+1. [W:A] **Review step** — `prompts/planning.py get_plan_loop_review_prompt`;
    verdict parsed in-worker by `claude_invoke.parse_review_verdict` (GO,
    NOGO, AMBIGUOUS, ERROR).
 2. [M] **EVAL**: if GO → apply `state:plan-go` label [durable] → ADVANCE; if
@@ -172,7 +172,7 @@ causes a queue push.
    [M] Upsert the amended plan comment [durable] before looping back to
    review. The iteration counter increments in EVAL when each real review
    verdict is processed.
-4. [W:A] **Learn step** (on GO only) — `learn.py:111 build_learn_prompt`.
+4. [W:A] **Learn step** (on GO only) — `learn.py build_learn_prompt`.
 
 **Verdicts**: ADVANCE, RETRY, FAIL_BACK(nogo, plan_cycles_exhausted).
 
@@ -187,8 +187,8 @@ causes a queue push.
 
 **Prompt functions**:
 
-- `prompts/planning.py:270 get_plan_loop_review_prompt`
-- `learn.py:111 build_learn_prompt`
+- `prompts/planning.py get_plan_loop_review_prompt`
+- `learn.py build_learn_prompt`
 
 ### 4. implementation
 
@@ -216,7 +216,7 @@ per-repo in-flight cap.
    with test-failure feedback → repeat step 6.
 8. [W:G] Commit and push (or no-op if existing-PR).
 9. [M] **PR_CREATE**: call `gh pr create` (idempotent for existing) with
-   `prompts/pr_review.py:352 get_pr_description` [durable] → ADVANCE.
+   `prompts/pr_review.py get_pr_description` [durable] → ADVANCE.
 
 **Verdicts**: ADVANCE, RETRY, FAIL_BACK(reason).
 
@@ -231,9 +231,9 @@ per-repo in-flight cap.
 
 **Prompt functions**:
 
-- `prompts/implementation.py:299 get_dirty_reused_worktree_decision_prompt`
-- `prompts/implementation.py:217 get_implementation_prompt`
-- `prompts/pr_review.py:352 get_pr_description`
+- `prompts/implementation.py get_dirty_reused_worktree_decision_prompt`
+- `prompts/implementation.py get_implementation_prompt`
+- `prompts/pr_review.py get_pr_description`
 
 ### 5. pr_review
 
@@ -254,7 +254,7 @@ an internal GO because the PR is not eligible to merge.
 5. [W:A] **Difficulty step** — `prompts/pr_review.py:310
    get_comment_difficulty_prompt`.
 6. [W:A] **Address step**: if fresh PR → resume implementer with
-   `prompts/implementation.py:342 get_impl_resume_feedback_prompt`; if
+   `prompts/implementation.py get_impl_resume_feedback_prompt`; if
    existing-PR path → `prompts/address_review.py:181
    get_address_review_prompt`.
 7. [W:G] Push (commit+force-push addressing changes).
@@ -306,12 +306,12 @@ retry/regress) [durable],
 
 **Prompt functions**:
 
-- `prompts/pr_review.py:104 get_pr_review_analysis_prompt`
-- `prompts/pr_review.py:232 get_review_validation_prompt`
-- `prompts/pr_review.py:310 get_comment_difficulty_prompt`
-- `prompts/implementation.py:342 get_impl_resume_feedback_prompt`
-- `prompts/address_review.py:181 get_address_review_prompt`
-- `prompts/follow_up.py:105 get_follow_up_prompt`
+- `prompts/pr_review.py get_pr_review_analysis_prompt`
+- `prompts/pr_review.py get_review_validation_prompt`
+- `prompts/pr_review.py get_comment_difficulty_prompt`
+- `prompts/implementation.py get_impl_resume_feedback_prompt`
+- `prompts/address_review.py get_address_review_prompt`
+- `prompts/follow_up.py get_follow_up_prompt`
 
 **Severity-aware GO gate** (#1856; recovers detail from the orphaned
 `automation-pr-severity-aware-gate-implementation` skill draft, #2067):
@@ -391,8 +391,8 @@ force_engagement), `rebase` = 2 (max mechanical rebase attempts).
 
 **Prompt functions**:
 
-- `ci_fix_orchestrator.py:498 build_ci_fix_prompt`
-- `ci_fix_orchestrator.py:148 force_engagement_prompt`
+- `ci_fix_orchestrator.py build_ci_fix_prompt`
+- `ci_fix_orchestrator.py force_engagement_prompt`
 
 ### 7. merge_wait
 
@@ -420,8 +420,8 @@ CI/dirty/blocked recovery routes only after strict proof owns eligibility.
 
 **Prompt functions**:
 
-- `prompts/address_review.py:181 get_address_review_prompt`
-- `learn.py:111 build_learn_prompt` (post-merge deduped)
+- `prompts/address_review.py get_address_review_prompt`
+- `learn.py build_learn_prompt` (post-merge deduped)
 
 ### 8. finished
 
