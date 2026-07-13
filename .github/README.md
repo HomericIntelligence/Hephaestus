@@ -26,9 +26,10 @@ Continuous Integration pipeline that runs on every push and pull request to `mai
 ![Test](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/test.yml/badge.svg)
 ```
 
-### Pre-commit Workflow (`workflows/pre-commit.yml`)
+### Lint Job (`workflows/_required.yml`)
 
-Runs all pre-commit hooks (ruff, mypy, security checks) on pull requests.
+Runs the full pre-commit hook suite (ruff, mypy, security checks) as the
+required `lint` job on pull requests.
 
 ### Security Workflow (`workflows/security.yml`)
 
@@ -45,19 +46,11 @@ The consolidated required-status-check gate that runs on every pull request to
 shellcheck, the `pr-policy` gate (enforces `Closes #N` and signed commits),
 unit/integration/shell tests, wheel build, security scans (pip-audit, Gitleaks,
 bandit), workflow-schema validation, and version-sync. It also runs the
-advisory `auto-merge-policy` job (the auto-merge ↔ `state:implementation-go`
-state machine), which is intentionally **not** a required check so its
-timing-sensitive verdict never blocks merge — it fails its own job only on a
-mismatch as a visible signal. The workflow re-runs on `auto_merge_enabled` /
-`auto_merge_disabled` and `labeled` / `unlabeled` events so the
-`auto-merge-policy` job converges without timing races.
-
-### Enable Auto-Merge on Implementation GO Workflow (`workflows/enable-auto-merge-on-implementation-go.yml`)
-
-Privileged label-event workflow that runs when `state:implementation-go` is
-added to an open pull request. It does not checkout PR code; it only reads PR
-metadata, verifies the GO label is still present, and enables squash auto-merge
-with `gh pr merge --auto --squash` when auto-merge is not already armed.
+advisory `auto-merge-policy` job. During #2054's fail-closed bootstrap it
+signals any open PR with auto-merge armed; it is intentionally **not** a
+required check so it does not block the manually reviewed bootstrap merge.
+The privileged label-event auto-merge workflow was removed. #2055 restores
+queue-owned arming only after a head-bound independent strict-review proof.
 
 ### Auto-Tag Workflow (`workflows/auto-tag.yml`)
 

@@ -257,11 +257,11 @@ class StageGitHub(Protocol):
         ...
 
     def defer_auto_merge(self, pr_number: int) -> None:
-        """Durably ensure auto-merge stays DISABLED until implementation GO.
+        """Durably ensure auto-merge stays DISABLED until strict proof exists.
 
-        Mirrors ``pr_manager.ensure_pr_auto_merge_deferred`` — called
-        immediately after PR creation (the load-bearing legacy order):
-        auto-merge must never be armed before ``state:implementation-go``.
+        The adapter must read back disabled state for an open PR. #2054 calls
+        this before every PR-stage ingress and transition; #2055 will retain
+        the check before its strict-gated arming protocol.
         """
         ...
 
@@ -278,16 +278,16 @@ class StageGitHub(Protocol):
     def mark_pr_implementation_go(self, pr_number: int) -> None:
         """Durably apply ``state:implementation-go`` to the PR.
 
-        Mirrors ``pr_manager.mark_pr_implementation_go``; written BEFORE
-        :meth:`arm_auto_merge` (the label authorizes the arming).
+        Reserved for #2055's head-bound strict-review stage. #2054's internal
+        review does not call it, so a label cannot authorize an auto-merge.
         """
         ...
 
     def arm_auto_merge(self, pr_number: int) -> None:
         """Durably arm squash auto-merge after implementation GO.
 
-        Mirrors ``pr_manager.enable_auto_merge_after_implementation_go``;
-        only ever called after :meth:`mark_pr_implementation_go` succeeded.
+        Reserved for #2055's head-bound strict-review stage. No active #2054
+        pipeline stage may call it.
         """
         ...
 
@@ -308,7 +308,8 @@ class StageGitHub(Protocol):
     def arm_drive_green(self, issue_number: int, pr_number: int, head_sha: str) -> None:
         """Durably persist the drive-green arming record (crash-safe).
 
-        Mirrors ``ci_driver.CIDriver._arm_drive_green`` /
+        Reserved for #2055's strict-gated arming protocol. It mirrors
+        ``ci_driver.CIDriver._arm_drive_green`` /
         ``ArmingStateStore.save``: written immediately after
         :meth:`arm_auto_merge` succeeds so a crash between arming and the
         next POLL cannot lose the fact that this PR (at this head SHA) was

@@ -190,7 +190,7 @@ class TestROUTES:
                 budgets={"implement": 2, "test_fix": 1},
             ),
             StageName.PR_REVIEW: Route(
-                next=StageName.CI,
+                next=StageName.FINISHED,
                 fail_routes={
                     "agent_error": StageName.IMPLEMENTATION,
                     "human_blocked": StageName.FINISHED,
@@ -213,18 +213,34 @@ class TestROUTES:
             StageName.MERGE_WAIT: Route(
                 next=StageName.FINISHED,
                 fail_routes={
-                    "ci_red": StageName.CI,
-                    "blocked_exhausted": StageName.PR_REVIEW,
-                    "missing_worktree": StageName.IMPLEMENTATION,
                     "closed": StageName.FINISHED,
-                    "timeout": StageName.FINISHED,
                     "*": StageName.FINISHED,
                 },
-                budgets={"blocked_address": 2, "rebase": 2, "merge": 1},
+                budgets={},
             ),
             StageName.FINISHED: Route(next=StageName.FINISHED),
         }
         assert expected == ROUTES
+
+    def test_legacy_implementation_go_docs_match_ci_maintenance_behavior(self) -> None:
+        """The architecture doc must not claim CI immediately terminates legacy GO work."""
+        root = Path(__file__).resolve().parents[4]
+        text = (root / "docs" / "AUTOMATION_LOOP_ARCHITECTURE.md").read_text(encoding="utf-8")
+        normalized = " ".join(text.split())
+
+        assert "`ci` may perform bounded rebase, polling, and CI-fix work" in normalized
+        assert "`ci` immediately verifies auto-merge is" not in normalized
+
+    def test_ci_architecture_docs_include_containment_before_maintenance(self) -> None:
+        """The CI contract must name its disable/readback gate and terminal failure."""
+        root = Path(__file__).resolve().parents[4]
+        text = (root / "docs" / "AUTOMATION_LOOP_ARCHITECTURE.md").read_text(encoding="utf-8")
+        normalized = " ".join(text.split())
+
+        assert "disable auto-merge and read back the disabled state" in normalized
+        assert "`auto_merge_disable_failed`" in normalized
+        assert "`not_implementation_go` → pr_review" in normalized
+        assert "finished(fail) on no_pr or auto_merge_disable_failed" in normalized
 
     def test_merge_budget_provenance_uses_stable_source_references(self) -> None:
         """#1902: merge-budget provenance should not pin volatile line numbers."""

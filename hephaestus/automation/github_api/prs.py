@@ -6,12 +6,24 @@ import contextlib
 import json
 import re
 import subprocess
+from collections.abc import Callable
 from typing import Any, cast
 
 import hephaestus.automation.github_api as _api
+from hephaestus.github.auto_merge import defer_auto_merge, defer_auto_merge_batch
 from hephaestus.utils.helpers import strip_null_bytes
 
 _ACCEPTABLE_SIG_STATUSES = frozenset({"G", "U"})
+_PULL_REQUEST_STATES = frozenset({"OPEN", "CLOSED", "MERGED"})
+
+
+class OpenPrDiscoveryIncompleteError(RuntimeError):
+    """A head lookup that retained known PRs but could not prove completeness."""
+
+    def __init__(self, branch: str, open_prs: list[tuple[int, str]], reason: str) -> None:
+        """Record the known PRs that must be contained before failing closed."""
+        super().__init__(f"could not verify existing PR state for head {branch!r}: {reason}")
+        self.open_prs = open_prs
 
 
 def _gh_commit_is_verified(oid: str) -> bool:
@@ -127,34 +139,97 @@ def _assert_branch_commits_signed(branch: str, base: str = "main") -> None:
         )
 
 
-def _find_open_pr_for_head(branch: str) -> int | None:
-    """Return the number of an OPEN PR on ``branch``'s head, or None.
+def _find_open_prs_for_head(
+    branch: str,
+    run_gh: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
+) -> list[tuple[int, str]]:
+    """Return every validated OPEN PR number and base branch for ``branch``.
 
     Used by :func:`gh_pr_create` as an idempotency guard so a re-run on a
     branch that already has an open PR reuses it rather than creating a
-    duplicate (issue #1018). Any failure to query or parse (no PRs, malformed
-    output, transient error) is treated as "no open PR" so PR creation can
-    proceed normally.
+    duplicate (issue #1018). A query or parse failure raises: treating an
+    unknown result as no PR could leave a pre-existing auto-merge arm uncontained.
 
     Args:
         branch: Head branch name to look up.
+        run_gh: Optional repo-scoped ``gh`` runner. Defaults to the shared
+            GitHub API runner.
 
     Returns:
-        The PR number of the first OPEN PR on the head, or None.
+        Every open PR as ``(number, base_ref_name)``.
 
     """
     try:
-        result = _api._gh_call(
-            ["pr", "list", "--head", branch, "--json", "number,state", "--limit", "10"]
+        runner = run_gh or _api._gh_call
+        result = runner(
+            [
+                "pr",
+                "list",
+                "--head",
+                branch,
+                "--json",
+                "number,state,baseRefName",
+                "--limit",
+                "1000",
+            ]
         )
-        prs = json.loads(result.stdout or "[]")
-    except (subprocess.CalledProcessError, json.JSONDecodeError, TypeError) as e:
-        _api.logger.debug("Open-PR lookup failed for head %s (treating as none): %s", branch, e)
-        return None
+        stdout = result.stdout
+        if not isinstance(stdout, str) or not stdout.strip():
+            raise ValueError("existing PR lookup returned empty output")
+        prs = json.loads(stdout)
+    except (subprocess.CalledProcessError, json.JSONDecodeError, TypeError, ValueError) as e:
+        raise RuntimeError(f"could not verify existing PR state for head {branch!r}") from e
+    if not isinstance(prs, list):
+        raise RuntimeError(f"could not verify existing PR state for head {branch!r}")
+    open_prs: list[tuple[int, str]] = []
+    incomplete_reason = "head lookup reached the 1000-PR cap" if len(prs) >= 1000 else ""
     for pr in prs:
-        if str(pr.get("state", "")).upper() == "OPEN":
-            return cast(int, pr["number"])
-    return None
+        if not isinstance(pr, dict):
+            incomplete_reason = incomplete_reason or "head lookup returned a malformed PR row"
+            continue
+        state = pr.get("state")
+        base_ref_name = pr.get("baseRefName")
+        if not isinstance(state, str) or not isinstance(base_ref_name, str):
+            incomplete_reason = incomplete_reason or "head lookup returned an incomplete PR row"
+            continue
+        base_ref_name = base_ref_name.strip()
+        if not base_ref_name:
+            incomplete_reason = incomplete_reason or "head lookup returned a blank base branch"
+            continue
+        state = state.upper()
+        if state not in _PULL_REQUEST_STATES:
+            incomplete_reason = incomplete_reason or "head lookup returned an unknown PR state"
+            continue
+        if state == "OPEN":
+            number = pr.get("number")
+            if not isinstance(number, int) or number <= 0:
+                incomplete_reason = incomplete_reason or "head lookup returned an invalid PR number"
+                continue
+            open_prs.append((number, base_ref_name))
+    if incomplete_reason:
+        raise OpenPrDiscoveryIncompleteError(branch, open_prs, incomplete_reason)
+    return open_prs
+
+
+def _select_open_pr_for_base(open_prs: list[tuple[int, str]], base: str) -> int | None:
+    """Return the single open PR targeting ``base`` or fail on ambiguity."""
+    matching_numbers = [number for number, base_ref_name in open_prs if base_ref_name == base]
+    if len(matching_numbers) > 1:
+        raise RuntimeError(f"could not verify existing PR state for base {base!r}")
+    return matching_numbers[0] if matching_numbers else None
+
+
+def _find_open_pr_for_head(branch: str, base: str) -> int | None:
+    """Return the single OPEN PR from ``branch`` into ``base``.
+
+    This compatibility selector preserves the historical return type. Callers
+    that must contain every same-head PR should use
+    :func:`_find_open_prs_for_head` before selecting the requested base.
+    """
+    try:
+        return _select_open_pr_for_base(_find_open_prs_for_head(branch), base)
+    except RuntimeError as e:
+        raise RuntimeError(f"could not verify existing PR state for head {branch!r}") from e
 
 
 def gh_pr_create(
@@ -171,9 +246,9 @@ def gh_pr_create(
     1. *body* must contain a literal ``Closes #N`` line.
     2. Every commit on *branch* (vs *base*) must be cryptographically signed.
 
-    When ``auto_merge=True`` the helper also arms auto-merge immediately. The
-    implementation pipeline deliberately passes ``False`` until the in-loop
-    implementation review marks the PR GO.
+    ``auto_merge`` is retained for API compatibility but ignored during #2054's
+    fail-closed bootstrap. #2055 restores automatic arming only after a
+    head-bound strict-review proof.
 
     The CI gate (``.github/workflows/_required.yml`` job ``pr-policy``) and the
     PR review prompt re-check the same three properties, so a slip past one
@@ -183,7 +258,7 @@ def gh_pr_create(
         branch: Branch name
         title: PR title
         body: PR description
-        auto_merge: Whether to enable auto-merge immediately (default False)
+        auto_merge: Deprecated compatibility flag; ignored while #2054 is active.
         base: Base branch to compare against for signed-commit validation
 
     Returns:
@@ -191,8 +266,7 @@ def gh_pr_create(
 
     Raises:
         ValueError: If *body* lacks ``Closes #N`` or *branch* has unsigned commits.
-        RuntimeError: If the underlying ``gh`` CLI call fails, or immediate
-            auto-merge cannot be enabled when ``auto_merge=True``.
+        RuntimeError: If the underlying ``gh`` CLI call fails.
 
     """
     # Policy gate #1: PR body must reference the closing issue.
@@ -207,7 +281,28 @@ def gh_pr_create(
     # failure observed on issue #768 (issue #1018). A closed/merged-only head
     # still gets a fresh PR — the issue may legitimately need new work, and the
     # worktree manager already extends the remote branch's history.
-    existing_open_pr = _api._find_open_pr_for_head(branch)
+    discovery_error: OpenPrDiscoveryIncompleteError | None = None
+    try:
+        open_prs = _api._find_open_prs_for_head(branch)
+    except _api.OpenPrDiscoveryIncompleteError as exc:
+        open_prs = exc.open_prs
+        discovery_error = exc
+    containment_failures = defer_auto_merge_batch(
+        (open_pr_number for open_pr_number, _open_pr_base in open_prs),
+        lambda pr_number: defer_auto_merge(
+            pr_number, lambda args: _api._gh_call(args, check=False)
+        ),
+    )
+    if containment_failures:
+        raise RuntimeError(
+            "could not verify auto-merge disabled for existing PR(s): "
+            + "; ".join(containment_failures)
+        )
+    if discovery_error is not None:
+        raise RuntimeError(
+            f"could not verify existing PR state for head {branch!r}"
+        ) from discovery_error
+    existing_open_pr = _api._select_open_pr_for_base(open_prs, base)
     if existing_open_pr is not None:
         _api.logger.info("Reusing existing open PR #%s on head %s", existing_open_pr, branch)
         return existing_open_pr
@@ -244,16 +339,12 @@ def gh_pr_create(
         _api.logger.info("Created PR #%s", pr_number)
 
         if auto_merge:
-            try:
-                _api._gh_call(["pr", "merge", str(pr_number), "--auto", "--squash"])
-                _api.logger.info("Enabled auto-merge for PR #%s", pr_number)
-            except Exception as e:
-                _api.logger.error("Failed to enable auto-merge for PR #%s: %s", pr_number, e)
-                raise RuntimeError(
-                    f"Auto-merge could not be enabled for PR #{pr_number}: {e}. "
-                    "Resolve the underlying issue (e.g. branch protection, merge method) "
-                    "and re-run."
-                ) from e
+            _api.logger.warning(
+                "Ignoring auto_merge=True for PR #%s while the strict-review gate is unavailable",
+                pr_number,
+            )
+        if not defer_auto_merge(pr_number, lambda args: _api._gh_call(args, check=False)):
+            raise RuntimeError(f"could not verify auto-merge disabled for new PR #{pr_number}")
 
         return pr_number
 

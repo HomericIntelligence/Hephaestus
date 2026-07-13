@@ -1,12 +1,9 @@
 """Guard tests for the required-checks-gate aggregator job.
 
-The ``required-checks-gate`` job in ``.github/workflows/_required.yml`` is the
-single branch-protection required status check for that workflow (see
-``docs/ci/required-checks.md``). Branch protection requires only that one
-context, so the gate MUST fan in every gating job — if a new job is added to
-``_required.yml`` without being wired into the gate's ``needs:`` list, it would
-silently stop blocking merges (exactly the failure mode that let a red ``lint``
-job reach ``main``; issue #1315).
+The ``required-checks-gate`` job in ``.github/workflows/_required.yml`` is an
+aggregate workflow signal (see ``docs/ci/required-checks.md``). It does not
+replace the repository ruleset's direct required contexts, but it MUST fan in
+every gating job so the full workflow remains auditable.
 
 These tests turn that structural invariant into a unit-test failure.
 """
@@ -26,8 +23,7 @@ REQUIRED_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "_required.yml"
 
 # Jobs intentionally NOT gated by required-checks-gate:
 #   - auto-merge-policy: advisory only (see its comment in _required.yml); must
-#     not block merges or it would contradict the state:implementation-go arming
-#     contract.
+#     not block the independently reviewed manual bootstrap merge during #2054.
 #   - required-checks-gate: the gate cannot depend on itself.
 EXEMPT_JOBS = frozenset({"auto-merge-policy", GATE_JOB})
 
@@ -51,20 +47,20 @@ class TestRequiredChecksGate:
     def test_gate_job_exists(self, jobs: dict[str, Any]) -> None:
         """_required.yml must define the required-checks-gate job."""
         assert GATE_JOB in jobs, (
-            f"{GATE_JOB} job missing from _required.yml — it is the single "
-            "branch-protection required check; see docs/ci/required-checks.md"
+            f"{GATE_JOB} job missing from _required.yml — aggregate workflow "
+            "coverage would be unavailable; see docs/ci/required-checks.md"
         )
 
     def test_gate_needs_every_non_exempt_job(self, workflow: dict[str, Any]) -> None:
         """Every job except the exempt set must be in the gate's needs list.
 
         This is the core invariant: add a job to _required.yml and you MUST add
-        it to required-checks-gate.needs, or it stops gating merges.
+        it to required-checks-gate.needs, or it disappears from aggregate coverage.
         """
         missing = _unwired_jobs(workflow, EXEMPT_JOBS)
         assert not missing, (
-            f"These jobs are not gated by {GATE_JOB}.needs and would not block "
-            f"merges: {sorted(missing)}. Add them to the gate's needs list in "
+            f"These jobs are not included in {GATE_JOB}.needs and lack aggregate "
+            f"coverage: {sorted(missing)}. Add them to the gate's needs list in "
             ".github/workflows/_required.yml (see docs/ci/required-checks.md)."
         )
 

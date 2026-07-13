@@ -30,8 +30,9 @@ class CiConclusion(enum.Enum):
 
 
 #: The legacy ``all_green`` conclusion set (``ci_driver._drive_issue`` /
-#: ``CIDriveRunCoordinator.drive_issue``): a PR is GREEN — and may be armed —
-#: only when every required check concluded in one of these.
+#: ``CIDriveRunCoordinator.drive_issue``): a PR is GREEN only when every
+#: required check concluded in one of these. #2054 still contains any existing
+#: auto-merge request and terminates until the strict-review gate exists.
 GREEN_CONCLUSIONS: frozenset[str] = frozenset({"success", "skipped", "neutral"})
 
 
@@ -41,8 +42,8 @@ def classify_ci_state(checks: list[dict[str, Any]]) -> CiConclusion:
     Extracted from poll_ci_until_concluded (issue #1816) so a pipeline stage
     can classify in one sub-second call and timer-park on PENDING. GREEN
     mirrors the legacy ``all_green`` semantics EXACTLY (conclusions all in
-    :data:`GREEN_CONCLUSIONS`) — the pipeline must never arm a PR the legacy
-    driver would not have armed. Returns:
+    :data:`GREEN_CONCLUSIONS`). The pipeline then contains auto-merge and stops
+    until the strict-review gate exists. Returns:
         NO_CHECKS: empty list — no CI configured; caller treats as success.
         PENDING:   at least one required check has status != "completed".
         GREEN:     all required completed, conclusions all in
@@ -66,7 +67,7 @@ def classify_ci_state(checks: list[dict[str, Any]]) -> CiConclusion:
 
 
 class PrMergeState(enum.Enum):
-    """Pure classification of an armed PR's merge state (issue #1816)."""
+    """Pure classification of a legacy PR's merge state (issue #1816)."""
 
     MERGED = "merged"
     CLOSED = "closed"
@@ -102,6 +103,15 @@ def classify_pr_merge_state(
     if merge_status == "BLOCKED" and not failing and not pending:
         return PrMergeState.BLOCKED
     return PrMergeState.PENDING
+
+
+def _contain_remaining_prs(
+    auto_merge: Any, remaining: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Contain every retained final-sweep PR or preserve an empty result."""
+    if not remaining:
+        return remaining
+    return cast(list[dict[str, Any]], auto_merge.arm_all_unarmed_open_prs(remaining))
 
 
 class CIDriveRunCoordinator:
@@ -146,7 +156,14 @@ class CIDriveRunCoordinator:
         if not options.issues and not options.prs and not options.include_bot_prs:
             logger.warning("No issues, no direct PRs, and bot-PR discovery disabled")
             return {}
-        workset = self._discovery.discover_workset(options.issues)
+        try:
+            workset = self._discovery.discover_workset(options.issues)
+        except Exception:
+            # Discovery is untrusted input to the containment boundary. A
+            # failure cannot prove the repository has no armed PRs, so run the
+            # full final sweep before propagating the discovery failure.
+            self.open_prs_remaining = self._final_open_prs({})
+            raise
         self._set_shared_pr_issues(workset.shared_pr_issues)
         pr_map = workset.pr_map
         if not pr_map:
@@ -154,6 +171,7 @@ class CIDriveRunCoordinator:
                 "No open PRs found for the specified issues (and no open bot PRs) "
                 "- nothing to drive"
             )
+            self.open_prs_remaining = self._final_open_prs(pr_map)
             return {}
         logger.info("Found %s PR(s) to drive to green: %s", len(pr_map), pr_map)
         try:
@@ -203,14 +221,31 @@ class CIDriveRunCoordinator:
         if self._options().dry_run:
             return []
         remaining = cast(list[dict[str, Any]], self._discovery.list_open_prs_remaining())
-        if self._options().issues and remaining:
+        if self._options().issues and pr_map and remaining:
             scoped_prs = set(pr_map.values())
-            remaining = [pr for pr in remaining if pr.get("number") in scoped_prs]
-        if remaining:
-            remaining = cast(
-                list[dict[str, Any]],
-                self._auto_merge.arm_all_unarmed_open_prs(remaining),
+            complete_returned_identity = all(
+                isinstance(pr.get("number"), int)
+                and pr["number"] > 0
+                and isinstance(pr.get("headRefName"), str)
+                and pr["headRefName"].strip()
+                for pr in remaining
             )
+            if complete_returned_identity:
+                scoped_rows = [pr for pr in remaining if pr.get("number") in scoped_prs]
+                if {pr["number"] for pr in scoped_rows} != scoped_prs:
+                    return _contain_remaining_prs(self._auto_merge, remaining)
+                scoped_heads = {str(pr["headRefName"]).strip() for pr in scoped_rows}
+                remaining = [
+                    pr
+                    for pr in remaining
+                    if pr.get("number") == -1
+                    or pr.get("number") in scoped_prs
+                    or (
+                        isinstance(pr.get("headRefName"), str)
+                        and pr["headRefName"].strip() in scoped_heads
+                    )
+                ]
+        remaining = _contain_remaining_prs(self._auto_merge, remaining)
         if remaining:
             logger.warning("%d open PR(s) remain on the repo - not done:", len(remaining))
             for pr in remaining:
@@ -229,7 +264,7 @@ class CIDriveRunCoordinator:
         return remaining
 
     def drive_issue(self, issue_number: int, pr_number: int, slot_id: int) -> WorkerResult:
-        """Drive a single PR toward green CI and auto-merge."""
+        """Contain a legacy PR and stop until the strict-review gate exists."""
         with self._status.slot() as acquired_slot:
             if acquired_slot is None:
                 return WorkerResult(
@@ -238,49 +273,18 @@ class CIDriveRunCoordinator:
                     error="Failed to acquire worker slot",
                 )
             try:
-                armed = cast(
-                    WorkerResult | None,
-                    self._arming.check_on_drive_start(issue_number, pr_number),
-                )
-                if armed is not None:
-                    return armed
-                if self._options().enable_mechanical_rebase and not self._options().dry_run:
-                    self._auto_merge._attempt_mechanical_rebase(
-                        issue_number, pr_number, acquired_slot
-                    )
-                self._status.update_slot(acquired_slot, f"{pr_ref(pr_number)}: fetching checks")
-                poll_result = self.poll_ci_until_concluded(
-                    issue_number, pr_number, acquired_slot, self._options().poll_max_wait
-                )
-                if poll_result is None:
+                if not self._auto_merge.defer_auto_merge(pr_number):
                     return WorkerResult(
-                        issue_number=issue_number, success=True, pr_number=pr_number
+                        issue_number=issue_number,
+                        success=False,
+                        pr_number=pr_number,
+                        error="auto_merge_disable_failed",
                     )
-                _checks, required_checks = poll_result
-                all_green = all(
-                    c.get("conclusion") in ("success", "skipped", "neutral")
-                    for c in required_checks
-                )
-                if all_green:
-                    if not self._auto_merge.pr_has_implementation_go(pr_number):
-                        logger.info(
-                            "Issue #%s: PR #%s is green but lacks state:implementation-go",
-                            issue_number,
-                            pr_number,
-                        )
-                        return WorkerResult(
-                            issue_number=issue_number,
-                            success=True,
-                            pr_number=pr_number,
-                        )
-                    return cast(
-                        WorkerResult,
-                        self._auto_merge.arm_and_wait_for_merge(
-                            issue_number, pr_number, acquired_slot
-                        ),
-                    )
-                return self.handle_failing_pr(
-                    issue_number, pr_number, acquired_slot, required_checks
+                return WorkerResult(
+                    issue_number=issue_number,
+                    success=False,
+                    pr_number=pr_number,
+                    error="strict_gate_unavailable",
                 )
             except Exception as exc:
                 logger.error("Issue #%s: unexpected error: %s", issue_number, exc)
@@ -364,7 +368,7 @@ class CIDriveRunCoordinator:
         *,
         resolve_dirty: bool = True,
     ) -> WorkerResult | None:
-        """Re-poll post-fix CI and arm auto-merge if the PR is now green."""
+        """Re-poll post-fix CI and contain legacy auto-merge when the PR is green."""
         if self._options().dry_run:
             return None
         checks = _poll_post_fix_required(

@@ -37,10 +37,11 @@ Analyze PR #{pr_number} linked to issue #{issue_number}.
 
 **Code-quality review:**
 
-> Note: repo PR policies (`Closes #N`, signed commits, deferred auto-merge) are
-> enforced authoritatively by the GitHub CI gates `pr-policy` (required) and
-> `auto-merge-policy` (advisory). Do NOT re-check them here — focus solely on
-> code correctness, completeness, and quality.
+> Note: `Closes #N` and signed-commit policy are enforced by the required
+> GitHub CI gate `pr-policy`. `auto-merge-policy` is advisory during #2054;
+> pipeline containment keeps auto-merge disabled and human strict review is
+> the effective bootstrap merge control. Do NOT re-check policy here — focus
+> solely on code correctness, completeness, and quality.
 
 Review the PR for correctness, completeness, and code quality. Identify any issues that should
 be addressed as inline review comments.
@@ -60,7 +61,8 @@ The review prose + inline comments explain *why*; the verdict line is a binary
 gate. Write your analysis in prose, then end your response with exactly one of
 the two verdict lines below (the parser takes the LAST matching line):
 
-Verdict: GO — Code is correct, complete, and acceptable to merge.
+Verdict: GO — Code is correct, complete,
+and eligible for independent strict review; it is not merge authorization.
 Verdict: NOGO — A fundamental code problem must be fixed first (explain in the review).
 
 After the verdict line, emit a single fenced JSON block:
@@ -128,10 +130,11 @@ def get_pr_review_analysis_prompt(
 
     All free-text fields are fenced as untrusted (see module docstring).
 
-    Repo PR policies (`Closes #N`, signed commits, deferred auto-merge) are NOT
-    checked here — the GitHub CI gates ``pr-policy`` (required) and
-    ``auto-merge-policy`` (advisory) enforce them authoritatively. The in-loop
-    reviewer does code-quality review only.
+    Repo PR policy (`Closes #N`, signed commits) is NOT checked here — the
+    required GitHub CI gate ``pr-policy`` enforces it authoritatively. During
+    #2054, ``auto-merge-policy`` is advisory; pipeline containment and human
+    strict review are the effective bootstrap controls. The in-loop reviewer
+    does code-quality review only.
 
     Args:
         pr_number: GitHub PR number

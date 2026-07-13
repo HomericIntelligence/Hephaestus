@@ -329,13 +329,15 @@ releases from signed `vX.Y.Z` tags; there are no release branches.
 1. The PR body MUST contain the literal line `Closes #<issue-number>` (capital
    `C`, no colon, on its own line). `Fixes`, `Resolves`, `closes`, and
    `Closes:` are NOT accepted.
-2. Auto-merge MUST stay disabled until implementation review applies
-   `state:implementation-go`; then enable it with `gh pr merge --auto --squash`
-   (squash-only; rebase is disabled).
-3. Every commit MUST be cryptographically signed (`git commit -S`).
+2. Every commit MUST be cryptographically signed (`git commit -S`) and carry a
+   DCO `Signed-off-by` trailer.
 
-CI blocks PRs that fail any of these checks. No exceptions, including
-Dependabot and dependency-bump PRs.
+`pr-policy` blocks PRs that fail those checks. During #2054's fail-closed
+bootstrap, auto-merge must also remain disabled: pipeline code verifies that
+state, `auto-merge-policy` reports armed PRs advisory-only, and the PR reviewer
+requires an unconditional independent strict-review GO before a maintainer
+manually squash-merges. #2055 will restore queue-owned arming after a
+head-bound strict-review proof.
 
 ```bash
 # 1. Create feature branch
@@ -354,9 +356,8 @@ gh pr create \
   --title "[Type] Brief description" \
   --body "$(printf 'Summary of change.\n\nCloses #<issue-number>\n')"
 
-# 5. After implementation review marks the PR `state:implementation-go`,
-#    enable auto-merge (mandatory; squash-only — rebase is disabled)
-gh pr merge --auto --squash
+# 5. Keep auto-merge disabled. After an unconditional independent strict-review
+#    GO, bootstrap PRs are merged manually with the repository's squash method.
 ```
 
 ### Commit Message Format

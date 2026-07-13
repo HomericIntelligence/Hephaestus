@@ -1,4 +1,4 @@
-"""Auto-merge arming and terminal-state routing for drive-green."""
+"""Auto-merge containment and terminal-state routing for drive-green."""
 
 from __future__ import annotations
 
@@ -7,9 +7,10 @@ import logging
 import subprocess
 import time
 from collections.abc import Callable
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 from hephaestus.constants import read_timeout_env
+from hephaestus.github.auto_merge import defer_auto_merge
 
 from .git_utils import issue_ref, pr_ref
 from .models import CIDriverOptions, WorkerResult
@@ -27,7 +28,7 @@ def without_auto_merge_policy(check_names: list[str]) -> list[str]:
 
 
 class AutoMergeCoordinator:
-    """Owns auto-merge writes and terminal PR polling."""
+    """Owns compatibility containment and terminal PR polling."""
 
     def __init__(
         self,
@@ -63,83 +64,67 @@ class AutoMergeCoordinator:
         self._attempt_mechanical_rebase = attempt_mechanical_rebase
         self._recheck_and_arm_after_fix = recheck_and_arm_after_fix
 
+    def defer_auto_merge(self, pr_number: int) -> bool:
+        """Fail closed by disabling and reading back auto-merge for one PR."""
+        if self._options().dry_run:
+            logger.info("[dry-run] would defer auto-merge on PR #%s", pr_number)
+            return True
+        return defer_auto_merge(pr_number, lambda args: self._gh_call(args, check=False))
+
     def arm_all_unarmed_open_prs(self, open_prs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Arm auto-merge on every implementation-GO unarmed open PR."""
-        armed_now: list[int] = []
+        """Contain every open PR retained by the legacy final-sweep API.
+
+        The historical name is kept for compatibility, but #2054 reverses its
+        behavior: an existing arm is disabled and a new arm is never created.
+        Open PRs remain in the result so callers report that manual action is
+        still required. A malformed record or failed disable/readback raises so
+        callers cannot report an unverified arm as ordinary remaining work.
+
+        Raises:
+            RuntimeError: If a PR record is malformed or containment cannot be
+                verified.
+
+        """
+        contained_prs: list[dict[str, Any]] = []
+        failures: list[str] = []
         for pr in open_prs:
             number = pr.get("number")
-            if not isinstance(number, int) or number < 0 or pr.get("autoMergeRequest"):
+            if not isinstance(number, int) or number <= 0:
+                failures.append("invalid PR number")
                 continue
-            if not pr_has_implementation_go_label(pr):
-                logger.info(
-                    "PR #%s lacks state:implementation-go; leaving auto-merge disabled",
-                    number,
+            if not self.defer_auto_merge(number):
+                failures.append(
+                    f"could not verify auto-merge disabled for legacy open PR #{number}"
                 )
                 continue
-            if self.enable_auto_merge(number, is_bot_pr=bool(pr.get("isBot"))):
-                armed_now.append(number)
-        if not armed_now:
-            return open_prs
-        logger.info(
-            "Armed auto-merge on %d previously-unarmed open PR(s): %s",
-            len(armed_now),
-            sorted(armed_now),
-        )
-        return []
+            contained_prs.append({**pr, "autoMergeRequest": None})
+        if failures:
+            raise RuntimeError(f"cannot verify auto-merge disabled: {'; '.join(failures)}")
+        return contained_prs
 
     def arm_and_wait_for_merge(
         self, issue_number: int, pr_number: int, acquired_slot: int
     ) -> WorkerResult:
-        """Enable auto-merge, record arming, and route the terminal outcome."""
-        self._status().update_slot(acquired_slot, f"{pr_ref(pr_number)}: enabling auto-merge")
-        if self._options().dry_run:
-            logger.info(
-                "[dry_run] Would enable auto-merge for PR #%s (issue #%s)",
-                pr_number,
-                issue_number,
-            )
-            return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
-        merge_ok = self.enable_auto_merge(
-            pr_number, is_bot_pr=self._is_bot_pr_mode(issue_number, pr_number)
+        """Contain a legacy PR and stop until the strict-review gate exists."""
+        self._status().update_slot(
+            acquired_slot, f"{pr_ref(pr_number)}: verifying auto-merge is disabled"
         )
-        if not merge_ok:
+        if not self.defer_auto_merge(pr_number):
             return WorkerResult(
                 issue_number=issue_number,
                 success=False,
                 pr_number=pr_number,
-                error=f"auto-merge failed for PR {pr_ref(pr_number)}",
+                error=f"auto-merge containment failed for PR {pr_ref(pr_number)}",
             )
-        self._status().update_slot(
-            acquired_slot, f"{pr_ref(pr_number)}: arming for post-merge /learn"
+        return WorkerResult(
+            issue_number=issue_number,
+            success=False,
+            pr_number=pr_number,
+            error="strict_gate_unavailable",
         )
-        gh_state = self._gh_pr_state(pr_number)
-        pr_head_sha = (gh_state or {}).get("headRefOid", "") or ""
-        self._arming.record_arming(pr_number, self._get_pr_branch(pr_number), pr_head_sha)
-        outcome = self.wait_for_pr_terminal(issue_number, pr_number)
-        if outcome == "FAILING":
-            fix_result = self._fix_flow.attempt_ci_fixes(issue_number, pr_number, acquired_slot)
-            if fix_result is not None and fix_result.success:
-                return (
-                    self._recheck_and_arm_after_fix(issue_number, pr_number, acquired_slot)
-                    or fix_result
-                )
-            return fix_result or WorkerResult(
-                issue_number=issue_number,
-                success=False,
-                pr_number=pr_number,
-                error=f"CI fix failed after {self._options().max_fix_iterations} attempt(s)",
-            )
-        if outcome == "DIRTY":
-            return self.resolve_dirty_pr(issue_number, pr_number, acquired_slot)
-        if outcome == "BLOCKED":
-            return cast(
-                WorkerResult,
-                self._review_threads.resolve_blocked_pr(issue_number, pr_number, acquired_slot),
-            )
-        return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
 
     def wait_for_pr_terminal(self, issue_number: int, pr_number: int) -> TerminalOutcome:
-        """Poll an armed PR until it reaches a terminal or actionable state."""
+        """Poll a legacy PR until it reaches a terminal or actionable state."""
         if self._options().dry_run:
             return "TIMEOUT"
         max_wait = read_timeout_env("HEPH_PR_MERGE_MAX_WAIT", 1800)
@@ -254,30 +239,18 @@ class AutoMergeCoordinator:
         )
 
     def enable_auto_merge(self, pr_number: int, is_bot_pr: bool = False) -> bool:
-        """Enable auto-merge for a PR, with existing bot and force-merge fallbacks."""
-        try:
-            self._gh_call(["pr", "merge", str(pr_number), "--auto", "--squash"])
-            logger.info("Enabled auto-merge for PR #%s", pr_number)
-            return True
-        except subprocess.CalledProcessError as exc:
-            logger.warning("Could not enable auto-merge for PR #%s: %s", pr_number, exc)
-        if is_bot_pr:
-            try:
-                self._gh_call(["pr", "merge", str(pr_number), "--auto"])
-                logger.info("Enabled auto-merge (strategy-agnostic) for bot PR #%s", pr_number)
-                return True
-            except subprocess.CalledProcessError as exc:
-                logger.warning("Could not enable strategy-agnostic auto-merge: %s", exc)
-        if not self._options().force_merge_on_stall:
-            logger.error("PR #%s: auto-merge failed and force_merge_on_stall is not set", pr_number)
+        """Refuse legacy automatic arming until the strict-review gate exists.
+
+        The queue pipeline is the production entry point, but compatibility
+        callers must be fail-closed too: a stale implementation-GO label must
+        never reactivate auto-merge through this legacy coordinator.
+        """
+        del is_bot_pr
+        if not self.defer_auto_merge(pr_number):
+            logger.error("Could not verify auto-merge disabled for PR #%s", pr_number)
             return False
-        try:
-            self._gh_call(["pr", "merge", str(pr_number), "--squash", "--delete-branch"])
-            logger.info("Squash-merged PR #%s via fallback", pr_number)
-            return True
-        except subprocess.CalledProcessError as exc:
-            logger.error("PR #%s: both auto-merge and squash fallback failed: %s", pr_number, exc)
-            return False
+        logger.error("Refusing to arm auto-merge for PR #%s until #2055 lands", pr_number)
+        return False
 
     def pr_has_implementation_go(self, pr_number: int) -> bool:
         """Return whether a PR has the implementation-review GO label."""

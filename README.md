@@ -1,7 +1,6 @@
 # Hephaestus
 
 [![Test](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/test.yml/badge.svg)](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/test.yml)
-[![Pre-commit](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/pre-commit.yml/badge.svg)](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/pre-commit.yml)
 [![Security](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/security.yml/badge.svg)](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/security.yml)
 [![Release](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/release.yml/badge.svg)](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/release.yml)
 [![Auto Tag](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/auto-tag.yml/badge.svg)](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/auto-tag.yml)
@@ -299,7 +298,7 @@ with `--help` to see full usage.
 
 | Command | Description |
 |---|---|
-| `hephaestus-automation-loop` | Multi-repo queue-based automation pipeline using Claude Code or Codex (repo → planning → plan_review → implementation → pr_review → ci → merge_wait → finished) |
+| `hephaestus-automation-loop` | Multi-repo queue-based automation pipeline using Claude Code or Codex (repo → planning → plan_review → implementation → pr_review → finished; legacy implementation-GO inputs route through ci → merge_wait → finished during #2054) |
 | `hephaestus-plan-issues` | Bulk issue planning using Claude Code or Codex |
 | `hephaestus-implement-issues` | Bulk issue implementation using Claude Code or Codex in parallel worktrees |
 | `hephaestus-review-prs` | Read-only PR review automation using Claude Code or Codex in parallel worktrees |
@@ -465,8 +464,11 @@ hephaestus-check-complexity --help
 
 ## Contributing
 
-The `main` branch is protected; all changes go through a pull request. CI enforces
-three rules — a PR that violates any of them is blocked:
+The `main` branch is protected; all changes go through a pull request. CI blocks
+PRs that fail its issue-reference, signature, and DCO checks. During #2054,
+auto-merge remains disabled through pipeline containment and reviewer control;
+the `auto-merge-policy` check reports armed PRs but is advisory so it does not
+block the independently reviewed manual bootstrap merge.
 
 1. Create a feature branch named `<issue-number>-description`
    (`git checkout -b 123-amazing-feature`).
@@ -475,8 +477,10 @@ three rules — a PR that violates any of them is blocked:
 3. Push the branch (`git push -u origin 123-amazing-feature`).
 4. Open a pull request whose body contains the literal line `Closes #123`
    (capital `C`, no colon, on its own line — `Fixes`/`Resolves` are **not** accepted).
-5. Keep auto-merge disabled until implementation review applies
-   `state:implementation-go`; then enable it with `gh pr merge --auto --squash`.
+5. Keep auto-merge disabled while #2054's fail-closed policy is active. A
+   bootstrap PR requires an unconditional independent strict-review GO before
+   a manual squash merge; #2055 restores queue-owned auto-merge after a
+   head-bound strict-review proof.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full process.
 
