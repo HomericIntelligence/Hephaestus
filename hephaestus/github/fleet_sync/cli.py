@@ -81,7 +81,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     configure_github_throttle_from_args(args)
-    args.agent = resolve_agent(args.agent)
+    # Dry-run performs no discovery or agent work, so an offline preview must
+    # not require provider authentication.
+    args.agent = args.agent if args.dry_run else resolve_agent(args.agent)
+    if args.agent is None:
+        args.agent = "codex"
 
     setup_logging(
         level=logging.DEBUG if args.verbose else logging.INFO,
