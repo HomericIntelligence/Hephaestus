@@ -93,7 +93,7 @@ class TestDiscoverBotPrs:
             patch("hephaestus.automation.pr_discovery.get_repo_info", return_value=("o", "r")),
             patch(
                 "hephaestus.automation.pr_discovery._gh_call",
-                return_value=MagicMock(stdout=json.dumps(pulls)),
+                return_value=MagicMock(returncode=0, stdout=json.dumps(pulls)),
             ),
         ):
             result = discovery.discover_bot_prs()
@@ -142,7 +142,7 @@ class TestDiscoverFailingPrs:
             patch("hephaestus.automation.pr_discovery.get_repo_info", return_value=("o", "r")),
             patch(
                 "hephaestus.automation.pr_discovery._gh_call",
-                return_value=MagicMock(stdout=json.dumps(pulls)),
+                return_value=MagicMock(returncode=0, stdout=json.dumps(pulls)),
             ),
         ):
             result = discovery.discover_failing_prs(lambda pr: not pr.get("isDraft"))
@@ -155,3 +155,149 @@ class TestDiscoverFailingPrs:
         ):
             result = discovery.discover_failing_prs(lambda pr: True)
         assert result == {}
+
+
+class TestValidatePrOpen:
+    """Tests for direct-PR validation before the final containment sweep."""
+
+    def test_non_object_response_returns_false(self, discovery: PRDiscovery) -> None:
+        """Malformed JSON cannot abort the run before final containment executes."""
+        with patch(
+            "hephaestus.automation.pr_discovery._gh_call",
+            return_value=MagicMock(returncode=0, stdout="[]"),
+        ):
+            assert discovery.validate_pr_open(42) is False
+
+
+class TestListOpenPrsRemaining:
+    """Tests for the final open-PR discovery used by containment."""
+
+    @pytest.mark.parametrize(
+        "result",
+        [
+            MagicMock(returncode=1, stdout="", stderr="gh failed"),
+            MagicMock(returncode=0, stdout="", stderr=""),
+            MagicMock(returncode=0, stdout="{}", stderr=""),
+        ],
+        ids=["nonzero-exit", "empty-output", "non-list-json"],
+    )
+    def test_malformed_lookup_returns_unknown_sentinel(
+        self, discovery: PRDiscovery, result: MagicMock
+    ) -> None:
+        """A failed final-sweep lookup cannot be reinterpreted as a clean repo."""
+        with (
+            patch("hephaestus.automation.pr_discovery.get_repo_info", return_value=("o", "r")),
+            patch("hephaestus.automation.pr_discovery._gh_call", return_value=result),
+        ):
+            remaining = discovery.list_open_prs_remaining()
+
+        assert remaining == [{"number": -1, "title": "(unknown: gh api pulls failed)"}]
+
+    def test_malformed_nested_row_preserves_the_pr_for_containment(
+        self, discovery: PRDiscovery
+    ) -> None:
+        """Malformed nested REST fields cannot hide a known open PR from the sweep."""
+        discovery._options().include_all_authors = True
+        discovery._pr_merge_state_fn = lambda _number: ("", "")
+        raw_pr = {
+            "number": 42,
+            "title": "malformed fields",
+            "head": "not-an-object",
+            "labels": "not-a-list",
+            "user": "not-an-object",
+            "auto_merge": {"enabledAt": "now"},
+        }
+        with (
+            patch("hephaestus.automation.pr_discovery.get_repo_info", return_value=("o", "r")),
+            patch(
+                "hephaestus.automation.pr_discovery._gh_call",
+                return_value=MagicMock(returncode=0, stdout=json.dumps([raw_pr])),
+            ),
+        ):
+            remaining = discovery.list_open_prs_remaining()
+
+        assert remaining[0]["number"] == 42
+        assert remaining[0]["headRefName"] == ""
+        assert remaining[0]["labels"] == []
+
+    def test_mixed_malformed_rows_preserve_valid_prs_and_an_unknown_sentinel(
+        self, discovery: PRDiscovery
+    ) -> None:
+        """A malformed sibling cannot hide known PRs from final containment."""
+        discovery._options().include_all_authors = True
+        discovery._pr_merge_state_fn = lambda _number: ("", "")
+        raw_pr = {
+            "number": 42,
+            "title": "armed PR",
+            "head": {"ref": "feature"},
+            "labels": [],
+            "user": {"login": "viewer", "type": "User"},
+            "auto_merge": {"enabledAt": "now"},
+        }
+        with (
+            patch("hephaestus.automation.pr_discovery.get_repo_info", return_value=("o", "r")),
+            patch(
+                "hephaestus.automation.pr_discovery._gh_call",
+                return_value=MagicMock(returncode=0, stdout=json.dumps([raw_pr, "malformed"])),
+            ),
+        ):
+            remaining = discovery.list_open_prs_remaining()
+
+        assert [pr["number"] for pr in remaining] == [42, -1]
+        assert remaining[-1]["title"] == "(unknown: malformed gh api pull row)"
+
+    def test_explicit_direct_pr_scope_keeps_other_author_for_containment(
+        self, discovery: PRDiscovery
+    ) -> None:
+        """An explicit ``--prs`` target must not be dropped by the author filter."""
+        discovery._options().include_all_authors = False
+        discovery._options().prs = [42]
+        discovery._viewer_login = "viewer"
+        discovery._pr_merge_state_fn = lambda _number: ("", "")
+        raw_pr = {
+            "number": 42,
+            "title": "teammate PR",
+            "head": {"ref": "teammate-head"},
+            "labels": [],
+            "user": {"login": "teammate", "type": "User"},
+            "auto_merge": {"enabledAt": "now"},
+        }
+        with (
+            patch("hephaestus.automation.pr_discovery.get_repo_info", return_value=("o", "r")),
+            patch(
+                "hephaestus.automation.pr_discovery._gh_call",
+                return_value=MagicMock(returncode=0, stdout=json.dumps([raw_pr])),
+            ),
+        ):
+            remaining = discovery.list_open_prs_remaining()
+
+        assert [pr["number"] for pr in remaining] == [42]
+
+    def test_malformed_merge_state_preserves_the_pr_for_containment(
+        self, discovery: PRDiscovery
+    ) -> None:
+        """A non-object merge-state response is unknown, not a final-sweep exception."""
+        discovery._options().include_all_authors = True
+        raw_pr = {
+            "number": 42,
+            "title": "armed PR",
+            "head": {"ref": "feature"},
+            "labels": [],
+            "user": {"login": "viewer", "type": "User"},
+            "auto_merge": {"enabledAt": "now"},
+        }
+
+        def fake_gh_call(argv: list[str], **_kwargs: object) -> MagicMock:
+            if argv[:2] == ["api", "--paginate"]:
+                return MagicMock(returncode=0, stdout=json.dumps([raw_pr]))
+            assert argv[:2] == ["pr", "view"]
+            return MagicMock(returncode=0, stdout="null")
+
+        with (
+            patch("hephaestus.automation.pr_discovery.get_repo_info", return_value=("o", "r")),
+            patch("hephaestus.automation.pr_discovery._gh_call", side_effect=fake_gh_call),
+        ):
+            remaining = discovery.list_open_prs_remaining()
+
+        assert remaining[0]["number"] == 42
+        assert remaining[0]["mergeStateStatus"] == ""

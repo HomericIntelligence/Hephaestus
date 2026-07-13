@@ -7,7 +7,12 @@ from unittest.mock import patch
 
 from hephaestus.automation.pipeline.jobs import AgentJob, BuildTestJob, GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition
-from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
+from hephaestus.automation.pipeline.stages import (
+    Continue,
+    JobRequest,
+    StageOutcome,
+    implementation as implementation_module,
+)
 from hephaestus.automation.pipeline.stages.implementation import (
     GIT_ERROR_RETRY_CAP,
     PRE_PR_TEST_ARGV,
@@ -63,6 +68,13 @@ class TestComposedPromptBuilders:
 
         assert "## Prior Learnings from Team Knowledge Base" in prompt
         assert prompt.endswith("Use the retry helper.")
+
+    def test_stage_contract_does_not_make_implementation_go_a_merge_boundary(self) -> None:
+        """The module contract must describe the bootstrap containment semantics."""
+        contract = implementation_module.__doc__ or ""
+
+        assert "until ``state:implementation-go``" not in contract
+        assert "does not create merge eligibility" in contract
 
     def test_test_fix_prompt_carries_failure_output(self) -> None:
         """The test-fix resume prompt embeds the failing pytest output."""
@@ -287,6 +299,23 @@ class TestGate:
         assert item.payload["existing_pr"] is True
         assert github.mutation_log == [("defer_auto_merge", (1001,))]
 
+    def test_gate_existing_pr_fails_closed_when_auto_merge_deferral_cannot_be_verified(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Existing-PR adoption stops before worktree preparation on failed containment."""
+
+        class DeferFailsGitHub(FakeStageGitHub):
+            def defer_auto_merge(self, pr_number: int) -> None:
+                raise RuntimeError(f"PR #{pr_number} remains armed")
+
+        stage = ImplementationStage()
+        ctx = make_ctx(github=DeferFailsGitHub(open_pr=1001))
+        item = make_work_item(issue=1, state="GATE")
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "auto_merge_disable_failed"
+        )
+
     def test_adopted_worktree_job_syncs_without_trunk_reset(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -425,7 +454,7 @@ class TestAgentErrorPingPongBound:
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.FINISH_FAIL
         assert result.note == "agent_error_exhausted"
-        assert github.mutation_log == []  # no labels, no deferral on the dead path
+        assert github.mutation_log == [("defer_auto_merge", (1001,))]
 
     def test_flag_never_survives_the_fresh_implement_path(
         self, make_ctx: Any, make_work_item: Any
@@ -969,6 +998,25 @@ class TestCommitPushAndPrCreate:
         # The PR body is a get_pr_description body carrying the closing line.
         assert "Closes #9" in github.prs[1001]["body"]
         assert github.prs[1001]["title"] == "Add the widget"
+
+    def test_pr_create_fails_explicitly_when_auto_merge_deferral_cannot_be_verified(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Fresh PR creation exposes a failed containment read-back to routing."""
+
+        class DeferFailsGitHub(FakeStageGitHub):
+            def defer_auto_merge(self, pr_number: int) -> None:
+                raise RuntimeError(f"PR #{pr_number} remains armed")
+
+        stage = ImplementationStage()
+        ctx = make_ctx(github=DeferFailsGitHub())
+        item = make_work_item(issue=9, state="PR_CREATE")
+        item.branch = "9-auto-impl"
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "auto_merge_disable_failed"
+        )
+        assert item.pr == 1001
 
     def test_pr_create_is_idempotent_for_existing_pr(
         self, make_ctx: Any, make_work_item: Any

@@ -159,8 +159,8 @@ class TestScanFileDetectsViolations:
         findings = scan_file(md, tmp_path)
         assert any(f.rule == "wrong-merge-strategy" for f in findings)
 
-    def test_detects_missing_auto_flag(self, tmp_path: Path) -> None:
-        """Should flag gh pr merge --squash when --auto is missing."""
+    def test_detects_auto_merge_flag(self, tmp_path: Path) -> None:
+        """Should flag gh pr merge --auto --squash during the strict-gate bootstrap."""
         md = make_md(
             tmp_path,
             "bad.md",
@@ -168,7 +168,7 @@ class TestScanFileDetectsViolations:
             # Doc
 
             ```bash
-            gh pr merge --squash
+            gh pr merge --auto --squash
             ```
             """,
         )
@@ -247,8 +247,8 @@ class TestScanFilePassesCleanExamples:
         )
         assert scan_file(md, tmp_path) == []
 
-    def test_passes_squash_merge_strategy(self, tmp_path: Path) -> None:
-        """Gh pr merge --auto --squash should produce no findings."""
+    def test_passes_manual_squash_merge_strategy(self, tmp_path: Path) -> None:
+        """Gh pr merge --squash should produce no findings."""
         md = make_md(
             tmp_path,
             "good.md",
@@ -256,14 +256,14 @@ class TestScanFilePassesCleanExamples:
             # Doc
 
             ```bash
-            gh pr merge --auto --squash
+            gh pr merge --squash
             ```
             """,
         )
         assert scan_file(md, tmp_path) == []
 
-    def test_passes_squash_merge_strategy_with_pr_number(self, tmp_path: Path) -> None:
-        """Gh pr merge with PR number and --auto --squash should produce no findings."""
+    def test_passes_manual_squash_merge_strategy_with_pr_number(self, tmp_path: Path) -> None:
+        """Gh pr merge with PR number and --squash should produce no findings."""
         md = make_md(
             tmp_path,
             "good.md",
@@ -271,14 +271,14 @@ class TestScanFilePassesCleanExamples:
             # Doc
 
             ```bash
-            gh pr merge 42 --auto --squash
+            gh pr merge 42 --squash
             ```
             """,
         )
         assert scan_file(md, tmp_path) == []
 
-    def test_passes_squash_merge_strategy_reversed_order(self, tmp_path: Path) -> None:
-        """Gh pr merge --squash --auto (flags reversed) should produce no findings."""
+    def test_passes_auto_merge_containment_command(self, tmp_path: Path) -> None:
+        """Disabling an existing arm is containment, not a merge strategy."""
         md = make_md(
             tmp_path,
             "good.md",
@@ -286,7 +286,22 @@ class TestScanFilePassesCleanExamples:
             # Doc
 
             ```bash
-            gh pr merge --squash --auto
+            gh pr merge 42 --disable-auto
+            ```
+            """,
+        )
+        assert scan_file(md, tmp_path) == []
+
+    def test_passes_manual_squash_merge_with_extra_safe_flag(self, tmp_path: Path) -> None:
+        """A manual squash merge may include unrelated non-strategy flags."""
+        md = make_md(
+            tmp_path,
+            "good.md",
+            """\
+            # Doc
+
+            ```bash
+            gh pr merge --squash --delete-branch
             ```
             """,
         )

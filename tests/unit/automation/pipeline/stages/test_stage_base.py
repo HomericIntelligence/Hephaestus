@@ -15,7 +15,6 @@ from hephaestus.automation.pipeline.stages import (
     Stage,
     base as stage_base,
     ci,
-    merge_wait,
 )
 from hephaestus.automation.pipeline.stages.base import (
     BACKOFF_CAP_S,
@@ -113,13 +112,12 @@ class TestStepResultTypes:
 
 
 class TestSharedBackoffCap:
-    """The legacy poll backoff cap is owned once by the stage base module."""
+    """The active CI poll backoff cap is owned once by the stage base module."""
 
-    def test_backoff_cap_is_shared_by_ci_and_merge_wait(self) -> None:
-        """Ci and merge_wait read the same exported cap from base.py."""
+    def test_backoff_cap_is_shared_by_ci(self) -> None:
+        """The active CI stage reads the exported cap from base.py."""
         assert BACKOFF_CAP_S == 60
         assert ci.BACKOFF_CAP_S == BACKOFF_CAP_S
-        assert merge_wait.BACKOFF_CAP_S == BACKOFF_CAP_S
 
 
 class TestAgentProvider:

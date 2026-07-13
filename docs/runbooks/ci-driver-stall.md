@@ -1,71 +1,41 @@
-# Runbook: CI-Driver Stall (Green-but-BLOCKED PR)
+# Runbook: CI-Driver Stall
 
-Use this when the CI/merge stage keeps running but PRs never merge — they sit
-armed for auto-merge with all checks green, yet stay un-mergeable. The queue
-pipeline handles this in `hephaestus/automation/pipeline/stages/merge_wait.py`; the
-`hephaestus-drive-prs-green` console script is a thin queue-pipeline wrapper for
-the ci/merge_wait slice.
+This runbook is inactive during the #2054 fail-closed bootstrap. The queue
+pipeline does not arm, retry, rebase, or address an open PR from `merge_wait`.
+It verifies auto-merge is disabled, records `strict_gate_unavailable`, and
+preserves post-merge learn only for a PR that was already merged.
 
-## Symptom
+## Containment
 
-- In the default pipeline, `=== Pipeline summary ===` shows the affected issue
-  cycling through or ending around `merge_wait`, `ci`, or `pr_review`, but the
-  PR remains open and armed.
-- Pipeline logs show one of the `merge_wait` routes:
-  - `merge_wait:N: PR #M still BLOCKED after address budget; regressing`
-  - `merge_wait:N: PR #M genuinely stuck after address budget; skipping`
-  - `merge_wait:N: PR #M still OPEN after ...; timing out`
-- `mergeStateStatus` for the PR is `BLOCKED` even though every check is green
-  and auto-merge is armed.
-
-## Root cause
-
-The merge classifier treats `mergeStateStatus == "BLOCKED"` as a merge gate
-that cannot be satisfied by waiting alone. The common cause is
-**required-context drift**: an org ruleset requires a check context that the
-repo's CI never emits, so the PR is `BLOCKED` permanently. A second cause is an
-unresolved review thread when the ruleset requires
-`required_review_thread_resolution`.
-
-In the queue pipeline, `merge_wait` addresses blocked threads while the
-`blocked_address` budget remains. After that budget is exhausted, genuinely
-stuck PRs receive `state:skip`; other blocked PRs regress to `pr_review` via
-`blocked_exhausted`.
-
-## Diagnose
+If an open PR has `autoMergeRequest` present, disable it and verify the
+read-back before doing any other automation work:
 
 ```bash
-gh pr view <N> --json mergeStateStatus,statusCheckRollup,autoMergeRequest
+gh pr view <N> --json state,autoMergeRequest
+gh pr merge <N> --disable-auto
+gh pr view <N> --json state,autoMergeRequest
 ```
 
-Armed (`autoMergeRequest` present) + all checks green + `mergeStateStatus`
-`BLOCKED` = a gating condition CI cannot satisfy on its own. Then inspect what
-is actually required:
+An unreadable state, a failed disable request, or a read-back that remains armed
+is a blocking failure. Do not retry the legacy CI-driver recovery flow and do
+not enable auto-merge manually.
+
+## Resolution
+
+Obtain an unconditional independent strict-review GO and green required checks.
+A maintainer may then perform a manual squash merge:
 
 ```bash
-# Org/repo ruleset: which check contexts are REQUIRED?
-gh api repos/{owner}/{repo}/rulesets
-gh api repos/{owner}/{repo}/rulesets/{id}
-
-# Any unresolved review threads holding the merge?
-gh pr view <N> --json reviewDecision,reviewRequests
+gh pr merge <N> --squash
 ```
 
-## Fix
+## Follow-Up
 
-1. **Required-context drift** — reconcile the ruleset's required check contexts
-   with the contexts CI actually emits. Either remove the obsolete required
-   context from the ruleset, or add a CI job that emits it. A push to re-run CI
-   then re-queues the (now-present) required context.
-2. **Unresolved threads** — if the ruleset requires
-   `required_review_thread_resolution`, resolve the lingering (often bot)
-   review threads, then the armed auto-merge proceeds on its own.
+Issue #2055 will add the head-bound strict-review proof and its single-authority
+merge gate. It must provide a new runbook for any strict-gated recovery behavior
+before this runbook is expanded again.
 
-After the gate is satisfied, the already-armed PR merges without re-running the
-driver; re-run `hephaestus-automation-loop` only if you need to
-drive other issues, continue a regressed item, or refresh the pipeline summary.
-
-## See also
+## See Also
 
 - [Automation loop crashed mid-issue](automation-loop-crash.md)
-- PR / state-label policy: [`../../CLAUDE.md`](../../CLAUDE.md)
+- PR and state-label policy: [`../../CLAUDE.md`](../../CLAUDE.md)

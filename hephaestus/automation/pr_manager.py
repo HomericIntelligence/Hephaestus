@@ -22,6 +22,7 @@ from hephaestus.agents.runtime import (
     run_agent_text,
     uses_direct_agent_runner,
 )
+from hephaestus.github.auto_merge import defer_auto_merge, defer_auto_merge_batch
 
 from .agent_config import DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT
 from .ci_check_inspector import FAILING_CHECK_CONCLUSIONS
@@ -29,7 +30,10 @@ from .claude_invoke import invoke_claude_with_session
 from .claude_models import git_message_model, implementer_model
 from .git_utils import get_repo_slug, issue_ref, run
 from .github_api import (
+    OpenPrDiscoveryIncompleteError,
+    _find_open_prs_for_head,
     _gh_call,
+    _select_open_pr_for_base,
     fetch_issue_info,
     gh_issue_add_labels,
     gh_issue_remove_labels,
@@ -587,22 +591,39 @@ def _branch_has_commits_vs_base(branch_name: str, base: str, worktree_path: Path
     return True
 
 
-def _pr_auto_merge_enabled(pr_number: int) -> bool:
-    """Return whether GitHub currently has auto-merge armed for a PR."""
-    result = _gh_call(["pr", "view", str(pr_number), "--json", "autoMergeRequest"])
-    data = json.loads(result.stdout or "{}")
-    return data.get("autoMergeRequest") is not None
-
-
 def ensure_pr_auto_merge_deferred(pr_number: int) -> None:
-    """Disable premature auto-merge before implementation review reaches GO."""
-    if not _pr_auto_merge_enabled(pr_number):
-        return
-    _gh_call(["pr", "merge", str(pr_number), "--disable-auto"])
-    logger.warning(
-        "Disabled premature auto-merge for PR #%s; implementation review has not reached GO yet",
-        pr_number,
+    """Disable auto-merge and verify it remains disabled while the PR is open."""
+    if not defer_auto_merge(pr_number, lambda args: _gh_call(args, check=False)):
+        raise RuntimeError(f"could not verify auto-merge disabled for PR #{pr_number}")
+
+
+def _find_and_contain_open_prs(branch_name: str) -> list[tuple[int, str]]:
+    """Contain known head PRs before rejecting an incomplete discovery result."""
+    discovery_error: OpenPrDiscoveryIncompleteError | None = None
+    try:
+        open_prs = _find_open_prs_for_head(branch_name)
+    except OpenPrDiscoveryIncompleteError as exc:
+        open_prs = exc.open_prs
+        discovery_error = exc
+    except Exception as exc:
+        raise RuntimeError(
+            f"could not verify existing PR state for branch {branch_name!r}"
+        ) from exc
+
+    containment_failures = defer_auto_merge_batch(
+        (open_pr_number for open_pr_number, _open_pr_base in open_prs),
+        ensure_pr_auto_merge_deferred,
     )
+    if containment_failures:
+        raise RuntimeError(
+            "could not verify auto-merge disabled for existing PR(s): "
+            + "; ".join(containment_failures)
+        )
+    if discovery_error is not None:
+        raise RuntimeError(
+            f"could not verify existing PR state for branch {branch_name!r}"
+        ) from discovery_error
+    return open_prs
 
 
 def mark_pr_implementation_go(pr_number: int) -> None:
@@ -733,9 +754,11 @@ def pr_has_implementation_state_label(pr_number: int) -> tuple[bool, bool]:
 
 
 def enable_auto_merge_after_implementation_go(pr_number: int) -> None:
-    """Arm auto-merge after implementation review has labeled the PR GO."""
-    _gh_call(["pr", "merge", str(pr_number), "--auto", "--squash"])
-    logger.info("Enabled auto-merge for implementation-GO PR #%s", pr_number)
+    """Refuse legacy auto-merge arming until #2055 supplies strict proof."""
+    ensure_pr_auto_merge_deferred(pr_number)
+    raise RuntimeError(
+        f"refusing to arm auto-merge for PR #{pr_number}: strict-review gate unavailable"
+    )
 
 
 def commit_changes(
@@ -882,8 +905,8 @@ def ensure_pr_created(
         issue_number: Issue number
         branch_name: Git branch name
         worktree_path: Path to worktree
-        auto_merge: Whether the caller eventually wants auto-merge. The PR is
-            still created with auto-merge disabled until implementation review GO.
+        auto_merge: Deprecated compatibility flag; auto-merge remains disabled
+            until #2055 supplies a head-bound strict-review proof.
         status_tracker: StatusTracker instance for slot updates (optional)
         slot_id: Worker slot ID for status updates
         agent: Selected implementation agent for generated PR metadata.
@@ -947,22 +970,20 @@ def ensure_pr_created(
 
     # Check if PR exists, if not create it
     _update_slot(f"{issue_ref(issue_number)}: Creating PR")
-    pr_number = None
+    open_prs = _find_and_contain_open_prs(branch_name)
     try:
-        result = _gh_call(["pr", "list", "--head", branch_name, "--json", "number", "--limit", "1"])
-        pr_data = json.loads(result.stdout)
-        if pr_data and len(pr_data) > 0:
-            pr_number = cast(int, pr_data[0]["number"])
-            logger.info("PR #%s already exists", pr_number)
-            return pr_number
-    except Exception as e:  # broad catch: gh CLI + JSON parsing; fallback is to create PR
-        logger.debug("Could not find existing PR: %s", e)
+        pr_number = _select_open_pr_for_base(open_prs, base_branch)
+    except Exception as e:
+        raise RuntimeError(f"could not verify existing PR state for branch {branch_name!r}") from e
+    if pr_number is not None:
+        logger.info("PR #%s already exists", pr_number)
+        return pr_number
 
     # PR doesn't exist, create it
     logger.warning("No PR found for branch %s, creating one...", branch_name)
     if auto_merge:
         logger.info(
-            "Deferring auto-merge for branch %s until implementation review marks the PR GO",
+            "Keeping auto-merge disabled for branch %s until the strict-review gate exists",
             branch_name,
         )
     pr_number = create_pr(
@@ -992,7 +1013,7 @@ def create_pr(
     Args:
         issue_number: Issue number
         branch_name: Git branch name
-        auto_merge: Whether to enable auto-merge on the PR
+        auto_merge: Deprecated compatibility flag; ignored while #2054 is active.
         agent: Selected implementation agent for generated PR metadata.
         base: Base branch used for changed-file and commit context.
         worktree_path: Optional worktree path used to invoke the lightweight
@@ -1025,10 +1046,15 @@ def create_pr(
         generated_by=f"{_agent_display_name(agent)} via Hephaestus automation.",
     )
 
+    if auto_merge:
+        logger.warning(
+            "Ignoring auto_merge=True for branch %s while the strict-review gate is unavailable",
+            branch_name,
+        )
     return gh_pr_create(
         branch=branch_name,
         title=pr_title,
         body=pr_body,
-        auto_merge=auto_merge,
+        auto_merge=False,
         base=base,
     )

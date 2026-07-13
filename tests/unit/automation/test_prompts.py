@@ -44,8 +44,8 @@ class TestImplementationPrompt:
         assert "DO NOT run `git commit`" in out
         assert "`git push`" in out
         assert "`gh pr create`" in out
-        assert "Keep auto-merge disabled" in out
-        assert "state:implementation-go" in out
+        assert "Keep auto-merge disabled pending the queue-owned strict-review gate" in out
+        assert "state:implementation-go" not in out
         # The implementation agent should not run the PR verification/mutation commands.
         assert "gh pr view" not in out
         assert "gh api graphql" not in out
@@ -90,9 +90,10 @@ class TestPRReviewAnalysisPrompt:
     def test_omits_policy_checks_defers_to_ci_gates(self) -> None:
         """The reviewer no longer enforces repo policy — CI gates own it.
 
-        Closes #N / signed-commits / deferred-auto-merge are enforced by the
-        pr-policy + auto-merge-policy CI gates, not the in-loop LLM reviewer
-        (which fabricated false POLICY VIOLATIONs from empty/stale data).
+        Closes #N and signed commits are enforced by CI. Auto-merge containment
+        is enforced by the queue pipeline and human strict review, not the
+        in-loop LLM reviewer (which fabricated false POLICY VIOLATIONs from
+        empty/stale data).
         """
         out = prompts.get_pr_review_analysis_prompt(pr_number=1, issue_number=1)
         # The removed policy machinery must be gone.
@@ -103,6 +104,11 @@ class TestPRReviewAnalysisPrompt:
         assert "Policy checks (MANDATORY" not in out
         # But the prompt should tell the reviewer the CI gates own policy.
         assert "pr-policy" in out
+        assert "pipeline containment" in out
+        assert "human strict review" in out
+        assert "acceptable to merge" not in out
+        assert "eligible for independent strict review" in out
+        assert "pipeline containment" in (prompts.get_pr_review_analysis_prompt.__doc__ or "")
         # The code-quality verdict contract stays intact.
         assert "Verdict: NOGO" in out
         assert "Verdict: GO" in out

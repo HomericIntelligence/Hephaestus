@@ -521,7 +521,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
         _store_true(
             "--no-auto-merge",
             "no_auto_merge",
-            "Don't enable auto-merge after implementation-review GO",
+            "(Deprecated, ignored) auto-merge stays disabled pending the strict-review gate",
         ),
         _dry_run_spec(
             _dry_help("Suppress GitHub mutations and git pushes (no PR creation, no commits).")
@@ -821,6 +821,14 @@ def test_parser_action_specs_are_preserved(
 ) -> None:
     """Affected parsers keep their current action specs after common-helper extraction."""
     assert _sorted_specs(_specs(factory())) == _sorted_specs(EXPECTED_SPECS[name])
+
+
+def test_ci_driver_help_describes_the_strict_review_gate() -> None:
+    """The CI driver must not advertise automatic merging while #2054 is active."""
+    description = ci_driver._build_parser().description or ""
+
+    assert "strict-review auto-merge gate" in description
+    assert "enable auto-merge" not in description
 
 
 def test_build_automation_parser_does_not_add_throttle_by_default() -> None:

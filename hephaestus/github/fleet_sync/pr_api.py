@@ -6,6 +6,7 @@ import json
 import subprocess
 from typing import Any
 
+from hephaestus.github.auto_merge import defer_auto_merge
 from hephaestus.github.client import gh_call
 from hephaestus.github.fleet_sync.models import PRInfo, PRStatus
 from hephaestus.logging.utils import get_logger
@@ -128,18 +129,22 @@ def list_prs(repo: str, org: str) -> list[PRInfo]:
     return out
 
 
+def _defer_auto_merge(pr: PRInfo, org: str) -> bool:
+    """Disable a pre-existing fleet PR arm and verify the read-back."""
+    return defer_auto_merge(
+        pr.number,
+        lambda args: _gh(args, repo=pr.repo, org=org, check=False),
+    )
+
+
 def merge_pr(pr: PRInfo, org: str, dry_run: bool = False) -> bool:
-    """Merge a ready PR via merge commit."""
-    logger.info("  Merging PR #%d via merge commit...", pr.number)
-    try:
-        _gh(
-            ["pr", "merge", str(pr.number), "--merge", "--auto"],
-            repo=pr.repo,
-            org=org,
-            dry_run=dry_run,
-        )
-        return True
-    except (subprocess.CalledProcessError, RuntimeError) as e:
-        stderr = getattr(e, "stderr", "") or str(e)
-        logger.error("  Failed to merge PR #%d: %s", pr.number, stderr)
+    """Contain an existing arm, then refuse fleet-sync automatic merging."""
+    if dry_run:
+        logger.info("  [dry-run] Would verify auto-merge is disabled for PR #%d", pr.number)
         return False
+    if not _defer_auto_merge(pr, org):
+        return False
+    logger.error(
+        "  Refusing to merge PR #%d while the strict-review gate is unavailable", pr.number
+    )
+    return False

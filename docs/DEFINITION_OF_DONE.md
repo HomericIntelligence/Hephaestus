@@ -14,7 +14,7 @@ A piece of work is **done** when every item below is true.
 | 1 | Branch named `<issue-number>-<description>` | Convention (PR reviewer) |
 | 2 | PR body contains the literal line `Closes #<issue-number>` (capital C, no colon, on its own line) | CI gate `pr-policy` (`.github/workflows/_required.yml`) |
 | 3 | Every commit on the branch is cryptographically signed and DCO-signed (`git commit -S -s`) | CI gate `pr-policy` |
-| 4 | Auto-merge is disabled until `state:implementation-go`, then enabled with `--squash` (NOT `--rebase`; the repo disallows rebase merges) | CI gate `pr-policy` |
+| 4 | Auto-merge remains disabled during #2054's fail-closed bootstrap. An unconditional independent strict-review GO is required before a manual squash merge; #2055 restores queue-owned arming. | Advisory `auto-merge-policy` and human review |
 | 5 | Commit messages follow Conventional Commits (`type(scope): description`) | CI gate `pr-policy` (Check 3) + local `commit-msg` hook `conventional-commit-msg` |
 | 6 | `pixi run ruff check hephaestus/ tests/` passes | CI job `lint` |
 | 7 | `pixi run ruff format --check hephaestus/ tests/` passes (no files would be reformatted) | CI job `lint` |
@@ -34,11 +34,12 @@ A piece of work is **done** when every item below is true.
 | 21 | Pre-commit hooks pass on the diff | CI job `lint` (pre-commit suite folded into `lint` per #1173) |
 | 22 | Every review thread is resolved (including bot-authored threads) | Org ruleset `required_review_thread_resolution` |
 
-> **Which of these actually block the merge button?** All of the CI jobs above
-> are aggregated into a single required status check, `required-checks-gate`.
-> See [`docs/ci/required-checks.md`](ci/required-checks.md) for the exact
-> required-context list, why a single aggregator is used, and how to (re-)apply
-> branch protection.
+> **Which of these actually block the merge button?** Both the classic branch
+> protection contexts (`required-checks-gate` and the two Python 3.12 matrix
+> contexts) and the direct GitHub ruleset contexts documented in
+> [`docs/ci/required-checks.md`](ci/required-checks.md) do. The aggregate gate
+> excludes advisory `auto-merge-policy` during #2054 so it cannot block the
+> independently reviewed manual bootstrap merge.
 
 ## For new features
 

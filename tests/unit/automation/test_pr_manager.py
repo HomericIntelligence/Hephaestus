@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hephaestus.automation import pr_manager
+from hephaestus.automation.github_api import OpenPrDiscoveryIncompleteError
 from hephaestus.automation.session_naming import AGENT_COMMIT_MESSAGE, AGENT_PR_MESSAGE
 
 
@@ -336,12 +337,155 @@ class TestEnsurePRCreated:
                 _status("refs/heads/branch"),  # ls-remote (already pushed)
             ]
         )
-        gh_mock = _status('[{"number": 99}]')
         with (
             patch.object(pr_manager, "run", run_mock),
-            patch.object(pr_manager, "_gh_call", return_value=gh_mock),
+            patch.object(
+                pr_manager,
+                "_find_open_prs_for_head",
+                return_value=[(99, "master")],
+            ) as find_open_pr,
+            patch.object(pr_manager, "ensure_pr_auto_merge_deferred") as defer,
         ):
             assert pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt")) == 99
+        find_open_pr.assert_called_once_with("branch")
+        defer.assert_called_once_with(99)
+
+    def test_existing_pr_containment_failure_does_not_fall_through_to_creation(self) -> None:
+        """A reused PR with an unverified arm must fail instead of creating a duplicate."""
+        run_mock = MagicMock(
+            side_effect=[
+                _status("abc1234 commit msg"),
+                _status("origin/master"),
+                _status("2"),
+                _status("refs/heads/branch"),
+            ]
+        )
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "_find_open_prs_for_head", return_value=[(99, "master")]),
+            patch.object(
+                pr_manager,
+                "ensure_pr_auto_merge_deferred",
+                side_effect=RuntimeError("PR remains armed"),
+            ),
+            patch.object(pr_manager, "create_pr") as create_pr,
+        ):
+            with pytest.raises(RuntimeError, match="PR remains armed"):
+                pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt"))
+        create_pr.assert_not_called()
+
+    def test_existing_pr_containment_attempts_later_siblings_after_a_failure(self) -> None:
+        """A failed readback cannot stop containment of a later same-head PR."""
+        run_mock = MagicMock(
+            side_effect=[
+                _status("abc1234 commit msg"),
+                _status("origin/master"),
+                _status("2"),
+                _status("refs/heads/branch"),
+            ]
+        )
+        deferred: list[int] = []
+
+        def defer(pr_number: int) -> None:
+            deferred.append(pr_number)
+            if pr_number == 99:
+                raise RuntimeError("PR #99 remains armed")
+
+        with (
+            patch.object(
+                pr_manager,
+                "_find_open_prs_for_head",
+                return_value=[(99, "master"), (100, "release")],
+            ),
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "ensure_pr_auto_merge_deferred", side_effect=defer),
+        ):
+            with pytest.raises(RuntimeError, match="PR #99 remains armed"):
+                pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt"))
+
+        assert deferred == [99, 100]
+
+    def test_existing_pr_contains_valid_rows_before_rejecting_incomplete_discovery(self) -> None:
+        """A legacy lookup error cannot prevent containment of known sibling PRs."""
+        run_mock = MagicMock(
+            side_effect=[
+                _status("abc1234 commit msg"),
+                _status("origin/master"),
+                _status("2"),
+                _status("refs/heads/branch"),
+            ]
+        )
+        deferred: list[int] = []
+        incomplete = OpenPrDiscoveryIncompleteError(
+            "branch", [(99, "master"), (100, "release")], "malformed PR row"
+        )
+
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "_find_open_prs_for_head", side_effect=incomplete),
+            patch.object(
+                pr_manager,
+                "ensure_pr_auto_merge_deferred",
+                side_effect=lambda pr_number: deferred.append(pr_number),
+            ),
+        ):
+            with pytest.raises(RuntimeError, match="could not verify existing PR state"):
+                pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt"))
+
+        assert deferred == [99, 100]
+
+    def test_existing_pr_contains_every_open_pr_on_the_head(self) -> None:
+        """A target-base PR is reused only after every head PR is contained."""
+        run_mock = MagicMock(
+            side_effect=[
+                _status("abc1234 commit msg"),
+                _status("origin/master"),
+                _status("2"),
+                _status("refs/heads/branch"),
+            ]
+        )
+        with (
+            patch.object(
+                pr_manager,
+                "_find_open_prs_for_head",
+                return_value=[(99, "master"), (100, "release")],
+            ),
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "ensure_pr_auto_merge_deferred") as defer,
+        ):
+            assert pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt")) == 99
+
+        assert [call.args[0] for call in defer.call_args_list] == [99, 100]
+
+    def test_ambiguous_target_prs_are_contained_before_legacy_creation_refuses(self) -> None:
+        """The legacy caller contains ambiguous PRs before surfacing the ambiguity."""
+        run_mock = MagicMock(
+            side_effect=[
+                _status("abc1234 commit msg"),
+                _status("origin/master"),
+                _status("2"),
+                _status("refs/heads/branch"),
+            ]
+        )
+        with (
+            patch.object(
+                pr_manager,
+                "_find_open_prs_for_head",
+                return_value=[(99, "master"), (100, "master")],
+            ),
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "ensure_pr_auto_merge_deferred") as defer,
+        ):
+            with pytest.raises(RuntimeError, match="could not verify existing PR state"):
+                pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt"))
+
+        assert [call.args[0] for call in defer.call_args_list] == [99, 100]
+
+    def test_auto_merge_deferral_rejects_an_incomplete_open_pr_state(self) -> None:
+        """Legacy review containment requires an explicit autoMergeRequest field."""
+        with patch.object(pr_manager, "_gh_call", return_value=_status('{"state": "OPEN"}')):
+            with pytest.raises(RuntimeError, match="could not verify auto-merge disabled"):
+                pr_manager.ensure_pr_auto_merge_deferred(99)
 
     def test_creates_pr_when_missing(self) -> None:
         run_mock = MagicMock(
@@ -353,10 +497,9 @@ class TestEnsurePRCreated:
                 _status(""),  # git push
             ]
         )
-        gh_mock = _status("[]")
         with (
             patch.object(pr_manager, "run", run_mock),
-            patch.object(pr_manager, "_gh_call", return_value=gh_mock),
+            patch.object(pr_manager, "_find_open_prs_for_head", return_value=[]),
             patch.object(pr_manager, "create_pr", return_value=42) as create_mock,
         ):
             assert pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt")) == 42
@@ -379,10 +522,9 @@ class TestEnsurePRCreated:
                 _status("refs/heads/branch"),  # ls-remote (already pushed)
             ]
         )
-        gh_mock = _status("[]")
         with (
             patch.object(pr_manager, "run", run_mock),
-            patch.object(pr_manager, "_gh_call", return_value=gh_mock),
+            patch.object(pr_manager, "_find_open_prs_for_head", return_value=[]),
             patch.object(pr_manager, "create_pr", return_value=42) as create_mock,
         ):
             assert pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt"), agent="codex") == 42
@@ -400,6 +542,23 @@ class TestEnsurePRCreated:
 class TestCreatePR:
     """Tests for create p r."""
 
+    def test_retired_pr_manager_armer_contains_before_refusing(self) -> None:
+        """The direct legacy armer follows view-disable-readback before rejecting."""
+        responses = iter(
+            [
+                _status('{"state": "OPEN", "autoMergeRequest": {"enabledAt": "now"}}'),
+                _status(""),
+                _status('{"state": "OPEN", "autoMergeRequest": null}'),
+            ]
+        )
+        with patch.object(
+            pr_manager,
+            "_gh_call",
+            side_effect=lambda *_args, **_kwargs: next(responses),
+        ):
+            with pytest.raises(RuntimeError, match="strict-review gate unavailable"):
+                pr_manager.enable_auto_merge_after_implementation_go(42)
+
     def test_invokes_gh_pr_create(self) -> None:
         issue = MagicMock(title="Add feature X")
         with (
@@ -410,7 +569,7 @@ class TestCreatePR:
         kwargs = gh_mock.call_args.kwargs
         assert kwargs["branch"] == "branch"
         assert "Add feature X" in kwargs["title"]
-        assert kwargs["auto_merge"] is True
+        assert kwargs["auto_merge"] is False
         assert kwargs["base"] == "main"
         assert "Closes #5" in kwargs["body"]
         assert "Automated implementation via Codex" in kwargs["body"]

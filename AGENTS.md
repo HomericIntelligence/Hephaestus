@@ -14,6 +14,12 @@ pool. Each agent job runs either **Claude Code** or **Codex**, chosen via the
 optional `--agent` CLI flag or auto-detected with a Claude preference when
 omitted (see `hephaestus.agents.runtime.add_agent_argument`).
 
+**Temporary merge policy (#2054):** all automatic auto-merge armers are
+fail-closed while #2055 adds the head-bound `strict_review` queue stage. The
+pipeline verifies auto-merge is disabled for open PRs and stops at
+`strict_gate_unavailable`; bootstrap PRs require an unconditional independent
+strict-review GO and a manual squash merge.
+
 | Queue stage | Module | Purpose |
 |-------------|--------|---------|
 | repo | `hephaestus.automation.pipeline.stages.repo` | Clone/discover, classify issues/PRs, and seed entry queues |
@@ -22,7 +28,7 @@ omitted (see `hephaestus.agents.runtime.add_agent_argument`).
 | implementation | `hephaestus.automation.pipeline.stages.implementation` | Worktree creation, implementation, tests, commit/push, and PR creation |
 | pr_review | `hephaestus.automation.pipeline.stages.pr_review` | Inline PR review, validation, comment addressing, and implementation labels |
 | ci | `hephaestus.automation.pipeline.stages.ci` | Non-blocking CI classification and CI-fix routing |
-| merge_wait | `hephaestus.automation.pipeline.stages.merge_wait` | Auto-merge arming, merge polling, dirty/blocked handling, and post-merge learn |
+| merge_wait | `hephaestus.automation.pipeline.stages.merge_wait` | Verifies auto-merge is disabled and terminalizes open PRs; preserves post-merge learn only for already-merged PRs |
 | finished | `hephaestus.automation.pipeline.stages.finished` | Terminal ledger and worktree cleanup/preservation |
 
 Console scripts preserve their historical names. Stage-scoped wrappers are

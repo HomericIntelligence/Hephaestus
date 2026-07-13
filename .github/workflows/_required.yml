@@ -8,11 +8,11 @@ on:
   pull_request:
     # Default types are [opened, synchronize, reopened], which do NOT fire when
     # auto-merge is toggled or labels are changed after PR creation — so
-    # pr-policy's auto-merge check was stuck with its PR-open verdict until the
+    # auto-merge-policy's check was stuck with its PR-open verdict until the
     # next push (the race that #680 papered over with `needs: lint`).
     # Re-running on auto_merge_enabled / auto_merge_disabled, labeled /
     # unlabeled, and ready_for_review makes that gate converge on the true
-    # state with no timing reliance. See pr-policy below.
+    # state with no timing reliance. See auto-merge-policy below.
     #
     # IMPORTANT: a pull_request trigger applies to the WHOLE workflow, so the
     # label / auto-merge event types would otherwise re-run EVERY job on each
@@ -465,14 +465,10 @@ jobs:
 
   auto-merge-policy:
     name: auto-merge-policy
-    # Advisory (NOT a required check): verifies auto-merge matches the
-    # implementation-review state — disabled before `state:implementation-go`,
-    # enabled after it. Split out of `pr-policy` (#1080) so this timing-sensitive
-    # verdict no longer BLOCKS merge; it fails its OWN job only on a mismatch, as
-    # a visible signal. Keep this job OUT of the branch-protection required-checks
-    # ruleset. Like pr-policy it has no `needs:` and re-runs on auto_merge_enabled
-    # / auto_merge_disabled and labeled / unlabeled events so it converges on the
-    # PR's true state.
+    # Advisory (NOT a required check): #2054 temporarily makes every automatic
+    # armer fail closed while #2055 introduces the head-bound strict-review gate.
+    # This job signals any still-armed open PR but intentionally does not block
+    # manual bootstrap merges after an independent strict review.
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -483,62 +479,37 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
     steps:
-      - name: "Auto-merge matches implementation-review state"
+      - name: "Auto-merge remains disabled pending strict-review gate"
         run: |
           set -euo pipefail
           gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
             --json autoMergeRequest,labels,state \
             > pr.json
-          pr_state=$(jq -r '.state // ""' pr.json)
+          if ! jq -e '
+              type == "object"
+              and has("state")
+              and has("autoMergeRequest")
+              and (.state | type == "string")
+              and (.state == "OPEN" or .state == "MERGED" or .state == "CLOSED")
+              and (.autoMergeRequest == null or (.autoMergeRequest | type == "object"))
+            ' pr.json > /dev/null; then
+            echo "::error::Incomplete PR state response; cannot verify auto-merge is disabled."
+            exit 1
+          fi
+          pr_state=$(jq -r '.state' pr.json)
           if [ "$pr_state" != "OPEN" ]; then
             echo "OK: PR state is $pr_state; auto-merge policy is terminal"
             exit 0
           fi
 
           state=$(jq -r '.autoMergeRequest' pr.json)
-          implementation_go=$(jq -r '[(.labels // [])[].name] | index("state:implementation-go") != null' pr.json)
-          if [ "$implementation_go" = "true" ]; then
-            for attempt in 1 2 3 4 5 6; do
-              if [ "$state" != "null" ] && [ -n "$state" ]; then
-                echo "OK: implementation-GO PR has auto-merge enabled"
-                exit 0
-              fi
-              if [ "$attempt" -lt 6 ]; then
-                echo "Waiting for label-triggered auto-merge workflow to arm PR #$PR_NUMBER..."
-                sleep 10
-                gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
-                  --json autoMergeRequest,labels,state \
-                  > pr.json
-                pr_state=$(jq -r '.state // ""' pr.json)
-                if [ "$pr_state" != "OPEN" ]; then
-                  echo "OK: PR state is $pr_state; auto-merge policy is terminal"
-                  exit 0
-                fi
-                state=$(jq -r '.autoMergeRequest' pr.json)
-                implementation_go=$(jq -r '[(.labels // [])[].name] | index("state:implementation-go") != null' pr.json)
-                if [ "$implementation_go" != "true" ]; then
-                  break
-                fi
-              fi
-            done
-
-            if [ "$state" = "null" ] || [ -z "$state" ]; then
-              msg="::error::PR has state:implementation-go but auto-merge is not enabled."
-              msg+=" Run: gh pr merge $PR_NUMBER --auto --squash  (this repo is squash-only)."
-              echo "$msg"
-              exit 1
-            fi
-            echo "OK: implementation-GO PR has auto-merge enabled"
-          else
-            if [ "$state" != "null" ] && [ -n "$state" ]; then
-              msg="::error::Auto-merge is enabled before implementation review GO."
-              msg+=" Remove it with: gh pr merge $PR_NUMBER --disable-auto"
-              msg+="; re-enable only after state:implementation-go is applied."
-              echo "$msg"
-              exit 1
-            fi
-            echo "OK: auto-merge is deferred until implementation review GO"
+          if [ "$state" != "null" ] && [ -n "$state" ]; then
+            msg="::error::Auto-merge is enabled while the strict-review gate is unavailable."
+            msg+=" Remove it with: gh pr merge $PR_NUMBER --disable-auto"
+            echo "$msg"
+            exit 1
           fi
+          echo "OK: auto-merge is disabled pending the queue-owned strict-review gate"
 
   unit-tests:
     name: unit-tests
@@ -913,12 +884,12 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # required-checks-gate is the SINGLE branch-protection required status check
-  # for this workflow (alongside the two `test (...)` contexts from test.yml).
-  # It fans in every gating job above so that branch protection never has to
-  # enumerate them individually — add a new gating job to the `needs:` list and
-  # protection keeps working with no GitHub-side change. See
-  # docs/ci/required-checks.md and the guard test
+  # required-checks-gate is an aggregate workflow-level signal and a classic
+  # branch-protection context, alongside the repository ruleset's direct
+  # required contexts. It fans in every gating job above so the full workflow
+  # has one auditable result; add every new gating job to `needs:`. Update the
+  # GitHub ruleset deliberately only when that job also needs its own direct
+  # ruleset context. See docs/ci/required-checks.md and the guard test
   # tests/unit/ci/test_required_checks_gate.py.
   #
   # `if: always()` is mandatory: the heavy jobs skip on label / auto-merge PR

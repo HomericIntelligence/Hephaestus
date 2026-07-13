@@ -317,6 +317,19 @@ class CiStage(Stage):
         terminal = _terminal_pr_outcome(gh_state, item.pr)
         if terminal is not None:
             return terminal
+        try:
+            # A direct CI seed can carry a legacy implementation-GO label.
+            # Contain that PR before any worktree/CI work while #2055 adds
+            # the head-bound strict-review gate.
+            ctx.github.defer_auto_merge(item.pr)
+        except Exception as e:
+            logger.error(
+                "ci:%s: could not verify PR #%d auto-merge disabled: %s",
+                item.issue,
+                item.pr,
+                e,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_disable_failed")
         if not item.branch:
             # Adopt the PR's REAL head branch — never assume {issue}-auto-impl
             # (the _review_existing_pr branch-assumption bug).

@@ -3,8 +3,10 @@
 #
 # Usage:
 #   . "<path>/scripts/choose_merge_flag.sh"
-#   MERGE_FLAG=$(choose_merge_flag [--gh-bin hephaestus-gh] HomericIntelligence/Mnemosyne) || exit 1
-#   gh pr merge "$PR" --auto "$MERGE_FLAG" --repo HomericIntelligence/Mnemosyne
+#   MERGE_FLAG=$(choose_merge_flag [--gh-bin hephaestus-gh] HomericIntelligence/ProjectMnemosyne) || exit 1
+#   gh pr merge "$PR" --auto "$MERGE_FLAG" --repo HomericIntelligence/ProjectMnemosyne
+# Legacy consumers choose a permitted merge strategy with this helper; #2054
+# keeps automatic merging disabled until the strict-review gate exists.
 #
 # Preference order: rebase (linear history) -> squash -> merge commit.
 # Exit codes:

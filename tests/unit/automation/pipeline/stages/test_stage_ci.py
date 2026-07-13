@@ -211,6 +211,23 @@ class TestCiDiscover:
         assert isinstance(result, Continue)
         assert item.payload["base_branch"] == "main"
 
+    def test_discovery_fails_closed_when_auto_merge_deferral_cannot_be_verified(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A direct CI ingress cannot proceed after a failed containment read-back."""
+
+        class DeferFailsGitHub(FakeStageGitHub):
+            def defer_auto_merge(self, pr_number: int) -> None:
+                raise RuntimeError(f"PR #{pr_number} remains armed")
+
+        stage = CiStage()
+        ctx = make_ctx(github=DeferFailsGitHub(open_pr=777))
+        item = _item(make_work_item, pr=None, state=DISCOVER)
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "auto_merge_disable_failed"
+        )
+
     def test_already_merged_pr_finishes_before_branch_adoption(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -571,7 +588,7 @@ class TestCiWalks:
         git_jobs = [h.job for h in pool.submitted if isinstance(h.job, GitJob)]
         assert [j.op for j in git_jobs] == ["rebase", "push"]
         assert item.attempts["rebase"] == 1
-        assert github.mutation_log == []  # ci owns no labels
+        assert github.mutation_log == [("defer_auto_merge", (501,))]
 
     def test_fix_path_reaches_green(self, make_ctx: Any, make_work_item: Any) -> None:
         """FAILING -> fix agent -> push (real commit) -> re-poll green -> ADVANCE."""

@@ -25,6 +25,7 @@ import hephaestus
 import hephaestus.automation.github_api as github_api
 
 _PIPELINE = Path(hephaestus.__file__).parent / "automation" / "pipeline"
+_AUTOMATION = _PIPELINE.parent
 
 # Public mutators from github_api.__all__ (avoids hardcoding drift).
 # Scope note: this guard only tracks direct github_api mutator names. The
@@ -187,6 +188,22 @@ def test_guard_scope_excludes_coordinator_neutral_stage_github_calls(
     path.write_text(synthetic, encoding="utf-8")
 
     assert _imported_mutators(path) == {"gh_issue_add_labels"}
+
+
+def test_legacy_auto_merge_coordinator_is_fail_closed() -> None:
+    """Compatibility drive-green code cannot bypass the queue strict gate (#2054)."""
+    path = _AUTOMATION / "auto_merge_coordinator.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    method = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "enable_auto_merge"
+    )
+    calls = [node for node in ast.walk(method) if isinstance(node, ast.Call)]
+    assert not any(
+        isinstance(call.func, ast.Attribute) and call.func.attr == "_gh_call" for call in calls
+    )
+    assert any(isinstance(node, ast.Constant) and node.value is False for node in ast.walk(method))
 
 
 def _sleep_violations(tree: ast.AST, filename: str, *, allow_time_import: bool) -> list[str]:
