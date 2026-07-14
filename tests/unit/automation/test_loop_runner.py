@@ -184,6 +184,17 @@ def test_parse_args_model_flag_wires_to_namespace() -> None:
     assert loop_runner._parse_args([]).model == ""
 
 
+def test_parse_args_metrics_port_defaults_to_disabled() -> None:
+    """Omitted --metrics-port defaults to 0 (server disabled, issue #1485)."""
+    assert loop_runner._parse_args([]).metrics_port == 0
+
+
+def test_parse_args_metrics_port_accepts_explicit_value() -> None:
+    """--metrics-port parses into args.metrics_port."""
+    args = loop_runner._parse_args(["--metrics-port", "9100"])
+    assert args.metrics_port == 9100
+
+
 # ---------------------------------------------------------------------------
 # CLI scope refinements: fork filter, comma-only --repos, cwd default, --org
 # ---------------------------------------------------------------------------
@@ -499,7 +510,7 @@ def _capture_config(argv: list[str], monkeypatch: pytest.MonkeyPatch) -> object:
 
     captured: dict[str, object] = {}
 
-    def _capture(config: object) -> int:
+    def _capture(config: object, **kwargs: object) -> int:
         captured["config"] = config
         return 0
 
@@ -540,13 +551,64 @@ def test_main_installs_sigtstp_handler(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(loop_runner, "_resolve_org_and_repos", lambda args: ("Org", ["Repo"], None))
     monkeypatch.setattr(loop_runner, "_preflight_token_scopes", lambda *a, **k: None)
-    monkeypatch.setattr(coordinator_mod, "run_pipeline", lambda config: 0)
+    monkeypatch.setattr(coordinator_mod, "run_pipeline", lambda config, **kwargs: 0)
 
     with patch("hephaestus.utils.terminal.install_sigtstp_only") as mock_tstp:
         rc = main(["--repos", "Repo", "--dry-run", "--loops", "1", "--agent", "claude"])
 
     assert rc == 0
     mock_tstp.assert_called_once_with()
+
+
+def test_main_metrics_port_defaults_to_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Omitted --metrics-port round-trips into PipelineConfig.metrics_port=0 (issue #1485)."""
+    config = _capture_config(
+        ["--repos", "Repo", "--dry-run", "--loops", "1", "--agent", "claude"], monkeypatch
+    )
+    assert config.metrics_port == 0  # type: ignore[attr-defined]
+
+
+def test_main_metrics_port_round_trips_into_pipeline_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--metrics-port N`` reaches PipelineConfig.metrics_port unchanged."""
+    config = _capture_config(
+        [
+            "--repos",
+            "Repo",
+            "--dry-run",
+            "--loops",
+            "1",
+            "--agent",
+            "claude",
+            "--metrics-port",
+            "9100",
+        ],
+        monkeypatch,
+    )
+    assert config.metrics_port == 9100  # type: ignore[attr-defined]
+
+
+def test_dispatch_pipeline_injects_circuit_breaker_snapshots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_dispatch_pipeline passes hephaestus.resilience.all_circuit_breaker_snapshots through."""
+    from hephaestus.automation.pipeline import coordinator as coordinator_mod
+    from hephaestus.resilience import all_circuit_breaker_snapshots
+
+    captured: dict[str, object] = {}
+
+    def _capture(config: object, **kwargs: object) -> int:
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(loop_runner, "_resolve_org_and_repos", lambda args: ("Org", ["Repo"], None))
+    monkeypatch.setattr(loop_runner, "_preflight_token_scopes", lambda *a, **k: None)
+    monkeypatch.setattr(coordinator_mod, "run_pipeline", _capture)
+
+    main(["--repos", "Repo", "--dry-run", "--loops", "1", "--agent", "claude"])
+
+    assert captured["circuit_breaker_snapshots"] is all_circuit_breaker_snapshots
 
 
 def test_main_prefers_current_checkout_parent_for_projects_dir_default(

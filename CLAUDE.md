@@ -25,7 +25,7 @@ Hephaestus is the shared utilities and tooling repository of the HomericIntellig
 
 ```text
 Hephaestus/
-├── hephaestus/                 # Python source code (20 documented subpackages)
+├── hephaestus/                 # Python source code (21 documented subpackages)
 │   ├── agents/                 # Agent frontmatter + loader + runtime
 │   ├── automation/             # Queue-based issue planning / implementation / PR review pipeline
 │   ├── benchmarks/             # Benchmark comparison utilities
@@ -40,6 +40,7 @@ Hephaestus/
 │   ├── logging/                # Logging utilities
 │   ├── markdown/               # Markdown linting and link fixing
 │   ├── nats/                   # NATS JetStream subscriber (event-driven workflows)
+│   ├── observability/          # Metrics registry, /metrics + /health HTTP server, alert rules
 │   ├── resilience/             # Circuit breaker + retry + subprocess resilience
 │   ├── scripts_lib/            # Standalone consistency-check scripts (CLI table, version)
 │   ├── system/                 # System information collection

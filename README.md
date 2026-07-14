@@ -114,6 +114,7 @@ Hephaestus/
 │   ├── logging/       # Logging utilities (ContextLogger, setup_logging)
 │   ├── markdown/      # Markdown linting and link fixing
 │   ├── nats/          # NATS JetStream subscriber (event-driven workflows)
+│   ├── observability/ # Metrics registry, /metrics + /health HTTP server, alert rules
 │   ├── resilience/    # Circuit breaker + retry + subprocess resilience primitives
 │   ├── scripts_lib/   # Standalone consistency-check scripts (CLI table, version)
 │   ├── system/        # System information collection

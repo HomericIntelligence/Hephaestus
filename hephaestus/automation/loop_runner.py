@@ -204,6 +204,9 @@ class LoopConfig:
     # (``HEPH_PHASE_TIMEOUT``); ``--phase-timeout`` overrides it and a
     # non-positive value disables the bound (``None``).
     phase_timeout_s: float | None = field(default_factory=_default_phase_timeout_s)
+    # Port for the /metrics + /health HTTP server (issue #1485). 0 (default)
+    # disables the server entirely.
+    metrics_port: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +373,12 @@ def _build_parser() -> argparse.ArgumentParser:
             "Comma-separated repo list (e.g. `--repos foo,bar`). Overrides org "
             "enumeration. Space-separated input is NOT accepted."
         ),
+    )
+    p.add_argument(
+        "--metrics-port",
+        type=int,
+        default=0,
+        help="Port for the Prometheus /metrics + /health HTTP server (0 = disabled).",
     )
     return p
 
@@ -597,6 +606,7 @@ def _build_pipeline_config(
         projects_dir=cfg.projects_dir,
         json_out=args.json,
         scope=_pipeline_scope_for_phases(cfg.phases),
+        metrics_port=cfg.metrics_port,
     )
 
 
@@ -641,8 +651,12 @@ def _dispatch_pipeline(
     if not cfg.dry_run:
         _preflight_token_scopes(cfg.org, repos[0])
     from hephaestus.automation.pipeline.coordinator import run_pipeline
+    from hephaestus.resilience import all_circuit_breaker_snapshots
 
-    return run_pipeline(_build_pipeline_config(args, cfg, org, repos))
+    return run_pipeline(
+        _build_pipeline_config(args, cfg, org, repos),
+        circuit_breaker_snapshots=all_circuit_breaker_snapshots,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -689,6 +703,7 @@ def main(argv: list[str] | None = None) -> int:
         phase_timeout_s=(
             args.phase_timeout if args.phase_timeout and args.phase_timeout > 0 else None
         ),
+        metrics_port=args.metrics_port,
     )
 
     if not repos:

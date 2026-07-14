@@ -22,6 +22,7 @@ Hephaestus is the shared utilities and tooling library for the HomericIntelligen
 - **hephaestus.logging** — Enhanced logging (ContextLogger, setup_logging)
 - **hephaestus.markdown** — Markdown linting, link fixing, anchor validation
 - **hephaestus.nats** — NATS JetStream subscriber for event-driven workflows
+- **hephaestus.observability** — Metrics registry, `/metrics` + `/health` HTTP server, alert rules
 - **hephaestus.resilience** — Circuit breaker + retry + subprocess resilience primitives
 - **hephaestus.system** — System information collection
 - **hephaestus.utils** — General utility functions (slugify, retry, subprocess and git helpers)

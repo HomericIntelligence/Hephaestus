@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import socket
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -1489,3 +1490,128 @@ class TestConfigWiring:
         ctx = coordinator._ctx_for_repo("repo-a")
 
         assert ctx.config.enable_mechanical_rebase is True
+
+
+def _free_port() -> int:
+    """Return a currently-unused TCP port on localhost (best-effort; racy by nature)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+class TestMetricsWiring:
+    """metrics_port=0 (default) is a no-op; a nonzero port serves /metrics + /health."""
+
+    def test_metrics_port_zero_does_not_start_a_server(self, tmp_path: Path) -> None:
+        """Default config never constructs a registry/server (issue #1485)."""
+        config = PipelineConfig(org="org", repos=["repo-a"], projects_dir=tmp_path)
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        )
+
+        assert coordinator._metrics_registry is None
+        assert coordinator._metrics_server is None
+
+    def test_metrics_port_nonzero_starts_a_server(self, tmp_path: Path) -> None:
+        """A nonzero metrics_port binds a real MetricsHTTPServer."""
+        config = PipelineConfig(
+            org="org", repos=["repo-a"], projects_dir=tmp_path, metrics_port=_free_port()
+        )
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        )
+        try:
+            assert coordinator._metrics_registry is not None
+            assert coordinator._metrics_server is not None
+            assert coordinator._metrics_server.bound_port == config.metrics_port
+        finally:
+            if coordinator._metrics_server is not None:
+                coordinator._metrics_server.stop()
+
+    def test_metrics_endpoint_reflects_queue_depth_after_tick(self, tmp_path: Path) -> None:
+        """_emit_metrics_tick() updates the stage_queue_depth gauge for /metrics."""
+        config = PipelineConfig(
+            org="org", repos=["repo-a"], projects_dir=tmp_path, metrics_port=_free_port()
+        )
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        )
+        try:
+            item = _issue_item(44, StageName.PLANNING)
+            coordinator._push_item(item, StageName.PLANNING, enter=True)
+
+            coordinator._emit_metrics_tick()
+
+            assert coordinator._metrics_registry is not None
+            snapshot = coordinator._metrics_registry.snapshot()
+            assert snapshot["hephaestus_stage_queue_depth"] == 1.0
+        finally:
+            if coordinator._metrics_server is not None:
+                coordinator._metrics_server.stop()
+
+    def test_emit_metrics_tick_records_metrics_snapshot_event(self, tmp_path: Path) -> None:
+        """_emit_metrics_tick() appends one metrics_snapshot event via _record_event."""
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            projects_dir=tmp_path,
+            event_log_path=event_log_path,
+            metrics_port=_free_port(),
+        )
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        )
+        try:
+            coordinator._emit_metrics_tick()
+
+            assert coordinator.event_log[-1][0] == "metrics_snapshot"
+            records = [json.loads(line) for line in event_log_path.read_text().splitlines()]
+            assert records[-1]["event"] == "metrics_snapshot"
+        finally:
+            if coordinator._metrics_server is not None:
+                coordinator._metrics_server.stop()
+
+    def test_health_snapshot_uses_injected_circuit_breaker_snapshots(self, tmp_path: Path) -> None:
+        """The injected callable feeds /health, not a hephaestus.resilience import."""
+        config = PipelineConfig(org="org", repos=["repo-a"], projects_dir=tmp_path)
+        fake_snapshots = {"github-api": {"name": "github-api", "state": "open"}}
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+            circuit_breaker_snapshots=lambda: fake_snapshots,
+        )
+
+        health = coordinator._health_snapshot()
+
+        assert health["circuit_breakers"] == fake_snapshots
+
+    def test_health_snapshot_defaults_to_empty_circuit_breakers(self, tmp_path: Path) -> None:
+        """Without an injected callable, /health reports no circuit breaker state."""
+        config = PipelineConfig(org="org", repos=["repo-a"], projects_dir=tmp_path)
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        )
+
+        assert coordinator._health_snapshot()["circuit_breakers"] == {}
+
+    def test_run_stops_metrics_server_on_completion(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A metrics server started for run() is stopped in the finally block."""
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
+        config = PipelineConfig(
+            org="org", repos=["repo-a"], loops=1, projects_dir=tmp_path, metrics_port=_free_port()
+        )
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        )
+        coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
+        server = coordinator._metrics_server
+        assert server is not None
+
+        coordinator.run()
+
+        assert server._httpd is None

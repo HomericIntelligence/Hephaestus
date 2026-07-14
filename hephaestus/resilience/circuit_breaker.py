@@ -290,6 +290,23 @@ class CircuitBreaker:
             self._last_failure_time = 0.0
             logger.info("Circuit breaker '%s' reset to CLOSED", self.name)
 
+    def snapshot(self) -> dict[str, Any]:
+        """Return a JSON-serialisable snapshot of this breaker's live state.
+
+        Returns:
+            Dict with ``name``, ``state``, ``failure_count``, and
+            ``last_failure_time`` — the fields issue #1485 calls out as
+            held by the registry but never read by any monitoring system.
+
+        """
+        with self._lock:
+            return {
+                "name": self.name,
+                "state": self._effective_state().value,
+                "failure_count": self._failure_count,
+                "last_failure_time": self._last_failure_time,
+            }
+
 
 # Global registry of circuit breakers
 _registry: dict[str, CircuitBreaker] = {}
@@ -350,3 +367,15 @@ def reset_all_circuit_breakers() -> None:
         for cb in _registry.values():
             cb.reset()
         _registry.clear()
+
+
+def all_circuit_breaker_snapshots() -> dict[str, dict[str, Any]]:
+    """Return a snapshot of every registered circuit breaker.
+
+    Returns:
+        Mapping of breaker name to its :meth:`CircuitBreaker.snapshot` dict.
+
+    """
+    with _registry_lock:
+        breakers = list(_registry.values())
+    return {cb.name: cb.snapshot() for cb in breakers}

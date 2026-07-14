@@ -249,6 +249,10 @@ class PipelineConfig:
     # when True, issues already at-or-past ``state:plan-go`` are re-routed to
     # PLANNING instead of being classified past the scope (and thus skipped).
     force: bool = False
+    # Port for the /metrics + /health HTTP server (issue #1485). 0 disables
+    # the server entirely — no MetricsRegistry is constructed and no port is
+    # bound, preserving existing behavior for every caller that doesn't set it.
+    metrics_port: int = 0
 
 
 @dataclass
@@ -301,6 +305,7 @@ class Coordinator:
         stages: dict[StageName, Stage] | None = None,
         github_factory: Callable[[str, Path], StageGitHub] | None = None,
         install_signals: bool = True,
+        circuit_breaker_snapshots: Callable[[], dict[str, dict[str, Any]]] | None = None,
     ) -> None:
         """Initialize coordinator state.
 
@@ -314,11 +319,18 @@ class Coordinator:
                 this so each repo context targets GitHub with an explicit repo.
             install_signals: Install SIGINT/SIGTERM/SIGHUP handlers in
                 ``run()`` (disabled in unit tests).
+            circuit_breaker_snapshots: Callable returning every registered
+                circuit breaker's live state, injected so the pure pipeline
+                layer never imports ``hephaestus.resilience`` directly
+                (``tests/unit/automation/pipeline/test_zero_io_imports.py``).
+                Defaults to an empty-dict provider when omitted; production
+                wiring in ``run_pipeline`` injects the real registry reader.
 
         """
         self.config = config
         self.github = github
         self._github_factory = github_factory
+        self._circuit_breaker_snapshots = circuit_breaker_snapshots or (lambda: {})
         self.shutdown = threading.Event()
         self.completion_q: CompletionQueue = queue_mod.Queue()
         if pool is None:
@@ -341,6 +353,22 @@ class Coordinator:
         self.timers: list[tuple[float, int, WorkItem]] = []
         self.in_flight: dict[JobHandle, WorkItem] = {}
         self.inflight_per_repo: Counter[str] = Counter()
+
+        self._metrics_registry: Any | None = None
+        self._metrics_server: Any | None = None
+        if config.metrics_port:
+            # Imported here, not module-top: hephaestus.observability does
+            # real socket I/O (http.server), which the pipeline's zero-I/O
+            # guard (test_zero_io_imports.py) forbids at module scope.
+            from hephaestus.observability import MetricsHTTPServer, MetricsRegistry
+
+            self._metrics_registry = MetricsRegistry()
+            self._metrics_server = MetricsHTTPServer(
+                self._metrics_registry,
+                port=config.metrics_port,
+                health_provider=self._health_snapshot,
+            )
+            self._metrics_server.start()
         self.ledger: list[ItemResult] = []
         self.preserved: list[PreservedWorktree] = []
         self.items: list[WorkItem] = []
@@ -478,6 +506,44 @@ class Coordinator:
         """Wake the coordinator if it is blocked in completion_q.get()."""
         self.completion_q.put((_WAKE_HANDLE, JobResult(ok=False, interrupted=True, error="wake")))
 
+    def _queue_depths(self) -> dict[str, int]:
+        """Return the current item count per stage queue, keyed by stage name."""
+        return {name.value: len(queue) for name, queue in self.queues.items()}
+
+    def _health_snapshot(self) -> dict[str, Any]:
+        """Return the JSON-serialisable payload served at ``/health``."""
+        return {
+            "loops_run": self._loops_run,
+            "queue_depths": self._queue_depths(),
+            "in_flight": len(self.in_flight),
+            "inflight_per_repo": dict(self.inflight_per_repo),
+            "circuit_breakers": self._circuit_breaker_snapshots(),
+        }
+
+    def _emit_metrics_tick(self) -> None:
+        """Update live gauges and append one ``metrics_snapshot`` event.
+
+        Reuses the existing :meth:`_record_event` JSONL writer (issue #1485)
+        instead of introducing a second periodic-emission mechanism.
+        """
+        queue_depths = self._queue_depths()
+        cb_snapshots = self._circuit_breaker_snapshots()
+        if self._metrics_registry is not None:
+            depth_gauge = self._metrics_registry.gauge(
+                "hephaestus_stage_queue_depth", "Number of items queued per pipeline stage"
+            )
+            for stage, depth in queue_depths.items():
+                depth_gauge.set(depth, labels={"stage": stage})
+            inflight_gauge = self._metrics_registry.gauge(
+                "hephaestus_inflight_per_repo", "Number of in-flight jobs per repo"
+            )
+            for repo, count in self.inflight_per_repo.items():
+                inflight_gauge.set(count, labels={"repo": repo})
+        self._record_event(
+            "metrics_snapshot",
+            {"queue_depths": queue_depths, "circuit_breakers": cb_snapshots},
+        )
+
     # -- run loop ---------------------------------------------------------------
 
     def run(self) -> int:
@@ -512,6 +578,8 @@ class Coordinator:
                     self._wait_for_completion(timeout=0.2)
                     continue
                 self._drain_queues()
+                if self._metrics_registry is not None:
+                    self._emit_metrics_tick()
                 if self._all_idle():
                     if not self._reseed_if_converged():
                         break
@@ -521,6 +589,8 @@ class Coordinator:
             logger.exception("pipeline run failed")
             self._fatal = True
         finally:
+            if self._metrics_server is not None:
+                self._metrics_server.stop()
             # Reap the pool on EVERY exit path — a fatal exception never sets
             # self.shutdown, so without this the executor and in-flight AgentJob
             # subprocesses (e.g. claude reviewers) would leak (#2059). Idempotent
@@ -1565,7 +1635,11 @@ class Coordinator:
                 self._park_resumable(item)
 
 
-def run_pipeline(config: PipelineConfig) -> int:
+def run_pipeline(
+    config: PipelineConfig,
+    *,
+    circuit_breaker_snapshots: Callable[[], dict[str, dict[str, Any]]] | None = None,
+) -> int:
     """Run the queue-based pipeline to completion.
 
     Public entry point called from ``loop_runner.main()`` on the default
@@ -1573,6 +1647,15 @@ def run_pipeline(config: PipelineConfig) -> int:
 
     Args:
         config: Pipeline configuration.
+        circuit_breaker_snapshots: Callable returning every registered
+            circuit breaker's live state, forwarded to
+            :class:`Coordinator` for ``/health`` and the periodic
+            ``metrics_snapshot`` event (issue #1485). ``hephaestus.resilience``
+            is forbidden at module scope in this file
+            (``tests/unit/automation/pipeline/test_zero_io_imports.py``), so
+            production callers (``loop_runner.py``) pass
+            ``hephaestus.resilience.all_circuit_breaker_snapshots`` in
+            explicitly; omitted, breaker state is reported empty.
 
     Returns:
         Exit code: 130 interrupt, 1 any fail/skip/blocked, 0 clean.
@@ -1595,5 +1678,10 @@ def run_pipeline(config: PipelineConfig) -> int:
     github = (
         _github_for(repo, repo_root) if repo else PipelineGitHub(config.org, dry_run=config.dry_run)
     )
-    coordinator = Coordinator(config, github=github, github_factory=_github_for)
+    coordinator = Coordinator(
+        config,
+        github=github,
+        github_factory=_github_for,
+        circuit_breaker_snapshots=circuit_breaker_snapshots,
+    )
     return coordinator.run()

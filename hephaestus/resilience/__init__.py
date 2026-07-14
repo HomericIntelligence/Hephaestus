@@ -10,6 +10,7 @@ from hephaestus.resilience.circuit_breaker import (
     CircuitBreakerOpenError,
     CircuitBreakerOpenReason,
     CircuitBreakerState,
+    all_circuit_breaker_snapshots,
     get_circuit_breaker,
     reset_all_circuit_breakers,
 )
@@ -27,6 +28,7 @@ __all__ = [
     "CircuitBreakerOpenError",
     "CircuitBreakerOpenReason",
     "CircuitBreakerState",
+    "all_circuit_breaker_snapshots",
     "get_circuit_breaker",
     "is_transient_subprocess_error",
     "reset_all_circuit_breakers",

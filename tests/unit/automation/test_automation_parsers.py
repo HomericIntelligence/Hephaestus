@@ -755,6 +755,13 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
                 "enumeration. Space-separated input is NOT accepted."
             ),
         ),
+        _action_spec(
+            ("--metrics-port",),
+            "metrics_port",
+            "_StoreAction",
+            0,
+            help_text="Port for the Prometheus /metrics + /health HTTP server (0 = disabled).",
+        ),
         *_github_throttle_specs(),
         _verbose_spec("Enable DEBUG logging"),
         _json_spec(),

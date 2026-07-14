@@ -18,7 +18,7 @@ mypy-pkg = "mypy hephaestus/"
 # Runs pip-audit in the lint environment without a nested `pixi run` invocation.
 # The top-level `audit` alias was removed: use `pixi run --environment lint audit`
 # or `pixi run --environment lint pip-audit` directly (as CI already does).
-docs = "pdoc ./hephaestus ./hephaestus/agents ./hephaestus/benchmarks ./hephaestus/ci ./hephaestus/cli ./hephaestus/config ./hephaestus/datasets ./hephaestus/discovery ./hephaestus/forensics ./hephaestus/github ./hephaestus/io ./hephaestus/logging ./hephaestus/markdown ./hephaestus/nats ./hephaestus/resilience ./hephaestus/scripts_lib ./hephaestus/system ./hephaestus/utils ./hephaestus/validation ./hephaestus/version --output-dir docs/api"
+docs = "pdoc ./hephaestus ./hephaestus/agents ./hephaestus/benchmarks ./hephaestus/ci ./hephaestus/cli ./hephaestus/config ./hephaestus/datasets ./hephaestus/discovery ./hephaestus/forensics ./hephaestus/github ./hephaestus/io ./hephaestus/logging ./hephaestus/markdown ./hephaestus/nats ./hephaestus/observability ./hephaestus/resilience ./hephaestus/scripts_lib ./hephaestus/system ./hephaestus/utils ./hephaestus/validation ./hephaestus/version --output-dir docs/api"
 # Editable install of this package into the pixi environment, for local dev
 # that imports `hephaestus` at runtime. Run once after `pixi install`:
 #   pixi run dev-install

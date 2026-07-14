@@ -13,6 +13,7 @@ from hephaestus.resilience.circuit_breaker import (
     CircuitBreakerOpenError,
     CircuitBreakerOpenReason,
     CircuitBreakerState,
+    all_circuit_breaker_snapshots,
     get_circuit_breaker,
     reset_all_circuit_breakers,
 )
@@ -462,6 +463,41 @@ class TestCircuitBreakerReset:
         assert cb.state == CircuitBreakerState.CLOSED
 
 
+class TestCircuitBreakerSnapshot:
+    """Tests for CircuitBreaker.snapshot()."""
+
+    def test_snapshot_of_closed_breaker(self) -> None:
+        """A fresh breaker snapshots as closed with zero failures."""
+        cb = CircuitBreaker("svc")
+        snap = cb.snapshot()
+        assert snap == {
+            "name": "svc",
+            "state": "closed",
+            "failure_count": 0,
+            "last_failure_time": 0.0,
+        }
+
+    def test_snapshot_reflects_open_state_and_failure_count(self) -> None:
+        """After tripping the breaker, snapshot reports OPEN and the failure count."""
+        cb = CircuitBreaker("svc", failure_threshold=2)
+        for _ in range(2):
+            with pytest.raises(RuntimeError):
+                cb.call(MagicMock(side_effect=RuntimeError("fail")))
+
+        snap = cb.snapshot()
+        assert snap["state"] == "open"
+        assert snap["failure_count"] == 2
+        assert snap["last_failure_time"] > 0.0
+
+    def test_snapshot_uses_effective_state(self) -> None:
+        """snapshot() reflects the OPEN->HALF_OPEN auto-transition, like .state."""
+        cb = CircuitBreaker("svc", failure_threshold=1, recovery_timeout=0.0)
+        with pytest.raises(RuntimeError):
+            cb.call(MagicMock(side_effect=RuntimeError("fail")))
+
+        assert cb.snapshot()["state"] == "half_open"
+
+
 class TestCircuitBreakerRegistry:
     """Tests for the global circuit breaker registry."""
 
@@ -493,6 +529,31 @@ class TestCircuitBreakerRegistry:
         # Getting same name creates new instance
         cb3 = get_circuit_breaker("service_a")
         assert cb3 is not cb1
+
+    def test_all_circuit_breaker_snapshots_empty_registry(self) -> None:
+        """An empty registry snapshots to an empty dict."""
+        assert all_circuit_breaker_snapshots() == {}
+
+    def test_all_circuit_breaker_snapshots_covers_every_breaker(self) -> None:
+        """Every registered breaker appears, keyed by name."""
+        get_circuit_breaker("service_a")
+        get_circuit_breaker("service_b")
+
+        snapshots = all_circuit_breaker_snapshots()
+
+        assert set(snapshots) == {"service_a", "service_b"}
+        assert snapshots["service_a"]["state"] == "closed"
+        assert snapshots["service_b"]["state"] == "closed"
+
+    def test_all_circuit_breaker_snapshots_reflects_live_state(self) -> None:
+        """A tripped breaker's OPEN state is visible via the registry-wide snapshot."""
+        cb = get_circuit_breaker("flaky", failure_threshold=1)
+        with pytest.raises(RuntimeError):
+            cb.call(MagicMock(side_effect=RuntimeError("fail")))
+
+        snapshots = all_circuit_breaker_snapshots()
+        assert snapshots["flaky"]["state"] == "open"
+        assert snapshots["flaky"]["failure_count"] == 1
 
 
 class TestCircuitBreakerThreadSafety:

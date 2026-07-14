@@ -466,3 +466,19 @@ class NATSSubscriberThread(threading.Thread):
                 )
                 return False
         return True
+
+
+if __name__ == "__main__":
+    # Example wiring: health_dict() (issue #1485) already produces a JSON
+    # snapshot, but nothing exposed it to a monitoring system. Deferred
+    # imports keep `import hephaestus.nats.subscriber` free of any
+    # observability-server import cost when this block does not run.
+    from hephaestus.observability import MetricsHTTPServer, MetricsRegistry
+
+    example_config = NATSConfig(enabled=True, url="tls://nats.example.com:4222", subjects=["my.>"])
+    example_thread = NATSSubscriberThread(config=example_config, handler=lambda event: print(event))
+    metrics_server = MetricsHTTPServer(
+        MetricsRegistry(), port=9100, health_provider=example_thread.health_dict
+    )
+    metrics_server.start()
+    example_thread.start()
