@@ -74,6 +74,12 @@ _CAPABILITY_EXEMPT: dict[str, dict[str, frozenset[str] | None]] = {
     # verdict in-worker (#1815), so the stage attaches parse_review_verdict
     # as AgentJob.parse. No other claude_invoke symbol is permitted.
     "pr_review.py": {"hephaestus.automation.claude_invoke": frozenset({"parse_review_verdict"})},
+    # stages/strict_review.py gets the SAME symbol-scoped exemption (#2055):
+    # the strict-review verdict is likewise parsed in-worker by
+    # claude_invoke.parse_review_verdict, attached as AgentJob.parse.
+    "strict_review.py": {
+        "hephaestus.automation.claude_invoke": frozenset({"parse_review_verdict"})
+    },
 }
 
 

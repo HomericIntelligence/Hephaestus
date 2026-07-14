@@ -75,7 +75,7 @@ class TestModuleSurface:
 
 
 def test_main_builds_ci_merge_wait_scope_and_dispatches() -> None:
-    """--issues N builds a (ci, merge_wait) scoped config and returns rc."""
+    """--issues N builds a (strict_review, ci, merge_wait) scoped config."""
     captured = _run_main_capturing_config(["--issues", "123", "--dry-run"], rc=0)
 
     assert captured["rc"] == 0
@@ -84,9 +84,11 @@ def test_main_builds_ci_merge_wait_scope_and_dispatches() -> None:
     assert config.repos == ["widget"]
     assert config.issues == [123]
     assert config.dry_run is True
-    # Scope is trimmed to exactly ci + merge_wait.
+    # Scope is trimmed to exactly strict_review + ci + merge_wait.
     assert config.scope is not None
-    assert config.scope.stages == frozenset({StageName.CI, StageName.MERGE_WAIT})
+    assert config.scope.stages == frozenset(
+        {StageName.STRICT_REVIEW, StageName.CI, StageName.MERGE_WAIT}
+    )
 
 
 def test_main_scoped_run_disables_drive_green_all() -> None:

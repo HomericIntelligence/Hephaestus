@@ -41,6 +41,7 @@ from hephaestus.automation._review_utils import (
 from hephaestus.automation.arming_state import ArmingStateStore
 from hephaestus.automation.ci_check_inspector import CICheckInspector
 from hephaestus.automation.git_utils import issue_auto_impl_branch_name
+from hephaestus.automation.pipeline.stages.base import StrictReviewArtifact
 from hephaestus.automation.prompts.pr_review import (
     BLOCKING_SEVERITIES,
     SEVERITY_MARKER_PREFIX,
@@ -64,6 +65,11 @@ from hephaestus.automation.state_labels import (
     has_label,
     is_implementation_go,
     is_plan_go,
+)
+from hephaestus.automation.strict_review_artifact import (
+    STRICT_REVIEW_ARTIFACT_MARKER,
+    parse_strict_review_artifact,
+    render_strict_review_artifact,
 )
 from hephaestus.constants import read_timeout_env
 from hephaestus.github.auto_merge import defer_auto_merge, defer_auto_merge_batch
@@ -770,13 +776,15 @@ class PipelineGitHub:
         return resolved
 
     def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
-        """Read shared PR state for seed, CI, implementation, and merge_wait.
+        """Read shared PR state for seed, CI, strict_review, and merge_wait.
 
         One ``gh pr view`` returns ``{state, headRefOid, mergedAt,
-        mergeStateStatus, baseRefName}``; ``None`` signals a read failure.
-        Seed, CI, and implementation paths use the result for terminal-state
-        checks before branch adoption or label routing, while merge_wait uses it
-        for head capture and merge-state polling.
+        mergeStateStatus, baseRefName, autoMergeRequest}``; ``None`` signals a
+        read failure. Seed, CI, and implementation paths use the result for
+        terminal-state checks before branch adoption or label routing;
+        merge_wait uses it for head capture and merge-state polling;
+        strict_review and merge_wait both use ``autoMergeRequest`` to verify
+        auto-merge is actually disabled after a NOGO/revocation write.
         """
         try:
             result = self._gh(
@@ -785,7 +793,7 @@ class PipelineGitHub:
                     "view",
                     str(pr_number),
                     "--json",
-                    "state,headRefOid,mergedAt,mergeStateStatus,baseRefName",
+                    "state,headRefOid,mergedAt,mergeStateStatus,baseRefName,autoMergeRequest",
                 ]
             )
             data = json.loads(result.stdout or "{}")
@@ -1123,6 +1131,126 @@ class PipelineGitHub:
         raise RuntimeError(
             f"refusing to arm auto-merge for PR #{pr_number}: strict-review gate unavailable"
         )
+
+    def _pr_comments_with_authors(self, pr_number: int) -> list[dict[str, Any]]:
+        """Return PR/issue-channel comments as ``{body, author}`` dicts.
+
+        PRs share the issue comment channel; ``gh issue view --json comments``
+        works uniformly on a PR number and returns each comment's
+        ``author.login``, which ``_repo_issue_comments`` (REST, no author
+        field) does not carry.
+        """
+        result = self._gh(
+            ["issue", "view", str(pr_number), "--json", "comments"],
+            check=False,
+        )
+        try:
+            data = json.loads(result.stdout or "{}")
+        except json.JSONDecodeError:
+            return []
+        raw = data.get("comments") if isinstance(data, dict) else None
+        if not isinstance(raw, list):
+            return []
+        out: list[dict[str, Any]] = []
+        for c in raw:
+            if not isinstance(c, dict):
+                continue
+            author_obj = c.get("author")
+            author = author_obj.get("login") if isinstance(author_obj, dict) else None
+            out.append({"body": str(c.get("body") or ""), "author": author})
+        return out
+
+    def strict_review_artifact(self, pr_number: int, head_sha: str) -> StrictReviewArtifact | None:
+        """Return the authenticated, current-head strict-review artifact, or None.
+
+        Fetches PR comments, resolves the automation identity via
+        ``gh_current_login``, filters to the marker-tagged comment authored
+        by that login, and grammar/digest-validates it via
+        :func:`parse_strict_review_artifact`. ANY mismatch (no artifact from
+        the automation identity, malformed grammar, tampered digest, or a
+        head SHA that doesn't match the requested ``head_sha``) returns
+        ``None`` — "no trusted authorization."
+        """
+        current_login = github_api.gh_current_login()
+        if not current_login:
+            logger.warning(
+                "strict_review_artifact: could not resolve automation login; refusing PR #%d",
+                pr_number,
+            )
+            return None
+        comments = self._pr_comments_with_authors(pr_number)
+        candidates = [
+            c
+            for c in comments
+            if c["author"] == current_login and c["body"].startswith(STRICT_REVIEW_ARTIFACT_MARKER)
+        ]
+        if not candidates:
+            return None
+        # Newest matching comment wins (mirrors the marker-upsert "last match" rule).
+        parsed = parse_strict_review_artifact(candidates[-1]["body"])
+        if parsed is None:
+            return None
+        if parsed.head_sha != head_sha.lower():
+            logger.info(
+                "strict_review_artifact: PR #%d artifact head %s != requested %s; stale",
+                pr_number,
+                parsed.head_sha,
+                head_sha,
+            )
+            return None
+        return StrictReviewArtifact(
+            is_go=parsed.is_go, head_sha=parsed.head_sha, verdict=parsed.verdict_body
+        )
+
+    def publish_strict_review_artifact(
+        self, pr_number: int, head_sha: str, verdict_body: str, *, is_go: bool
+    ) -> None:
+        """Durably publish the versioned strict-review artifact comment.
+
+        Upserts (single artifact per PR, keyed on the marker) rather than
+        appending, mirroring :meth:`upsert_plan_comment`'s dedupe pattern.
+        """
+        if self._skip(f"publish strict-review artifact on PR #{pr_number}"):
+            return
+        rendered = render_strict_review_artifact(head_sha, verdict_body, is_go=is_go)
+        if self._repo_slug is not None:
+            comments = self._repo_issue_comments(pr_number)
+            matching = [
+                c
+                for c in comments
+                if str(c.get("body", "")).startswith(STRICT_REVIEW_ARTIFACT_MARKER)
+                and c.get("databaseId") is not None
+            ]
+            if not matching:
+                with github_api._body_file(rendered) as path:
+                    self._gh(["issue", "comment", str(pr_number), "--body-file", path])
+                return
+            owner, name = self._owner_name()
+            target_id = int(matching[-1]["databaseId"])
+            for dup in matching[:-1]:
+                dup_id = dup.get("databaseId")
+                if dup_id is not None:
+                    gh_call(
+                        [
+                            "api",
+                            "--method",
+                            "DELETE",
+                            f"/repos/{owner}/{name}/issues/comments/{int(dup_id)}",
+                        ]
+                    )
+            with github_api._body_file(rendered) as path:
+                gh_call(
+                    [
+                        "api",
+                        "--method",
+                        "PATCH",
+                        f"/repos/{owner}/{name}/issues/comments/{target_id}",
+                        "-F",
+                        f"body=@{path}",
+                    ]
+                )
+            return
+        github_api.gh_issue_upsert_comment(pr_number, STRICT_REVIEW_ARTIFACT_MARKER, rendered)
 
     def post_review_threads(
         self, pr_number: int, threads: list[dict[str, Any]], summary: str

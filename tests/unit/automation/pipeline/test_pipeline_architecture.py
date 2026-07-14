@@ -285,3 +285,41 @@ def test_sleep_guard_detects_synthetic_violations() -> None:
     assert any("time.sleep reference" in v for v in relaxed)
     assert not any(": import time" in v for v in relaxed)
     assert sum("from time import sleep" in v for v in relaxed) == 2
+
+
+def _arm_auto_merge_call_sites(tree: ast.AST, filename: str) -> list[str]:
+    """AST-collect ``ctx.github.arm_auto_merge(...)`` call sites in a module."""
+    sites = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr == "arm_auto_merge":
+            sites.append(f"{filename}:{node.lineno}")
+    return sites
+
+
+def test_only_merge_wait_calls_arm_auto_merge() -> None:
+    """AC8 (#2055): no automatic caller besides MergeWaitStage may arm auto-merge.
+
+    ``ctx.github.arm_auto_merge`` is coordinator-neutral (out of this file's
+    usual github_api-mutator scope per the module docstring), but the SOLE
+    armer invariant is load-bearing enough for #2055 to pin directly: an
+    AST walk over every pipeline stage module must find the call in
+    merge_wait.py ONLY.
+    """
+    hits: dict[str, list[str]] = {}
+    for py in sorted(_PIPELINE.glob("stages/*.py")):
+        tree = ast.parse(py.read_text(), filename=str(py))
+        sites = _arm_auto_merge_call_sites(tree, py.name)
+        if sites:
+            hits[py.name] = sites
+    assert set(hits) == {"merge_wait.py"}, f"arm_auto_merge called outside merge_wait.py: {hits}"
+
+
+def test_arm_auto_merge_guard_detects_synthetic_violation() -> None:
+    """Negative test: the AST arm_auto_merge guard actually flags a call site."""
+    synthetic = "def f(ctx):\n    ctx.github.arm_auto_merge(1)\n"
+    tree = ast.parse(synthetic, filename="<synthetic>")
+    sites = _arm_auto_merge_call_sites(tree, "synthetic_stage.py")
+    assert sites == ["synthetic_stage.py:2"]

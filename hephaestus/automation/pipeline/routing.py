@@ -33,6 +33,7 @@ class StageName(str, Enum):
     PLAN_REVIEW = "plan_review"
     IMPLEMENTATION = "implementation"
     PR_REVIEW = "pr_review"
+    STRICT_REVIEW = "strict_review"
     CI = "ci"
     MERGE_WAIT = "merge_wait"
     FINISHED = "finished"
@@ -118,7 +119,7 @@ ROUTES: dict[StageName, Route] = {
         budgets={"implement": 2, "test_fix": 1},
     ),
     StageName.PR_REVIEW: Route(
-        next=StageName.FINISHED,
+        next=StageName.STRICT_REVIEW,
         fail_routes={
             "agent_error": StageName.IMPLEMENTATION,
             "human_blocked": StageName.FINISHED,
@@ -127,11 +128,20 @@ ROUTES: dict[StageName, Route] = {
         },
         budgets={"pr_review_iter": 3, "pr_review_hard": 6},
     ),
+    StageName.STRICT_REVIEW: Route(
+        next=StageName.CI,
+        fail_routes={
+            "nogo": StageName.IMPLEMENTATION,
+            "head_changed": StageName.STRICT_REVIEW,
+            "*": StageName.STRICT_REVIEW,
+        },
+        budgets={"strict_review_iter": 1},
+    ),
     StageName.CI: Route(
         next=StageName.MERGE_WAIT,
         fail_routes={
             "fix_exhausted": StageName.IMPLEMENTATION,
-            "not_implementation_go": StageName.PR_REVIEW,
+            "not_implementation_go": StageName.STRICT_REVIEW,
             "missing_worktree": StageName.IMPLEMENTATION,
             "no_pr": StageName.FINISHED,
             "*": StageName.CI,
@@ -141,10 +151,19 @@ ROUTES: dict[StageName, Route] = {
     StageName.MERGE_WAIT: Route(
         next=StageName.FINISHED,
         fail_routes={
+            "ci_red": StageName.CI,
+            "blocked_exhausted": StageName.PR_REVIEW,
+            "missing_worktree": StageName.IMPLEMENTATION,
+            "strict_gate_unavailable": StageName.STRICT_REVIEW,
             "closed": StageName.FINISHED,
+            "timeout": StageName.FINISHED,
             "*": StageName.FINISHED,
         },
-        budgets={},
+        budgets={
+            "blocked_address": 2,
+            "rebase": 2,
+            "merge": DEFAULT_MERGE_ATTEMPTS,
+        },
     ),
     StageName.FINISHED: Route(next=StageName.FINISHED),
 }

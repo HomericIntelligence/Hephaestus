@@ -22,6 +22,7 @@ from hephaestus.automation.prompts import (
     get_review_validation_prompt,
 )
 from hephaestus.automation.prompts._shared import _TERSE_OUTPUT_DIRECTIVE
+from hephaestus.automation.prompts.strict_review_gate import build_strict_review_prompt
 
 # Distinctive phrase from the directive; verified at plan time to be absent
 # from every existing prompt file (grep -rnE "Output discipline|token budget"
@@ -83,6 +84,7 @@ PROMPT_BUILDERS = [
         marketplace_path="m.json",
     ),
     lambda: get_comment_difficulty_prompt(issue_number=1, comments_json="[]"),
+    lambda: build_strict_review_prompt(pr_number=1, issue_number=1, head_sha="a" * 40),
 ]
 
 

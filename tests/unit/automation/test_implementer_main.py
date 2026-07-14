@@ -2,8 +2,8 @@
 
 ``implementer.main()`` no longer runs a legacy ``IssueImplementer`` orchestration
 loop; it parses the historical implementer argument surface, builds a
-``PipelineConfig`` trimmed to the ``(implementation, pr_review)`` stage scope,
-seeds the requested (or discovered) issues, and dispatches to
+``PipelineConfig`` trimmed to the ``(implementation, pr_review, strict_review)``
+stage scope, seeds the requested (or discovered) issues, and dispatches to
 ``pipeline.coordinator.run_pipeline``. These tests exercise the wrapper end to
 end with ``run_pipeline`` (and issue discovery) mocked so no live agent or
 GitHub call is made.
@@ -70,7 +70,7 @@ class TestModuleSurface:
 
 
 def test_main_builds_implementation_scope_and_dispatches(tmp_path: Path) -> None:
-    """--issues N builds an (implementation, pr_review) scoped config and returns rc."""
+    """--issues N builds an (implementation, pr_review, strict_review) scoped config."""
     captured = _run_main_capturing_config(["--issues", "123", "--dry-run"], tmp_path, rc=0)
 
     assert captured["rc"] == 0
@@ -79,9 +79,11 @@ def test_main_builds_implementation_scope_and_dispatches(tmp_path: Path) -> None
     assert config.repos == ["widget"]
     assert config.issues == [123]
     assert config.dry_run is True
-    # Scope is trimmed to exactly implementation + pr_review.
+    # Scope is trimmed to exactly implementation + pr_review + strict_review.
     assert config.scope is not None
-    assert config.scope.stages == frozenset({StageName.IMPLEMENTATION, StageName.PR_REVIEW})
+    assert config.scope.stages == frozenset(
+        {StageName.IMPLEMENTATION, StageName.PR_REVIEW, StageName.STRICT_REVIEW}
+    )
 
 
 def test_main_maps_max_workers_to_worker_pool(tmp_path: Path) -> None:

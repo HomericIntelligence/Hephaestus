@@ -17,6 +17,7 @@ import pytest
 from hephaestus.automation.pipeline.events import StageEvent
 from hephaestus.automation.pipeline.routing import ROUTES, StageName
 from hephaestus.automation.pipeline.stages import StageContext, StageGitHub
+from hephaestus.automation.pipeline.stages.base import StrictReviewArtifact
 from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARGV
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.protocol import PLAN_COMMENT_MARKER
@@ -55,6 +56,7 @@ class FakeStageGitHub(FakeGitHub):
         pr_stuck: bool = False,
         learn_terminal: bool = False,
         resolve_count: int = 0,
+        strict_artifact: StrictReviewArtifact | None = None,
     ) -> None:
         """Initialize the fake with canned read answers.
 
@@ -86,6 +88,14 @@ class FakeStageGitHub(FakeGitHub):
                 True mirrors an issue whose post-merge /learn already ran
                 terminally (the #848 dedupe record).
             resolve_count: Canned return count for resolve_automation_threads.
+            strict_artifact: Canned answer for strict_review_artifact — a
+                caller-constructed :class:`StrictReviewArtifact` (or None,
+                the "no trusted authorization" default) that
+                strict_review_artifact returns UNCONDITIONALLY on every
+                call. Tests scripting head-mismatch/foreign/stale rejection
+                pass ``None`` here (the real adapter's job, not the fake's,
+                is doing that validation) and instead assert against the
+                (pr_number, head_sha) args via ``strict_artifact_calls``.
 
         """
         super().__init__()
@@ -113,6 +123,10 @@ class FakeStageGitHub(FakeGitHub):
         self._resolve_count = resolve_count
         self.arming_records: dict[int, tuple[int, str]] = {}
         self.learn_results: dict[int, bool] = {}
+        self._strict_artifact = strict_artifact
+        self.strict_artifact_calls: list[tuple[int, str]] = []
+        self.published_artifacts: dict[int, tuple[str, str]] = {}
+        self._auto_merge_armed = False
 
     def _issue_labels(self, issue_number: int) -> set[str]:
         """Return the issue's label set, seeding it on first access."""
@@ -220,6 +234,7 @@ class FakeStageGitHub(FakeGitHub):
 
     def defer_auto_merge(self, pr_number: int) -> None:
         """Mirror pr_manager.ensure_pr_auto_merge_deferred (records mutation)."""
+        self._auto_merge_armed = False
         self._log("defer_auto_merge", pr_number)
 
     def post_review_threads(
@@ -252,11 +267,42 @@ class FakeStageGitHub(FakeGitHub):
 
     def arm_auto_merge(self, pr_number: int) -> None:
         """Mirror pr_manager.enable_auto_merge_after_implementation_go."""
+        self._auto_merge_armed = True
         self._log("arm_auto_merge", pr_number)
 
+    def strict_review_artifact(self, pr_number: int, head_sha: str) -> StrictReviewArtifact | None:
+        """Return the canned artifact, recording the (pr, head_sha) query."""
+        self.strict_artifact_calls.append((pr_number, head_sha))
+        return self._strict_artifact
+
+    def publish_strict_review_artifact(
+        self, pr_number: int, head_sha: str, verdict_body: str, *, is_go: bool
+    ) -> None:
+        """Record the published artifact and flip the canned read to match.
+
+        Mirrors the real adapter's upsert-then-readable-back contract so a
+        stage that publishes and then re-reads (or a later merge_wait read
+        in the same test) observes the just-published artifact.
+        """
+        self.published_artifacts[pr_number] = (head_sha, verdict_body)
+        self._strict_artifact = StrictReviewArtifact(
+            is_go=is_go, head_sha=head_sha, verdict=verdict_body
+        )
+        self._log("publish_strict_review_artifact", pr_number, head_sha, is_go)
+
     def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
-        """Mirror ci_driver.CIDriver._gh_pr_state (canned answer)."""
+        """Mirror ci_driver.CIDriver._gh_pr_state (canned answer).
+
+        ``autoMergeRequest`` reflects :meth:`arm_auto_merge` /
+        :meth:`defer_auto_merge` calls made so far UNLESS the canned
+        ``pr_state`` already specifies the key explicitly (tests that care
+        about a specific autoMergeRequest shape own that value).
+        """
         del pr_number  # single canned answer; not per-PR keyed
+        if self._pr_state is not None and "autoMergeRequest" not in self._pr_state:
+            merged = dict(self._pr_state)
+            merged["autoMergeRequest"] = {"enabledBy": {}} if self._auto_merge_armed else None
+            return merged
         return self._pr_state
 
     def failing_required_check_names(self, pr_number: int) -> list[str]:

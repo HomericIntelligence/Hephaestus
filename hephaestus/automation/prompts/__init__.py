@@ -89,6 +89,7 @@ from .pr_review import (
     get_pr_review_analysis_prompt,
     get_review_validation_prompt,
 )
+from .strict_review_gate import STRICT_REVIEW_GATE_PROMPT, build_strict_review_prompt
 
 __all__ = [
     "ADDRESS_REVIEW_PROMPT",
@@ -104,7 +105,9 @@ __all__ = [
     "PLAN_PROMPT",
     "PLAN_REVIEW_PROMPT",
     "PR_REVIEW_ANALYSIS_PROMPT",
+    "STRICT_REVIEW_GATE_PROMPT",
     "FencedContent",
+    "build_strict_review_prompt",
     "build_unaddressed_directive",
     "fence_content",
     "get_address_review_prompt",

@@ -7,7 +7,7 @@ console-script entry point only: :func:`main` parses the historical implementer
 argument surface (``--issues``, ``--epic``, ``--max-workers``, ``--dry-run``,
 the ``--no-*`` toggles, timeout + GitHub-throttle flags), builds a
 :class:`~hephaestus.automation.pipeline.coordinator.PipelineConfig` trimmed to
-the ``(implementation, pr_review)`` stage scope via
+the ``(implementation, pr_review, strict_review)`` stage scope via
 :class:`~hephaestus.automation.pipeline.routing.PipelineScope`, seeds the
 requested (or discovered) issues, and dispatches to
 :func:`~hephaestus.automation.pipeline.coordinator.run_pipeline`.
@@ -539,7 +539,9 @@ def main() -> int:
         nitpick=args.nitpick,
         projects_dir=resolve_projects_dir(None, prefer_cwd_parent=True),
         json_out=args.json,
-        scope=PipelineScope(frozenset({StageName.IMPLEMENTATION, StageName.PR_REVIEW})),
+        scope=PipelineScope(
+            frozenset({StageName.IMPLEMENTATION, StageName.PR_REVIEW, StageName.STRICT_REVIEW})
+        ),
     )
 
     rc = run_pipeline(config)

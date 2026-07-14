@@ -12,7 +12,9 @@ Entry routing (the binding contract is the classification table in
 
 - ``state:skip`` or epic → excluded (stage ``None``, logged)
 - PR merged → finished (pass, idempotent)
-- Open PR + at-or-past ``state:implementation-go`` → ci
+- Open PR + at-or-past ``state:implementation-go`` → strict_review (#2055;
+  NEVER directly to ci — a label alone is not proof of a head-bound
+  strict-GO artifact, and strict_review re-derives its own verdict)
 - Open PR, no impl-GO → pr_review (existing-PR path)
 - No PR, at-or-past ``state:plan-go`` → implementation
 - No PR, ``state:plan-no-go`` → planning (amend path)
@@ -257,15 +259,25 @@ def classify_issue(facts: IssueFacts) -> Classification:
 
     # Routing logic: open PR path
     if facts.pr_is_open:
-        # Open PR + PR-level implementation-go → ready for CI. The
+        # Open PR + PR-level implementation-go → strict_review, NEVER ci
+        # directly (#2055): a label alone (however it got there — possibly a
+        # legacy/stale/forged one) is not proof of a head-bound strict-GO
+        # artifact. strict_review re-derives its own verdict; ci's DISCOVER
+        # step additionally re-verifies a current-head artifact exists. The
         # issue-label fallback preserves compatibility with pre-PR-label
         # snapshots while PR-level no-go remains authoritative.
         if facts.pr_has_implementation_go:
-            return StageName.CI, f"#{facts.number} open PR with {STATE_IMPLEMENTATION_GO}"
+            return (
+                StageName.STRICT_REVIEW,
+                f"#{facts.number} open PR with {STATE_IMPLEMENTATION_GO}",
+            )
         if facts.pr_has_implementation_no_go:
             return StageName.PR_REVIEW, f"#{facts.number} open PR awaiting review"
         if _label_at_or_past(state_label, STATE_IMPLEMENTATION_GO):
-            return StageName.CI, f"#{facts.number} open PR with {STATE_IMPLEMENTATION_GO}"
+            return (
+                StageName.STRICT_REVIEW,
+                f"#{facts.number} open PR with {STATE_IMPLEMENTATION_GO}",
+            )
         # Open PR, no implementation-go → awaiting PR review
         return StageName.PR_REVIEW, f"#{facts.number} open PR awaiting review"
 
@@ -425,8 +437,10 @@ def seed_from_cli(
     - ``issues`` → :func:`seed_issue` + :func:`classify_issue` per issue.
     - ``prs`` → tri-state classification mirroring ``classify_issue``'s
       open-PR routing: merged PR -> FINISHED (idempotent), closed PR ->
-      excluded, open PR with ``state:implementation-go`` -> CI, open PR
-      without it -> PR_REVIEW. A failed state/label fetch reads as
+      excluded, open PR with ``state:implementation-go`` -> STRICT_REVIEW
+      (#2055: the label alone never short-circuits straight to ``ci`` —
+      strict_review re-derives its own verdict from the current head), open
+      PR without it -> PR_REVIEW. A failed state/label fetch reads as
       "open, not yet reviewed" (-> pr_review), matching the legacy
       ``_review_existing_pr`` fail-open-to-review semantics.
       When *github* is given (a repo-scoped accessor, e.g.
@@ -509,7 +523,7 @@ def seed_from_cli(
                 SeedEntry(
                     kind="pr",
                     identifier=pr,
-                    stage=StageName.CI,
+                    stage=StageName.STRICT_REVIEW,
                     reason=f"PR #{pr} carries {STATE_IMPLEMENTATION_GO}",
                     pr_number=pr,
                 )

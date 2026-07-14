@@ -36,6 +36,7 @@ class AgentJob:
     prompt_kwargs: dict[str, Any] = field(default_factory=dict)
     output_format: str = "text"
     parse: Callable[[str], Any] | None = None  # e.g. claude_invoke.parse_review_verdict
+    sandbox: str = "workspace-write"
     descr: str = ""
 
 

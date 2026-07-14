@@ -26,6 +26,7 @@ class TestStageName:
             "plan_review",
             "implementation",
             "pr_review",
+            "strict_review",
             "ci",
             "merge_wait",
             "finished",
@@ -190,7 +191,7 @@ class TestROUTES:
                 budgets={"implement": 2, "test_fix": 1},
             ),
             StageName.PR_REVIEW: Route(
-                next=StageName.FINISHED,
+                next=StageName.STRICT_REVIEW,
                 fail_routes={
                     "agent_error": StageName.IMPLEMENTATION,
                     "human_blocked": StageName.FINISHED,
@@ -199,11 +200,20 @@ class TestROUTES:
                 },
                 budgets={"pr_review_iter": 3, "pr_review_hard": 6},
             ),
+            StageName.STRICT_REVIEW: Route(
+                next=StageName.CI,
+                fail_routes={
+                    "nogo": StageName.IMPLEMENTATION,
+                    "head_changed": StageName.STRICT_REVIEW,
+                    "*": StageName.STRICT_REVIEW,
+                },
+                budgets={"strict_review_iter": 1},
+            ),
             StageName.CI: Route(
                 next=StageName.MERGE_WAIT,
                 fail_routes={
                     "fix_exhausted": StageName.IMPLEMENTATION,
-                    "not_implementation_go": StageName.PR_REVIEW,
+                    "not_implementation_go": StageName.STRICT_REVIEW,
                     "missing_worktree": StageName.IMPLEMENTATION,
                     "no_pr": StageName.FINISHED,
                     "*": StageName.CI,
@@ -213,10 +223,15 @@ class TestROUTES:
             StageName.MERGE_WAIT: Route(
                 next=StageName.FINISHED,
                 fail_routes={
+                    "ci_red": StageName.CI,
+                    "blocked_exhausted": StageName.PR_REVIEW,
+                    "missing_worktree": StageName.IMPLEMENTATION,
+                    "strict_gate_unavailable": StageName.STRICT_REVIEW,
                     "closed": StageName.FINISHED,
+                    "timeout": StageName.FINISHED,
                     "*": StageName.FINISHED,
                 },
-                budgets={},
+                budgets={"blocked_address": 2, "rebase": 2, "merge": 1},
             ),
             StageName.FINISHED: Route(next=StageName.FINISHED),
         }
@@ -239,7 +254,7 @@ class TestROUTES:
 
         assert "disable auto-merge and read back the disabled state" in normalized
         assert "`auto_merge_disable_failed`" in normalized
-        assert "`not_implementation_go` → pr_review" in normalized
+        assert "`not_implementation_go` to `strict_review`" in normalized
         assert "finished(fail) on no_pr or auto_merge_disable_failed" in normalized
 
     def test_merge_budget_provenance_uses_stable_source_references(self) -> None:

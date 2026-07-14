@@ -52,8 +52,28 @@ _REASON_BUDGET: dict[str, str | None] = {
     "not_implementation_go": None,
     "missing_worktree": None,
     "no_pr": None,
-    # #2054 terminalizes every open merge-wait item after containment.
+    # ci_red cycles merge_wait -> ci for another merge attempt later, so it
+    # consumes a merge slot; closed/timeout EXIT the pipeline entirely and
+    # charge nothing (a closed PR must not deplete merge attempts).
+    "ci_red": "merge",
+    "blocked_exhausted": "blocked_address",
     "closed": None,
+    "timeout": None,
+    # strict_review's "nogo" (-> implementation, an EXIT) reuses the same
+    # reason STRING as plan_review's cycling "nogo" (-> planning, budgeted
+    # plan_review_iter). _drive is keyed on the string alone (not
+    # (stage, reason)), so a walk that lands on strict_review with "nogo"
+    # over-charges plan_review_iter versus the real per-stage behavior —
+    # harmless here since it only tightens the termination bound (charging
+    # a budget early can never delay reaching FINISHED, only hasten it).
+    # strict_review's own head_changed self-loop consumes no budget (its
+    # only budget, strict_review_iter, is consumed by the stage itself on
+    # every REVIEW_WAIT dispatch, not by this reason).
+    "head_changed": None,
+    # merge_wait's strict_gate_unavailable EXITS to strict_review (no
+    # cycling back into merge_wait), so it charges nothing — mirrors
+    # closed/timeout above.
+    "strict_gate_unavailable": None,
     "unknown_reason": None,
 }
 

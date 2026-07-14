@@ -83,6 +83,7 @@ __all__ = [
     "StageName",
     "StageOutcome",
     "StepResult",
+    "StrictReviewArtifact",
     "WorkItem",
     "agent_provider",
     "stage_model",
@@ -99,6 +100,25 @@ GIT_JOB_TIMEOUT_S = 600
 #: Poll backoff cap in seconds (legacy ``min(2**attempt, 60)`` — shared by
 #: every stage that uses the legacy exponential poll delay.
 BACKOFF_CAP_S = 60
+
+
+@dataclass(frozen=True)
+class StrictReviewArtifact:
+    """An authenticated, current-head strict-review verdict artifact.
+
+    Returned only by :meth:`StageGitHub.strict_review_artifact` when the
+    artifact comment passed every authentication check (automation-identity
+    authorship, schema version, SHA-256 digest, exact head match, verdict
+    grammar). A ``None`` return from that method — never a NOGO instance of
+    this type substituting for "no trusted authorization" — is how callers
+    detect an absent/untrusted artifact; ``merge_wait`` additionally checks
+    :attr:`is_go` before arming, since a validly-authenticated NOGO artifact
+    must never authorize a merge.
+    """
+
+    is_go: bool
+    head_sha: str
+    verdict: str
 
 
 @runtime_checkable
@@ -260,8 +280,8 @@ class StageGitHub(Protocol):
         """Durably ensure auto-merge stays DISABLED until strict proof exists.
 
         The adapter must read back disabled state for an open PR. #2054 calls
-        this before every PR-stage ingress and transition; #2055 will retain
-        the check before its strict-gated arming protocol.
+        this before every PR-stage ingress and transition; #2055's
+        strict-gated arming protocol retains the check.
         """
         ...
 
@@ -278,16 +298,52 @@ class StageGitHub(Protocol):
     def mark_pr_implementation_go(self, pr_number: int) -> None:
         """Durably apply ``state:implementation-go`` to the PR.
 
-        Reserved for #2055's head-bound strict-review stage. #2054's internal
-        review does not call it, so a label cannot authorize an auto-merge.
+        Mirrors ``pr_manager.mark_pr_implementation_go``. Since #2055, the
+        ONLY automatic caller is ``StrictReviewStage`` on a GO verdict, and
+        only AFTER :meth:`publish_strict_review_artifact` succeeded (artifact
+        precedes label). The label alone never authorizes arming —
+        ``MergeWaitStage`` independently re-validates a head-bound artifact
+        via :meth:`strict_review_artifact` immediately before calling
+        :meth:`arm_auto_merge`. #2054's internal review never calls it.
         """
         ...
 
     def arm_auto_merge(self, pr_number: int) -> None:
         """Durably arm squash auto-merge after implementation GO.
 
-        Reserved for #2055's head-bound strict-review stage. No active #2054
-        pipeline stage may call it.
+        The ONLY automatic caller is ``MergeWaitStage._arm`` (#2055), and only
+        immediately after re-validating a head-bound strict-review artifact
+        via :meth:`strict_review_artifact`. No other pipeline stage may call
+        it.
+        """
+        ...
+
+    # -- strict_review surface (#2055) ---------------------------------------
+
+    def strict_review_artifact(self, pr_number: int, head_sha: str) -> StrictReviewArtifact | None:
+        """Return the authenticated, current-head strict-review artifact, or None.
+
+        Returns None on ANY of: no artifact comment from the automation
+        identity, schema-version mismatch, digest mismatch, head-sha
+        mismatch, malformed verdict grammar, or oversized body — callers
+        (``StrictReviewStage`` and ``MergeWaitStage``) must treat None as "no
+        trusted authorization." A returned artifact with ``is_go=False``
+        (an authenticated NOGO) is likewise never sufficient to authorize a
+        merge; callers must check :attr:`StrictReviewArtifact.is_go`.
+        """
+        ...
+
+    def publish_strict_review_artifact(
+        self, pr_number: int, head_sha: str, verdict_body: str, *, is_go: bool
+    ) -> None:
+        """Durably publish the versioned strict-review artifact comment.
+
+        On a GO verdict, written BEFORE :meth:`mark_pr_implementation_go`
+        (doc contract: artifact precedes label) so a crash between the two
+        never leaves the GO label standing without its backing artifact. A
+        NOGO artifact is published too (auditability of the verdict trail)
+        but ``is_go=False`` ensures :meth:`strict_review_artifact` callers
+        never treat it as authorization.
         """
         ...
 
@@ -297,18 +353,21 @@ class StageGitHub(Protocol):
         """Read shared PR state for seed, stage, and merge decisions.
 
         Returns ``{state, headRefOid, mergedAt, mergeStateStatus,
-        baseRefName}``, or ``None`` on a transient read failure. The repo seed
-        path and the CI and implementation stage boundaries use this read for
-        merged/closed terminal-state checks before branch adoption or further
-        routing. The merge_wait path uses the same contract to capture the
-        head OID and classify MERGED/CLOSED/FAILING/DIRTY/BLOCKED/PENDING.
+        baseRefName, autoMergeRequest}``, or ``None`` on a transient read
+        failure. The repo seed path and the CI and implementation stage
+        boundaries use this read for merged/closed terminal-state checks
+        before branch adoption or further routing. The merge_wait path uses
+        the same contract to capture the head OID and classify
+        MERGED/CLOSED/FAILING/DIRTY/BLOCKED/PENDING. strict_review and
+        merge_wait also read ``autoMergeRequest`` (present/non-null iff
+        auto-merge is armed) to verify a disable actually took.
         """
         ...
 
     def arm_drive_green(self, issue_number: int, pr_number: int, head_sha: str) -> None:
         """Durably persist the drive-green arming record (crash-safe).
 
-        Reserved for #2055's strict-gated arming protocol. It mirrors
+        Part of #2055's strict-gated arming protocol. It mirrors
         ``ci_driver.CIDriver._arm_drive_green`` /
         ``ArmingStateStore.save``: written immediately after
         :meth:`arm_auto_merge` succeeds so a crash between arming and the

@@ -588,7 +588,7 @@ class TestSeedingEdges:
         coordinator._seed_pass()
 
         assert created == [("target-repo", tmp_path / "target-repo")]
-        item = coordinator.queues[StageName.CI].snapshot()[0]
+        item = coordinator.queues[StageName.STRICT_REVIEW].snapshot()[0]
         assert item.repo == "target-repo"
         assert item.kind is ItemKind.ISSUE
         assert item.issue == 1818
@@ -628,7 +628,7 @@ class TestSeedingEdges:
         coordinator._seed_pass()
 
         assert created == [("target-repo", tmp_path / "target-repo")]
-        item = coordinator.queues[StageName.CI].snapshot()[0]
+        item = coordinator.queues[StageName.STRICT_REVIEW].snapshot()[0]
         assert item.repo == "target-repo"
         assert item.kind is ItemKind.PR
         assert item.issue == 1818

@@ -22,6 +22,7 @@ from .plan_review import PlanReviewStage
 from .planning import PlanningStage
 from .pr_review import PrReviewStage
 from .repo import RepoStage
+from .strict_review import StrictReviewStage
 
 __all__ = [
     "CiStage",
@@ -39,4 +40,5 @@ __all__ = [
     "StageGitHub",
     "StageOutcome",
     "StepResult",
+    "StrictReviewStage",
 ]

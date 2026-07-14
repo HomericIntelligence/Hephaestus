@@ -16,6 +16,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
 
 from hephaestus.agents.runtime import resolve_agent, run_agent_session
 from hephaestus.automation import claude_invoke, git_utils, subprocess_registry
@@ -378,6 +379,10 @@ class WorkerPool:
 
             def _invoke() -> str:
                 if is_claude:
+                    claude_kwargs: dict[str, Any] = {}
+                    if job.sandbox == "read-only":
+                        claude_kwargs["allowed_tools"] = "Read,Glob,Grep"
+                        claude_kwargs["permission_mode"] = "dontAsk"
                     stdout, _ = claude_invoke.invoke_claude_with_session(
                         repo=job.repo,
                         issue=job.issue,
@@ -387,6 +392,7 @@ class WorkerPool:
                         cwd=job.cwd,
                         timeout=job.timeout_s,
                         output_format=job.output_format,
+                        **claude_kwargs,
                     )
                     return stdout
                 else:
@@ -396,7 +402,7 @@ class WorkerPool:
                         cwd=job.cwd,
                         timeout=job.timeout_s,
                         model=job.model,
-                        sandbox="workspace-write",
+                        sandbox=job.sandbox,
                         approval="never",
                     )
                     return agent_result.stdout or ""

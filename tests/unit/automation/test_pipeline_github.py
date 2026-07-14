@@ -21,6 +21,10 @@ import hephaestus.automation.pr_manager as pr_manager_mod
 from hephaestus.automation.pipeline.stages.base import StageGitHub
 from hephaestus.automation.protocol import PLAN_COMMENT_MARKER, PLAN_REVIEW_PREFIX
 from hephaestus.automation.state_labels import STATE_PLAN_GO
+from hephaestus.automation.strict_review_artifact import (
+    STRICT_REVIEW_ARTIFACT_MARKER,
+    render_strict_review_artifact,
+)
 
 
 @pytest.fixture
@@ -1523,3 +1527,158 @@ class TestSeverityMarker:
         assert count == 1
         assert "auto_thread_id" in resolved_ids
         assert "human_thread_id" not in resolved_ids
+
+
+_ARTIFACT_SHA = "b" * 40
+
+
+class TestStrictReviewArtifact:
+    """strict_review_artifact / publish_strict_review_artifact (#2055)."""
+
+    def test_no_login_refuses(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: None)
+        assert adapter.strict_review_artifact(7, _ARTIFACT_SHA) is None
+
+    def test_no_matching_comment_returns_none(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "automation-bot")
+        monkeypatch.setattr(adapter, "_pr_comments_with_authors", lambda pr: [])
+        assert adapter.strict_review_artifact(7, _ARTIFACT_SHA) is None
+
+    def test_foreign_author_rejected(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        body = render_strict_review_artifact(_ARTIFACT_SHA, "Verdict: GO", is_go=True)
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "automation-bot")
+        monkeypatch.setattr(
+            adapter,
+            "_pr_comments_with_authors",
+            lambda pr: [{"body": body, "author": "someone-else"}],
+        )
+        assert adapter.strict_review_artifact(7, _ARTIFACT_SHA) is None
+
+    def test_stale_head_rejected(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        body = render_strict_review_artifact(_ARTIFACT_SHA, "Verdict: GO", is_go=True)
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "automation-bot")
+        monkeypatch.setattr(
+            adapter,
+            "_pr_comments_with_authors",
+            lambda pr: [{"body": body, "author": "automation-bot"}],
+        )
+        assert adapter.strict_review_artifact(7, "c" * 40) is None
+
+    def test_malformed_body_rejected(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "automation-bot")
+        monkeypatch.setattr(
+            adapter,
+            "_pr_comments_with_authors",
+            lambda pr: [
+                {
+                    "body": f"{STRICT_REVIEW_ARTIFACT_MARKER}\nnot the right grammar",
+                    "author": "automation-bot",
+                }
+            ],
+        )
+        assert adapter.strict_review_artifact(7, _ARTIFACT_SHA) is None
+
+    def test_valid_go_artifact_accepted(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        body = render_strict_review_artifact(_ARTIFACT_SHA, "Grade: A\nVerdict: GO", is_go=True)
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "automation-bot")
+        monkeypatch.setattr(
+            adapter,
+            "_pr_comments_with_authors",
+            lambda pr: [{"body": body, "author": "automation-bot"}],
+        )
+
+        artifact = adapter.strict_review_artifact(7, _ARTIFACT_SHA)
+
+        assert artifact is not None
+        assert artifact.is_go is True
+        assert artifact.head_sha == _ARTIFACT_SHA
+
+    def test_valid_nogo_artifact_never_reads_as_go(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        body = render_strict_review_artifact(_ARTIFACT_SHA, "Grade: D\nVerdict: NOGO", is_go=False)
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "automation-bot")
+        monkeypatch.setattr(
+            adapter,
+            "_pr_comments_with_authors",
+            lambda pr: [{"body": body, "author": "automation-bot"}],
+        )
+
+        artifact = adapter.strict_review_artifact(7, _ARTIFACT_SHA)
+
+        assert artifact is not None
+        assert artifact.is_go is False
+
+    def test_publish_dry_run_skips(
+        self, dry_adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[list[str]] = []
+        monkeypatch.setattr(pg, "gh_call", lambda argv, **kw: calls.append(argv))
+        dry_adapter.publish_strict_review_artifact(7, _ARTIFACT_SHA, "Verdict: GO", is_go=True)
+        assert not calls
+
+    def test_publish_org_scoped_upserts_via_marker(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mock = _patch_target(monkeypatch, "github_api", "gh_issue_upsert_comment")
+
+        adapter.publish_strict_review_artifact(7, _ARTIFACT_SHA, "Verdict: GO", is_go=True)
+
+        assert mock.call_count == 1
+        args = mock.call_args[0]
+        assert args[0] == 7
+        assert args[1] == STRICT_REVIEW_ARTIFACT_MARKER
+        assert args[2].startswith(STRICT_REVIEW_ARTIFACT_MARKER)
+
+    def test_publish_repo_scoped_creates_when_absent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[list[str]] = []
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            if argv == ["api", "/repos/org/repo-a/issues/7/comments", "--paginate", "--slurp"]:
+                return SimpleNamespace(stdout=json.dumps([[]]))
+            return SimpleNamespace(stdout="")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).publish_strict_review_artifact(
+            7, _ARTIFACT_SHA, "Verdict: GO", is_go=True
+        )
+
+        assert any(call[:2] == ["issue", "comment"] for call in calls)
+
+    def test_publish_repo_scoped_updates_existing_marker_comment(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[list[str]] = []
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            if argv == ["api", "/repos/org/repo-a/issues/7/comments", "--paginate", "--slurp"]:
+                payload = [[{"id": 99, "body": f"{STRICT_REVIEW_ARTIFACT_MARKER}\nold"}]]
+                return SimpleNamespace(stdout=json.dumps(payload))
+            return SimpleNamespace(stdout="")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).publish_strict_review_artifact(
+            7, _ARTIFACT_SHA, "Verdict: GO", is_go=True
+        )
+
+        assert any(call[:3] == ["api", "--method", "PATCH"] for call in calls)
+        assert any("/repos/org/repo-a/issues/comments/99" in call for call in calls)
+        assert not any(call[:2] == ["issue", "comment"] for call in calls)

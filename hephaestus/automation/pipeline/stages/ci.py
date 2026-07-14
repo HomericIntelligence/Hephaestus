@@ -14,10 +14,13 @@ contract):
   adopt the PR's REAL head branch; capture the PR's real base ref
   (``baseRefName`` from the same ``gh_pr_state`` read) into
   ``payload["base_branch"]`` for REBASE_WAIT, mirroring merge_wait's
-  ``_route_dirty``; verify the PR carries ``state:implementation-go``
-  (``ctx.github.pr_has_implementation_state_label``, the legacy
-  ``_pr_has_implementation_go`` gate) — a PR without it fails back
-  ``not_implementation_go`` (routes to pr_review).
+  ``_route_dirty``; verify auto-merge is disabled (read-back; a failure
+  finishes ``auto_merge_disable_failed``); verify the PR carries
+  ``state:implementation-go`` (``ctx.github.pr_has_implementation_state_label``,
+  the legacy ``_pr_has_implementation_go`` gate) AND a valid current-head
+  strict-review GO artifact (``ctx.github.strict_review_artifact``, #2055) —
+  a PR missing either fails back ``not_implementation_go`` (routes to
+  strict_review).
 - REBASE_WAIT [W:G] -> REBASE_PUSH_WAIT [W:G]: optional mechanical rebase
   (re-housed ``_attempt_mechanical_rebase`` :1094 — the worker pool's
   ``op="rebase"`` is ``git_utils.rebase_worktree_onto``, which never
@@ -303,6 +306,13 @@ class CiStage(Stage):
         the same ``gh_pr_state`` read (mirrors ``merge_wait._route_dirty``'s
         ``baseRefName`` capture), so REBASE_WAIT targets the PR's actual
         base instead of a hardcoded ``"main"``.
+
+        #2055: the label alone is not proof of authorization — DISCOVER
+        additionally re-verifies a valid, CURRENT-head strict-review GO
+        artifact exists (``ctx.github.strict_review_artifact``). A PR whose
+        artifact is missing/stale/foreign/NOGO regresses to strict_review
+        itself (``not_implementation_go`` routes there, not pr_review, per
+        the ROUTES table) rather than proceeding on label alone.
         """
         if item.pr is None:
             if item.issue is None:
@@ -342,7 +352,17 @@ class CiStage(Stage):
         has_go, _has_no_go = ctx.github.pr_has_implementation_state_label(item.pr)
         if not has_go:
             logger.info(
-                "ci:%s: PR #%d lacks state:implementation-go; regressing to pr_review",
+                "ci:%s: PR #%d lacks state:implementation-go; regressing to strict_review",
+                item.issue,
+                item.pr,
+            )
+            return StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
+        head_sha = str((gh_state or {}).get("headRefOid") or "")
+        artifact = ctx.github.strict_review_artifact(item.pr, head_sha)
+        if artifact is None or not artifact.is_go:
+            logger.info(
+                "ci:%s: PR #%d has no valid current-head strict-GO artifact; "
+                "regressing to strict_review",
                 item.issue,
                 item.pr,
             )

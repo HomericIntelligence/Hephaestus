@@ -114,6 +114,7 @@ from hephaestus.automation.pipeline.stages import (
     Stage,
     StageContext,
     StageGitHub,
+    StrictReviewStage,
 )
 from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARGV
 from hephaestus.automation.pipeline.stages.repo import product_to_work_item
@@ -160,6 +161,7 @@ _DRAIN_ORDER: tuple[StageName, ...] = (
     StageName.FINISHED,
     StageName.MERGE_WAIT,
     StageName.CI,
+    StageName.STRICT_REVIEW,
     StageName.PR_REVIEW,
     StageName.IMPLEMENTATION,
     StageName.PLAN_REVIEW,
@@ -402,6 +404,7 @@ class Coordinator:
             StageName.PLAN_REVIEW: PlanReviewStage(),
             StageName.IMPLEMENTATION: ImplementationStage(),
             StageName.PR_REVIEW: PrReviewStage(),
+            StageName.STRICT_REVIEW: StrictReviewStage(),
             StageName.CI: CiStage(),
             StageName.MERGE_WAIT: MergeWaitStage(),
             StageName.FINISHED: FinishedStage(self.ledger, self.preserved),
@@ -1399,9 +1402,12 @@ class Coordinator:
                 continue
             has_go, _has_no_go = github.pr_has_implementation_state_label(pr)
             if has_go:
+                # #2055: the label alone never short-circuits straight to ci
+                # — strict_review re-derives its own verdict from the
+                # current head before anything can proceed toward CI/merge.
                 stage, reason, passed = self._scope_seed_decision(
                     scope_identifier,
-                    StageName.CI,
+                    StageName.STRICT_REVIEW,
                     f"PR #{pr} carries {STATE_IMPLEMENTATION_GO}",
                     scope_stages,
                 )

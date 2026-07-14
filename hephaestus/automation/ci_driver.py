@@ -7,7 +7,7 @@ console-script entry point only: :func:`main` parses the historical CI-driver
 argument surface (``--issues`` / ``--prs``, ``--max-fix-iterations``, the
 poll/timeout + GitHub-throttle flags, ``--all`` / bot-PR toggles), builds a
 :class:`~hephaestus.automation.pipeline.coordinator.PipelineConfig` trimmed to
-the ``(ci, merge_wait)`` stage scope via
+the ``(strict_review, ci, merge_wait)`` stage scope via
 :class:`~hephaestus.automation.pipeline.routing.PipelineScope`, seeds the
 requested issues / PRs (and, in no-scope discovery mode, the repo-wide failing-PR
 sweep via ``drive_green_all``), and dispatches to
@@ -66,11 +66,14 @@ logger = logging.getLogger(__name__)
 # ``loop_repo_manager._count_failing_prs`` both consume it from here.
 
 #: Contiguous stage subset the CI-driver CLI runs: the CI drive-green loop
-#: (CI) followed by the containment-only merge-wait stage (MERGE_WAIT).
-#: CiStage's ADVANCE target (MERGE_WAIT) is in scope, so a green PR flows
-#: straight into merge_wait; that stage verifies auto-merge is disabled and
-#: finishes with ``strict_gate_unavailable`` until #2055 supplies the gate.
-_CI_DRIVER_SCOPE_STAGES: frozenset[StageName] = frozenset({StageName.CI, StageName.MERGE_WAIT})
+#: the head-bound independent strict-review gate (STRICT_REVIEW, #2055) that
+#: precedes it, and the arm + wait-for-merge + post-merge /learn loop
+#: (MERGE_WAIT). CiStage's ADVANCE target (MERGE_WAIT) is in scope, so a
+#: green PR flows straight into merge_wait, which arms only after
+#: revalidating strict_review's current-head GO artifact.
+_CI_DRIVER_SCOPE_STAGES: frozenset[StageName] = frozenset(
+    {StageName.STRICT_REVIEW, StageName.CI, StageName.MERGE_WAIT}
+)
 
 
 def _pr_is_failing(pr: dict[str, Any]) -> bool:

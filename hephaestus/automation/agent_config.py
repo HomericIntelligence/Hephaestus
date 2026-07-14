@@ -331,6 +331,12 @@ AGENT_IMPLEMENTER = "implementer"
 AGENT_PR_REVIEWER = "pr-reviewer"
 AGENT_ADDRESS_REVIEW = "address-review"
 AGENT_CI_DRIVER = "ci-driver"
+# Independent, read-only second-opinion reviewer (issue #2055). Deliberately
+# NOT a member of _PER_ITERATION_REVIEWERS: reviewer_agent()'s per-ITERATION
+# suffix serves the plan/PR loop reviewers (keyed on loop round only), while
+# strict_review runs once per PR head and must never resume a session from a
+# prior head or a rejected artifact's attempt — see strict_review_agent.
+AGENT_STRICT_REVIEW = "strict-review"
 # Lightweight read-only metadata writers. They are deliberately separate from
 # implementer/reviewer sessions so commit and PR text generation cannot inherit
 # or mutate a code-producing transcript.
@@ -353,6 +359,7 @@ _ALL_AGENTS = frozenset(
         AGENT_COMMIT_MESSAGE,
         AGENT_PR_MESSAGE,
         AGENT_COMMENT_CLASSIFIER,
+        AGENT_STRICT_REVIEW,
     }
 )
 
@@ -410,13 +417,49 @@ def reviewer_agent(base_agent: str, iteration: int) -> str:
     return f"{base_agent}-r{iteration}"
 
 
+def strict_review_agent(head_sha: str, attempt: int) -> str:
+    """Return a per-head/per-attempt strict-review session token.
+
+    Unlike :func:`reviewer_agent`'s per-ITERATION suffix (plan/PR loop
+    reviewers, keyed on loop round only), strict_review runs once per PR
+    head and must never resume a session from a prior head or a rejected
+    artifact's attempt — the session key includes both the head SHA
+    (truncated to 12 hex chars) and the attempt counter, so a head change or
+    a retried attempt always mints a fresh session.
+
+    Args:
+        head_sha: The PR's current head commit SHA.
+        attempt: Zero-based attempt counter for this head.
+
+    Returns:
+        ``f"{AGENT_STRICT_REVIEW}-{head_sha[:12]}-a{attempt}"``.
+
+    Raises:
+        ValueError: If ``head_sha`` is empty or ``attempt`` is negative.
+
+    """
+    if not head_sha:
+        raise ValueError("head_sha must be non-empty")
+    if attempt < 0:
+        raise ValueError(f"attempt must be >= 0, got {attempt}")
+    return f"{AGENT_STRICT_REVIEW}-{head_sha[:12]}-a{attempt}"
+
+
 def _is_valid_agent(agent: str) -> bool:
     """Return True for a known base agent or a per-iteration reviewer token."""
     if agent in _ALL_AGENTS:
         return True
     # Accept the reviewer_agent() form: "<base>-r<N>".
     base, sep, suffix = agent.rpartition("-r")
-    return bool(sep) and base in _PER_ITERATION_REVIEWERS and suffix.isdigit()
+    if sep and base in _PER_ITERATION_REVIEWERS and suffix.isdigit():
+        return True
+    # Accept the strict_review_agent() form: "strict-review-<sha12>-a<N>".
+    prefix = f"{AGENT_STRICT_REVIEW}-"
+    if agent.startswith(prefix):
+        rest = agent[len(prefix) :]
+        sha_part, sep, attempt_part = rest.rpartition("-a")
+        return bool(sep) and bool(sha_part) and attempt_part.isdigit()
+    return False
 
 
 def _model_token(model: str | None) -> str:
@@ -560,6 +603,7 @@ __all__ = [
     "AGENT_PR_MESSAGE",
     "AGENT_PR_REVIEWER",
     "AGENT_REVIEW_TIMEOUT",
+    "AGENT_STRICT_REVIEW",
     # Model selection
     "CODEX_ADVISE",
     "DEFAULT_AGENT_TIMEOUT",
@@ -610,4 +654,5 @@ __all__ = [
     "session_name",
     "session_uuid",
     "short_githash",
+    "strict_review_agent",
 ]

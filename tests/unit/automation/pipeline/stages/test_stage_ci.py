@@ -7,6 +7,7 @@ from typing import Any
 from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobResult
 from hephaestus.automation.pipeline.routing import ROUTES, Disposition, StageName
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
+from hephaestus.automation.pipeline.stages.base import StrictReviewArtifact
 from hephaestus.automation.pipeline.stages.ci import (
     BACKOFF_CAP_S,
     CI_POLL_STARTED_AT,
@@ -27,7 +28,7 @@ from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 # Sanity anchors: the reasons this suite exercises are ROUTES rows.
 assert ROUTES[StageName.CI].fail_routes["fix_exhausted"] == StageName.IMPLEMENTATION
-assert ROUTES[StageName.CI].fail_routes["not_implementation_go"] == StageName.PR_REVIEW
+assert ROUTES[StageName.CI].fail_routes["not_implementation_go"] == StageName.STRICT_REVIEW
 assert ROUTES[StageName.CI].budgets == {"ci_fix": 1, "rebase": 2}
 
 GREEN_CHECKS = [
@@ -84,8 +85,17 @@ def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int
 
 
 def _go_github(**kwargs: Any) -> FakeStageGitHub:
-    """FakeStageGitHub for a PR that already carries implementation-go."""
+    """FakeStageGitHub for a PR that already carries implementation-go.
+
+    #2055: DISCOVER also requires a valid current-head strict-GO artifact,
+    so this helper seeds one by default (FakeStageGitHub's canned
+    strict_review_artifact answer ignores the queried head_sha).
+    """
     kwargs.setdefault("pr_impl_state", (True, False))
+    kwargs.setdefault(
+        "strict_artifact",
+        StrictReviewArtifact(is_go=True, head_sha="abc123", verdict="Verdict: GO"),
+    )
     return FakeStageGitHub(**kwargs)
 
 
@@ -271,7 +281,7 @@ class TestCiDiscover:
         assert result == StageOutcome(Disposition.FINISH_FAIL, "closed")
 
     def test_missing_implementation_go_fails_back(self, make_ctx: Any, make_work_item: Any) -> None:
-        """A PR without state:implementation-go regresses to pr_review."""
+        """A PR without state:implementation-go regresses to strict_review."""
         stage = CiStage()
         ctx = make_ctx(github=FakeStageGitHub(pr_impl_state=(False, False)))
         item = _item(make_work_item, state=DISCOVER)
@@ -279,6 +289,54 @@ class TestCiDiscover:
         result = stage.step(item, ctx)
 
         assert result == StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
+
+    def test_go_label_without_strict_artifact_regresses(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """#2055: state:implementation-go label alone is not sufficient.
+
+        DISCOVER must additionally find a valid current-head strict-GO
+        artifact; a labeled PR with no artifact still regresses (to
+        strict_review, per ROUTES) rather than proceeding to REBASE_WAIT.
+        """
+        stage = CiStage()
+        ctx = make_ctx(github=FakeStageGitHub(pr_impl_state=(True, False), strict_artifact=None))
+        item = _item(make_work_item, state=DISCOVER)
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
+
+    def test_go_label_with_nogo_strict_artifact_regresses(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A validly-authenticated NOGO artifact never authorizes CI to proceed."""
+        stage = CiStage()
+        ctx = make_ctx(
+            github=FakeStageGitHub(
+                pr_impl_state=(True, False),
+                strict_artifact=StrictReviewArtifact(
+                    is_go=False, head_sha="abc123", verdict="Verdict: NOGO"
+                ),
+            )
+        )
+        item = _item(make_work_item, state=DISCOVER)
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
+
+    def test_go_label_with_valid_strict_artifact_proceeds(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A valid current-head strict-GO artifact lets DISCOVER proceed."""
+        stage = CiStage()
+        ctx = make_ctx(github=_go_github())
+        item = _item(make_work_item, state=DISCOVER)
+
+        result = stage.step(item, ctx)
+
+        assert result == Continue(next_state=REBASE_WAIT)
 
     def test_preset_branch_is_kept(self, make_ctx: Any, make_work_item: Any) -> None:
         """An item that already knows its branch never overwrites it."""
@@ -593,7 +651,13 @@ class TestCiWalks:
     def test_fix_path_reaches_green(self, make_ctx: Any, make_work_item: Any) -> None:
         """FAILING -> fix agent -> push (real commit) -> re-poll green -> ADVANCE."""
         stage = CiStage()
-        github = _FifoChecksGitHub([FAILING_CHECKS, GREEN_CHECKS], pr_impl_state=(True, False))
+        github = _FifoChecksGitHub(
+            [FAILING_CHECKS, GREEN_CHECKS],
+            pr_impl_state=(True, False),
+            strict_artifact=StrictReviewArtifact(
+                is_go=True, head_sha="abc123", verdict="Verdict: GO"
+            ),
+        )
         ctx = make_ctx(github=github)
         ctx.config.enable_mechanical_rebase = False
         pool = FakeWorkerPool()
@@ -645,7 +709,13 @@ class TestCiWalks:
     def test_fix_budget_exhaustion_fails_back(self, make_ctx: Any, make_work_item: Any) -> None:
         """A fix round that leaves CI red exhausts ci_fix=1 -> implementation."""
         stage = CiStage()
-        github = _FifoChecksGitHub([FAILING_CHECKS], pr_impl_state=(True, False))
+        github = _FifoChecksGitHub(
+            [FAILING_CHECKS],
+            pr_impl_state=(True, False),
+            strict_artifact=StrictReviewArtifact(
+                is_go=True, head_sha="abc123", verdict="Verdict: GO"
+            ),
+        )
         ctx = make_ctx(github=github)
         ctx.config.enable_mechanical_rebase = False
         pool = FakeWorkerPool()
@@ -663,7 +733,13 @@ class TestCiWalks:
     def test_failed_fix_job_never_pushes(self, make_ctx: Any, make_work_item: Any) -> None:
         """A hard-failed fix session reroutes to POLL without a push job."""
         stage = CiStage()
-        github = _FifoChecksGitHub([FAILING_CHECKS], pr_impl_state=(True, False))
+        github = _FifoChecksGitHub(
+            [FAILING_CHECKS],
+            pr_impl_state=(True, False),
+            strict_artifact=StrictReviewArtifact(
+                is_go=True, head_sha="abc123", verdict="Verdict: GO"
+            ),
+        )
         ctx = make_ctx(github=github)
         ctx.config.enable_mechanical_rebase = False
         pool = FakeWorkerPool()
@@ -679,7 +755,13 @@ class TestCiWalks:
     def test_hard_push_failure_fails_back(self, make_ctx: Any, make_work_item: Any) -> None:
         """A lost-lease/broken-remote push is exhaustion (head never advanced)."""
         stage = CiStage()
-        github = _FifoChecksGitHub([FAILING_CHECKS], pr_impl_state=(True, False))
+        github = _FifoChecksGitHub(
+            [FAILING_CHECKS],
+            pr_impl_state=(True, False),
+            strict_artifact=StrictReviewArtifact(
+                is_go=True, head_sha="abc123", verdict="Verdict: GO"
+            ),
+        )
         ctx = make_ctx(github=github)
         ctx.config.enable_mechanical_rebase = False
         pool = FakeWorkerPool()
@@ -696,7 +778,13 @@ class TestCiWalks:
     def test_no_commit_escalation_walk(self, make_ctx: Any, make_work_item: Any) -> None:
         """No-commit push -> ONE force-engagement retry -> green -> ADVANCE."""
         stage = CiStage()
-        github = _FifoChecksGitHub([FAILING_CHECKS, GREEN_CHECKS], pr_impl_state=(True, False))
+        github = _FifoChecksGitHub(
+            [FAILING_CHECKS, GREEN_CHECKS],
+            pr_impl_state=(True, False),
+            strict_artifact=StrictReviewArtifact(
+                is_go=True, head_sha="abc123", verdict="Verdict: GO"
+            ),
+        )
         ctx = make_ctx(github=github)
         ctx.config.enable_mechanical_rebase = False
         pool = FakeWorkerPool()
@@ -723,7 +811,13 @@ class TestCiWalks:
     def test_double_no_commit_exhausts(self, make_ctx: Any, make_work_item: Any) -> None:
         """A second consecutive no-commit turn fails back (escalation is ONE)."""
         stage = CiStage()
-        github = _FifoChecksGitHub([FAILING_CHECKS], pr_impl_state=(True, False))
+        github = _FifoChecksGitHub(
+            [FAILING_CHECKS],
+            pr_impl_state=(True, False),
+            strict_artifact=StrictReviewArtifact(
+                is_go=True, head_sha="abc123", verdict="Verdict: GO"
+            ),
+        )
         ctx = make_ctx(github=github)
         ctx.config.enable_mechanical_rebase = False
         pool = FakeWorkerPool()

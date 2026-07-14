@@ -19,12 +19,14 @@ from hephaestus.automation.session_naming import (
     AGENT_PLAN_REVIEWER,
     AGENT_PLANNER,
     AGENT_PR_REVIEWER,
+    AGENT_STRICT_REVIEW,
     current_trunk_githash,
     reviewer_agent,
     session_jsonl_path,
     session_name,
     session_uuid,
     short_githash,
+    strict_review_agent,
 )
 
 _GIT_REPO_ENV_KEYS = (
@@ -78,6 +80,43 @@ class TestReviewerAgent:
     def test_unsuffixed_unknown_still_rejected(self) -> None:
         with pytest.raises(ValueError, match="unknown agent"):
             session_name("R", 5, "totally-bogus")
+
+
+class TestStrictReviewAgent:
+    """Per-head/per-attempt strict-review session tokens (#2055)."""
+
+    def test_token_shape(self) -> None:
+        assert strict_review_agent("abc123def456789", 0) == f"{AGENT_STRICT_REVIEW}-abc123def456-a0"
+
+    def test_head_sha_truncated_to_12_hex_chars(self) -> None:
+        token = strict_review_agent("0123456789abcdefFULL", 1)
+        assert token == f"{AGENT_STRICT_REVIEW}-0123456789ab-a1"
+
+    def test_different_head_different_uuid(self) -> None:
+        u0 = session_uuid("R", 5, strict_review_agent("aaaaaaaaaaaa", 0))
+        u1 = session_uuid("R", 5, strict_review_agent("bbbbbbbbbbbb", 0))
+        assert u0 != u1
+
+    def test_different_attempt_different_uuid(self) -> None:
+        u0 = session_uuid("R", 5, strict_review_agent("aaaaaaaaaaaa", 0))
+        u1 = session_uuid("R", 5, strict_review_agent("aaaaaaaaaaaa", 1))
+        assert u0 != u1
+
+    def test_suffixed_token_is_valid_session_agent(self) -> None:
+        name = session_name("R", 5, strict_review_agent("aaaaaaaaaaaa", 2))
+        assert name == f"R_5_{AGENT_STRICT_REVIEW}-aaaaaaaaaaaa-a2"
+
+    def test_rejects_empty_head_sha(self) -> None:
+        with pytest.raises(ValueError, match="head_sha must be"):
+            strict_review_agent("", 0)
+
+    def test_rejects_negative_attempt(self) -> None:
+        with pytest.raises(ValueError, match="attempt must be"):
+            strict_review_agent("aaaaaaaaaaaa", -1)
+
+    def test_malformed_strict_review_token_rejected(self) -> None:
+        with pytest.raises(ValueError, match="unknown agent"):
+            session_name("R", 5, f"{AGENT_STRICT_REVIEW}-noattemptsuffix")
 
 
 class TestSessionName:

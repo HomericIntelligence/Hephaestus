@@ -60,9 +60,13 @@ from .pr_review_core import (
 logger = logging.getLogger(__name__)
 
 #: Single-stage scope the PR-review CLI runs: the read-only analyze + post-inline
-#: + GO/NOGO review loop (PR_REVIEW). PrReviewStage's ADVANCE target (CI) is out
-#: of scope, so ``PipelineScope`` rewrites it to FINISHED — a GO'd review simply
-#: finishes (this CLI does not drive CI or arm auto-merge).
+#: + GO/NOGO review loop (PR_REVIEW). PrReviewStage's ADVANCE target
+#: (STRICT_REVIEW) is out of scope, so ``PipelineScope`` rewrites it to
+#: FINISHED — a GO'd review simply finishes. This command performs INTERNAL
+#: review only and NEVER authorizes a merge (#2055): ``strict_review`` is a
+#: separate, independent stage — the sole automatic producer of
+#: ``state:implementation-go`` — and ``merge_wait`` is the sole automatic
+#: armer. This CLI does not drive CI, strict_review, or arm auto-merge.
 _PR_REVIEWER_SCOPE_STAGES: frozenset[StageName] = frozenset({StageName.PR_REVIEW})
 
 
@@ -112,6 +116,11 @@ Examples:
 
   # Review with more workers
   %(prog)s --issues 595 596 --max-workers 5
+
+Note: this command performs INTERNAL review only. It never authorizes a
+merge — the independent `strict_review` stage is the sole automatic
+producer of `state:implementation-go`, and `merge_wait` is the sole
+automatic armer of auto-merge.
         """,
         issues_help="Issue numbers whose linked PRs should be reviewed",
         dry_run_prefix="Show what would be done without actually posting any review comments.",
@@ -145,6 +154,10 @@ def main() -> int:
     Parses the historical reviewer argument surface, builds a
     :class:`PipelineConfig` scoped to ``pr_review``, seeds the requested issues
     into the PR-review queue, and runs the coordinator.
+
+    Internal review only (#2055): this command never authorizes a merge.
+    ``strict_review`` is the separate, independent stage that is the sole
+    automatic producer of ``state:implementation-go``.
 
     Returns:
         Exit code: the coordinator's exit code (0 clean, non-zero on

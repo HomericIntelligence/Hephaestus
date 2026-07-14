@@ -17,7 +17,9 @@ Steps:
    ``ctx.github.skip_epics`` [durable, BEFORE excluding], classify each kept
    issue via the REUSED :func:`~..seeding.seed_issue` /
    :func:`~..seeding.classify_issue`, and (``--drive-green-all``) route
-   orphan PRs (open PRs with no tracked issue) to the ci queue.
+   orphan PRs (open PRs with no tracked issue) to the strict_review queue
+   (#2055: never straight to ci — the label alone is not proof of
+   authorization).
 4. [M] SEEDED: expose the classified products in
    ``item.payload["products"]`` — the coordinator (queue owner) performs the
    actual queue pushes when routing the repo item — and finish
@@ -249,7 +251,10 @@ class RepoStage(Stage):
                 }
             )
 
-        # --drive-green-all: orphan PRs (no tracked issue) -> ci stage.
+        # --drive-green-all: orphan PRs (no tracked issue) -> strict_review
+        # (#2055: never straight to ci — a legacy/stale/forged label is not
+        # proof of authorization; strict_review re-derives its own verdict
+        # and ci's own DISCOVER additionally re-verifies the artifact).
         if getattr(ctx.config, "drive_green_all", False):
             include_bot_prs = bool(getattr(ctx.config, "include_bot_prs", True))
             include_all_authors = bool(getattr(ctx.config, "include_all_authors", False))
@@ -271,7 +276,7 @@ class RepoStage(Stage):
                     {
                         "kind": "pr",
                         "number": pr_number,
-                        "stage": StageName.CI,
+                        "stage": StageName.STRICT_REVIEW,
                         "reason": f"orphan PR #{pr_number} (drive-green-all)",
                     }
                 )
