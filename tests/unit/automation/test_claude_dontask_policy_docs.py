@@ -78,3 +78,16 @@ def test_issue_1482_dontask_sites_are_documented_in_agents_md() -> None:
     documented = _documented_rows()
     for call_key, tools in EXPECTED_DONTASK_CALLS.items():
         assert documented.get(call_key) == tools
+
+
+def test_agents_md_has_design_philosophy_section() -> None:
+    """AGENTS.md must document the agent-design philosophy (issue #2111)."""
+    agents_md = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    assert "## Design Philosophy" in agents_md
+    # Heritage attribution required by the issue title.
+    assert "ProjectOdyssey" in agents_md
+    # Core principles the section is grounded in.
+    for principle in ("KISS", "YAGNI", "SOLID", "POLA"):
+        assert principle in agents_md, f"Design Philosophy missing {principle}"
+    # Cross-link back to the canonical principle list in CLAUDE.md.
+    assert "CLAUDE.md#key-development-principles" in agents_md
