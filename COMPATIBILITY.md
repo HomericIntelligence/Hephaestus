@@ -17,9 +17,10 @@ follows the deprecation policy below.
 
 ## Stability Tiers
 
-Hephaestus ships 20 documented subpackages with different maturity levels. Only the
-**stable** subpackages below are covered by the [deprecation policy](#deprecation-policy);
-**provisional** subpackages may change without notice, even across minor versions.
+Hephaestus ships documented subpackages with different maturity levels. Only
+the **stable** subpackages below are covered by the
+[deprecation policy](#deprecation-policy); provisional subpackages may change
+without notice, even across minor versions.
 
 ### Stable
 
@@ -45,7 +46,7 @@ may change incompatibly in a minor release.
 | Subpackage | Why provisional |
 |------------|-----------------|
 | `hephaestus.agents` | Agent metadata schema still evolving |
-| `hephaestus.automation` | Actively-evolving 3-stage issue/PR pipeline (collapsed from the prior 6-phase design in #677/#679); internals still evolving |
+| `hephaestus.automation` | Queue-based issue and PR orchestration is a provisional product layer; its internals may change |
 | `hephaestus.benchmarks` | Comparison API is exploratory |
 | `hephaestus.ci` | CI helpers are project-specific glue, not a general API |
 | `hephaestus.datasets` | Downloader URLs and on-disk layout are not contracted |
@@ -54,13 +55,13 @@ may change incompatibly in a minor release.
 | `hephaestus.github` | Only `detect_repo_from_remote`/`local_branch_exists` and the `stats` / `rate_limit` helpers are intended as library API; the CLI `main()`s are not |
 | `hephaestus.markdown` | Linting/fixing rules track evolving markdown conventions |
 | `hephaestus.nats` | NATS subscriber surface is provisional pending real-world use |
-| `hephaestus.resilience` | Implemented but not yet wired into production paths (#469) |
+| `hephaestus.resilience` | Circuit-breaker, retry, and subprocess primitives remain provisional |
 | `hephaestus.validation` | Validation rules track CI policy and evolve with it |
 
 ## Console-Script Stability Tiers
 
-Hephaestus installs 53 console scripts via `[project.scripts]` in
-`pyproject.toml`. Each is classified into one of three tiers:
+Hephaestus installs the console scripts declared in
+`pyproject.toml [project.scripts]`. Each is classified into one of three tiers:
 
 - **Stable** — covered by the [deprecation policy](#deprecation-policy). CLI
   name, flags, exit codes, and JSON output schema (when `--json` is passed)

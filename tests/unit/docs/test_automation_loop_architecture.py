@@ -30,12 +30,12 @@ def test_ci_stage_documents_shipped_classifier() -> None:
     assert "tests/unit/automation/pipeline/stages/test_classify_ci_state.py" in text
 
 
-def test_automation_loop_architecture_status_is_implemented() -> None:
-    """The architecture contract must describe the implemented pipeline."""
+def test_automation_loop_architecture_describes_the_shipped_pipeline() -> None:
+    """The architecture contract must describe the pipeline as shipped."""
     text = _arch_text()
-    header = "\n".join(text.splitlines()[:5])
+    header = "\n".join(text.splitlines()[:8])
 
-    assert "Status: implemented for the epic #1809 queue-based automation loop." in header
+    assert "The `hephaestus-automation-loop` CLI runs this pipeline directly" in header
     assert "pre-implementation" not in header
 
 

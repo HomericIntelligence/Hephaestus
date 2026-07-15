@@ -298,7 +298,7 @@ with `--help` to see full usage.
 
 | Command | Description |
 |---|---|
-| `hephaestus-automation-loop` | Multi-repo queue-based automation pipeline using Claude Code or Codex (repo → planning → plan_review → implementation → pr_review → finished; legacy implementation-GO inputs route through ci → merge_wait → finished during #2054) |
+| `hephaestus-automation-loop` | Multi-repo queue-based automation pipeline using Claude Code or Codex; see `docs/AUTOMATION_LOOP_ARCHITECTURE.md` for the maintained stage and routing contract |
 | `hephaestus-plan-issues` | Bulk issue planning using Claude Code or Codex |
 | `hephaestus-implement-issues` | Bulk issue implementation using Claude Code or Codex in parallel worktrees |
 | `hephaestus-review-prs` | Read-only PR review automation using Claude Code or Codex in parallel worktrees |
@@ -465,10 +465,9 @@ hephaestus-check-complexity --help
 ## Contributing
 
 The `main` branch is protected; all changes go through a pull request. CI blocks
-PRs that fail its issue-reference, signature, and DCO checks. During #2054,
-auto-merge remains disabled through pipeline containment and reviewer control;
-the `auto-merge-policy` check reports armed PRs but is advisory so it does not
-block the independently reviewed manual bootstrap merge.
+PRs that fail issue-reference, signature, DCO, and required-check policy. The
+current strict-review and auto-merge contract is maintained in
+[Required status checks](docs/ci/required-checks.md).
 
 1. Create a feature branch named `<issue-number>-description`
    (`git checkout -b 123-amazing-feature`).
@@ -477,10 +476,7 @@ block the independently reviewed manual bootstrap merge.
 3. Push the branch (`git push -u origin 123-amazing-feature`).
 4. Open a pull request whose body contains the literal line `Closes #123`
    (capital `C`, no colon, on its own line — `Fixes`/`Resolves` are **not** accepted).
-5. Keep auto-merge disabled while #2054's fail-closed policy is active. A
-   bootstrap PR requires an unconditional independent strict-review GO before
-   a manual squash merge; #2055 restores queue-owned auto-merge after a
-   head-bound strict-review proof.
+5. Satisfy the current review and merge policy in `docs/ci/required-checks.md`.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full process.
 

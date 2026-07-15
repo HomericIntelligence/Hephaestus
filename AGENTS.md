@@ -2,23 +2,22 @@
 
 This file is a single-page map of the AI-agent topology and conventions used by
 Hephaestus and the wider HomericIntelligence ecosystem. For project-specific
-rules (commit policy, branch naming, version model) see [`CLAUDE.md`](CLAUDE.md);
-for the catalog of skills the agents invoke, see the [`skills/`](skills/) directory.
+rules see [`CLAUDE.md`](CLAUDE.md); enabled procedural skills are declared in
+[`.claude/settings.json`](.claude/settings.json).
 
 ## Agents the codebase orchestrates
 
 The default `hephaestus-automation-loop` path is the queue-based in-process
 pipeline in `hephaestus.automation.pipeline.coordinator`. The coordinator owns
-eight in-memory stage queues and dispatches agent/build/git jobs to a worker
+the stage queues listed below and dispatches agent, build, and Git jobs to a worker
 pool. Each agent job runs either **Claude Code** or **Codex**, chosen via the
 optional `--agent` CLI flag or auto-detected with a Claude preference when
 omitted (see `hephaestus.agents.runtime.add_agent_argument`).
 
-**Temporary merge policy (#2054):** all automatic auto-merge armers are
-fail-closed while #2055 adds the head-bound `strict_review` queue stage. The
-pipeline verifies auto-merge is disabled for open PRs and stops at
-`strict_gate_unavailable`; bootstrap PRs require an unconditional independent
-strict-review GO and a manual squash merge.
+Shipped routing and merge-gate behavior are maintained in
+[`docs/AUTOMATION_LOOP_ARCHITECTURE.md`](docs/AUTOMATION_LOOP_ARCHITECTURE.md).
+Live branch-protection and merge requirements are maintained in
+[`docs/ci/required-checks.md`](docs/ci/required-checks.md).
 
 | Queue stage | Module | Purpose |
 |-------------|--------|---------|
@@ -71,8 +70,7 @@ Hephaestus's shared tooling. Those principles, applied to agent design, are:
 
 - **Simplicity first (KISS / YAGNI).** Each queue stage owns one responsibility
   and one reason to change; we do not add stages, providers, or abstractions
-  until a concrete workflow needs them. The deferred `AgentProtocol` and
-  resilience wiring (issues #468, #469) are intentionally *not* built yet.
+  until a concrete workflow needs them.
 - **One-way dependencies (DRY / boundaries).** The dependency arrow points only
   automation → library (see [`CLAUDE.md`](CLAUDE.md#library-vs-product-layer)).
   Prompt construction lives in exactly one module (`hephaestus.automation.prompts`)
@@ -127,44 +125,26 @@ This prevents a hostile issue body from forging a verdict line or injecting
 instructions that bypass the strict review loop. See the tests in
 `tests/unit/automation/test_prompts.py` for the regression coverage.
 
-## Human-in-the-loop checkpoints
+## Skill catalog and human gates
 
-Several skills mandate human gates that the agents must wait on:
-
-- `skills/myrmidon-swarm/SKILL.md` — explicit Phase 1 "STOP HERE. Ask the user…"
-  before any swarm deploys.
-- `skills/skill-advisor/SKILL.md` — invoked at the start of any substantive task
-  with `allowed-tools: []`, so it can route but never act autonomously.
-- `skills/finish-branch/SKILL.md`, `skills/code-review/SKILL.md` — explicit confirm
-  steps before tagging, force-pushing, or merging.
+`.claude/settings.json` is the repository source for enabled plugins; the
+runtime-provided skill catalog and each installed skill's current manifest
+define arguments, tool boundaries, and human approval gates. Agents must read
+the selected skill before acting and must stop at any approval gate it defines.
 
 Every PR opened by the automation pipeline goes through GitHub's normal branch
-protection and the `pr-policy` required-check gate
-(see [`CLAUDE.md`](CLAUDE.md#pr-policy)) — a human still reviews and merges.
-
-## Skill catalog
-
-`skills/` contains 23 reusable skills the agents can invoke. See
-[`CLAUDE.md`](CLAUDE.md#skill-catalog) for the full table. Highlights:
-
-- **Workflow**: `skill-advisor`, `advise`, `brainstorm`, `test-driven-development`,
-  `systematic-debugging`, `verification`, `finish-branch`, `code-review`.
-- **Repo audits**: `repo-analyze` and its `-quick`, `-strict`, `-full`, and
-  `*-full` variants.
-- **Worktrees**: `git-worktrees`, `worktree-cleanup`, `tidy`.
-- **Orchestration**: `myrmidon-swarm` for hierarchical multi-agent fan-out.
-- **Knowledge capture**: `learn` (writes back to the Mnemosyne marketplace).
+protection and the `pr-policy` required-check gate; a human still reviews and
+merges.
 
 ## Configuration / boundaries
 
-- Hooks and per-skill `allowed-tools` are declared in each skill's frontmatter
-  (`skills/<name>/SKILL.md`) — these are the agent permission boundaries.
-- `.claude/settings.json` carries project-level plugin enablement.
+- `.claude/settings.json` carries project-level plugin enablement. Installed
+  skill manifests define their own tool boundaries.
 - **MCP** (Model Context Protocol): `.mcp.json` at the repo root is the
   project-scoped, version-controlled MCP config. Its `mcpServers` map is empty
   — ecosystem integration runs through plugin marketplaces (Mnemosyne), NATS
   (`hephaestus/nats/`), and HTTP REST (Agamemnon/Hermes), none of which is MCP.
   To add a server, edit `.mcp.json`; see [`docs/mcp.md`](docs/mcp.md).
-- The deferred follow-ups for cross-agent abstraction (a formal `AgentProtocol`)
-  and for wiring `hephaestus.resilience` into the GitHub call path are tracked
-  in issues #468 and #469.
+- No formal cross-provider `AgentProtocol` or production GitHub resilience
+  wiring is part of the current contract. Introduce either only with a concrete
+  workflow, tests, and an update to this topology map.

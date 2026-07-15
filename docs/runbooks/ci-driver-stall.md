@@ -1,9 +1,9 @@
 # Runbook: CI-Driver Stall
 
-This runbook is inactive during the #2054 fail-closed bootstrap. The queue
+This runbook is inactive under the current fail-closed merge gate. The queue
 pipeline does not arm, retry, rebase, or address an open PR from `merge_wait`.
 It verifies auto-merge is disabled, records `strict_gate_unavailable`, and
-preserves post-merge learn only for a PR that was already merged.
+preserves post-merge learning only for a PR that was already merged.
 
 ## Containment
 
@@ -29,13 +29,14 @@ A maintainer may then perform a manual squash merge:
 gh pr merge <N> --squash
 ```
 
-## Follow-Up
+## Activation condition
 
-Issue #2055 will add the head-bound strict-review proof and its single-authority
-merge gate. It must provide a new runbook for any strict-gated recovery behavior
-before this runbook is expanded again.
+Reactivate or expand this recovery procedure only when the maintained pipeline
+sources implement a head-bound strict-review proof and
+`docs/ci/required-checks.md` permits queue-owned arming. That change must update
+this runbook and its index entry in the same PR.
 
 ## See Also
 
 - [Automation loop crashed mid-issue](automation-loop-crash.md)
-- PR and state-label policy: [`../../CLAUDE.md`](../../CLAUDE.md)
+- PR and state-label policy: [`../ci/required-checks.md`](../ci/required-checks.md)

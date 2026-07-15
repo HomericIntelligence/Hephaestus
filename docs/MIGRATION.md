@@ -1,14 +1,9 @@
 # Migration Guide
 
-> **Status (as of 2026-07-03):** The latest released version is **0.9.9** (tag-driven
-> via hatch-vcs). **1.0 has not been released yet** — the section below is the
-> *forthcoming* 1.0 migration guidance, published ahead of the cut so consumers can
-> prepare. There are currently **no breaking changes between 0.9.x releases**: upgrading
-> within the 0.9.x line requires no code changes for code that uses only the documented
-> public API in [`COMPATIBILITY.md`](../COMPATIBILITY.md). The `Development Status ::
-> 5 - Production/Stable` classifier in `pyproject.toml` reflects the maturity of the
-> stable public API surface, not a 1.0 tag; the package remains tag-driven and is
-> currently on the 0.9.x series.
+> **Release source:** Hephaestus versions are derived from immutable `vX.Y.Z`
+> tags through hatch-vcs. The latest released version is **0.9.9**; CI checks
+> this statement against the newest available tag. The 1.0 section below is
+> forthcoming guidance so consumers can prepare before that release.
 
 ## 0.x → 1.0 (forthcoming — not yet released)
 

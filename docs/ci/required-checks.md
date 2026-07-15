@@ -4,6 +4,19 @@ This document records the CI contract and the last verified `main` protection
 and ruleset configuration. GitHub policy can change outside git; use the audit
 commands below before relying on this record for an operational merge decision.
 
+## Maintenance
+
+**Owner:** The maintainer changing workflow jobs, branch protection, rulesets,
+or merge policy.
+
+**Maintained sources:** The live GitHub protection/ruleset responses and
+`.github/workflows/_required.yml` plus `.github/workflows/test.yml`.
+
+**Update trigger:** Audit and update this document in the same change whenever
+either the workflow contract or live protection changes. Run the read-only audit
+below before making an operational merge decision because GitHub settings can
+change outside the repository.
+
 ## The contract
 
 A PR can merge to `main` only when every enforced classic branch-protection
@@ -83,9 +96,9 @@ failure — and **deadlock** a required check. Treating `skipped` as acceptable
 lets those legitimately-gated-off events pass while still failing on any real
 job failure.
 
-`auto-merge-policy` is deliberately **excluded** from the gate: it is advisory
-and, during #2054's fail-closed bootstrap, flags any open PR with auto-merge
-enabled. It must not block the independently reviewed manual bootstrap merge.
+`auto-merge-policy` is deliberately excluded from the aggregate gate: it is
+advisory and reports an open PR that violates the current fail-closed auto-merge
+policy. It must not block a separately reviewed manual merge.
 
 ## Adding a new gating job (runbook)
 

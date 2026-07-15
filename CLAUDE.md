@@ -25,43 +25,19 @@ Hephaestus is the shared utilities and tooling repository of the HomericIntellig
 
 ```text
 Hephaestus/
-├── hephaestus/                 # Python source code (20 documented subpackages)
-│   ├── agents/                 # Agent frontmatter + loader + runtime
-│   ├── automation/             # Queue-based issue planning / implementation / PR review pipeline
-│   ├── benchmarks/             # Benchmark comparison utilities
-│   ├── ci/                     # CI helpers (precommit, workflows, docker timing)
-│   ├── cli/                    # Command-line interface tools
-│   ├── config/                 # Configuration management
-│   ├── datasets/               # Dataset downloading utilities
-│   ├── discovery/              # Discovery of agents, skills, and code blocks
-│   ├── forensics/              # Coredump capture + gdb post-mortem runner
-│   ├── github/                 # GitHub automation (PR merging, fleet sync, tidy, stats)
-│   ├── io/                     # Input/output utilities
-│   ├── logging/                # Logging utilities
-│   ├── markdown/               # Markdown linting and link fixing
-│   ├── nats/                   # NATS JetStream subscriber (event-driven workflows)
-│   ├── resilience/             # Circuit breaker + retry + subprocess resilience
-│   ├── scripts_lib/            # Standalone consistency-check scripts (CLI table, version)
-│   ├── system/                 # System information collection
-│   ├── utils/                  # General utility functions (slugify, retry, subprocess, git helpers)
-│   ├── validation/             # README, schema, and structural validation
-│   └── version/                # Version management
+├── hephaestus/                 # Python source packages
 ├── scripts/                    # Automation and maintenance scripts
-├── skills/                     # Claude Code skill definitions (23 SKILL.md skills; kebab-case naming for plugin format)
 ├── tests/                      # Unit and integration tests
-│   ├── unit/                   # Unit tests (mirror hephaestus/ subpackages; a small sanctioned set of extra dirs covers non-package targets — scripts/, docs/, shell, top-level modules)
-│   └── integration/            # Integration tests
 ├── docs/                       # Documentation
-└── .claude/                    # Claude Code configurations
+└── .claude/                    # Plugin enablement and Claude Code configuration
 ```
 
-Skill directories use kebab-case (`code-review`, `git-worktrees`) per the
-Claude Code plugin format. All Python packages use lowercase_snake_case.
+Python packages use lowercase_snake_case.
 
 ## Library vs product layer
 
-`hephaestus/automation/` is a **product layer** (26.1k LoC, 53.9% of the
-codebase) co-located with the utility library. It is gated behind the
+`hephaestus/automation/` is a **product layer** co-located with the utility
+library. It is gated behind the
 `HomericIntelligence-Hephaestus[automation]` optional extra. The base
 `import hephaestus` surface MUST NOT pull `curses`, `fcntl`, `pydantic`,
 or any `hephaestus.automation.*` module. Enforced by
@@ -237,64 +213,13 @@ Skip Extended Thinking for:
 - Boilerplate code generation
 - Well-defined refactorings
 
-### Automatic Skill Selection
+### Automatic skill selection
 
-Before beginning any substantive task, invoke `/hephaestus:skill-advisor` to determine if a structured
-skill applies. Use `Skill(skill: "hephaestus:skill-advisor", args: "<task description>")`.
-
-If you are a myrmidon-swarm subagent with a specific task prompt, skip this and follow your prompt directly.
-
-### Skill Catalog
-
-Invoke a skill with `Skill(skill: "hephaestus:<name>", args: "<argument>")`, or
-`/hephaestus:<name> <argument>` interactively. The **Arguments** column mirrors each
-skill's `argument-hint` frontmatter in `skills/<name>/SKILL.md`; `—` means the skill
-takes no argument.
-
-| Skill | Arguments | When to Use |
-|-------|-----------|-------------|
-| `skill-advisor` | `<task description>` | Before any task — routes to the correct skill |
-| `advise` | `<task description>` | Before starting work — search Mnemosyne for prior learnings |
-| `learn` | — | After completing work — capture session learnings in Mnemosyne |
-| `myrmidon-swarm` | `<task description>` | Complex multi-step tasks requiring parallel agent coordination |
-| `brainstorm` | `<idea or feature description>` | Before implementing a new feature — design before code |
-| `test-driven-development` | `<feature or bugfix description>` | Before writing implementation code — RED-GREEN-REFACTOR |
-| `systematic-debugging` | `<description of the bug or failure>` | Before proposing fixes — root cause first |
-| `verification` | `<what you are verifying>` | Before claiming work is done — evidence before assertions |
-| `git-worktrees` | `<branch-name or feature description>` | When needing isolated branch workspace |
-| `finish-branch` | `"<optional: base branch name>"` | When implementation is complete — branch completion workflow |
-| `code-review` | `<what was implemented>` | After major feature completion — Sonnet reviewer + feedback reception |
-| `repo-analyze` | — | Comprehensive 15-dimension repository audit |
-| `repo-analyze-quick` | — | Quick repository health check |
-| `repo-analyze-strict` | — | Ruthlessly thorough repository audit |
-| `repo-analyze-full` | — | Full-coverage audit — one swarm agent per section, no sampling cap |
-| `repo-analyze-quick-full` | — | Quick health check with full file coverage |
-| `repo-analyze-strict-full` | — | Strict audit with full file coverage (swarm per section) |
-| `review-pr-strict` | — | Ruthlessly thorough PR-alignment audit with full coverage |
-| `worktree-cleanup` | `"<optional: --dry-run>"` | Audit + prune git worktrees (never deletes branches) |
-| `tidy` | `"<optional: --dry-run \| --no-swarm \| --trunk BRANCH \| --max-concurrent N>"` | Rebase all local branches with swarm conflict resolution |
-| `create-reusable-utilities` | — | Port/generalize utility scripts for cross-project reuse |
-| `github-actions-python-cicd` | — | Set up a Python GitHub Actions CI/CD pipeline |
-| `python-repo-modernization` | `<path to Python repo to modernize>` | Bring a Python repo to production-grade quality |
-
-### Agent Skills vs Sub-Agents Decision Tree
-
-```text
-Is the task well-defined with predictable steps?
-├─ YES → Use an Agent Skill (see catalog above)
-│   ├─ Is it a new feature? → brainstorm → test-driven-development
-│   ├─ Is it a bug? → systematic-debugging → test-driven-development
-│   ├─ Is it ready to ship? → verification → finish-branch
-│   ├─ Is it a CI/CD pipeline setup? → github-actions-python-cicd
-│   ├─ Is it a repo audit? → repo-analyze (or its quick/strict/full variants)
-│   └─ Is it a PR review? → code-review (or review-pr-strict for alignment audits)
-│
-└─ NO → Use a Sub-Agent
-    ├─ Does it require exploration/discovery? → Use sub-agent
-    ├─ Does it need adaptive decision-making? → Use sub-agent
-    ├─ Is the workflow dynamic/context-dependent? → Use myrmidon-swarm
-    └─ Does it need extended thinking? → Use sub-agent
-```
+Before beginning any substantive task, invoke the installed `skill-advisor`.
+`.claude/settings.json` is the maintained source for plugin enablement; the
+runtime skill catalog and installed skill manifests are authoritative for
+available names, arguments, and tool permissions. Do not maintain a duplicate
+count or catalog in this document.
 
 ### Output Style Guidelines
 
@@ -332,12 +257,10 @@ releases from signed `vX.Y.Z` tags; there are no release branches.
 2. Every commit MUST be cryptographically signed (`git commit -S`) and carry a
    DCO `Signed-off-by` trailer.
 
-`pr-policy` blocks PRs that fail those checks. During #2054's fail-closed
-bootstrap, auto-merge must also remain disabled: pipeline code verifies that
-state, `auto-merge-policy` reports armed PRs advisory-only, and the PR reviewer
-requires an unconditional independent strict-review GO before a maintainer
-manually squash-merges. #2055 will restore queue-owned arming after a
-head-bound strict-review proof.
+`pr-policy` blocks PRs that fail those checks. Before merging, follow the
+current auto-merge, strict-review, and required-check contract in
+[`docs/ci/required-checks.md`](docs/ci/required-checks.md); that runbook is the
+maintained operational source rather than this contributor summary.
 
 ```bash
 # 1. Create feature branch
@@ -356,8 +279,7 @@ gh pr create \
   --title "[Type] Brief description" \
   --body "$(printf 'Summary of change.\n\nCloses #<issue-number>\n')"
 
-# 5. Keep auto-merge disabled. After an unconditional independent strict-review
-#    GO, bootstrap PRs are merged manually with the repository's squash method.
+# 5. Follow the current merge policy in docs/ci/required-checks.md.
 ```
 
 ### Commit Message Format

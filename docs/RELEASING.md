@@ -36,6 +36,9 @@ Before triggering the workflow, ensure:
 - [ ] All changes merged to `main` and CI is green.
 - [ ] `pixi.lock` is up to date (`pixi install` produces no changes).
 - [ ] No open issues in the milestone you are releasing.
+- [ ] Review `docs/ROADMAP.md` against the open epics and `audit-finding`
+  issues. Update durable priorities if direction changed; do not copy issue
+  counts, open/closed state, or a calendar timestamp into the roadmap.
 - [ ] `docs/MIGRATION.md`'s "latest released version is **X.Y.Z**" line already names
   the version you are about to tag. The Release workflow's test job runs
   `test_migration_md_version_does_not_trail_latest_git_tag`, and tags are immutable —

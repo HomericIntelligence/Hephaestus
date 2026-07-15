@@ -13,6 +13,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 ROADMAP_MD = REPO_ROOT / "docs" / "ROADMAP.md"
+RELEASING_MD = REPO_ROOT / "docs" / "RELEASING.md"
 
 _SECTION_RE = re.compile(
     r"^##\s+Updating This Roadmap\s*$(.*?)(?=^##\s|\Z)",
@@ -54,3 +55,12 @@ def test_cadence_is_release_driven_not_vague_monthly() -> None:
         "The cadence section must name who is responsible for the review "
         "(the maintainer cutting the release)."
     )
+
+
+def test_release_checklist_owns_roadmap_refresh() -> None:
+    """The release maintainer's checklist must include the roadmap review."""
+    checklist = RELEASING_MD.read_text(encoding="utf-8").lower()
+
+    assert "docs/roadmap.md" in checklist
+    assert "open epics" in checklist
+    assert "audit-finding" in checklist

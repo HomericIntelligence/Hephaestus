@@ -1,28 +1,39 @@
 # Automation Loop Architecture
 
-Status: implemented for the epic #1809 queue-based automation loop. The
-`hephaestus-automation-loop` CLI runs this pipeline directly; the legacy
-subprocess-per-phase loop was removed after the #1818/#1819 cutover.
+The `hephaestus-automation-loop` CLI runs this pipeline directly; the legacy
+subprocess-per-phase loop was removed.
+
+## Maintenance
+
+**Owner:** The automation maintainer changing queue stages or routing.
+
+**Maintained sources:** `hephaestus.automation.pipeline.coordinator`,
+`hephaestus.automation.pipeline.routing`, and the modules under
+`hephaestus.automation.pipeline.stages`.
+
+**Update trigger:** Any change to a stage, route, terminal outcome, merge gate,
+or reconstruction rule must update this document and its regression tests in
+the same PR.
 
 ## Overview and goals
 
-The automation loop is a single-coordinator, eight-queue state-machine
+The automation loop is a single-coordinator, stage-queue state-machine
 pipeline. The coordinator (main thread) owns queues and performs validation,
 logging, and GitHub manipulation. A single worker pool executes all agent
 invocations, build/test subprocesses, and git/network operations. GitHub labels
 and PR state are the persistent journal; queues are in-memory and reconstructed
 from labels at startup. An interrupt leaves items resumable, never failed.
 
-### Temporary strict-gate bootstrap (#2054)
+### Current strict-gate behavior
 
-The current eight-stage topology is deliberately **fail closed** while #2055
-adds a ninth, head-bound `strict_review` stage. Internal `pr_review` GO results
-are informational only: they verify auto-merge is disabled and publish a
-pending-strict-review artifact. `merge_wait` also verifies an open PR is
-unarmed, then stops with `strict_gate_unavailable`; it does not poll or arm an
-open PR. The privileged label-event armer was removed. A bootstrap PR therefore
-requires an unconditional independent strict-review GO and a manual squash
-merge. This is a temporary safety state, not the intended steady-state route.
+The shipped topology is fail-closed for open PRs. Review and merge-wait paths
+verify that auto-merge is disabled and terminalize an open PR as
+`strict_gate_unavailable`; bootstrap merging requires an independent strict
+review and a manual squash merge. Already-merged PRs retain the deduplicated
+post-merge learning path.
+
+Any future head-bound strict-review stage must update the pipeline sources,
+routing tests, this section, and the operational merge-policy runbook together.
 
 ## Queue topology
 
@@ -49,7 +60,7 @@ repo ─> planning ─> plan_review ─> implementation ─> pr_review ─> fini
                 (iter 3, cycles 2)        └── legacy implementation-GO ─> ci ─> merge_wait ─> finished
 ```
 
-The diagrams show the active #2054 bootstrap flow. The complete edge set —
+The diagrams show the active fail-closed flow. The complete edge set —
 including implementation → plan_review (`plan_not_go`) and the legacy
 implementation → ci (`already_implementation_go_pr`) containment route — is
 normative in the ROUTES table below.
@@ -238,8 +249,8 @@ per-repo in-flight cap.
 ### 5. pr_review
 
 **States**: ENTER → REVIEW_WAIT → VALIDATE_WAIT → POST → DIFFICULTY_WAIT →
-ADDRESS_WAIT → PUSH_WAIT → EVAL → (loop). #2054 does not run follow-up after
-an internal GO because the PR is not eligible to merge.
+ADDRESS_WAIT → PUSH_WAIT → EVAL → (loop). The fail-closed gate does not run
+follow-up after an internal GO because the PR is not eligible to merge.
 
 **Steps**:
 
@@ -270,7 +281,7 @@ an internal GO because the PR is not eligible to merge.
    (`minor_automation`) threads, then verify auto-merge is disabled and
    publish an internal-GO artifact [durable] → finish `strict_gate_unavailable`;
    it does not apply `state:implementation-go`, run follow-up, or arm
-   auto-merge until issue #2055's strict gate is present. If GO but
+   auto-merge. If GO but
    `human > 0` → FINISH_FAIL (`human_blocked`); if NOGO/AMBIGUOUS/ERROR and
    iteration < 3 → RETRY; if HUMAN_BLOCKED or iteration cap exhausted →
    routes depend on iteration (hard cap 6) and unresolved-thread progress;
@@ -411,10 +422,12 @@ LEARN_WAIT solely to preserve the existing post-merge learn dedupe.
 **Verdicts**: FINISH_FAIL (`strict_gate_unavailable` or failed disable
 verification); FINISH_PASS only for a previously merged PR after learn.
 
-**Fail routes**: all current bootstrap outcomes finish. #2055 restores the
-CI/dirty/blocked recovery routes only after strict proof owns eligibility.
+**Fail routes:** All open-PR outcomes finish under the current fail-closed gate.
+CI, dirty, and blocked recovery routes remain inactive until a qualifying
+strict-review proof is implemented and documented.
 
-**Budgets**: retained for compatibility but inactive for open PRs during #2054.
+**Budgets:** Retained for compatibility but inactive for open PRs under the
+current merge gate.
 
 **Owned labels**: none (merge state is PR state).
 
@@ -466,10 +479,10 @@ inputs are terminalized at the seed boundary when their PR is already merged or
 closed: merged PRs become `finished(pass)` and closed PRs become
 `finished(fail)`, before branch adoption or label-based routing is attempted.
 Open direct PRs enter the target repo's `pr_review` queue unless the PR already
-carries `state:implementation-go`, in which case they enter `ci`. During #2054
-this is not merge readiness: `ci` may perform bounded rebase, polling, and
-CI-fix work, but it cannot arm auto-merge. Every path verifies auto-merge is
-disabled, and `merge_wait` stops at `strict_gate_unavailable`.
+carries `state:implementation-go`, in which case they enter `ci`. This is not
+merge readiness: `ci` may perform bounded rebase, polling, and CI-fix work,
+but it cannot arm auto-merge. Every path verifies auto-merge is disabled, and
+`merge_wait` stops at `strict_gate_unavailable`.
 
 The same terminal-state check is repeated at the CI and implementation stage
 boundaries before branch adoption or implementation-label routing. This makes a
@@ -492,7 +505,7 @@ semantics.
 | state:skip or epic | excluded | Epic tagging is the one seeding write; done BEFORE excluding. |
 | Direct PR already merged | finished | pass, idempotent; terminalized before branch adoption. |
 | Direct PR already closed | finished | fail; terminalized before branch adoption. |
-| Open PR + PR carries state:implementation-go | ci | Legacy route only; may perform bounded non-merge maintenance, then is contained and stopped pending #2055. |
+| Open PR + PR carries state:implementation-go | ci | Legacy route only; bounded non-merge maintenance may run, but merge-wait verifies auto-merge is disabled and finishes `strict_gate_unavailable`. |
 | Open PR, no impl-go | pr_review | existing-PR path; will be reviewed. |
 | No PR, at-or-past state:plan-go | implementation | plan approved; ready to implement. |
 | No PR, state:plan-no-go | planning | plan rejected; amend with feedback. |

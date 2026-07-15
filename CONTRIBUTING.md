@@ -23,8 +23,8 @@ links to the full section below.
    make it pass, keep coverage at 83%+ (target 90%).
 5. **Open the PR** ([Pull Request Process](#pull-request-process)) — sign every
    commit (`git commit -S`), put `Closes #<issue-number>` on its own line in the
-   body, and keep auto-merge disabled. After an unconditional independent
-   strict-review GO, a maintainer performs the manual squash merge.
+   body, and follow the current
+   [`docs/ci/required-checks.md`](docs/ci/required-checks.md) contract.
 
 If anything in steps 1–2 fails, see [Platform Support](#platform-support) — the
 pixi dev environment is `linux-64` only by design.
@@ -244,10 +244,11 @@ valid issue reference, signed commits, or DCO sign-offs:
 3. **Sign off every commit**: include a DCO `Signed-off-by` trailer, normally
    with `git commit -s -S`.
 
-During #2054's bootstrap, auto-merge must remain disabled. The pipeline verifies
-that state and the advisory `auto-merge-policy` reports any armed PR, but it is
-not a required check. An unconditional independent strict-review GO is required
-before a maintainer manually runs `gh pr merge --squash`.
+Before merging, follow the current strict-review, auto-merge, and branch
+protection contract in
+[`docs/ci/required-checks.md`](docs/ci/required-checks.md). That runbook owns
+operational merge state; this contributor guide owns the stable branch, commit,
+DCO, and PR-body requirements above.
 
 Also: ensure tests pass locally (`pixi run test`), keep commits to logical units with
 [conventional commit](https://www.conventionalcommits.org/) messages, and never bypass

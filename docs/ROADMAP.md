@@ -4,49 +4,33 @@
 
 Hephaestus is the foundational utilities and tooling repository of the HomericIntelligence ecosystem, providing standardized components that support development across all other projects. We prioritize modularity, reliability, and consistency across a diverse set of cross-cutting concerns: configuration management, logging, GitHub automation, and agent coordination.
 
-## Current Focus (Q2 2026)
+## Current work
 
-The strict 2026-04-28 repository audit (Epic #310) is now **closed**. The active work is remediating findings from the follow-up strict 2026-05-28 audit, tracked as individual `audit-finding` issues. This ongoing work spans:
+The authoritative current backlog is the set of open GitHub epics and
+`audit-finding` issues. This document records durable direction and planning
+policy; it does not mirror issue open/closed state, issue counts, source
+metrics, or calendar-quarter snapshots.
 
-1. **Audit Remediation** — Addressing the open `audit-finding` issues across the 15 audit dimensions. Focus areas include documentation currency, automation module test coverage, fixing f-string logging anti-patterns, and continued hardening of the 3-stage review-PR pipeline (collapsed from the prior 6-phase design in #677/#679).
+Current themes are:
 
-2. **Automation Package Stabilization** — Refactoring and hardening the automation modules (PR review, CI driver, issue implementation) to improve single responsibility, observability, and idempotency. This includes fixing critical bugs in the CI state machine and worktree management.
+1. **Automation stabilization** — improve orchestration reliability,
+   observability, testability, and worktree safety.
+2. **Cross-platform support** — align tested platforms with supported platforms.
+3. **Public API documentation** — keep stable package and CLI surfaces complete
+   and machine-validated.
+4. **Security and dependency management** — keep vulnerability, secret, and
+   dependency-consistency gates blocking and maintainable.
 
-3. **CLI Tool Coverage Expansion** — Expanding the CLI entry point test suite from 13 of 47 declared tools to full coverage, ensuring all command-line interfaces are properly validated.
+## Longer-term direction
 
-4. **Test Coverage Hardening** — Bringing 12 excluded automation modules into coverage measurement with mocked unit tests for core orchestration logic.
-
-5. **Security & Dependency Management** — Hard-blocking pip-audit failures in CI and resolving dependency consistency issues across pixi.toml and pyproject.toml.
-
-## Near-term (Next 1-2 Quarters)
-
-Assuming audit remediation is complete:
-
-1. **Multi-platform CI Support** — Extend GitHub Actions test matrix to include macOS and Windows alongside Ubuntu, addressing the gap between pixi.toml multi-platform claims and CI reality (#321 context).
-
-2. **Cross-Repository Coverage** — Expand hephaestus utility adoption across other HomericIntelligence projects. Standardize configuration loading, logging setup, and subprocess execution patterns.
-
-3. **API Surface Documentation** — ✅ Auto-generated API reference is now published to
-   GitHub Pages on each release (pdoc). Remaining: ensure every public function carries a
-   complete docstring, including stable subpackage surfaces and a full CLI reference.
-
-4. **Observability and Health Checks** — Add structured health reporting for long-running components (e.g., NATSSubscriberThread), supporting the broader Argus (observability) initiative.
-
-## Long-term (4+ Quarters Out)
-
-Conservative, directional items:
-
-1. **Agent Coordination Framework** — Explore deeper integration with Myrmidons for agent swarm coordination patterns, building on existing entry points for orchestration.
-
-2. **Benchmark Suite Expansion** — Enhance the benchmark comparison utilities to support cross-project performance tracking and regression detection.
-
-3. **Configuration Ecosystem** — Investigate dynamic configuration patterns (Proteus integration) and configuration composition across multiple environments.
+- Expand cross-repository adoption of shared utilities.
+- Improve benchmark and regression-detection tooling.
+- Explore configuration composition and agent-coordination integrations when a
+  concrete consumer requires them.
 
 ## How We Plan
 
 Hephaestus uses an Epic-and-children issue pattern for project planning. Major initiatives are tracked as Epic issues (labeled `epic`), with breakdown into concrete child issues tagged by audit section and severity.
-
-**Exemplar:** Epic #310 (Strict audit 2026-04-28, now closed) contained 29 child issues spanning all 15 audit dimensions, with clear scoping and evidence-based requirements.
 
 We also capture session learnings in Mnemosyne via the `/learn` skill, preserving team knowledge about patterns, anti-patterns, and decisions across the ecosystem.
 
@@ -61,16 +45,13 @@ not date-driven**. Cadence in practice tracks release frequency rather than a
 fixed monthly rhythm.
 
 **Trigger.** The roadmap is reviewed as part of the pre-release checklist,
-whenever a release is cut. Any Epic being opened or closed, or a shift in
-priorities, is also a valid trigger to refresh it between releases.
+whenever a release is cut. Opening or closing an epic, or a shift in priorities,
+is also an update trigger.
 
-**Responsibility.** The maintainer cutting the release owns the roadmap review
-for that cycle: confirming the "Current Focus" section still reflects open
-Epics and updating the "Last updated" date below. In this solo/small-team repo
-that is the release maintainer; there is no separate roadmap committee.
+**Responsibility.** The maintainer cutting a release owns the roadmap review
+for that cycle: compare these themes with the open epics and update the
+document when direction changes.
 
 **How to propose changes.** Open an issue that references this document (or a
-PR editing it directly). The roadmap is refreshed to reflect current focus
-areas as Epics are created or priorities shift.
-
-Last updated: 2026-07-01
+PR editing it directly). Current execution status remains in GitHub, not in a
+manual "last updated" stamp.
