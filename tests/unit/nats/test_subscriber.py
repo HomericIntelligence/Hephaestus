@@ -49,22 +49,34 @@ class TestNATSSubscriberThread:
         # A thread that was never started counts as "joined cleanly" (True).
         assert thread.stop() is True
 
-    def test_stop_returns_false_on_join_timeout(self) -> None:
-        """When a started thread refuses to exit within the timeout, stop() returns False.
-
-        Regression for #521: stop() previously returned None and silently
-        masked a wedged subscriber thread.
-        """
+    def test_stop_timeout_records_terminal_health_failure(self) -> None:
+        """A timed-out join leaves the live daemon observable as unhealthy."""
+        entered = threading.Event()
+        release = threading.Event()
         thread = NATSSubscriberThread(config=_config(), handler=MagicMock())
-        # Simulate a wedged thread: is_alive() returns True both before and
-        # after join(), and join() itself is a no-op so we don't need to
-        # actually start a real thread.
-        with (
-            patch.object(NATSSubscriberThread, "is_alive", return_value=True),
-            patch.object(NATSSubscriberThread, "join", return_value=None),
-        ):
-            result = thread.stop(timeout=0.01)
-        assert result is False
+
+        def blocked_run() -> None:
+            entered.set()
+            release.wait()
+
+        thread.run = blocked_run  # type: ignore[method-assign]
+        thread.start()
+        assert entered.wait(timeout=1.0)
+
+        try:
+            assert thread.stop(timeout=0.01) is False
+            assert thread.is_alive()
+            assert thread.state is SubscriberState.ERROR
+            assert isinstance(thread.last_error, TimeoutError)
+            assert thread.health_dict()["state"] == "error"
+            assert thread.health_dict()["last_error"] == (
+                "NATS subscriber thread did not stop within 0.01s — still running"
+            )
+        finally:
+            release.set()
+            thread.join(timeout=1.0)
+
+        assert not thread.is_alive()
 
     def test_stop_event_is_threading_event(self) -> None:
         thread = NATSSubscriberThread(config=_config(), handler=MagicMock())

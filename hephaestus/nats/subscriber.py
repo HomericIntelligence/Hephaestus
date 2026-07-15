@@ -74,7 +74,8 @@ class SubscriberState(enum.Enum):
         CONNECTED    → STOPPING     (stop() called while connected)
         DISCONNECTED → STOPPING     (stop() called while in backoff)
         STOPPING     → STOPPED      (thread join completes)
-        any          → ERROR        (unhandled exception or open circuit breaker)
+        any          → ERROR        (unhandled exception, open circuit breaker,
+                                     or shutdown join timeout)
 
     """
 
@@ -521,9 +522,10 @@ class NATSSubscriberThread(threading.Thread):
 
         Returns:
             ``True`` if the thread joined cleanly within the timeout (or had
-            already finished); ``False`` if the join timed out and the thread
-            is still running. A ``False`` return also logs a warning so the
-            condition is visible in logs even when the caller ignores it.
+            already finished). ``False`` if the thread remains alive after the
+            timeout; in that case the subscriber enters ``ERROR`` state and
+            exposes a :class:`TimeoutError` through ``last_error`` and
+            :meth:`health_dict`.
 
         """
         effective_timeout = self._join_timeout if timeout is None else timeout
@@ -532,9 +534,11 @@ class NATSSubscriberThread(threading.Thread):
         if self.is_alive():
             self.join(timeout=effective_timeout)
             if self.is_alive():
-                logger.warning(
-                    "NATS subscriber thread did not stop within %.1fs — still running",
-                    effective_timeout,
+                error = TimeoutError(
+                    "NATS subscriber thread did not stop within "
+                    f"{effective_timeout:g}s — still running"
                 )
+                self._record_terminal_error(error)
+                logger.error("%s", error)
                 return False
         return True
