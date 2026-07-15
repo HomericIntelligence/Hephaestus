@@ -31,6 +31,12 @@ through installed `hephaestus-*` console scripts.
   `__init__.py`) via `hephaestus.version.manager`. The canonical version comes
   from git tags via hatch-vcs — see [`../docs/RELEASING.md`](../docs/RELEASING.md).
 
+### Release operations
+
+- **`release_rollback.py`** — Fail-closed release preflight plus read-only
+  inspection and confirmed withdrawal-advisory application for immutable
+  releases. See [`../docs/RELEASING.md`](../docs/RELEASING.md).
+
 ### Benchmarks / demos
 
 - **`compare_benchmarks.py`** — Compare benchmark results across runs.

@@ -46,7 +46,11 @@ class TestPublishTestPyPIJobExists:
         assert "publish-testpypi" in _load_workflow()["jobs"]
 
     def test_needs_test_and_type_check(self) -> None:
-        assert _job("publish-testpypi")["needs"] == ["test", "type-check"]
+        assert _job("publish-testpypi")["needs"] == ["test", "type-check", "release-preflight"]
+
+    def test_needs_release_preflight(self) -> None:
+        """Publication is blocked until all targets have been checked live."""
+        assert "release-preflight" in _job("publish-testpypi")["needs"]
 
     def test_uses_testpypi_environment(self) -> None:
         assert _job("publish-testpypi")["environment"] == "testpypi"
@@ -82,6 +86,42 @@ class TestArtifactReuse:
         """A duplicate build step would defeat byte-identical reuse."""
         names = [s.get("name", "") for s in _steps("build-and-publish")]
         assert not any(name == "Build package" for name in names)
+
+
+class TestImmutableReleasePublication:
+    """GitHub assets must be complete before the immutable release is published."""
+
+    def test_draft_assets_precede_pypi_and_final_publication(self) -> None:
+        names = [step.get("name", "") for step in _steps("build-and-publish")]
+        assert names.index("Stage draft GitHub Release with all assets") < names.index(
+            "Publish to PyPI"
+        )
+        assert names.index("Publish to PyPI") < names.index("Publish prepared GitHub Release")
+
+    def test_draft_requires_matching_all_release_assets(self) -> None:
+        step = next(
+            step
+            for step in _steps("build-and-publish")
+            if step.get("name") == "Stage draft GitHub Release with all assets"
+        )
+        assert step["with"]["draft"] is True
+        assert step["with"]["fail_on_unmatched_files"] is True
+        assert step["with"]["files"] == "dist/*"
+
+    def test_final_publication_uses_draft_action_release_id(self) -> None:
+        step = next(
+            step
+            for step in _steps("build-and-publish")
+            if step.get("name") == "Publish prepared GitHub Release"
+        )
+        assert step["env"]["RELEASE_ID"] == "${{ steps.draft_release.outputs.id }}"
+        assert "--method PATCH" in step["run"]
+        assert "releases/${RELEASE_ID}" in step["run"]
+
+    def test_asset_failures_are_not_suppressed(self) -> None:
+        names = [step.get("name", "") for step in _steps("build-and-publish")]
+        assert "Attach build artifacts to existing release" not in names
+        assert "Check for existing release" not in names
 
 
 class TestTestPyPIPublishStrictness:

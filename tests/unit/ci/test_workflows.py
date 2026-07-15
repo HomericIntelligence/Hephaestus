@@ -428,18 +428,32 @@ class TestAutoTagReleaseDispatch:
         assert "### Dispatch failed after tag push" in doc
         assert "gh workflow run release.yml -f tag=vX.Y.Z" in doc
 
-    def test_release_concurrency_keys_on_resolved_tag(self) -> None:
-        """Dispatched and tag-push release runs must serialize per tag, not per branch.
-
-        With ``release-${{ github.ref }}`` every workflow_dispatch run grouped on
-        the branch ref, so two dispatched runs for DIFFERENT tags serialized while
-        a dispatched and a tag-push run of the SAME tag did not share a group.
-        Keying on ``inputs.tag`` first makes dispatched runs group per tag.
-        """
+    def test_release_concurrency_serializes_every_trigger_form(self) -> None:
+        """All publication triggers share the single immutable-release transaction."""
         workflow = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
-        concurrency = workflow["concurrency"]
-        assert concurrency["group"] == "release-${{ inputs.tag || github.ref }}"
-        assert concurrency["cancel-in-progress"] is False
+        assert workflow["concurrency"] == {
+            "group": "hephaestus-release-publication",
+            "cancel-in-progress": False,
+        }
+
+    def test_release_dispatch_requires_explicit_tag(self) -> None:
+        """Manual publication cannot infer a moving latest tag."""
+        workflow = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        triggers = workflow[True]
+        tag = triggers["workflow_dispatch"]["inputs"]["tag"]
+        assert tag == {
+            "description": "Exact existing vX.Y.Z tag to release",
+            "required": True,
+            "type": "string",
+        }
+
+    def test_releasing_documentation_prohibits_immutable_asset_replacement(self) -> None:
+        """The runbook must not direct operators to delete tags or replace assets."""
+        doc = (REPO_ROOT / "docs" / "RELEASING.md").read_text(encoding="utf-8")
+        rollback_section = doc[doc.index("## Rollback") :]
+        assert "--cleanup-tag" not in rollback_section
+        assert "gh release upload" not in rollback_section
+        assert "release_rollback.py rollback" in rollback_section
 
 
 class TestReleaseAttestations:

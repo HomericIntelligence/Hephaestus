@@ -7,23 +7,19 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release (leave blank to use latest tag)"
-        required: false
-        default: ""
+        description: "Exact existing vX.Y.Z tag to release"
+        required: true
+        type: string
 
 permissions:
   contents: write
   id-token: write
   pages: write
 
-# Serialize per-tag: this workflow builds, publishes to PyPI, and creates a
-# GitHub release — none idempotent. Two runs for the SAME tag must not race
-# (double-publish); different tags proceed independently. Key on the resolved
-# tag: dispatched runs group on the explicit `tag` input (previously they all
-# shared the branch ref's group), tag-push runs group on the tag ref. Never
-# cancel a publish in flight, hence cancel-in-progress: false.
+# One PyPI project and one GitHub release namespace are mutated here. Serialize
+# all trigger forms across the complete preflight/publication transaction.
 concurrency:
-  group: release-${{ inputs.tag || github.ref }}
+  group: hephaestus-release-publication
   cancel-in-progress: false
 
 jobs:
@@ -88,10 +84,41 @@ jobs:
       - name: Run mypy type checking
         run: pixi run mypy
 
+  release-preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Resolve and validate release tag
+        id: tag
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          TAG="${INPUT_TAG:-${REF_NAME}}"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release tag must match vX.Y.Z"
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify publication targets are unused
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          python3 scripts/release_rollback.py preflight \
+            --tag "$TAG" \
+            --repository "$GITHUB_REPOSITORY" \
+            --package HomericIntelligence-Hephaestus
+
   publish-testpypi:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    needs: [test, type-check]
+    needs: [test, type-check, release-preflight]
     environment: testpypi
 
     steps:
@@ -104,7 +131,7 @@ jobs:
         id: tag
         shell: bash
         run: |
-          # Priority: explicit input > tag-push ref > latest tag
+          # Manual dispatch always supplies a tag; tag pushes use the pushed ref.
           INPUT_TAG="${{ github.event.inputs.tag }}"
           REF_TAG="${{ github.ref }}"
           if [ -n "$INPUT_TAG" ]; then
@@ -112,7 +139,12 @@ jobs:
           elif [[ "$REF_TAG" == refs/tags/* ]]; then
             TAG="${REF_TAG#refs/tags/}"
           else
-            TAG=$(git tag --list 'v*' --sort=-v:refname | head -1)
+            echo "::error::Release dispatch requires an explicit vX.Y.Z tag"
+            exit 1
+          fi
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release tag must match vX.Y.Z"
+            exit 1
           fi
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "Releasing tag: ${TAG}"
@@ -224,7 +256,7 @@ jobs:
         id: tag
         shell: bash
         run: |
-          # Priority: explicit input > tag-push ref > latest tag
+          # Manual dispatch always supplies a tag; tag pushes use the pushed ref.
           INPUT_TAG="${{ github.event.inputs.tag }}"
           REF_TAG="${{ github.ref }}"
           if [ -n "$INPUT_TAG" ]; then
@@ -232,7 +264,12 @@ jobs:
           elif [[ "$REF_TAG" == refs/tags/* ]]; then
             TAG="${REF_TAG#refs/tags/}"
           else
-            TAG=$(git tag --list 'v*' --sort=-v:refname | head -1)
+            echo "::error::Release dispatch requires an explicit vX.Y.Z tag"
+            exit 1
+          fi
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release tag must match vX.Y.Z"
+            exit 1
           fi
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "Releasing tag: ${TAG}"
@@ -271,6 +308,18 @@ jobs:
           name: release-dist
           path: dist/
 
+      - name: Stage draft GitHub Release with all assets
+        id: draft_release
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b  # v3.0.1
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          draft: true
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # release/v1
         with:
@@ -280,50 +329,19 @@ jobs:
           # `id-token: write`, granted at the top of this file (release.yml:16).
           generate_attestations: true
 
-      - name: Check for existing release
-        id: existing
+      - name: Publish prepared GitHub Release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.tag.outputs.tag }}
+          RELEASE_ID: ${{ steps.draft_release.outputs.id }}
         run: |
-          # A release may already exist for this tag if it was created
-          # manually or by a previous (partially failed) run of this
-          # workflow. GitHub marks releases immutable, and an immutable
-          # release cannot be updated or have assets added — so the
-          # create/update action below must be skipped when one exists.
-          if gh release view "$TAG" --json isImmutable -q .isImmutable >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Release $TAG already exists — skipping creation."
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+          if [[ ! "$RELEASE_ID" =~ ^[0-9]+$ ]]; then
+            echo "::error::Draft release action returned an invalid release ID"
+            exit 1
           fi
-
-      - name: Create GitHub Release
-        if: steps.existing.outputs.exists == 'false'
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b  # v3.0.1
-        with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          generate_release_notes: true
-          files: dist/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Attach build artifacts to existing release
-        if: steps.existing.outputs.exists == 'true'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.tag.outputs.tag }}
-        run: |
-          # The release already exists. Try to attach the freshly built
-          # artifacts; an immutable release rejects uploads, so treat an
-          # upload failure as non-fatal — the package is already on PyPI.
-          if gh release upload "$TAG" dist/* --clobber; then
-            echo "Attached dist/* to release $TAG."
-          else
-            echo "::notice::Release $TAG is immutable — build artifacts not attached. The package is published to PyPI."
-          fi
+          gh api --method PATCH \
+            "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            -F draft=false
 
   deploy-docs:
     runs-on: ubuntu-24.04

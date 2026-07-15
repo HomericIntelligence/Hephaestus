@@ -18,6 +18,7 @@ workflow_dispatch (Auto Tag Release)
   └─ workflow_dispatch (Release workflow, tag=vX.Y.Z)
          ├─ test job (pytest)
          ├─ type-check job (mypy)
+         ├─ release-preflight (remote tag + unused publication targets)
          ├─ publish-testpypi job
          │      ├─ build wheel + sdist
          │      ├─ publish to TestPyPI (trusted publishing)
@@ -25,8 +26,9 @@ workflow_dispatch (Auto Tag Release)
          └─ build-and-publish job (after publish-testpypi succeeds)
               ├─ verify tag == package version
               ├─ reuse dist built by publish-testpypi
+              ├─ stage a GitHub draft with every asset
               ├─ publish to PyPI (trusted publishing)
-              └─ create GitHub Release with auto-generated notes
+              └─ publish the prepared GitHub draft
 ```
 
 ## Pre-Release Checklist
@@ -48,9 +50,9 @@ hatch-vcs dynamic versioning, so the package version is derived from the git tag
 
 ## Manual Tag + Release (escape hatch)
 
-If `auto-tag.yml` is skipped and a tag was pushed manually, the **Release** workflow also accepts
-a `workflow_dispatch` with an optional explicit `tag` input. Leave it blank to use the latest tag,
-or supply a tag name (e.g. `v0.8.0`) to release a specific ref.
+If `auto-tag.yml` is skipped and a tag was pushed manually, dispatch the **Release** workflow with
+the exact existing `vX.Y.Z` tag. The manual input is required: the workflow never infers a moving
+"latest" tag.
 
 ### Dispatch failed after tag push
 
@@ -179,72 +181,44 @@ plus a verification dry-run:
 If the import step fails for any reason, no tag is created and no release artifact is produced
 (see the idempotency guarantee in #432).
 
-## Rollback
+## Rollback and withdrawal
 
-A release produces a published-then-immutable PyPI artifact plus a git tag and a
-GitHub Release. Options are listed below by escalating impact; prefer the lowest-impact
-option that addresses the problem.
+Package files and published immutable-release assets cannot be rolled back, replaced, or attached
+later. A release withdrawal preserves the tag and asset fingerprints: yank the PyPI version, add a
+withdrawal advisory to the matching immutable GitHub Release, then ship a corrected patch version.
 
-### 1. Yank from PyPI (recommended for shipped-but-broken releases)
-
-[Yanking](https://pypi.org/help/#yanked) keeps the release on PyPI for users who pin
-the exact version, but hides it from new resolvers. Existing installs are not affected.
-
-Yanking is performed by a project owner from the PyPI web UI:
-
-```text
-PyPI project page → Manage → Releases → vX.Y.Z → Options → Yank
-```
-
-### 2. Edit or delete the GitHub Release
+Do not upload packages outside the globally serialized release workflow while it is active. If API
+state is not clearly one of the cases below, stop and escalate rather than deleting tags, releases,
+or package files speculatively.
 
 ```bash
-# Mark as pre-release (hides from "Latest"):
-gh release edit vX.Y.Z --prerelease
+# 1. Read-only inspection/rehearsal against live APIs.
+pixi run python scripts/release_rollback.py inspect --tag vX.Y.Z
 
-# Or delete the GitHub Release entry:
-gh release delete vX.Y.Z --cleanup-tag    # also deletes the git tag
-gh release delete vX.Y.Z                  # GitHub Release only; tag stays
+# 2. Yank X.Y.Z in the PyPI project UI and include the incident/fix reason.
+
+# 3. Verify the yank and add a withdrawal warning to GitHub release notes.
+GH_TOKEN="$(gh auth token)" \
+pixi run python scripts/release_rollback.py rollback \
+  --tag vX.Y.Z \
+  --reason "Broken because <reason>; use X.Y.(Z+1)." \
+  --apply \
+  --confirm-tag vX.Y.Z
+
+# 4. Implement, review, and publish the corrected patch through the normal workflow.
 ```
 
-The release workflow is **idempotent** (see #432): re-running it on an existing tag
-re-attaches build artifacts without duplicating the GitHub Release.
+Yanking is deliberately performed through the PyPI project UI. It is non-destructive: exact pins
+can still select the withdrawn version, while new resolution avoids it. The checked-in command is
+read-only until `--apply`, then verifies that every PyPI file is yanked and PATCHes only GitHub
+release notes. It refuses malformed, unavailable, or contradictory API state.
 
-### 3. Ship a hotfix (preferred for forward-fix)
+### Recovery matrix
 
-Yanking does not retract a bad release for users already on it. The cleanest fix is
-a new patch release:
-
-```bash
-# 1. Branch from the bad tag
-git checkout -b hotfix/vX.Y.Zp1 vX.Y.Z
-
-# 2. Apply the fix (with tests). One issue per PR per CONTRIBUTING.md.
-
-# 3. Open + merge a PR targeting main.
-
-# 4. Trigger the Auto Tag Release workflow with bump_kind=patch.
-```
-
-The new patch publishes via the normal release pipeline and supersedes the bad
-release for new installs.
-
-### 4. Delete the git tag (last resort)
-
-Once a tag is pushed and a PyPI release published, deleting the tag does not
-unpublish PyPI and breaks reproducibility for anyone who fetched the tag. Use only
-for tags that **never** reached PyPI:
-
-```bash
-git push --delete origin vX.Y.Z
-git tag -d vX.Y.Z
-```
-
-### Recovery summary
-
-| Situation | Action |
-|-----------|--------|
-| Bad release on PyPI, fix is ready | Ship a patch (option 3); optionally yank the bad version (option 1). |
-| Bad release on PyPI, no fix yet | Yank (option 1) + mark the GitHub Release as pre-release (option 2). |
-| Tag pushed but PyPI publish failed | Delete the tag (option 4) and re-trigger after fixing the workflow. |
-| GitHub Release notes are wrong | `gh release edit vX.Y.Z --notes-file …` — no PyPI impact. |
+| Observed state | Recovery |
+| --- | --- |
+| TestPyPI only; no PyPI or published GitHub release | Remove the TestPyPI version and any GitHub draft, fix the cause, then explicitly redispatch the same tag. |
+| PyPI published; GitHub draft complete; package is good | Verify draft assets, then publish that draft; do not upload replacement bytes. |
+| PyPI published; package is broken | Yank with a reason, publish or retain the matching GitHub record, apply the withdrawal advisory, then ship a new patch. |
+| Immutable GitHub release published | Never replace or delete its assets or reuse its tag; edit notes only and forward-fix. |
+| Any API state is incomplete or contradictory | Stop and escalate; do not delete tags, releases, or package files speculatively. |
