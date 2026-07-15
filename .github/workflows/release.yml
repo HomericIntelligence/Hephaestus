@@ -27,6 +27,46 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_TAG: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+          elif [[ "$REF_TAG" == refs/tags/* ]]; then
+            TAG="${REF_TAG#refs/tags/}"
+          else
+            TAG=$(git tag --list 'v*' --sort=-v:refname | sed -n '1p')
+          fi
+
+          if [ -z "$TAG" ]; then
+            echo "::error::No release tag could be resolved"
+            exit 1
+          fi
+          if ! git show-ref --verify --quiet "refs/tags/${TAG}"; then
+            echo "::error::Resolved release tag does not exist: ${TAG}"
+            exit 1
+          fi
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Releasing tag: ${TAG}"
+
   test:
     runs-on: ubuntu-24.04
     # Unit + integration suites run here; the pixi env is cached and dev-install
@@ -34,10 +74,12 @@ jobs:
     # 15) is free insurance so a first-run integration slowdown never aborts a
     # publish (issue #1499).
     timeout-minutes: 20
+    needs: prepare
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
+          ref: ${{ needs.prepare.outputs.tag }}
           fetch-depth: 0
           fetch-tags: true
 
@@ -68,10 +110,12 @@ jobs:
   type-check:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    needs: prepare
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
+          ref: ${{ needs.prepare.outputs.tag }}
           fetch-depth: 0
           fetch-tags: true
 
@@ -91,32 +135,15 @@ jobs:
   publish-testpypi:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    needs: [test, type-check]
+    needs: [prepare, test, type-check]
     environment: testpypi
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
+          ref: ${{ needs.prepare.outputs.tag }}
           fetch-depth: 0
           fetch-tags: true
-
-      - name: Resolve tag
-        id: tag
-        shell: bash
-        run: |
-          # Priority: explicit input > tag-push ref > latest tag
-          INPUT_TAG="${{ github.event.inputs.tag }}"
-          REF_TAG="${{ github.ref }}"
-          if [ -n "$INPUT_TAG" ]; then
-            TAG="$INPUT_TAG"
-          elif [[ "$REF_TAG" == refs/tags/* ]]; then
-            TAG="${REF_TAG#refs/tags/}"
-          else
-            TAG=$(git tag --list 'v*' --sort=-v:refname | head -1)
-          fi
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "Releasing tag: ${TAG}"
-          git checkout "${TAG}"
 
       - name: Install pixi
         uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f  # v0.10.0
@@ -169,7 +196,7 @@ jobs:
       - name: Smoke-install from TestPyPI
         shell: bash
         env:
-          TAG: ${{ steps.tag.outputs.tag }}
+          TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           EXPECTED_VERSION="${TAG#v}"
           pixi run python -m venv /tmp/testpypi-smoke
@@ -211,32 +238,15 @@ jobs:
   build-and-publish:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    needs: [test, type-check, publish-testpypi]
+    needs: [prepare, test, type-check, publish-testpypi]
     environment: pypi
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
+          ref: ${{ needs.prepare.outputs.tag }}
           fetch-depth: 0
           fetch-tags: true
-
-      - name: Resolve tag
-        id: tag
-        shell: bash
-        run: |
-          # Priority: explicit input > tag-push ref > latest tag
-          INPUT_TAG="${{ github.event.inputs.tag }}"
-          REF_TAG="${{ github.ref }}"
-          if [ -n "$INPUT_TAG" ]; then
-            TAG="$INPUT_TAG"
-          elif [[ "$REF_TAG" == refs/tags/* ]]; then
-            TAG="${REF_TAG#refs/tags/}"
-          else
-            TAG=$(git tag --list 'v*' --sort=-v:refname | head -1)
-          fi
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "Releasing tag: ${TAG}"
-          git checkout "${TAG}"
 
       - name: Install pixi
         uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f  # v0.10.0
@@ -251,7 +261,7 @@ jobs:
       - name: Verify tag matches package version
         shell: bash
         env:
-          TAG: ${{ steps.tag.outputs.tag }}
+          TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           TAG_VERSION="${TAG#v}"
           # Resolve the version straight from hatch-vcs against the checked-out git
@@ -285,7 +295,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.tag.outputs.tag }}
+          TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           # A release may already exist for this tag if it was created
           # manually or by a previous (partially failed) run of this
@@ -303,7 +313,7 @@ jobs:
         if: steps.existing.outputs.exists == 'false'
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b  # v3.0.1
         with:
-          tag_name: ${{ steps.tag.outputs.tag }}
+          tag_name: ${{ needs.prepare.outputs.tag }}
           generate_release_notes: true
           files: dist/*
         env:
@@ -314,7 +324,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.tag.outputs.tag }}
+          TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           # The release already exists. Try to attach the freshly built
           # artifacts; an immutable release rejects uploads, so treat an
@@ -328,7 +338,7 @@ jobs:
   deploy-docs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    needs: [build-and-publish]
+    needs: [prepare, build-and-publish]
     # Publish the pdoc API reference to GitHub Pages only after the package
     # release succeeds, so the online docs always match a version on PyPI.
     environment:
@@ -338,26 +348,9 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
+          ref: ${{ needs.prepare.outputs.tag }}
           fetch-depth: 0
           fetch-tags: true
-
-      - name: Resolve tag
-        id: tag
-        shell: bash
-        env:
-          INPUT_TAG: ${{ github.event.inputs.tag }}
-          REF_TAG: ${{ github.ref }}
-        run: |
-          # Priority: explicit input > tag-push ref > latest tag (mirrors build-and-publish)
-          if [ -n "$INPUT_TAG" ]; then
-            TAG="$INPUT_TAG"
-          elif [[ "$REF_TAG" == refs/tags/* ]]; then
-            TAG="${REF_TAG#refs/tags/}"
-          else
-            TAG=$(git tag --list 'v*' --sort=-v:refname | head -1)
-          fi
-          echo "Releasing docs for tag: ${TAG}"
-          git checkout "${TAG}"
 
       - name: Install pixi
         uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f  # v0.10.0

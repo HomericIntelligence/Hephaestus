@@ -45,8 +45,12 @@ class TestPublishTestPyPIJobExists:
     def test_job_present(self) -> None:
         assert "publish-testpypi" in _load_workflow()["jobs"]
 
-    def test_needs_test_and_type_check(self) -> None:
-        assert _job("publish-testpypi")["needs"] == ["test", "type-check"]
+    def test_needs_prepare_test_and_type_check(self) -> None:
+        assert _job("publish-testpypi")["needs"] == [
+            "prepare",
+            "test",
+            "type-check",
+        ]
 
     def test_uses_testpypi_environment(self) -> None:
         assert _job("publish-testpypi")["environment"] == "testpypi"
@@ -55,8 +59,9 @@ class TestPublishTestPyPIJobExists:
 class TestBuildAndPublishDependsOnTestPyPI:
     """Production publish must not proceed until the TestPyPI gate passes."""
 
-    def test_needs_includes_publish_testpypi(self) -> None:
+    def test_needs_includes_prepare_and_publish_testpypi(self) -> None:
         assert "publish-testpypi" in _job("build-and-publish")["needs"]
+        assert "prepare" in _job("build-and-publish")["needs"]
 
     def test_still_needs_test_and_type_check(self) -> None:
         needs = _job("build-and-publish")["needs"]
