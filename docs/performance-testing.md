@@ -17,7 +17,8 @@ most 50,000 jobs, 8 workers, and 64 in-flight jobs. The test configuration
 rejects non-positive values and hard limits exceeding 60 seconds, 100,000 jobs,
 32 workers, 256 in-flight jobs, 1,000 ms of synthetic service time, or a
 60,000 ms p95 budget before a load run starts. The workflow job has a 10-minute
-timeout.
+timeout. The in-flight cap must also be at least the worker count so every
+configured worker can become active.
 
 The lane gates on all submitted jobs producing exactly one successful
 completion, no duplicates, use of every configured worker during sustained

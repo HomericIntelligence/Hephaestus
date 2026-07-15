@@ -49,7 +49,5 @@ def test_load_config_rejects_non_positive_or_over_ceiling_values(
 @pytest.mark.performance
 def test_load_config_requires_enough_in_flight_work_for_every_worker() -> None:
     """Sustained profiles must let every configured worker become active."""
-    with pytest.raises(pytest.UsageError, match="load_max_in_flight"):
-        _load_config_from_options(
-            _config_with_options(load_workers=8, load_max_in_flight=7)
-        )
+    with pytest.raises(pytest.UsageError, match="--load-max-in-flight"):
+        _load_config_from_options(_config_with_options(load_workers=8, load_max_in_flight=7))

@@ -9,6 +9,7 @@ import queue
 import threading
 import time
 from dataclasses import asdict, dataclass, replace
+from math import ceil
 from pathlib import Path
 from unittest.mock import patch
 
@@ -174,8 +175,18 @@ def _percentile(samples: list[float], percentile: float) -> float:
     if not samples:
         return 0.0
     ordered = sorted(samples)
-    index = min(len(ordered) - 1, int((len(ordered) - 1) * percentile))
+    index = min(len(ordered) - 1, max(0, ceil(len(ordered) * percentile) - 1))
     return ordered[index]
+
+
+@pytest.mark.performance
+@pytest.mark.parametrize(
+    ("percentile", "expected"),
+    [(0.50, 5.0), (0.95, 10.0), (0.99, 10.0)],
+)
+def test_percentile_uses_nearest_rank(percentile: float, expected: float) -> None:
+    """Tail percentiles use the nearest rank instead of rounding down."""
+    assert _percentile([float(value) for value in range(1, 11)], percentile) == expected
 
 
 def _latency_summary(samples: list[float]) -> _LatencySummary:
@@ -403,5 +414,5 @@ def test_worker_pool_sustains_load_with_bounded_latency(load_config: LoadConfig)
     assert report.peak_concurrency <= load_config.workers
     assert report.drain_s <= _DRAIN_GRACE_S
     assert report.end_to_end_latency_ms.p95 <= load_config.p95_budget_ms
-    assert artifact["capacity"]["control"]["invariants"]["lost"] == 0
-    assert artifact["capacity"]["scaled"]["invariants"]["lost"] == 0
+    assert artifact["invariants"]["lost"] == 0
+    assert artifact["concurrency"]["active_workers"] == load_config.workers

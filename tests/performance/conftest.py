@@ -63,9 +63,8 @@ def _positive_bounded(
     return value
 
 
-@pytest.fixture(scope="session")
-def load_config(pytestconfig: pytest.Config) -> LoadConfig:
-    """Provide the immutable, validated profile for each performance test."""
+def _load_config_from_options(pytestconfig: pytest.Config) -> LoadConfig:
+    """Build a validated immutable profile from pytest command-line options."""
     duration_s = _positive_bounded(
         pytestconfig,
         "load_duration_s",
@@ -103,3 +102,9 @@ def load_config(pytestconfig: pytest.Config) -> LoadConfig:
         p95_budget_ms=float(p95_budget_ms),
         report_path=str(report_path),
     )
+
+
+@pytest.fixture(scope="session")
+def load_config(pytestconfig: pytest.Config) -> LoadConfig:
+    """Provide the immutable, validated profile for each performance test."""
+    return _load_config_from_options(pytestconfig)
