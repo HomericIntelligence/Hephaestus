@@ -35,6 +35,10 @@ except ModuleNotFoundError:  # pragma: no cover — only on Python 3.10
     import tomli as tomllib  # type: ignore[no-redef, unused-ignore]
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+_DIRECT_PYTEST_PREREQUISITE = (
+    "run `pixi run dev-install` before direct pytest invocations, or use the self-contained "
+    "`pixi run test tests/integration`"
+)
 
 
 def _load_entry_points() -> list[tuple[str, str, str]]:
@@ -59,6 +63,29 @@ def _cli_subprocess_env() -> dict[str, str]:
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)
     return env
+
+
+def _require_console_script(command: str) -> str:
+    """Resolve an installed console script or report the local-test prerequisite."""
+    binary = shutil.which(command)
+    if binary is None:
+        pytest.skip(f"{command} not on PATH; {_DIRECT_PYTEST_PREREQUISITE}")
+    return binary
+
+
+def test_missing_console_script_reports_direct_pytest_prerequisite(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing scripts identify the direct-pytest editable-install prerequisite."""
+    monkeypatch.setattr(shutil, "which", lambda _command: None)
+
+    with pytest.raises(pytest.skip.Exception) as exc_info:
+        _require_console_script("hephaestus-system-info")
+
+    assert str(exc_info.value) == (
+        "hephaestus-system-info not on PATH; run `pixi run dev-install` before direct pytest "
+        "invocations, or use the self-contained `pixi run test tests/integration`"
+    )
 
 
 class TestCLITargetImportable:
@@ -88,10 +115,7 @@ class TestCLIHelpFlag:
         # Windows operators. Skip the help-flag check on that platform.
         if sys.platform == "win32" and "automation" in module_path:
             pytest.skip("automation CLIs require POSIX stdlib (curses/fcntl)")
-        binary: str | None = shutil.which(command)
-        if binary is None:
-            pytest.skip(f"{command} not on PATH — install with `pip install -e .` or run via pixi")
-        assert binary is not None  # narrow for mypy; pytest.skip already returned
+        binary = _require_console_script(command)
 
         result = subprocess.run(
             [binary, "--help"],
@@ -124,10 +148,7 @@ class TestCLIJsonFlag:
         """
         if sys.platform == "win32" and "automation" in module_path:
             pytest.skip("automation CLIs require POSIX stdlib (curses/fcntl)")
-        binary: str | None = shutil.which(command)
-        if binary is None:
-            pytest.skip(f"{command} not on PATH — install with `pip install -e .` or run via pixi")
-        assert binary is not None
+        binary = _require_console_script(command)
 
         result = subprocess.run(
             [binary, "--help"],
@@ -158,10 +179,7 @@ class TestCLIVersionFlag:
         """``<cmd> --version`` must exit 0 and print a version line."""
         if sys.platform == "win32" and "automation" in module_path:
             pytest.skip("automation CLIs require POSIX stdlib (curses/fcntl)")
-        binary: str | None = shutil.which(command)
-        if binary is None:
-            pytest.skip(f"{command} not on PATH — install with `pip install -e .` or run via pixi")
-        assert binary is not None
+        binary = _require_console_script(command)
 
         result = subprocess.run(
             [binary, "--version"],
@@ -186,10 +204,7 @@ class TestCLIVersionFlag:
         """``<cmd> -V`` must also work (short form of --version)."""
         if sys.platform == "win32" and "automation" in module_path:
             pytest.skip("automation CLIs require POSIX stdlib (curses/fcntl)")
-        binary: str | None = shutil.which(command)
-        if binary is None:
-            pytest.skip(f"{command} not on PATH — install with `pip install -e .` or run via pixi")
-        assert binary is not None
+        binary = _require_console_script(command)
 
         result = subprocess.run(
             [binary, "-V"],
@@ -221,10 +236,7 @@ class TestMaxWorkersValidation:
 
     def test_automation_loop_rejects_zero_max_workers(self) -> None:
         """hephaestus-automation-loop --max-workers=0 exits non-zero with clear error."""
-        binary = shutil.which("hephaestus-automation-loop")
-        if binary is None:
-            pytest.skip("hephaestus-automation-loop not on PATH")
-        assert binary is not None  # narrow Optional[str] for mypy
+        binary = _require_console_script("hephaestus-automation-loop")
 
         result = subprocess.run(
             [binary, "--max-workers", "0"],

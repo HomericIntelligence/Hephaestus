@@ -45,6 +45,18 @@ JUSTFILE="${REPO_ROOT}/justfile"
     [[ "$output" == *"test-integration"* ]]
 }
 
+@test "'test' delegates to the self-contained pixi test task" {
+    run just --justfile "$JUSTFILE" --dry-run test
+    [ "$status" -eq 0 ]
+    [ "$output" = "pixi run test tests" ]
+}
+
+@test "'test-integration' delegates to the self-contained pixi test task" {
+    run just --justfile "$JUSTFILE" --dry-run test-integration
+    [ "$status" -eq 0 ]
+    [ "$output" = "pixi run test tests/integration" ]
+}
+
 @test "justfile contains 'lint' recipe" {
     run just --justfile "$JUSTFILE" --list
     [[ "$output" == *"lint "* ]] || [[ "$output" == *"lint"$'\n'* ]]

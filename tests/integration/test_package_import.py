@@ -93,7 +93,10 @@ class TestTopLevelImports:
         try:
             expected = pkg_version("HomericIntelligence-Hephaestus")
         except PackageNotFoundError:
-            pytest.skip("package not installed; metadata-based version unavailable")
+            pytest.skip(
+                "package metadata unavailable; run `pixi run dev-install` before direct pytest "
+                "invocations, or use the self-contained `pixi run test tests/integration`"
+            )
 
         assert hephaestus.__version__ == expected
         assert hephaestus.__version__ != "unknown"

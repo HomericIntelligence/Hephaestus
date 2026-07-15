@@ -168,6 +168,10 @@ Run tests with:
 pixi run test
 ```
 
+`pixi run test` runs the existing `dev-install` task first so distribution
+metadata and every `hephaestus-*` console script are available to integration
+tests. If invoking `pytest` directly, run `pixi run dev-install` first.
+
 ### Test environment requirements
 
 The unit-test suite executes a small number of real subprocesses and therefore

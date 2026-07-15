@@ -154,17 +154,17 @@ just bootstrap
 ### Running Tests
 
 ```bash
-# Run all tests (unit + integration)
+# Run all tests (unit + integration); installs the editable package first
 just test
-pixi run pytest
+pixi run test
 
 # Run only unit tests (coverage-gated in CI)
 just test-unit
 pytest -m unit
 
-# Run only integration tests
+# Run only integration tests; installs console scripts first
 just test-integration
-pytest -m integration
+pixi run test tests/integration
 
 # Run all tests except integration
 pytest -m "not integration"
@@ -172,6 +172,9 @@ pytest -m "not integration"
 
 All integration tests carry `pytest.mark.integration` (module-level `pytestmark`),
 so marker-based selection is reliable.
+
+Direct `pytest` commands that include integration tests require a prior
+`pixi run dev-install`.
 
 ### Development Commands
 

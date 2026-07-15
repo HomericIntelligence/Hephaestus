@@ -22,17 +22,17 @@ bootstrap:
     pixi run dev-install
     pixi run pre-commit install
 
-# Run all tests (unit + integration)
+# Run all tests (unit + integration); the pixi task installs the editable package.
 test:
-    pixi run pytest {{ test_dir }}
+    pixi run test {{ test_dir }}
 
 # Run unit tests only
 test-unit:
     pixi run pytest {{ unit_test_dir }}
 
-# Run integration tests only
+# Run integration tests only; console scripts are installed by the pixi task.
 test-integration:
-    pixi run pytest {{ integration_test_dir }}
+    pixi run test {{ integration_test_dir }}
 
 # Run BATS shell tests (recursive under tests/shell)
 test-shell:

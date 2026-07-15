@@ -22,7 +22,7 @@ A piece of work is **done** when every item below is true.
 | 9 | Full unit suite passes: `pixi run pytest tests/unit` (currently 2,500+ tests across 4 Python versions) | CI jobs `unit-tests`, `test (ubuntu-latest, 3.10/3.11/3.12/3.13, unit)` |
 | 10 | Coverage gate satisfied: `--cov-fail-under=83` (configured in `pyproject.toml [tool.coverage.report].fail_under`) | CI job `unit-tests` |
 | 11 | No new warnings introduced (pytest, deprecation, ruff) | PR reviewer |
-| 12 | Integration tests pass: `pixi run pytest tests/integration` | CI job `integration-tests` |
+| 12 | Integration tests pass: `pixi run test tests/integration` (installs the editable package first) | CI job `integration-tests` |
 | 13 | Shell tests pass: `pixi run test-shell` | CI job `shell-tests` |
 | 14 | Schema validation passes (CLI inventory, YAML/Markdown structure) | CI job `schema-validation` |
 | 15 | Dep sync check passes (pyproject.toml then pixi.toml then pixi.lock) | CI job `deps/version-sync` |

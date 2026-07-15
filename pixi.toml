@@ -6,7 +6,9 @@ platforms = ["linux-64", "osx-arm64"] # Do not re-enable, "win-64", "osx-64"]
 requires-pixi = ">=0.69.0"
 
 [tasks]
-test = "pytest"
+# The full suite includes console-script and distribution-metadata integration
+# checks, so install the editable package before pytest collection.
+test = { cmd = "pytest", depends-on = ["dev-install"] }
 test-shell = "bats --recursive tests/shell"
 lint = "ruff check hephaestus scripts tests"
 format = "ruff format hephaestus scripts tests"
