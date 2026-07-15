@@ -13,7 +13,9 @@ EXPECTED_DONTASK_CALLS = {
     "review_validator.py:_run_validation_session": "Read,Glob,Grep",
     "comment_difficulty.py:_run_classifier_session": "Read,Glob,Grep",
     "pr_review_core.py:_invoke_and_parse_review_session": "Read,Glob,Grep",
-    "address_review_core.py:run_address_fix_session": "Read,Write,Edit,Glob,Grep,Bash,Task,Skill",
+    "address_review_core.py:_invoke_address_fix_session": (
+        "Read,Write,Edit,Glob,Grep,Bash,Task,Skill"
+    ),
     "_implement_phase.py:ImplementPhase._run_claude_impl_session": (
         "Read,Write,Edit,Glob,Grep,Bash"
     ),

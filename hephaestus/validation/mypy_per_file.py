@@ -22,6 +22,7 @@ from __future__ import annotations
 import subprocess
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from hephaestus.cli.utils import create_validation_parser, emit_json_status
 from hephaestus.utils.helpers import NETWORK_TIMEOUT
@@ -93,21 +94,31 @@ def run_mypy_per_file(
     extra_flags: list[str] = flags or []
 
     overall_rc = 0
-    for filepath in files:
-        cmd = [executable, "-m", "mypy", *extra_flags, filepath]
-        try:
-            result = subprocess.run(cmd, capture_output=False, timeout=NETWORK_TIMEOUT)
-            rc = result.returncode
-        except subprocess.TimeoutExpired as exc:
-            # A hung mypy run must not stall the whole check; treat it as a
-            # failure for this file so the aggregate rc is non-zero (#684).
-            print(
-                f"mypy-each-file: {filepath} timed out after {exc.timeout}s",
-                file=sys.stderr,
-            )
-            rc = 124
-        if rc != 0:
-            overall_rc = rc
+    # A shared incremental cache can be corrupted by concurrent mypy processes.
+    with TemporaryDirectory(prefix="hephaestus-mypy-") as cache_dir:
+        for filepath in files:
+            cmd = [
+                executable,
+                "-m",
+                "mypy",
+                *extra_flags,
+                "--cache-dir",
+                cache_dir,
+                filepath,
+            ]
+            try:
+                result = subprocess.run(cmd, capture_output=False, timeout=NETWORK_TIMEOUT)
+                rc = result.returncode
+            except subprocess.TimeoutExpired as exc:
+                # A hung mypy run must not stall the whole check; treat it as a
+                # failure for this file so the aggregate rc is non-zero (#684).
+                print(
+                    f"mypy-each-file: {filepath} timed out after {exc.timeout}s",
+                    file=sys.stderr,
+                )
+                rc = 124
+            if rc != 0:
+                overall_rc = rc
 
     return overall_rc
 
