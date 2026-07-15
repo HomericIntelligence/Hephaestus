@@ -253,8 +253,8 @@ jobs:
       - name: Run shellcheck
         run: |
           set -euo pipefail
-          shopt -s nullglob
-          files=(scripts/*.sh scripts/shell/*.sh)
+          shopt -s nullglob globstar
+          files=(scripts/**/*.sh scripts/**/*.sbatch)
           if [[ ${#files[@]} -eq 0 ]]; then
             echo "No shell scripts found — nothing to lint."
             exit 0
