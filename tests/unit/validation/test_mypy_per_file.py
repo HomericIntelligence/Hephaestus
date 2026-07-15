@@ -131,6 +131,17 @@ class TestRunMypyPerFile:
             run_mypy_per_file(files, flags=[])
         assert mock_run.call_args.kwargs["timeout"] == NETWORK_TIMEOUT
 
+    def test_uses_isolated_mypy_cache(self, tmp_path: Path) -> None:
+        """Each wrapper run avoids the shared project mypy cache."""
+        files = [str(tmp_path / "f.py")]
+        Path(files[0]).write_text("x = 1\n")
+        with patch("hephaestus.validation.mypy_per_file.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            run_mypy_per_file(files, flags=[])
+        command = mock_run.call_args.args[0]
+        cache_dir_index = command.index("--cache-dir")
+        assert command[cache_dir_index + 1] != ".mypy_cache"
+
     def test_timeout_yields_nonzero_rc(self, tmp_path: Path) -> None:
         """A hung mypy run is treated as a failure (rc 124), not a crash (#684)."""
         files = [str(tmp_path / "f.py")]

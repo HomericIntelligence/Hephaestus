@@ -30,9 +30,11 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from hephaestus.agents.runtime import (
     direct_agent_model,
@@ -97,6 +99,186 @@ def _log_address_parse_error(
         )
 
 
+@dataclass(frozen=True)
+class _AddressFixSessionOutput:
+    """Normalized response and persisted log text from an address-fix session."""
+
+    response_text: str
+    log_text: str
+
+
+def _build_address_fix_prompt(
+    *,
+    issue_number: int,
+    pr_number: int,
+    worktree_path: Path,
+    threads: list[dict[str, Any]],
+    agent: str,
+    repo_root: Path,
+    state_dir: Path,
+    advise_timeout: int,
+    task_block: str,
+    task_review_block: str,
+    diff_text: str,
+    unaddressed_findings: list[dict[str, Any]] | None,
+) -> str:
+    """Build the difficulty-annotated prompt for one address-fix session."""
+    threads_json = json.dumps(
+        [
+            {
+                "thread_id": thread["id"],
+                "path": thread["path"],
+                "line": thread.get("line"),
+                "body": thread["body"],
+            }
+            for thread in threads
+        ]
+    )
+    difficulties = classify_comments(
+        threads=threads,
+        agent=agent,
+        issue_number=issue_number,
+        worktree_path=worktree_path,
+        repo_root=repo_root,
+        state_dir=state_dir,
+        advise_timeout=advise_timeout,
+    )
+    todo_block = "\n".join(
+        format_todo_line(thread, difficulties.get(thread["id"], "medium")) for thread in threads
+    )
+    return get_address_review_prompt(
+        pr_number=pr_number,
+        issue_number=issue_number,
+        worktree_path=str(worktree_path),
+        threads_json=threads_json,
+        todo_block=todo_block,
+        task_block=task_block,
+        task_review_block=task_review_block,
+        diff_text=diff_text,
+        unaddressed_findings=unaddressed_findings,
+    )
+
+
+@contextmanager
+def _address_fix_prompt_file(
+    worktree_path: Path,
+    issue_number: int,
+    prompt: str,
+) -> Iterator[Path]:
+    """Create an address-fix prompt file and remove it after the session."""
+    prompt_file = worktree_path / f".claude-address-review-{issue_number}.md"
+    write_secure(prompt_file, prompt)
+    try:
+        yield prompt_file
+    finally:
+        try:
+            prompt_file.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            logger.warning("Could not unlink prompt file %s: %s", prompt_file, exc)
+
+
+def _invoke_address_fix_session(
+    *,
+    issue_number: int,
+    worktree_path: Path,
+    agent: str,
+    repo_root: Path,
+    prompt: str,
+    timeout: int,
+) -> _AddressFixSessionOutput:
+    """Run the selected provider and normalize its response and log output."""
+    if uses_direct_agent_runner(agent):
+        result = run_agent_session(
+            agent=agent,
+            prompt=prompt,
+            cwd=worktree_path,
+            timeout=timeout,
+            model=direct_agent_model(agent, "HEPH_IMPLEMENTER_MODEL"),
+            sandbox="workspace-write",
+        )
+        log_text = result.stdout
+        if result.session_id:
+            log_text = f"SESSION_ID: {result.session_id}\n\n{log_text}"
+        return _AddressFixSessionOutput(
+            response_text=result.stdout,
+            log_text=log_text,
+        )
+
+    stdout, _ = invoke_claude_with_session(
+        repo=get_repo_slug(repo_root),
+        issue=issue_number,
+        agent=AGENT_IMPLEMENTER,
+        prompt=prompt,
+        model=implementer_model(),
+        cwd=worktree_path,
+        timeout=timeout,
+        output_format="json",
+        permission_mode="dontAsk",
+        # Task: the session dispatches one sub-agent per review comment at its
+        # classified model tier. Skill: each sub-agent runs /hephaestus:advise.
+        allowed_tools="Read,Write,Edit,Glob,Grep,Bash,Task,Skill",
+        input_via_stdin=True,
+    )
+    raw_stdout = stdout or ""
+    try:
+        data = json.loads(raw_stdout or "{}")
+        response_text: str = data.get("result", raw_stdout)
+    except (json.JSONDecodeError, AttributeError):
+        response_text = raw_stdout
+    return _AddressFixSessionOutput(
+        response_text=response_text,
+        log_text=raw_stdout,
+    )
+
+
+def _persist_address_fix_log(log_file: Path, text: str) -> None:
+    """Persist an address-fix session log with the project's secure writer."""
+    write_secure(log_file, text)
+
+
+def _parse_address_fix_session_output(
+    output: _AddressFixSessionOutput,
+    *,
+    parse_fn: Callable[[str], dict[str, Any]],
+    pr_number: int,
+) -> dict[str, Any]:
+    """Parse the provider response and record the completed thread count."""
+    parsed = parse_fn(output.response_text)
+    logger.info(
+        "Fix session complete for PR #%s; addressed %s thread(s)",
+        pr_number,
+        len(parsed.get("addressed", [])),
+    )
+    return parsed
+
+
+def _raise_address_fix_error(
+    error: subprocess.CalledProcessError | subprocess.TimeoutExpired,
+    *,
+    log_file: Path,
+    pr_number: int,
+) -> NoReturn:
+    """Persist a provider failure and translate it to the public error contract."""
+    if isinstance(error, subprocess.CalledProcessError):
+        stdout = error.stdout or ""
+        stderr = error.stderr or ""
+        _persist_address_fix_log(
+            log_file,
+            f"EXIT CODE: {error.returncode}\n\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}",
+        )
+        raise RuntimeError(
+            f"Fix session failed for PR {pr_ref(pr_number)}: {error.stderr or error.stdout}"
+        ) from error
+
+    _persist_address_fix_log(
+        log_file,
+        f"TIMEOUT after {error.timeout}s\n\nOutput:\n{error.output or ''}",
+    )
+    raise RuntimeError(f"Fix session timed out for PR {pr_ref(pr_number)}") from error
+
+
 def run_address_fix_session(
     *,
     issue_number: int,
@@ -117,170 +299,51 @@ def run_address_fix_session(
 ) -> dict[str, Any]:
     """Run the address-review fix session and return the agent's parsed result.
 
-    Shared core of :meth:`AddressReviewer._run_fix_session` and the in-loop
-    implementer address step (Stage 2, #28). Classifies each comment's fix
-    difficulty (#1083), builds the address-review prompt (which fans out one
-    sub-agent per COMMENT at the model tier matching its difficulty, with
-    same-file comments serialized), runs the implementer agent, and returns the
-    parsed ``{"addressed", "replies"}`` dict.
-
-    The Claude path resumes the implementer's deterministic
-    :data:`AGENT_IMPLEMENTER` session so fixes land in the same long-lived
-    Session 2 transcript. Codex starts a fresh session (it has no
-    deterministic-UUID resume).
-
-    Args:
-        issue_number: GitHub issue number.
-        pr_number: GitHub PR number.
-        worktree_path: Worktree containing the PR branch.
-        threads: Unresolved thread dicts (``id``/``path``/``line``/``body``).
-        agent: Selected implementation agent (``"claude"`` / ``"codex"``).
-        repo_root: Repo root used for session-naming githash + slug.
-        parse_fn: Callable ``(text) -> dict`` used to parse the agent's output.
-            The standalone path passes its trace-writing closure; the in-loop
-            path passes :func:`_parse_addressed_block`.
-        log_file: Path to write the raw session log to.
-        dry_run: When True, skip the agent call and return empty result.
-        task_block: Optional task (issue) text for the prompt's context section.
-            Supplied on the existing-PR review path so a fresh (non-resumed)
-            session can read the task and continue the work.
-        task_review_block: Optional plan-review verdict text for the context.
-        diff_text: Optional current implementation diff for the context.
-        unaddressed_findings: Optional still-unresolved threads from a prior
-            no-commit turn (#1554); injected as a "Make sure to handle <finding>"
-            directive to re-ground a resumed session on what it failed to fix.
-
-    Returns:
-        Parsed dict with ``"addressed"`` and ``"replies"`` keys.
-
+    The public signature and observable provider, persistence, parsing, and
+    cleanup behavior are retained while focused private helpers own each step.
     """
     if dry_run:
         logger.info("[DRY RUN] Would run fix session for PR #%s", pr_number)
         return {"addressed": [], "replies": {}}
 
-    threads_json = json.dumps(
-        [
-            {
-                "thread_id": t["id"],
-                "path": t["path"],
-                "line": t.get("line"),
-                "body": t["body"],
-            }
-            for t in threads
-        ]
-    )
-
-    # #1083: classify each comment's fix difficulty (separate cheap sub-agent),
-    # then render the difficulty-annotated todo list that drives one-sub-agent-
-    # per-comment dispatch at the matching model tier. Classification degrades to
-    # "medium" on any failure, so this never blocks the fix session.
-    difficulties = classify_comments(
+    prompt = _build_address_fix_prompt(
+        issue_number=issue_number,
+        pr_number=pr_number,
+        worktree_path=worktree_path,
         threads=threads,
         agent=agent,
-        issue_number=issue_number,
-        worktree_path=worktree_path,
         repo_root=repo_root,
         state_dir=log_file.parent,
         advise_timeout=advise_timeout,
-    )
-    todo_block = "\n".join(
-        format_todo_line(t, difficulties.get(t["id"], "medium")) for t in threads
-    )
-
-    prompt = get_address_review_prompt(
-        pr_number=pr_number,
-        issue_number=issue_number,
-        worktree_path=str(worktree_path),
-        threads_json=threads_json,
-        todo_block=todo_block,
         task_block=task_block,
         task_review_block=task_review_block,
         diff_text=diff_text,
         unaddressed_findings=unaddressed_findings,
     )
 
-    prompt_file = worktree_path / f".claude-address-review-{issue_number}.md"
-    write_secure(prompt_file, prompt)
-
-    try:
-        if uses_direct_agent_runner(agent):
-            direct_result = run_agent_session(
+    with _address_fix_prompt_file(worktree_path, issue_number, prompt):
+        try:
+            output = _invoke_address_fix_session(
+                issue_number=issue_number,
+                worktree_path=worktree_path,
                 agent=agent,
+                repo_root=repo_root,
                 prompt=prompt,
-                cwd=worktree_path,
                 timeout=timeout,
-                model=direct_agent_model(agent, "HEPH_IMPLEMENTER_MODEL"),
-                sandbox="workspace-write",
             )
-            log = direct_result.stdout
-            if direct_result.session_id:
-                log = f"SESSION_ID: {direct_result.session_id}\n\n{log}"
-            write_secure(log_file, log)
-            parsed = parse_fn(direct_result.stdout)
-            logger.info(
-                "Fix session complete for PR #%s; addressed %s thread(s)",
-                pr_number,
-                len(parsed.get("addressed", [])),
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            _raise_address_fix_error(
+                error,
+                log_file=log_file,
+                pr_number=pr_number,
             )
-            return parsed
 
-        repo_slug = get_repo_slug(repo_root)
-        stdout, _ = invoke_claude_with_session(
-            repo=repo_slug,
-            issue=issue_number,
-            agent=AGENT_IMPLEMENTER,
-            prompt=prompt,
-            model=implementer_model(),
-            cwd=worktree_path,
-            timeout=timeout,
-            output_format="json",
-            permission_mode="dontAsk",
-            # Task: the session acts as a coordinator that dispatches one
-            # sub-agent per review COMMENT, at the model tier matching the
-            # comment's classified difficulty (#1083), serializing same-file
-            # comments. Skill: each sub-agent runs /hephaestus:advise before
-            # fixing. See prompts/address_review.py.
-            allowed_tools="Read,Write,Edit,Glob,Grep,Bash,Task,Skill",
-            input_via_stdin=True,
+        _persist_address_fix_log(log_file, output.log_text)
+        return _parse_address_fix_session_output(
+            output,
+            parse_fn=parse_fn,
+            pr_number=pr_number,
         )
-        write_secure(log_file, stdout or "")
-
-        # Extract response text from Claude's JSON wrapper
-        try:
-            data = json.loads(stdout or "{}")
-            response_text: str = data.get("result", stdout or "")
-        except (json.JSONDecodeError, AttributeError):
-            response_text = stdout or ""
-
-        parsed = parse_fn(response_text)
-        logger.info(
-            "Fix session complete for PR #%s; addressed %s thread(s)",
-            pr_number,
-            len(parsed.get("addressed", [])),
-        )
-        return parsed
-
-    except subprocess.CalledProcessError as e:
-        stdout = e.stdout or ""
-        stderr = e.stderr or ""
-        error_output = f"EXIT CODE: {e.returncode}\n\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}"
-        write_secure(log_file, error_output)
-        raise RuntimeError(
-            f"Fix session failed for PR {pr_ref(pr_number)}: {e.stderr or e.stdout}"
-        ) from e
-    except subprocess.TimeoutExpired as e:
-        write_secure(log_file, f"TIMEOUT after {e.timeout}s\n\nOutput:\n{e.output or ''}")
-        raise RuntimeError(f"Fix session timed out for PR {pr_ref(pr_number)}") from e
-    finally:
-        # Narrow exception: a missing prompt file is benign cleanup,
-        # but ENOSPC / permission errors are signal we want surfaced.
-        try:
-            prompt_file.unlink()
-        except FileNotFoundError:
-            # Already gone — benign; nothing to clean up.
-            pass
-        except OSError as exc:
-            logger.warning("Could not unlink prompt file %s: %s", prompt_file, exc)
 
 
 def resolve_addressed_threads(
