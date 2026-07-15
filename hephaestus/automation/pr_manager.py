@@ -74,7 +74,7 @@ SECRET_FILE_EXTENSIONS: frozenset[str] = frozenset({".key", ".pem", ".pfx", ".p1
 # is intentionally excluded because this call does not request ignored paths.
 _PORCELAIN_STATUS_PAIRS: frozenset[str] = frozenset(
     {"D ", "DD", "AU", "UD", "UA", "DU", "AA", "UU", "??"}
-    | {f" {worktree_status}" for worktree_status in "AMDRC"}
+    | {f" {worktree_status}" for worktree_status in "AMDTRC"}
     | {f"{index_status}{worktree_status}" for index_status in "MTARC" for worktree_status in " MTD"}
 )
 
