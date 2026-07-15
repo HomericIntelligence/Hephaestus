@@ -322,7 +322,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--reviewer-model",
         default="",
-        help="HEPH_REVIEWER_MODEL for child processes (plan-review + PR-review)",
+        help=(
+            "HEPH_REVIEWER_MODEL for child processes (plan-review + PR-review); "
+            "use terra:default to select GPT-5.6 Terra without an explicit reasoning override"
+        ),
     )
     p.add_argument(
         "--implementer-model",

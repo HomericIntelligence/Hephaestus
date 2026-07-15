@@ -699,7 +699,10 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "reviewer_model",
             "_StoreAction",
             "",
-            help_text="HEPH_REVIEWER_MODEL for child processes (plan-review + PR-review)",
+            help_text=(
+                "HEPH_REVIEWER_MODEL for child processes (plan-review + PR-review); "
+                "use terra:default to select GPT-5.6 Terra without an explicit reasoning override"
+            ),
         ),
         _action_spec(
             ("--implementer-model",),
