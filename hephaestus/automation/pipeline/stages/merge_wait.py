@@ -6,6 +6,18 @@ label once, asks GitHub to arm auto-merge for the live head, and then polls
 only the arm it created.  It deliberately does not recover, confirm, retry,
 or take over an arm created by another process or run: those operational
 states are warned about and left for an operator.
+
+The implemented mini-state graph is:
+
+- Open PR: ENTER -> ARM -> FINISH_FAIL(``strict_gate_unavailable``) after
+  auto-merge disablement is verified.
+- Already-merged PR: ENTER -> ARM -> POLL -> LEARN_WAIT -> MW_FINISH,
+  preserving the exactly-once post-merge learning contract through
+  ``ctx.github.drive_green_learn_terminal``.
+
+Dirty/blocked recovery and automatic arming are not dormant branches in this
+module. Issue #2055 must introduce those transitions explicitly behind a
+head-bound strict-review proof rather than reviving undocumented legacy state.
 """
 
 from __future__ import annotations

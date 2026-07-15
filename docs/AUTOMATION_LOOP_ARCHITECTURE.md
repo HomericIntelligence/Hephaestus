@@ -30,6 +30,22 @@ label and live PR head immediately before its one arm request. If it detects an
 arm or conflicting state owned by another process/run, it warns and stops
 processing that item; operators own reconciliation.
 
+## Legacy compatibility inventory and retirement gates
+
+“Compatibility” here means accepting durable GitHub state written before the
+head-bound strict-review pipeline. Comments that cite legacy behavior only as
+algorithm provenance are not compatibility branches.
+
+| Compatibility family | Current containment | Removal gate |
+|---|---|---|
+| `legacy_issue_impl_go_fallback` in `pipeline/seeding.py` | An issue-level implementation-GO may seed an open PR into CI only when the PR does not carry authoritative implementation-NOGO. Each use emits the named warning marker. | After #2055 is deployed, a complete supported-repository seed pass must report zero fallback observations; then remove the issue-label branch and its classifier tests. |
+| `already_implementation_go_pr` and `not_implementation_go` across `routing.py`, `implementation.py`, and `ci.py` | Legacy-GO PRs may receive bounded CI maintenance, but every entry verifies auto-merge is disabled and `merge_wait` stops at `strict_gate_unavailable`. | Remove only after #2055 reconstructs eligibility from head-bound strict-review proof and the supported repositories contain zero open legacy implementation-GO PRs. Remove both route reasons, their stage branches, architecture rows, and tests together. |
+
+The former `pr_review` follow-up mini-states were removed by #2140: queue
+mini-states are not persisted, no current transition produced those states,
+and future post-strict-review follow-up behavior must be introduced as an
+explicit transition owned by the strict-review design.
+
 ## Queue topology
 
 ### Mermaid
@@ -314,7 +330,6 @@ objects are rejected.
 - `prompts/pr_review.py get_comment_difficulty_prompt`
 - `prompts/implementation.py get_impl_resume_feedback_prompt`
 - `prompts/address_review.py get_address_review_prompt`
-- `prompts/follow_up.py get_follow_up_prompt`
 
 **Severity-aware GO gate** (#1856; recovers detail from the orphaned
 `automation-pr-severity-aware-gate-implementation` skill draft, #2067):

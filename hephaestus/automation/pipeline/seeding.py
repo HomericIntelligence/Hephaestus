@@ -272,9 +272,23 @@ def classify_issue(facts: IssueFacts) -> Classification:
         if facts.pr_has_implementation_no_go:
             return StageName.PR_REVIEW, f"#{facts.number} open PR awaiting review"
         if _label_at_or_past(state_label, STATE_IMPLEMENTATION_GO):
+            # Legacy compatibility path (#2140): an *issue-level*
+            # IMPLEMENTATION_GO label on an open PR predates the loop-owned
+            # approval model (#2280), where the durable authorization is the
+            # PR-level label handled above (facts.pr_has_implementation_go).
+            # Post-#2280 there is no CI pipeline stage, so the legacy
+            # issue-level GO no longer auto-authorizes a merge — it is treated
+            # as an open PR awaiting review. The warning surfaces the stale
+            # label so it can be retired.
+            LOG.warning(
+                "legacy_issue_impl_go_fallback: issue #%d supplies %s for open PR #%s",
+                facts.number,
+                STATE_IMPLEMENTATION_GO,
+                facts.pr_number,
+            )
             return (
-                StageName.MERGE_WAIT,
-                f"#{facts.number} open PR with {STATE_IMPLEMENTATION_GO}",
+                StageName.PR_REVIEW,
+                f"#{facts.number} open PR with legacy issue-level {STATE_IMPLEMENTATION_GO}",
             )
         # Open PR, no implementation-go → awaiting PR review
         return StageName.PR_REVIEW, f"#{facts.number} open PR awaiting review"

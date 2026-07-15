@@ -251,7 +251,9 @@ class TestDiscover:
 
         assert isinstance(result, Continue)
         assert github.issue_reads == [8]
-        assert repo_item.payload["products"][0]["stage"] is StageName.MERGE_WAIT
+        # Issue-level implementation-go on an open PR is a legacy compatibility
+        # label (#2140): post-#2280 it routes back to review, not merge_wait.
+        assert repo_item.payload["products"][0]["stage"] is StageName.PR_REVIEW
         assert repo_item.payload["products"][0]["pr"] == 44
 
     def test_discover_failure_finishes_fail(
