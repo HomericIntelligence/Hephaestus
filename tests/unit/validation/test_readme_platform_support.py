@@ -34,19 +34,11 @@ def test_readme_links_to_platform_support_section() -> None:
     )
 
 
-def test_readme_flags_pixi_as_linux_only() -> None:
-    """README must warn that the pixi dev env is Linux-only before `pixi install`."""
+def test_readme_routes_platform_support_to_contributing() -> None:
+    """README must route contributor platform details to the canonical guide."""
     text = README.read_text(encoding="utf-8")
-    pixi_section_start = text.find("## Getting Started with Pixi")
-    assert pixi_section_start != -1, (
-        "README must contain a '## Getting Started with Pixi' section heading"
-    )
-    pixi_install_pos = text.find("pixi install", pixi_section_start)
-    assert pixi_install_pos != -1, (
-        "README must contain 'pixi install' command in the Getting Started section"
-    )
-    preface = text[pixi_section_start:pixi_install_pos]
-    assert "linux-64" in preface.lower() or "linux only" in preface.lower(), (
-        "README must mention the linux-64 restriction before the first "
-        "`pixi install` command so off-Linux users do not hit a hard failure."
+    contributing_start = text.find("## Contributing")
+    assert contributing_start != -1, "README must contain a '## Contributing' section"
+    assert text.find(PLATFORM_SUPPORT_ANCHOR, contributing_start) != -1, (
+        "README's Contributing section must link to the canonical Platform Support section"
     )

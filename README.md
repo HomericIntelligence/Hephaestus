@@ -59,19 +59,6 @@ pytest, ruff, and mypy):
 - Individual extras (e.g. `[github]`, `[schema]`) are available for users who
   only need one integration.
 
-### Development setup
-
-For local development, [install Pixi](https://pixi.sh/install/) and
-[`just`](https://just.systems/), then bootstrap the project (installs deps, the
-editable package, and pre-commit hooks in one step):
-
-```bash
-just bootstrap
-```
-
-See [CONTRIBUTING.md → Development Setup](CONTRIBUTING.md#development-setup) for
-the full workflow, including the manual fallback if you do not have `just`.
-
 ## Library vs product layer
 
 Hephaestus ships two layers from one distribution:
@@ -124,63 +111,6 @@ Hephaestus/
 ├── docs/              # Documentation
 ├── scripts/           # Utility scripts
 └── README.md          # This file
-```
-
-## Getting Started with Pixi
-
-This project uses [Pixi](https://pixi.sh) for environment management, which automatically handles dependencies and creates isolated environments.
-
-> **Platform note:** The pixi developer environment is **Linux-64 only** (see
-> `platforms` in [`pixi.toml`](pixi.toml)). On macOS or Windows, install the
-> published wheel into a plain virtualenv instead — see
-> [From PyPI](#from-pypi) above. The
-> full comparison table (install paths, supported platforms, Python versions)
-> lives in [CONTRIBUTING.md#platform-support](CONTRIBUTING.md#platform-support).
-
-### Prerequisites
-
-Install Pixi by following the [official installation guide](https://pixi.sh/install/).
-
-### Setup Development Environment
-
-Bootstrap the project in one step (see
-[CONTRIBUTING.md → Development Setup](CONTRIBUTING.md#development-setup) for the
-full workflow and the no-`just` fallback):
-
-```bash
-just bootstrap
-```
-
-### Running Tests
-
-```bash
-# Run all tests (unit + integration)
-just test
-pixi run pytest
-
-# Run only unit tests (coverage-gated in CI)
-just test-unit
-pytest -m unit
-
-# Run only integration tests
-just test-integration
-pytest -m integration
-
-# Run all tests except integration
-pytest -m "not integration"
-```
-
-All integration tests carry `pytest.mark.integration` (module-level `pytestmark`),
-so marker-based selection is reliable.
-
-### Development Commands
-
-```bash
-# Format code with ruff
-pixi run format
-
-# Lint code with ruff
-pixi run lint
 ```
 
 ## Usage
@@ -454,74 +384,16 @@ hephaestus-check-coverage --help
 hephaestus-check-complexity --help
 ```
 
-## Development Guidelines
-
-1. Follow the principles in [CLAUDE.md](CLAUDE.md)
-2. Write comprehensive unit tests for all new functionality
-3. Document all public functions with Google-style docstrings
-4. Use type hints for all function parameters and return values
-5. Keep functions small and focused (single responsibility principle)
-
 ## Contributing
 
-The `main` branch is protected; all changes go through a pull request. CI blocks
-PRs that fail its issue-reference, signature, and DCO checks. During #2054,
-auto-merge remains disabled through pipeline containment and reviewer control;
-the `auto-merge-policy` check reports armed PRs but is advisory so it does not
-block the independently reviewed manual bootstrap merge.
+[`CONTRIBUTING.md`](CONTRIBUTING.md) is the canonical source for contributor
+setup and workflow:
 
-1. Create a feature branch named `<issue-number>-description`
-   (`git checkout -b 123-amazing-feature`).
-2. Commit your changes **signed** (`git commit -S -m "feat(scope): add amazing feature"`),
-   using [conventional commit](https://www.conventionalcommits.org/) messages.
-3. Push the branch (`git push -u origin 123-amazing-feature`).
-4. Open a pull request whose body contains the literal line `Closes #123`
-   (capital `C`, no colon, on its own line — `Fixes`/`Resolves` are **not** accepted).
-5. Keep auto-merge disabled while #2054's fail-closed policy is active. A
-   bootstrap PR requires an unconditional independent strict-review GO before
-   a manual squash merge; #2055 restores queue-owned auto-merge after a
-   head-bound strict-review proof.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the full process.
-
-## Pixi Environments
-
-This project defines multiple environments in `pixi.toml`:
-
-- **default**: Basic runtime environment
-- **dev**: Development environment with linting and formatting tools
-- **lint**: Linting-only environment
-
-Switch environments with:
-
-```bash
-pixi shell -e dev
-pixi shell -e lint
-```
-
-## Adding New Dependencies
-
-Add new dependencies to `pixi.toml`:
-
-For conda packages:
-
-```toml
-[dependencies]
-numpy = "*"
-```
-
-For PyPI packages:
-
-```toml
-[pypi-dependencies]
-requests = "*"
-```
-
-Then run:
-
-```bash
-pixi install
-```
+- [Development Setup](CONTRIBUTING.md#development-setup) and
+  [Platform Support](CONTRIBUTING.md#platform-support)
+- [Code Style](CONTRIBUTING.md#code-style) and [Testing](CONTRIBUTING.md#testing)
+- [Dependency Updates](CONTRIBUTING.md#dependency-updates)
+- [Pull Request Process](CONTRIBUTING.md#pull-request-process)
 
 ## License
 

@@ -47,7 +47,9 @@ just docs        # outputs to docs/api/
 
 ## Setup
 
-See the [README](../README.md) for installation and development setup instructions.
+See [README.md → Installation](../README.md#installation) for package
+installation. Contributor environment setup is maintained in
+[CONTRIBUTING.md → Development Setup](../CONTRIBUTING.md#development-setup).
 
 - [Audit Reviewer](audit-reviewer.md) — `hephaestus-audit-prs`: coordinator-pattern auditor for ALL open PRs (issue #994)
 - [MCP Configuration](mcp.md) — Project-scoped `.mcp.json` and how to add a Model Context Protocol server
@@ -56,4 +58,5 @@ See the [README](../README.md) for installation and development setup instructio
 
 ## Contributing
 
-See [CONTRIBUTING.md](../CONTRIBUTING.md) for guidelines.
+The complete contributor workflow is maintained in the canonical
+[CONTRIBUTING.md](../CONTRIBUTING.md).

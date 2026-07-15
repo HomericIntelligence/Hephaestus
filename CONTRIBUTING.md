@@ -1,6 +1,11 @@
 # Contributing to Hephaestus
 
-Thank you for considering contributing to Hephaestus! We welcome contributions from the community.
+Thank you for considering contributing to Hephaestus! We welcome contributions
+from the community.
+
+This file is the canonical source for contributor setup and workflow. For
+installing and using a released package, see
+[README.md → Installation](README.md#installation).
 
 ## Code of Conduct
 
@@ -27,7 +32,7 @@ links to the full section below.
    strict-review GO, a maintainer performs the manual squash merge.
 
 If anything in steps 1–2 fails, see [Platform Support](#platform-support) — the
-pixi dev environment is `linux-64` only by design.
+pixi dev environment supports `linux-64` and `osx-arm64` by design.
 
 ## Planning artifacts
 
@@ -84,16 +89,20 @@ are cut on demand by pushing a signed `vX.Y.Z` git tag (see
 ## Development Setup
 
 1. Install Pixi: <https://pixi.sh/install/>
-2. Clone your fork
-3. Bootstrap the project (installs deps, the editable package, and pre-commit
-   hooks in one step): `just bootstrap`
+2. Clone your fork.
+3. Bootstrap the project (installs dependencies, the editable package, and
+   pre-commit hooks in one step): `just bootstrap`.
 
    `just bootstrap` wraps `pixi install`, `pixi run dev-install`, and
-   `pixi run pre-commit install`. If you do not have [`just`](https://just.systems/)
-   installed, run those three commands manually instead.
-4. Activate development environment: `pixi shell -e dev`
+   `pixi run pre-commit install`. If you do not have
+   [`just`](https://just.systems/) installed, run those three commands manually.
+4. Activate the default developer environment: `pixi shell -e default`.
 5. Before pushing, run the fast quality gate: `just check`
    (lint + format-check + typecheck). Run `just --list` to see every recipe.
+
+`pixi.toml` exposes two named environments: `default` contains the developer and
+test tooling, while `lint` contains the narrower lint and security toolchain.
+Select one explicitly with `pixi shell -e <environment>`.
 
 ### Platform Support
 
@@ -103,15 +112,16 @@ they are using:
 
 | Install path                        | Platforms supported                    | Python      |
 | ----------------------------------- | -------------------------------------- | ----------- |
-| `pixi install` (development)        | `linux-64` only                        | 3.10 (pinned by `pixi.toml`) |
+| `pixi install` (development)        | `linux-64`, `osx-arm64`                | 3.10–3.13 (`>=3.10,<3.14` in `pixi.toml`) |
 | `pip install HomericIntelligence-Hephaestus` (wheel) | Linux, macOS, Windows (any OS) | 3.10+ (see `requires-python` in `pyproject.toml`) |
 
 Why the asymmetry:
 
-- **Pixi is Linux-64 only by design.** `pixi.toml` declares
-  `platforms = ["linux-64"]` with an explicit `# Do not re-enable` comment
-  next to the other entries. Full local reproduction of the development
-  environment (lint, mypy, test, pre-commit) is only supported on Linux.
+- **Pixi supports Linux x86_64 and macOS Apple Silicon by design.**
+  `pixi.toml` declares `platforms = ["linux-64", "osx-arm64"]` and explicitly
+  excludes `win-64` and Intel macOS (`osx-64`). Full local reproduction of the
+  development environment (lint, mypy, test, pre-commit) is supported on those
+  two platforms.
 - **The wheel supports the broader matrix advertised in `pyproject.toml`.**
   `requires-python` in `pyproject.toml` describes what `pip install` will accept.
   No platform-restriction classifier is published, so the wheel is installable
@@ -122,10 +132,11 @@ Why the asymmetry:
   which has no IANA database bundled on Windows. POSIX installs skip this
   dependency.
 
-If you need to develop or run the test suite on macOS or Windows, install the
-wheel into a plain virtualenv (`pip install -e '.[dev]'`) — pixi tooling is
-not available there, and any subpackage with POSIX-only assumptions is out
-of scope for this project's supported development environment (track those separately).
+If you need to develop or run the test suite on Windows or Intel-based macOS,
+install the wheel into a plain virtualenv (`pip install -e '.[dev]'`) — pixi
+tooling is not available there, and any subpackage with POSIX-only assumptions
+is out of scope for this project's supported development environment (track
+those separately).
 
 ### The `build/` directory
 
@@ -214,6 +225,24 @@ see [`docs/RELEASING.md`](docs/RELEASING.md) for the full workflow. `hephaestus-
 computes the next semver string and prints the `git tag` commands to run.
 
 ## Dependency Updates
+
+### Adding a dependency
+
+Add conda packages under `[dependencies]` in `pixi.toml`. Add packages available
+only from PyPI under `[pypi-dependencies]`:
+
+```toml
+[dependencies]
+numpy = "*"
+
+[pypi-dependencies]
+requests = "*"
+```
+
+Run `pixi install` after changing dependency declarations and commit the
+resulting `pixi.lock` update with the manifest change.
+
+### Automated updates
 
 - **Dependabot** is configured for `pip` (pyproject.toml dev extras) and is the
   **sole** manager of `github-actions`. It opens PRs automatically for those.
