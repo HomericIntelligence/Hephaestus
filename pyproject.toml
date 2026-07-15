@@ -30,7 +30,7 @@ dependencies = [
     "pyyaml>=6.0,<7",
     # IANA timezone data is bundled with Python on POSIX but not on Windows;
     # rate_limit.py uses ZoneInfo which needs it on Windows.
-    "tzdata; platform_system == 'Windows'",
+    "tzdata>=2026.2,<2027; platform_system == 'Windows'",
 ]
 
 # Optional-dependency groups. The `all` aggregator below intentionally lists

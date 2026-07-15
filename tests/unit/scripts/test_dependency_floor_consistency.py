@@ -162,6 +162,21 @@ class TestDependencyFloorConsistency:
         )
 
 
+class TestTzdataRuntimeDependency:
+    """Tests for the Windows-only tzdata runtime dependency (issue #2149)."""
+
+    def test_tzdata_has_supported_range_and_windows_marker(self, repo_root: Path) -> None:
+        """Tzdata must retain its Windows marker and constrain supported releases."""
+        pyproject_path = repo_root / "pyproject.toml"
+        with pyproject_path.open("rb") as f:
+            pyproject = tomllib.load(f)
+
+        runtime_deps = pyproject["project"]["dependencies"]
+        tzdata_spec = next((dep for dep in runtime_deps if dep.startswith("tzdata")), None)
+
+        assert tzdata_spec == "tzdata>=2026.2,<2027; platform_system == 'Windows'"
+
+
 class TestMypyUpperCapConsistency:
     """Tests for mypy upper-cap consistency across pyproject.toml and pixi.toml.
 
