@@ -1,0 +1,45 @@
+name: Performance
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: performance-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  worker-pool-load:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        run: pip install -e ".[dev,automation]"
+      - name: Run bounded worker-pool load tests
+        run: >
+          pytest tests/performance
+          --override-ini="addopts="
+          -v --strict-markers
+          --load-duration-s=30
+          --load-max-jobs=50000
+          --load-workers=8
+          --load-max-in-flight=64
+          --load-service-ms=5
+          --load-p95-budget-ms=500
+          --load-report=build/performance/worker-pool.json
+      - name: Upload performance report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v4
+        with:
+          name: worker-pool-performance
+          path: build/performance/worker-pool.json
+          if-no-files-found: warn
+          retention-days: 14
