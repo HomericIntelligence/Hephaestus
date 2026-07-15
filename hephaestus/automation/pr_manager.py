@@ -70,6 +70,14 @@ SECRET_FILE_NAMES: frozenset[str] = frozenset(
 # File extensions whose presence indicates a cryptographic key or certificate.
 SECRET_FILE_EXTENSIONS: frozenset[str] = frozenset({".key", ".pem", ".pfx", ".p12"})
 
+# Valid ``git status --porcelain=v1`` status pairs for this command. ``!!``
+# is intentionally excluded because this call does not request ignored paths.
+_PORCELAIN_STATUS_PAIRS: frozenset[str] = frozenset(
+    {"D ", "DD", "AU", "UD", "UA", "DU", "AA", "UU", "??"}
+    | {f" {worktree_status}" for worktree_status in "AMDRC"}
+    | {f"{index_status}{worktree_status}" for index_status in "MTARC" for worktree_status in " MTD"}
+)
+
 _RESERVED_MESSAGE_LINE = re.compile(
     r"^\s*(?:Closes\s+#\d+|Implemented-By:|Co-Authored-By:)",
     re.IGNORECASE,
@@ -158,6 +166,14 @@ class _CommitMessageParts:
 
     subject: str
     body: str
+
+
+@dataclass(frozen=True)
+class _CommitPaths:
+    """Paths classified for ordinary and index-update staging."""
+
+    add_paths: tuple[str, ...]
+    update_paths: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -724,6 +740,118 @@ def enable_auto_merge_after_implementation_go(pr_number: int) -> None:
     )
 
 
+def _read_porcelain_status(worktree_path: Path, git_timeout: int | None) -> str:
+    """Return stable, NUL-delimited porcelain-v1 worktree status."""
+    try:
+        result = run(
+            ["git", "status", "--porcelain=v1", "-z"],
+            cwd=worktree_path,
+            capture_output=True,
+            **_git_timeout_kw(git_timeout),
+        )
+    except UnicodeDecodeError as exc:
+        raise RuntimeError("Could not decode git status --porcelain=v1 -z output") from exc
+    return result.stdout or ""
+
+
+def _parse_porcelain_status(output: str) -> tuple[tuple[str, str], ...]:
+    """Return ``(status, target_path)`` entries from porcelain-v1 ``-z`` output."""
+    if not output:
+        return ()
+    if not output.endswith("\0"):
+        raise RuntimeError("Malformed git status --porcelain=v1 -z output")
+
+    records = output[:-1].split("\0")
+    if any(not record for record in records):
+        raise RuntimeError("Malformed git status --porcelain=v1 -z output")
+
+    entries: list[tuple[str, str]] = []
+    index = 0
+
+    while index < len(records):
+        record = records[index]
+        if len(record) < 4 or record[2] != " " or not record[3:]:
+            raise RuntimeError("Malformed git status --porcelain=v1 -z output")
+
+        status = record[:2]
+        if status not in _PORCELAIN_STATUS_PAIRS:
+            raise RuntimeError("Malformed git status --porcelain=v1 -z output")
+        entries.append((status, record[3:]))
+        index += 1
+
+        if "R" in status or "C" in status:
+            if index >= len(records):
+                raise RuntimeError("Malformed renamed path in git porcelain output")
+            index += 1
+
+    return tuple(entries)
+
+
+def _is_secret_path(path: str) -> bool:
+    """Return whether a repository-relative path matches secret-file policy."""
+    filename = Path(path).name
+    return filename in SECRET_FILE_NAMES or any(
+        filename.endswith(extension) for extension in SECRET_FILE_EXTENSIONS
+    )
+
+
+def _select_commit_paths(
+    entries: Collection[tuple[str, str]],
+    allowed_paths: Collection[str] | None,
+) -> _CommitPaths:
+    """Apply exact allowlist and secret policy to parsed status entries."""
+    allowed = set(allowed_paths) if allowed_paths is not None else None
+    add_paths: list[str] = []
+    update_paths: list[str] = []
+
+    for status, path in entries:
+        if allowed is not None and path not in allowed:
+            logger.debug("Skipping non-allowlisted file: %s", path)
+            continue
+        if _is_secret_path(path):
+            logger.warning("Skipping potential secret file: %s", path)
+            continue
+        if "D" in status:
+            update_paths.append(path)
+        else:
+            add_paths.append(path)
+
+    return _CommitPaths(tuple(add_paths), tuple(update_paths))
+
+
+def _stage_commit_paths(
+    paths: _CommitPaths,
+    worktree_path: Path,
+    git_timeout: int | None,
+) -> None:
+    """Stage selected paths without broad or implicit pathspecs."""
+    if paths.update_paths:
+        run(
+            ["git", "add", "-u", "--", *paths.update_paths],
+            cwd=worktree_path,
+            **_git_timeout_kw(git_timeout),
+        )
+    if paths.add_paths:
+        run(
+            ["git", "add", "--", *paths.add_paths],
+            cwd=worktree_path,
+            **_git_timeout_kw(git_timeout),
+        )
+
+
+def _commit_with_signature(
+    commit_message: str,
+    worktree_path: Path,
+    git_timeout: int | None,
+) -> None:
+    """Create the repository-policy signed and DCO-signed commit."""
+    run(
+        ["git", "commit", "-S", "-s", "-m", commit_message],
+        cwd=worktree_path,
+        **_git_timeout_kw(git_timeout),
+    )
+
+
 def commit_changes(
     issue_number: int,
     worktree_path: Path,
@@ -749,88 +877,25 @@ def commit_changes(
         RuntimeError: If there are no changes, or all changes are secret files.
 
     """
-    # Check if there are changes
-    result = run(
-        ["git", "status", "--porcelain"],
-        cwd=worktree_path,
-        capture_output=True,
-        **_git_timeout_kw(git_timeout),
-    )
-
-    if not result.stdout.strip():
+    porcelain = _read_porcelain_status(worktree_path, git_timeout)
+    if not porcelain:
         raise RuntimeError(
             f"No changes to commit for issue {issue_ref(issue_number)}. "
             "Check if the implementation was successful or if the plan needs revision."
         )
 
-    # Parse git status --porcelain output to get all changed files
-    # Format: XY filename or XY "quoted filename" for special chars
-    # X = index status, Y = worktree status
-    # Common codes: M (modified), A (added), D (deleted), R (renamed), ?? (untracked)
-    files_to_add = []
-    files_to_update = []
-    allowed_path_set = set(allowed_paths) if allowed_paths is not None else None
-
-    for line in result.stdout.splitlines():
-        if not line:
-            continue
-
-        # Parse status code and filename
-        # Format: "XY filename" where X and Y are status codes
-        # Position 0-1: status codes, position 2: space, position 3+: filename
-        status = line[:2]
-        filename_part = line[3:]  # Don't strip - filename starts at position 3
-
-        # Handle renamed files (format: "old -> new")
-        if status.startswith("R") and " -> " in filename_part:
-            filename_part = filename_part.split(" -> ", 1)[1]
-
-        # Handle quoted filenames (git quotes names with special chars)
-        if filename_part.startswith('"') and filename_part.endswith('"'):
-            # Remove quotes - git uses C-style escaping
-            filename_part = filename_part[1:-1]
-
-        if allowed_path_set is not None and filename_part not in allowed_path_set:
-            logger.debug("Skipping non-allowlisted file: %s", filename_part)
-            continue
-
-        # Check if file is a potential secret
-        filename = Path(filename_part).name
-
-        # Skip secret files (never stage these)
-        has_secret_ext = any(filename.endswith(ext) for ext in SECRET_FILE_EXTENSIONS)
-        if filename in SECRET_FILE_NAMES or has_secret_ext:
-            logger.warning("Skipping potential secret file: %s", filename_part)
-            continue
-
-        if "D" in status:
-            files_to_update.append(filename_part)
-        else:
-            files_to_add.append(filename_part)
-
-    if not files_to_add and not files_to_update:
+    paths = _select_commit_paths(_parse_porcelain_status(porcelain), allowed_paths)
+    if not paths.add_paths and not paths.update_paths:
         raise RuntimeError(
             f"No non-secret files to commit for issue {issue_ref(issue_number)}. "
             "All changes appear to be secret files."
         )
 
-    # Stage the files
-    if files_to_update:
-        run(
-            ["git", "add", "-u", "--", *files_to_update],
-            cwd=worktree_path,
-            **_git_timeout_kw(git_timeout),
-        )
-    if files_to_add:
-        run(
-            ["git", "add", "--", *files_to_add],
-            cwd=worktree_path,
-            **_git_timeout_kw(git_timeout),
-        )
+    _stage_commit_paths(paths, worktree_path, git_timeout)
 
     # Generate commit message
     issue = fetch_issue_info(issue_number)
-    commit_msg = _generate_commit_message(
+    commit_message = _generate_commit_message(
         issue_number=issue_number,
         issue_title=issue.title,
         issue_body=_issue_body(issue),
@@ -844,12 +909,7 @@ def commit_changes(
     # may have set, so the commit inherits the operator's verifiable identity (#2110).
     _clear_local_committer_identity(worktree_path, git_timeout)
 
-    # Commit with cryptographic signature and DCO sign-off — required by repo policy.
-    run(
-        ["git", "commit", "-S", "-s", "-m", commit_msg],
-        cwd=worktree_path,
-        **_git_timeout_kw(git_timeout),
-    )
+    _commit_with_signature(commit_message, worktree_path, git_timeout)
 
 
 def ensure_pr_created(
