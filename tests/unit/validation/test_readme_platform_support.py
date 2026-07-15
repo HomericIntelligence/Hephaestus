@@ -1,8 +1,8 @@
-"""Regression test for README ↔ CONTRIBUTING platform-support cross-reference.
+"""Regression tests for the README ↔ CONTRIBUTING platform-support link.
 
-Issue #767: install/upgrade docs for non-Linux platforms must point readers
-from the README (the first-landed surface) to the canonical comparison table
-in CONTRIBUTING.md. This test guards both halves of that link.
+Issue #767 established CONTRIBUTING.md as the canonical comparison table.
+Issue #2135 moves manifest-parity assertions into
+test_pixi_platform_documentation.py while this file preserves the cross-link.
 """
 
 from __future__ import annotations
@@ -29,24 +29,6 @@ def test_readme_links_to_platform_support_section() -> None:
     """README must cross-link to the CONTRIBUTING Platform Support anchor."""
     text = README.read_text(encoding="utf-8")
     assert PLATFORM_SUPPORT_ANCHOR in text, (
-        f"README.md must link to {PLATFORM_SUPPORT_ANCHOR} so macOS/Windows "
-        "readers find the supported install path before running `pixi install`."
-    )
-
-
-def test_readme_flags_pixi_as_linux_only() -> None:
-    """README must warn that the pixi dev env is Linux-only before `pixi install`."""
-    text = README.read_text(encoding="utf-8")
-    pixi_section_start = text.find("## Getting Started with Pixi")
-    assert pixi_section_start != -1, (
-        "README must contain a '## Getting Started with Pixi' section heading"
-    )
-    pixi_install_pos = text.find("pixi install", pixi_section_start)
-    assert pixi_install_pos != -1, (
-        "README must contain 'pixi install' command in the Getting Started section"
-    )
-    preface = text[pixi_section_start:pixi_install_pos]
-    assert "linux-64" in preface.lower() or "linux only" in preface.lower(), (
-        "README must mention the linux-64 restriction before the first "
-        "`pixi install` command so off-Linux users do not hit a hard failure."
+        f"README.md must link to {PLATFORM_SUPPORT_ANCHOR} so contributors "
+        "can choose the correct Pixi or pip installation path."
     )

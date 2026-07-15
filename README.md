@@ -130,12 +130,11 @@ Hephaestus/
 
 This project uses [Pixi](https://pixi.sh) for environment management, which automatically handles dependencies and creates isolated environments.
 
-> **Platform note:** The pixi developer environment is **Linux-64 only** (see
-> `platforms` in [`pixi.toml`](pixi.toml)). On macOS or Windows, install the
-> published wheel into a plain virtualenv instead — see
-> [From PyPI](#from-pypi) above. The
-> full comparison table (install paths, supported platforms, Python versions)
-> lives in [CONTRIBUTING.md#platform-support](CONTRIBUTING.md#platform-support).
+> **Platform note:** The Pixi developer environment targets `linux-64` and
+> `osx-arm64` (Apple silicon macOS), matching `platforms` in
+> [`pixi.toml`](pixi.toml). `win-64` and `osx-64` are not workspace targets; on
+> Windows or Intel macOS, use the pip/virtualenv development path documented in
+> [CONTRIBUTING.md#platform-support](CONTRIBUTING.md#platform-support).
 
 ### Prerequisites
 
@@ -205,8 +204,9 @@ print(size_str)  # Output: 1.0 MB
 
 Hephaestus is published to PyPI as `homericintelligence-hephaestus`.
 The wheel is pure-Python and installs on Linux, macOS, and Windows
-(see `requires-python` in [`pyproject.toml`](pyproject.toml)). This is
-the supported install path for non-Linux platforms.
+(see `requires-python` in [`pyproject.toml`](pyproject.toml)). It is the portable
+install path on all supported Python platforms, including Windows or Intel
+macOS, which are not targets of this repository's Pixi workspace.
 
 **Using pip:**
 

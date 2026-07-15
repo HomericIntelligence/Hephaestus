@@ -27,7 +27,7 @@ links to the full section below.
    strict-review GO, a maintainer performs the manual squash merge.
 
 If anything in steps 1–2 fails, see [Platform Support](#platform-support) — the
-pixi dev environment is `linux-64` only by design.
+Pixi workspace targets `linux-64` and `osx-arm64`.
 
 ## Planning artifacts
 
@@ -97,35 +97,33 @@ are cut on demand by pushing a signed `vX.Y.Z` git tag (see
 
 ### Platform Support
 
-The pixi developer environment and the published wheel intentionally cover
-different platform sets. Contributors and downstream users should know which
-they are using:
+The Pixi workspace, editable pip development environment, and published wheel
+cover different platform sets:
 
-| Install path                        | Platforms supported                    | Python      |
-| ----------------------------------- | -------------------------------------- | ----------- |
-| `pixi install` (development)        | `linux-64` only                        | 3.10 (pinned by `pixi.toml`) |
-| `pip install HomericIntelligence-Hephaestus` (wheel) | Linux, macOS, Windows (any OS) | 3.10+ (see `requires-python` in `pyproject.toml`) |
+| Install path | Platforms supported | Python |
+| --- | --- | --- |
+| `pixi install` (development) | `linux-64`; `osx-arm64` (Apple silicon macOS) | 3.10–3.13 (`>=3.10,<3.14` in `pixi.toml`) |
+| `pip install -e '.[dev]'` (development fallback) | Linux, macOS, Windows | 3.10+ |
+| `pip install HomericIntelligence-Hephaestus` (published wheel) | Linux, macOS, Windows | 3.10+ (`requires-python` in `pyproject.toml`) |
 
-Why the asymmetry:
+Why the matrices differ:
 
-- **Pixi is Linux-64 only by design.** `pixi.toml` declares
-  `platforms = ["linux-64"]` with an explicit `# Do not re-enable` comment
-  next to the other entries. Full local reproduction of the development
-  environment (lint, mypy, test, pre-commit) is only supported on Linux.
-- **The wheel supports the broader matrix advertised in `pyproject.toml`.**
-  `requires-python` in `pyproject.toml` describes what `pip install` will accept.
-  No platform-restriction classifier is published, so the wheel is installable
-  on macOS and Windows.
-- **Windows wheels pull in `tzdata` automatically.** The
+- **The Pixi workspace targets Linux x86-64 and Apple silicon macOS.**
+  `pixi.toml` declares `platforms = ["linux-64", "osx-arm64"]`; `win-64` and
+  `osx-64` remain excluded. This describes the workspace solve targets and does
+  not imply that both targets are exercised by the current CI runner matrix.
+- **Editable pip installation is the development fallback outside the Pixi
+  matrix.** On Windows or Intel macOS, create a plain virtualenv and run
+  `pip install -e '.[dev]'`. Platform-specific tests retain their documented
+  skip behavior.
+- **The published wheel supports the broader package matrix.**
+  `requires-python` in `pyproject.toml` describes what `pip install` accepts.
+  No platform-restriction classifier is published, so the pure-Python wheel is
+  installable on Linux, macOS, and Windows.
+- **Windows installations pull in `tzdata` automatically.** The
   `"tzdata; platform_system == 'Windows'"` marker in `[project.dependencies]`
-  exists because `hephaestus.github.rate_limit` uses `zoneinfo.ZoneInfo`,
-  which has no IANA database bundled on Windows. POSIX installs skip this
-  dependency.
-
-If you need to develop or run the test suite on macOS or Windows, install the
-wheel into a plain virtualenv (`pip install -e '.[dev]'`) — pixi tooling is
-not available there, and any subpackage with POSIX-only assumptions is out
-of scope for this project's supported development environment (track those separately).
+  provides the IANA database needed by `hephaestus.github.rate_limit`; POSIX
+  installations skip that dependency.
 
 ### The `build/` directory
 
@@ -185,10 +183,10 @@ assumes a POSIX-like development environment. Specifically:
   `~/.gitconfig`.
 
 These cases are tagged with the `requires_posix` pytest marker and are skipped
-automatically on `sys.platform == "win32"`. They run under macOS, Linux, and
-WSL with no extra setup beyond `pixi install`. Windows contributors using Git
-Bash / MSYS2 will execute them; pure-Windows-Python runs will skip them.
-Tracking: #742.
+automatically on `sys.platform == "win32"`. They run on the supported Pixi
+targets (`linux-64` and `osx-arm64`) and under WSL. Windows contributors using
+Git Bash/MSYS2 with the pip development environment will execute them;
+pure-Windows-Python runs will skip them. Tracking: #742.
 
 ## Documentation
 
