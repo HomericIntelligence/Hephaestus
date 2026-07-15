@@ -33,10 +33,22 @@ from hephaestus.agents.runtime import (
     uses_direct_agent_runner,
 )
 from hephaestus.constants import agent_git_timeout, diff_collect_timeout
-from hephaestus.github.client import ClaudeUsageCapError, gh_call
+from hephaestus.github.client import ClaudeUsageCapError
 from hephaestus.github.rate_limit import resolve_quota_reset_epoch, wait_until
 from hephaestus.io.utils import write_secure
 
+from ._review_conflict_resolver import (
+    ConflictResolutionRequest,
+    ReviewConflictResolver,
+    build_conflict_resolution_operations,
+)
+from ._review_loop import (
+    AddressOutcome,
+    ReviewIterationOutcome,
+    ReviewLoopCoordinator,
+    ReviewLoopOperations,
+    ReviewLoopState,
+)
 from ._review_utils import log_file_path
 from ._stage_context import StageMixin
 from .address_review import run_address_fix_session
@@ -51,15 +63,12 @@ from .claude_invoke import (
 from .claude_models import implementer_model, reviewer_model
 from .git_utils import (
     commit_if_changes,
-    get_repo_info,
     get_repo_slug,
     issue_ref,
     pr_ref,
     push_branch,
     push_current_branch_with_lease_on_divergence,
-    rebase_worktree_onto,
     run,
-    sync_worktree_to_remote_branch,
 )
 from .github_api import (
     gh_current_login,
@@ -184,14 +193,240 @@ def _is_automation_owned_thread(thread: dict[str, Any], current_login: str | Non
 class ReviewPhase(StageMixin):
     """Run the bounded review + address cycle and label the final verdict."""
 
-    def _repo_name_with_owner(self) -> str:
-        """Return ``OWNER/REPO`` for gh commands that require an explicit repo."""
-        owner, repo = get_repo_info(self.repo_root)
-        return f"{owner}/{repo}"
-
     def __init__(self, ctx: StageContext) -> None:
         """Store the shared :class:`StageContext`."""
         self.ctx = ctx
+
+    def _resolve_conflict_before_review(
+        self,
+        *,
+        issue_number: int,
+        pr_number: int,
+        worktree_path: Path,
+        branch_name: str,
+        session_id: str | None,
+        slot_id: int | None,
+        thread_id: int | None,
+        state: ImplementationState | None,
+    ) -> bool:
+        """Delegate the pre-review conflict gate to its focused collaborator."""
+        resolver = ReviewConflictResolver(
+            dry_run=lambda: bool(self.options.dry_run),
+            operations=build_conflict_resolution_operations(self.repo_root),
+            resume_implementation=lambda feedback: self._resume_impl_with_feedback(
+                session_id=session_id,
+                worktree_path=worktree_path,
+                issue_number=issue_number,
+                review_text=feedback,
+                prev_iteration=-1,
+                verdict="CONFLICT",
+                state=state,
+            ),
+            commit_changes=lambda: self._commit_if_changes(issue_number, worktree_path),
+            push_rebased_branch=lambda branch, path: self._push_rebased_branch(branch, path),
+            push_agent_branch=lambda branch, path: self._push_branch(branch, path),
+            log=lambda level, message, log_thread: self.impl._log(level, message, log_thread),
+            update_slot=self.status_tracker.update_slot,
+        )
+        return resolver.resolve(
+            ConflictResolutionRequest(
+                issue_number=issue_number,
+                pr_number=pr_number,
+                worktree_path=worktree_path,
+                branch_name=branch_name,
+                slot_id=slot_id,
+                thread_id=thread_id,
+            )
+        )
+
+    def _run_impl_review_loop(
+        self,
+        *,
+        issue_number: int,
+        worktree_path: Path,
+        branch_name: str,
+        issue_title: str,
+        issue_body: str,
+        session_id: str | None,
+        slot_id: int | None,
+        thread_id: int | None,
+        state: ImplementationState | None = None,
+        pr_number: int | None = None,
+        advise_findings: str = "",
+    ) -> tuple[int, str | None, str | None]:
+        """Preserve the legacy tuple contract through the pure loop coordinator."""
+        return self._coordinate_review_loop(
+            issue_number=issue_number,
+            worktree_path=worktree_path,
+            branch_name=branch_name,
+            issue_title=issue_title,
+            issue_body=issue_body,
+            session_id=session_id,
+            slot_id=slot_id,
+            thread_id=thread_id,
+            state=state,
+            pr_number=pr_number,
+            advise_findings=advise_findings,
+        )
+
+    def _coordinate_review_loop(
+        self,
+        *,
+        issue_number: int,
+        worktree_path: Path,
+        branch_name: str,
+        issue_title: str,
+        issue_body: str,
+        session_id: str | None,
+        slot_id: int | None,
+        thread_id: int | None,
+        state: ImplementationState | None,
+        pr_number: int | None,
+        advise_findings: str,
+    ) -> tuple[int, str | None, str | None]:
+        """Bind phase I/O to the pure review-loop state machine."""
+        operations = ReviewLoopOperations(
+            resolve_conflict=lambda: (
+                pr_number is None
+                or self._resolve_conflict_before_review(
+                    issue_number=issue_number,
+                    pr_number=pr_number,
+                    worktree_path=worktree_path,
+                    branch_name=branch_name,
+                    session_id=session_id,
+                    slot_id=slot_id,
+                    thread_id=thread_id,
+                    state=state,
+                )
+            ),
+            review_iteration=lambda loop_state: self._process_review_iteration(
+                loop_state,
+                issue_number=issue_number,
+                issue_title=issue_title,
+                issue_body=issue_body,
+                branch_name=branch_name,
+                worktree_path=worktree_path,
+                session_id=session_id,
+                slot_id=slot_id,
+                thread_id=thread_id,
+                pr_number=pr_number,
+                advise_findings=advise_findings,
+            ),
+            address_iteration=lambda loop_state: self._run_address_iteration(
+                loop_state,
+                issue_number=issue_number,
+                pr_number=pr_number,
+                branch_name=branch_name,
+                worktree_path=worktree_path,
+                session_id=session_id,
+                slot_id=slot_id,
+                thread_id=thread_id,
+                issue_title=issue_title,
+                issue_body=issue_body,
+            ),
+            finalize=lambda result: self._apply_review_finalization(
+                issue_number=issue_number,
+                pr_number=pr_number,
+                last_verdict=result.verdict,
+                iterations_run=result.iterations_run,
+            ),
+            budget_extended=lambda budget: self.impl._log(
+                "info",
+                f"{issue_ref(issue_number)}: extending review budget to "
+                f"{budget}/{MAX_REVIEW_ITERATIONS_HARD_CAP} iteration(s)",
+                thread_id,
+            ),
+        )
+        result = ReviewLoopCoordinator(
+            soft_limit=MAX_REVIEW_ITERATIONS,
+            hard_limit=MAX_REVIEW_ITERATIONS_HARD_CAP,
+            operations=operations,
+        ).run(has_pr=pr_number is not None)
+        return result.iterations_run, result.verdict, result.grade
+
+    def _process_review_iteration(
+        self,
+        loop_state: ReviewLoopState,
+        *,
+        issue_number: int,
+        issue_title: str,
+        issue_body: str,
+        branch_name: str,
+        worktree_path: Path,
+        session_id: str | None,
+        slot_id: int | None,
+        thread_id: int | None,
+        pr_number: int | None,
+        advise_findings: str,
+    ) -> ReviewIterationOutcome:
+        """Run the phase-owned review work for one typed coordinator iteration."""
+        (
+            verdict,
+            grade,
+            review_text,
+            posted_thread_ids,
+            go_blocked_by_automation,
+            reopened,
+            should_break,
+            reopened_keys,
+            validator_clean,
+        ) = self._execute_review_iteration(
+            issue_number=issue_number,
+            issue_title=issue_title,
+            issue_body=issue_body,
+            branch_name=branch_name,
+            worktree_path=worktree_path,
+            session_id=session_id,
+            slot_id=slot_id,
+            thread_id=thread_id,
+            pr_number=pr_number,
+            iteration=loop_state.iteration,
+            prior_review=loop_state.prior_review,
+            prior_addressed_threads=list(loop_state.prior_addressed_threads),
+            prior_reopened_keys=set(loop_state.reopened_keys),
+            advise_findings=advise_findings,
+        )
+        return ReviewIterationOutcome(
+            verdict=verdict,
+            grade=grade,
+            review_text=review_text,
+            posted_thread_ids=tuple(posted_thread_ids),
+            go_blocked_by_automation=go_blocked_by_automation,
+            reopened=tuple(reopened),
+            should_break=should_break,
+            reopened_keys=frozenset(reopened_keys),
+            validator_clean=validator_clean,
+        )
+
+    def _run_address_iteration(
+        self,
+        loop_state: ReviewLoopState,
+        *,
+        issue_number: int,
+        pr_number: int | None,
+        branch_name: str,
+        worktree_path: Path,
+        session_id: str | None,
+        slot_id: int | None,
+        thread_id: int | None,
+        issue_title: str,
+        issue_body: str,
+    ) -> AddressOutcome:
+        """Run the phase-owned address work for one typed coordinator iteration."""
+        prior_addressed_threads, addressed = self._execute_address_iteration(
+            issue_number=issue_number,
+            pr_number=pr_number,
+            branch_name=branch_name,
+            worktree_path=worktree_path,
+            iteration=loop_state.iteration,
+            session_id=session_id,
+            slot_id=slot_id,
+            thread_id=thread_id,
+            issue_title=issue_title,
+            issue_body=issue_body,
+            unaddressed_findings=list(loop_state.pending_unaddressed),
+        )
+        return AddressOutcome(tuple(prior_addressed_threads), addressed)
 
     # ------------------------------------------------------------------
     # Final-verdict labeling
@@ -494,396 +729,7 @@ class ReviewPhase(StageMixin):
         impl._save_review_iteration_state(issue_number, iteration + 1, review_text)
         return reopened, review_text, posted_thread_ids, verdict, validator_clean, reopened_keys
 
-    # ------------------------------------------------------------------
-    # Pre-review conflict gate (#1328)
-    # ------------------------------------------------------------------
-
-    def _pr_merge_state(self, pr_number: int) -> tuple[str, str]:
-        """Return ``(mergeStateStatus, mergeable)`` upper-cased for *pr_number*.
-
-        Mirrors the merge-state query the CI driver uses
-        (``ci_driver._gh_pr_state`` / ``_attempt_mechanical_rebase``). Returns
-        empty strings on any query failure so an unknown merge-state is never
-        misread as CONFLICTING.
-        """
-        try:
-            result = gh_call(
-                [
-                    "pr",
-                    "view",
-                    str(pr_number),
-                    "--repo",
-                    self._repo_name_with_owner(),
-                    "--json",
-                    "mergeStateStatus,mergeable",
-                ],
-            )
-            state = dict(json.loads(result.stdout or "{}"))
-        except (subprocess.CalledProcessError, RuntimeError, json.JSONDecodeError) as exc:
-            logger.warning(
-                "#%d: could not fetch PR %s merge-state for conflict gate: %s",
-                pr_number,
-                pr_ref(pr_number),
-                exc,
-            )
-            return "", ""
-        return (
-            str(state.get("mergeStateStatus") or "").upper(),
-            str(state.get("mergeable") or "").upper(),
-        )
-
-    def _resolve_conflict_before_review(
-        self,
-        *,
-        issue_number: int,
-        pr_number: int,
-        worktree_path: Path,
-        branch_name: str,
-        session_id: str | None,
-        slot_id: int | None,
-        thread_id: int | None,
-        state: ImplementationState | None,
-    ) -> bool:
-        """Ensure *pr_number* is conflict-free before the review iterations (#1328).
-
-        Reviewing a PR that has a merge conflict with its base is pointless — a
-        conflicted PR can never merge, so any GO verdict would be wasted spend.
-        Per the user's instruction this resolves the conflict with the
-        IMPLEMENTATION agent BEFORE the first review iteration.
-
-        The flow reuses the SAME primitives the CI driver's ``_resolve_dirty_pr``
-        uses (``rebase_worktree_onto`` / ``push_current_branch_with_lease_on_divergence``
-        from :mod:`git_utils`, and the implementer-session resume in
-        ``_resume_impl_with_feedback``), rather than reinventing conflict
-        resolution. ``ReviewPhase`` runs under ``IssueImplementer`` — a different
-        object than ``CIDriver`` — so the helper cannot be called directly; this
-        is the smallest seam that reuses the underlying rebase/agent primitives.
-
-        Steps:
-
-        1. Query merge-state. If NOT DIRTY/CONFLICTING, return ``True`` (nothing
-           to do — proceed straight to review). An unknown merge-state also
-           returns ``True`` so a transient gh failure never strands a healthy PR.
-        2. Mechanical rebase onto the base. A clean rebase + lease-push
-           re-triggers CI; return ``True`` once the merge-state clears.
-        3. Still conflicting → dispatch the implementation agent with explicit
-           conflict-resolution instructions, commit + push, then re-check.
-        4. Return ``True`` only if the PR is conflict-free afterwards; ``False``
-           if the conflict could not be resolved (caller returns early so the PR
-           is treated as not-GO rather than reviewed).
-
-        Returns:
-            ``True`` if the PR is conflict-free (review may proceed); ``False``
-            if an unresolved merge conflict remains.
-
-        """
-        if self.options.dry_run:
-            return True
-
-        merge_state, mergeable = self._pr_merge_state(pr_number)
-        if merge_state not in ("DIRTY", "CONFLICTING") and mergeable != "CONFLICTING":
-            return True
-
-        impl = self.impl
-        impl._log(
-            "warning",
-            f"{issue_ref(issue_number)}: {pr_ref(pr_number)} is {merge_state or 'CONFLICTING'} "
-            "(merge conflict) before review — resolving with the implementation agent "
-            "before any review iteration",
-            thread_id,
-        )
-        if slot_id is not None:
-            self.status_tracker.update_slot(
-                slot_id, f"{pr_ref(pr_number)}: resolving merge conflict"
-            )
-
-        # Resolve the base branch once for both the rebase target and the agent
-        # prompt. Best-effort: default to ``main`` like ``_resolve_dirty_pr``.
-        base_branch = "main"
-        try:
-            base_result = gh_call(
-                [
-                    "pr",
-                    "view",
-                    str(pr_number),
-                    "--repo",
-                    self._repo_name_with_owner(),
-                    "--json",
-                    "baseRefName",
-                ],
-            )
-            base_branch = dict(json.loads(base_result.stdout or "{}")).get("baseRefName") or "main"
-        except (subprocess.CalledProcessError, RuntimeError, json.JSONDecodeError) as exc:
-            logger.debug(
-                "#%d: failed to determine base branch for %s; defaulting to 'main': %s",
-                issue_number,
-                pr_ref(pr_number),
-                exc,
-            )
-
-        # 1. Cheap path: mechanical rebase. A clean rebase resolves a PR that is
-        #    merely behind / non-overlapping with no agent spend.
-        with contextlib.suppress(subprocess.CalledProcessError):
-            sync_worktree_to_remote_branch(worktree_path, branch_name)
-            if rebase_worktree_onto(worktree_path, base_branch):
-                push_current_branch_with_lease_on_divergence(
-                    worktree_path,
-                    branch=branch_name,
-                    push_ref=f"HEAD:{branch_name}",
-                )
-                logger.info(
-                    "#%d: mechanically rebased %s onto %s (no agent) for conflict gate",
-                    issue_number,
-                    pr_ref(pr_number),
-                    base_branch,
-                )
-                cleared_state, cleared_mergeable = self._pr_merge_state(pr_number)
-                if cleared_state not in ("DIRTY", "CONFLICTING") and (
-                    cleared_mergeable != "CONFLICTING"
-                ):
-                    return True
-
-        # 2. Rebase still conflicts → the implementation agent resolves it. Reuse
-        #    the same conflict_context wording as ci_driver._resolve_dirty_pr.
-        #    Existing-PR review can start without a saved implementer transcript;
-        #    in that case _resume_impl_with_feedback starts/uses the deterministic
-        #    implementer session instead of dead-ending the conflict gate.
-        conflict_context = (
-            f"This PR has a MERGE CONFLICT with `origin/{base_branch}` "
-            f"(mergeStateStatus=DIRTY) — it cannot merge until the conflict is "
-            f"resolved. Rebase the PR head branch onto `origin/{base_branch}` and "
-            f"resolve every conflict, keeping both the PR's intent and the latest "
-            f"base changes. Then commit the resolution (signed). There may be NO "
-            f"failing CI checks — the conflict itself is the blocker."
-        )
-        resolved = self._resume_impl_with_feedback(
-            session_id=session_id,
-            worktree_path=worktree_path,
-            issue_number=issue_number,
-            review_text=conflict_context,
-            prev_iteration=-1,
-            verdict="CONFLICT",
-            state=state,
-        )
-        if resolved and self.runner._commit_if_changes(issue_number, worktree_path):
-            self.runner._push_branch(branch_name, worktree_path)
-
-        final_state, final_mergeable = self._pr_merge_state(pr_number)
-        if final_state in ("DIRTY", "CONFLICTING") or final_mergeable == "CONFLICTING":
-            impl._log(
-                "warning",
-                f"{issue_ref(issue_number)}: {pr_ref(pr_number)} still has an unresolved merge "
-                "conflict after agent resolution — skipping review (not-GO)",
-                thread_id,
-            )
-            return False
-        return True
-
-    def _run_impl_review_loop(
-        self,
-        *,
-        issue_number: int,
-        worktree_path: Path,
-        branch_name: str,
-        issue_title: str,
-        issue_body: str,
-        session_id: str | None,
-        slot_id: int | None,
-        thread_id: int | None,
-        state: ImplementationState | None = None,
-        pr_number: int | None = None,
-        advise_findings: str = "",
-    ) -> tuple[int, str | None, str | None]:
-        """Run the bounded in-loop review + address cycle for an implementation.
-
-        Each iteration posts inline PR review threads and returns a verdict; on
-        NOGO the implementer session is resumed to address threads. Terminates on
-        GO or zero blocking threads, or on budget exhaustion. The budget starts
-        at :data:`MAX_REVIEW_ITERATIONS` and is extended one iteration at a time —
-        up to :data:`MAX_REVIEW_ITERATIONS_HARD_CAP` — for as long as each round
-        keeps making real progress (resolves a fresh finding without the
-        validator re-opening a prior one), so a steadily-improving PR converges
-        instead of being stranded one address-pass short (#1554).
-
-        #1328: before the FIRST review iteration, a PR with a merge conflict is
-        rebased / handed to the implementation agent to resolve. A conflicted PR
-        can never merge, so reviewing it would be wasted spend; if the conflict
-        cannot be resolved the loop returns early with a non-GO verdict so the PR
-        is treated as needs-action instead of being reviewed.
-        """
-        last_verdict: str | None = None
-        last_grade: str | None = None
-        prior_review: str | None = None
-        iterations_run = 0
-        prior_addressed_threads: list[dict[str, Any]] = []
-        # #1329: stable keys of findings the validator re-opened, carried across
-        # rounds so a re-open recurring on an already-documented design decision
-        # is accepted once and never re-added (converging the loop toward GO).
-        prior_reopened_keys: set[str] = set()
-
-        # #1328: resolve any merge conflict BEFORE reviewing. Never review a
-        # conflicted PR — it cannot merge regardless of the verdict.
-        if pr_number is not None and not self._resolve_conflict_before_review(
-            issue_number=issue_number,
-            pr_number=pr_number,
-            worktree_path=worktree_path,
-            branch_name=branch_name,
-            session_id=session_id,
-            slot_id=slot_id,
-            thread_id=thread_id,
-            state=state,
-        ):
-            self._finalize_review_outcome(
-                issue_number=issue_number,
-                pr_number=pr_number,
-                last_verdict="NOGO",
-                iterations_run=0,
-            )
-            return 0, "NOGO", None
-
-        # #1554: progress-aware review budget. The loop starts with the base
-        # ``MAX_REVIEW_ITERATIONS`` budget; whenever the PREVIOUS round made
-        # genuine PROGRESS (its address step resolved a fresh finding without the
-        # validator re-opening a prior one) and the loop is about to exhaust the
-        # budget, grant one more iteration — up to ``MAX_REVIEW_ITERATIONS_HARD_CAP``
-        # — so a steadily-improving PR with more real findings than the base
-        # budget converges to a clean GO instead of being stranded one
-        # address-pass short. A stuck or oscillating reviewer makes no progress
-        # and is never extended, so it still terminates at the base budget and is
-        # tagged ``state:skip``. The extension happens at the TOP of the loop
-        # (before the address-step gate that breaks on the final budgeted
-        # iteration), keyed off the prior round's progress.
-        budget = MAX_REVIEW_ITERATIONS
-        prior_round_made_progress = False
-        # #1554: still-unresolved threads from a prior address turn that produced
-        # NO commit. Injected into the NEXT address invocation as a "Make sure to
-        # handle <finding>" directive to re-ground a resumed session that
-        # self-reported success without editing code. Empty except on the round
-        # immediately following a no-commit turn.
-        pending_unaddressed: list[dict[str, Any]] = []
-        iteration = 0
-        while iteration < budget:
-            # Extend the budget when the prior round made real progress and this
-            # would otherwise be the last budgeted iteration — so the fix the
-            # prior round landed gets a re-review (and its findings addressed).
-            if (
-                prior_round_made_progress
-                and iteration == budget - 1
-                and budget < MAX_REVIEW_ITERATIONS_HARD_CAP
-            ):
-                budget += 1
-                self.impl._log(
-                    "info",
-                    f"{issue_ref(issue_number)} R{iteration}: prior round resolved "
-                    f"finding(s); extending review budget to "
-                    f"{budget}/{MAX_REVIEW_ITERATIONS_HARD_CAP} iteration(s)",
-                    thread_id,
-                )
-            prior_round_made_progress = False
-            (
-                last_verdict,
-                last_grade,
-                review_text,
-                posted_thread_ids,
-                go_blocked_by_automation,
-                reopened,
-                should_break,
-                prior_reopened_keys,
-                validator_clean,
-            ) = self._process_review_iteration(
-                issue_number=issue_number,
-                issue_title=issue_title,
-                issue_body=issue_body,
-                branch_name=branch_name,
-                worktree_path=worktree_path,
-                session_id=session_id,
-                slot_id=slot_id,
-                thread_id=thread_id,
-                pr_number=pr_number,
-                iteration=iteration,
-                prior_review=prior_review,
-                prior_addressed_threads=prior_addressed_threads,
-                prior_reopened_keys=prior_reopened_keys,
-                advise_findings=advise_findings,
-            )
-            iterations_run = iteration + 1
-            if should_break:
-                break
-            # An unclean validator pass (#1329) — including a PR-level-only
-            # re-open that posts no inline thread id — means a prior comment is
-            # still unaddressed and must run the address step. This is distinct
-            # from a zero-thread REVIEWER non-GO (validator clean), which must
-            # simply re-review (the loop's zero-thread convergence contract).
-            if (
-                pr_number is not None
-                and not posted_thread_ids
-                and not reopened
-                and not go_blocked_by_automation
-                and validator_clean
-            ):
-                prior_review = review_text
-                iteration += 1
-                continue
-            prior_review = review_text
-            address_result = self._run_address_step_if_needed(
-                issue_number=issue_number,
-                pr_number=pr_number,
-                branch_name=branch_name,
-                worktree_path=worktree_path,
-                iteration=iteration,
-                budget=budget,
-                session_id=session_id,
-                slot_id=slot_id,
-                thread_id=thread_id,
-                issue_title=issue_title,
-                issue_body=issue_body,
-                unaddressed_findings=pending_unaddressed,
-            )
-            if address_result is None:
-                break
-            prior_addressed_threads, addressed = address_result
-            if pr_number is None:
-                iteration += 1
-                continue
-            if not addressed:
-                # #1554: the address step produced NO commit (the fix agent
-                # punted or self-reported a phantom fix). If fixable threads
-                # remain AND iterations are left, do NOT give up — re-review and
-                # retry, carrying the still-unresolved threads forward as a "Make
-                # sure to handle <finding>" directive to re-ground the next
-                # address attempt. ``prior_addressed_threads`` is the snapshot the
-                # address step already took (its current unresolved set), so we
-                # reuse it instead of issuing another network call. Only when
-                # there is nothing fixable left OR no iterations remain do we
-                # break to the existing terminal/skip handling (unchanged).
-                still_unresolved = prior_addressed_threads
-                if still_unresolved and iteration < budget - 1:
-                    pending_unaddressed = still_unresolved
-                    iteration += 1
-                    continue
-                break
-            # A progress round clears the retry directive. Progress is either a
-            # committed code change or an observed unresolved-thread count drop.
-            pending_unaddressed = []
-            # The address step made progress without the validator re-opening a
-            # prior one (``validator_clean``). Record it so the NEXT iteration
-            # can extend the budget if it would otherwise be the last — letting
-            # a PR that fixes one real bug or closes one real thread per round
-            # converge instead of being stranded one pass short of GO and
-            # wrongly skipped (#1554). The hard cap still bounds total
-            # iterations.
-            prior_round_made_progress = addressed and validator_clean
-            iteration += 1
-
-        self._finalize_review_outcome(
-            issue_number=issue_number,
-            pr_number=pr_number,
-            last_verdict=last_verdict,
-            iterations_run=iterations_run,
-        )
-        return iterations_run, last_verdict, last_grade
-
-    def _process_review_iteration(
+    def _execute_review_iteration(
         self,
         *,
         issue_number: int,
@@ -978,66 +824,7 @@ class ReviewPhase(StageMixin):
             validator_clean,
         )
 
-    def _run_address_step_if_needed(
-        self,
-        *,
-        issue_number: int,
-        pr_number: int | None,
-        branch_name: str,
-        worktree_path: Path,
-        iteration: int,
-        budget: int,
-        session_id: str | None,
-        slot_id: int | None,
-        thread_id: int | None,
-        issue_title: str,
-        issue_body: str,
-        unaddressed_findings: list[dict[str, Any]] | None = None,
-    ) -> tuple[list[dict[str, Any]], bool] | None:
-        """Run address iteration unless this is the final budgeted iteration.
-
-        Args:
-            issue_number: GitHub issue number.
-            pr_number: PR number, or None for diff-only mode.
-            branch_name: Git branch name.
-            worktree_path: Path to the checked-out worktree.
-            iteration: Current zero-based iteration index.
-            budget: Current iteration budget. Addressing is skipped on the final
-                budgeted iteration (``iteration == budget - 1``); a productive
-                round extends ``budget`` in the caller BEFORE the next pass, so a
-                steadily-improving PR still gets its findings addressed (#1554).
-            session_id: Optional implementer session ID.
-            slot_id: Worker slot for status tracking.
-            thread_id: Current thread id for logging.
-            issue_title: Issue title for context.
-            issue_body: Issue body for context.
-            unaddressed_findings: Still-unresolved threads from a prior no-commit
-                turn, injected as a "Make sure to handle <finding>" directive to
-                re-ground a resumed session (#1554).
-
-        Returns:
-            None if this is the final budgeted iteration (caller should break).
-            (prior_addressed_threads, addressed) tuple otherwise.
-
-        """
-        if iteration == budget - 1:
-            return None
-        prior_addressed_threads, addressed = self._run_address_iteration(
-            issue_number=issue_number,
-            pr_number=pr_number,
-            branch_name=branch_name,
-            worktree_path=worktree_path,
-            iteration=iteration,
-            session_id=session_id,
-            slot_id=slot_id,
-            thread_id=thread_id,
-            issue_title=issue_title,
-            issue_body=issue_body,
-            unaddressed_findings=unaddressed_findings,
-        )
-        return prior_addressed_threads, addressed
-
-    def _run_address_iteration(
+    def _execute_address_iteration(
         self,
         *,
         issue_number: int,
@@ -1140,7 +927,7 @@ class ReviewPhase(StageMixin):
             )
             return None
 
-    def _finalize_review_outcome(
+    def _apply_review_finalization(
         self,
         *,
         issue_number: int,
@@ -1556,6 +1343,14 @@ class ReviewPhase(StageMixin):
     def _push_branch(self, branch_name: str, worktree_path: Path) -> None:
         """Push *branch_name* to origin after an in-loop address step."""
         push_branch(branch_name, worktree_path)
+
+    def _push_rebased_branch(self, branch_name: str, worktree_path: Path) -> None:
+        """Publish a rebased branch without overwriting a concurrent remote update."""
+        push_current_branch_with_lease_on_divergence(
+            worktree_path,
+            branch=branch_name,
+            push_ref=f"HEAD:{branch_name}",
+        )
 
     def _resume_impl_with_feedback(
         self,
