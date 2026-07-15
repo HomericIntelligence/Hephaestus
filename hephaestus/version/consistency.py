@@ -155,6 +155,9 @@ def _get_pixi_version(repo_root: Path) -> str | None:
     Returns:
         The version string, or ``None`` if the file is absent or has no version.
 
+    Raises:
+        ValueError: If ``pixi.toml`` contains malformed TOML.
+
     """
     if _tomllib is None:
         return None
@@ -163,11 +166,8 @@ def _get_pixi_version(repo_root: Path) -> str | None:
     if not pixi_path.is_file():
         return None
 
-    try:
-        with open(pixi_path, "rb") as fh:
-            data = _tomllib.load(fh)
-    except Exception:
-        return None
+    with open(pixi_path, "rb") as fh:
+        data = _tomllib.load(fh)
 
     version = data.get("workspace", {}).get("version")
     return str(version) if version else None

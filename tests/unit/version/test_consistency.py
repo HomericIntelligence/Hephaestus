@@ -61,6 +61,18 @@ def test_check_version_consistency_pixi_no_version(tmp_path, set_canonical):
     assert check_version_consistency(tmp_path) == 0
 
 
+def test_check_version_consistency_malformed_pixi_surfaces_diagnostic(tmp_path, set_canonical):
+    """Malformed pixi.toml preserves the parser's source diagnostic."""
+    set_canonical("1.2.3")
+    (tmp_path / "pixi.toml").write_text("[workspace]\nversion =\n")
+
+    with pytest.raises(
+        ValueError,
+        match=r"Invalid value.*line 2, column \d+",
+    ):
+        check_version_consistency(tmp_path)
+
+
 def test_check_version_consistency_matching(tmp_path, set_canonical):
     """Pass when pixi.toml version matches the canonical git-tag version."""
     set_canonical("1.2.3")
