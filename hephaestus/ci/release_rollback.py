@@ -471,7 +471,10 @@ def _pypi_release_is_yanked(release: dict[str, Any]) -> bool:
             raise ReleaseRollbackError("PyPI release has a malformed file record")
         if "yanked" not in file_data:
             raise ReleaseRollbackError("PyPI release file is missing yank status")
-        yanked.append(bool(file_data["yanked"]))
+        status = file_data["yanked"]
+        if not isinstance(status, bool):
+            raise ReleaseRollbackError("PyPI release file has a malformed yank status")
+        yanked.append(status)
     return all(yanked)
 
 

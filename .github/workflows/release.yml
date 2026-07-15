@@ -36,6 +36,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Install pixi
         uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f  # v0.10.0
@@ -70,6 +71,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Install pixi
         uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f  # v0.10.0
@@ -366,7 +368,7 @@ jobs:
           INPUT_TAG: ${{ github.event.inputs.tag }}
           REF_TAG: ${{ github.ref }}
         run: |
-          # Priority: explicit input > tag-push ref > latest tag (mirrors build-and-publish)
+          # Manual dispatch supplies a tag; tag pushes use the pushed ref.
           if [ -n "$INPUT_TAG" ]; then
             TAG="$INPUT_TAG"
           elif [[ "$REF_TAG" == refs/tags/* ]]; then

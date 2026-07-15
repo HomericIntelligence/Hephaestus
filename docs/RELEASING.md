@@ -72,9 +72,8 @@ Instead, dispatch the Release workflow directly with the stranded tag named expl
 gh workflow run release.yml -f tag=vX.Y.Z   # the exact tag auto-tag pushed
 ```
 
-Never dispatch with a blank `tag` input in this state. Blank means "latest tag", which is only
-correct until another tag lands between the failure and your recovery — always name the
-stranded tag.
+A blank `tag` input is rejected. Always provide the exact stranded tag when recovering a
+failed dispatch.
 
 ## TestPyPI Trusted Publishing
 

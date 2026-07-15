@@ -447,6 +447,12 @@ class TestAutoTagReleaseDispatch:
             "type": "string",
         }
 
+    def test_stranded_tag_recovery_documents_required_dispatch_input(self) -> None:
+        """Recovery instructions must not describe a rejected blank dispatch tag."""
+        doc = (REPO_ROOT / "docs" / "RELEASING.md").read_text(encoding="utf-8")
+        assert 'Blank means "latest tag"' not in doc
+        assert "A blank `tag` input is rejected" in doc
+
     def test_releasing_documentation_prohibits_immutable_asset_replacement(self) -> None:
         """The runbook must not direct operators to delete tags or replace assets."""
         doc = (REPO_ROOT / "docs" / "RELEASING.md").read_text(encoding="utf-8")

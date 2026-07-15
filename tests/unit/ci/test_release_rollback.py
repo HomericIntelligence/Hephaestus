@@ -231,6 +231,15 @@ def test_rollback_requires_every_pypi_file_to_be_yanked() -> None:
     assert client.update_calls == []
 
 
+@pytest.mark.parametrize("status", ["false", 0, 1, None])
+def test_rollback_rejects_non_boolean_pypi_yank_status(status: object) -> None:
+    """Malformed PyPI yank statuses cannot authorize a withdrawal advisory."""
+    release = {"urls": [{"filename": "release.whl", "yanked": status}]}
+
+    with pytest.raises(ReleaseRollbackError, match="yank status"):
+        _pypi_release_is_yanked(release)
+
+
 def test_rollback_requires_immutable_github_release() -> None:
     """Rollback refuses mutable or incomplete GitHub release records."""
     client = _ReleaseClient(_release(immutable=False))

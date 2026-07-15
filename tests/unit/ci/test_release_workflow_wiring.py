@@ -124,6 +124,17 @@ class TestImmutableReleasePublication:
         assert "Check for existing release" not in names
 
 
+class TestReleaseValidationRef:
+    """Tests and type checks must validate the exact tag that will be published."""
+
+    def test_validation_jobs_checkout_the_selected_release_ref(self) -> None:
+        expected_ref = "${{ inputs.tag || github.ref }}"
+
+        for job_name in ("test", "type-check"):
+            checkout = _step_using(job_name, "actions/checkout")
+            assert checkout["with"]["ref"] == expected_ref
+
+
 class TestTestPyPIPublishStrictness:
     """The staging gate must test THIS run's artifact, not a stale one."""
 
