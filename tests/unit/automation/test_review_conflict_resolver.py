@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -206,8 +206,12 @@ def test_github_read_failures_are_logged(caplog: pytest.LogCaptureFixture) -> No
         assert operations.merge_state(12) == ("", "")
         assert operations.base_branch(12) == "main"
 
-    assert "Could not fetch PR #12 merge state" in caplog.messages
-    assert "Could not fetch PR #12 base branch" in caplog.messages
+    assert any(
+        "Could not fetch Hephaestus#12 merge state" in message for message in caplog.messages
+    )
+    assert any(
+        "Could not fetch Hephaestus#12 base branch" in message for message in caplog.messages
+    )
 
 
 @pytest.mark.parametrize("stdout", ["null", '"clean"'])

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -18,6 +19,8 @@ from .git_utils import (
     rebase_worktree_onto,
     sync_worktree_to_remote_branch,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -72,7 +75,8 @@ def build_conflict_resolution_operations(
             payload = json.loads(result.stdout or "{}")
             if not isinstance(payload, dict):
                 return "", ""
-        except (OSError, RuntimeError, subprocess.SubprocessError, json.JSONDecodeError):
+        except (OSError, RuntimeError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+            logger.warning("Could not fetch %s merge state: %s", pr_ref(pr_number), exc)
             return "", ""
         return (
             str(payload.get("mergeStateStatus") or "").upper(),
@@ -96,7 +100,8 @@ def build_conflict_resolution_operations(
             if not isinstance(payload, dict):
                 return "main"
             return str(payload.get("baseRefName") or "main")
-        except (OSError, RuntimeError, subprocess.SubprocessError, json.JSONDecodeError):
+        except (OSError, RuntimeError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+            logger.debug("Could not fetch %s base branch: %s", pr_ref(pr_number), exc)
             return "main"
 
     return ConflictResolutionOperations(
