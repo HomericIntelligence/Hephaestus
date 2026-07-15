@@ -365,6 +365,16 @@ def test_codex_base_cmd_maps_haiku_to_mini_without_reasoning_override(
     assert "model_reasoning_effort" not in cmd
 
 
+@pytest.mark.parametrize("model", ["terra:default", "gpt-5.6-terra:default"])
+def test_codex_base_cmd_allows_terra_default_reasoning(model: str, tmp_path: Path) -> None:
+    """An explicit default suffix must omit the Codex reasoning override."""
+    with patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]):
+        cmd = agent_runtime._codex_base_cmd(cwd=tmp_path, model=model)
+
+    assert cmd[cmd.index("--model") + 1] == "gpt-5.6-terra"
+    assert "model_reasoning_effort" not in cmd
+
+
 @pytest.mark.parametrize(
     "native_model",
     ["gpt-5.4-mini", "gpt-5.5", "gpt-5.6"],
