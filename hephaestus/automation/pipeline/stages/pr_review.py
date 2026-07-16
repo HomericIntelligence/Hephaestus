@@ -1223,9 +1223,9 @@ class PrReviewStage(Stage):
     def _write_internal_go(pr_number: int, ctx: StageContext) -> str | None:
         """Record clean internal review while preserving the strict-review gate.
 
-        The temporary #2054 baseline neither applies ``state:implementation-go``
-        nor arms auto-merge. It proves the PR is unarmed before publishing the
-        internal result, so a stale label cannot merge it before #2055 lands.
+        Internal pr_review neither applies ``state:implementation-go`` nor
+        arms auto-merge. It proves the PR is unarmed before publishing its
+        internal result; strict_review owns the later head-bound eligibility.
 
         Args:
             pr_number: GitHub PR number that earned the clean GO.

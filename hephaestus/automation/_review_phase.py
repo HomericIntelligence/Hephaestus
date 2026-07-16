@@ -7,8 +7,8 @@ cycle (#28/#1083/#1152): each iteration runs a fresh reviewer that posts inline
 PR threads, validates that prior comments were truly addressed, gates GO on
 zero unresolved threads, and resumes the implementer session to fix what
 remains. It also owns the diff/changed-file collectors and review-log
-persistence helpers. During #2054, an internal GO is informational only and
-does not label or arm the PR.
+persistence helpers. An internal GO is informational only and does not label
+or arm the PR; the independent pipeline strict-review stage owns eligibility.
 
 The module-level helper ``_is_automation_owned_thread`` lives here because the
 GO-gate thread accounting is its only caller.
@@ -209,17 +209,16 @@ class ReviewPhase(StageMixin):
         """Label a PR from the review loop's final verdict without arming auto-merge.
 
         Shared by both the fresh-implementation path and the existing-PR review
-        path. #2054 removes the legacy automatic armer and makes an internal GO
-        informational only; #2055 replaces it with a head-bound strict-review
-        result.
+        path. The queue makes an internal GO informational only; its separate
+        head-bound strict-review stage owns the implementation-GO result.
 
         An ``ERROR`` verdict (reviewer-infrastructure failure) or a
         ``HUMAN_BLOCKED`` verdict (review reached GO but an unresolved human
         review thread remains) applies **neither** label: the PR is not settled,
         so it must be left unlabeled for the "no go/no-go label → re-review" path
         to pick it up next loop (#911 / PR #1069). Labeling it no-go would falsely
-        record a converged failure; internal GO labels are also unavailable until
-        strict proof exists in #2055.
+        record a converged failure; internal GO labels remain reserved for the
+        independent strict-review stage.
         """
         impl = self.impl
         try:

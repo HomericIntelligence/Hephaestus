@@ -84,8 +84,8 @@ lets those legitimately-gated-off events pass while still failing on any real
 job failure.
 
 `auto-merge-policy` is deliberately **excluded** from the gate: it is advisory
-and, during #2054's fail-closed bootstrap, flags any open PR with auto-merge
-enabled. It must not block the independently reviewed manual bootstrap merge.
+reporting only. The queue's head-bound `strict_review` and `merge_wait` stages
+are the sole automatic arming authority.
 
 ## Adding a new gating job (runbook)
 

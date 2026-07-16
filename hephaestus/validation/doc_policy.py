@@ -11,7 +11,7 @@ Policies enforced:
 - ``gh pr create`` must NOT include ``--label``
 - ``git commit`` must NOT use ``--no-verify``
 - ``gh pr merge`` must use manual ``--squash`` without ``--auto`` (not ``--merge``
-  or ``--rebase``; #2054 keeps automatic merging disabled until #2055)
+  or ``--rebase``; automatic arming is reserved for the queue strict-review gate)
 - ``git push`` must NOT push directly to ``main``/``master``
 
 Excluded paths (archived / test-fixture content that is not authoritative):
@@ -111,14 +111,14 @@ _RAW_RULES: list[tuple[str, Severity, str, str]] = [
         "wrong-merge-strategy",
         Severity.CRITICAL,
         (
-            "gh pr merge must use manual --squash without --auto while the "
-            "strict-review gate is unavailable. --merge and --rebase are "
+            "gh pr merge must use manual --squash without --auto. --merge "
+            "and --rebase are "
             "rejected as merge-strategy flags; --disable-auto is containment."
         ),
         # Flag any ``gh pr merge`` invocation that carries ``--auto`` or a
         # rejected strategy flag, or that omits the required manual squash
-        # strategy. The temporary #2054 policy is intentionally conservative:
-        # docs must not instruct an agent to arm a merge autonomously.
+        # strategy. Docs must not instruct an agent to arm a merge autonomously:
+        # queue-owned arming is reserved for the strict-review gate.
         r"gh\s+pr\s+merge\b"
         r"(?:"
         r"(?=.*--auto\b)|"

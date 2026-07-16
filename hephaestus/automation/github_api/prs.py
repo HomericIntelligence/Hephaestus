@@ -246,9 +246,9 @@ def gh_pr_create(
     1. *body* must contain a literal ``Closes #N`` line.
     2. Every commit on *branch* (vs *base*) must be cryptographically signed.
 
-    ``auto_merge`` is retained for API compatibility but ignored during #2054's
-    fail-closed bootstrap. #2055 restores automatic arming only after a
-    head-bound strict-review proof.
+    ``auto_merge`` is retained for API compatibility but ignored: only
+    ``MergeWaitStage`` may conditionally arm after a head-bound strict-review
+    proof.
 
     The CI gate (``.github/workflows/_required.yml`` job ``pr-policy``) and the
     PR review prompt re-check the same three properties, so a slip past one
@@ -258,7 +258,8 @@ def gh_pr_create(
         branch: Branch name
         title: PR title
         body: PR description
-        auto_merge: Deprecated compatibility flag; ignored while #2054 is active.
+        auto_merge: Deprecated compatibility flag; ignored because this is not
+            the strict-gated MergeWaitStage armer.
         base: Base branch to compare against for signed-commit validation
 
     Returns:

@@ -24,7 +24,8 @@ links to the full section below.
 5. **Open the PR** ([Pull Request Process](#pull-request-process)) — sign every
    commit (`git commit -S`), put `Closes #<issue-number>` on its own line in the
    body, and keep auto-merge disabled. After an unconditional independent
-   strict-review GO, a maintainer performs the manual squash merge.
+   current-head strict-review GO, the queue may conditionally arm the PR in
+   `merge_wait`; do not enable auto-merge manually.
 
 If anything in steps 1–2 fails, see [Platform Support](#platform-support) for
 the supported Python versions and platform-specific test behavior.
@@ -239,10 +240,10 @@ valid issue reference, signed commits, or DCO sign-offs:
 3. **Sign off every commit**: include a DCO `Signed-off-by` trailer, normally
    with `git commit -s -S`.
 
-During #2054's bootstrap, auto-merge must remain disabled. The pipeline verifies
-that state and the advisory `auto-merge-policy` reports any armed PR, but it is
-not a required check. An unconditional independent strict-review GO is required
-before a maintainer manually runs `gh pr merge --squash`.
+Do not enable auto-merge manually. The queue verifies and arms it only after an
+independent strict-review GO has been published as an authenticated proof for
+the PR's current head; `merge_wait` conditionally arms that same head. The
+advisory `auto-merge-policy` is not the authorization mechanism.
 
 Also: ensure tests pass locally (`uv run pytest`), keep commits to logical units with
 [conventional commit](https://www.conventionalcommits.org/) messages, and never bypass

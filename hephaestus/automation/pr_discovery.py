@@ -491,7 +491,7 @@ class PRDiscovery:
             if viewer and login != viewer:
                 if login is None:
                     logger.warning(
-                        "PR #%s has no usable user.login; retaining it for containment (#2054)",
+                        "PR #%s has no usable user.login; retaining it for containment",
                         pr.get("number"),
                         extra={
                             "missing_field": "user.login",

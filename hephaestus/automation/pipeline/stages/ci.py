@@ -298,9 +298,9 @@ class CiStage(Stage):
 
         Re-houses ``_drive_issue``'s entry facts: the drive needs an open PR
         (``pr_discovery`` semantics via ``ctx.github.find_pr_for_issue``) and
-        the PR must already carry ``state:implementation-go`` (the legacy
-        ``_pr_has_implementation_go`` gate) — a PR that lost or never had it
-        regresses to pr_review (``not_implementation_go``), never arms. The
+        the PR must already carry ``state:implementation-go`` plus an exact-
+        head strict-GO artifact — a PR that lost either regresses to
+        strict_review, never arms. The
         PR's real base ref is captured into ``payload["base_branch"]`` from
         the same ``gh_pr_state`` read (mirrors ``merge_wait._route_dirty``'s
         ``baseRefName`` capture), so REBASE_WAIT targets the PR's actual
@@ -320,9 +320,9 @@ class CiStage(Stage):
         if terminal is not None:
             return terminal
         try:
-            # A direct CI seed can carry a legacy implementation-GO label.
-            # Contain that PR before any worktree/CI work while #2055 adds
-            # the head-bound strict-review gate.
+            # A direct CI seed can carry a stale implementation-GO label.
+            # Contain it before any worktree/CI work; strict_review remains
+            # the only stage that can restore current-head eligibility.
             ctx.github.defer_auto_merge(item.pr)
         except Exception as e:
             logger.error(

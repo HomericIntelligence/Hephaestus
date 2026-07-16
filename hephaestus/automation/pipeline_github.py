@@ -1360,7 +1360,12 @@ class PipelineGitHub:
     def publish_strict_review_artifact(
         self, pr_number: int, head_sha: str, verdict_body: str, *, is_go: bool
     ) -> None:
-        """Durably upsert a stage-validated strict-review artifact for one head."""
+        """Durably upsert an automation-owned strict-review artifact.
+
+        A foreign marker comment is untrusted evidence, not an upsert target:
+        changing or deleting it would let an attacker permanently block the
+        strict gate by creating a comment the automation identity cannot edit.
+        """
         rendered = render_strict_review_artifact(
             head_sha,
             verdict_body,
@@ -1368,7 +1373,58 @@ class PipelineGitHub:
         )
         if self._skip(f"publish strict-review artifact on PR #{pr_number}"):
             return
-        self.upsert_pr_comment(pr_number, STRICT_REVIEW_ARTIFACT_MARKER, rendered)
+        if self._repo_slug is None:
+            self.upsert_pr_comment(pr_number, STRICT_REVIEW_ARTIFACT_MARKER, rendered)
+            return
+        login = self._strict_review_login()
+        if login is None:
+            raise RuntimeError("could not resolve automation identity for strict-review artifact")
+        self._upsert_owned_strict_review_artifact(pr_number, rendered, login)
+
+    def _upsert_owned_strict_review_artifact(
+        self, pr_number: int, body: str, login: str
+    ) -> int | None:
+        """Create/update only marker comments authored by ``login``."""
+        comments = self._repo_issue_comments(pr_number)
+        matching = []
+        for comment in comments:
+            author_data = comment.get("user")
+            author = author_data.get("login") if isinstance(author_data, dict) else None
+            if (
+                author == login
+                and str(comment.get("body", "")).startswith(STRICT_REVIEW_ARTIFACT_MARKER)
+                and comment.get("databaseId") is not None
+            ):
+                matching.append(comment)
+        if not matching:
+            self.post_pr_comment(pr_number, body)
+            return None
+
+        owner, name = self._owner_name()
+        target_id = int(matching[-1]["databaseId"])
+        for duplicate in matching[:-1]:
+            duplicate_id = duplicate.get("databaseId")
+            if duplicate_id is not None:
+                gh_call(
+                    [
+                        "api",
+                        "--method",
+                        "DELETE",
+                        f"/repos/{owner}/{name}/issues/comments/{int(duplicate_id)}",
+                    ]
+                )
+        with github_api._body_file(body) as path:
+            gh_call(
+                [
+                    "api",
+                    "--method",
+                    "PATCH",
+                    f"/repos/{owner}/{name}/issues/comments/{target_id}",
+                    "-F",
+                    f"body=@{path}",
+                ]
+            )
+        return target_id
 
     def post_review_threads(
         self, pr_number: int, threads: list[dict[str, Any]], summary: str
