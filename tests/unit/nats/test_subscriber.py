@@ -13,6 +13,7 @@ from hephaestus.nats.subscriber import (
     NATSSubscriberThread,
     SubscriberState,
 )
+from hephaestus.observability.metrics import MetricsRegistry
 
 
 def _config(**kwargs: object) -> NATSConfig:
@@ -73,6 +74,25 @@ class TestNATSSubscriberThread:
         config = _config(url="nats://test:4222")
         thread = NATSSubscriberThread(config=config, handler=MagicMock())
         assert thread._config.url == "nats://test:4222"
+
+    def test_injected_registry_records_lifecycle_activity_and_errors(self) -> None:
+        """An opt-in registry receives only live subscriber lifecycle values."""
+        registry = MetricsRegistry()
+        thread = NATSSubscriberThread(
+            config=_config(), handler=MagicMock(), metrics_registry=registry
+        )
+
+        thread._record_message()
+        thread._record_error(ConnectionError("nats gone"))
+        thread._record_handler_error(RuntimeError("handler failed"))
+        thread._record_decode_error()
+
+        rendered = registry.render_prometheus()
+        assert 'hephaestus_nats_subscriber_state{state="disconnected"} 1' in rendered
+        assert "hephaestus_nats_subscriber_messages_total 1" in rendered
+        assert 'hephaestus_nats_subscriber_errors_total{kind="connection"} 1' in rendered
+        assert 'hephaestus_nats_subscriber_errors_total{kind="handler"} 1' in rendered
+        assert 'hephaestus_nats_subscriber_errors_total{kind="decode"} 1' in rendered
 
 
 class TestSubscriberStateEnum:

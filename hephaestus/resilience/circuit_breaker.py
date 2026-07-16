@@ -290,6 +290,17 @@ class CircuitBreaker:
             self._last_failure_time = 0.0
             logger.info("Circuit breaker '%s' reset to CLOSED", self.name)
 
+    def snapshot(self) -> dict[str, str | int | float]:
+        """Return a JSON-safe view of the breaker's current lifecycle state."""
+        with self._lock:
+            state = self._effective_state()
+            return {
+                "name": self.name,
+                "state": state.value,
+                "failure_count": self._failure_count,
+                "last_failure_time": self._last_failure_time,
+            }
+
 
 # Global registry of circuit breakers
 _registry: dict[str, CircuitBreaker] = {}
@@ -350,3 +361,10 @@ def reset_all_circuit_breakers() -> None:
         for cb in _registry.values():
             cb.reset()
         _registry.clear()
+
+
+def all_circuit_breaker_snapshots() -> dict[str, dict[str, str | int | float]]:
+    """Return point-in-time snapshots of every registered circuit breaker."""
+    with _registry_lock:
+        breakers = list(_registry.values())
+    return {breaker.name: breaker.snapshot() for breaker in breakers}
