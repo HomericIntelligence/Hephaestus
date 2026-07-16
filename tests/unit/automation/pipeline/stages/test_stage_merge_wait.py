@@ -68,6 +68,14 @@ class _MergeDuringArmGitHub(_ProofAwareGitHub):
         raise RuntimeError("PR was merged before auto-merge could be armed")
 
 
+class _AmbiguousArmFailureGitHub(_ProofAwareGitHub):
+    """The remote arm may have succeeded before the client reports failure."""
+
+    def arm_auto_merge(self, pr_number: int, expected_head_sha: str) -> None:
+        self._log("arm_auto_merge", pr_number, expected_head_sha)
+        raise RuntimeError("connection closed after request was sent")
+
+
 class _MarkFailGitHub(FakeStageGitHub):
     """mark_drive_green_learn_result raises (learn-record write failed)."""
 
@@ -253,6 +261,26 @@ class TestMergeWaitContainment:
             ("strict_review_artifact", (601, "abc123")),
             ("arm_auto_merge", (601, "abc123")),
         ]
+
+    def test_ambiguous_arm_failure_is_contained_before_terminalizing(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A failed client call cannot leave a potentially remote arm behind."""
+        stage = MergeWaitStage()
+        github = _AmbiguousArmFailureGitHub(
+            states=[OPEN_STATE, OPEN_STATE],
+            proof=_StrictGoArtifact(),
+        )
+        ctx = make_ctx(github=github)
+        item = _item(make_work_item, state=ARM)
+
+        assert stage.step(item, ctx) == StageOutcome(Disposition.FINISH_FAIL, "arm_failed")
+        assert github.mutation_log == [
+            ("strict_review_artifact", (601, "abc123")),
+            ("arm_auto_merge", (601, "abc123")),
+            ("defer_auto_merge", (601,)),
+        ]
+        assert item.armed is False
 
     def test_arm_confirmation_failure_disables_auto_merge_again(
         self, make_ctx: Any, make_work_item: Any

@@ -40,7 +40,8 @@ _REASONS = [*_DECLARED_REASONS, "unknown_reason"]
 # (implementation -> plan_review), already_implementation_go_pr (-> strict_review),
 # not_implementation_go / not_strict_review_go (ci -> strict_review),
 # missing_worktree (-> implementation),
-# and no_pr (-> finished) all map to None.
+# no_pr (-> finished), and strict-gate re-review routes from merge_wait all
+# map to None.
 _REASON_BUDGET: dict[str, str | None] = {
     "nogo": "plan_review_iter",
     "plan_cycles_exhausted": "plan_cycles",
@@ -57,8 +58,17 @@ _REASON_BUDGET: dict[str, str | None] = {
     "no_pr": None,
     # #2054 terminalizes every open merge-wait item after containment.
     "closed": None,
+    # #2055 sends an unverifiable strict-review proof or post-arm head drift
+    # back to a fresh review.  Those routes are containment retries, not a
+    # stage-local budget consumption.
+    "strict_gate_unavailable": None,
+    "arm_confirm_failed": None,
     "unknown_reason": None,
 }
+
+assert set(_DECLARED_REASONS) <= set(_REASON_BUDGET), (
+    "Every declared fail-route reason must state whether it consumes a budget"
+)
 
 
 def _fail_target(stage: StageName, reason: str) -> StageName:
