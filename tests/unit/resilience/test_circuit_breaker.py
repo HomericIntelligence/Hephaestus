@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import importlib
 import threading
 from unittest.mock import MagicMock, patch
 
@@ -22,6 +23,23 @@ from hephaestus.resilience.circuit_breaker import (
 def _clean_registry() -> None:
     """Reset circuit breaker registry before each test."""
     reset_all_circuit_breakers()
+
+
+def test_registered_breaker_snapshots_are_json_safe_and_live() -> None:
+    """The registry exposes actual open-breaker state for observability."""
+    circuit_breaker = importlib.import_module("hephaestus.resilience.circuit_breaker")
+    breaker = get_circuit_breaker("observed", failure_threshold=1)
+    with pytest.raises(ConnectionError):
+        breaker.call(lambda: (_ for _ in ()).throw(ConnectionError("down")))
+
+    snapshots = circuit_breaker.all_circuit_breaker_snapshots()
+
+    assert snapshots["observed"] == {
+        "name": "observed",
+        "state": "open",
+        "failure_count": 1,
+        "last_failure_time": pytest.approx(snapshots["observed"]["last_failure_time"]),
+    }
 
 
 class TestCircuitBreakerIgnoredExceptions:

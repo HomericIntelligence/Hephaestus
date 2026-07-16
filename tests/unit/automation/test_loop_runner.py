@@ -529,6 +529,28 @@ def test_main_disables_phase_timeout_when_zero(monkeypatch: pytest.MonkeyPatch) 
     assert config.phase_timeout_s is None  # type: ignore[attr-defined]
 
 
+@pytest.mark.parametrize("port", [0, 65535])
+def test_metrics_port_parser_accepts_tcp_port_range(port: int) -> None:
+    """The opt-in local metrics endpoint accepts every valid TCP port."""
+    assert loop_runner._parse_args(["--metrics-port", str(port)]).metrics_port == port
+
+
+@pytest.mark.parametrize("port", [-1, 65536])
+def test_metrics_port_parser_rejects_out_of_range_values(port: int) -> None:
+    """Bad port values fail during CLI parsing, before coordinator setup."""
+    with pytest.raises(SystemExit):
+        loop_runner._parse_args(["--metrics-port", str(port)])
+
+
+def test_main_wires_metrics_port_to_pipeline_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The validated CLI port reaches the coordinator's opt-in configuration."""
+    config = _capture_config(
+        ["--repos", "Repo", "--metrics-port", "9123", "--loops", "1", "--agent", "claude"],
+        monkeypatch,
+    )
+    assert config.metrics_port == 9123  # type: ignore[attr-defined]
+
+
 def test_main_installs_sigtstp_handler(monkeypatch: pytest.MonkeyPatch) -> None:
     """main() fixes Ctrl+Z (#1784) via the shared install_sigtstp_only helper.
 

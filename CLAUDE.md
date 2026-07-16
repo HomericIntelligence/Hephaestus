@@ -40,6 +40,7 @@ Hephaestus/
 │   ├── logging/                # Logging utilities
 │   ├── markdown/               # Markdown linting and link fixing
 │   ├── nats/                   # NATS JetStream subscriber (event-driven workflows)
+│   ├── observability/          # Prometheus metrics, local health endpoint, and alert transitions
 │   ├── resilience/             # Circuit breaker + retry + subprocess resilience
 │   ├── scripts_lib/            # Standalone consistency-check scripts (CLI table, version)
 │   ├── system/                 # System information collection

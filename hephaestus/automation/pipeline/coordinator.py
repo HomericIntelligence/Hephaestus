@@ -236,6 +236,16 @@ class PipelineConfig:
     pre_pr_test_argv: tuple[str, ...] = PRE_PR_TEST_ARGV
     run_pre_pr_tests: bool = False
     serialize_file_overlap: bool = True
+    # Zero disables the optional local observability server. Values are
+    # validated at the CLI boundary and again by MetricsHTTPServer on use.
+    metrics_port: int = 0
+    # Alerts are emitted only from measured queue depths and circuit-breaker
+    # snapshots. Keep the threshold explicit and non-negative.
+    alert_queue_depth_threshold: int = 100
+    # A product-layer caller supplies the library breaker snapshot reader. The
+    # coordinator remains a zero-I/O pipeline module and never imports the
+    # resilience capability directly.
+    circuit_breaker_snapshot_provider: Callable[[], dict[str, dict[str, Any]]] | None = None
     event_log_path: Path | None = None
     projects_dir: Path = field(default_factory=lambda: Path.home() / "Projects")
     json_out: bool = False
@@ -346,6 +356,31 @@ class Coordinator:
         self.items: list[WorkItem] = []
         self.event_log: list[tuple[Any, ...]] = []
         self._event_log_disabled = False
+        # Observability is opt-in.  Keep imports and all socket setup out of
+        # the default construction path so the product layer retains its
+        # zero-I/O import contract.
+        self._metrics_registry: Any | None = None
+        self._metrics_server: Any | None = None
+        self._alert_tracker: Any | None = None
+        # Gauges retain label series until explicitly updated.  Remember the
+        # prior tick's dynamic labels so a completed job or state transition
+        # is rendered as zero rather than as stale active work.
+        self._observed_inflight_repos: set[str] = set()
+        self._observed_circuit_breaker_states: dict[str, str] = {}
+        if config.metrics_port:
+            from hephaestus.observability.alerts import AlertTracker
+            from hephaestus.observability.metrics import MetricsRegistry
+            from hephaestus.observability.server import MetricsHTTPServer
+
+            self._metrics_registry = MetricsRegistry()
+            self._alert_tracker = AlertTracker(
+                queue_depth_threshold=config.alert_queue_depth_threshold
+            )
+            self._metrics_server = MetricsHTTPServer(
+                self._metrics_registry,
+                port=config.metrics_port,
+                health_provider=self._health_snapshot,
+            )
         self.stages: dict[StageName, Stage] = stages or self._default_stages()
         # Route table for this run: the full ROUTES, or a scope-trimmed copy
         # (out-of-scope next/fail targets rewritten to FINISHED) when the
@@ -474,6 +509,94 @@ class Coordinator:
             logger.warning("failed to write pipeline event log %s: %s", path, exc)
             self._event_log_disabled = True
 
+    def _observability_snapshot(self) -> dict[str, Any]:
+        """Read the coordinator lifecycle values that observability exposes."""
+        circuit_breakers: dict[str, dict[str, Any]] = {}
+        provider = self.config.circuit_breaker_snapshot_provider
+        if provider is not None:
+            try:
+                circuit_breakers = provider()
+            except Exception:
+                # Observability must not terminate a production automation
+                # loop if an optional diagnostic provider is broken.
+                logger.exception("circuit-breaker snapshot provider failed")
+
+        return {
+            "queue_depths": {name.value: len(queue) for name, queue in self.queues.items()},
+            "inflight_per_repo": dict(self.inflight_per_repo),
+            "inflight_jobs": len(self.in_flight),
+            "circuit_breakers": circuit_breakers,
+            "loops_run": self._loops_run,
+        }
+
+    def _health_snapshot(self) -> dict[str, Any]:
+        """Return the local server's JSON health response without external I/O."""
+        snapshot = self._observability_snapshot()
+        snapshot["status"] = "stopping" if self.shutdown.is_set() else "ok"
+        return snapshot
+
+    def _emit_observability_tick(self) -> None:
+        """Update live gauges and durably record alert state transitions."""
+        registry = self._metrics_registry
+        tracker = self._alert_tracker
+        if registry is None or tracker is None:
+            return
+        snapshot = self._observability_snapshot()
+        for stage, depth in snapshot["queue_depths"].items():
+            registry.gauge(
+                "hephaestus_pipeline_queue_depth",
+                "Queued pipeline work items by stage.",
+            ).set(depth, labels={"stage": stage})
+        registry.gauge(
+            "hephaestus_pipeline_inflight_jobs",
+            "Pipeline jobs currently owned by the worker pool.",
+        ).set(snapshot["inflight_jobs"])
+        inflight_by_repo = registry.gauge(
+            "hephaestus_pipeline_inflight_per_repo",
+            "Pipeline jobs currently in flight by repository.",
+        )
+        current_repos: set[str] = set()
+        for repo, count in snapshot["inflight_per_repo"].items():
+            repo_name = str(repo)
+            current_repos.add(repo_name)
+            inflight_by_repo.set(count, labels={"repo": repo_name})
+        for repo in self._observed_inflight_repos - current_repos:
+            inflight_by_repo.set(0, labels={"repo": repo})
+        self._observed_inflight_repos = current_repos
+
+        breaker_states = registry.gauge(
+            "hephaestus_circuit_breaker_state",
+            "Circuit-breaker lifecycle state (active state has value 1).",
+        )
+        current_breaker_states: dict[str, str] = {}
+        for name, breaker in snapshot["circuit_breakers"].items():
+            breaker_name = str(name)
+            state = str(breaker["state"])
+            previous_state = self._observed_circuit_breaker_states.get(breaker_name)
+            if previous_state is not None and previous_state != state:
+                breaker_states.set(0, labels={"name": breaker_name, "state": previous_state})
+            breaker_states.set(1, labels={"name": breaker_name, "state": state})
+            current_breaker_states[breaker_name] = state
+        for name, state in self._observed_circuit_breaker_states.items():
+            if name not in current_breaker_states:
+                breaker_states.set(0, labels={"name": name, "state": state})
+        self._observed_circuit_breaker_states = current_breaker_states
+
+        self._record_event("metrics_snapshot", snapshot)
+        for event in tracker.observe(snapshot):
+            registry.gauge(
+                "hephaestus_pipeline_alert_active",
+                "Current active pipeline alert state (1 active, 0 resolved).",
+            ).set(int(event.status == "fired"), labels={"name": event.name})
+            self._record_event(
+                f"alert_{event.status}",
+                {
+                    "name": event.name,
+                    "severity": event.severity,
+                    "message": event.message,
+                },
+            )
+
     def _wake_completion_wait(self) -> None:
         """Wake the coordinator if it is blocked in completion_q.get()."""
         self.completion_q.put((_WAKE_HANDLE, JobResult(ok=False, interrupted=True, error="wake")))
@@ -486,6 +609,8 @@ class Coordinator:
         if self._install_signals:
             self._install_signal_handlers()
         try:
+            if self._metrics_server is not None:
+                self._metrics_server.start()
             self._record_event(
                 "run_start",
                 {
@@ -505,6 +630,7 @@ class Coordinator:
                     break
                 self._wake_timers()
                 self._drain_completions()
+                self._emit_observability_tick()
                 if self.shutdown.is_set():
                     # Graceful: stop admitting; drain in-flight to RESUMABLE.
                     if not self.in_flight:
@@ -537,17 +663,21 @@ class Coordinator:
             )
             summary_items = self._effective_items()
             preserved = self._active_preserved_worktrees()
-            self._record_event(
-                "run_end",
-                {
-                    "exit_code": exit_code,
-                    "interrupted": stats.interrupted,
-                    "items": len(summary_items),
-                    "agent_jobs": self._agent_job_count,
-                    "wall_s": stats.wall_s,
-                },
-            )
-            print_summary(summary_items, stats, preserved, json_out=self.config.json_out)
+            try:
+                self._record_event(
+                    "run_end",
+                    {
+                        "exit_code": exit_code,
+                        "interrupted": stats.interrupted,
+                        "items": len(summary_items),
+                        "agent_jobs": self._agent_job_count,
+                        "wall_s": stats.wall_s,
+                    },
+                )
+                print_summary(summary_items, stats, preserved, json_out=self.config.json_out)
+            finally:
+                if self._metrics_server is not None:
+                    self._metrics_server.stop()
         return exit_code
 
     def _effective_items(self) -> list[WorkItem]:

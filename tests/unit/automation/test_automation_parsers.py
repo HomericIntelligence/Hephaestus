@@ -749,6 +749,16 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             ),
         ),
         _action_spec(
+            ("--metrics-port",),
+            "metrics_port",
+            "_StoreAction",
+            0,
+            help_text=(
+                "Loopback-only port for the local Prometheus /metrics and /health server "
+                "(0 disables it)."
+            ),
+        ),
+        _action_spec(
             ("--repos",),
             "repos",
             "_StoreAction",

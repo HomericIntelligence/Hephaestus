@@ -33,7 +33,7 @@ import threading
 import time
 import warnings
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from hephaestus.nats.config import NATSConfig
 from hephaestus.nats.events import NATSEvent
@@ -42,6 +42,9 @@ from hephaestus.resilience import (
     CircuitBreakerOpenError,
     CircuitBreakerState,
 )
+
+if TYPE_CHECKING:
+    from hephaestus.observability.metrics import MetricsRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +141,8 @@ class NATSSubscriberThread(threading.Thread):
         config: NATSConfig,
         handler: Callable[[NATSEvent], None],
         join_timeout: float = DEFAULT_JOIN_TIMEOUT,
+        *,
+        metrics_registry: MetricsRegistry | None = None,
     ) -> None:
         """Initialize the subscriber thread.
 
@@ -149,12 +154,16 @@ class NATSSubscriberThread(threading.Thread):
                 internal ``thread.join()``.  Defaults to
                 :data:`DEFAULT_JOIN_TIMEOUT` (5.0 s).  May be overridden per
                 call via ``stop(timeout=…)``.
+            metrics_registry: Optional caller-owned registry that receives
+                subscriber state, message, and error metrics. The subscriber
+                does not create a global registry or start an HTTP server.
 
         """
         super().__init__(daemon=True, name="NATSSubscriberThread")
         self._config = config
         self._handler = handler
         self._join_timeout = join_timeout
+        self._metrics_registry = metrics_registry
         self._stop_event = threading.Event()
         self._circuit_breaker = CircuitBreaker(
             NATS_CIRCUIT_BREAKER_NAME,
@@ -168,6 +177,7 @@ class NATSSubscriberThread(threading.Thread):
         self._last_error: BaseException | None = None
         self._last_message_at: float | None = None
         self._started_at: float = time.monotonic()
+        self._emit_metrics()
 
     # ------------------------------------------------------------------
     # Public health surface
@@ -240,23 +250,87 @@ class NATSSubscriberThread(threading.Thread):
         """Transition to *new_state* under the state lock."""
         with self._state_lock:
             self._state = new_state
+        self._emit_metrics()
 
     def _record_error(self, exc: BaseException) -> None:
         """Record *exc* as the latest error and transition to DISCONNECTED."""
         with self._state_lock:
             self._last_error = exc
             self._state = SubscriberState.DISCONNECTED
+        self._increment_error_metric("connection")
+        self._emit_metrics()
 
     def _record_terminal_error(self, exc: BaseException) -> None:
         """Record *exc* as the latest error and transition to ERROR."""
         with self._state_lock:
             self._last_error = exc
             self._state = SubscriberState.ERROR
+        self._increment_error_metric("terminal")
+        self._emit_metrics()
 
     def _record_message(self) -> None:
         """Update ``last_message_at`` to the current time."""
         with self._state_lock:
             self._last_message_at = time.time()
+        registry = self._metrics_registry
+        if registry is not None:
+            registry.counter(
+                "hephaestus_nats_subscriber_messages_total",
+                "NATS messages dispatched successfully by this subscriber.",
+            ).inc()
+        self._emit_metrics()
+
+    def _record_handler_error(self, exc: BaseException) -> None:
+        """Record a handler failure while preserving at-most-once delivery."""
+        with self._state_lock:
+            self._last_error = exc
+        self._increment_error_metric("handler")
+        self._emit_metrics()
+
+    def _record_decode_error(self) -> None:
+        """Record a malformed incoming NATS message without exposing its body."""
+        self._increment_error_metric("decode")
+        self._emit_metrics()
+
+    def _increment_error_metric(self, kind: str) -> None:
+        """Increment a bounded error-kind counter when metrics are injected."""
+        registry = self._metrics_registry
+        if registry is not None:
+            registry.counter(
+                "hephaestus_nats_subscriber_errors_total",
+                "NATS subscriber errors by bounded lifecycle kind.",
+            ).inc(labels={"kind": kind})
+
+    def _emit_metrics(self) -> None:
+        """Update caller-owned metrics from the thread-safe lifecycle snapshot."""
+        registry = self._metrics_registry
+        if registry is None:
+            return
+        with self._state_lock:
+            state = self._state
+            last_message_at = self._last_message_at
+        state_gauge = registry.gauge(
+            "hephaestus_nats_subscriber_state",
+            "NATS subscriber lifecycle state (one active state has value 1).",
+        )
+        for subscriber_state in SubscriberState:
+            state_gauge.set(
+                int(subscriber_state is state), labels={"state": subscriber_state.value}
+            )
+        breaker_state = self._circuit_breaker.state
+        breaker_gauge = registry.gauge(
+            "hephaestus_nats_subscriber_circuit_breaker_state",
+            "NATS subscriber circuit-breaker state (one active state has value 1).",
+        )
+        for breaker_state_candidate in CircuitBreakerState:
+            breaker_gauge.set(
+                int(breaker_state_candidate is breaker_state),
+                labels={"state": breaker_state_candidate.value},
+            )
+        registry.gauge(
+            "hephaestus_nats_subscriber_last_message_timestamp_seconds",
+            "Unix timestamp of the last successfully dispatched NATS message (zero if none).",
+        ).set(last_message_at or 0.0)
 
     # ------------------------------------------------------------------
     # Thread lifecycle
@@ -315,9 +389,7 @@ class NATSSubscriberThread(threading.Thread):
                         self._config.max_backoff_seconds,
                     )
         except Exception as exc:
-            with self._state_lock:
-                self._last_error = exc
-                self._state = SubscriberState.ERROR
+            self._record_terminal_error(exc)
             logger.exception("NATSSubscriberThread terminated with unhandled error")
             return
 
@@ -398,6 +470,7 @@ class NATSSubscriberThread(threading.Thread):
                     try:
                         data: dict[str, Any] = json.loads(msg.data.decode())
                     except (json.JSONDecodeError, UnicodeDecodeError):
+                        self._record_decode_error()
                         logger.warning(
                             "Failed to decode message on %s (seq=%d)",
                             msg.subject,
@@ -416,8 +489,7 @@ class NATSSubscriberThread(threading.Thread):
                     try:
                         self._handler(event)
                     except Exception as exc:
-                        with self._state_lock:
-                            self._last_error = exc
+                        self._record_handler_error(exc)
                         logger.exception(
                             "Handler raised on subject %s (seq=%d)",
                             event.subject,

@@ -40,6 +40,11 @@ from hephaestus.automation.pipeline.stages.pr_review import (
     PrReviewStage,
 )
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
+from hephaestus.resilience import (
+    all_circuit_breaker_snapshots,
+    get_circuit_breaker,
+    reset_all_circuit_breakers,
+)
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
@@ -123,6 +128,43 @@ def _issue_item(
 
 class TestQuiescence:
     """Full-run tests driving seeded items to the finished ledger."""
+
+    def test_metrics_server_starts_for_run_and_stops_on_teardown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Coordinator teardown closes the explicit local listener on every normal exit."""
+        from hephaestus.observability import server as server_mod
+
+        created: list[object] = []
+
+        class FakeMetricsServer:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                del args, kwargs
+                self.started = False
+                self.stopped = False
+                created.append(self)
+
+            def start(self) -> None:
+                self.started = True
+
+            def stop(self) -> None:
+                self.stopped = True
+
+        monkeypatch.setattr(server_mod, "MetricsHTTPServer", FakeMetricsServer)
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org", repos=["repo-a"], loops=1, projects_dir=tmp_path, metrics_port=9123
+            ),
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+
+        assert coordinator.run() == 0
+        assert len(created) == 1
+        assert created[0].started is True  # type: ignore[attr-defined]
+        assert created[0].stopped is True  # type: ignore[attr-defined]
 
     def test_explicit_issue_scope_suppresses_repo_discovery_seed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -871,6 +913,99 @@ class TestImplementationAdmission:
 
 class TestDurableEventLog:
     """Optional JSONL event log mirrors the coordinator's in-memory event log."""
+
+    def test_observability_tick_zeroes_previous_circuit_breaker_state(self, tmp_path: Path) -> None:
+        """A transition leaves exactly one active state gauge for each breaker."""
+        snapshots: dict[str, dict[str, Any]] = {"github": {"state": "closed"}}
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                projects_dir=tmp_path,
+                metrics_port=9123,
+                circuit_breaker_snapshot_provider=lambda: snapshots,
+            ),
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+
+        coordinator._emit_observability_tick()
+        snapshots["github"]["state"] = "open"
+        coordinator._emit_observability_tick()
+
+        assert coordinator._metrics_registry is not None
+        rendered = coordinator._metrics_registry.render_prometheus()
+        assert 'hephaestus_circuit_breaker_state{name="github",state="closed"} 0' in rendered
+        assert 'hephaestus_circuit_breaker_state{name="github",state="open"} 1' in rendered
+
+    def test_observability_tick_zeroes_removed_inflight_repo(self, tmp_path: Path) -> None:
+        """A repo that leaves the in-flight counter no longer reports active work."""
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                projects_dir=tmp_path,
+                metrics_port=9123,
+            ),
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        coordinator.inflight_per_repo["repo-a"] = 1
+
+        coordinator._emit_observability_tick()
+        del coordinator.inflight_per_repo["repo-a"]
+        coordinator._emit_observability_tick()
+
+        assert coordinator._metrics_registry is not None
+        assert 'hephaestus_pipeline_inflight_per_repo{repo="repo-a"} 0' in (
+            coordinator._metrics_registry.render_prometheus()
+        )
+
+    def test_observability_tick_snapshots_lifecycle_and_deduplicates_alerts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A metrics-enabled coordinator durably records only alert transitions."""
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            loops=1,
+            projects_dir=tmp_path,
+            metrics_port=9123,
+            alert_queue_depth_threshold=0,
+            circuit_breaker_snapshot_provider=all_circuit_breaker_snapshots,
+        )
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        )
+        coordinator.queues[StageName.PLANNING].push(_issue_item(44, StageName.PLANNING))
+        breaker = get_circuit_breaker("github-observed", failure_threshold=1)
+        with pytest.raises(ConnectionError):
+            breaker.call(lambda: (_ for _ in ()).throw(ConnectionError("down")))
+
+        coordinator._emit_observability_tick()
+        coordinator._emit_observability_tick()
+        coordinator.queues[StageName.PLANNING].pop()
+        reset_all_circuit_breakers()
+        coordinator._emit_observability_tick()
+
+        events = [entry for entry in coordinator.event_log if entry[0].startswith("alert_")]
+        assert [(event[0], event[1]["name"]) for event in events] == [
+            ("alert_fired", "circuit_breaker_open"),
+            ("alert_fired", "queue_depth_exceeds"),
+            ("alert_resolved", "circuit_breaker_open"),
+            ("alert_resolved", "queue_depth_exceeds"),
+        ]
+        snapshots = [entry[1] for entry in coordinator.event_log if entry[0] == "metrics_snapshot"]
+        assert snapshots[0]["queue_depths"]["planning"] == 1
+        # The registry reflects the latest resolved lifecycle state, not a stale
+        # historical high-water mark.
+        assert coordinator._metrics_registry is not None
+        assert 'hephaestus_pipeline_queue_depth{stage="planning"} 0' in (
+            coordinator._metrics_registry.render_prometheus()
+        )
 
     def test_event_log_path_persists_queue_events(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
