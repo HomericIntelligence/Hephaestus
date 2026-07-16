@@ -696,6 +696,33 @@ def test_main_does_not_override_projects_root_for_automation_worktree(
     assert config.repo_roots == {}  # type: ignore[attr-defined]
 
 
+def test_main_uses_noncanonical_automation_worktree_base_as_repo_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An internal worktree under a renamed checkout must not become its own base.
+
+    ``resolve_projects_dir`` correctly unwraps an automation issue worktree
+    to the parent of its base checkout.  When that base checkout itself has a
+    noncanonical name, the loop must still use the base checkout, rather than
+    creating a nested ``build/.worktrees`` tree under the issue checkout.
+    """
+    projects_dir = tmp_path / "projects"
+    base_checkout = projects_dir / "renamed-base-checkout"
+    automation_worktree = base_checkout / "build" / ".worktrees" / "issue-99"
+
+    monkeypatch.setattr(loop_runner, "_detect_cwd_repo", lambda: ("Org", "Repo"))
+    monkeypatch.setattr(loop_runner, "get_repo_root", lambda: automation_worktree)
+    with patch.object(loop_runner, "resolve_projects_dir", return_value=projects_dir):
+        config = _capture_main_config(
+            ["--repos", "Repo,Other", "--dry-run", "--loops", "1", "--agent", "claude"],
+            monkeypatch,
+        )
+
+    assert config.projects_dir == projects_dir  # type: ignore[attr-defined]
+    assert config.repo_roots == {"Repo": base_checkout}  # type: ignore[attr-defined]
+    assert "Other" not in config.repo_roots  # type: ignore[attr-defined]
+
+
 def test_main_resolves_agent_before_building_config(monkeypatch: pytest.MonkeyPatch) -> None:
     """PipelineConfig stores the concrete auto-detected provider."""
     resolve = patch.object(loop_runner, "resolve_agent", return_value="codex")

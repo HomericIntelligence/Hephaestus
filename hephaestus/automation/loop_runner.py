@@ -676,9 +676,15 @@ def _current_checkout_repo_roots(
     if checkout == conventional_root:
         return {}
 
-    automation_worktree_dir = conventional_root / "build" / ".worktrees"
-    if checkout.parent == automation_worktree_dir:
-        return {}
+    # An automation issue worktree always has the structural form
+    # ``<base checkout>/build/.worktrees/<issue>``.  Do not assume that the
+    # base checkout has the conventional ``projects_dir / repo`` name: swarm
+    # and manually renamed checkouts are valid.  In that noncanonical case the
+    # base checkout itself is the explicit root; using the issue worktree here
+    # would make a later implementation create nested worktrees beneath it.
+    if checkout.parent.name == ".worktrees" and checkout.parent.parent.name == "build":
+        base_checkout = checkout.parent.parent.parent
+        return {} if base_checkout == conventional_root else {repo: base_checkout}
 
     return {repo: checkout}
 
