@@ -362,6 +362,11 @@ class Coordinator:
         self._metrics_registry: Any | None = None
         self._metrics_server: Any | None = None
         self._alert_tracker: Any | None = None
+        # Gauges retain label series until explicitly updated.  Remember the
+        # prior tick's dynamic labels so a completed job or state transition
+        # is rendered as zero rather than as stale active work.
+        self._observed_inflight_repos: set[str] = set()
+        self._observed_circuit_breaker_states: dict[str, str] = {}
         if config.metrics_port:
             from hephaestus.observability.alerts import AlertTracker
             from hephaestus.observability.metrics import MetricsRegistry
@@ -546,17 +551,36 @@ class Coordinator:
             "hephaestus_pipeline_inflight_jobs",
             "Pipeline jobs currently owned by the worker pool.",
         ).set(snapshot["inflight_jobs"])
+        inflight_by_repo = registry.gauge(
+            "hephaestus_pipeline_inflight_per_repo",
+            "Pipeline jobs currently in flight by repository.",
+        )
+        current_repos: set[str] = set()
         for repo, count in snapshot["inflight_per_repo"].items():
-            registry.gauge(
-                "hephaestus_pipeline_inflight_per_repo",
-                "Pipeline jobs currently in flight by repository.",
-            ).set(count, labels={"repo": repo})
+            repo_name = str(repo)
+            current_repos.add(repo_name)
+            inflight_by_repo.set(count, labels={"repo": repo_name})
+        for repo in self._observed_inflight_repos - current_repos:
+            inflight_by_repo.set(0, labels={"repo": repo})
+        self._observed_inflight_repos = current_repos
+
+        breaker_states = registry.gauge(
+            "hephaestus_circuit_breaker_state",
+            "Circuit-breaker lifecycle state (active state has value 1).",
+        )
+        current_breaker_states: dict[str, str] = {}
         for name, breaker in snapshot["circuit_breakers"].items():
-            state = breaker["state"]
-            registry.gauge(
-                "hephaestus_circuit_breaker_state",
-                "Circuit-breaker lifecycle state (active state has value 1).",
-            ).set(1, labels={"name": name, "state": state})
+            breaker_name = str(name)
+            state = str(breaker["state"])
+            previous_state = self._observed_circuit_breaker_states.get(breaker_name)
+            if previous_state is not None and previous_state != state:
+                breaker_states.set(0, labels={"name": breaker_name, "state": previous_state})
+            breaker_states.set(1, labels={"name": breaker_name, "state": state})
+            current_breaker_states[breaker_name] = state
+        for name, state in self._observed_circuit_breaker_states.items():
+            if name not in current_breaker_states:
+                breaker_states.set(0, labels={"name": name, "state": state})
+        self._observed_circuit_breaker_states = current_breaker_states
 
         self._record_event("metrics_snapshot", snapshot)
         for event in tracker.observe(snapshot):

@@ -914,6 +914,55 @@ class TestImplementationAdmission:
 class TestDurableEventLog:
     """Optional JSONL event log mirrors the coordinator's in-memory event log."""
 
+    def test_observability_tick_zeroes_previous_circuit_breaker_state(self, tmp_path: Path) -> None:
+        """A transition leaves exactly one active state gauge for each breaker."""
+        snapshots: dict[str, dict[str, Any]] = {"github": {"state": "closed"}}
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                projects_dir=tmp_path,
+                metrics_port=9123,
+                circuit_breaker_snapshot_provider=lambda: snapshots,
+            ),
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+
+        coordinator._emit_observability_tick()
+        snapshots["github"]["state"] = "open"
+        coordinator._emit_observability_tick()
+
+        assert coordinator._metrics_registry is not None
+        rendered = coordinator._metrics_registry.render_prometheus()
+        assert 'hephaestus_circuit_breaker_state{name="github",state="closed"} 0' in rendered
+        assert 'hephaestus_circuit_breaker_state{name="github",state="open"} 1' in rendered
+
+    def test_observability_tick_zeroes_removed_inflight_repo(self, tmp_path: Path) -> None:
+        """A repo that leaves the in-flight counter no longer reports active work."""
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                projects_dir=tmp_path,
+                metrics_port=9123,
+            ),
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        coordinator.inflight_per_repo["repo-a"] = 1
+
+        coordinator._emit_observability_tick()
+        del coordinator.inflight_per_repo["repo-a"]
+        coordinator._emit_observability_tick()
+
+        assert coordinator._metrics_registry is not None
+        assert 'hephaestus_pipeline_inflight_per_repo{repo="repo-a"} 0' in (
+            coordinator._metrics_registry.render_prometheus()
+        )
+
     def test_observability_tick_snapshots_lifecycle_and_deduplicates_alerts(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
