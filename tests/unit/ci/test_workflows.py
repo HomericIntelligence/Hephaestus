@@ -469,6 +469,22 @@ class TestAutomationRuntimeInstall:
         assert "uv sync --all-groups --all-extras --locked" in unit_section
         assert "uv sync --all-groups --all-extras --locked" in integration_section
 
+    def test_shell_tests_install_just_before_running_bats(self) -> None:
+        """The BATS suite exercises ``just --list`` on a bare runner."""
+        workflow = yaml.safe_load(REQUIRED_WORKFLOW.read_text(encoding="utf-8"))
+        steps = workflow["jobs"]["shell-tests"]["steps"]
+        bats_index = next(
+            index for index, step in enumerate(steps) if step.get("name") == "Run bats shell tests"
+        )
+        just_index, just_step = next(
+            (index, step)
+            for index, step in enumerate(steps)
+            if step.get("uses", "").startswith("extractions/setup-just@")
+        )
+
+        assert just_index < bats_index
+        assert just_step["with"]["just-version"] == "1.36.0"
+
 
 class TestCollectWorkflowFiles:
     """Tests for collect_workflow_files()."""
