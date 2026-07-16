@@ -338,7 +338,8 @@ class TestAdvisePrompt:
         assert "Do not invoke `$advise`" in out
         assert "Do not clone or update Mnemosyne yourself" in out
         assert "/advise" not in out
-        assert "#7: t" in out
+        assert "#7" in out
+        assert "t" in out
         assert '"skills"' in out
         assert "b" in out
 
@@ -427,6 +428,24 @@ class TestUntrustedFencing:
         assert self._fence_present(out, "ISSUE_BODY")
         assert get_untrusted_notice() in out
 
+    def test_advise_prompts_fence_issue_and_marketplace_fields(self) -> None:
+        """Both advise providers fence GitHub and marketplace input."""
+        for name, builder in (
+            ("claude", prompts.get_advise_prompt),
+            ("direct", prompts.get_codex_advise_prompt),
+        ):
+            out = builder(
+                issue_number=1,
+                issue_title=self.INJECTION,
+                issue_body=self.INJECTION,
+                marketplace_path="/mp.json",
+                marketplace_json=self.INJECTION,
+            )
+
+            for label in ("ISSUE_TITLE", "ISSUE_BODY", "MARKETPLACE_JSON"):
+                assert self._fence_present(out, label), f"{name}: {label}"
+            assert get_untrusted_notice() in out, name
+
     def test_plan_loop_review_prompt_fences_untrusted_fields(self) -> None:
         """get_plan_loop_review_prompt fences all untrusted planning-loop fields."""
         out = prompts.get_plan_loop_review_prompt(
@@ -501,6 +520,26 @@ class TestUntrustedFencing:
     def test_refactored_prompt_builders_include_untrusted_notice(self) -> None:
         """Prompt builders using shared fencing still carry the notice."""
         rendered_prompts = [
+            (
+                "advise",
+                prompts.get_advise_prompt(
+                    issue_number=1,
+                    issue_title=self.INJECTION,
+                    issue_body=self.INJECTION,
+                    marketplace_path="/mp.json",
+                    marketplace_json=self.INJECTION,
+                ),
+            ),
+            (
+                "codex_advise",
+                prompts.get_codex_advise_prompt(
+                    issue_number=1,
+                    issue_title=self.INJECTION,
+                    issue_body=self.INJECTION,
+                    marketplace_path="/mp.json",
+                    marketplace_json=self.INJECTION,
+                ),
+            ),
             (
                 "plan_review",
                 prompts.get_plan_review_prompt(
