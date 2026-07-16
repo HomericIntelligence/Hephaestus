@@ -953,6 +953,7 @@ class TestDurableEventLog:
         assert snapshots[0]["queue_depths"]["planning"] == 1
         # The registry reflects the latest resolved lifecycle state, not a stale
         # historical high-water mark.
+        assert coordinator._metrics_registry is not None
         assert 'hephaestus_pipeline_queue_depth{stage="planning"} 0' in (
             coordinator._metrics_registry.render_prometheus()
         )
