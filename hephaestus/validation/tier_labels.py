@@ -54,7 +54,7 @@ CANONICAL_TIERS: dict[str, str] = {
 
 # Default directories to skip when scanning the repository.
 _DEFAULT_EXCLUDES: frozenset[str] = frozenset(
-    {".pixi", "build", ".git", ".worktrees", "node_modules"}
+    {".venv", "build", ".git", ".worktrees", "node_modules"}
 )
 
 # Matches a tier ID followed (on the same line) by any known tier name,
@@ -318,7 +318,7 @@ def main() -> int:
             "  %(prog)s --verbose\n"
             "  %(prog)s --json\n"
             "  %(prog)s --directory /path/to/dir\n"
-            "  %(prog)s --glob '**/*.md' --exclude build --exclude .pixi"
+            "  %(prog)s --glob '**/*.md' --exclude build --exclude .venv"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -339,7 +339,7 @@ def main() -> int:
         dest="excludes",
         metavar="DIR",
         default=[],
-        help=("Directory name to exclude (repeatable, default: .pixi build .git .worktrees)."),
+        help=("Directory name to exclude (repeatable, default: .venv build .git .worktrees)."),
     )
     parser.add_argument(
         "--verbose",

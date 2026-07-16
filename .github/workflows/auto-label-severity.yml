@@ -22,9 +22,9 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-      - uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f  # v0.10.0
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
-          environments: default
+          enable-cache: true
       - name: Reconcile severity label
         env:
           GH_TOKEN: ${{ github.token }}
@@ -34,4 +34,4 @@ jobs:
           # Bound as env (NOT interpolated into the shell step) — the body is
           # only read inside Python via os.environ, matched against fixed strings.
           ISSUE_BODY: ${{ github.event.issue.body }}
-        run: pixi run python -m hephaestus.github.severity_label
+        run: uv run python -m hephaestus.github.severity_label

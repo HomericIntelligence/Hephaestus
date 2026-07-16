@@ -51,7 +51,7 @@ Adopt a **dual-layer package** with four guarantees:
 ## Alternatives considered
 
 - **Carve out to a `homeric-automation` distribution.** Rejected: requires
-  new repo, dual pixi.lock, CI sweep of every workflow invoking the seven
+  new repo, dual uv.lock, CI sweep of every workflow invoking the seven
   automation console scripts. The `ci-library-migration-audit` team-knowledge
   skill documents how prone that path is to silent CI breakage.
 - **Status quo (just document).** Rejected: leaves no installable boundary;

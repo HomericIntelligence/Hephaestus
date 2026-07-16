@@ -133,8 +133,7 @@ class TestPreCommitHook:
         hook = self._load_hook("check-settings-permission-paths")
 
         assert hook["entry"] == (
-            "pixi run --environment default "
-            "python3 -m hephaestus.scripts_lib.check_settings_permission_paths"
+            "uv run python -m hephaestus.scripts_lib.check_settings_permission_paths"
         )
         assert hook["language"] == "system"
         assert hook["pass_filenames"] is False

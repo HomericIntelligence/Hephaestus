@@ -7,8 +7,6 @@ git tags, not a file. Tests inject a canonical version by monkeypatching
 ``_version_from_git_tag`` rather than writing a static ``[project].version``.
 """
 
-from pathlib import Path
-
 import pytest
 
 import hephaestus.version.consistency as consistency
@@ -33,49 +31,15 @@ def set_canonical(monkeypatch: pytest.MonkeyPatch):
     return _set
 
 
-def _write_pixi(tmp_path: Path, version: str | None) -> None:
-    """Write a minimal pixi.toml; omit the version field if None."""
-    if version is None:
-        (tmp_path / "pixi.toml").write_text('[workspace]\nname = "test-pkg"\n')
-    else:
-        (tmp_path / "pixi.toml").write_text(
-            f'[workspace]\nname = "test-pkg"\nversion = "{version}"\n'
-        )
-
-
 # ---------------------------------------------------------------------------
 # check_version_consistency
 # ---------------------------------------------------------------------------
 
 
-def test_check_version_consistency_no_pixi(tmp_path, set_canonical):
-    """Pass when pixi.toml is absent."""
+def test_check_version_consistency_resolves_canonical_version(tmp_path, set_canonical):
+    """Pass when the git-derived canonical version can be resolved."""
     set_canonical("1.2.3")
     assert check_version_consistency(tmp_path) == 0
-
-
-def test_check_version_consistency_pixi_no_version(tmp_path, set_canonical):
-    """Pass when pixi.toml has no [workspace].version."""
-    set_canonical("1.2.3")
-    _write_pixi(tmp_path, None)
-    assert check_version_consistency(tmp_path) == 0
-
-
-def test_check_version_consistency_matching(tmp_path, set_canonical):
-    """Pass when pixi.toml version matches the canonical git-tag version."""
-    set_canonical("1.2.3")
-    _write_pixi(tmp_path, "1.2.3")
-    assert check_version_consistency(tmp_path) == 0
-
-
-def test_check_version_consistency_mismatch(tmp_path, set_canonical, capsys):
-    """Fail when pixi.toml version differs from the canonical version."""
-    set_canonical("1.2.3")
-    _write_pixi(tmp_path, "1.2.4")
-    result = check_version_consistency(tmp_path)
-    assert result == 1
-    err = capsys.readouterr().err
-    assert "mismatch" in err.lower() or "1.2.3" in err
 
 
 def test_check_version_consistency_verbose(tmp_path, set_canonical, capsys):
@@ -149,23 +113,6 @@ def test_check_package_consistency_no_version_in_init(tmp_path, set_canonical):
     init.parent.mkdir()
     init.write_text("# no version here\n")
     assert check_package_version_consistency(tmp_path, package_init=init) == 0
-
-
-def test_check_package_consistency_pixi_mismatch(tmp_path, set_canonical, capsys):
-    """Fail when pixi.toml [workspace].version differs from the canonical version."""
-    set_canonical("1.0.0")
-    _write_pixi(tmp_path, "0.9.0")
-    result = check_package_version_consistency(tmp_path)
-    assert result == 1
-    err = capsys.readouterr().err
-    assert "0.9.0" in err
-
-
-def test_check_package_consistency_pixi_match(tmp_path, set_canonical):
-    """Pass when pixi.toml [workspace].version matches the canonical version."""
-    set_canonical("1.0.0")
-    _write_pixi(tmp_path, "1.0.0")
-    assert check_package_version_consistency(tmp_path) == 0
 
 
 def test_check_package_consistency_scan_skills_clean(tmp_path, set_canonical):
@@ -280,7 +227,7 @@ def test_bump_version_next_steps_mention_git_tag(tmp_path, set_canonical, capsys
 
 
 def test_check_version_consistency_main_pass(tmp_path, set_canonical, monkeypatch):
-    """CLI passes when pixi.toml has no conflicting version."""
+    """CLI passes with the canonical dynamic version configuration."""
     from hephaestus.version.consistency import check_version_consistency_main
 
     set_canonical("1.0.0")
@@ -289,19 +236,6 @@ def test_check_version_consistency_main_pass(tmp_path, set_canonical, monkeypatc
         ["hephaestus-check-version-consistency", "--repo-root", str(tmp_path)],
     )
     assert check_version_consistency_main() == 0
-
-
-def test_check_version_consistency_main_mismatch(tmp_path, set_canonical, monkeypatch):
-    """CLI fails when versions differ."""
-    from hephaestus.version.consistency import check_version_consistency_main
-
-    set_canonical("1.0.0")
-    _write_pixi(tmp_path, "1.0.1")
-    monkeypatch.setattr(
-        "sys.argv",
-        ["hephaestus-check-version-consistency", "--repo-root", str(tmp_path)],
-    )
-    assert check_version_consistency_main() == 1
 
 
 def test_check_package_versions_main_pass(tmp_path, set_canonical, monkeypatch):

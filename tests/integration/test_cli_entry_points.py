@@ -90,7 +90,7 @@ class TestCLIHelpFlag:
             pytest.skip("automation CLIs require POSIX stdlib (curses/fcntl)")
         binary: str | None = shutil.which(command)
         if binary is None:
-            pytest.skip(f"{command} not on PATH — install with `pip install -e .` or run via pixi")
+            pytest.skip(f"{command} not on PATH — install with `pip install -e .` or run with uv")
         assert binary is not None  # narrow for mypy; pytest.skip already returned
 
         result = subprocess.run(
@@ -126,7 +126,7 @@ class TestCLIJsonFlag:
             pytest.skip("automation CLIs require POSIX stdlib (curses/fcntl)")
         binary: str | None = shutil.which(command)
         if binary is None:
-            pytest.skip(f"{command} not on PATH — install with `pip install -e .` or run via pixi")
+            pytest.skip(f"{command} not on PATH — install with `pip install -e .` or run with uv")
         assert binary is not None
 
         result = subprocess.run(
@@ -160,7 +160,7 @@ class TestCLIVersionFlag:
             pytest.skip("automation CLIs require POSIX stdlib (curses/fcntl)")
         binary: str | None = shutil.which(command)
         if binary is None:
-            pytest.skip(f"{command} not on PATH — install with `pip install -e .` or run via pixi")
+            pytest.skip(f"{command} not on PATH — install with `pip install -e .` or run with uv")
         assert binary is not None
 
         result = subprocess.run(
@@ -188,7 +188,7 @@ class TestCLIVersionFlag:
             pytest.skip("automation CLIs require POSIX stdlib (curses/fcntl)")
         binary: str | None = shutil.which(command)
         if binary is None:
-            pytest.skip(f"{command} not on PATH — install with `pip install -e .` or run via pixi")
+            pytest.skip(f"{command} not on PATH — install with `pip install -e .` or run with uv")
         assert binary is not None
 
         result = subprocess.run(

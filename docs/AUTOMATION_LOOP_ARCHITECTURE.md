@@ -67,7 +67,7 @@ A single worker pool executes:
 - **Agent jobs**: call prompt-builder callables (which may fetch diffs/bodies
   via `gh`), then invoke an agent runtime, with optional result parsing
   (e.g., `parse_review_verdict`).
-- **Build/test jobs**: execute subprocess commands in worktrees (e.g., `pixi
+- **Build/test jobs**: execute subprocess commands in worktrees (e.g., `uv
   run pytest`).
 - **Git jobs**: clone, worktree management, rebase, push — all git/network
   operations (protected by per-repo `threading.Lock` since worktrees share
@@ -210,7 +210,7 @@ per-repo in-flight cap.
 4. [W:A] **Advise step**.
 5. [W:A] **Implement step** — `prompts/implementation.py:217
    get_implementation_prompt`.
-6. [W:B] **Test step** (optional) — `_run_tests_in_worktree` (`pixi run
+6. [W:B] **Test step** (optional) — `_run_tests_in_worktree` (`uv run
    pytest`); on failure, RETRY with budget test_fix.
 7. [W:A] **Test fix step** (on test failure, budget test_fix = 1) — resume
    with test-failure feedback → repeat step 6.

@@ -1,19 +1,8 @@
-"""Delegation stub — all tests moved to tests/unit/validation/test_python_version.py.
+"""Smoke coverage for the Python-version compatibility shim."""
 
-pytest discovers test classes imported at module scope, so running
-``pixi run pytest tests/unit/scripts_lib/`` still collects all tests here.
-``pythonpath = ["."]`` in pyproject.toml makes the ``tests.unit`` import work.
-"""
+from hephaestus.scripts_lib.check_python_version_consistency import extract_pyproject_versions
 
-from tests.unit.validation.test_python_version import (  # noqa: F401
-    TestCheckCiMatrixCoverage,
-    TestCheckPixiPythonCeiling,
-    TestCheckProjectVersionConsistency,
-    TestExtractCiMatrixPythonVersions,
-    TestExtractClassifiersPythonVersions,
-    TestExtractPixiPythonCeiling,
-    TestExtractPixiWorkspaceVersion,
-    TestExtractProjectVersion,
-    TestExtractPyprojectVersionsStr,
-    TestSmokeAgainstRealFiles,
-)
+
+def test_shim_exports_project_version_parser() -> None:
+    """The legacy module continues to expose the canonical parser."""
+    assert extract_pyproject_versions('requires-python = ">=3.10"')["requires-python"] == "3.10"

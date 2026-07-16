@@ -124,10 +124,7 @@ bypass a misfiring hook locally use
 | `hephaestus-check-links` | Internal | Repo CI link checker |
 | `hephaestus-validate-anchors` | Internal | Repo CI anchor validator |
 | `hephaestus-scaffold-subpackage` | Internal | Dev scaffolding tool for new subpackages |
-| `hephaestus-check-dep-sync` | Internal | Repo CI dependency-sync check |
-| `hephaestus-sync-requirements` | Internal | Repo CI requirements sync |
 | `hephaestus-bench-precommit` | Internal | Repo CI pre-commit benchmark |
-| `hephaestus-check-precommit-versions` | Internal | Repo CI pre-commit version check |
 | `hephaestus-check-workflow-inventory` | Internal | Repo CI workflow inventory check |
 | `hephaestus-validate-workflow-checkout` | Internal | Repo CI workflow checkout validator |
 | `hephaestus-github-stats` | Provisional | GitHub repo-stats helper |
@@ -182,17 +179,11 @@ Lazy-loaded symbols (accessible via `hephaestus.<name>`): `add_logging_args`,
 
 | Symbol | Added | Notes |
 |--------|-------|-------|
-| `check_dep_sync` | 0.3.0 | Check pixi.toml ↔ requirements drift |
-| `check_requirements_up_to_date` | 0.3.0 | Verify requirements file is current |
-| `generate_requirements_content` | 0.3.0 | Render requirements.txt content from pixi deps |
 | `get_setting` | 0.1.0 | Dot-notation access to nested config dict |
 | `load_config` | 0.1.0 | Load YAML/JSON config file |
 | `load_yaml_config` | 0.1.0 | Load a YAML config file |
 | `merge_configs` | 0.1.0 | Deep-merge multiple config dicts |
 | `merge_with_env` | 0.2.0 | Overlay env vars onto config |
-| `parse_pixi_toml` | 0.3.0 | Parse pixi.toml dependency tables |
-| `parse_requirements` | 0.3.0 | Parse a requirements.txt file |
-| `sync_requirements` | 0.3.0 | Sync requirements.txt from pixi deps |
 | `validate_config` | 0.1.0 | Validate a config dict against a schema |
 
 ### `hephaestus.io`

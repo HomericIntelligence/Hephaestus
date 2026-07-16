@@ -1,11 +1,7 @@
 """Tests for hephaestus.version.parsing shared version-tuple core.
 
-These tests pin the three behaviours the shared core must reproduce so the DRY
-consolidation of the four version parsers stays behaviour-preserving:
-
-- ``on_non_numeric="drop"`` reproduces ``config.dep_sync._parse_version``.
-- ``on_non_numeric="zero"`` reproduces ``ci.precommit._version_tuple``.
-- ``on_non_numeric="raise"`` reproduces ``version.consistency._parse_version_tuple``.
+These tests pin each supported non-numeric-segment policy.  The strict mode is
+also checked against the active version-consistency call site.
 """
 
 from __future__ import annotations
@@ -16,7 +12,7 @@ from hephaestus.version.parsing import parse_version_tuple
 
 
 class TestDropMode:
-    """``on_non_numeric='drop'`` — dep_sync semantics (split on '.' and '-')."""
+    """``on_non_numeric='drop'`` skips non-numeric segments."""
 
     def _parse(self, v: str) -> tuple[int, ...]:
         return parse_version_tuple(v, split_pattern=r"[.\-]", on_non_numeric="drop")
@@ -55,7 +51,7 @@ class TestDropMode:
 
 
 class TestZeroMode:
-    """``on_non_numeric='zero'`` — precommit semantics (split on '.', coerce)."""
+    """``on_non_numeric='zero'`` coerces non-numeric segments."""
 
     def _parse(self, v: str) -> tuple[int, ...]:
         return parse_version_tuple(v, on_non_numeric="zero")
@@ -102,22 +98,8 @@ class TestRaiseMode:
             self._parse("")
 
 
-class TestDelegationParity:
-    """The live call sites must equal the shared core for the same options."""
-
-    def test_dep_sync_delegates(self) -> None:
-        from hephaestus.config.dep_sync import _parse_version
-
-        for v in ("1.2.3", "2", "1.0", "1.2-3", "1.a.3", "1.2.3.4", "1.2.3rc1", "", "2.0.0.dev1"):
-            assert _parse_version(v) == parse_version_tuple(
-                v, split_pattern=r"[.\-]", on_non_numeric="drop"
-            )
-
-    def test_precommit_delegates(self) -> None:
-        from hephaestus.ci.precommit import _version_tuple
-
-        for v in ("1.19.1", "1.2.rc1", "1.2-3", "1..2", "", "0.26.1"):
-            assert _version_tuple(v) == parse_version_tuple(v, on_non_numeric="zero")
+class TestActiveDelegationParity:
+    """The active call site must equal the shared core for the same options."""
 
     def test_consistency_delegates(self) -> None:
         from hephaestus.version.consistency import _parse_version_tuple

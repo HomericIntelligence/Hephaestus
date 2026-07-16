@@ -26,9 +26,9 @@ setup() {
     cp "$SRC_SCRIPT" "$SANDBOX_REPO/scripts/shell/install_hooks.sh"
     SCRIPT="$SANDBOX_REPO/scripts/shell/install_hooks.sh"
 
-    # PATH stub dir holding the fake pre-commit (and, where needed, pixi).
+    # PATH stub dir holding the fake pre-commit (and, where needed, uv).
     # It is the ONLY directory on PATH during a run, so the host's real
-    # pre-commit/pixi never leak in. Symlink the few external binaries the
+    # pre-commit/uv never leak in. Symlink the few external binaries the
     # script genuinely needs (git + the coreutils it shells out to) so a
     # hermetic PATH still works.
     STUB_DIR="$TEST_TMPDIR/stubs"
@@ -60,7 +60,7 @@ EOF
     chmod +x "$STUB_DIR/pre-commit"
 }
 
-# A hermetic PATH: ONLY the stub dir. Real pre-commit/pixi are deliberately
+# A hermetic PATH: ONLY the stub dir. Real pre-commit/uv are deliberately
 # excluded so the script's tool-resolution logic is exercised against the
 # fakes (or their absence) and nothing else.
 stub_path() {
@@ -100,24 +100,24 @@ stub_path() {
 
 @test "install_hooks.sh fails clearly when pre-commit is unavailable" {
     init_git
-    # No fake pre-commit and no pixi on PATH.
+    # No fake pre-commit and no uv on PATH.
     run env PATH="$(stub_path)" bash "$SCRIPT"
     [ "$status" -eq 1 ]
     [[ "$output" == *"pre-commit not found"* ]]
 }
 
 
-@test "install_hooks.sh falls back to 'pixi run pre-commit' when only pixi exists" {
+@test "install_hooks.sh falls back to 'uv run pre-commit' when only uv exists" {
     init_git
-    # Provide pixi (which forwards to our recorder) but NO direct pre-commit.
-    cat > "$STUB_DIR/pixi" <<EOF
+    # Provide uv (which forwards to our recorder) but NO direct pre-commit.
+    cat > "$STUB_DIR/uv" <<EOF
 #!/usr/bin/env bash
-# Expect: pixi run pre-commit <args...>
+# Expect: uv run pre-commit <args...>
 shift 2   # drop "run" and "pre-commit"
 echo "\$*" >> "$PC_LOG"
 exit 0
 EOF
-    chmod +x "$STUB_DIR/pixi"
+    chmod +x "$STUB_DIR/uv"
     run env PATH="$(stub_path)" bash "$SCRIPT"
     [ "$status" -eq 0 ]
     grep -qx "install" "$PC_LOG"

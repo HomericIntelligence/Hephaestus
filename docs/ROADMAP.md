@@ -16,13 +16,13 @@ The strict 2026-04-28 repository audit (Epic #310) is now **closed**. The active
 
 4. **Test Coverage Hardening** — Bringing 12 excluded automation modules into coverage measurement with mocked unit tests for core orchestration logic.
 
-5. **Security & Dependency Management** — Hard-blocking pip-audit failures in CI and resolving dependency consistency issues across pixi.toml and pyproject.toml.
+5. **Security & Dependency Management** — Hard-blocking pip-audit failures in CI and resolving dependency consistency issues across pyproject.toml and pyproject.toml.
 
 ## Near-term (Next 1-2 Quarters)
 
 Assuming audit remediation is complete:
 
-1. **Multi-platform CI Support** — Extend GitHub Actions test matrix to include macOS and Windows alongside Ubuntu, addressing the gap between pixi.toml multi-platform claims and CI reality (#321 context).
+1. **Multi-platform CI Support** — Extend GitHub Actions test matrix to include macOS and Windows alongside Ubuntu, addressing the gap between pyproject.toml multi-platform claims and CI reality (#321 context).
 
 2. **Cross-Repository Coverage** — Expand hephaestus utility adoption across other HomericIntelligence projects. Standardize configuration loading, logging setup, and subprocess execution patterns.
 

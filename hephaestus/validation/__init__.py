@@ -39,14 +39,9 @@ from hephaestus.validation.markdown import (
 from hephaestus.validation.mypy_per_file import check_mypy_per_file
 from hephaestus.validation.python_version import (
     check_ci_matrix_coverage,
-    check_pixi_python_ceiling,
-    check_project_version_consistency,
     check_python_version_consistency,
     extract_ci_matrix_python_versions,
     extract_classifiers_python_versions,
-    extract_pixi_python_ceiling,
-    extract_pixi_workspace_version,
-    extract_project_version,
     extract_pyproject_versions_str,
 )
 from hephaestus.validation.readme_commands import (
@@ -88,8 +83,6 @@ __all__ = [
     "check_max_complexity",
     "check_mypy_per_file",
     "check_no_loose_test_files",
-    "check_pixi_python_ceiling",
-    "check_project_version_consistency",
     "check_python_version_consistency",
     "check_required_sections",
     "check_scripts_coverage",
@@ -101,9 +94,6 @@ __all__ = [
     "extract_ci_matrix_python_versions",
     "extract_classifiers_python_versions",
     "extract_markdown_links",
-    "extract_pixi_python_ceiling",
-    "extract_pixi_workspace_version",
-    "extract_project_version",
     "extract_pyproject_versions_str",
     "extract_sections",
     "filter_audit_results",

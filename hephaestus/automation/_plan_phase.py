@@ -78,23 +78,11 @@ class PlanPhase(StageMixin):
         total planner runtime while individual planner agent calls still use
         their shorter ``AGENT_PLAN_TIMEOUT`` budget (#1374).
         """
-        import shutil
-
         plan_timeout = plan_stage_timeout()
 
-        # Prefer the installed entry point (works in any repo)
-        entry_point = shutil.which("hephaestus-plan-issues")
-        if entry_point:
-            run(
-                [entry_point, "--issues", str(issue_number), "--agent", self.options.agent],
-                timeout=plan_timeout,
-                env=_phase_env(self.repo_root),
-            )
-            return
-
-        # Fall back to python -m invocation using the sanitized repo-root-only
-        # PYTHONPATH (source-checkout fallback). On failure, fall through to the
-        # legacy scripts/plan_issues.py path.
+        # Invoke the planner through the active interpreter. Resolving a console
+        # script from PATH can escape the uv project environment and select an
+        # unrelated globally installed Hephaestus package.
         with contextlib.suppress(subprocess.SubprocessError, OSError):
             run(
                 [

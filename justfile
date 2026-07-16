@@ -1,4 +1,4 @@
-# Hephaestus command runner — wraps pixi commands for consistent developer experience.
+# Hephaestus command runner — wraps uv commands for consistent developer experience.
 # All path variables are configurable at the top of the file.
 
 # Source directories for linting, formatting, and type checking
@@ -18,60 +18,59 @@ default:
 
 # Install dependencies and set up pre-commit hooks (one-command bootstrap)
 bootstrap:
-    pixi install
-    pixi run dev-install
-    pixi run pre-commit install
+    uv sync
+    uv run pre-commit install
 
 # Run all tests (unit + integration)
 test:
-    pixi run pytest {{ test_dir }}
+    uv run pytest {{ test_dir }}
 
 # Run unit tests only
 test-unit:
-    pixi run pytest {{ unit_test_dir }}
+    uv run pytest {{ unit_test_dir }}
 
 # Run integration tests only
 test-integration:
-    pixi run pytest {{ integration_test_dir }}
+    uv run pytest {{ integration_test_dir }}
 
 # Run BATS shell tests (recursive under tests/shell)
 test-shell:
-    pixi run test-shell
+    bats --recursive tests/shell
 
 # Re-run unit tests on file change (uses pytest-watcher). Cancel with Ctrl-C.
 watch:
-    pixi run --environment default ptw {{ unit_test_dir }} -- --no-cov -q
+    uv run ptw {{ unit_test_dir }} -- --no-cov -q
 
 # Run linter
 lint:
-    pixi run ruff check {{ src_dirs }}
+    uv run ruff check {{ src_dirs }}
 
 # Run formatter
 format:
-    pixi run ruff format {{ src_dirs }}
+    uv run ruff format {{ src_dirs }}
 
 # Check formatting without applying changes
 format-check:
-    pixi run ruff format --check {{ src_dirs }}
+    uv run ruff format --check {{ src_dirs }}
 
-# Run type checking on the package only (use `pixi run mypy` for everything)
+# Run type checking on the package only (use `uv run mypy hephaestus/ scripts/ tests/` for everything)
 typecheck:
-    pixi run mypy-pkg
+    uv run mypy {{ pkg_dir }}/
 
 # Run all pre-commit hooks on all files
 precommit:
-    pixi run pre-commit run --all-files
+    uv run pre-commit run --all-files
 
 # Run lint + format-check + typecheck
 check: lint format-check typecheck
 
 # Run pip-audit to check for known dependency vulnerabilities
 audit:
-    pixi run --environment lint pip-audit
+    uv run pip-audit --ignore-vuln PYSEC-2025-183
 
 # Generate API reference documentation with pdoc (output: docs/api/)
 docs:
-    pixi run docs
+    uv run pdoc ./hephaestus ./hephaestus/agents ./hephaestus/benchmarks ./hephaestus/ci ./hephaestus/cli ./hephaestus/config ./hephaestus/datasets ./hephaestus/discovery ./hephaestus/forensics ./hephaestus/github ./hephaestus/io ./hephaestus/logging ./hephaestus/markdown ./hephaestus/nats ./hephaestus/resilience ./hephaestus/scripts_lib ./hephaestus/system ./hephaestus/utils ./hephaestus/validation ./hephaestus/version --output-dir docs/api
 
 # Full CI-equivalent run: bootstrap, check, and test
 all: bootstrap check test
@@ -89,7 +88,7 @@ clean:
     rm -f run*.log
 
 # Deep clean: remove dev logs + all gitignored caches and build artifacts
-# (safe — only removes regenerable artifacts; does NOT touch .pixi/ envs).
+# (safe — only removes regenerable artifacts; does NOT touch .venv/ envs).
 # NOTE: also wipes docs/api/ — pdoc-generated API docs (see `just docs`);
 # regenerate them afterward. Does NOT remove build/ wholesale: this repo keeps
 # live git worktrees under build/.worktrees/, so only build-backend outputs are
@@ -98,6 +97,6 @@ clean-all: clean
     rm -rf .ruff_cache .mypy_cache .pytest_cache htmlcov .coverage
     rm -rf dist docs/api
     rm -rf build/lib build/lib.* build/bdist.* build/temp.* build/scripts*
-    find . -type d -name __pycache__ -not -path './.pixi/*' -exec rm -rf {} +
-    find . -type d -name '*.egg-info' -not -path './.pixi/*' -exec rm -rf {} +
-    find . -type f \( -name '*.pyc' -o -name '*.pyo' \) -not -path './.pixi/*' -delete
+    find . -type d -name __pycache__ -not -path './.venv/*' -exec rm -rf {} +
+    find . -type d -name '*.egg-info' -not -path './.venv/*' -exec rm -rf {} +
+    find . -type f \( -name '*.pyc' -o -name '*.pyo' \) -not -path './.venv/*' -delete

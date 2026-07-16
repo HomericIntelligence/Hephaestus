@@ -54,7 +54,7 @@ Implement GitHub issue #{issue_number}.
 1. Read the issue description and any existing plan carefully
 2. Follow existing code patterns in hephaestus/
 3. Write tests in tests/ using pytest
-4. Run tests with: pixi run python -m pytest tests/ -v
+4. Run tests with: uv run python -m pytest tests/ -v
 5. Ensure all tests pass before finishing
 6. Follow the code quality guidelines in CLAUDE.md
 

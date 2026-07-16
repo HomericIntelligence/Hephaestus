@@ -92,14 +92,14 @@ def _build_plan(name: str, root: Path, *, with_cli: bool) -> _Plan:
         f"Next steps for '{name}':",
         f"  1. Add 'hephaestus/{name}/' to the directory tree in README.md",
         f"  2. Implement hephaestus/{name}/{name}.py",
-        f"  3. Run: pixi run pytest tests/unit/{name}/ -v",
+        f"  3. Run: uv run pytest tests/unit/{name}/ -v",
     ]
     if with_cli:
         cmd = name.replace("_", "-")
         hints += [
             "  4. Register the console script in pyproject.toml [project.scripts]:",
             f'       hephaestus-{cmd} = "hephaestus.scripts_lib.{name}:main"',
-            "     Then run: pixi run dev-install",
+            "     Then run: uv sync",
             "  5. Add the command to the README CLI table",
         ]
     return _Plan(files=files, hints=hints)

@@ -7,10 +7,8 @@ tags, not stored in any file. The single-source-of-truth invariant is therefore:
 - ``pyproject.toml`` declares ``version`` in ``[project].dynamic`` and has NO
   static ``[project].version`` field.
 - ``pyproject.toml`` configures ``[tool.hatch.version]`` with ``source = "vcs"``.
-- ``pixi.toml`` has no ``version`` field under ``[workspace]``.
-
-Any deviation (a reintroduced static version, a removed dynamic declaration, a
-pixi workspace version) means the version now has two — or zero — authorities.
+Any deviation (a reintroduced static version or a removed dynamic declaration)
+means the version now has two — or zero — authorities.
 
 Usage:
     python3 -m hephaestus.scripts_lib.check_version_single_source
@@ -18,7 +16,6 @@ Usage:
 
 from __future__ import annotations
 
-import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -90,42 +87,12 @@ def check_pyproject_dynamic_version(repo_root: Path) -> bool:
     return True
 
 
-def check_pixi_no_version(repo_root: Path) -> bool:
-    """Verify pixi.toml does NOT have a version under [workspace]."""
-    pixi_path = repo_root / "pixi.toml"
-    if not pixi_path.exists():
-        # No pixi.toml is fine — nothing to conflict
-        return True
-
-    content = pixi_path.read_text()
-
-    # Check for version = "..." in the [workspace] section
-    # The [workspace] section ends at the next [section] header or EOF
-    workspace_match = re.search(r"\[workspace\](.*?)(?=\n\[|\Z)", content, re.DOTALL)
-    if not workspace_match:
-        # No [workspace] section — nothing to conflict
-        return True
-
-    workspace_content = workspace_match.group(1)
-    version_match = re.search(r"^\s*version\s*=", workspace_content, re.MULTILINE)
-    if version_match:
-        print("ERROR: pixi.toml [workspace] contains a 'version' field.")
-        print("  pyproject.toml (hatch-vcs) is the single source of truth for the version.")
-        print("  Remove the version field from pixi.toml [workspace].")
-        return False
-
-    print("OK: pixi.toml has no version field (as expected)")
-    return True
-
-
 def main() -> int:
     """Check version single source of truth. Returns 0 if OK, 1 if issues found."""
     repo_root = get_repo_root()
 
     pyproject_ok = check_pyproject_dynamic_version(repo_root)
-    pixi_ok = check_pixi_no_version(repo_root)
-
-    if pyproject_ok and pixi_ok:
+    if pyproject_ok:
         print("\nVersion single source of truth: PASS")
         return 0
 

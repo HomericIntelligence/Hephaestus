@@ -125,12 +125,6 @@ make_install_tmpdir() {
 # *.sha256 artifact on each project's GitHub Release page, or computed from
 # the release tarball. Mirrors the gitleaks pattern at
 # .github/workflows/_required.yml:574-576.
-readonly PIXI_VERSION="0.69.0"
-readonly PIXI_SHA256_LINUX_X86_64="285e021a8dd81d151e1dd03541ef6525a8205e0e6422aae3dfe17772b20cdd41"
-readonly PIXI_SHA256_LINUX_AARCH64="8e05e2f3c79bcfdde5656d6e021062a2d1275bd0b4115360bef4560fc3fb1974"
-readonly PIXI_SHA256_DARWIN_X86_64="daa582b13f45b6acaf049005b98ea111749ac2e9c5385c4a3d6731bc6a68ef5d"
-readonly PIXI_SHA256_DARWIN_AARCH64="640de30196141d6b67c745675cec6d6b784fb42df34b02ee25fde2bb2b542aac"
-
 readonly DAGGER_VERSION="0.13.3"
 readonly DAGGER_SHA256_LINUX_X86_64="787307925b10c0b9b04c0fd814716abe339c53b6aa250a8ba25321a934d14a67"
 readonly DAGGER_SHA256_LINUX_AARCH64="8b2a6df85760775b094e8cab551d1f27f5172aadae77abd6652989db3346789d"
@@ -450,10 +444,10 @@ else
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Section 3: Python + pixi (all roles)
+# Section 3: Python (all roles)
 # Required by: Myrmidons workers, Hermes bridge, console tools
 # ═════════════════════════════════════════════════════════════════════════════
-section "Python & pixi"
+section "Python"
 
 # Python 3.10+
 if has_cmd python3; then
@@ -489,7 +483,7 @@ else
     fi
 fi
 
-# python3.12-venv (required for pixi and isolated virtual environments)
+# python3.12-venv (required for isolated virtual environments)
 if python3 -c "import venv" 2>/dev/null; then
     check_pass "python3 venv module available"
 else
@@ -534,65 +528,6 @@ else
             check_fail "nats-py — install failed (try: pip3 install nats-py)"
         fi
     fi
-fi
-
-# pixi (Python environment manager for Hermes + Hephaestus)
-if has_cmd pixi; then
-    check_pass "pixi $(get_version pixi --version)"
-else
-    check_fail "pixi — NOT FOUND (required by Hermes bridge and Hephaestus)"
-    if $INSTALL; then
-        echo -e "    ${BLUE}→${NC} Installing pixi..."
-        sha=""; tgt=""
-        if ! platform="$(detect_platform)"; then
-            check_fail "pixi — unsupported platform"
-        else
-            case "$platform" in
-                linux-x86_64)   sha="$PIXI_SHA256_LINUX_X86_64"
-                                tgt="pixi-x86_64-unknown-linux-musl.tar.gz" ;;
-                linux-aarch64)  sha="$PIXI_SHA256_LINUX_AARCH64"
-                                tgt="pixi-aarch64-unknown-linux-musl.tar.gz" ;;
-                darwin-x86_64)  sha="$PIXI_SHA256_DARWIN_X86_64"
-                                tgt="pixi-x86_64-apple-darwin.tar.gz" ;;
-                darwin-aarch64) sha="$PIXI_SHA256_DARWIN_AARCH64"
-                                tgt="pixi-aarch64-apple-darwin.tar.gz" ;;
-                *) check_fail "pixi — no pinned build for $platform" ;;
-            esac
-        fi
-        if [ -n "$tgt" ]; then
-            url="https://github.com/prefix-dev/pixi/releases/download/v${PIXI_VERSION}/${tgt}"
-            tmp="$(make_install_tmpdir pixi)"
-            mkdir -p ~/.local/bin
-            if download_and_verify "$sha" "$url" "$tmp/pixi.tar.gz" \
-                && tar -xzf "$tmp/pixi.tar.gz" -C "$tmp" \
-                && install -m 0755 "$tmp/pixi" ~/.local/bin/pixi; then
-                check_pass "pixi v${PIXI_VERSION} installed (SHA-256 verified)"
-            else
-                check_fail "pixi — pinned install failed"
-            fi
-            rm -rf "$tmp"
-        fi
-    fi
-fi
-
-# Mojo (Odyssey) — installed via pixi, not as a system binary
-# The mojo binary lives in Odyssey/.pixi/envs/default/bin/mojo
-ODYSSEY_DIR="${ODYSSEY_DIR:-$HOME/Odyssey}"
-if has_cmd mojo; then
-    check_pass "mojo $(get_version mojo --version)"
-elif [[ -x "$ODYSSEY_DIR/.pixi/envs/default/bin/mojo" ]]; then
-    check_pass "mojo (via pixi env at $ODYSSEY_DIR)"
-elif [[ -d "$ODYSSEY_DIR" ]]; then
-    check_warn "mojo — pixi env not initialized in $ODYSSEY_DIR"
-    if $INSTALL && has_cmd pixi; then
-        echo -e "    ${BLUE}→${NC} Running pixi install in $ODYSSEY_DIR..."
-        # shellcheck disable=SC2015  # B is check_pass (never fails); ternary is safe
-        pixi install -q --manifest-path "$ODYSSEY_DIR/pixi.toml" >/dev/null 2>&1 \
-            && check_pass "mojo installed via pixi" \
-            || check_warn "mojo — pixi install failed (check $ODYSSEY_DIR/pixi.toml)"
-    fi
-else
-    check_skip "mojo — $ODYSSEY_DIR not found (clone Odyssey first)"
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════

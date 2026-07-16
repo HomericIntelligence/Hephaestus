@@ -66,7 +66,7 @@ applying their own rate limiting and abuse controls at their request edge.
 ### Dependency Suppression Ledger
 
 Known-but-accepted dependency vulnerabilities are tracked in the pip-audit
-suppression ledger (`pixi.toml`, `[feature.lint.tasks]`). Every suppression
+suppression ledger (`pyproject.toml`, `[feature.lint.tasks]`). Every suppression
 must carry a re-review trigger; this is enforced at commit time by the
 `check-pip-audit-ledger-reminder` pre-commit hook
 (`scripts/check_pip_audit_ledger_reminder.py`). The weekly `Security`

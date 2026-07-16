@@ -12,7 +12,7 @@
 # Pre-reqs:
 #   - gh authenticated (`gh auth status`)
 #   - Repos cloned under $PROJECTS_ROOT (default /home/mvillmow/Projects)
-#   - pixi env initialized in Hephaestus
+#   - uv environment initialized in Hephaestus
 #
 # Usage:
 #   ~/drive-prs-green-ecosystem.sh                     # real run, logs to ~/drive-prs-green-logs/<utc-ts>/
@@ -345,14 +345,14 @@ for REPO in "${REPOS[@]}"; do
   if (
     cd "$REPO_DIR"
     if ((${#ISSUES[@]})); then
-      pixi run --manifest-path "$PROJECT_ROOT/pixi.toml" python -u \
+      uv run --project "$PROJECT_ROOT" python -u \
         -m "$DRIVER_MODULE" \
         --issues "${ISSUES[@]}" \
         --no-ui \
         "${GH_ARGS[@]}" \
         "${DRIVER_ARGS[@]}"
     else
-      pixi run --manifest-path "$PROJECT_ROOT/pixi.toml" python -u \
+      uv run --project "$PROJECT_ROOT" python -u \
         -m "$DRIVER_MODULE" \
         --no-ui \
         "${GH_ARGS[@]}" \

@@ -8,11 +8,11 @@ secondary version declarations against the git-derived canonical version.
 
 Provides three operations:
 
-1. ``check_version_consistency`` — verify pixi.toml [workspace].version (if
-   present) matches the canonical git-tag version.
+1. ``check_version_consistency`` — verify that a canonical git-derived version
+   can be resolved.
 
-2. ``check_package_version_consistency`` — broader multi-source scan: pixi.toml,
-   ``__init__.py`` ``__version__``, and optional skill markdown files.
+2. ``check_package_version_consistency`` — broader multi-source scan of
+   ``__init__.py`` ``__version__`` and optional skill markdown files.
 
 3. ``bump_version`` — compute the next semver string by incrementing a chosen part
    (major/minor/patch), then delegate writes to :class:`~hephaestus.version.manager.VersionManager`.
@@ -35,15 +35,11 @@ from hephaestus.cli.utils import (
     format_output,
     resolve_repo_root,
 )
-from hephaestus.io.toml import import_tomllib
 from hephaestus.version.manager import VersionManager, parse_version
 from hephaestus.version.parsing import parse_version_tuple
 
 # PyPI distribution name used for the importlib.metadata fallback.
 _DIST_NAME = "HomericIntelligence-Hephaestus"
-
-# tomllib ships with Python 3.11+; fall back to the tomli backport on 3.10.
-_tomllib = import_tomllib()
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -146,33 +142,6 @@ def _get_canonical_version(repo_root: Path) -> str:
     return version
 
 
-def _get_pixi_version(repo_root: Path) -> str | None:
-    """Read the version from ``pixi.toml`` ``[workspace].version`` if present.
-
-    Args:
-        repo_root: Repository root directory.
-
-    Returns:
-        The version string, or ``None`` if the file is absent or has no version.
-
-    """
-    if _tomllib is None:
-        return None
-
-    pixi_path = repo_root / "pixi.toml"
-    if not pixi_path.is_file():
-        return None
-
-    try:
-        with open(pixi_path, "rb") as fh:
-            data = _tomllib.load(fh)
-    except Exception:
-        return None
-
-    version = data.get("workspace", {}).get("version")
-    return str(version) if version else None
-
-
 def _strip_inline_code(line: str) -> str:
     """Replace inline code spans with whitespace so embedded versions are ignored.
 
@@ -237,71 +206,20 @@ def _find_aspirational_versions(
 
 
 def check_version_consistency(repo_root: Path, verbose: bool = False) -> int:
-    """Verify pixi.toml's version (if any) matches the canonical git-tag version.
-
-    Passes if pixi.toml has no version field (expected state — the canonical
-    version comes from git tags via hatch-vcs). Fails if pixi.toml declares a
-    version that differs from the canonical version.
+    """Verify the project can resolve its canonical git-derived version.
 
     Args:
         repo_root: Root directory of the repository.
         verbose: If True, print versions even when they match.
 
     Returns:
-        0 if versions are consistent (or pixi.toml has no version), 1 otherwise.
+        0 when the canonical version can be resolved.
 
     """
     canonical_version = _get_canonical_version(repo_root)
-    pixi_version = _get_pixi_version(repo_root)
-
     if verbose:
         print(f"Canonical version (git tag / metadata): {canonical_version}")
-
-    if pixi_version is None:
-        if verbose:
-            print("pixi.toml: no [workspace].version (canonical version is git-derived)")
-        return 0
-
-    if verbose:
-        print(f"pixi.toml [workspace].version:          {pixi_version}")
-
-    if canonical_version != pixi_version:
-        print(
-            "ERROR: version mismatch:\n"
-            f"  canonical (git tag): {canonical_version}\n"
-            f"  pixi.toml:           {pixi_version}\n"
-            "The canonical version is derived from git tags — update or remove "
-            "the pixi.toml version.",
-            file=sys.stderr,
-        )
-        return 1
-
-    if verbose:
-        print(f"OK: version is consistent ({canonical_version})")
     return 0
-
-
-def _check_pixi_version_errors(repo_root: Path, canonical: str, verbose: bool) -> list[str]:
-    """Return errors if pixi.toml version field differs from canonical.
-
-    Args:
-        repo_root: Repository root directory.
-        canonical: The canonical version from pyproject.toml.
-        verbose: If True, print a PASS line when consistent.
-
-    Returns:
-        List of error strings (empty if consistent or no pixi version).
-
-    """
-    pixi_version = _get_pixi_version(repo_root)
-    if pixi_version is not None and pixi_version != canonical:
-        return [
-            f"pixi.toml [workspace].version mismatch: '{pixi_version}' vs canonical '{canonical}'"
-        ]
-    if verbose:
-        state = pixi_version if pixi_version else "no version (expected)"
-        print(f"PASS: pixi.toml — {state}")
-    return []
 
 
 def _check_init_version_errors(
@@ -375,9 +293,8 @@ def check_package_version_consistency(
     """Run multi-source package version consistency checks.
 
     Checks:
-    1. pixi.toml [workspace].version matches pyproject.toml (if present).
-    2. ``<package>/__init__.py`` ``__version__`` matches pyproject.toml (if present).
-    3. (opt-in) Skill markdown files have no aspirational version references.
+    1. ``<package>/__init__.py`` ``__version__`` matches the canonical version.
+    2. (opt-in) Skill markdown files have no aspirational version references.
 
     Args:
         repo_root: Root directory of the repository.
@@ -396,7 +313,6 @@ def check_package_version_consistency(
         print(f"Canonical version (git tag / metadata): {canonical}")
 
     all_errors: list[str] = []
-    all_errors.extend(_check_pixi_version_errors(repo_root, canonical, verbose))
     all_errors.extend(_check_init_version_errors(package_init, canonical, verbose))
 
     canonical_tuple = _parse_version_tuple(canonical)
@@ -507,7 +423,7 @@ def check_version_consistency_main() -> int:
 
     """
     parser = create_validation_parser(
-        "Detect version drift between pyproject.toml and pixi.toml",
+        "Verify the canonical git-derived project version",
         epilog="Example: %(prog)s --repo-root /path/to/repo --verbose",
     )
     parser.add_argument(
@@ -520,15 +436,12 @@ def check_version_consistency_main() -> int:
     root = resolve_repo_root(args)
     if args.json:
         canonical = _version_from_git_tag(root) or _version_from_metadata()
-        pixi_version = _get_pixi_version(root)
-        consistent = pixi_version is None or pixi_version == canonical
         payload = {
             "canonical_version": canonical,
-            "pixi_version": pixi_version,
-            "consistent": consistent,
+            "consistent": canonical is not None,
         }
         print(format_output(payload, "json"))
-        return 0 if consistent else 1
+        return 0 if canonical is not None else 1
     return check_version_consistency(root, verbose=args.verbose)
 
 
@@ -571,7 +484,6 @@ def check_package_versions_main() -> int:
     if args.json:
         canonical = _get_canonical_version(root)
         errors: list[str] = []
-        errors.extend(_check_pixi_version_errors(root, canonical, verbose=False))
         errors.extend(_check_init_version_errors(init_path, canonical, verbose=False))
         if args.scan_skills:
             errors.extend(

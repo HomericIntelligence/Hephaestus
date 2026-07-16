@@ -4,7 +4,7 @@
 # Core configuration
 CLAUDE.md @mvillmow
 pyproject.toml @mvillmow
-pixi.toml @mvillmow
+pyproject.toml @mvillmow
 .pre-commit-config.yaml @mvillmow
 
 # CI/CD

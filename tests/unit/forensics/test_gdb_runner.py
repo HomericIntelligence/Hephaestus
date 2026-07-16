@@ -152,23 +152,23 @@ class TestGdbCmdPrefixParsing:
             str(tmp_path / "cores"),
             "sh",
             ["-c", "true"],
-            gdb_cmd_prefix="pixi run --",
+            gdb_cmd_prefix="uv run --",
         )
         argv = captured[0]
-        assert argv[:3] == ["pixi", "run", "--"]
+        assert argv[:3] == ["uv", "run", "--"]
         assert argv[3] == "gdb"
 
     def test_single_quoted_path_with_spaces_stays_one_token(self, monkeypatch, tmp_path) -> None:
-        """Regression for issue #756: '/path with space/pixi' must be ONE token."""
+        """Regression for issue #756: '/path with space/uv' must be ONE token."""
         captured = self._capture_argv(monkeypatch)
         run_under_gdb(
             str(tmp_path / "cores"),
             "sh",
             ["-c", "true"],
-            gdb_cmd_prefix="'/path with space/pixi' run --",
+            gdb_cmd_prefix="'/path with space/uv' run --",
         )
         argv = captured[0]
-        assert argv[:3] == ["/path with space/pixi", "run", "--"]
+        assert argv[:3] == ["/path with space/uv", "run", "--"]
         assert argv[3] == "gdb"
 
     def test_double_quoted_path_with_spaces_stays_one_token(self, monkeypatch, tmp_path) -> None:
@@ -177,10 +177,10 @@ class TestGdbCmdPrefixParsing:
             str(tmp_path / "cores"),
             "sh",
             ["-c", "true"],
-            gdb_cmd_prefix='"/abs path/to/pixi" run --',
+            gdb_cmd_prefix='"/abs path/to/uv" run --',
         )
         argv = captured[0]
-        assert argv[:3] == ["/abs path/to/pixi", "run", "--"]
+        assert argv[:3] == ["/abs path/to/uv", "run", "--"]
 
     def test_malformed_quoting_raises_valueerror(self, monkeypatch, tmp_path) -> None:
         """Unclosed quotes surface as ValueError, not as silently broken argv."""
@@ -255,7 +255,7 @@ class TestValidateGdbCmdPrefix:
     @pytest.mark.parametrize(
         "raw,expected",
         [
-            ("pixi run --", ["pixi", "run", "--"]),
+            ("uv run --", ["uv", "run", "--"]),
             ("/usr/bin/env", ["/usr/bin/env"]),
             ("env FOO=bar baz", ["env", "FOO=bar", "baz"]),
             ("nice", ["nice"]),
@@ -271,7 +271,7 @@ class TestValidateGdbCmdPrefix:
         [
             "--init-eval-command=run",
             "-ex",
-            "pixi --bad",
+            "uv --bad",
             "rm; rm -rf /",
             "foo|bar",
             "foo&bar",
@@ -321,7 +321,7 @@ class TestRunUnderGdbPrefixValidation:
             str(tmp_path / "cores"),
             _UNRESOLVABLE_CMD,
             [],
-            gdb_cmd_prefix="pixi run --",
+            gdb_cmd_prefix="uv run --",
         )
         assert rc == 127
 
@@ -356,6 +356,6 @@ class TestMainPrefixValidation:
     def test_main_safe_env_var_unchanged(self, monkeypatch, tmp_path: Path) -> None:
         """Safe prefix + unresolvable command: validation passes, returns 127."""
         monkeypatch.delenv("RUN_UNDER_GDB", raising=False)
-        monkeypatch.setenv("GDB_CMD_PREFIX", "pixi run --")
+        monkeypatch.setenv("GDB_CMD_PREFIX", "uv run --")
         rc = main([str(tmp_path / "cores"), _UNRESOLVABLE_CMD])
         assert rc == 127

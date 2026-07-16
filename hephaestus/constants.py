@@ -17,7 +17,7 @@ DEFAULT_EXCLUDE_DIRS: frozenset[str] = frozenset(
         "venv",
         "__pycache__",
         ".tox",
-        ".pixi",
+        ".venv",
         ".pytest_cache",
         "dist",
         "build",

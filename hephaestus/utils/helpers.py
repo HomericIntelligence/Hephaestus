@@ -19,7 +19,7 @@ from hephaestus.logging.utils import get_logger
 logger = get_logger(__name__)
 
 # Subprocess timeouts for different operation types.
-# METADATA_TIMEOUT: local, non-network queries (git status, git config, pixi list)
+# METADATA_TIMEOUT: local, non-network queries (git status, git config, uv tree)
 # NETWORK_TIMEOUT: operations touching the network (gh calls, git clone/fetch/push)
 # Both support env-var overrides for CI tuning. read_timeout_env logs and falls
 # back to the default on a non-integer value rather than crashing at import.

@@ -1,17 +1,10 @@
 """Shared version-string parsing core.
 
-Several modules parsed dotted version strings into comparable integer tuples,
-each with subtly different handling of non-numeric segments:
+The parser supports distinct policies for non-numeric segments: dropping them,
+coercing them to zero, or raising :class:`ValueError`.  The active version
+consistency check uses the strict policy after validating semver input.
 
-- ``config.dep_sync._parse_version`` splits on ``.`` and ``-`` and **drops** any
-  segment that is not all-digits (e.g. ``"1.2.3rc1"`` → ``(1, 2)``).
-- ``ci.precommit._version_tuple`` splits on ``.`` and **coerces** any
-  non-integer segment to ``0`` (e.g. ``"1.2.rc1"`` → ``(1, 2, 0)``).
-- ``version.consistency._parse_version_tuple`` splits on ``.`` and **raises** on
-  any non-integer segment (it is only ever fed pre-validated ``X.Y.Z`` strings).
-
-This module exposes one configurable core, :func:`parse_version_tuple`, plus
-thin convenience wrappers that reproduce each call site's exact behaviour. The
+This module exposes one configurable core, :func:`parse_version_tuple`. The
 strict 3-component semver validator lives in
 :func:`hephaestus.version.manager.parse_version`, which delegates its integer
 conversion here after its own regex validation.

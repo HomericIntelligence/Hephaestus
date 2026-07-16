@@ -20,8 +20,8 @@ Environment variables:
 * ``RUN_UNDER_GDB=0`` — skip gdb entirely and exec the command directly
   (local-dev escape hatch; gdb adds overhead).
 * ``GDB_CMD_PREFIX`` — optional command prefix inserted before ``gdb``, e.g.
-  ``"pixi run --"``. Parsed with ``shlex.split`` so values containing
-  shell-quoted whitespace (e.g. ``"'/path with space/pixi' run --"``) are
+  ``"uv run --"``. Parsed with ``shlex.split`` so values containing
+  shell-quoted whitespace (e.g. ``"'/path with space/uv' run --"``) are
   tokenized correctly.
 
 Security:
@@ -36,7 +36,7 @@ Security:
   Anything else — including unbalanced quotes — is rejected: the library entry point
   raises ``ValueError`` and the CLI prints ``[run-under-gdb] ERROR: …`` to
   stderr and exits with code ``2``. The supported shape is a sub-runner like
-  ``"pixi run --"`` that ends in its own argument terminator.
+  ``"uv run --"`` that ends in its own argument terminator.
 
 Exit code:
 
@@ -72,7 +72,7 @@ def _validate_gdb_cmd_prefix(raw: str | None) -> list[str]:
 
     Returns ``[]`` for ``None``/empty/whitespace-only input. Otherwise
     tokenizes with :func:`shlex.split` so values containing shell-quoted
-    whitespace (e.g. ``"'/path with space/pixi' run --"``) are split
+    whitespace (e.g. ``"'/path with space/uv' run --"``) are split
     correctly; each token must either be the bare argv terminator ``--``
     or fully match the safe character class AND not begin with ``-`` (which
     would let a caller inject gdb flags such as ``--init-eval-command``).
@@ -237,7 +237,7 @@ def run_under_gdb(
         command: The program to run. Resolved via ``PATH`` if not a path.
         command_args: Arguments passed to ``command`` verbatim.
         gdb_cmd_prefix: Optional command prefix inserted before ``gdb`` (e.g.
-            ``"pixi run --"``) so gdb and its inferior inherit an activated
+            ``"uv run --"``) so gdb and its inferior inherit an activated
             environment. Tokenized with :func:`shlex.split` to honor shell
             quoting rules, so paths with embedded whitespace can be quoted.
             Each resulting token must either be the bare ``--`` terminator or

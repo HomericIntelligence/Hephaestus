@@ -3,7 +3,6 @@
     "ms-python.python",
     "ms-python.vscode-pylance",
     "charliermarsh.ruff",
-    "prefix-dev.pixi-vscode",
     "tamasfe.even-better-toml",
     "DavidAnson.vscode-markdownlint"
   ]

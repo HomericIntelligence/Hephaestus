@@ -50,7 +50,7 @@ class BuildTestJob:
 
     repo: str
     cwd: Path
-    argv: tuple[str, ...]  # e.g. ("pixi","run","pytest","tests/unit","-q")
+    argv: tuple[str, ...]  # e.g. ("uv", "run", "pytest", "tests/unit", "-q")
     timeout_s: int
     descr: str = ""
 

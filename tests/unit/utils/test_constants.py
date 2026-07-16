@@ -31,7 +31,7 @@ class TestDefaultExcludeDirs:
             "node_modules",
             "venv",
             ".tox",
-            ".pixi",
+            ".venv",
             ".pytest_cache",
             "dist",
             "build",

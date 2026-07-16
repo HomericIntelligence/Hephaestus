@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -117,15 +118,12 @@ def test_phase_env_keeps_only_repo_root_pythonpath(
 
 
 def test_plan_phase_generate_uses_entry_point(tmp_path: Path) -> None:
-    """_generate prefers the installed hephaestus-plan-issues entry point."""
+    """_generate runs the planner through the active interpreter, not PATH."""
     phase = PlanPhase(_make_ctx(tmp_path))
-    with (
-        mock.patch("shutil.which", return_value="/usr/bin/hpi"),
-        mock.patch("hephaestus.automation._plan_phase.run") as mock_run,
-    ):
+    with mock.patch("hephaestus.automation._plan_phase.run") as mock_run:
         phase._generate(7)
     args = mock_run.call_args[0][0]
-    assert args[0] == "/usr/bin/hpi"
+    assert args[:3] == [sys.executable, "-m", "hephaestus.automation.planner"]
     assert "--issues" in args and "7" in args
 
 
@@ -135,10 +133,7 @@ def test_plan_phase_generate_sanitizes_pythonpath(
     """_generate passes a repo-root-only PYTHONPATH to child subprocesses."""
     monkeypatch.setenv("PYTHONPATH", f"/opt/site-packages{os.pathsep}/tmp/elsewhere")
     phase = PlanPhase(_make_ctx(tmp_path))
-    with (
-        mock.patch("shutil.which", return_value="/usr/bin/hpi"),
-        mock.patch("hephaestus.automation._plan_phase.run") as mock_run,
-    ):
+    with mock.patch("hephaestus.automation._plan_phase.run") as mock_run:
         phase._generate(7)
     assert mock_run.call_args.kwargs["env"]["PYTHONPATH"] == str(tmp_path)
 

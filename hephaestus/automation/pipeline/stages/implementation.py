@@ -171,7 +171,7 @@ PRE_PR_TEST_TIMEOUT_S = 1800
 
 #: Vetted pre-PR test command (BuildTestJob argv must never carry
 #: issue-derived strings).
-PRE_PR_TEST_ARGV: tuple[str, ...] = ("pixi", "run", "pytest", "tests/unit", "-q", "--tb=short")
+PRE_PR_TEST_ARGV: tuple[str, ...] = ("uv", "run", "pytest", "tests/unit", "-q", "--tb=short")
 
 
 def build_implementation_prompt(
@@ -894,7 +894,7 @@ class ImplementationStage(Stage):
                 summary=item.payload.get("implement_summary", "")
                 or f"Automated implementation for issue #{item.issue}.",
                 changes="See the PR diff for the full change set.",
-                testing=item.payload.get("test_output") or "pixi run pytest tests/unit -q",
+                testing=item.payload.get("test_output") or "uv run pytest tests/unit -q",
             )
             pr_number = ctx.github.create_pr(item.issue, item.branch, title, body)
             item.pr = pr_number

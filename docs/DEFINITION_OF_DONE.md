@@ -16,16 +16,16 @@ A piece of work is **done** when every item below is true.
 | 3 | Every commit on the branch is cryptographically signed and DCO-signed (`git commit -S -s`) | CI gate `pr-policy` |
 | 4 | Auto-merge remains disabled during #2054's fail-closed bootstrap. An unconditional independent strict-review GO is required before a manual squash merge; #2055 restores queue-owned arming. | Advisory `auto-merge-policy` and human review |
 | 5 | Commit messages follow Conventional Commits (`type(scope): description`) | CI gate `pr-policy` (Check 3) + local `commit-msg` hook `conventional-commit-msg` |
-| 6 | `pixi run ruff check hephaestus/ tests/` passes | CI job `lint` |
-| 7 | `pixi run ruff format --check hephaestus/ tests/` passes (no files would be reformatted) | CI job `lint` |
-| 8 | `pixi run mypy` returns `Success: no issues found in N source files` | CI job `lint` |
-| 9 | Full unit suite passes: `pixi run pytest tests/unit` (currently 2,500+ tests across 4 Python versions) | CI jobs `unit-tests`, `test (ubuntu-latest, 3.10/3.11/3.12/3.13, unit)` |
+| 6 | `uv run ruff check hephaestus/ tests/` passes | CI job `lint` |
+| 7 | `uv run ruff format --check hephaestus/ tests/` passes (no files would be reformatted) | CI job `lint` |
+| 8 | `uv run mypy hephaestus/ scripts/ tests/` returns `Success: no issues found in N source files` | CI job `lint` |
+| 9 | Full unit suite passes: `uv run pytest tests/unit` (currently 2,500+ tests across 4 Python versions) | CI jobs `unit-tests`, `test (ubuntu-latest, 3.10/3.11/3.12/3.13, unit)` |
 | 10 | Coverage gate satisfied: `--cov-fail-under=83` (configured in `pyproject.toml [tool.coverage.report].fail_under`) | CI job `unit-tests` |
 | 11 | No new warnings introduced (pytest, deprecation, ruff) | PR reviewer |
-| 12 | Integration tests pass: `pixi run pytest tests/integration` | CI job `integration-tests` |
-| 13 | Shell tests pass: `pixi run test-shell` | CI job `shell-tests` |
+| 12 | Integration tests pass: `uv run pytest tests/integration` | CI job `integration-tests` |
+| 13 | Shell tests pass: `just test-shell` | CI job `shell-tests` |
 | 14 | Schema validation passes (CLI inventory, YAML/Markdown structure) | CI job `schema-validation` |
-| 15 | Dep sync check passes (pyproject.toml then pixi.toml then pixi.lock) | CI job `deps/version-sync` |
+| 15 | The lockfile is current: `uv lock --check` | CI job `uv-lock-check` |
 | 16 | Secrets scan finds no leaks | CI jobs `security/secrets-scan`, gitleaks in `_required.yml` |
 | 17 | Dependency vulnerability scan passes | CI jobs `security/dependency-scan`, `pip-audit` in `_required.yml` |
 | 18 | Markdownlint passes on all `.md` changes | CI job `lint` (pre-commit hook) |

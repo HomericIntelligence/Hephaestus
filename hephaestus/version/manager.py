@@ -17,7 +17,7 @@ This module keeps secondary version files in sync regardless of model:
 - VERSION (root file)
 - __init__.py (__version__ attribute)
 
-Note: pixi.toml intentionally has no version field.
+The project version is derived exclusively from Git tags through hatch-vcs.
 """
 
 import re
