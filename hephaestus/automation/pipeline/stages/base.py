@@ -425,14 +425,35 @@ class StageGitHub(Protocol):
         """
         ...
 
+    def drive_green_learn_inflight(self, issue_number: int) -> bool:
+        """Return whether a durable post-merge ``/learn`` claim is in flight.
+
+        An ``in_progress`` claim is deliberately distinct from a terminal
+        outcome. It is written and read back before the agent starts. If a
+        process dies after that boundary, a later process must not replay the
+        externally visible ``/learn`` operation.
+        """
+        ...
+
+    def claim_drive_green_learn(self, issue_number: int, pr_number: int) -> bool:
+        """Durably claim one post-merge ``/learn`` dispatch.
+
+        Returns ``True`` only after an ``in_progress`` record for this issue
+        and PR has been persisted and read back. ``False`` means a terminal
+        or previously in-flight claim already owns the dispatch. Raises when
+        persistence cannot be acknowledged, so the caller fails closed before
+        the agent can perform an external learning action.
+        """
+        ...
+
     def mark_drive_green_learn_result(self, issue_number: int, *, succeeded: bool) -> None:
         """Durably record the post-merge ``/learn`` outcome on the arming record.
 
         Mirrors ``post_merge_processor.mark_drive_green_learn_result``:
-        written as soon as the learn job completes (success or failure
-        alike) and BEFORE the FINISH_PASS outcome, so a restart can never
-        replay ``/learn`` for the same merged PR —
-        :meth:`drive_green_learn_terminal` reads this record back.
+        written as soon as the learn job completes (success or failure alike)
+        and BEFORE the FINISH_PASS outcome. The preceding durable in-flight
+        claim prevents a restart from replaying ``/learn`` if this final
+        outcome write fails.
         """
         ...
 

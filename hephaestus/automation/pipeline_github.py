@@ -1049,6 +1049,17 @@ class PipelineGitHub:
             return True
         return str(record.get("learn_status") or "").lower() in {"succeeded", "failed"}
 
+    def drive_green_learn_inflight(self, issue_number: int) -> bool:
+        """Return whether a persisted /learn dispatch may already have run.
+
+        A process can fail after the agent receives its prompt but before it
+        writes its outcome. This durable claim is intentionally not treated as
+        a successful result: recovery retains the record for inspection, but
+        must never repeat the external learning side effect.
+        """
+        record = self._arming.load(issue_number) or {}
+        return str(record.get("learn_status") or "").lower() == "in_progress"
+
     def pending_drive_green_arms(self) -> list[tuple[int, int]]:
         """Return non-terminal durable arm records for pipeline restart recovery."""
         try:
@@ -1555,6 +1566,39 @@ class PipelineGitHub:
             raise RuntimeError(
                 f"could not verify drive-green arming record for issue #{issue_number}"
             )
+
+    def claim_drive_green_learn(self, issue_number: int, pr_number: int) -> bool:
+        """Persist and read back the pre-dispatch /learn claim.
+
+        The claim is the exactly-once boundary for the agent's external
+        learning work. A nonterminal arm record becomes ``in_progress``
+        before the job is handed to the worker; a restart encountering that
+        state must surface an unknown outcome instead of invoking /learn a
+        second time.
+        """
+        if self._skip(f"claim drive-green learn for #{issue_number} (PR #{pr_number})"):
+            return True
+        record = self._arming.load(issue_number) or {"pr_number": pr_number}
+        status = str(record.get("learn_status") or "").lower()
+        if status in {"succeeded", "failed", "in_progress"}:
+            return False
+        record["pr_number"] = pr_number
+        record["learn_status"] = "in_progress"
+        record["learn_attempted_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        if not self._arming.save(issue_number, record):
+            raise RuntimeError(
+                f"could not persist drive-green learn claim for issue #{issue_number}"
+            )
+        persisted = self._arming.load(issue_number)
+        if (
+            persisted is None
+            or persisted.get("pr_number") != pr_number
+            or persisted.get("learn_status") != "in_progress"
+        ):
+            raise RuntimeError(
+                f"could not verify drive-green learn claim for issue #{issue_number}"
+            )
+        return True
 
     def mark_drive_green_learn_result(self, issue_number: int, *, succeeded: bool) -> None:
         """Record the post-merge ``/learn`` outcome on the arming record.

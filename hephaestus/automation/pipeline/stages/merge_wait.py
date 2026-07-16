@@ -328,19 +328,40 @@ class MergeWaitStage(Stage):
                 item.pr,
             )
             return StageOutcome(Disposition.FINISH_PASS, "merged")
+        if item.issue is not None and ctx.github.drive_green_learn_inflight(item.issue):
+            logger.error(
+                "merge_wait:%d: /learn outcome is unknown after a durable in-flight claim; "
+                "refusing to replay it",
+                item.issue,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "learn_outcome_unknown")
         return Continue(next_state=LEARN_WAIT)
 
-    def _request_learn(self, item: WorkItem, ctx: StageContext) -> JobRequest:
+    def _request_learn(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """LEARN_WAIT [W:A]: dispatch the deduped post-merge /learn session.
 
         Prompt composed in-worker by :func:`build_drive_green_learn_prompt`.
         The dedupe already held at ``_route_merged`` (a terminal record never
-        reaches here); ``on_job_done`` durably marks the outcome on the
-        arming record BEFORE MW_FINISH, closing the exactly-once loop.
+        reaches here). A durable claim is written before dispatch; an
+        unpersisted outcome is therefore an explicit unknown rather than a
+        replayable job after restart.
         """
+        if item.issue is None or item.pr is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "missing_learn_scope")
+        try:
+            claimed = ctx.github.claim_drive_green_learn(item.issue, item.pr)
+        except Exception as exc:
+            logger.error(
+                "merge_wait:%d: failed to durably claim /learn dispatch: %s",
+                item.issue,
+                exc,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "learn_claim_failed")
+        if not claimed:
+            return StageOutcome(Disposition.FINISH_FAIL, "learn_outcome_unknown")
         job = AgentJob(
             repo=item.repo,
-            issue=item.issue if item.issue is not None else 0,
+            issue=item.issue,
             agent=agent_provider(ctx),
             model=stage_model(ctx, "implementer", implementer_model),
             prompt_builder=build_drive_green_learn_prompt,
@@ -348,7 +369,7 @@ class MergeWaitStage(Stage):
             timeout_s=learn_claude_timeout(),
             session_agent=AGENT_CI_DRIVER,
             prompt_kwargs={
-                "issue_number": item.issue if item.issue is not None else 0,
+                "issue_number": item.issue,
                 "pr_number": item.pr,
             },
             descr="drive_green_learn",

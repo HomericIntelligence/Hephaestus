@@ -1527,7 +1527,32 @@ class Coordinator:
         github = self._ctx_for_repo(repo).github if repo else self.github
         entries: list[_seeding.SeedEntry] = []
         scope_stages = self.config.scope.stages if self.config.scope is not None else None
-        issue_numbers = list(self.config.issues)
+        reader = getattr(github, "pending_drive_green_arms", None)
+        pending_arms = set(reader()) if callable(reader) else set()
+        requested_issues = list(self.config.issues)
+        recovered_issues: set[int] = set()
+        for issue, pr in pending_arms:
+            if issue not in requested_issues:
+                continue
+            stage, reason, passed = self._scope_seed_decision(
+                issue,
+                StageName.MERGE_WAIT,
+                f"PR #{pr} has a pending durable drive-green arm record",
+                scope_stages,
+            )
+            entries.append(
+                _seeding.SeedEntry(
+                    kind="pr",
+                    identifier=pr,
+                    stage=stage,
+                    reason=reason,
+                    pr_number=pr,
+                    issue_number=issue,
+                    passed=passed,
+                )
+            )
+            recovered_issues.add(issue)
+        issue_numbers = [issue for issue in requested_issues if issue not in recovered_issues]
         if issue_numbers:
             issue_numbers = _admission._filter_open_issues(repo, issue_numbers)
         for issue in issue_numbers:
@@ -1542,9 +1567,7 @@ class Coordinator:
             pr_state = github.gh_pr_state(pr)
             pr_state_name = ((pr_state or {}).get("state") or "").upper()
             if pr_state_name == "MERGED":
-                reader = getattr(github, "pending_drive_green_arms", None)
-                pending = set(reader()) if callable(reader) else set()
-                if issue_number is not None and (issue_number, pr) in pending:
+                if issue_number is not None and (issue_number, pr) in pending_arms:
                     stage, reason, passed = self._scope_seed_decision(
                         scope_identifier,
                         StageName.MERGE_WAIT,

@@ -1518,6 +1518,61 @@ class TestPipelineScopeWiring:
         assert entries[0].stage is StageName.MERGE_WAIT
         assert entries[0].issue_number == 2055
 
+    def test_direct_merged_issue_with_pending_arm_record_reenters_merge_wait(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue-scoped restart preserves the same post-merge learn handoff."""
+
+        class _RecoveryGitHub(FakeStageGitHub):
+            def pending_drive_green_arms(self) -> list[tuple[int, int]]:
+                return [(2055, 601)]
+
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            issues=[2055],
+            projects_dir=tmp_path,
+            scope=PipelineScope(frozenset({StageName.MERGE_WAIT})),
+        )
+        github = _RecoveryGitHub(merged_pr=601)
+        coordinator = Coordinator(
+            config, github=github, pool=FakeWorkerPool(), install_signals=False
+        )
+
+        entries = coordinator._seed_direct_scope("repo-a")
+
+        assert len(entries) == 1
+        assert entries[0].stage is StageName.MERGE_WAIT
+        assert entries[0].pr_number == 601
+
+    def test_issue_scoped_pending_arm_recovers_before_closed_issue_filter(
+        self, tmp_path: Path
+    ) -> None:
+        """A merged PR's closed issue still restores its unconsumed learn record."""
+
+        class _RecoveryGitHub(FakeStageGitHub):
+            def pending_drive_green_arms(self) -> list[tuple[int, int]]:
+                return [(2055, 601)]
+
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            issues=[2055],
+            projects_dir=tmp_path,
+            scope=PipelineScope(frozenset({StageName.MERGE_WAIT})),
+        )
+        coordinator = Coordinator(
+            config,
+            github=_RecoveryGitHub(merged_pr=601),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+
+        assert coordinator._seed_pass() == 1
+        assert coordinator.items[0].stage is StageName.MERGE_WAIT
+        assert coordinator.items[0].issue == 2055
+        assert coordinator.items[0].pr == 601
+
     def test_seed_pass_filters_closed_explicit_issues_before_classification(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

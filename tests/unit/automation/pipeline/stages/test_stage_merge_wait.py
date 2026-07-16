@@ -457,7 +457,10 @@ class TestMergedPrLearn:
         assert _drive(stage, _item(make_work_item, state=""), ctx, pool) == StageOutcome(
             Disposition.FINISH_PASS, "merged"
         )
-        assert github.mutation_log == [("mark_drive_green_learn_result", (1, True))]
+        assert github.mutation_log == [
+            ("claim_drive_green_learn", (1, 601)),
+            ("mark_drive_green_learn_result", (1, True)),
+        ]
 
     def test_closed_poll_finishes_failed(self, make_ctx: Any, make_work_item: Any) -> None:
         stage = MergeWaitStage()
@@ -501,10 +504,19 @@ class TestMergedPrLearn:
         )
         assert github.learn_results[1] is False
 
-        failing_ctx = make_ctx(github=_MarkFailGitHub(pr_state=MERGED_STATE))
+        failing_github = _MarkFailGitHub(pr_state=MERGED_STATE)
+        failing_ctx = make_ctx(github=failing_github)
         assert _drive(
             stage, _poll_item(make_work_item), failing_ctx, FakeWorkerPool()
         ) == StageOutcome(Disposition.FINISH_FAIL, "learn_result_persistence_failed")
+        restarted_pool = FakeWorkerPool()
+        assert _drive(
+            stage,
+            _poll_item(make_work_item),
+            make_ctx(github=failing_github),
+            restarted_pool,
+        ) == StageOutcome(Disposition.FINISH_FAIL, "learn_outcome_unknown")
+        assert restarted_pool.submitted == []
 
     def test_learn_job_and_finish_state(self, make_ctx: Any, make_work_item: Any) -> None:
         stage = MergeWaitStage()

@@ -126,6 +126,7 @@ class FakeStageGitHub(FakeGitHub):
         self.strict_evidence_calls: list[tuple[int, str, int]] = []
         self.arming_records: dict[int, tuple[int, str]] = {}
         self.learn_results: dict[int, bool] = {}
+        self.learn_claims: set[int] = set()
 
     def _issue_labels(self, issue_number: int) -> set[str]:
         """Return the issue's label set, seeding it on first access."""
@@ -326,9 +327,22 @@ class FakeStageGitHub(FakeGitHub):
         """
         return self._learn_terminal or issue_number in self.learn_results
 
+    def drive_green_learn_inflight(self, issue_number: int) -> bool:
+        """Mirror a durable pre-dispatch /learn claim."""
+        return issue_number in self.learn_claims
+
+    def claim_drive_green_learn(self, issue_number: int, pr_number: int) -> bool:
+        """Record the pre-dispatch claim unless another run already owns it."""
+        if self.drive_green_learn_terminal(issue_number) or issue_number in self.learn_claims:
+            return False
+        self.learn_claims.add(issue_number)
+        self._log("claim_drive_green_learn", issue_number, pr_number)
+        return True
+
     def mark_drive_green_learn_result(self, issue_number: int, *, succeeded: bool) -> None:
         """Mirror post_merge_processor.mark_drive_green_learn_result [durable]."""
         self.learn_results[issue_number] = succeeded
+        self.learn_claims.discard(issue_number)
         self._log("mark_drive_green_learn_result", issue_number, succeeded)
 
     def ensure_state_labels(self) -> None:

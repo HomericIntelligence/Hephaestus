@@ -1457,6 +1457,14 @@ class TestDriveGreenArmingRecords:
         adapter.mark_drive_green_learn_result(3, succeeded=True)
         assert adapter.drive_green_learn_terminal(3) is True
 
+    def test_learn_claim_is_durable_and_never_replayable(self, adapter: pg.PipelineGitHub) -> None:
+        """A crash after dispatch claim is an explicit unknown, never a replay."""
+        assert adapter.claim_drive_green_learn(31, 701) is True
+        assert adapter.drive_green_learn_inflight(31) is True
+        assert adapter.claim_drive_green_learn(31, 701) is False
+        assert adapter.drive_green_learn_terminal(31) is False
+        assert adapter.pending_drive_green_arms() == [(31, 701)]
+
     def test_failed_learn_is_also_terminal(self, adapter: pg.PipelineGitHub) -> None:
         adapter.mark_drive_green_learn_result(4, succeeded=False)
 
