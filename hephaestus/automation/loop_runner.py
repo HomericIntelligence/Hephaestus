@@ -131,6 +131,17 @@ def _parse_pr_list(value: str) -> list[int]:
     return _parse_positive_int_list(value, "PR")
 
 
+def _parse_metrics_port(value: str) -> int:
+    """Parse a TCP port while rejecting values outside the socket range."""
+    try:
+        port = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"metrics port must be an integer, got {value!r}") from exc
+    if not 0 <= port <= 65535:
+        raise argparse.ArgumentTypeError("metrics port must be in 0..65535")
+    return port
+
+
 def _default_phase_timeout_s() -> float:
     """Return the default per-agent-job timeout in seconds.
 
@@ -204,6 +215,10 @@ class LoopConfig:
     # (``HEPH_PHASE_TIMEOUT``); ``--phase-timeout`` overrides it and a
     # non-positive value disables the bound (``None``).
     phase_timeout_s: float | None = field(default_factory=_default_phase_timeout_s)
+    # Prometheus text + JSON health endpoint. Zero deliberately disables the
+    # listener rather than selecting an ephemeral port, so the CLI remains
+    # opt-in and operators know which port is exposed.
+    metrics_port: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +378,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "Per-phase timeout in seconds (default: HEPH_PHASE_TIMEOUT or "
             f"{int(_default_phase_timeout_s())}s). Pass 0 or a negative value to disable. "
             "This bounds each AGENT JOB the pipeline runs, not a whole phase subprocess."
+        ),
+    )
+    p.add_argument(
+        "--metrics-port",
+        type=_parse_metrics_port,
+        default=0,
+        metavar="PORT",
+        help=(
+            "Loopback-only port for the local Prometheus /metrics and /health server "
+            "(0 disables it)."
         ),
     )
     p.add_argument(
@@ -572,6 +597,14 @@ def _build_pipeline_config(
     """
     from hephaestus.automation.pipeline.coordinator import PipelineConfig
 
+    circuit_breaker_snapshot_provider = None
+    if cfg.metrics_port:
+        # Keep this capability out of the pure pipeline coordinator. It is
+        # supplied only for the explicitly enabled observability path.
+        from hephaestus.resilience import all_circuit_breaker_snapshots
+
+        circuit_breaker_snapshot_provider = all_circuit_breaker_snapshots
+
     return PipelineConfig(
         org=org,
         repos=repos,
@@ -596,6 +629,8 @@ def _build_pipeline_config(
         run_pre_pr_tests=cfg.run_pre_pr_tests,
         budget_overrides={"merge": cfg.max_merge_attempts},
         serialize_file_overlap=cfg.serialize_file_overlap,
+        metrics_port=cfg.metrics_port,
+        circuit_breaker_snapshot_provider=circuit_breaker_snapshot_provider,
         event_log_path=_pipeline_event_log_path(cfg.projects_dir, repos),
         projects_dir=cfg.projects_dir,
         json_out=args.json,
@@ -692,6 +727,7 @@ def main(argv: list[str] | None = None) -> int:
         phase_timeout_s=(
             args.phase_timeout if args.phase_timeout and args.phase_timeout > 0 else None
         ),
+        metrics_port=args.metrics_port,
     )
 
     if not repos:
