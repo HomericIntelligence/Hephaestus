@@ -29,12 +29,12 @@ from .conftest import FakeStageGitHub
 
 
 class _RepoPaths:
-    """Paths stub exposing the projects_dir the repo stage anchors clones at."""
+    """Paths stub exposing a projects root and an optional explicit checkout."""
 
-    def __init__(self, projects_dir: Path) -> None:
+    def __init__(self, projects_dir: Path, *, repo_root: Path | None = None) -> None:
         self.projects_dir = projects_dir
-        self.repo_root = projects_dir
-        self.worktree = projects_dir
+        self.repo_root = repo_root or projects_dir
+        self.worktree = self.repo_root
 
 
 @pytest.fixture
@@ -111,6 +111,21 @@ class TestOnEnterAndCloneStates:
         repo_item.state = "CLONE_WAIT"
 
         result = RepoStage().step(repo_item, repo_ctx)
+
+        assert isinstance(result, Continue)
+        assert result.next_state == "DISCOVER"
+
+    def test_clone_skipped_when_explicit_repo_root_is_existing_checkout(
+        self, repo_item: WorkItem, tmp_path: Path, make_ctx: Callable[..., Any]
+    ) -> None:
+        """An isolated checkout is used directly instead of ``projects_dir / repo``."""
+        projects_dir = tmp_path / "projects"
+        checkout = tmp_path / "isolated" / "repo-a-worktree"
+        checkout.mkdir(parents=True)
+        ctx = make_ctx(paths=_RepoPaths(projects_dir, repo_root=checkout))
+        repo_item.state = "CLONE_WAIT"
+
+        result = RepoStage().step(repo_item, ctx)
 
         assert isinstance(result, Continue)
         assert result.next_state == "DISCOVER"

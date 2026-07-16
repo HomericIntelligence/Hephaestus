@@ -74,8 +74,15 @@ def _drive_green_pr_is_in_scope(
 
 
 def _repo_checkout_path(item: WorkItem, ctx: StageContext) -> Path:
-    """Return the expected local checkout path for the repo item."""
-    return Path(str(ctx.paths.projects_dir)) / item.repo
+    """Return the effective local checkout path for the repo item.
+
+    Coordinator contexts always provide a per-repository ``repo_root``.  The
+    projects-root fallback keeps legacy lightweight stage contexts compatible
+    while making an explicit noncanonical root authoritative for clone checks.
+    """
+    repo_root = Path(str(ctx.paths.repo_root))
+    projects_dir = Path(str(ctx.paths.projects_dir))
+    return projects_dir / item.repo if repo_root == projects_dir else repo_root
 
 
 def _tag_epics(repo: str, ctx: StageContext, epics_labels: dict[int, list[str]]) -> None:

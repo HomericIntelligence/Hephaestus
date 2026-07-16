@@ -510,6 +510,23 @@ def _capture_config(argv: list[str], monkeypatch: pytest.MonkeyPatch) -> object:
     return captured["config"]
 
 
+def _capture_main_config(argv: list[str], monkeypatch: pytest.MonkeyPatch) -> object:
+    """Run main with only its coordinator dispatch replaced."""
+    from hephaestus.automation.pipeline import coordinator as coordinator_mod
+
+    captured: dict[str, object] = {}
+
+    def capture(config: object) -> int:
+        captured["config"] = config
+        return 0
+
+    monkeypatch.setattr(loop_runner, "_preflight_token_scopes", lambda *args, **kwargs: None)
+    monkeypatch.setattr(coordinator_mod, "run_pipeline", capture)
+
+    assert main(argv) == 0
+    return captured["config"]
+
+
 def test_main_applies_default_phase_timeout_when_flag_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -583,6 +600,127 @@ def test_main_prefers_current_checkout_parent_for_projects_dir_default(
         )
     resolve_projects_dir.assert_called_once_with(None, prefer_cwd_parent=True)
     assert config.projects_dir == projects_dir  # type: ignore[attr-defined]
+
+
+def test_main_wires_external_checkout_as_explicit_repo_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An external noncanonical checkout is not rewritten as ``projects_dir / repo``.
+
+    The loop may be launched from an isolated worktree whose path bears no
+    relationship to its remote repository name.  Its matching repo therefore
+    needs an explicit coordinator path, while other requested repos retain the
+    normal projects-root discovery fallback.
+    """
+    checkout = tmp_path / "isolated" / "automation-worktree"
+    projects_dir = tmp_path / "configured-projects"
+
+    monkeypatch.setattr(loop_runner, "_detect_cwd_repo", lambda: ("Org", "Repo"))
+    monkeypatch.setattr(loop_runner, "get_repo_root", lambda: checkout)
+    with patch.object(loop_runner, "resolve_projects_dir", return_value=projects_dir):
+        config = _capture_main_config(
+            ["--repos", "Repo,Other", "--dry-run", "--loops", "1", "--agent", "claude"],
+            monkeypatch,
+        )
+
+    assert config.projects_dir == projects_dir  # type: ignore[attr-defined]
+    assert config.repo_roots == {"Repo": checkout}  # type: ignore[attr-defined]
+    assert "Other" not in config.repo_roots  # type: ignore[attr-defined]
+
+
+def test_main_does_not_override_explicit_projects_dir_with_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An explicit ``--projects-dir`` remains authoritative for every repo."""
+    checkout = tmp_path / "isolated" / "automation-worktree"
+    projects_dir = tmp_path / "configured-projects"
+
+    monkeypatch.setattr(loop_runner, "_detect_cwd_repo", lambda: ("Org", "Repo"))
+    monkeypatch.setattr(loop_runner, "get_repo_root", lambda: checkout)
+    config = _capture_main_config(
+        [
+            "--repos",
+            "Repo,Other",
+            "--projects-dir",
+            str(projects_dir),
+            "--dry-run",
+            "--loops",
+            "1",
+            "--agent",
+            "claude",
+        ],
+        monkeypatch,
+    )
+
+    assert config.projects_dir == projects_dir  # type: ignore[attr-defined]
+    assert config.repo_roots == {}  # type: ignore[attr-defined]
+
+
+def test_main_does_not_override_valid_projects_root_with_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A valid ``PROJECTS_ROOT`` remains authoritative for every repo."""
+    checkout = tmp_path / "isolated" / "automation-worktree"
+    projects_dir = tmp_path / "configured-projects"
+    projects_dir.mkdir()
+
+    monkeypatch.setenv("PROJECTS_ROOT", str(projects_dir))
+    monkeypatch.setattr(loop_runner, "_detect_cwd_repo", lambda: ("Org", "Repo"))
+    monkeypatch.setattr(loop_runner, "get_repo_root", lambda: checkout)
+    config = _capture_main_config(
+        ["--repos", "Repo,Other", "--dry-run", "--loops", "1", "--agent", "claude"],
+        monkeypatch,
+    )
+
+    assert config.projects_dir == projects_dir  # type: ignore[attr-defined]
+    assert config.repo_roots == {}  # type: ignore[attr-defined]
+
+
+def test_main_does_not_override_projects_root_for_automation_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Automation worktrees continue using their base checkout through projects_dir."""
+    projects_dir = tmp_path / "projects"
+    base_checkout = projects_dir / "Repo"
+    automation_worktree = base_checkout / "build" / ".worktrees" / "issue-99"
+
+    monkeypatch.setattr(loop_runner, "_detect_cwd_repo", lambda: ("Org", "Repo"))
+    monkeypatch.setattr(loop_runner, "get_repo_root", lambda: automation_worktree)
+    with patch.object(loop_runner, "resolve_projects_dir", return_value=projects_dir):
+        config = _capture_main_config(
+            ["--repos", "Repo,Other", "--dry-run", "--loops", "1", "--agent", "claude"],
+            monkeypatch,
+        )
+
+    assert config.projects_dir == projects_dir  # type: ignore[attr-defined]
+    assert config.repo_roots == {}  # type: ignore[attr-defined]
+
+
+def test_main_uses_noncanonical_automation_worktree_base_as_repo_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An internal worktree under a renamed checkout must not become its own base.
+
+    ``resolve_projects_dir`` correctly unwraps an automation issue worktree
+    to the parent of its base checkout.  When that base checkout itself has a
+    noncanonical name, the loop must still use the base checkout, rather than
+    creating a nested ``build/.worktrees`` tree under the issue checkout.
+    """
+    projects_dir = tmp_path / "projects"
+    base_checkout = projects_dir / "renamed-base-checkout"
+    automation_worktree = base_checkout / "build" / ".worktrees" / "issue-99"
+
+    monkeypatch.setattr(loop_runner, "_detect_cwd_repo", lambda: ("Org", "Repo"))
+    monkeypatch.setattr(loop_runner, "get_repo_root", lambda: automation_worktree)
+    with patch.object(loop_runner, "resolve_projects_dir", return_value=projects_dir):
+        config = _capture_main_config(
+            ["--repos", "Repo,Other", "--dry-run", "--loops", "1", "--agent", "claude"],
+            monkeypatch,
+        )
+
+    assert config.projects_dir == projects_dir  # type: ignore[attr-defined]
+    assert config.repo_roots == {"Repo": base_checkout}  # type: ignore[attr-defined]
+    assert "Other" not in config.repo_roots  # type: ignore[attr-defined]
 
 
 def test_main_resolves_agent_before_building_config(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -143,6 +143,38 @@ class TestWiring:
 
         assert run_pipeline(config) == 7
 
+    def test_explicit_repo_root_reaches_context_and_scoped_accessor(self, tmp_path: Path) -> None:
+        """A noncanonical checkout stays authoritative throughout coordinator wiring."""
+        checkout = tmp_path / "isolated" / "target-repo-worktree"
+        scoped_github = FakeStageGitHub()
+        created: list[tuple[str, Path]] = []
+
+        def github_factory(repo: str, repo_root: Path) -> FakeStageGitHub:
+            created.append((repo, repo_root))
+            return scoped_github
+
+        config = PipelineConfig(
+            org="org",
+            repos=["target-repo"],
+            projects_dir=tmp_path / "projects",
+            repo_roots={"target-repo": checkout},
+        )
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(),
+            github_factory=github_factory,
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+
+        ctx = coordinator._ctx_for_repo("target-repo")
+
+        assert created == [("target-repo", checkout)]
+        assert ctx.github is scoped_github
+        assert ctx.paths.repo_root == checkout
+        assert ctx.paths.worktree == checkout
+        assert ctx.paths.projects_dir == tmp_path / "projects"
+
     def test_budget_lookup_known_and_default(self) -> None:
         assert _budget_lookup("clone") == 2
         assert _budget_lookup("nonexistent") == 1
