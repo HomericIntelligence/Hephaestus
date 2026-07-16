@@ -95,6 +95,31 @@ def test_head_change_fails_closed_when_auto_merge_cannot_be_disarmed(
     assert result == StageOutcome(Disposition.FINISH_FAIL, "auto_merge_disable_failed")
 
 
+def test_label_clear_failure_still_attempts_auto_merge_containment(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A failed label mutation must not skip revoking a possible remote arm."""
+
+    class _RemoveLabelFailsGitHub(_HeadChangedGitHub):
+        def remove_labels(self, issue_number: int, labels: list[str]) -> None:
+            del issue_number, labels
+            raise RuntimeError("labels API unavailable")
+
+    strict_review = importlib.import_module("hephaestus.automation.pipeline.stages.strict_review")
+    item = make_work_item(
+        stage=StageName.STRICT_REVIEW,
+        pr=601,
+        state="HEAD_CHECK",
+        payload={"strict_review_head": _OLD_HEAD},
+    )
+    github = _RemoveLabelFailsGitHub()
+
+    result = strict_review.StrictReviewStage().on_enter(item, make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.FINISH_FAIL, "auto_merge_disable_failed")
+    assert ("defer_auto_merge", (601,)) in github.mutation_log
+
+
 def test_review_job_receives_fresh_current_head_evidence(
     make_ctx: Any, make_work_item: Any
 ) -> None:
