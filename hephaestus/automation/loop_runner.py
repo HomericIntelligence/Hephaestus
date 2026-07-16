@@ -59,6 +59,7 @@ from hephaestus.cli.utils import (
 )
 from hephaestus.config.paths import DEFAULT_PROJECTS_DIR, resolve_projects_dir
 from hephaestus.github.client import gh_call
+from hephaestus.utils.helpers import get_repo_root
 
 LOG = logging.getLogger(__name__)
 
@@ -211,6 +212,10 @@ class LoopConfig:
     # hardcoded fallback. Always set by main() before dispatch.
     org: str = ""
     projects_dir: Path = DEFAULT_PROJECTS_DIR
+    # The loop can be launched from a checkout whose directory name does not
+    # match its remote repository.  Keep that exceptional path explicit while
+    # retaining ``projects_dir / repo`` as the normal multi-repo convention.
+    repo_roots: dict[str, Path] = field(default_factory=dict)
     # Per-agent-job timeout in seconds. Defaults to an env-overridable bound
     # (``HEPH_PHASE_TIMEOUT``); ``--phase-timeout`` overrides it and a
     # non-positive value disables the bound (``None``).
@@ -633,9 +638,55 @@ def _build_pipeline_config(
         circuit_breaker_snapshot_provider=circuit_breaker_snapshot_provider,
         event_log_path=_pipeline_event_log_path(cfg.projects_dir, repos),
         projects_dir=cfg.projects_dir,
+        repo_roots=cfg.repo_roots,
         json_out=args.json,
         scope=_pipeline_scope_for_phases(cfg.phases),
     )
+
+
+def _current_checkout_repo_roots(
+    args: argparse.Namespace, org: str, repos: list[str], projects_dir: Path
+) -> dict[str, Path]:
+    """Return an explicit root only for an eligible noncanonical cwd checkout.
+
+    A user-supplied projects root (either the CLI flag or a valid
+    ``PROJECTS_ROOT``) is an authoritative request to use conventional
+    ``projects_dir / repo`` locations.  The automatic exception exists solely
+    for running the loop from a differently named checkout, such as a swarm
+    worktree.  Automation's own ``build/.worktrees/issue-N`` checkouts are
+    already represented by the conventional base checkout and remain so.
+    """
+    if args.projects_dir is not None:
+        return {}
+
+    configured_root = os.environ.get("PROJECTS_ROOT")
+    if configured_root and Path(configured_root).is_dir():
+        return {}
+
+    detected_org, detected_repo = _detect_cwd_repo()
+    if not detected_repo or not detected_org or detected_org.casefold() != org.casefold():
+        return {}
+
+    repo = next((name for name in repos if name.casefold() == detected_repo.casefold()), None)
+    if repo is None:
+        return {}
+
+    checkout = get_repo_root()
+    conventional_root = projects_dir / repo
+    if checkout == conventional_root:
+        return {}
+
+    # An automation issue worktree always has the structural form
+    # ``<base checkout>/build/.worktrees/<issue>``.  Do not assume that the
+    # base checkout has the conventional ``projects_dir / repo`` name: swarm
+    # and manually renamed checkouts are valid.  In that noncanonical case the
+    # base checkout itself is the explicit root; using the issue worktree here
+    # would make a later implementation create nested worktrees beneath it.
+    if checkout.parent.name == ".worktrees" and checkout.parent.parent.name == "build":
+        base_checkout = checkout.parent.parent.parent
+        return {} if base_checkout == conventional_root else {repo: base_checkout}
+
+    return {repo: checkout}
 
 
 def _error_exit(args: argparse.Namespace, message: str, json_message: str | None = None) -> int:
@@ -699,6 +750,7 @@ def main(argv: list[str] | None = None) -> int:
     if err:
         return _error_exit(args, err)
 
+    projects_dir = resolve_projects_dir(args.projects_dir, prefer_cwd_parent=True)
     cfg = LoopConfig(
         loops=args.loops,
         max_workers=args.max_workers,
@@ -721,7 +773,8 @@ def main(argv: list[str] | None = None) -> int:
         gh_global_rate=args.gh_global_rate,
         gh_global_burst=args.gh_global_burst,
         org=org,
-        projects_dir=resolve_projects_dir(args.projects_dir, prefer_cwd_parent=True),
+        projects_dir=projects_dir,
+        repo_roots=_current_checkout_repo_roots(args, org, repos, projects_dir),
         # A non-positive --phase-timeout explicitly disables the bound; any
         # positive value (including the env-overridable default) applies it.
         phase_timeout_s=(
