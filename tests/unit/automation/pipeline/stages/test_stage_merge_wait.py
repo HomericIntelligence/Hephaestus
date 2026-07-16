@@ -6,7 +6,11 @@ from typing import Any
 
 from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageName
-from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
+from hephaestus.automation.pipeline.stages import (
+    Continue,
+    JobRequest,
+    StageOutcome,
+)
 from hephaestus.automation.pipeline.stages.merge_wait import (
     ARM,
     ENTER,
@@ -28,13 +32,20 @@ class _StrictGoArtifact:
     """Minimal trusted-proof value used at the merge-wait boundary."""
 
     is_go = True
+    head_sha = "abc123"
 
 
 class _ProofAwareGitHub(FakeStageGitHub):
     """Fake with scripted head reads and the #2055 proof accessor."""
 
-    def __init__(self, *, states: list[dict[str, Any]], proof: object | None) -> None:
-        super().__init__(pr_state=states[0])
+    def __init__(
+        self,
+        *,
+        states: list[dict[str, Any]],
+        proof: object | None,
+        pr_impl_state: tuple[bool, bool] = (True, False),
+    ) -> None:
+        super().__init__(pr_state=states[0], pr_impl_state=pr_impl_state)
         self._states = list(states)
         self._proof = proof
 
@@ -52,8 +63,8 @@ class _ProofAwareGitHub(FakeStageGitHub):
 class _MergeDuringArmGitHub(_ProofAwareGitHub):
     """The auto-merge request loses a race to an already-merged PR."""
 
-    def arm_auto_merge(self, pr_number: int) -> None:
-        self._log("arm_auto_merge", pr_number)
+    def arm_auto_merge(self, pr_number: int, expected_head_sha: str) -> None:
+        self._log("arm_auto_merge", pr_number, expected_head_sha)
         raise RuntimeError("PR was merged before auto-merge could be armed")
 
 
@@ -104,7 +115,7 @@ def _poll_item(make_work_item: Any, **kwargs: Any) -> Any:
 
 
 class TestMergeWaitContainment:
-    """Every open PR state is terminalized after verified deferral."""
+    """Every unsafe open PR is contained before its strict-review recovery."""
 
     def test_arm_disables_and_stops_until_the_strict_gate_exists(
         self, make_ctx: Any, make_work_item: Any
@@ -115,7 +126,7 @@ class TestMergeWaitContainment:
         item = _item(make_work_item, state=ARM)
 
         assert stage.step(item, ctx) == StageOutcome(
-            Disposition.FINISH_FAIL, "strict_gate_unavailable"
+            Disposition.FAIL_BACK, "strict_gate_unavailable"
         )
         assert github.mutation_log == [("defer_auto_merge", (601,))]
         assert item.armed is False
@@ -131,7 +142,7 @@ class TestMergeWaitContainment:
         item.payload.pop("merge_wait_started_at")
 
         assert stage.step(item, ctx) == StageOutcome(
-            Disposition.FINISH_FAIL, "strict_gate_unavailable"
+            Disposition.FAIL_BACK, "strict_gate_unavailable"
         )
         assert github.mutation_log == [("defer_auto_merge", (601,))]
         assert item.armed is False
@@ -175,7 +186,7 @@ class TestMergeWaitContainment:
         item = _item(make_work_item, state=ARM)
 
         assert stage.step(item, ctx) == StageOutcome(
-            Disposition.FINISH_FAIL, "strict_gate_unavailable"
+            Disposition.FAIL_BACK, "strict_gate_unavailable"
         )
         assert github.mutation_log == [("defer_auto_merge", (601,))]
 
@@ -196,13 +207,30 @@ class TestMergeWaitContainment:
         item = _item(make_work_item, state=ARM)
 
         assert stage.step(item, ctx) == StageOutcome(
-            Disposition.FINISH_FAIL, "strict_gate_unavailable"
+            Disposition.FAIL_BACK, "strict_gate_unavailable"
         )
         assert github.mutation_log == [
             ("strict_review_artifact", (601, "abc123")),
             ("defer_auto_merge", (601,)),
         ]
         assert item.armed is False
+
+    def test_arm_requires_the_current_implementation_go_label(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A valid artifact alone cannot arm an unlabelled current PR head."""
+        stage = MergeWaitStage()
+        github = _ProofAwareGitHub(
+            states=[OPEN_STATE],
+            proof=_StrictGoArtifact(),
+            pr_impl_state=(False, False),
+        )
+        ctx = make_ctx(github=github)
+
+        assert stage.step(_item(make_work_item, state=ARM), ctx) == StageOutcome(
+            Disposition.FAIL_BACK, "strict_gate_unavailable"
+        )
+        assert github.mutation_log == [("defer_auto_merge", (601,))]
 
     def test_arm_failure_after_remote_merge_uses_the_deduped_learn_path(
         self, make_ctx: Any, make_work_item: Any
@@ -223,7 +251,7 @@ class TestMergeWaitContainment:
         assert item.payload["merge_wait_started_at"] == 1001.0
         assert github.mutation_log == [
             ("strict_review_artifact", (601, "abc123")),
-            ("arm_auto_merge", (601,)),
+            ("arm_auto_merge", (601, "abc123")),
         ]
 
     def test_arm_confirmation_failure_disables_auto_merge_again(
@@ -241,10 +269,80 @@ class TestMergeWaitContainment:
         ctx = make_ctx(github=github)
         item = _item(make_work_item, state=ARM)
 
-        assert stage.step(item, ctx) == StageOutcome(Disposition.FINISH_FAIL, "arm_confirm_failed")
+        assert stage.step(item, ctx) == StageOutcome(Disposition.FAIL_BACK, "arm_confirm_failed")
         assert github.mutation_log == [
             ("strict_review_artifact", (601, "abc123")),
-            ("arm_auto_merge", (601,)),
+            ("arm_auto_merge", (601, "abc123")),
+            ("strict_review_artifact", (601, "abc123")),
+            ("defer_auto_merge", (601,)),
+        ]
+        assert item.armed is False
+
+    def test_post_arm_head_drift_revokes_the_arm(self, make_ctx: Any, make_work_item: Any) -> None:
+        """ARM confirms the same reviewed head after GitHub accepts the request."""
+        stage = MergeWaitStage()
+        github = _ProofAwareGitHub(
+            states=[
+                OPEN_STATE,
+                {
+                    "state": "OPEN",
+                    "headRefOid": "def456",
+                    "autoMergeRequest": {"enabledAt": "now"},
+                },
+            ],
+            proof=_StrictGoArtifact(),
+        )
+        ctx = make_ctx(github=github)
+        item = _item(make_work_item, state=ARM)
+
+        assert stage.step(item, ctx) == StageOutcome(Disposition.FAIL_BACK, "arm_confirm_failed")
+        assert github.mutation_log == [
+            ("strict_review_artifact", (601, "abc123")),
+            ("arm_auto_merge", (601, "abc123")),
+            ("strict_review_artifact", (601, "def456")),
+            ("defer_auto_merge", (601,)),
+        ]
+        assert item.armed is False
+
+    def test_poll_requires_current_label_and_exact_head_proof(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A persisted arm is revoked when the live head no longer has its proof."""
+        stage = MergeWaitStage()
+        github = _ProofAwareGitHub(
+            states=[{"state": "OPEN", "headRefOid": "def456"}],
+            proof=_StrictGoArtifact(),
+        )
+        ctx = make_ctx(github=github)
+        item = _poll_item(make_work_item)
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FAIL_BACK, "strict_gate_unavailable"
+        )
+        assert github.mutation_log == [
+            ("strict_review_artifact", (601, "def456")),
+            ("defer_auto_merge", (601,)),
+        ]
+        assert item.armed is False
+
+    def test_poll_without_current_go_label_revokes_the_arm(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An armed PR must retain state:implementation-go until it merges."""
+        stage = MergeWaitStage()
+        github = _ProofAwareGitHub(
+            states=[OPEN_STATE],
+            proof=_StrictGoArtifact(),
+            pr_impl_state=(False, False),
+        )
+        ctx = make_ctx(github=github)
+        item = _poll_item(make_work_item)
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FAIL_BACK, "strict_gate_unavailable"
+        )
+        assert github.mutation_log == [
+            ("strict_review_artifact", (601, "abc123")),
             ("defer_auto_merge", (601,)),
         ]
         assert item.armed is False

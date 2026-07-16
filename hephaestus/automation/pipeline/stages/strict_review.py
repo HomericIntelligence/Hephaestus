@@ -46,9 +46,10 @@ head-bound artifact this stage publishes before it ever arms.
 from __future__ import annotations
 
 import logging
+import re
 
 from hephaestus.automation.agent_config import pr_reviewer_claude_timeout, reviewer_model
-from hephaestus.automation.claude_invoke import parse_review_verdict
+from hephaestus.automation.claude_invoke import ReviewVerdict
 from hephaestus.automation.prompts.strict_review_gate import build_strict_review_prompt
 from hephaestus.automation.session_naming import strict_review_agent
 from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_GO
@@ -83,6 +84,27 @@ FINISH = SR_FINISH
 #: HTML-comment marker for the NOGO remediation feedback comment.
 STRICT_REVIEW_NOGO_MARKER = "<!-- hephaestus-strict-review-nogo -->"
 
+# Unlike the general review-loop parser, the merge-authorizing strict gate
+# accepts only the final, exact output contract.  A diff or prior review may
+# legitimately contain a quoted ``Verdict: GO`` line; taking the *first* such
+# line would let untrusted evidence choose the gate result.
+_STRICT_FINAL_VERDICT_RE = re.compile(r"(?m)^Grade: ([A-F][+-]?)\nVerdict: (GO|NOGO)[ \t]*\n?\Z")
+
+
+def parse_strict_review_verdict(text: str) -> ReviewVerdict:
+    """Parse only the final exact strict-review verdict contract.
+
+    The generic review parser intentionally supports legacy variants and
+    therefore finds the first matching line.  This gate has a stronger
+    authorization contract: the final two lines must be the exact grade and
+    GO/NOGO verdict requested by its prompt.  Anything else is ambiguous and
+    is handled as a fail-closed NOGO by :meth:`StrictReviewStage._eval`.
+    """
+    match = _STRICT_FINAL_VERDICT_RE.search(text)
+    if match is None:
+        return ReviewVerdict(grade=None, verdict="AMBIGUOUS", raw=text)
+    return ReviewVerdict(grade=match.group(1), verdict=match.group(2), raw=text)
+
 
 def _issue_number(item: WorkItem) -> int:
     """Return a stable issue id; orphan PRs use zero for review-session scope."""
@@ -107,40 +129,47 @@ class StrictReviewStage(Stage):
         if not item.state:
             item.state = ENTER
         if item.pr is not None:
-            return self._revoke_on_head_change(item, ctx)
+            return self._contain_and_revoke_on_entry(item, ctx)
         return None
 
-    def _revoke_on_head_change(self, item: WorkItem, ctx: StageContext) -> StageOutcome | None:
-        """Clear stale artifact/session state when the PR head has moved.
+    def _contain_and_revoke_on_entry(
+        self, item: WorkItem, ctx: StageContext
+    ) -> StageOutcome | None:
+        """Disarm every strict-review ingress and revoke stale head state.
 
-        A captured head from a prior pass (``payload["strict_review_head"]``)
-        that no longer matches the PR's live head means neither the prior
-        session nor its artifact prove anything about the current commit:
-        durably clear the GO label, verify auto-merge disabled, and restart
-        at ``ENTER`` so HEAD_CHECK captures the new head fresh.
+        A strict-review job can take minutes.  Before submitting one, revoke
+        any earlier eligibility and verify GitHub has actually disarmed
+        auto-merge.  This covers direct/reseeded ingress as well as a saved
+        head that has moved.  Otherwise a legacy or parallel arm could merge
+        while the independent reviewer is still running.
         """
-        prior_head = item.payload.get("strict_review_head")
-        if not prior_head:
-            return None
-        pr_state = ctx.github.gh_pr_state(item.pr)  # type: ignore[arg-type]
+        pr_number = item.pr
+        if pr_number is None:  # guarded by on_enter; narrowing
+            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        pr_state = ctx.github.gh_pr_state(pr_number)
+        terminal = _terminal_pr_outcome(pr_state, pr_number)
+        if terminal is not None:
+            return terminal
         live_head = str((pr_state or {}).get("headRefOid") or "")
-        if not live_head or live_head == prior_head:
-            return None
-        logger.info(
-            "strict_review:%s: PR #%d head changed (%s -> %s); revoking prior pass",
-            item.issue,
-            item.pr,
-            prior_head,
-            live_head,
-        )
-        item.payload.pop("strict_review_head", None)
-        item.payload.pop("strict_review_attempt", None)
-        item.payload.pop("strict_review_verdict", None)
-        item.payload.pop("strict_review_text", None)
-        item.payload.pop("strict_review_failed", None)
-        if not self._clear_go_and_verify_disabled(item.pr, ctx):  # type: ignore[arg-type]
+        if not live_head:
+            return StageOutcome(Disposition.FINISH_FAIL, "no_head_sha")
+        prior_head = item.payload.get("strict_review_head")
+        if prior_head and live_head != prior_head:
+            logger.info(
+                "strict_review:%s: PR #%d head changed (%s -> %s); revoking prior pass",
+                item.issue,
+                pr_number,
+                prior_head,
+                live_head,
+            )
+            item.payload.pop("strict_review_head", None)
+            item.payload.pop("strict_review_attempt", None)
+            item.payload.pop("strict_review_verdict", None)
+            item.payload.pop("strict_review_text", None)
+            item.payload.pop("strict_review_failed", None)
+            item.state = ENTER
+        if not self._clear_go_and_verify_disabled(pr_number, ctx):
             return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_disable_failed")
-        item.state = ENTER
         return None
 
     def _clear_go_and_verify_disabled(self, pr_number: int, ctx: StageContext) -> bool:
@@ -229,6 +258,20 @@ class StrictReviewStage(Stage):
         if not head_sha:
             # Guarded by HEAD_CHECK; restart-safety fallback.
             return Continue(next_state=HEAD_CHECK)
+        evidence = ctx.github.strict_review_evidence(item.pr, head_sha)  # type: ignore[arg-type]
+        if evidence is None or evidence.head_sha.lower() != head_sha.lower():
+            logger.warning(
+                "strict_review:%s: current-head evidence unavailable for PR #%d; invalidating",
+                item.issue,
+                item.pr,
+            )
+            return self._handle_nogo(
+                item,
+                ctx,
+                head_sha,
+                "Strict-review evidence could not be fetched and authenticated for this head.\n"
+                "Grade: F\nVerdict: NOGO",
+            )
         attempt = item.payload.get("strict_review_attempt", 0)
         item.payload["strict_review_attempt"] = attempt + 1
         item.payload.pop("strict_review_verdict", None)
@@ -257,36 +300,47 @@ class StrictReviewStage(Stage):
                 "pr_number": item.pr,
                 "issue_number": item.issue,
                 "head_sha": head_sha,
-                "diff": item.payload.get("pr_diff", ""),
-                "ci_status": item.payload.get("ci_status", ""),
-                "prior_pr_review_verdict": item.payload.get("prior_pr_review_verdict", ""),
+                "diff": evidence.diff,
+                "ci_status": evidence.ci_status,
+                "prior_pr_review_verdict": evidence.prior_pr_review_verdict,
             },
-            parse=parse_review_verdict,
+            parse=parse_strict_review_verdict,
             descr="strict_review",
         )
         return JobRequest(job, on_done_state=EVAL)
 
     def _eval(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """EVAL [M]: GO publishes artifact + label (never arms); NOGO remediates."""
+        head_sha = str(item.payload.get("strict_review_head") or "")
         if item.payload.pop("strict_review_failed", None):
             logger.warning(
-                "strict_review:%s: review job failed; failing back to implementation",
+                "strict_review:%s: review job failed; invalidating eligibility",
                 item.issue,
             )
-            return StageOutcome(Disposition.FAIL_BACK, "nogo")
+            return self._handle_nogo(
+                item,
+                ctx,
+                head_sha,
+                "Strict-review infrastructure failed.\nGrade: F\nVerdict: NOGO",
+            )
         verdict = item.payload.get("strict_review_verdict")
         verdict_text = str(item.payload.get("strict_review_text") or "")
-        head_sha = str(item.payload.get("strict_review_head") or "")
         if verdict not in ("GO", "NOGO"):
             logger.warning(
-                "strict_review:%s: missing/ambiguous verdict (%r); failing back",
+                "strict_review:%s: missing/ambiguous verdict (%r); invalidating eligibility",
                 item.issue,
                 verdict,
             )
-            return StageOutcome(Disposition.FAIL_BACK, "nogo")
+            return self._handle_nogo(
+                item,
+                ctx,
+                head_sha,
+                "Strict-review output did not satisfy the final verdict contract.\n"
+                "Grade: F\nVerdict: NOGO",
+            )
         if verdict == "GO":
             return self._handle_go(item, ctx, head_sha, verdict_text)
-        return self._handle_nogo(item, ctx, verdict_text)
+        return self._handle_nogo(item, ctx, head_sha, verdict_text)
 
     def _handle_go(
         self, item: WorkItem, ctx: StageContext, head_sha: str, verdict_text: str
@@ -295,6 +349,22 @@ class StrictReviewStage(Stage):
         pr_number = item.pr
         if pr_number is None:  # guarded by step(); narrowing
             return StageOutcome(Disposition.FAIL_BACK, "nogo")
+        pr_state = ctx.github.gh_pr_state(pr_number)
+        terminal = _terminal_pr_outcome(pr_state, pr_number)
+        if terminal is not None:
+            return terminal
+        live_head = str((pr_state or {}).get("headRefOid") or "")
+        if not head_sha or live_head != head_sha:
+            logger.warning(
+                "strict_review:%s: head changed before GO publication (%s -> %s)",
+                item.issue,
+                head_sha[:12],
+                live_head[:12],
+            )
+            outcome = self._contain_and_revoke_on_entry(item, ctx)
+            if outcome is not None:
+                return outcome
+            return Continue(next_state=HEAD_CHECK)
         logger.info(
             "strict_review:%s: GO for PR #%d at head %s; publishing artifact",
             item.issue,
@@ -302,7 +372,7 @@ class StrictReviewStage(Stage):
             head_sha[:12],
         )
         try:
-            ctx.github.publish_strict_review_artifact(pr_number, head_sha, verdict_text)
+            ctx.github.publish_strict_review_artifact(pr_number, head_sha, verdict_text, is_go=True)
         except Exception as e:
             logger.warning(
                 "strict_review: failed to publish GO artifact on PR #%d (non-fatal, "
@@ -310,18 +380,43 @@ class StrictReviewStage(Stage):
                 pr_number,
                 e,
             )
-            return Continue(next_state=SR_FINISH)
+            return StageOutcome(Disposition.FINISH_FAIL, "strict_go_artifact_failed")
+        published = ctx.github.strict_review_artifact(pr_number, head_sha)
+        if (
+            published is None
+            or not published.is_go
+            or published.head_sha.lower() != head_sha.lower()
+        ):
+            logger.error(
+                "strict_review: PR #%d GO artifact could not be authenticated on read-back",
+                pr_number,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "strict_go_artifact_unverified")
+        # A push can race the durable comment write.  Never attach a global
+        # implementation-GO label to a newer, unreviewed head.
+        after_publish = ctx.github.gh_pr_state(pr_number)
+        after_terminal = _terminal_pr_outcome(after_publish, pr_number)
+        if after_terminal is not None:
+            return after_terminal
+        if str((after_publish or {}).get("headRefOid") or "") != head_sha:
+            outcome = self._contain_and_revoke_on_entry(item, ctx)
+            if outcome is not None:
+                return outcome
+            return Continue(next_state=HEAD_CHECK)
         try:
             ctx.github.mark_pr_implementation_go(pr_number)
         except Exception as e:
             logger.warning(
-                "strict_review: failed to mark PR #%d implementation-go (non-fatal): %s",
+                "strict_review: failed to mark PR #%d implementation-go: %s",
                 pr_number,
                 e,
             )
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_label_failed")
         return Continue(next_state=SR_FINISH)
 
-    def _handle_nogo(self, item: WorkItem, ctx: StageContext, verdict_text: str) -> StepResult:
+    def _handle_nogo(
+        self, item: WorkItem, ctx: StageContext, head_sha: str, verdict_text: str
+    ) -> StepResult:
         """NOGO: disable+verify auto-merge, post fenced remediation, route to implementation."""
         pr_number = item.pr
         if pr_number is None:  # guarded by step(); narrowing
@@ -333,6 +428,19 @@ class StrictReviewStage(Stage):
         )
         if not self._clear_go_and_verify_disabled(pr_number, ctx):
             return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_disable_failed")
+        try:
+            # An authenticated current-head NOGO shadows any old GO proof.
+            # This must succeed before a same-head remediation can continue.
+            ctx.github.publish_strict_review_artifact(
+                pr_number, head_sha, verdict_text, is_go=False
+            )
+        except Exception as e:
+            logger.error(
+                "strict_review: failed to publish NOGO invalidation on PR #%d: %s",
+                pr_number,
+                e,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "strict_nogo_artifact_failed")
         self._post_nogo_remediation(pr_number, ctx, verdict_text)
         try:
             ctx.github.mark_pr_implementation_no_go(pr_number)
@@ -342,6 +450,12 @@ class StrictReviewStage(Stage):
                 pr_number,
                 e,
             )
+        if item.issue is None:
+            # A PR-only/orphan item cannot safely enter the issue-bound
+            # implementation stage.  It is contained and left for a human.
+            return StageOutcome(Disposition.FINISH_FAIL, "strict_review_nogo_orphan")
+        item.payload["strict_review_feedback"] = verdict_text
+        item.payload.pop("existing_pr_impl_go", None)
         return StageOutcome(Disposition.FAIL_BACK, "nogo")
 
     @staticmethod

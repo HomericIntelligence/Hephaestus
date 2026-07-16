@@ -153,6 +153,11 @@ ROUTES: dict[StageName, Route] = {
         next=StageName.FINISHED,
         fail_routes={
             "closed": StageName.FINISHED,
+            # A contained proof/head failure needs a fresh independent
+            # review, not terminal abandonment.  Containment failures such
+            # as inability to disarm or persist the arm remain terminal.
+            "strict_gate_unavailable": StageName.STRICT_REVIEW,
+            "arm_confirm_failed": StageName.STRICT_REVIEW,
             "*": StageName.FINISHED,
         },
         budgets={},

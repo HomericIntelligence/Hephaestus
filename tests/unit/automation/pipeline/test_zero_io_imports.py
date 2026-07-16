@@ -74,12 +74,10 @@ _CAPABILITY_EXEMPT: dict[str, dict[str, frozenset[str] | None]] = {
     # verdict in-worker (#1815), so the stage attaches parse_review_verdict
     # as AgentJob.parse. No other claude_invoke symbol is permitted.
     "pr_review.py": {"hephaestus.automation.claude_invoke": frozenset({"parse_review_verdict"})},
-    # strict_review.py is the independent read-only gate. Like plan_review
-    # and pr_review, it may attach only the pure verdict parser to AgentJob;
-    # importing invocation helpers would violate the stage's zero-I/O boundary.
-    "strict_review.py": {
-        "hephaestus.automation.claude_invoke": frozenset({"parse_review_verdict"})
-    },
+    # strict_review.py owns a stricter final-verdict parser locally. It may
+    # import only the immutable verdict value needed to return AgentJob.parse
+    # results; invocation helpers and the general parser remain forbidden.
+    "strict_review.py": {"hephaestus.automation.claude_invoke": frozenset({"ReviewVerdict"})},
 }
 
 
@@ -260,10 +258,10 @@ def test_plan_review_exemption_is_symbol_scoped() -> None:
 
 
 def test_strict_review_exemption_is_symbol_scoped() -> None:
-    """The strict gate may import only the pure in-worker verdict parser."""
+    """The strict gate may import only its immutable verdict value."""
     synthetic_source = (
-        "from hephaestus.automation.claude_invoke import parse_review_verdict\n"
         "from hephaestus.automation.claude_invoke import ReviewVerdict\n"
+        "from hephaestus.automation.claude_invoke import parse_review_verdict\n"
         "from hephaestus.automation.claude_invoke import invoke_claude_with_session\n"
         "import hephaestus.automation.claude_invoke\n"
     )
@@ -273,7 +271,7 @@ def test_strict_review_exemption_is_symbol_scoped() -> None:
     )
 
     assert len(violations) == 3, violations
-    assert any("import ReviewVerdict" in violation for violation in violations)
+    assert any("import parse_review_verdict" in violation for violation in violations)
     assert any("import invoke_claude_with_session" in violation for violation in violations)
     assert any(
         violation.startswith("strict_review.py:4: import hephaestus.automation.claude_invoke")

@@ -23,6 +23,7 @@ from hephaestus.automation.pipeline.stages.ci import (
     PUSH_WAIT,
     REBASE_PUSH_WAIT,
     REBASE_WAIT,
+    STRICT_REVIEW_PROVEN_HEAD,
     CiStage,
     build_ci_fix_prompt,
     build_force_engagement_prompt,
@@ -47,7 +48,8 @@ FAILING_CHECKS = [
 PENDING_CHECKS = [
     {"status": "in_progress", "conclusion": None, "required": True},
 ]
-STRICT_GO = StrictReviewArtifact(is_go=True, head_sha="", verdict="GO")
+OPEN_STATE = {"state": "OPEN", "headRefOid": "abc123"}
+STRICT_GO = StrictReviewArtifact(is_go=True, head_sha="abc123", verdict="GO")
 # Legacy residual class: concluded, no "failure", but NOT all_green — the
 # tightened classifier routes it to the fix leg (never arms it).
 CANCELLED_CHECKS = [
@@ -60,6 +62,7 @@ class _FifoChecksGitHub(FakeStageGitHub):
 
     def __init__(self, checks_fifo: list[list[dict[str, Any]]], **kwargs: Any) -> None:
         kwargs.setdefault("strict_artifact", STRICT_GO)
+        kwargs.setdefault("pr_state", OPEN_STATE)
         super().__init__(**kwargs)
         self._checks_fifo = list(checks_fifo)
 
@@ -68,6 +71,27 @@ class _FifoChecksGitHub(FakeStageGitHub):
         if len(self._checks_fifo) > 1:
             return self._checks_fifo.pop(0)
         return list(self._checks_fifo[0])
+
+
+class _FifoStateGitHub(_FifoChecksGitHub):
+    """CI fake whose PR-state reads model a live head change."""
+
+    def __init__(
+        self,
+        checks_fifo: list[list[dict[str, Any]]],
+        *,
+        states: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> None:
+        kwargs.setdefault("pr_state", states[0])
+        super().__init__(checks_fifo, **kwargs)
+        self._states = list(states)
+
+    def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
+        del pr_number
+        if len(self._states) > 1:
+            return self._states.pop(0)
+        return self._states[0]
 
 
 def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int = 80) -> Any:
@@ -95,6 +119,7 @@ def _go_github(**kwargs: Any) -> FakeStageGitHub:
     """FakeStageGitHub for a PR that already carries implementation-go."""
     kwargs.setdefault("pr_impl_state", (True, False))
     kwargs.setdefault("strict_artifact", STRICT_GO)
+    kwargs.setdefault("pr_state", OPEN_STATE)
     return FakeStageGitHub(**kwargs)
 
 
@@ -104,6 +129,8 @@ def _item(make_work_item: Any, **kwargs: Any) -> Any:
     item = make_work_item(**kwargs)
     item.branch = item.branch or "1-auto-impl"
     item.worktree = "/tmp/wt/1"
+    if item.state == POLL:
+        item.payload.setdefault(STRICT_REVIEW_PROVEN_HEAD, "abc123")
     return item
 
 
@@ -192,13 +219,22 @@ class TestCiDiscover:
         assert result.next_state == REBASE_WAIT
         assert item.pr == 777
         assert item.branch == "real-head"
+        assert item.payload[STRICT_REVIEW_PROVEN_HEAD] == "abc123"
 
     def test_discovery_captures_pr_base_branch_from_baseref(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
         """A PR based on a non-main branch seeds payload["base_branch"] from baseRefName."""
         stage = CiStage()
-        ctx = make_ctx(github=_go_github(pr_state={"state": "OPEN", "baseRefName": "release/2.0"}))
+        ctx = make_ctx(
+            github=_go_github(
+                pr_state={
+                    "state": "OPEN",
+                    "headRefOid": "abc123",
+                    "baseRefName": "release/2.0",
+                }
+            )
+        )
         item = _item(make_work_item, state=DISCOVER)
 
         result = stage.step(item, ctx)
@@ -210,9 +246,9 @@ class TestCiDiscover:
     def test_discovery_defaults_base_branch_to_main_without_baseref(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """No gh_pr_state / missing baseRefName still defaults to "main" (unchanged)."""
+        """A PR without baseRefName still defaults to "main"."""
         stage = CiStage()
-        ctx = make_ctx(github=_go_github())  # pr_state defaults to None
+        ctx = make_ctx(github=_go_github(pr_state=OPEN_STATE))
         item = _item(make_work_item, state=DISCOVER)
 
         result = stage.step(item, ctx)
@@ -532,6 +568,36 @@ class TestCiPoll:
 
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.ADVANCE
+
+    def test_green_regresses_when_the_head_changed_since_discovery(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A green check cannot promote a head different from DISCOVER's proof."""
+        stage = CiStage()
+        github = _FifoStateGitHub(
+            [GREEN_CHECKS],
+            states=[OPEN_STATE, {"state": "OPEN", "headRefOid": "def456"}],
+            pr_impl_state=(True, False),
+        )
+        ctx = make_ctx(github=github)
+        ctx.config.enable_mechanical_rebase = False
+        item = _item(make_work_item, state="")
+
+        assert _drive(stage, item, ctx, FakeWorkerPool()) == StageOutcome(
+            Disposition.FAIL_BACK, "not_strict_review_go"
+        )
+        assert item.payload[STRICT_REVIEW_PROVEN_HEAD] == "abc123"
+        assert github.strict_artifact_calls == [(501, "abc123"), (501, "def456")]
+
+    def test_green_requires_the_current_implementation_go_label(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """CI success cannot advance after the strict-review label was revoked."""
+        stage = CiStage()
+        ctx = make_ctx(github=_go_github(checks=GREEN_CHECKS, pr_impl_state=(False, False)))
+        item = _item(make_work_item, state=POLL)
+
+        assert stage.step(item, ctx) == StageOutcome(Disposition.FAIL_BACK, "not_strict_review_go")
 
     def test_failing_is_never_treated_as_green(self, make_ctx: Any, make_work_item: Any) -> None:
         """FAILING enters the fix leg — mutation probe (a): FAILING != GREEN."""
