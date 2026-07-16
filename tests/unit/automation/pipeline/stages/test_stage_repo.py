@@ -2,7 +2,7 @@
 
 Doc section "1. repo" is the binding contract: ENTER -> CLONE_WAIT ->
 DISCOVER -> SEEDED; budget clone=2; epics tagged ``state:skip`` [durable]
-BEFORE exclusion; ``--drive-green-all`` routes orphan PRs to ci; the repo
+BEFORE exclusion; ``--drive-green-all`` routes orphan PRs to strict_review; the repo
 item is terminal (FINISH_PASS ``seeded:N``).
 """
 
@@ -251,7 +251,7 @@ class TestDiscover:
 
         assert isinstance(result, Continue)
         assert github.issue_reads == [8]
-        assert repo_item.payload["products"][0]["stage"] is StageName.CI
+        assert repo_item.payload["products"][0]["stage"] is StageName.STRICT_REVIEW
         assert repo_item.payload["products"][0]["pr"] == 44
 
     def test_discover_failure_finishes_fail(
@@ -382,14 +382,14 @@ class TestDiscover:
         assert "state:skip" in gh.labels[5]
         assert [p["number"] for p in reseed_item.payload["products"]] == [5, 6]
 
-    def test_drive_green_all_routes_orphan_prs_to_ci(
+    def test_drive_green_all_routes_orphan_prs_to_strict_review(
         self,
         repo_item: WorkItem,
         tmp_path: Path,
         make_ctx: Callable[..., Any],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Open PRs with no tracked issue become ci-stage PR products."""
+        """Open PRs with no tracked issue enter the strict-review gate."""
         config = type(
             "Cfg",
             (),
@@ -416,7 +416,7 @@ class TestDiscover:
         RepoStage().step(repo_item, ctx)
 
         orphan = [p for p in repo_item.payload["products"] if p.get("kind") == "pr"]
-        assert [(p["number"], p["stage"]) for p in orphan] == [(66, StageName.CI)]
+        assert [(p["number"], p["stage"]) for p in orphan] == [(66, StageName.STRICT_REVIEW)]
 
     @pytest.mark.parametrize(
         ("include_bot_prs", "include_all_authors", "expected"),
