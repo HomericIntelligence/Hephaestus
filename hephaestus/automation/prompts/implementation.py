@@ -109,13 +109,13 @@ After you return, the orchestrator will:
 2. Push the branch to origin.
 3. Create or reuse the pull request for this branch.
 4. Ensure the PR body contains the exact policy line `Closes #{issue_number}`.
-5. Keep auto-merge disabled pending the queue-owned strict-review gate. An
-   internal review GO records that strict review remains pending; it does not
-   add a state label or arm auto-merge.
+5. Do not enable auto-merge yourself. An internal review GO remains internal;
+   the queue's independent strict-review stage alone may publish a head-bound
+   proof and implementation-GO label.
 
 Missing `Closes #N` or signed-commit policy will be blocked by the required CI
-gate. Auto-merge stays disabled until human strict review authorizes a manual
-merge. This policy applies to every PR — no exceptions.
+gate. Only the queue's strict-review and merge-wait stages may authorize and
+arm automatic merge. This policy applies to every PR — no exceptions.
 """
 
 

@@ -278,11 +278,11 @@ class StageGitHub(Protocol):
         ...
 
     def defer_auto_merge(self, pr_number: int) -> None:
-        """Durably ensure auto-merge stays DISABLED until strict proof exists.
+        """Durably disable auto-merge whenever a stage must revoke eligibility.
 
-        The adapter must read back disabled state for an open PR. #2054 calls
-        this before every PR-stage ingress and transition; #2055 will retain
-        the check before its strict-gated arming protocol.
+        The adapter must read back disabled state for an open PR. Strict review
+        and merge wait use this containment boundary before fresh review and
+        whenever a current-head proof becomes invalid.
         """
         ...
 
@@ -299,8 +299,8 @@ class StageGitHub(Protocol):
     def mark_pr_implementation_go(self, pr_number: int) -> None:
         """Durably apply ``state:implementation-go`` to the PR.
 
-        Reserved for #2055's head-bound strict-review stage. #2054's internal
-        review does not call it, so a label cannot authorize an auto-merge.
+        Reserved for the head-bound strict-review stage. Internal pr_review
+        does not call it, and the label alone never authorizes auto-merge.
         """
         ...
 

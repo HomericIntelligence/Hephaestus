@@ -262,6 +262,7 @@ class MergeWaitStage(Stage):
             artifact = artifact_reader(item.pr, head_sha) if callable(artifact_reader) else None
             if (
                 item.armed
+                and bool((gh_state or {}).get("autoMergeRequest"))
                 and has_go
                 and artifact is not None
                 and bool(getattr(artifact, "is_go", False))

@@ -151,6 +151,49 @@ class TestWorkerPoolSubmitComplete:
         assert result.ok is True
         assert mock_session.call_args.kwargs["sandbox"] == "read-only"
 
+    def test_read_only_agent_job_scopes_claude_to_read_tools(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+    ) -> None:
+        """Strict-review Claude jobs receive no write or shell capability."""
+        job = _agent_job(sandbox="read-only")
+        with (
+            patch(f"{_WP}.resolve_agent", return_value="claude"),
+            patch(
+                f"{_WP}.claude_invoke.invoke_claude_with_session",
+                return_value=("GO", "s"),
+            ) as invoke,
+        ):
+            pool.submit(job, StageName.STRICT_REVIEW)
+            _handle, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        assert invoke.call_args.kwargs["allowed_tools"] == "Read,Glob,Grep"
+        assert invoke.call_args.kwargs["permission_mode"] == "dontAsk"
+
+    def test_expected_head_mismatch_blocks_agent_before_invocation(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+    ) -> None:
+        """A strict reviewer never sees a worktree at a different commit."""
+        expected = "a" * 40
+        job = _agent_job(expected_head_sha=expected)
+        head_result = subprocess.CompletedProcess(
+            ["git", "rev-parse", "HEAD"], 0, stdout=("b" * 40) + "\n", stderr=""
+        )
+        with (
+            patch(f"{_WP}.subprocess.run", return_value=head_result),
+            patch(f"{_WP}.claude_invoke.invoke_claude_with_session") as invoke,
+        ):
+            pool.submit(job, StageName.STRICT_REVIEW)
+            _handle, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error is not None and "local_head_mismatch" in result.error
+        invoke.assert_not_called()
+
     def test_submit_and_complete_build_test_job(
         self,
         pool: WorkerPool,

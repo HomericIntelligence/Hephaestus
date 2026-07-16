@@ -464,7 +464,7 @@ def seed_from_cli(
     - ``issues`` → :func:`seed_issue` + :func:`classify_issue` per issue.
     - ``prs`` → tri-state classification mirroring ``classify_issue``'s
       open-PR routing: merged PR -> FINISHED (idempotent), closed PR ->
-      excluded, open PR with ``state:implementation-go`` -> CI, open PR
+      excluded, open PR with ``state:implementation-go`` -> STRICT_REVIEW, open PR
       without it -> PR_REVIEW. A failed state/label fetch reads as
       "open, not yet reviewed" (-> pr_review), matching the legacy
       ``_review_existing_pr`` fail-open-to-review semantics.

@@ -7,7 +7,8 @@ binding contract). This stage is the ONLY automatic producer of
 the sole responsibility of ``MergeWaitStage``, which re-validates a
 head-bound artifact this stage publishes before it ever arms.
 
-- States: ENTER -> HEAD_CHECK -> REVIEW_WAIT -> EVAL -> SR_FINISH.
+- States: ENTER -> HEAD_CHECK -> WORKTREE_WAIT -> REVIEW_WAIT -> EVAL ->
+  SR_FINISH.
   Budget: ``strict_review_iter`` = 1 (a single independent pass; a NOGO
   routes straight to ``implementation``, never loops in-stage).
 - ``on_enter``: refresh labels; if a prior pass's captured head
@@ -17,8 +18,8 @@ head-bound artifact this stage publishes before it ever arms.
 - HEAD_CHECK [M]: capture ``gh_pr_state(pr)["headRefOid"]`` into
   ``payload["strict_review_head"]`` — the exact value baked into both the
   session key (:func:`~hephaestus.automation.agent_config.strict_review_agent`)
-  and the published artifact, so the artifact and the session are both
-  provably bound to one commit.
+  and the published artifact. A synced isolated worktree and worker-side
+  ``git rev-parse HEAD`` check must match this remote SHA before dispatch.
 - REVIEW_WAIT [W:A]: submit a READ-ONLY agent job
   (``AgentJob(sandbox="read-only", ...)``) — never write/GitHub-mutation
   capable — using a fresh per-head/per-attempt session
@@ -55,9 +56,11 @@ from hephaestus.automation.session_naming import strict_review_agent
 from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_GO
 
 from .base import (
+    GIT_JOB_TIMEOUT_S,
     AgentJob,
     Continue,
     Disposition,
+    GitJob,
     JobRequest,
     JobResult,
     Stage,
@@ -76,6 +79,7 @@ logger = logging.getLogger(__name__)
 # In-memory mini-states (stage-local strings, never GitHub labels).
 ENTER = "ENTER"
 HEAD_CHECK = "HEAD_CHECK"
+WORKTREE_WAIT = "WORKTREE_WAIT"
 REVIEW_WAIT = "REVIEW_WAIT"
 EVAL = "EVAL"
 SR_FINISH = "SR_FINISH"
@@ -230,6 +234,8 @@ class StrictReviewStage(Stage):
             return Continue(next_state=HEAD_CHECK)
         if item.state == HEAD_CHECK:
             return self._head_check(item, ctx)
+        if item.state == WORKTREE_WAIT:
+            return StageOutcome(Disposition.FINISH_FAIL, "strict_review_worktree_unfinished")
         if item.state == REVIEW_WAIT:
             return self._review_wait(item, ctx)
         if item.state == EVAL:
@@ -241,6 +247,8 @@ class StrictReviewStage(Stage):
 
     def _head_check(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """HEAD_CHECK [M]: capture the PR's live head SHA before dispatching review."""
+        if item.payload.pop("strict_review_worktree_failed", None):
+            return StageOutcome(Disposition.FINISH_FAIL, "strict_review_worktree_failed")
         terminal = _terminal_pr_outcome(ctx.github.gh_pr_state(item.pr), item.pr)  # type: ignore[arg-type]
         if terminal is not None:
             return terminal
@@ -255,6 +263,36 @@ class StrictReviewStage(Stage):
             item.payload["retry_delay_s"] = 30
             return StageOutcome(Disposition.RETRY, "no_head_sha")
         item.payload["strict_review_head"] = head_sha
+        if not item.worktree:
+            branch = item.branch or ctx.github.get_pr_head_branch(item.pr)  # type: ignore[arg-type]
+            if not branch:
+                logger.warning(
+                    "strict_review:%s: could not resolve PR #%d head branch",
+                    item.issue,
+                    item.pr,
+                )
+                item.payload["retry_delay_s"] = 30
+                return StageOutcome(Disposition.RETRY, "no_head_branch")
+            item.branch = branch
+            # A direct PR/drive-green entry has no implementation worktree.
+            # Create and sync an isolated checkout before a read-only reviewer
+            # can inspect files, so its local Read/Glob context is this exact
+            # remote PR branch rather than the shared checkout's base branch.
+            worktree_job = GitJob(
+                repo=item.repo,
+                op="create_worktree",
+                timeout_s=GIT_JOB_TIMEOUT_S,
+                kwargs={
+                    "issue_number": item.issue if item.issue is not None else item.pr,
+                    "branch_name": branch,
+                    "refresh_base": False,
+                    "sync_to_remote": True,
+                    "pr_number": item.pr,
+                    "repo_root": str(ctx.paths.repo_root),
+                },
+                descr="strict_review_worktree",
+            )
+            return JobRequest(worktree_job, on_done_state=HEAD_CHECK)
         return Continue(next_state=REVIEW_WAIT)
 
     def _review_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
@@ -278,7 +316,14 @@ class StrictReviewStage(Stage):
                 "Strict-review evidence could not be fetched and authenticated for this head.\n"
                 "Grade: F\nVerdict: NOGO",
             )
-        attempt = item.payload.get("strict_review_attempt", 0)
+        attempt = int(item.payload.get("strict_review_attempt", 0))
+        if attempt >= ctx.budget("strict_review_iter"):
+            return self._handle_nogo(
+                item,
+                ctx,
+                head_sha,
+                "Strict-review attempt budget exhausted.\nGrade: F\nVerdict: NOGO",
+            )
         item.payload["strict_review_attempt"] = attempt + 1
         item.payload.pop("strict_review_verdict", None)
         item.payload.pop("strict_review_text", None)
@@ -299,12 +344,13 @@ class StrictReviewStage(Stage):
             cwd=_worktree_path(item, ctx),
             timeout_s=pr_reviewer_claude_timeout(),
             session_agent=strict_review_agent(head_sha, attempt),
+            expected_head_sha=head_sha,
             sandbox="read-only",
             # Diff / CI status / prior verdict are seeded into item.payload
             # by the coordinator, which owns the gh reads (mirrors pr_review).
             prompt_kwargs={
                 "pr_number": item.pr,
-                "issue_number": item.issue,
+                "issue_number": issue,
                 "head_sha": head_sha,
                 "diff": evidence.diff,
                 "ci_status": evidence.ci_status,
@@ -427,6 +473,24 @@ class StrictReviewStage(Stage):
         pr_number = item.pr
         if pr_number is None:  # guarded by step(); narrowing
             return StageOutcome(Disposition.FAIL_BACK, "nogo")
+        # A NOGO is as head-bound as a GO: never remediate or label a newer
+        # head from a reviewer result that inspected an older one.
+        pr_state = ctx.github.gh_pr_state(pr_number)
+        terminal = _terminal_pr_outcome(pr_state, pr_number)
+        if terminal is not None:
+            return terminal
+        live_head = str((pr_state or {}).get("headRefOid") or "")
+        if not head_sha or live_head != head_sha:
+            logger.info(
+                "strict_review:%s: head changed before NOGO handling (%s -> %s); restarting",
+                item.issue,
+                head_sha[:12],
+                live_head[:12],
+            )
+            outcome = self._contain_and_revoke_on_entry(item, ctx)
+            if outcome is not None:
+                return outcome
+            return Continue(next_state=HEAD_CHECK)
         logger.info(
             "strict_review:%s: NOGO for PR #%d; disabling auto-merge and remediating",
             item.issue,
@@ -498,6 +562,23 @@ class StrictReviewStage(Stage):
             ctx: Stage context.
 
         """
+        if item.state == WORKTREE_WAIT:
+            if not result.ok:
+                logger.warning(
+                    "strict_review:%s: isolated worktree setup failed: %s",
+                    item.issue,
+                    result.error,
+                )
+                item.payload["strict_review_worktree_failed"] = True
+                return
+            value = result.value
+            if isinstance(value, dict):
+                item.worktree = str(value.get("path") or "")
+            elif isinstance(value, str):
+                item.worktree = value
+            if not item.worktree:
+                item.payload["strict_review_worktree_failed"] = True
+            return
         if item.state != REVIEW_WAIT:
             return
         if not result.ok:

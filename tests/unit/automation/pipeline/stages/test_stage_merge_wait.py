@@ -375,6 +375,27 @@ class TestMergeWaitContainment:
         ]
         assert item.armed is False
 
+    def test_poll_recovers_when_an_armed_pr_was_later_disarmed(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A persisted arm cannot park forever after GitHub disables it."""
+        stage = MergeWaitStage()
+        github = _ProofAwareGitHub(
+            states=[OPEN_STATE],
+            proof=_StrictGoArtifact(),
+        )
+        ctx = make_ctx(github=github)
+        item = _poll_item(make_work_item)
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FAIL_BACK, "strict_gate_unavailable"
+        )
+        assert github.mutation_log == [
+            ("strict_review_artifact", (601, "abc123")),
+            ("defer_auto_merge", (601,)),
+        ]
+        assert item.armed is False
+
     def test_on_enter_initializes_enter_and_unknown_state_fails(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

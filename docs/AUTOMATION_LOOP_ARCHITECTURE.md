@@ -16,10 +16,12 @@ from labels at startup. An interrupt leaves items resumable, never failed.
 ### Head-bound strict-review gate (#2055)
 
 `strict_review` is the ninth queue stage, positioned between `pr_review` and
-`ci`. It captures a live PR head, runs an independent read-only reviewer in a
-fresh per-head session, and publishes an authenticated, byte-bounded artifact
-before it applies `state:implementation-go`. A stale, foreign, malformed, or
-NOGO artifact never authorizes CI or arming.
+`ci`. It captures a live PR head, synchronizes an isolated worktree to that
+head, and runs an independent read-only reviewer in a fresh per-head session.
+The worker verifies the local worktree HEAD still equals the captured remote
+SHA before invoking the reviewer. The coordinator publishes an authenticated,
+byte-bounded artifact before it applies `state:implementation-go`. A stale,
+foreign, malformed, or NOGO artifact never authorizes CI or arming.
 
 `merge_wait` is the sole automatic armer. It performs prepare → arm → confirm
 against the same current head and artifact, and disables/revokes eligibility if
@@ -349,7 +351,7 @@ Related: #1554 (original minor-thread deadlock this replaces), #1575
 
 ### 6. strict_review
 
-**States**: ENTER → HEAD_CHECK → REVIEW_WAIT → EVAL → FINISH.
+**States**: ENTER → HEAD_CHECK → WORKTREE_WAIT → REVIEW_WAIT → EVAL → FINISH.
 
 **Steps**:
 
@@ -357,12 +359,15 @@ Related: #1554 (original minor-thread deadlock this replaces), #1575
    `state:implementation-go`, disable/readback auto-merge, then capture the
    live PR head. A previously captured head that changed is restarted from a
    fresh head check. A containment failure is terminal and fail-closed.
-2. [W:A] Run an independent reviewer in `sandbox="read-only"`, with a fresh
-   per-head/per-attempt session. Before dispatch, the coordinator fetches a
-   bounded, repo-scoped nonempty diff, CI summary, and authenticated prior
-   review, and checks the head both before and after that fetch. Missing,
-   malformed, oversized, or stale evidence is a fail-closed NOGO. All
-   evidence is untrusted and nonce-fenced.
+2. [W:G] For a direct PR or a missing worktree, synchronize an isolated
+   worktree to the captured PR branch without refreshing it from the base
+   branch. [W:A] Run an independent reviewer there in `sandbox="read-only"`,
+   with a fresh per-head/per-attempt session and the expected remote SHA. The
+   worker rejects a local-HEAD mismatch before invoking the agent. Before
+   dispatch, the coordinator fetches a bounded, repo-scoped nonempty diff, CI
+   summary, and authenticated prior review, and checks the head both before
+   and after that fetch. Missing, malformed, oversized, or stale evidence is
+   a fail-closed NOGO. All evidence is untrusted and nonce-fenced.
 3. [M] Re-read the head before publishing. A GO publishes an authenticated,
    exact-grammar artifact for that head, reads it back, then applies
    `state:implementation-go`; any publish/readback/label failure is terminal.
@@ -452,9 +457,10 @@ LEARN_WAIT solely to preserve the existing post-merge learn dedupe.
    absent confirmation, or record-write failure disables auto-merge and fails
    closed. A PR that merged
    in the race window follows the existing deduped learn path.
-3. [M] **POLL**: every armed poll revalidates current head and strict proof;
-   drift revokes the arm and returns to strict review. An already-merged PR
-   continues to **LEARN_WAIT** for exactly-once post-merge learning.
+3. [M] **POLL**: every armed poll revalidates current head, strict proof, and
+   GitHub's `autoMergeRequest`; drift or a later disarm revokes eligibility
+   and returns to strict review. An already-merged PR continues to
+   **LEARN_WAIT** for exactly-once post-merge learning.
 
 **Verdicts**: RETRY while waiting for checks; FAIL_BACK to strict review on
 proof/head drift; FINISH_FAIL on a containment failure; FINISH_PASS after a

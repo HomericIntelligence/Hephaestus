@@ -10,6 +10,10 @@ from typing import Any
 import pytest
 
 import hephaestus.automation.pipeline_github as pg
+from hephaestus.automation.strict_review_artifact import (
+    MAX_ARTIFACT_BYTES,
+    parse_strict_review_artifact,
+)
 
 _HEAD_SHA = "a" * 40
 _AUTOMATION_LOGIN = "hephaestus-bot"
@@ -25,13 +29,13 @@ def _published_artifact(
     adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
     published: dict[str, str] = {}
 
-    def capture(pr_number: int, marker_prefix: str, body: str) -> bool:
+    def capture(pr_number: int, body: str, login: str) -> None:
         assert pr_number == 71
-        published["marker"] = marker_prefix
         published["body"] = body
-        return True
+        assert login == _AUTOMATION_LOGIN
 
-    monkeypatch.setattr(adapter, "upsert_pr_comment", capture)
+    monkeypatch.setattr(adapter, "_strict_review_login", lambda: _AUTOMATION_LOGIN)
+    monkeypatch.setattr(adapter, "_upsert_owned_strict_review_artifact", capture)
     adapter.publish_strict_review_artifact(
         71, _HEAD_SHA, verdict_body, is_go="Verdict: GO" in verdict_body
     )
@@ -101,3 +105,78 @@ def test_valid_nogo_artifact_never_authorizes(
     )
 
     assert _read_artifact(adapter, monkeypatch, body=published["body"]) is None
+
+
+def test_foreign_marker_does_not_block_automation_artifact_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Publishing creates our comment instead of PATCHing/deleting a foreign marker."""
+    adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+    calls: list[list[str]] = []
+
+    def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+        calls.append(argv)
+        if argv[:3] == ["api", "user", "--jq"]:
+            return SimpleNamespace(stdout=f"{_AUTOMATION_LOGIN}\n")
+        if argv[:2] == ["api", "/repos/org/repo-a/issues/71/comments"]:
+            return SimpleNamespace(
+                stdout=json.dumps(
+                    [
+                        [
+                            {
+                                "id": 99,
+                                "body": "<!-- hephaestus-strict-review: v1 -->\nforeign",
+                                "user": {"login": "mallory"},
+                            }
+                        ]
+                    ]
+                )
+            )
+        return SimpleNamespace(stdout="")
+
+    monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+    adapter.publish_strict_review_artifact(71, _HEAD_SHA, "Grade: A\nVerdict: GO", is_go=True)
+
+    assert any(call[:3] == ["issue", "comment", "71"] for call in calls)
+    assert not any(call[:3] == ["api", "--method", "PATCH"] for call in calls)
+    assert not any(call[:3] == ["api", "--method", "DELETE"] for call in calls)
+
+
+def test_oversized_or_malformed_artifact_never_parses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The artifact grammar rejects byte-limit and header/digest violations."""
+    adapter, published = _published_artifact(tmp_path, monkeypatch)
+    assert _read_artifact(adapter, monkeypatch, body="x" * (MAX_ARTIFACT_BYTES + 1)) is None
+    malformed = published["body"].replace("Digest: ", "Digest: bad")
+    assert parse_strict_review_artifact(malformed) is None
+
+
+def test_stale_head_and_latest_nogo_page_never_authorize(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A proof applies only to its SHA and the newest owned marker wins."""
+    adapter, go = _published_artifact(tmp_path, monkeypatch)
+    _, nogo = _published_artifact(
+        tmp_path,
+        monkeypatch,
+        verdict_body="Grade: F\nVerdict: NOGO",
+    )
+
+    def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+        if argv[:3] == ["api", "user", "--jq"]:
+            return SimpleNamespace(stdout=f"{_AUTOMATION_LOGIN}\n")
+        if argv[:2] == ["api", "/repos/org/repo-a/issues/71/comments"]:
+            return SimpleNamespace(
+                stdout=json.dumps(
+                    [
+                        [{"body": go["body"], "user": {"login": _AUTOMATION_LOGIN}}],
+                        [{"body": nogo["body"], "user": {"login": _AUTOMATION_LOGIN}}],
+                    ]
+                )
+            )
+        raise AssertionError(f"unexpected gh invocation: {argv!r}")
+
+    monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+    assert adapter.strict_review_artifact(71, _HEAD_SHA) is None
+    assert adapter.strict_review_artifact(71, "b" * 40) is None

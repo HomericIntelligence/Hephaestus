@@ -51,9 +51,9 @@ binding contract):
   runner's runtime-error handler), non-fatally.
 - PR_CREATE [M]: ``ctx.github.create_pr`` (idempotent ensure semantics)
   with a ``prompts/pr_review.py get_pr_description`` body [durable], then
-  ``ctx.github.defer_auto_merge`` — the load-bearing #2054 containment
-  boundary: auto-merge stays disabled regardless of legacy labels, and
-  ``state:implementation-go`` does not create merge eligibility.
+  ``ctx.github.defer_auto_merge`` — the containment boundary: auto-merge
+  stays disabled regardless of legacy labels, and ``state:implementation-go``
+  does not create merge eligibility by itself.
 - Prompt functions (imported, never re-authored):
   ``prompts/implementation.py get_implementation_prompt`` (composed with
   the advise-findings block by :func:`build_implementation_prompt`),
@@ -737,8 +737,8 @@ class ImplementationStage(Stage):
 
         Split out of :meth:`_gate` for the same readability reason as
         :meth:`_skip_gate`. Existing PRs may have been armed by the
-        pre-#2054 policy; a failed read-back must stop adoption before
-        worktree preparation or late CI routing (#2054 fail-closed).
+        pre-strict-review policy; a failed read-back must stop adoption before
+        worktree preparation or later strict-review routing.
 
         Args:
             issue: The GitHub issue number (for log messages).
@@ -767,8 +767,9 @@ class ImplementationStage(Stage):
 
         Split out of :meth:`_gate` for the same readability reason as
         :meth:`_skip_gate`. A late-stage entry that only knew the PR (no
-        worktree yet) must prepare one before the legacy ``ci`` route (m7);
-        an entry that already has a worktree can fail back to ``ci`` directly.
+        worktree yet) must prepare one before the strict-review route (m7);
+        an entry that already has a worktree can fail back to strict review
+        directly.
 
         Args:
             item: The work item under evaluation (``item.pr``/``item.branch``
@@ -785,13 +786,13 @@ class ImplementationStage(Stage):
         has_go, _has_no_go = ctx.github.pr_has_implementation_state_label(existing_pr)
         if not has_go:
             return None
-        # item.pr/item.branch are set above so the ci stage receives
-        # a fully-identified PR (m7). CI also needs a per-item
-        # worktree for any mutating git job; prepare one first when
+        # item.pr/item.branch are set above so strict_review receives
+        # a fully-identified PR (m7). Its read-only worker needs a per-item
+        # exact-head worktree; prepare one first when
         # this is a late-stage entry that only knew the PR.
         if item.worktree:
             logger.info(
-                "implementation:%d: PR #%d already implementation-go; routing to ci",
+                "implementation:%d: PR #%d already implementation-go; routing to strict review",
                 item.issue,
                 existing_pr,
             )
@@ -799,7 +800,7 @@ class ImplementationStage(Stage):
         item.payload["existing_pr"] = True
         item.payload["existing_pr_impl_go"] = True
         logger.info(
-            "implementation:%d: PR #%d already implementation-go; preparing worktree before ci",
+            "implementation:%d: PR #%d implementation-go; preparing worktree before strict review",
             item.issue,
             existing_pr,
         )

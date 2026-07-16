@@ -44,7 +44,7 @@ class TestImplementationPrompt:
         assert "DO NOT run `git commit`" in out
         assert "`git push`" in out
         assert "`gh pr create`" in out
-        assert "Keep auto-merge disabled pending the queue-owned strict-review gate" in out
+        assert "Do not enable auto-merge yourself" in out
         assert "state:implementation-go" not in out
         # The implementation agent should not run the PR verification/mutation commands.
         assert "gh pr view" not in out
@@ -91,7 +91,7 @@ class TestPRReviewAnalysisPrompt:
         """The reviewer no longer enforces repo policy — CI gates own it.
 
         Closes #N and signed commits are enforced by CI. Auto-merge containment
-        is enforced by the queue pipeline and human strict review, not the
+        is enforced by the queue pipeline's strict-review gate, not the
         in-loop LLM reviewer (which fabricated false POLICY VIOLATIONs from
         empty/stale data).
         """
@@ -104,11 +104,11 @@ class TestPRReviewAnalysisPrompt:
         assert "Policy checks (MANDATORY" not in out
         # But the prompt should tell the reviewer the CI gates own policy.
         assert "pr-policy" in out
-        assert "pipeline containment" in out
-        assert "human strict review" in out
+        assert "independent strict-review" in out
+        assert "merge-wait" in out
         assert "acceptable to merge" not in out
         assert "eligible for independent strict review" in out
-        assert "pipeline containment" in (prompts.get_pr_review_analysis_prompt.__doc__ or "")
+        assert "independent strict-review" in (prompts.get_pr_review_analysis_prompt.__doc__ or "")
         # The code-quality verdict contract stays intact.
         assert "Verdict: NOGO" in out
         assert "Verdict: GO" in out

@@ -372,6 +372,35 @@ class WorkerPool:
         the executing worker identity.
         """
         try:
+            if job.expected_head_sha:
+                local_head = subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=str(job.cwd),
+                    capture_output=True,
+                    text=True,
+                    timeout=job.timeout_s,
+                    check=False,
+                )
+                actual_head = (local_head.stdout or "").strip()
+                if (
+                    local_head.returncode != 0
+                    or actual_head.lower() != job.expected_head_sha.lower()
+                ):
+                    return JobResult(
+                        ok=False,
+                        error=(
+                            "local_head_mismatch: "
+                            f"expected={job.expected_head_sha} "
+                            f"actual={actual_head or '<unreadable>'}"
+                        )[:_ERR_MAX],
+                        stdout_tail=(local_head.stdout or "")[-_TAIL:],
+                        stderr_tail=(local_head.stderr or "")[-_TAIL:],
+                    )
+                logger.info(
+                    "agent job %s verified local HEAD %s against remote-reviewed head",
+                    job.descr or job.agent,
+                    actual_head[:12],
+                )
             agent = resolve_agent(job.agent)
             is_claude = agent == "claude"
             session_agent = job.session_agent or job.agent

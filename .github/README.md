@@ -46,11 +46,10 @@ The consolidated required-status-check gate that runs on every pull request to
 shellcheck, the `pr-policy` gate (enforces `Closes #N` and signed commits),
 unit/integration/shell tests, wheel build, security scans (pip-audit, Gitleaks,
 bandit), workflow-schema validation, and version-sync. It also runs the
-advisory `auto-merge-policy` job. During #2054's fail-closed bootstrap it
-signals any open PR with auto-merge armed; it is intentionally **not** a
-required check so it does not block the manually reviewed bootstrap merge.
-The privileged label-event auto-merge workflow was removed. #2055 restores
-queue-owned arming only after a head-bound independent strict-review proof.
+advisory `auto-merge-policy` job. It is intentionally **not** a required
+check: the queue's `strict_review` and `merge_wait` stages enforce the
+head-bound proof and conditional automatic arming. The privileged label-event
+auto-merge workflow remains removed.
 
 ### Auto-Tag Workflow (`workflows/auto-tag.yml`)
 
