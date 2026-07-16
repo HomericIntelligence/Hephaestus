@@ -17,11 +17,12 @@ import pytest
 
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.seeding import (
-    EPIC_NEEDS_SKIP_TAG,
+    EpicSkipTagObligation,
     IssueFacts,
     SeedEntry,
     _label_at_or_past,
     classify_issue,
+    seed_entry_from_facts,
     seed_from_cli,
     seed_issue,
 )
@@ -74,24 +75,23 @@ class TestClassifyIssue:
         assert "state:skip" in reason
         assert any("excluded" in record.message for record in caplog.records)
 
-    def test_epic_excluded_with_skip_tag_flag(self, caplog: pytest.LogCaptureFixture) -> None:
-        """An UNTAGGED epic is excluded with the epic_needs_skip_tag flag for the caller.
-
-        The state:skip write itself executes at the caller (coordinator #1817)
-        via the existing skip_epics chokepoint — seeding only surfaces the need.
-        """
+    def test_untagged_epic_is_excluded_without_encoding_a_mutation_in_reason(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The pure classifier describes exclusion; seeding carries obligations separately."""
         with caplog.at_level(logging.INFO, logger="hephaestus.automation.pipeline.seeding"):
             stage, reason = classify_issue(_facts(is_epic=True))
         assert stage is None
-        assert reason.startswith(EPIC_NEEDS_SKIP_TAG)
+        assert reason == "#1 is an epic tracking issue"
         assert any("excluded" in record.message for record in caplog.records)
 
     def test_epic_already_tagged_skip_needs_no_retag(self) -> None:
         """An epic that already carries state:skip excludes via skip — no tag flag."""
-        stage, reason = classify_issue(_facts(is_epic=True, labels={STATE_SKIP}))
+        facts = _facts(is_epic=True, labels={STATE_SKIP})
+        stage, reason = classify_issue(facts)
         assert stage is None
         assert STATE_SKIP in reason
-        assert EPIC_NEEDS_SKIP_TAG not in reason
+        assert seed_entry_from_facts(facts).skip_tag_obligation is None
 
     def test_skip_wins_over_plan_go(self) -> None:
         """state:skip + state:plan-go → excluded; skip is absolute and never ranked."""
@@ -542,6 +542,14 @@ class TestSeedFromCli:
         with patch("hephaestus.automation.pipeline.seeding.seed_issue", return_value=facts):
             entries = seed_from_cli([], [10], [])
         assert entries[0].stage is None
+
+    def test_untagged_epic_surfaces_a_typed_skip_tag_obligation(self) -> None:
+        """The coordinator receives an explicit durable-write obligation, not a reason prefix."""
+        facts = _facts(number=10, is_epic=True)
+        with patch("hephaestus.automation.pipeline.seeding.seed_issue", return_value=facts):
+            entry = seed_from_cli([], [10], [])[0]
+
+        assert entry.skip_tag_obligation == EpicSkipTagObligation(issue=10)
 
     def test_prs_arm_impl_go_routes_to_ci(self) -> None:
         """A PR carrying state:implementation-go seeds into ci (GO short-circuit)."""

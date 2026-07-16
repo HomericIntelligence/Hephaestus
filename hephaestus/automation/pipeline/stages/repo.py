@@ -78,25 +78,28 @@ def _repo_checkout_path(item: WorkItem, ctx: StageContext) -> Path:
     return Path(str(ctx.paths.projects_dir)) / item.repo
 
 
-def _tag_epics_best_effort(
-    repo: str,
-    ctx: StageContext,
-    epics: list[int],
-    epics_labels: dict[int, list[str]],
-) -> None:
-    """Tag excluded epics without blocking repo discovery on label failures."""
-    skip_tagged = True
-    try:
-        ctx.github.skip_epics(epics_labels)
-    except Exception as exc:
-        skip_tagged = False
-        logger.warning("repo:%s: could not tag excluded epics state:skip: %s", repo, exc)
+def _tag_epics(repo: str, ctx: StageContext, epics_labels: dict[int, list[str]]) -> None:
+    """Write epic skip labels and log the resulting durable exclusions."""
+    ctx.github.skip_epics(epics_labels)
+    for number in epics_labels:
+        logger.info("repo:%s: #%d is an epic; tagged state:skip, excluded", repo, number)
 
-    for num in epics:
-        if skip_tagged:
-            logger.info("repo:%s: #%d is an epic; tagged state:skip, excluded", repo, num)
-        else:
-            logger.info("repo:%s: #%d is an epic; state:skip tag failed, excluded", repo, num)
+
+def _partition_and_tag_epics(
+    repo: str, ctx: StageContext, issues_meta: list[dict[str, Any]]
+) -> tuple[list[int], list[int]]:
+    """Return issue partitions after durably tagging every discovered epic."""
+    kept, epics = partition_epics(issues_meta)
+    if not epics:
+        return kept, epics
+    epic_set = set(epics)
+    epics_labels = {
+        int(metadata["number"]): list(metadata.get("labels") or [])
+        for metadata in issues_meta
+        if int(metadata["number"]) in epic_set
+    }
+    _tag_epics(repo, ctx, epics_labels)
+    return kept, epics
 
 
 class RepoStage(Stage):
@@ -211,15 +214,11 @@ class RepoStage(Stage):
         # Epic tagging: the ONE sanctioned seeding write, durable and BEFORE
         # the exclusion is final (doc row "Epic tagging is the one seeding
         # write; done BEFORE excluding").
-        kept, epics = partition_epics(deduped)
-        if epics:
-            epic_set = set(epics)
-            epics_labels = {
-                int(m["number"]): list(m.get("labels") or [])
-                for m in deduped
-                if int(m["number"]) in epic_set
-            }
-            _tag_epics_best_effort(item.repo, ctx, epics, epics_labels)
+        try:
+            kept, epics = _partition_and_tag_epics(item.repo, ctx, deduped)
+        except Exception as exc:
+            logger.warning("repo:%s: could not tag excluded epics state:skip: %s", item.repo, exc)
+            return StageOutcome(Disposition.FINISH_FAIL, note=f"epic skip tag failed: {exc}")
 
         products: list[dict[str, Any]] = [
             {
