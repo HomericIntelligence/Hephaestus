@@ -26,8 +26,8 @@ links to the full section below.
    body, and keep auto-merge disabled. After an unconditional independent
    strict-review GO, a maintainer performs the manual squash merge.
 
-If anything in steps 1–2 fails, see [Platform Support](#platform-support) — the
-uv dev environment is `linux-64` only by design.
+If anything in steps 1–2 fails, see [Platform Support](#platform-support) for
+the supported Python versions and platform-specific test behavior.
 
 ## Planning artifacts
 
@@ -88,10 +88,11 @@ are cut on demand by pushing a signed `vX.Y.Z` git tag (see
 3. Bootstrap the project (installs deps, the editable package, and pre-commit
    hooks in one step): `just bootstrap`
 
-   `just bootstrap` wraps `uv sync`, `uv run dev-install`, and
-   `uv run pre-commit install`. If you do not have [`just`](https://just.systems/)
-   installed, run those three commands manually instead.
-4. Activate development environment: `uv run --group dev bash`
+   `just bootstrap` wraps `uv sync` and `uv run pre-commit install`. If you do
+   not have [`just`](https://just.systems/) installed, run those two commands
+   manually instead.
+4. Run project commands through the managed environment, for example
+   `uv run pytest tests/unit`.
 5. Before pushing, run the fast quality gate: `just check`
    (lint + format-check + typecheck). Run `just --list` to see every recipe.
 
@@ -103,29 +104,28 @@ they are using:
 
 | Install path                        | Platforms supported                    | Python      |
 | ----------------------------------- | -------------------------------------- | ----------- |
-| `uv sync` (development)        | `linux-64` only                        | 3.10 (pinned by `pyproject.toml`) |
+| `uv sync` (development) | Linux, macOS, Windows | 3.10+ (see `requires-python` in `pyproject.toml`) |
 | `pip install HomericIntelligence-Hephaestus` (wheel) | Linux, macOS, Windows (any OS) | 3.10+ (see `requires-python` in `pyproject.toml`) |
 
-Why the asymmetry:
+Platform notes:
 
-- **uv is Linux-64 only by design.** `pyproject.toml` declares
-  `platforms = ["linux-64"]` with an explicit `# Do not re-enable` comment
-  next to the other entries. Full local reproduction of the development
-  environment (lint, mypy, test, pre-commit) is only supported on Linux.
-- **The wheel supports the broader matrix advertised in `pyproject.toml`.**
-  `requires-python` in `pyproject.toml` describes what `pip install` will accept.
-  No platform-restriction classifier is published, so the wheel is installable
-  on macOS and Windows.
+- **uv manages the development environment on every platform supported by its
+  selected Python interpreter.** The project requires Python 3.10+; `uv sync`
+  installs the editable checkout and the default development groups.
+- **Required CI currently runs on Linux.** Native-Windows runs skip tests marked
+  `requires_posix`; Linux, macOS, and WSL run those POSIX subprocess checks.
+- **The wheel supports the same Python range.** `requires-python` in
+  `pyproject.toml` describes what `pip install` accepts; no platform-restriction
+  classifier is published.
 - **Windows wheels pull in `tzdata` automatically.** The
   `"tzdata; platform_system == 'Windows'"` marker in `[project.dependencies]`
   exists because `hephaestus.github.rate_limit` uses `zoneinfo.ZoneInfo`,
   which has no IANA database bundled on Windows. POSIX installs skip this
   dependency.
 
-If you need to develop or run the test suite on macOS or Windows, install the
-wheel into a plain virtualenv (`pip install -e '.[dev]'`) — uv tooling is
-not available there, and any subpackage with POSIX-only assumptions is out
-of scope for this project's supported development environment (track those separately).
+Use `uv sync` to develop and run the test suite on macOS, Linux, or Windows.
+Native-Windows runs skip only the tests explicitly marked `requires_posix`; do
+not substitute a second environment manager for the uv workflow.
 
 ### The `build/` directory
 
@@ -150,8 +150,8 @@ We follow these style guidelines:
 Run the development tools:
 
 ```bash
-uv run format  # Format code with ruff format
-uv run lint    # Lint with ruff check
+uv run ruff format hephaestus scripts tests
+uv run ruff check hephaestus scripts tests
 ```
 
 ## Testing
@@ -165,7 +165,7 @@ All contributions must include appropriate tests:
 Run tests with:
 
 ```bash
-uv run test
+uv run pytest
 ```
 
 ### Test environment requirements
@@ -215,22 +215,17 @@ computes the next semver string and prints the `git tag` commands to run.
 
 ## Dependency Updates
 
-- **Dependabot** is configured for `pip` (pyproject.toml dev extras) and is the
-  **sole** manager of `github-actions`. It opens PRs automatically for those.
-- **Renovate** (`renovate.json`) is configured with the `:uv` preset and watches
-  **only** conda-forge / uv dependencies in `pyproject.toml` — the package ecosystem
-  Dependabot cannot parse. Renovate's GitHub Actions manager is explicitly disabled
-  (`"github-actions": { "enabled": false }`) so the two tools never double-manage
-  actions and emit duplicate PRs. Renovate opens grouped PRs on a weekly cadence,
-  matching Dependabot's schedule. To manually refresh the lock file outside of that
-  cycle:
+- **Dependabot** is configured for Python and GitHub Actions updates in
+  [`.github/dependabot.yml`](.github/dependabot.yml).
+- Refresh the lockfile deliberately when updating dependencies:
 
   ```bash
-  uv lock --upgrade           # updates uv.lock; commit alongside any range changes
+  uv lock --upgrade
+  uv sync
   ```
 
-- A pre-commit hook (`check-dep-sync`) verifies that any committed `requirements*.txt`
-  entries fall within the `pyproject.toml` range; it does not initiate updates.
+  Review and commit the resulting `uv.lock` together with any corresponding
+  `pyproject.toml` change. `uv lock --check` is the CI consistency check.
 
 ## Pull Request Process
 
@@ -249,7 +244,7 @@ that state and the advisory `auto-merge-policy` reports any armed PR, but it is
 not a required check. An unconditional independent strict-review GO is required
 before a maintainer manually runs `gh pr merge --squash`.
 
-Also: ensure tests pass locally (`uv run test`), keep commits to logical units with
+Also: ensure tests pass locally (`uv run pytest`), keep commits to logical units with
 [conventional commit](https://www.conventionalcommits.org/) messages, and never bypass
 pre-commit hooks with `--no-verify`.
 

@@ -53,7 +53,7 @@ format:
 format-check:
     uv run ruff format --check {{ src_dirs }}
 
-# Run type checking on the package only (use `uv run mypy` for everything)
+# Run type checking on the package only (use `uv run mypy hephaestus/ scripts/ tests/` for everything)
 typecheck:
     uv run mypy {{ pkg_dir }}/
 

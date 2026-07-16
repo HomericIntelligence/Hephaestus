@@ -33,7 +33,7 @@ repos:
       - id: mypy-check-python
         name: Mypy Type Check Python
         description: Type check Python files using mypy
-        entry: uv run mypy
+        entry: uv run mypy hephaestus/ scripts/ tests/
         language: system
         files: ^(hephaestus|scripts|tests)/.*\.py$
         types: [python]

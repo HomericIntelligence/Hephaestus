@@ -324,7 +324,9 @@ Hephaestus uses trunk-based development: create one short-lived feature
 branch per issue, open a pull request, squash-merge it back to `main`, and cut
 releases from signed `vX.Y.Z` tags; there are no release branches.
 
-**PR policy (enforced by required CI gate `pr-policy` and by the PR reviewer):**
+#### PR policy
+
+The required CI gate `pr-policy` and the PR reviewer enforce:
 
 1. The PR body MUST contain the literal line `Closes #<issue-number>` (capital
    `C`, no colon, on its own line). `Fixes`, `Resolves`, `closes`, and
@@ -402,17 +404,14 @@ one-command bootstrap (deps + editable install + pre-commit hooks) is
 just bootstrap
 ```
 
-`just bootstrap` wraps the three commands below. Run them manually if you do
+`just bootstrap` wraps the two commands below. Run them manually if you do
 not have [`just`](https://just.systems/) installed:
 
 ```bash
 # 1. Install dependencies and create the environment
 uv sync
 
-# 2. Editable-install hephaestus so `import hephaestus` works at runtime
-uv run dev-install
-
-# 3. Install the pre-commit hooks (uv-managed binary)
+# 2. Install the pre-commit hooks (uv-managed binary)
 uv run pre-commit install
 ```
 
@@ -431,7 +430,7 @@ uv run ruff check hephaestus/ tests/
 uv run ruff format hephaestus/ tests/
 
 # Run type checking
-uv run mypy
+uv run mypy hephaestus/ scripts/ tests/
 ```
 
 ### Pre-commit Hooks
@@ -476,8 +475,7 @@ pre-commit run --all-files
 - `tests/integration/` - Integration tests (package importability, smoke tests)
 - `scripts/` - Automation and maintenance tools
 - `docs/` - Documentation and guides
-- `pyproject.toml` - Project metadata, dependencies, and tool configuration
-- `pyproject.toml` - uv environment and task definitions
+- `pyproject.toml` - Project metadata, dependencies, tool, and uv environment configuration
 - `.claude/` - Claude Code configuration and guidance
 
 ## Version Management
@@ -495,8 +493,7 @@ from git tags, not stored in any file.
 - **`pyproject.toml`** intentionally has no version field — do not add one.
 - The `check-version-single-source` pre-commit hook enforces this invariant: it fails if
   a static `[project].version` is reintroduced, if `dynamic = ["version"]` or
-  `[tool.hatch.version]` `source = "vcs"` is missing, or if `pyproject.toml [workspace]` gains
-  a `version` field.
+  `[tool.hatch.version]` `source = "vcs"` is missing.
 - To cut a release you do **not** edit any version field — a signed `vX.Y.Z` git tag drives
   it. See `docs/RELEASING.md` and `CONTRIBUTING.md` for the workflow.
 

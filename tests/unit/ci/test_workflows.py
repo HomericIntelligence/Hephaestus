@@ -27,6 +27,7 @@ AUTO_MERGE_ON_GO_WORKFLOW = (
 )
 REQUIRED_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "_required.yml"
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
+SECURITY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "security.yml"
 TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "test.yml"
 SETUP_PI_ACTION = REPO_ROOT / ".github" / "actions" / "setup-pi-cli" / "action.yml"
 
@@ -139,15 +140,19 @@ class TestWorkflowInventoryLiveTree:
         from hephaestus.ci.precommit import load_precommit_config
 
         repos = load_precommit_config(REPO_ROOT / ".pre-commit-config.yaml")
-        hook = next(
-            (
-                hook
-                for repo in repos
-                for hook in repo.get("hooks", [])
-                if hook.get("id") == "hephaestus-check-workflow-inventory"
-            ),
-            None,
-        )
+        hook = None
+        for repo in repos:
+            hooks = repo.get("hooks")
+            if not isinstance(hooks, list):
+                continue
+            for candidate in hooks:
+                if isinstance(candidate, dict) and candidate.get("id") == (
+                    "hephaestus-check-workflow-inventory"
+                ):
+                    hook = candidate
+                    break
+            if hook is not None:
+                break
 
         assert hook is not None
         assert hook["entry"] == "uv run hephaestus-check-workflow-inventory"
@@ -484,6 +489,36 @@ class TestAutomationRuntimeInstall:
 
         assert just_index < bats_index
         assert just_step["with"]["just-version"] == "1.36.0"
+
+
+class TestDependencyAuditEnvironment:
+    """Dependency scans must inspect the complete locked dependency graph."""
+
+    @pytest.mark.parametrize(
+        ("workflow_path", "job_name"),
+        (
+            (REQUIRED_WORKFLOW, "security-dependency-scan"),
+            (SECURITY_WORKFLOW, "pip-audit"),
+        ),
+    )
+    def test_pip_audit_syncs_all_locked_groups_and_extras(
+        self, workflow_path: Path, job_name: str
+    ) -> None:
+        """pip-audit cannot omit optional dependencies represented in uv.lock."""
+        workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+        steps = workflow["jobs"][job_name]["steps"]
+
+        audit_index = next(
+            index for index, step in enumerate(steps) if step.get("name") == "Run pip-audit"
+        )
+        install_index, install_step = next(
+            (index, step)
+            for index, step in enumerate(steps)
+            if step.get("name") == "Install locked dependency audit environment"
+        )
+
+        assert install_index < audit_index
+        assert install_step["run"] == "uv sync --all-groups --all-extras --locked"
 
 
 class TestCollectWorkflowFiles:

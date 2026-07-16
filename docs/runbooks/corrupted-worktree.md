@@ -71,7 +71,7 @@ environment may have re-solved and dropped the editable install, leaving
 `hephaestus-*` console scripts dangling. Restore it:
 
 ```bash
-uv run dev-install
+uv sync
 ```
 
 ## See also

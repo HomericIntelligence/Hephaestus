@@ -51,11 +51,10 @@ pytest, ruff, and mypy):
   extras: `automation`, `github`, `nats`, `toml`, `xml`, `schema`. Note that
   `automation` is the product layer (`hephaestus.automation`) and pulls in
   `pydantic`; see [ADR 0001](docs/adr/0001-automation-library-boundary.md).
-- `pip install HomericIntelligence-Hephaestus[dev]` — installs development and
-  testing dependencies. Use this for contributors and CI.
-- `pip install "HomericIntelligence-Hephaestus[all,dev]"` — both, for a full
-  development environment via pip (uv users get this automatically via
-  `uv sync`).
+- `uv sync` — installs the editable project plus its default development and
+  automation dependency groups for contributors.
+- `uv sync --all-groups --all-extras --locked` — installs the complete locked
+  dependency surface used by CI dependency and license checks.
 - Individual extras (e.g. `[github]`, `[schema]`) are available for users who
   only need one integration.
 
@@ -130,12 +129,10 @@ Hephaestus/
 
 This project uses [uv](https://uv.sh) for environment management, which automatically handles dependencies and creates isolated environments.
 
-> **Platform note:** The uv developer environment is **Linux-64 only** (see
-> `platforms` in [`pyproject.toml`](pyproject.toml)). On macOS or Windows, install the
-> published wheel into a plain virtualenv instead — see
-> [From PyPI](#from-pypi) above. The
-> full comparison table (install paths, supported platforms, Python versions)
-> lives in [CONTRIBUTING.md#platform-support](CONTRIBUTING.md#platform-support).
+> **Platform note:** uv supports this project's Python 3.10+ development
+> environment on Linux, macOS, and Windows. The required GitHub Actions jobs
+> currently run on Linux; POSIX-specific tests are marked to skip on native
+> Windows. See [CONTRIBUTING.md#platform-support](CONTRIBUTING.md#platform-support).
 
 ### Prerequisites
 
@@ -160,14 +157,14 @@ uv run pytest
 
 # Run only unit tests (coverage-gated in CI)
 just test-unit
-pytest -m unit
+uv run pytest tests/unit
 
 # Run only integration tests
 just test-integration
-pytest -m integration
+uv run pytest tests/integration
 
 # Run all tests except integration
-pytest -m "not integration"
+uv run pytest -m "not integration"
 ```
 
 All integration tests carry `pytest.mark.integration` (module-level `pytestmark`),
@@ -177,10 +174,12 @@ so marker-based selection is reliable.
 
 ```bash
 # Format code with ruff
-uv run format
+just format
+uv run ruff format hephaestus scripts tests
 
 # Lint code with ruff
-uv run lint
+just lint
+uv run ruff check hephaestus scripts tests
 ```
 
 ## Usage
@@ -225,22 +224,14 @@ dependencies = [
 ]
 ```
 
-Or add a PyPI entry to `pyproject.toml`:
-
-```toml
-[pypi-dependencies]
-homericintelligence-hephaestus = ">=0.9,<1"
-```
-
 Then run `uv sync` to resolve the dependency.
 
 After 1.0 ships, bump these constraints to `>=1.0,<2`.
 
 **For local development (path dependency):**
 
-```toml
-[pypi-dependencies]
-homericintelligence-hephaestus = { path = "../Hephaestus", editable = true }
+```bash
+uv add --editable ../Hephaestus
 ```
 
 ## Key Features
@@ -481,42 +472,21 @@ block the independently reviewed manual bootstrap merge.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full process.
 
-## uv Environments
+## uv Environment
 
-This project defines multiple environments in `pyproject.toml`:
-
-- **default**: Basic runtime environment
-- **dev**: Development environment with linting and formatting tools
-- **lint**: Linting-only environment
-
-Switch environments with:
-
-```bash
-uv run --group dev bash
-uv shell -e lint
-```
+`uv sync` creates this checkout's `.venv` and installs the project in editable
+mode. The default dependency groups include the development and automation
+tools; run repository commands with `uv run <command>` so they use that locked
+environment. Use `uv sync --all-groups --all-extras --locked` when a workflow
+or local check must exercise the complete dependency surface represented by
+`uv.lock`.
 
 ## Adding New Dependencies
 
-Add new dependencies to `pyproject.toml`:
-
-For conda packages:
-
-```toml
-[dependencies]
-numpy = "*"
-```
-
-For PyPI packages:
-
-```toml
-[pypi-dependencies]
-requests = "*"
-```
-
-Then run:
+Use uv to add a runtime dependency, then refresh the environment:
 
 ```bash
+uv add requests
 uv sync
 ```
 
