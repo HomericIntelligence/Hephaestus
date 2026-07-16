@@ -19,9 +19,10 @@ from labels at startup. An interrupt leaves items resumable, never failed.
 `ci`. It captures a live PR head, synchronizes an isolated worktree to that
 head, and runs an independent read-only reviewer in a fresh per-head session.
 The worker verifies the local worktree HEAD still equals the captured remote
-SHA before invoking the reviewer. The coordinator publishes an authenticated,
-byte-bounded artifact before it applies `state:implementation-go`. A stale,
-foreign, malformed, or NOGO artifact never authorizes CI or arming.
+SHA and that its tracked and untracked files are clean before invoking the
+reviewer. The coordinator publishes an authenticated, byte-bounded artifact
+before it applies `state:implementation-go`. A stale, foreign, malformed, or
+NOGO artifact never authorizes CI or arming.
 
 `merge_wait` is the sole automatic armer. It performs prepare → arm → confirm
 against the same current head and artifact, and disables/revokes eligibility if
@@ -363,11 +364,12 @@ Related: #1554 (original minor-thread deadlock this replaces), #1575
    worktree to the captured PR branch without refreshing it from the base
    branch. [W:A] Run an independent reviewer there in `sandbox="read-only"`,
    with a fresh per-head/per-attempt session and the expected remote SHA. The
-   worker rejects a local-HEAD mismatch before invoking the agent. Before
-   dispatch, the coordinator fetches a bounded, repo-scoped nonempty diff, CI
-   summary, and authenticated prior review, and checks the head both before
-   and after that fetch. Missing, malformed, oversized, or stale evidence is
-   a fail-closed NOGO. All evidence is untrusted and nonce-fenced.
+   worker rejects a local-HEAD mismatch or any tracked/untracked local change
+   before invoking the agent. Before dispatch, the coordinator fetches a
+   bounded, repo-scoped nonempty diff, CI summary, and authenticated prior
+   review, and checks the head both before and after that fetch. Missing,
+   malformed, oversized, or stale evidence is a fail-closed NOGO. All evidence
+   is untrusted and nonce-fenced.
 3. [M] Re-read the head before publishing. A GO publishes an authenticated,
    exact-grammar artifact for that head, reads it back, then applies
    `state:implementation-go`; any publish/readback/label failure is terminal.
