@@ -1583,7 +1583,10 @@ class PipelineGitHub:
         # JSON record is atomically replaced by save(), so it cannot itself be
         # the lock inode. Every coordinator process takes this same lock before
         # claiming, making only one external /learn dispatch possible.
-        with file_lock(self._arming.learn_claim_lock_path(issue_number)):
+        with file_lock(
+            self._arming.learn_claim_lock_path(issue_number),
+            require_exclusive=True,
+        ):
             record = self._arming.load(issue_number) or {"pr_number": pr_number}
             status = str(record.get("learn_status") or "").lower()
             if status in {"succeeded", "failed", "in_progress"}:

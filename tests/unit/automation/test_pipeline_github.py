@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
+from multiprocessing import get_context
 from pathlib import Path
 from time import sleep
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -23,6 +24,21 @@ import hephaestus.automation.pr_manager as pr_manager_mod
 from hephaestus.automation.pipeline.stages.base import StageGitHub
 from hephaestus.automation.protocol import PLAN_COMMENT_MARKER, PLAN_REVIEW_PREFIX
 from hephaestus.automation.state_labels import STATE_PLAN_GO
+from hephaestus.utils.file_lock import LockUnavailableError
+
+
+def _claim_drive_green_learn_from_process(repo_root: str, start_barrier: Any, results: Any) -> None:
+    """Race one real adapter claim from a separate process for lock coverage."""
+    adapter = pg.PipelineGitHub("org", dry_run=False, repo_root=Path(repo_root))
+    original_save = adapter._arming.save
+
+    def delayed_save(issue_number: int, record: dict[str, Any]) -> bool:
+        sleep(0.1)
+        return original_save(issue_number, record)
+
+    with patch.object(adapter._arming, "save", side_effect=delayed_save):
+        start_barrier.wait()
+        results.put(adapter.claim_drive_green_learn(33, 703))
 
 
 @pytest.fixture
@@ -1491,6 +1507,45 @@ class TestDriveGreenArmingRecords:
 
         assert outcomes.count(True) == 1
         assert outcomes.count(False) == 1
+
+    def test_process_racing_learn_claims_allow_exactly_one_dispatch(self, tmp_path: Path) -> None:
+        """The claim lock coordinates separate automation-loop processes."""
+        pytest.importorskip("fcntl")
+        context = get_context("spawn")
+        start_barrier = context.Barrier(2)
+        results = context.Queue()
+        processes = [
+            context.Process(
+                target=_claim_drive_green_learn_from_process,
+                args=(str(tmp_path), start_barrier, results),
+            )
+            for _ in range(2)
+        ]
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(timeout=10)
+            assert process.exitcode == 0
+
+        outcomes = [results.get(timeout=1) for _ in processes]
+        assert outcomes.count(True) == 1
+        assert outcomes.count(False) == 1
+
+    def test_learn_claim_fails_closed_without_an_exclusive_lock(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The pipeline refuses an external /learn action if locking is absent."""
+        unavailable_lock = MagicMock(side_effect=LockUnavailableError("exclusive lock unsupported"))
+        monkeypatch.setattr(pg, "file_lock", unavailable_lock)
+
+        with pytest.raises(LockUnavailableError, match="exclusive lock unsupported"):
+            adapter.claim_drive_green_learn(34, 704)
+
+        unavailable_lock.assert_called_once_with(
+            adapter._arming.learn_claim_lock_path(34),
+            require_exclusive=True,
+        )
+        assert adapter._arming.load(34) is None
 
     def test_failed_learn_is_also_terminal(self, adapter: pg.PipelineGitHub) -> None:
         adapter.mark_drive_green_learn_result(4, succeeded=False)
