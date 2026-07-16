@@ -463,7 +463,7 @@ class TestScanRepositoryExclusions:
         [
             "docs/arxiv",
             "tests/claude-code",
-            ".pixi",
+            ".venv",
             "build",
             "node_modules",
         ],

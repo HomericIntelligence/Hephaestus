@@ -1,6 +1,6 @@
 {
     "version": "0.2.0",
-    "comment": "Debug configs for the most-used hephaestus-* CLIs. Each entry runs the CLI inside the pixi env's interpreter so dev-installed package code is on the import path. Adjust `args` to the scenario you want to step through.",
+    "comment": "Debug configs for the most-used hephaestus-* CLIs. Each entry runs the CLI inside uv's project environment. Adjust `args` to the scenario you want to step through.",
     "configurations": [
         {
             "name": "Run unit tests (current file)",
@@ -13,7 +13,7 @@
                 "--no-cov"
             ],
             "console": "integratedTerminal",
-            "python": "${workspaceFolder}/.pixi/envs/default/bin/python",
+            "python": "${workspaceFolder}/.venv/bin/python",
             "cwd": "${workspaceFolder}",
             "justMyCode": false
         },
@@ -28,7 +28,7 @@
                 "--no-cov"
             ],
             "console": "integratedTerminal",
-            "python": "${workspaceFolder}/.pixi/envs/default/bin/python",
+            "python": "${workspaceFolder}/.venv/bin/python",
             "cwd": "${workspaceFolder}",
             "justMyCode": false
         },
@@ -43,7 +43,7 @@
                 "1"
             ],
             "console": "integratedTerminal",
-            "python": "${workspaceFolder}/.pixi/envs/default/bin/python",
+            "python": "${workspaceFolder}/.venv/bin/python",
             "cwd": "${workspaceFolder}",
             "justMyCode": false
         },
@@ -58,7 +58,7 @@
                 "1"
             ],
             "console": "integratedTerminal",
-            "python": "${workspaceFolder}/.pixi/envs/default/bin/python",
+            "python": "${workspaceFolder}/.venv/bin/python",
             "cwd": "${workspaceFolder}",
             "justMyCode": false
         },
@@ -73,7 +73,7 @@
                 "1"
             ],
             "console": "integratedTerminal",
-            "python": "${workspaceFolder}/.pixi/envs/default/bin/python",
+            "python": "${workspaceFolder}/.venv/bin/python",
             "cwd": "${workspaceFolder}",
             "justMyCode": false
         },
@@ -88,7 +88,7 @@
                 "1"
             ],
             "console": "integratedTerminal",
-            "python": "${workspaceFolder}/.pixi/envs/default/bin/python",
+            "python": "${workspaceFolder}/.venv/bin/python",
             "cwd": "${workspaceFolder}",
             "justMyCode": false
         },
@@ -101,7 +101,7 @@
                 "--dry-run"
             ],
             "console": "integratedTerminal",
-            "python": "${workspaceFolder}/.pixi/envs/default/bin/python",
+            "python": "${workspaceFolder}/.venv/bin/python",
             "cwd": "${workspaceFolder}",
             "justMyCode": false
         }

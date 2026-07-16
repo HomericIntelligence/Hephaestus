@@ -14,7 +14,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[3]
 INSTALL_SH = REPO_ROOT / "scripts" / "shell" / "install.sh"
 
-PINNED_TOOLS = ["pixi", "dagger", "just"]  # tailscale uses apt path; no SHA needed
+PINNED_TOOLS = ["dagger", "just"]  # tailscale uses apt path; no SHA needed
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -49,7 +49,6 @@ def test_pinned_tool_sha256_constants_are_real_hashes(install_script: str, tool:
 @pytest.mark.parametrize(
     "fragment",
     [
-        "pixi.sh/install.sh",
         "dl.dagger.io/dagger/install.sh",
         "just.systems/install.sh",
         "tailscale.com/install.sh",

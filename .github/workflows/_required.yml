@@ -1,5 +1,4 @@
-# Platform scope: Linux-only. The pixi environment targets linux-64 (see
-# pixi.toml [workspace] platforms); macOS/Windows CI is out of scope and
+# Platform scope: Linux-only. macOS/Windows CI is out of scope and
 # tracked in #539. Published wheels remain pure-Python importable elsewhere.
 # When #539 lands, expand the matrix to include macOS and Windows runners.
 name: Required Checks
@@ -181,11 +180,10 @@ jobs:
       # job (issue #1173) so that the WHOLE hook suite is a required status
       # check — previously pre-commit was advisory, which let an unformatted
       # file land on main via #959 and break pre-commit for every later PR.
-      - name: Setup pixi env (lint)
-        uses: ./.github/actions/setup-pixi-env
+      - name: Setup uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
-          environments: lint
-          cache-key-prefix: pixi-lint
+          enable-cache: true
 
       - name: Cache pre-commit environments
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
@@ -201,18 +199,14 @@ jobs:
           # Persist incremental cache so the full-tree mypy hook (pass_filenames: false)
           # re-checks only changed modules across CI runs. See issue #1503.
           path: .mypy_cache
-          key: mypy-${{ runner.os }}-${{ hashFiles('pixi.lock', 'pyproject.toml') }}
+          key: mypy-${{ runner.os }}-${{ hashFiles('uv.lock', 'pyproject.toml') }}
           restore-keys: |
             mypy-${{ runner.os }}-
 
       - name: Run pre-commit (all hooks)
         run: |
-          # Several hooks (check-dep-sync, check-unit-test-structure, the
-          # hephaestus-* catalog checks) invoke `pixi run hephaestus-*`, which
-          # resolves against the default env, so install it and the package too.
-          pixi install --environment default
-          pixi run dev-install
-          pixi run --environment lint pre-commit run --all-files --show-diff-on-failure
+          uv sync --all-groups --all-extras --locked
+          uv run pre-commit run --all-files --show-diff-on-failure
 
       - name: Upload pre-commit diff
         if: failure()
@@ -223,8 +217,8 @@ jobs:
           path: |
             .git/pre-commit-*
 
-  pixi-check:
-    name: pixi-check
+  uv-lock-check:
+    name: uv-lock-check
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: [lint, changes-gate]
@@ -233,19 +227,12 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-      - name: Setup pixi
-        uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f  # v0.10.0
+      - name: Setup uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
-          pixi-version: v0.69.0
-          cache: true
-      - name: pixi install (locked)
-        run: |
-          if [ -f pixi.lock ]; then
-            pixi install --locked
-          else
-            echo "::error::pixi.toml present but pixi.lock missing; refusing unlocked install"
-            exit 1
-          fi
+          enable-cache: true
+      - name: Check uv.lock is in sync with pyproject.toml
+        run: uv lock --check
 
   justfile-check:
     name: justfile-check
@@ -534,28 +521,25 @@ jobs:
       - name: Install Pi CLI
         uses: ./.github/actions/setup-pi-cli
 
-      - name: Cache pip packages
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+      - name: Setup uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
-          path: ~/.cache/pip
-          key: pip-${{ runner.os }}-3.12-${{ hashFiles('pyproject.toml') }}
-          restore-keys: |
-            pip-${{ runner.os }}-3.12-
+          enable-cache: true
 
-      - name: Install package
-        run: pip install -e ".[dev,schema,automation]"
+      - name: Install locked project environment
+        run: uv sync --all-groups --all-extras --locked
 
       - name: Run unit tests
         run: |
-          pytest tests/unit --override-ini="addopts=" -v --strict-markers \
+          uv run pytest tests/unit --override-ini="addopts=" -v --strict-markers \
             --cov=hephaestus --cov-report=term-missing --cov-report=xml
 
       - name: Check unit test structure
         # Use the strict CLI (also flags loose test_*.py files at tests/unit/ root).
-        run: hephaestus-check-test-structure
+        run: uv run hephaestus-check-test-structure
 
       - name: Check per-module coverage floors
-        run: pip install -e ".[xml]" && hephaestus-check-coverage --coverage-file coverage.xml --config coverage.toml
+        run: uv run hephaestus-check-coverage --coverage-file coverage.xml --config coverage.toml
 
   integration-tests:
     name: integration-tests
@@ -572,19 +556,16 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Cache pip packages
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+      - name: Setup uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
-          path: ~/.cache/pip
-          key: pip-${{ runner.os }}-3.12-${{ hashFiles('pyproject.toml') }}
-          restore-keys: |
-            pip-${{ runner.os }}-3.12-
+          enable-cache: true
 
-      - name: Install package
-        run: pip install -e ".[dev,automation]"
+      - name: Install locked project environment
+        run: uv sync --all-groups --all-extras --locked
 
       - name: Run integration tests
-        run: pytest tests/integration --override-ini="addopts=" -v --strict-markers
+        run: uv run pytest tests/integration --override-ini="addopts=" -v --strict-markers
 
   shell-tests:
     name: shell-tests
@@ -596,13 +577,16 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
-      - name: Setup pixi env (default)
-        uses: ./.github/actions/setup-pixi-env
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
-          cache-key-prefix: pixi-shell
+          python-version: "3.12"
 
       - name: Run bats shell tests
-        run: pixi run test-shell
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bats
+          bats --recursive tests/shell
 
   build:
     name: build
@@ -621,25 +605,23 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Cache pip packages
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+      - name: Setup uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
-          path: ~/.cache/pip
-          key: pip-${{ runner.os }}-3.12-build-${{ hashFiles('pyproject.toml') }}
-          restore-keys: |
-            pip-${{ runner.os }}-3.12-build-
+          enable-cache: true
 
-      - name: Install build deps
-        run: pip install build hatchling hatch-vcs
+      - name: Install locked build environment
+        run: uv sync --all-groups --all-extras --locked
 
       - name: Build wheel and sdist
-        run: python -m build --no-isolation
+        run: uv run python -m build --no-isolation
 
       - name: Smoke-test installed wheel
         run: |
-          pip install dist/homericintelligence_hephaestus-*.whl --force-reinstall
-          python -c "import hephaestus; print('Package version:', hephaestus.__version__)"
-          python -c "from hephaestus import slugify, retry_with_backoff, setup_logging; print('OK')"
+          uv venv /tmp/hephaestus-wheel-smoke
+          uv pip install --python /tmp/hephaestus-wheel-smoke/bin/python dist/homericintelligence_hephaestus-*.whl --force-reinstall
+          /tmp/hephaestus-wheel-smoke/bin/python -c "import hephaestus; print('Package version:', hephaestus.__version__)"
+          /tmp/hephaestus-wheel-smoke/bin/python -c "from hephaestus import slugify, retry_with_backoff, setup_logging; print('OK')"
 
   security-dependency-scan:
     name: security/dependency-scan
@@ -651,15 +633,14 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
-      - name: Setup pixi env (lint)
-        uses: ./.github/actions/setup-pixi-env
+      - name: Setup uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
-          environments: lint
-          cache-key-prefix: pixi-lint
+          enable-cache: true
 
       - name: Run pip-audit
         id: pip-audit
-        run: pixi run --environment lint pip-audit
+        run: uv run pip-audit --ignore-vuln PYSEC-2025-183
 
       - name: Post pip-audit summary
         if: always()
@@ -690,7 +671,7 @@ jobs:
 
       # Digest-pinned so the scan no longer depends on a transient GitHub
       # Releases tarball URL (audit #1483). gitleaks is not published on
-      # conda-forge or PyPI, so a Pixi-managed install cannot be locked; the
+      # PyPI, so its image digest is the reproducible pin; it remains
       # container digest is the reproducible pin instead. Run via `docker
       # run` rather than a job-level `container:` — the gitleaks image is
       # musl-based Alpine with no Node.js runtime, which breaks
@@ -718,15 +699,14 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
-      - name: Setup pixi env (lint)
-        uses: ./.github/actions/setup-pixi-env
+      - name: Setup uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
-          environments: lint
-          cache-key-prefix: pixi-lint
+          enable-cache: true
 
       - name: Run bandit (SAST)
         id: bandit
-        run: pixi run --environment lint sast
+        run: uv run bandit -c pyproject.toml -r hephaestus scripts --severity-level medium
 
       - name: Post bandit summary
         if: always()
@@ -758,8 +738,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install check-jsonschema
-        run: pip install check-jsonschema
+      - name: Setup uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        with:
+          enable-cache: true
 
       - name: Validate GitHub workflow schemas
         run: |
@@ -772,7 +754,7 @@ jobs:
             echo "No workflow files to validate"
             exit 0
           fi
-          check-jsonschema \
+          uvx check-jsonschema \
             --builtin-schema vendor.github-workflows \
             "${wf_files[@]}"
 
@@ -793,25 +775,25 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install package (for __version__ and checker imports)
-        # Install WITH deps: the single-source checker imports
-        # ``hephaestus.utils.helpers``, which imports ``packaging`` (a declared
-        # core dependency). ``--no-deps`` would skip ``packaging`` and the
-        # checker below would ModuleNotFoundError instead of asserting.
-        run: pip install -e "."
+      - name: Setup uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        with:
+          enable-cache: true
 
-      - name: Check version single-source-of-truth (pyproject + pixi.toml)
+      - name: Install locked project environment
+        run: uv sync --all-groups --all-extras --locked
+
+      - name: Check version single-source-of-truth
         run: |
           set -euo pipefail
 
           # Diagnostics (informational only).
-          PKG_VERSION=$(python -c "import hephaestus; print(hephaestus.__version__)")
+          PKG_VERSION=$(uv run python -c "import hephaestus; print(hephaestus.__version__)")
           echo "Installed __version__: $PKG_VERSION"
 
-          # ENFORCEMENT (legs 1+2): the tested checker asserts there is no
+          # ENFORCEMENT: the tested checker asserts there is no
           # static [project].version, that version is in [project].dynamic,
-          # that [tool.hatch.version].source == "vcs", and that pixi.toml has
-          # no [workspace].version. Under `set -e` a non-zero exit fails the
+          # that [tool.hatch.version].source == "vcs". Under `set -e` a non-zero exit fails the
           # job — this is the live exit-1 path the old dead VERSION-file
           # branch never provided.
           #
@@ -819,25 +801,15 @@ jobs:
           # the module form is immune to sys.path[0]/CWD-dependent __file__
           # resolution, so the checker's get_repo_root() anchors to the
           # installed package and reads the checked-out pyproject.toml.
-          python -m hephaestus.scripts_lib.check_version_single_source
+          uv run python -m hephaestus.scripts_lib.check_version_single_source
 
-      - name: Set up pixi (for lockfile sync check)
-        uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f  # v0.10.0
+      - name: Setup uv (for lockfile sync check)
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
-          pixi-version: v0.69.0
-          cache: true
+          enable-cache: true
 
-      - name: Check pixi.lock is in sync with pixi.toml
-        run: |
-          set -euo pipefail
-          # ENFORCEMENT (leg 3): the DoD names this job for the full
-          # "pyproject.toml then pixi.toml then pixi.lock" contract
-          # (docs/DEFINITION_OF_DONE.md:28). The checker above covers
-          # pyproject + pixi.toml but never reads pixi.lock. `pixi install
-          # --locked` exits non-zero if pixi.toml changed without re-locking
-          # — the same frozen-verification the pixi-check job uses, and a
-          # command guaranteed available in the repo-pinned pixi v0.69.0.
-          pixi install --locked
+      - name: Check uv.lock is in sync with pyproject.toml
+        run: uv lock --check
 
   license-scan:
     name: license-scan
@@ -851,23 +823,21 @@ jobs:
         with:
           fetch-depth: 0  # hatch-vcs needs full history to compute the version
 
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+      - name: Setup uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
-          python-version: "3.13"
-          cache: pip  # cache wheels so a PyPI hiccup does not flake the gate
+          enable-cache: true
 
-      # Install the package + ALL runtime extras (with deps) on a bare runner,
-      # NOT inside pixi: pip and pixi co-managing site-packages causes lockfile
-      # churn (see security.yml comment). .[all] is required so
+      # Install the package + all runtime extras. ``[all]`` is required so
       # distributed_requirements() can read every runtime extra's Requires-Dist.
-      - name: Install package with all runtime extras
-        run: pip install -e ".[all]"
+      - name: Install locked project environment
+        run: uv sync --all-groups --all-extras --locked
 
       - name: Run license scan
         id: license-scan
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
-        run: python3 scripts/check_license_compatibility.py
+        run: uv run python scripts/check_license_compatibility.py
 
       - name: Post license-scan summary
         if: always()
@@ -908,7 +878,7 @@ jobs:
       - changes-gate
       - forbid-suppressions
       - lint
-      - pixi-check
+      - uv-lock-check
       - justfile-check
       - symlink-check
       - shellcheck

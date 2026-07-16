@@ -19,9 +19,7 @@ def test_unlinked_todo_hook_is_registered() -> None:
         if h.get("id") == "check-no-unlinked-todo"
     )
 
-    assert hook["entry"] == (
-        "pixi run --environment default python3 -m hephaestus.validation.unlinked_todo"
-    )
+    assert hook["entry"] == ("uv run python -m hephaestus.validation.unlinked_todo")
     assert hook["language"] == "system"
     assert hook["pass_filenames"] is False
     assert hook["files"] == r"^(hephaestus|scripts)/.*\.py$|^docs/TECH_DEBT\.md$"

@@ -8,7 +8,7 @@
 [![Python](https://img.shields.io/pypi/pyversions/HomericIntelligence-Hephaestus.svg)](https://pypi.org/project/HomericIntelligence-Hephaestus/)
 [![License: BSD-3-Clause](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](LICENSE)
 
-Shared utilities and tooling for the HomericIntelligence ecosystem, powered by [Pixi](https://pixi.sh) for environment management.
+Shared utilities and tooling for the HomericIntelligence ecosystem, powered by [uv](https://uv.sh) for environment management.
 
 ## Overview
 
@@ -54,14 +54,14 @@ pytest, ruff, and mypy):
 - `pip install HomericIntelligence-Hephaestus[dev]` — installs development and
   testing dependencies. Use this for contributors and CI.
 - `pip install "HomericIntelligence-Hephaestus[all,dev]"` — both, for a full
-  development environment via pip (Pixi users get this automatically via
-  `pixi install`).
+  development environment via pip (uv users get this automatically via
+  `uv sync`).
 - Individual extras (e.g. `[github]`, `[schema]`) are available for users who
   only need one integration.
 
 ### Development setup
 
-For local development, [install Pixi](https://pixi.sh/install/) and
+For local development, [install uv](https://uv.sh/install/) and
 [`just`](https://just.systems/), then bootstrap the project (installs deps, the
 editable package, and pre-commit hooks in one step):
 
@@ -96,7 +96,7 @@ Hephaestus ships two layers from one distribution:
 
 ```
 Hephaestus/
-├── pixi.toml          # Pixi configuration
+├── pyproject.toml          # uv configuration
 ├── pyproject.toml     # Python package configuration
 ├── hephaestus/        # Main package
 │   ├── __init__.py
@@ -126,12 +126,12 @@ Hephaestus/
 └── README.md          # This file
 ```
 
-## Getting Started with Pixi
+## Getting Started with uv
 
-This project uses [Pixi](https://pixi.sh) for environment management, which automatically handles dependencies and creates isolated environments.
+This project uses [uv](https://uv.sh) for environment management, which automatically handles dependencies and creates isolated environments.
 
-> **Platform note:** The pixi developer environment is **Linux-64 only** (see
-> `platforms` in [`pixi.toml`](pixi.toml)). On macOS or Windows, install the
+> **Platform note:** The uv developer environment is **Linux-64 only** (see
+> `platforms` in [`pyproject.toml`](pyproject.toml)). On macOS or Windows, install the
 > published wheel into a plain virtualenv instead — see
 > [From PyPI](#from-pypi) above. The
 > full comparison table (install paths, supported platforms, Python versions)
@@ -139,7 +139,7 @@ This project uses [Pixi](https://pixi.sh) for environment management, which auto
 
 ### Prerequisites
 
-Install Pixi by following the [official installation guide](https://pixi.sh/install/).
+Install uv by following the [official installation guide](https://uv.sh/install/).
 
 ### Setup Development Environment
 
@@ -156,7 +156,7 @@ just bootstrap
 ```bash
 # Run all tests (unit + integration)
 just test
-pixi run pytest
+uv run pytest
 
 # Run only unit tests (coverage-gated in CI)
 just test-unit
@@ -177,17 +177,17 @@ so marker-based selection is reliable.
 
 ```bash
 # Format code with ruff
-pixi run format
+uv run format
 
 # Lint code with ruff
-pixi run lint
+uv run lint
 ```
 
 ## Usage
 
 ### As a Package
 
-After installing with Pixi:
+After installing with uv:
 
 ```python
 from hephaestus import slugify, human_readable_size, retry_with_backoff
@@ -214,7 +214,7 @@ the supported install path for non-Linux platforms.
 pip install homericintelligence-hephaestus
 ```
 
-**Using Pixi:**
+**Using uv:**
 
 Add to `pyproject.toml`:
 
@@ -225,14 +225,14 @@ dependencies = [
 ]
 ```
 
-Or add a PyPI entry to `pixi.toml`:
+Or add a PyPI entry to `pyproject.toml`:
 
 ```toml
 [pypi-dependencies]
 homericintelligence-hephaestus = ">=0.9,<1"
 ```
 
-Then run `pixi install` to resolve the dependency.
+Then run `uv sync` to resolve the dependency.
 
 After 1.0 ships, bump these constraints to `>=1.0,<2`.
 
@@ -291,7 +291,7 @@ config = merge_with_env({}, convert_bools=True)
 <!-- CLI table generated from pyproject.toml [project.scripts]. Keep in sync via
      `python3 -m hephaestus.scripts_lib.check_cli_table_sync` (also enforced in pre-commit). -->
 
-51 console scripts are installed when you install the package.  Run any command
+48 console scripts are installed when you install the package.  Run any command
 with `--help` to see full usage.
 
 ### Automation
@@ -409,7 +409,6 @@ sync (#993).
 | Command | Description |
 |---|---|
 | `hephaestus-bench-precommit` | Pre-commit CI utilities for GitHub Actions integration (benchmark) |
-| `hephaestus-check-precommit-versions` | Pre-commit CI utilities for GitHub Actions integration (version check) |
 | `hephaestus-check-workflow-inventory` | GitHub Actions workflow validation utilities (inventory check) |
 | `hephaestus-validate-workflow-checkout` | GitHub Actions workflow validation utilities (checkout validation) |
 
@@ -423,8 +422,6 @@ sync (#993).
 
 | Command | Description |
 |---|---|
-| `hephaestus-check-dep-sync` | Validate and synchronize dependency declarations across project config files |
-| `hephaestus-sync-requirements` | Synchronize dependency declarations across project config files |
 
 ### Version Management
 
@@ -484,9 +481,9 @@ block the independently reviewed manual bootstrap merge.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full process.
 
-## Pixi Environments
+## uv Environments
 
-This project defines multiple environments in `pixi.toml`:
+This project defines multiple environments in `pyproject.toml`:
 
 - **default**: Basic runtime environment
 - **dev**: Development environment with linting and formatting tools
@@ -495,13 +492,13 @@ This project defines multiple environments in `pixi.toml`:
 Switch environments with:
 
 ```bash
-pixi shell -e dev
-pixi shell -e lint
+uv run --group dev bash
+uv shell -e lint
 ```
 
 ## Adding New Dependencies
 
-Add new dependencies to `pixi.toml`:
+Add new dependencies to `pyproject.toml`:
 
 For conda packages:
 
@@ -520,7 +517,7 @@ requests = "*"
 Then run:
 
 ```bash
-pixi install
+uv sync
 ```
 
 ## License

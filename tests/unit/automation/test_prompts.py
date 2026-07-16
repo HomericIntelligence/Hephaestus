@@ -250,7 +250,7 @@ class TestPlanPrompt:
         """The worked examples model the concreteness the reviewer demands."""
         out = prompts.get_plan_prompt(99)
         assert re.search(r"\.py:\d+", out), "expected a file:line reference in the examples"
-        assert "pixi run pytest" in out
+        assert "uv run pytest" in out
 
 
 class TestPlanReviewContextAndVerdict:

@@ -18,7 +18,7 @@ Excluded paths (archived / test-fixture content that is not authoritative):
 
 - ``docs/arxiv/``
 - ``tests/claude-code/``
-- ``.pixi/``
+- ``.venv/``
 - ``build/``
 - ``node_modules/``
 
@@ -161,7 +161,7 @@ POLICY_RULES: list[tuple[str, Severity, str, re.Pattern[str]]] = [
 EXCLUDED_PREFIXES: tuple[str, ...] = (
     "docs/arxiv/",
     "tests/claude-code/",
-    ".pixi/",
+    ".venv/",
     ".worktrees/",
     "build/.worktrees/",
     ".claude/worktrees/",

@@ -36,16 +36,15 @@ def _dependency_name(requirement: str) -> str:
     return head.strip().lower().replace("_", "-")
 
 
-def test_dev_extra_includes_build_backend_for_no_isolation_sdist() -> None:
-    """The sdist test disables build isolation, so dev installs need backend deps."""
+def test_dev_group_includes_build_backend_for_no_isolation_sdist() -> None:
+    """The UV dev group supplies backend dependencies for the no-isolation test."""
     pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
     build_requires = {
         _dependency_name(requirement) for requirement in pyproject["build-system"]["requires"]
     }
     dev_dependencies = {
-        _dependency_name(requirement)
-        for requirement in pyproject["project"]["optional-dependencies"]["dev"]
+        _dependency_name(requirement) for requirement in pyproject["dependency-groups"]["dev"]
     }
 
     assert build_requires <= dev_dependencies
@@ -73,7 +72,7 @@ def test_sdist_includes_notice_and_compatibility(tmp_path: Path) -> None:
             "--outdir",
             str(tmp_path),
             # This test validates sdist contents, not build isolation or
-            # package-index access. The Pixi environment already provides the
+            # package-index access. The UV environment already provides the
             # backend dependencies, so avoid network-only dependency fetching.
             "--no-isolation",
         ],

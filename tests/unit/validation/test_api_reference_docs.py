@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import json
-import shlex
 from pathlib import Path
 
 import pytest
 
-from hephaestus.io.toml import import_tomllib
 from hephaestus.validation.api_reference import (
     DEFAULT_REPO_ROOT,
     ApiReferenceFinding,
@@ -49,17 +47,12 @@ class TestPdocTargets:
         assert set(targets[1:]) == direct_subpackages
         assert "./hephaestus/automation" not in targets
 
-    def test_pixi_docs_task_matches_expected_targets(self) -> None:
-        tomllib = import_tomllib()
-        assert tomllib is not None
-        pixi = tomllib.loads((REPO_ROOT / "pixi.toml").read_text(encoding="utf-8"))
-
-        parts = shlex.split(pixi["tasks"]["docs"])
-        output_flag = parts.index("--output-dir")
-
-        assert parts[0] == "pdoc"
-        assert tuple(parts[1:output_flag]) == expected_pdoc_targets(REPO_ROOT)
-        assert parts[output_flag + 1 :] == ["docs/api"]
+    def test_justfile_docs_recipe_matches_expected_targets(self) -> None:
+        recipe = (REPO_ROOT / "justfile").read_text(encoding="utf-8")
+        expected = (
+            "uv run pdoc " + " ".join(expected_pdoc_targets(REPO_ROOT)) + " --output-dir docs/api"
+        )
+        assert expected in recipe
 
 
 class TestFindViolations:

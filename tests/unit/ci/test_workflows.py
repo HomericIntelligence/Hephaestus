@@ -150,7 +150,7 @@ class TestWorkflowInventoryLiveTree:
         )
 
         assert hook is not None
-        assert hook["entry"] == "pixi run --environment default hephaestus-check-workflow-inventory"
+        assert hook["entry"] == "uv run hephaestus-check-workflow-inventory"
         assert hook["pass_filenames"] is False
         assert hook["always_run"] is True
         assert (
@@ -275,38 +275,22 @@ class TestStrictGateBootstrapWorkflow:
         assert "--json body\n" in text or "--json body \\" in text
 
 
-class TestRequiredPixiCheckWorkflow:
-    """Regression tests for the required pixi-check workflow job."""
+class TestRequiredUvLockCheckWorkflow:
+    """Regression tests for the required UV lockfile check."""
 
-    def _pixi_install_script(self) -> str:
+    def test_uv_lock_check_is_a_required_job(self) -> None:
         with open(REQUIRED_WORKFLOW, encoding="utf-8") as f:
             workflow = yaml.safe_load(f)
-        steps = workflow["jobs"]["pixi-check"]["steps"]
-        for step in steps:
-            if step.get("name") == "pixi install (locked)":
-                return str(step["run"])
-        raise AssertionError("pixi-check job must define a 'pixi install (locked)' step")
-
-    def test_missing_pixi_lock_fails_without_unlocked_install(self) -> None:
-        """pixi-check must fail fast if the lockfile is missing."""
-        script = self._pixi_install_script()
-        lines = {line.strip() for line in script.splitlines()}
-
-        assert "pixi install --locked" in lines
-        assert "exit 1" in lines
-        assert "pixi install" not in lines
-        assert "running unlocked" not in script
+        steps = workflow["jobs"]["uv-lock-check"]["steps"]
+        assert any(step.get("run") == "uv lock --check" for step in steps)
 
 
 class TestGitleaksSecretsScan:
     """Regression tests for the required gitleaks secrets scan.
 
-    gitleaks is not published on conda-forge or PyPI, so it cannot be a
-    Pixi-managed dependency in this repo (channels are pinned to
-    conda-forge). The job instead runs a digest-addressed container image
-    via `docker run`, which removes the dependency on a transient GitHub
-    Releases tarball URL (audit #1483) without requiring an unlockable Pixi
-    package. `docker run` (not a job-level `container:`) keeps
+    gitleaks runs as a digest-addressed container image via `docker run`.
+    This avoids a dependency on a transient GitHub Releases tarball. `docker
+    run` (not a job-level `container:`) keeps
     actions/checkout running on the host runner, since the gitleaks image is
     musl-based Alpine with no Node.js runtime.
     """
@@ -469,21 +453,21 @@ class TestReleaseAttestations:
         assert workflow["permissions"]["id-token"] == "write"
 
 
-class TestAutomationExtraInstall:
-    """Regression tests for the automation extra in pip-based CI test jobs."""
+class TestAutomationRuntimeInstall:
+    """Regression tests for the UV-managed automation runtime in CI test jobs."""
 
-    def test_matrix_tests_install_automation_extra(self) -> None:
+    def test_matrix_tests_sync_the_locked_project_environment(self) -> None:
         text = TEST_WORKFLOW.read_text(encoding="utf-8")
-        assert 'run: pip install -e ".[dev,schema,automation]"' in text
+        assert "uv sync --all-groups --all-extras --locked" in text
 
-    def test_required_tests_install_automation_extra(self) -> None:
+    def test_required_tests_sync_the_locked_project_environment(self) -> None:
         text = REQUIRED_WORKFLOW.read_text(encoding="utf-8")
         unit_section = text[text.index("  unit-tests:") : text.index("  integration-tests:")]
         integration_section = text[
             text.index("  integration-tests:") : text.index("  shell-tests:")
         ]
-        assert 'run: pip install -e ".[dev,schema,automation]"' in unit_section
-        assert 'run: pip install -e ".[dev,automation]"' in integration_section
+        assert "uv sync --all-groups --all-extras --locked" in unit_section
+        assert "uv sync --all-groups --all-extras --locked" in integration_section
 
 
 class TestCollectWorkflowFiles:

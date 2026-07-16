@@ -1,7 +1,7 @@
 """Validate generated pdoc API reference output.
 
 The release workflow publishes ``docs/api`` to GitHub Pages after running the
-``docs`` Pixi task. A lazy top-level ``hephaestus`` import can generate only
+``docs`` uv command. A lazy top-level ``hephaestus`` import can generate only
 ``hephaestus.html`` unless pdoc is pointed at the subpackages explicitly, so
 this guard verifies the generated tree contains real subpackage pages before
 upload.

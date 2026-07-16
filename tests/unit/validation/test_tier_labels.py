@@ -314,11 +314,11 @@ class TestScanRepository:
         result = scan_repository(tmp_path)
         assert result == []
 
-    def test_excludes_pixi_dir(self, tmp_path: Path) -> None:
-        """Files under .pixi/ are excluded from scanning."""
-        pixi = tmp_path / ".pixi"
-        pixi.mkdir()
-        (pixi / "readme.md").write_text("T5/Hierarchy bad\n", encoding="utf-8")
+    def test_excludes_uv_dir(self, tmp_path: Path) -> None:
+        """Files under .venv/ are excluded from scanning."""
+        uv = tmp_path / ".venv"
+        uv.mkdir()
+        (uv / "readme.md").write_text("T5/Hierarchy bad\n", encoding="utf-8")
         result = scan_repository(tmp_path)
         assert result == []
 

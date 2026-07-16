@@ -34,7 +34,7 @@ workflow_dispatch (Auto Tag Release)
 Before triggering the workflow, ensure:
 
 - [ ] All changes merged to `main` and CI is green.
-- [ ] `pixi.lock` is up to date (`pixi install` produces no changes).
+- [ ] `uv.lock` is up to date (`uv sync` produces no changes).
 - [ ] No open issues in the milestone you are releasing.
 - [ ] `docs/MIGRATION.md`'s "latest released version is **X.Y.Z**" line already names
   the version you are about to tag. The Release workflow's test job runs

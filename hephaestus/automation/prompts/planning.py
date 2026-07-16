@@ -63,7 +63,7 @@ you know the line.</files_to_modify>
 <implementation_order>A numbered sequence of concrete steps.</implementation_order>
 <verification>One runnable command per acceptance criterion in the issue, each
 labelled with the criterion it proves. Use the repo's real runner
-(e.g. `pixi run pytest <path>`). RUNNABLE-EVIDENCE RULE (ADR-014): if a
+(e.g. `uv run pytest <path>`). RUNNABLE-EVIDENCE RULE (ADR-014): if a
 criterion's honest verification requires a run longer than the session/timeout
 budget (e.g. a full training epoch), the plan authors the *command* but MUST
 NOT make the run's measured *result* (an accuracy/loss/metric number) a
@@ -91,7 +91,7 @@ with _body_file(body) as tmp:
 ```
 ## Verification
 ```bash
-pixi run pytest tests/unit/io/test_utils.py -k atomic   # acceptance criterion 1: no partial writes
+uv run pytest tests/unit/io/test_utils.py -k atomic   # acceptance criterion 1: no partial writes
 ```
 
 **GOOD example 2** (decision stated with evidence, not options):

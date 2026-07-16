@@ -1,23 +1,8 @@
 # Pre-commit hooks for Hephaestus
-# Install: pixi run pre-commit install
-# Run manually: pixi run pre-commit run --all-files
+# Install: uv run pre-commit install
+# Run manually: uv run pre-commit run --all-files
 #
-# Linter version pinning — single source of truth:
-#   pixi.toml [feature.lint] is authoritative for tool versions used in CI
-#   (ruff, mypy, yamllint run via `pixi run --environment lint ...` in
-#   .github/workflows/_required.yml). The mirror `rev:`s below pin the SAME
-#   tools for the local pre-commit run, so they MUST stay within the pixi
-#   range to keep local == CI. When bumping a tool, change pixi.toml first,
-#   then update the matching `rev:` here:
-#     - yamllint  (adrienverge/yamllint rev)        ⇄ pixi yamllint
-#     - shellcheck (shellcheck-py rev)              ⇄ CI installs via apt; keep
-#                                                      this rev current with it
-#     - markdownlint-cli2 (DavidAnson rev)          ⇄ CI markdownlint-cli2-action
-#     - pre-commit-hooks (pre-commit/pre-commit-hooks rev) ⇄ meta hooks, no pixi pkg
-#   The `hephaestus-check-precommit-versions` hook (wired as a local hook below)
-#   flags drift for the pixi-backed mirrored tools — currently `yamllint`, whose
-#   floor pixi.toml owns. markdownlint-cli2 (CI action) and shellcheck (apt) have
-#   no pixi package and so are not version-checked here.
+# Python tool versions are declared in pyproject.toml and locked in uv.lock.
 
 # Ensure `pre-commit install` (documented in CONTRIBUTING.md / README.md) wires
 # BOTH the pre-commit and commit-msg stages, so the conventional-commit-msg hook
@@ -32,7 +17,7 @@ repos:
       - id: ruff-format-python
         name: Ruff Format Python
         description: Format Python files using ruff format
-        entry: pixi run ruff format hephaestus/ scripts/ tests/
+        entry: uv run ruff format hephaestus/ scripts/ tests/
         language: system
         files: ^(hephaestus|scripts|tests)/.*\.py$
         types: [python]
@@ -40,7 +25,7 @@ repos:
       - id: ruff-check-python
         name: Ruff Check Python
         description: Lint Python files using ruff check
-        entry: pixi run ruff check --fix hephaestus/ scripts/ tests/
+        entry: uv run ruff check --fix hephaestus/ scripts/ tests/
         language: system
         files: ^(hephaestus|scripts|tests)/.*\.py$
         types: [python]
@@ -48,7 +33,7 @@ repos:
       - id: mypy-check-python
         name: Mypy Type Check Python
         description: Type check Python files using mypy
-        entry: pixi run mypy
+        entry: uv run mypy
         language: system
         files: ^(hephaestus|scripts|tests)/.*\.py$
         types: [python]
@@ -76,7 +61,7 @@ repos:
         name: YAML Lint
         description: Lint YAML files for syntax and style
         args: ['--config-file', '.yamllint.yaml']
-        exclude: ^(\.pixi|build)/
+        exclude: ^(\.venv|build)/
 
   # Security: CVE scanning
   - repo: local
@@ -84,7 +69,7 @@ repos:
       - id: pip-audit
         name: pip-audit (CVE scan)
         description: Scan dependencies for known CVEs
-        entry: pixi run pip-audit
+        entry: uv run pip-audit --ignore-vuln PYSEC-2025-183
         language: system
         pass_filenames: false
         stages: [manual]
@@ -95,7 +80,7 @@ repos:
       - id: bandit
         name: Bandit (SAST)
         description: AST-based Python security scanner (subprocess/shell injection)
-        entry: pixi run --environment lint sast
+        entry: uv run bandit -c pyproject.toml -r hephaestus scripts --severity-level medium
         language: system
         files: ^(hephaestus|scripts)/.*\.py$
         types: [python]
@@ -104,13 +89,13 @@ repos:
   # Lock file freshness
   - repo: local
     hooks:
-      - id: check-pixi-lock
-        name: Check pixi lock file
-        description: Verify pixi.lock is up to date
-        entry: pixi install --locked
+      - id: check-uv-lock
+        name: Check uv lock file
+        description: Verify uv.lock is up to date
+        entry: uv lock --check
         language: system
         pass_filenames: false
-        files: ^pixi\.(toml|lock)$
+        files: ^(pyproject\.toml|uv\.lock)$
 
   # Tech-debt marker linkage enforcement
   - repo: local
@@ -118,7 +103,7 @@ repos:
       - id: check-no-unlinked-todo
         name: Check no unlinked tech-debt markers
         description: Ensure TODO/FIXME/HACK comments reference a tracking issue
-        entry: pixi run --environment default python3 -m hephaestus.validation.unlinked_todo
+        entry: uv run python -m hephaestus.validation.unlinked_todo
         language: system
         pass_filenames: false
         files: ^(hephaestus|scripts)/.*\.py$|^docs/TECH_DEBT\.md$
@@ -129,7 +114,7 @@ repos:
       - id: check-cli-table-sync
         name: Check README CLI table sync
         description: Ensure README.md CLI table documents every pyproject.toml [project.scripts] entry
-        entry: pixi run --environment default python3 -m hephaestus.scripts_lib.check_cli_table_sync
+        entry: uv run python -m hephaestus.scripts_lib.check_cli_table_sync
         language: system
         pass_filenames: false
         files: ^(README\.md|pyproject\.toml)$
@@ -140,7 +125,7 @@ repos:
       - id: check-settings-permission-paths
         name: Check Claude settings permission paths
         description: Ensure .claude/settings.json permission paths are canonical POSIX paths
-        entry: pixi run --environment default python3 -m hephaestus.scripts_lib.check_settings_permission_paths
+        entry: uv run python -m hephaestus.scripts_lib.check_settings_permission_paths
         language: system
         pass_filenames: false
         files: ^\.claude/settings\.json$
@@ -151,9 +136,7 @@ repos:
       - id: check-unit-test-structure
         name: Check unit test structure
         description: Enforce tests/unit/ mirrors hephaestus/ and has no loose test files
-        # --environment default is explicit because the pre-commit CI job runs
-        # in the lint env; the hephaestus-* console scripts live in default.
-        entry: pixi run --environment default hephaestus-check-test-structure
+        entry: uv run hephaestus-check-test-structure
         language: system
         pass_filenames: false
         files: ^(hephaestus|tests/unit)/
@@ -164,9 +147,7 @@ repos:
       - id: hephaestus-check-cli-tier-docs
         name: Every [project.scripts] entry must have a tier in COMPATIBILITY.md
         description: Fails the build if pyproject.toml [project.scripts] and the Console-Script Stability Tiers table in COMPATIBILITY.md drift apart
-        # --environment default is explicit because the pre-commit CI job runs
-        # in the lint env; the hephaestus-* console scripts live in default.
-        entry: pixi run --environment default hephaestus-check-cli-tier-docs
+        entry: uv run hephaestus-check-cli-tier-docs
         language: system
         pass_filenames: false
         files: ^(pyproject\.toml|COMPATIBILITY\.md)$
@@ -177,9 +158,7 @@ repos:
       - id: hephaestus-check-api-table-docs
         name: Every guarded subpackage __all__ must be documented in COMPATIBILITY.md
         description: Fails the build if a guarded subpackage's __all__ and its API table in COMPATIBILITY.md drift apart
-        # --environment default is explicit because the pre-commit CI job runs
-        # in the lint env; the hephaestus-* console scripts live in default.
-        entry: pixi run --environment default hephaestus-check-api-table-docs
+        entry: uv run hephaestus-check-api-table-docs
         language: system
         pass_filenames: false
         files: ^(hephaestus/(cli|config|system|utils|version)/.*\.py|COMPATIBILITY\.md)$
@@ -190,7 +169,7 @@ repos:
       - id: ruff-check-complexity
         name: Ruff Complexity Check (C901)
         description: Enforce McCabe complexity limit on hephaestus/
-        entry: pixi run ruff check --select C901 hephaestus/
+        entry: uv run ruff check --select C901 hephaestus/
         language: system
         files: ^hephaestus/.*\.py$
         types: [python]
@@ -201,26 +180,11 @@ repos:
     hooks:
       - id: check-python-version-consistency
         name: Check Python version consistency
-        description: Ensure Python version is consistent across pyproject.toml, pixi.toml, and CI
-        entry: pixi run --environment default hephaestus-check-python-version
+        description: Ensure Python version is consistent across pyproject.toml and CI
+        entry: uv run hephaestus-check-python-version
         language: system
         pass_filenames: false
-        files: ^(pyproject\.toml|pixi\.toml|\.github/workflows/.*\.yml)$
-
-  # Pre-commit rev drift check: mirrored external hook revs (e.g. yamllint)
-  # must stay within their pixi.toml version floors. See the single-source-of-
-  # truth note at the top of this file and issue #1183.
-  - repo: local
-    hooks:
-      - id: hephaestus-check-precommit-versions
-        name: hephaestus check pre-commit rev drift
-        description: Ensure mirrored .pre-commit-config.yaml hook revs match pixi.toml version floors
-        # --environment default is explicit because the pre-commit CI job runs
-        # in the lint env; the hephaestus-* console scripts live in default.
-        entry: pixi run --environment default hephaestus-check-precommit-versions
-        language: system
-        pass_filenames: false
-        files: ^(\.pre-commit-config\.yaml|pixi\.toml)$
+        files: ^(pyproject\.toml|\.github/workflows/.*\.yml)$
 
   # GitHub workflow inventory documentation enforcement (#1474)
   - repo: local
@@ -228,9 +192,7 @@ repos:
       - id: hephaestus-check-workflow-inventory
         name: hephaestus check workflow inventory
         description: Ensure .github/workflows/README.md documents every .github/workflows/*.yml file
-        # --environment default is explicit because the pre-commit CI job runs
-        # in the lint env; the hephaestus-* console scripts live in default.
-        entry: pixi run --environment default hephaestus-check-workflow-inventory
+        entry: uv run hephaestus-check-workflow-inventory
         language: system
         pass_filenames: false
         always_run: true
@@ -241,11 +203,11 @@ repos:
     hooks:
       - id: check-version-single-source
         name: Check version single source of truth
-        description: Ensure pyproject.toml is the sole version authority, pixi.toml has no version
-        entry: pixi run --environment default python3 -m hephaestus.scripts_lib.check_version_single_source
+        description: Ensure pyproject.toml is the sole version authority
+        entry: uv run python -m hephaestus.scripts_lib.check_version_single_source
         language: system
         pass_filenames: false
-        files: ^(pyproject\.toml|pixi\.toml)$
+        files: ^pyproject\.toml$
 
   # SECURITY.md hard-coded date check: prevents doc-rot from "As of YYYY-MM-DD"
   # stamps in the supported-versions header. See issue #730.
@@ -265,13 +227,6 @@ repos:
         language: system
         pass_filenames: false
         files: ^SECURITY\.md$
-      - id: check-pip-audit-ledger-reminder
-        name: Check pip-audit ledger suppressions have re-review triggers
-        description: Reject '--ignore-vuln' entries lacking a 'Re-review:' trigger
-        entry: python3 scripts/check_pip_audit_ledger_reminder.py
-        language: system
-        pass_filenames: false
-        files: ^pixi\.toml$
       - id: check-build-dir-untracked
         name: build/ must stay untracked (gitignored automation scratch)
         description: >
@@ -319,21 +274,6 @@ repos:
         language: system
         stages: [commit-msg]
         pass_filenames: true
-
-
-  # Dependency-sync check: requirements*.txt entries must exist in pixi.toml
-  # and fall within the declared range. See hephaestus.config.dep_sync.
-  - repo: local
-    hooks:
-      - id: check-dep-sync
-        name: Check dependency declarations are consistent
-        description: Validate requirements*.txt entries against pixi.toml
-        # --environment default is explicit because the pre-commit CI job runs
-        # in the lint env; the hephaestus-* console scripts live in default.
-        entry: pixi run --environment default hephaestus-check-dep-sync
-        language: system
-        pass_filenames: false
-        files: ^(pyproject\.toml|pixi\.toml|pixi\.lock|requirements.*\.txt)$
 
   # Forbid silent-failure workarounds (|| true / continue-on-error: true).
   # See HomericIntelligence/Odysseus#280.

@@ -54,8 +54,8 @@ Thumbs.db
 *.pem
 credentials.json
 
-# Pixi
-.pixi/
+# uv
+.venv/
 .ruff_cache/
 
 # Coverage reports

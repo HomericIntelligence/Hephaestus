@@ -21,7 +21,7 @@
 #   RUN_UNDER_GDB=0       Skip gdb entirely and exec the command directly
 #                         (local-dev escape hatch — gdb adds overhead).
 #   GDB_CMD_PREFIX        Optional command prefix inserted before `gdb`, e.g.
-#                         "pixi run --" or "conda run -n env --", so gdb and
+#                         "uv run --" or "conda run -n env --", so gdb and
 #                         its inferior inherit an activated environment.
 #                         Default: empty (gdb is run directly).
 #
@@ -177,7 +177,7 @@ echo "[run-under-gdb] binary   : ${CMD_BIN}" >&2
 echo "[run-under-gdb] args     : $*" >&2
 
 # GDB_CMD_PREFIX lets the caller run gdb inside an environment activator
-# (e.g. "pixi run --") so gdb and its inferior inherit the activated env.
+# (e.g. "uv run --") so gdb and its inferior inherit the activated env.
 # Unquoted on purpose: the prefix is a word list, not a single argument.
 # `set -e` would abort here if gdb exits non-zero before we read the exit
 # file; disable it just for this invocation.

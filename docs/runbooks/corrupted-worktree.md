@@ -66,12 +66,12 @@ git -C <repo> worktree prune
 
 ## After worktree churn
 
-If the recovered worktree (or its removal) touched `pyproject.toml`, the pixi
+If the recovered worktree (or its removal) touched `pyproject.toml`, the uv
 environment may have re-solved and dropped the editable install, leaving
 `hephaestus-*` console scripts dangling. Restore it:
 
 ```bash
-pixi run dev-install
+uv run dev-install
 ```
 
 ## See also

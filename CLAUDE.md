@@ -382,18 +382,18 @@ All utility functions must include comprehensive test coverage:
 
 ```bash
 # Run all unit tests
-pixi run pytest tests/unit -v
+uv run pytest tests/unit -v
 
 # Run specific test file
-pixi run pytest tests/unit/utils/test_general_utils.py -v
+uv run pytest tests/unit/utils/test_general_utils.py -v
 
 # Run with coverage
-pixi run pytest tests/unit --cov=hephaestus --cov-report=html
+uv run pytest tests/unit --cov=hephaestus --cov-report=html
 ```
 
 ## Environment Setup
 
-This project uses [Pixi](https://pixi.sh) for environment management. The
+This project uses [uv](https://uv.sh) for environment management. The
 one-command bootstrap (deps + editable install + pre-commit hooks) is
 `just bootstrap`:
 
@@ -407,13 +407,13 @@ not have [`just`](https://just.systems/) installed:
 
 ```bash
 # 1. Install dependencies and create the environment
-pixi install
+uv sync
 
 # 2. Editable-install hephaestus so `import hephaestus` works at runtime
-pixi run dev-install
+uv run dev-install
 
-# 3. Install the pre-commit hooks (pixi-managed binary)
-pixi run pre-commit install
+# 3. Install the pre-commit hooks (uv-managed binary)
+uv run pre-commit install
 ```
 
 ## Common Commands
@@ -422,16 +422,16 @@ pixi run pre-commit install
 
 ```bash
 # Run tests
-pixi run pytest tests/unit
+uv run pytest tests/unit
 
 # Run linter
-pixi run ruff check hephaestus/ tests/
+uv run ruff check hephaestus/ tests/
 
 # Run formatter
-pixi run ruff format hephaestus/ tests/
+uv run ruff format hephaestus/ tests/
 
 # Run type checking
-pixi run mypy
+uv run mypy
 ```
 
 ### Pre-commit Hooks
@@ -452,10 +452,10 @@ pre-commit run --all-files
 
 ### Common Issues
 
-1. **Import Errors**: Check that `pixi install` has been run
-2. **Dependency Conflicts**: Update `pixi.toml` and run `pixi install`
+1. **Import Errors**: Check that `uv sync` has been run
+2. **Dependency Conflicts**: Update `pyproject.toml` and run `uv sync`
 3. **Test Failures**: Run tests with verbose output for details
-4. **Formatting Issues**: Run `pixi run ruff format hephaestus/ tests/`
+4. **Formatting Issues**: Run `uv run ruff format hephaestus/ tests/`
 
 ### Getting Help
 
@@ -477,7 +477,7 @@ pre-commit run --all-files
 - `scripts/` - Automation and maintenance tools
 - `docs/` - Documentation and guides
 - `pyproject.toml` - Project metadata, dependencies, and tool configuration
-- `pixi.toml` - Pixi environment and task definitions
+- `pyproject.toml` - uv environment and task definitions
 - `.claude/` - Claude Code configuration and guidance
 
 ## Version Management
@@ -492,10 +492,10 @@ from git tags, not stored in any file.
   (`[tool.hatch.build.hooks.vcs]`, `version-file = "hephaestus/_version.py"`) and is not
   committed. At runtime, `hephaestus/__init__.py` reads `__version__` from installed
   package metadata via `importlib.metadata`.
-- **`pixi.toml`** intentionally has no version field — do not add one.
+- **`pyproject.toml`** intentionally has no version field — do not add one.
 - The `check-version-single-source` pre-commit hook enforces this invariant: it fails if
   a static `[project].version` is reintroduced, if `dynamic = ["version"]` or
-  `[tool.hatch.version]` `source = "vcs"` is missing, or if `pixi.toml [workspace]` gains
+  `[tool.hatch.version]` `source = "vcs"` is missing, or if `pyproject.toml [workspace]` gains
   a `version` field.
 - To cut a release you do **not** edit any version field — a signed `vX.Y.Z` git tag drives
   it. See `docs/RELEASING.md` and `CONTRIBUTING.md` for the workflow.

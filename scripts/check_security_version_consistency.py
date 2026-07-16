@@ -15,8 +15,8 @@ NOTE: get_repo_root() logic is also implemented in
 hephaestus.scripts_lib.check_version_single_source and
 hephaestus.validation.python_version. The reusable version at
 hephaestus/utils/helpers.py:99 is intentionally not imported here because
-this pre-commit hook runs via raw `python3` (no `pixi run` wrapper) to avoid
-forcing a pixi env build on every commit.
+this pre-commit hook runs via raw `python3` (no `uv run` wrapper) to avoid
+forcing a uv env build on every commit.
 
 Usage:
     python3 scripts/check_security_version_consistency.py

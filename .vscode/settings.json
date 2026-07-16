@@ -1,7 +1,7 @@
 {
   "// note": "Minimal VS Code config — relies on .editorconfig for formatting baselines.",
 
-  "python.defaultInterpreterPath": "${workspaceFolder}/.pixi/envs/default/bin/python",
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
   "python.terminal.activateEnvironment": false,
 
   "python.testing.pytestEnabled": true,
@@ -24,7 +24,7 @@
 
   "files.exclude": {
     "**/__pycache__": true,
-    "**/.pixi": true,
+    "**/.venv": true,
     "**/.ruff_cache": true,
     "**/.mypy_cache": true,
     "**/.pytest_cache": true,

@@ -35,7 +35,7 @@ What 1.0 will mean for consumers:
    upper bound of `<1`, change it to `<2` so you receive 1.x releases:
 
    ```toml
-   # pyproject.toml or pixi.toml
+   # pyproject.toml or pyproject.toml
    "homericintelligence-hephaestus>=1.0,<2"
    ```
 

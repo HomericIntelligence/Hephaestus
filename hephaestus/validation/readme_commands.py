@@ -113,9 +113,9 @@ class ReadmeValidator:
 
     # Default allowed command prefixes (can be overridden)
     DEFAULT_ALLOWED_PREFIXES: ClassVar[list[str]] = [
-        "pixi run",
-        "pixi install",
-        "pixi info",
+        "uv run",
+        "uv sync",
+        "uv tree",
         "just precommit",
         "python3 -m py_compile",
         "python3 --version",

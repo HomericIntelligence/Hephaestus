@@ -189,10 +189,10 @@ class TestCommandClassification:
             "${SHELL} -c rm",
             "echo `rm -rf /`",
             "echo $(rm -rf /)",
-            "pixi run pytest && rm -rf /",
-            "pixi run pytest; rm -rf /",
-            "pixi run pytest | tee out.log",
-            "pixi run pytest < input",
+            "uv run pytest && rm -rf /",
+            "uv run pytest; rm -rf /",
+            "uv run pytest | tee out.log",
+            "uv run pytest < input",
             "echo line1\nrm -rf /",
         ],
     )
@@ -205,7 +205,7 @@ class TestCommandClassification:
         [
             "echo 'safe'",
             "ls -la",
-            "pixi run pytest",
+            "uv run pytest",
             "python3 --version",
         ],
     )
@@ -216,7 +216,7 @@ class TestCommandClassification:
     def test_is_allowed_command_defaults(self) -> None:
         """Default allowed prefixes are recognized."""
         v = ReadmeValidator()
-        assert v.is_allowed_command("pixi run pytest") is True
+        assert v.is_allowed_command("uv run pytest") is True
         assert v.is_allowed_command("echo hello") is True
         assert v.is_allowed_command("ls -la") is True
         assert v.is_allowed_command("python3 --version") is True
@@ -271,7 +271,7 @@ class TestGetBinaryFromCommand:
 
     def test_multi_word(self) -> None:
         """Returns the first token."""
-        assert ReadmeValidator().get_binary_from_command("pixi run pytest") == "pixi"
+        assert ReadmeValidator().get_binary_from_command("uv run pytest") == "uv"
 
 
 # ---------------------------------------------------------------------------
