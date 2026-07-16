@@ -16,8 +16,9 @@ contract):
   ``payload["base_branch"]`` for REBASE_WAIT, mirroring merge_wait's
   ``_route_dirty``; verify the PR carries ``state:implementation-go``
   (``ctx.github.pr_has_implementation_state_label``, the legacy
-  ``_pr_has_implementation_go`` gate) — a PR without it fails back
-  ``not_implementation_go`` (routes to pr_review).
+  ``_pr_has_implementation_go`` gate) AND an authenticated strict-GO proof
+  for the same current head. A missing label or proof fails back to
+  ``strict_review``; CI maintenance is never a proof substitute.
 - REBASE_WAIT [W:G] -> REBASE_PUSH_WAIT [W:G]: optional mechanical rebase
   (re-housed ``_attempt_mechanical_rebase`` :1094 — the worker pool's
   ``op="rebase"`` is ``git_utils.rebase_worktree_onto``, which never
@@ -347,6 +348,15 @@ class CiStage(Stage):
                 item.pr,
             )
             return StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
+        head_sha = str((gh_state or {}).get("headRefOid") or "")
+        artifact = ctx.github.strict_review_artifact(item.pr, head_sha)
+        if artifact is None or not artifact.is_go:
+            logger.info(
+                "ci:%s: PR #%d has no strict GO for its current head; regressing",
+                item.issue,
+                item.pr,
+            )
+            return StageOutcome(Disposition.FAIL_BACK, "not_strict_review_go")
         return Continue(next_state=REBASE_WAIT)
 
     def _request_rebase(self, item: WorkItem, ctx: StageContext) -> StepResult:

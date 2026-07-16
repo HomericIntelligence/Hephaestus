@@ -539,7 +539,9 @@ def main() -> int:
         nitpick=args.nitpick,
         projects_dir=resolve_projects_dir(None, prefer_cwd_parent=True),
         json_out=args.json,
-        scope=PipelineScope(frozenset({StageName.IMPLEMENTATION, StageName.PR_REVIEW})),
+        scope=PipelineScope(
+            frozenset({StageName.IMPLEMENTATION, StageName.PR_REVIEW, StageName.STRICT_REVIEW})
+        ),
     )
 
     rc = run_pipeline(config)

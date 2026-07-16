@@ -967,7 +967,7 @@ class TestRepoScopedAutoMerge:
         with pytest.raises(RuntimeError, match="could not verify auto-merge disabled"):
             pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).defer_auto_merge(7)
 
-    def test_arm_auto_merge_rejects_direct_arming(
+    def test_arm_auto_merge_uses_scoped_squash_auto_merge(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         calls: list[tuple[list[str], dict[str, object]]] = []
@@ -978,10 +978,14 @@ class TestRepoScopedAutoMerge:
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
 
-        with pytest.raises(RuntimeError, match="strict-review gate unavailable"):
-            pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).arm_auto_merge(7)
+        pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).arm_auto_merge(7)
 
-        assert calls == []
+        assert calls == [
+            (
+                ["pr", "merge", "7", "--auto", "--squash", "--repo", "org/repo-a"],
+                {},
+            )
+        ]
 
 
 class TestCreatePr:

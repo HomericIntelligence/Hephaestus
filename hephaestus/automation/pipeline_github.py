@@ -41,6 +41,7 @@ from hephaestus.automation._review_utils import (
 from hephaestus.automation.arming_state import ArmingStateStore
 from hephaestus.automation.ci_check_inspector import CICheckInspector
 from hephaestus.automation.git_utils import issue_auto_impl_branch_name
+from hephaestus.automation.pipeline.stages.base import StrictReviewArtifact
 from hephaestus.automation.prompts.pr_review import (
     BLOCKING_SEVERITIES,
     SEVERITY_MARKER_PREFIX,
@@ -64,6 +65,11 @@ from hephaestus.automation.state_labels import (
     has_label,
     is_implementation_go,
     is_plan_go,
+)
+from hephaestus.automation.strict_review_artifact import (
+    STRICT_REVIEW_ARTIFACT_MARKER,
+    parse_strict_review_artifact,
+    render_strict_review_artifact,
 )
 from hephaestus.constants import read_timeout_env
 from hephaestus.github.auto_merge import defer_auto_merge, defer_auto_merge_batch
@@ -195,6 +201,7 @@ class PipelineGitHub:
             # is truthful; only mutators log-and-skip.
             options_provider=lambda: SimpleNamespace(dry_run=False),
         )
+        self._automation_login: str | None = None
 
     @property
     def _repo_slug(self) -> str | None:
@@ -785,7 +792,7 @@ class PipelineGitHub:
                     "view",
                     str(pr_number),
                     "--json",
-                    "state,headRefOid,mergedAt,mergeStateStatus,baseRefName",
+                    "state,headRefOid,mergedAt,mergeStateStatus,baseRefName,autoMergeRequest",
                 ]
             )
             data = json.loads(result.stdout or "{}")
@@ -1117,12 +1124,93 @@ class PipelineGitHub:
         pr_manager.ensure_pr_auto_merge_deferred(pr_number)
 
     def arm_auto_merge(self, pr_number: int) -> None:
-        """Reject direct arming until #2055 installs the strict-review gate."""
+        """Request squash auto-merge for MergeWait's verified strict-GO path.
+
+        This adapter method deliberately does not check labels or artifacts:
+        those are coordinator-stage facts that must be revalidated in
+        ``MergeWaitStage._arm`` immediately before this sole automatic arm.
+        """
         if self._skip(f"arm auto-merge on PR #{pr_number}"):
             return
-        raise RuntimeError(
-            f"refusing to arm auto-merge for PR #{pr_number}: strict-review gate unavailable"
+        self._gh(["pr", "merge", str(pr_number), "--auto", "--squash"])
+
+    def _strict_review_login(self) -> str | None:
+        """Resolve and cache the authenticated automation identity."""
+        if self._automation_login is not None:
+            return self._automation_login
+        try:
+            result = gh_call(["api", "user", "--jq", ".login"])
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            logger.warning("strict_review_artifact: could not resolve automation login: %s", exc)
+            return None
+        login = str(result.stdout or "").strip()
+        if not login:
+            return None
+        self._automation_login = login
+        return login
+
+    def strict_review_artifact(self, pr_number: int, head_sha: str) -> StrictReviewArtifact | None:
+        """Return only an authenticated, byte-verified GO artifact for ``head_sha``."""
+        if not self.repo or not re.fullmatch(r"[0-9a-fA-F]{40}", head_sha):
+            return None
+        login = self._strict_review_login()
+        if login is None:
+            return None
+        endpoint = f"/repos/{self.org}/{self.repo}/issues/{pr_number}/comments"
+        try:
+            result = gh_call(["api", endpoint, "--paginate"])
+            raw = json.loads(result.stdout or "[]")
+        except (OSError, RuntimeError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+            logger.warning(
+                "strict_review_artifact: comment read failed for PR #%d: %s",
+                pr_number,
+                exc,
+            )
+            return None
+        # gh api --paginate can produce one JSON list per page.  Accept either
+        # form but reject all malformed entries rather than guessing at them.
+        pages = raw if isinstance(raw, list) else []
+        comments: list[dict[str, Any]] = []
+        for page in pages:
+            if isinstance(page, list):
+                comments.extend(entry for entry in page if isinstance(entry, dict))
+            elif isinstance(page, dict):
+                comments.append(page)
+        for comment in reversed(comments):
+            body = comment.get("body")
+            user = comment.get("user")
+            author = user.get("login") if isinstance(user, dict) else None
+            if author != login or not isinstance(body, str):
+                continue
+            if not body.startswith(STRICT_REVIEW_ARTIFACT_MARKER):
+                continue
+            parsed = parse_strict_review_artifact(body)
+            if parsed is None or not parsed.is_go:
+                return None
+            if parsed.head_sha != head_sha.lower():
+                return None
+            return StrictReviewArtifact(
+                is_go=True,
+                head_sha=parsed.head_sha,
+                verdict=parsed.verdict,
+            )
+        return None
+
+    def publish_strict_review_artifact(
+        self, pr_number: int, head_sha: str, verdict_body: str
+    ) -> None:
+        """Durably upsert the exact-head strict-review artifact before a GO label."""
+        verdict_match = re.search(r"(?:^|\n)Verdict:\s*(GO|NOGO)\s*$", verdict_body)
+        if verdict_match is None:
+            raise ValueError("strict-review artifact requires an exact Verdict: GO|NOGO line")
+        rendered = render_strict_review_artifact(
+            head_sha,
+            verdict_body,
+            is_go=verdict_match.group(1) == "GO",
         )
+        if self._skip(f"publish strict-review artifact on PR #{pr_number}"):
+            return
+        self.upsert_pr_comment(pr_number, STRICT_REVIEW_ARTIFACT_MARKER, rendered)
 
     def post_review_threads(
         self, pr_number: int, threads: list[dict[str, Any]], summary: str

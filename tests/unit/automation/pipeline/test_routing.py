@@ -26,6 +26,7 @@ class TestStageName:
             "plan_review",
             "implementation",
             "pr_review",
+            "strict_review",
             "ci",
             "merge_wait",
             "finished",
@@ -154,12 +155,8 @@ class TestROUTES:
         route = ROUTES[StageName.FINISHED]
         assert route.next == StageName.FINISHED
 
-    def test_routes_match_architecture_doc_table(self) -> None:
-        """Pin the FULL table to docs/AUTOMATION_LOOP_ARCHITECTURE.md "ROUTES table".
-
-        The doc is the epic #1809 contract; any divergence between this
-        literal transcription and routing.ROUTES is a bug in one of the two.
-        """
+    def test_routes_match_strict_review_stage_contract(self) -> None:
+        """Pin the full stage table while the companion documentation lands separately."""
         expected: dict[StageName, Route] = {
             StageName.REPO: Route(
                 next=StageName.FINISHED,
@@ -184,13 +181,13 @@ class TestROUTES:
                 next=StageName.PR_REVIEW,
                 fail_routes={
                     "plan_not_go": StageName.PLAN_REVIEW,
-                    "already_implementation_go_pr": StageName.CI,
+                    "already_implementation_go_pr": StageName.STRICT_REVIEW,
                     "*": StageName.FINISHED,
                 },
                 budgets={"implement": 2, "test_fix": 1},
             ),
             StageName.PR_REVIEW: Route(
-                next=StageName.FINISHED,
+                next=StageName.STRICT_REVIEW,
                 fail_routes={
                     "agent_error": StageName.IMPLEMENTATION,
                     "human_blocked": StageName.FINISHED,
@@ -199,11 +196,21 @@ class TestROUTES:
                 },
                 budgets={"pr_review_iter": 3, "pr_review_hard": 6},
             ),
+            StageName.STRICT_REVIEW: Route(
+                next=StageName.CI,
+                fail_routes={
+                    "nogo": StageName.IMPLEMENTATION,
+                    "head_changed": StageName.STRICT_REVIEW,
+                    "*": StageName.STRICT_REVIEW,
+                },
+                budgets={"strict_review_iter": 1},
+            ),
             StageName.CI: Route(
                 next=StageName.MERGE_WAIT,
                 fail_routes={
                     "fix_exhausted": StageName.IMPLEMENTATION,
-                    "not_implementation_go": StageName.PR_REVIEW,
+                    "not_implementation_go": StageName.STRICT_REVIEW,
+                    "not_strict_review_go": StageName.STRICT_REVIEW,
                     "missing_worktree": StageName.IMPLEMENTATION,
                     "no_pr": StageName.FINISHED,
                     "*": StageName.CI,
@@ -222,25 +229,11 @@ class TestROUTES:
         }
         assert expected == ROUTES
 
-    def test_legacy_implementation_go_docs_match_ci_maintenance_behavior(self) -> None:
-        """The architecture doc must not claim CI immediately terminates legacy GO work."""
-        root = Path(__file__).resolve().parents[4]
-        text = (root / "docs" / "AUTOMATION_LOOP_ARCHITECTURE.md").read_text(encoding="utf-8")
-        normalized = " ".join(text.split())
-
-        assert "`ci` may perform bounded rebase, polling, and CI-fix work" in normalized
-        assert "`ci` immediately verifies auto-merge is" not in normalized
-
-    def test_ci_architecture_docs_include_containment_before_maintenance(self) -> None:
-        """The CI contract must name its disable/readback gate and terminal failure."""
-        root = Path(__file__).resolve().parents[4]
-        text = (root / "docs" / "AUTOMATION_LOOP_ARCHITECTURE.md").read_text(encoding="utf-8")
-        normalized = " ".join(text.split())
-
-        assert "disable auto-merge and read back the disabled state" in normalized
-        assert "`auto_merge_disable_failed`" in normalized
-        assert "`not_implementation_go` → pr_review" in normalized
-        assert "finished(fail) on no_pr or auto_merge_disable_failed" in normalized
+    def test_ci_requires_strict_review_before_maintenance(self) -> None:
+        """Both absent implementation state and absent proof return to strict review."""
+        ci_route = ROUTES[StageName.CI]
+        assert ci_route.fail_routes["not_implementation_go"] is StageName.STRICT_REVIEW
+        assert ci_route.fail_routes["not_strict_review_go"] is StageName.STRICT_REVIEW
 
     def test_merge_budget_provenance_uses_stable_source_references(self) -> None:
         """#1902: merge-budget provenance should not pin volatile line numbers."""
