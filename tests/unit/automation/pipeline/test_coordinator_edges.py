@@ -42,8 +42,8 @@ Disposition = routing_mod.Disposition
 StageName = routing_mod.StageName
 StageOutcome = routing_mod.StageOutcome
 
-EPIC_NEEDS_SKIP_TAG = seeding_mod.EPIC_NEEDS_SKIP_TAG
 SeedEntry = seeding_mod.SeedEntry
+EpicSkipTagObligation = seeding_mod.EpicSkipTagObligation
 
 Continue = stage_base_mod.Continue
 JobRequest = stage_base_mod.JobRequest
@@ -480,16 +480,17 @@ class TestSubmitEdges:
 class TestSeedingEdges:
     """CLI-scope seeding: epic chokepoint, --prs entries, finished entries."""
 
-    def test_epic_needs_skip_tag_executes_chokepoint_write(
+    def test_epic_skip_tag_obligation_executes_chokepoint_write(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The ONE sanctioned seeding write goes through skip_epics."""
+        """The explicit seeding obligation is discharged before exclusion."""
         seed = [
             SeedEntry(
                 kind="issue",
                 identifier=44,
                 stage=None,
-                reason=f"{EPIC_NEEDS_SKIP_TAG}: #44 is an epic without state:skip",
+                reason="unrelated exclusion reason",
+                skip_tag_obligation=EpicSkipTagObligation(issue=44),
             )
         ]
         coordinator = _coordinator(tmp_path, monkeypatch, seed=seed)

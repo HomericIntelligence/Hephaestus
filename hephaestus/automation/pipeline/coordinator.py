@@ -1247,8 +1247,8 @@ class Coordinator:
                 # Epic tagging is the ONE sanctioned seeding write, executed
                 # here through the skip_epics chokepoint BEFORE the exclusion
                 # is honored (seeding.py write-path boundary).
-                if entry.reason.startswith(_seeding.EPIC_NEEDS_SKIP_TAG):
-                    self.github.skip_epics({int(entry.identifier): []})
+                if entry.skip_tag_obligation is not None:
+                    self.github.skip_epics({entry.skip_tag_obligation.issue: []})
                 logger.info("seed excluded: %s", entry.reason)
                 continue
             item = self._entry_to_item(entry, self.config.repos[0] if self.config.repos else "")
@@ -1352,20 +1352,10 @@ class Coordinator:
             issue_numbers = _admission._filter_open_issues(repo, issue_numbers)
         for issue in issue_numbers:
             facts = _seeding.seed_issue_from_github(issue, github)
-            stage, reason = _seeding.classify_issue(facts)
+            entry = _seeding.seed_entry_from_facts(facts)
+            stage, reason = entry.stage, entry.reason
             stage, reason, passed = self._scope_seed_decision(issue, stage, reason, scope_stages)
-            entries.append(
-                _seeding.SeedEntry(
-                    kind="issue",
-                    identifier=issue,
-                    stage=stage,
-                    reason=reason,
-                    pr_number=facts.pr_number if facts.pr_is_open else None,
-                    issue_title=facts.title,
-                    issue_body=facts.body,
-                    passed=passed,
-                )
-            )
+            entries.append(replace(entry, stage=stage, reason=reason, passed=passed))
         for pr in self.config.prs:
             issue_number = github.find_issue_for_pr(pr)
             scope_identifier = issue_number if issue_number is not None else pr

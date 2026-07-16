@@ -322,13 +322,13 @@ class TestDiscover:
         epic_products = [p for p in repo_item.payload["products"] if p["number"] == 5]
         assert epic_products[0]["stage"] is None
 
-    def test_skip_epics_failure_is_non_fatal_to_discovery(
+    def test_skip_epics_failure_blocks_exclusion_until_reseed(
         self,
         repo_item: WorkItem,
         repo_ctx: Any,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A failed epic label write does not block emitting discovered products."""
+        """A failed skip write leaves no excluded product; a reseed retries it."""
         meta = [
             {"number": 5, "labels": ["epic"], "title": "Epic: umbrella"},
             {"number": 6, "labels": [], "title": "real work"},
@@ -340,6 +340,7 @@ class TestDiscover:
             classifications={6: (StageName.PLANNING, "needs plan")},
         )
         gh: FakeStageGitHub = repo_ctx.github
+        original_skip_epics = gh.skip_epics
         monkeypatch.setattr(
             gh,
             "skip_epics",
@@ -349,13 +350,22 @@ class TestDiscover:
 
         result = RepoStage().step(repo_item, repo_ctx)
 
-        assert isinstance(result, Continue) and result.next_state == "SEEDED"
-        assert classified == [6]
-        products = repo_item.payload["products"]
-        assert {p["number"]: p["stage"] for p in products} == {
-            5: None,
-            6: StageName.PLANNING,
-        }
+        assert isinstance(result, StageOutcome)
+        assert result.disposition is Disposition.FINISH_FAIL
+        assert "products" not in repo_item.payload
+        assert classified == []
+        assert 5 not in gh.labels
+
+        monkeypatch.setattr(gh, "skip_epics", original_skip_epics)
+        reseed_item = WorkItem(
+            repo="repo-a", kind=ItemKind.REPO, stage=StageName.REPO, state="DISCOVER"
+        )
+
+        reseed = RepoStage().step(reseed_item, repo_ctx)
+
+        assert isinstance(reseed, Continue) and reseed.next_state == "SEEDED"
+        assert "state:skip" in gh.labels[5]
+        assert [p["number"] for p in reseed_item.payload["products"]] == [5, 6]
 
     def test_drive_green_all_routes_orphan_prs_to_ci(
         self,
