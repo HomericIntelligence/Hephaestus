@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib
 from typing import Any
 
-from hephaestus.automation.pipeline.jobs import JobResult
+from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageName
 from hephaestus.automation.pipeline.stages import (
     Continue,
@@ -179,6 +179,7 @@ def test_review_job_receives_fresh_current_head_evidence(
     result = strict_review.StrictReviewStage().step(item, make_ctx(github=github))
 
     assert isinstance(result, JobRequest)
+    assert isinstance(result.job, AgentJob)
     assert github.strict_evidence_calls == [(601, _NEW_HEAD)]
     assert result.job.prompt_kwargs["head_sha"] == _NEW_HEAD
     assert result.job.prompt_kwargs["diff"] == evidence.diff
@@ -209,6 +210,7 @@ def test_head_check_prepares_an_isolated_pr_worktree_before_review(
     request = stage.step(item, make_ctx(github=github))
 
     assert isinstance(request, JobRequest)
+    assert isinstance(request.job, GitJob)
     assert request.job.op == "create_worktree"
     assert request.on_done_state == strict_review.WORKTREE_WAIT
     assert request.job.kwargs["issue_number"] == 601

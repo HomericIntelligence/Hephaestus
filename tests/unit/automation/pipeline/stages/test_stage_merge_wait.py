@@ -10,6 +10,7 @@ from hephaestus.automation.pipeline.stages import (
     Continue,
     JobRequest,
     StageOutcome,
+    StrictReviewArtifact,
 )
 from hephaestus.automation.pipeline.stages.merge_wait import (
     ARM,
@@ -28,11 +29,11 @@ CLOSED_STATE = {"state": "CLOSED"}
 OPEN_STATE = {"state": "OPEN", "mergeStateStatus": "BEHIND", "headRefOid": "abc123"}
 
 
-class _StrictGoArtifact:
+class _StrictGoArtifact(StrictReviewArtifact):
     """Minimal trusted-proof value used at the merge-wait boundary."""
 
-    is_go = True
-    head_sha = "abc123"
+    def __init__(self) -> None:
+        super().__init__(is_go=True, head_sha="abc123", verdict="GO")
 
 
 class _ProofAwareGitHub(FakeStageGitHub):
@@ -42,7 +43,7 @@ class _ProofAwareGitHub(FakeStageGitHub):
         self,
         *,
         states: list[dict[str, Any]],
-        proof: object | None,
+        proof: StrictReviewArtifact | None,
         pr_impl_state: tuple[bool, bool] = (True, False),
     ) -> None:
         super().__init__(pr_state=states[0], pr_impl_state=pr_impl_state)
@@ -55,7 +56,7 @@ class _ProofAwareGitHub(FakeStageGitHub):
             return self._states.pop(0)
         return self._states[0]
 
-    def strict_review_artifact(self, pr_number: int, head_sha: str) -> object | None:
+    def strict_review_artifact(self, pr_number: int, head_sha: str) -> StrictReviewArtifact | None:
         self._log("strict_review_artifact", pr_number, head_sha)
         return self._proof
 
