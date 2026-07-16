@@ -313,7 +313,7 @@ class StageGitHub(Protocol):
         validation and arming cannot authorize a different commit. No earlier
         stage may call it.
         """
-        ...
+        pass
 
     # -- strict-review proof surface (#2055) ---------------------------------
 
@@ -324,7 +324,7 @@ class StageGitHub(Protocol):
         stale, and NOGO artifacts.  Callers must treat ``None`` as no merge
         authorization.
         """
-        ...
+        pass
 
     def publish_strict_review_artifact(
         self, pr_number: int, head_sha: str, verdict_body: str, *, is_go: bool
