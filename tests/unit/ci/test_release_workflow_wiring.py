@@ -167,6 +167,10 @@ class TestImmutableReleaseRef:
             "sha": "${{ steps.resolve.outputs.sha }}",
         }
 
+    def test_resolver_uses_only_read_repository_permission(self) -> None:
+        """Tag resolution must not inherit publication or OIDC permissions."""
+        assert _job("resolve-release")["permissions"] == {"contents": "read"}
+
     def test_dispatch_input_has_priority_and_resolves_exact_tag_commit(self) -> None:
         step = self._resolve_step()
         run = step["run"]

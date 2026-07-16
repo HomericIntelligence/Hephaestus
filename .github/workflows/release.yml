@@ -31,6 +31,8 @@ jobs:
   resolve-release:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    permissions:
+      contents: read
     outputs:
       tag: ${{ steps.resolve.outputs.tag }}
       sha: ${{ steps.resolve.outputs.sha }}
@@ -40,6 +42,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - name: Resolve release tag to commit SHA
         id: resolve
