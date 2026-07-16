@@ -159,6 +159,29 @@ def test_legacy_v1_go_cannot_authorize_a_required_check() -> None:
     )
 
 
+def test_legacy_v1_nogo_revokes_a_same_head_v2_go() -> None:
+    """Migration compatibility preserves the adapter's fail-closed v1 revocation."""
+    legacy_nogo = render_strict_review_artifact(HEAD_A, "Grade: F\nVerdict: NOGO", is_go=False)
+
+    assert not has_trusted_strict_review_proof(
+        [*_proof_comments(HEAD_A), _comment(legacy_nogo, comment_id=30)],
+        HEAD_A,
+        AUTOMATION_LOGIN,
+    )
+
+
+def test_result_posted_before_its_referenced_lease_cannot_authorize() -> None:
+    """Comment IDs, not rounded timestamps, prove lease publication preceded the result."""
+    result = _comment(
+        _artifact(HEAD_A, lease_comment_id=20),
+        comment_id=10,
+        created_at=LEASE_TIME,
+    )
+    later_lease = _comment(_lease(HEAD_A), comment_id=20, created_at=LEASE_TIME)
+
+    assert not has_trusted_strict_review_proof([result, later_lease], HEAD_A, AUTOMATION_LOGIN)
+
+
 def test_losing_or_expired_lease_result_cannot_authorize() -> None:
     """The proof verifier independently replays election and expiry fencing."""
     winning = _comment(_lease(HEAD_A, lease_id="winner"), comment_id=10, created_at=LEASE_TIME)

@@ -127,6 +127,7 @@ class FakeStageGitHub(FakeGitHub):
         self._strict_terminal: set[tuple[int, str]] = set()
         self._next_strict_comment_id = 1
         self.strict_artifact_calls: list[tuple[int, str]] = []
+        self.strict_terminal_artifact_calls: list[tuple[int, str]] = []
         self.strict_evidence_calls: list[tuple[int, str, int]] = []
         self.arming_records: dict[int, tuple[int, str]] = {}
         self.confirmed_arming_records: set[int] = set()
@@ -279,6 +280,18 @@ class FakeStageGitHub(FakeGitHub):
         if (
             self._strict_artifact is None
             or not self._strict_artifact.is_go
+            or self._strict_artifact.head_sha.lower() != head_sha.lower()
+        ):
+            return None
+        return self._strict_artifact
+
+    def strict_review_terminal_artifact(
+        self, pr_number: int, head_sha: str
+    ) -> StrictReviewArtifact | None:
+        """Return any canned current-head terminal strict result for recovery."""
+        self.strict_terminal_artifact_calls.append((pr_number, head_sha))
+        if (
+            self._strict_artifact is None
             or self._strict_artifact.head_sha.lower() != head_sha.lower()
         ):
             return None

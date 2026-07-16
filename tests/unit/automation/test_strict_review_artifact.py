@@ -94,6 +94,26 @@ def _read_artifact(
     return adapter.strict_review_artifact(71, head)
 
 
+def _read_terminal_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    comments: list[dict[str, object]],
+    head: str = _HEAD_SHA,
+) -> StrictReviewArtifact | None:
+    """Read the recovery-only terminal-result channel from canned comments."""
+    adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+
+    def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+        if argv[:3] == ["api", "user", "--jq"]:
+            return SimpleNamespace(stdout=f"{_AUTOMATION_LOGIN}\n")
+        if argv[:2] == ["api", "/repos/org/repo-a/issues/71/comments"]:
+            return SimpleNamespace(stdout=json.dumps([comments]))
+        raise AssertionError(f"unexpected gh invocation: {argv!r}")
+
+    monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+    return adapter.strict_review_terminal_artifact(71, head)
+
+
 def test_lease_round_trip_binds_one_exact_head_and_fencing_token() -> None:
     """Lease bytes are immutable, digest-checked evidence for one review generation."""
     lease = render_strict_review_lease(_HEAD_SHA, _LEASE_ID, expires_at=_LEASE_EXPIRES_AT)
@@ -146,6 +166,23 @@ def test_terminal_nogo_dominates_any_stale_go_for_the_same_head(
     assert _read_artifact(tmp_path, monkeypatch, comments) is None
 
 
+def test_terminal_nogo_is_observable_for_restart_recovery_but_not_merge_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A final NOGO is distinct from a live lease without becoming a GO proof."""
+    comments = [_lease(), _comment(12, _artifact(is_go=False))]
+
+    terminal = _read_terminal_artifact(tmp_path, monkeypatch, comments)
+
+    assert terminal is not None
+    assert terminal.is_go is False
+    assert terminal.head_sha == _HEAD_SHA
+    assert terminal.verdict == "NOGO"
+    assert terminal.verdict_body.endswith("Grade: F\nVerdict: NOGO")
+    assert terminal.schema_version == 2
+    assert _read_artifact(tmp_path, monkeypatch, comments) is None
+
+
 def test_foreign_or_losing_lease_artifact_never_authorizes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -192,15 +229,23 @@ def test_claim_appends_and_elects_one_immutable_lease_before_review_dispatch(
     """The real adapter persists a lease and uses its returned comment id as the fence."""
     adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
     calls: list[list[str]] = []
+    created: dict[str, object] | None = None
 
     def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+        nonlocal created
         calls.append(argv)
         if argv[:3] == ["api", "user", "--jq"]:
             return SimpleNamespace(stdout=f"{_AUTOMATION_LOGIN}\n")
         if "POST" in argv:
+            body_arg = next(arg for arg in argv if arg.startswith("body=@"))
+            created = _comment(
+                41,
+                Path(body_arg.removeprefix("body=@")).read_text(),
+                created_at=_LEASE_CREATED_AT,
+            )
             return SimpleNamespace(stdout=json.dumps({"id": 41}))
         if argv[:2] == ["api", "/repos/org/repo-a/issues/71/comments"]:
-            return SimpleNamespace(stdout=json.dumps([[]]))
+            return SimpleNamespace(stdout=json.dumps([[created] if created is not None else []]))
         raise AssertionError(f"unexpected gh invocation: {argv!r}")
 
     monkeypatch.setattr(pg, "gh_call", fake_gh_call)
@@ -236,6 +281,34 @@ def test_live_elected_lease_blocks_a_second_reviewer_claim(
 
     assert adapter.claim_strict_review_lease(71, _HEAD_SHA) is None
     assert not any("POST" in call for call in calls)
+
+
+def test_claim_refetches_after_post_and_yields_to_a_lower_comment_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A concurrent earlier claim seen after POST must prevent duplicate dispatch."""
+    adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+    calls: list[list[str]] = []
+    posted = False
+    winner = _lease(lease_id="winner", comment_id=40)
+
+    def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+        nonlocal posted
+        calls.append(argv)
+        if argv[:3] == ["api", "user", "--jq"]:
+            return SimpleNamespace(stdout=f"{_AUTOMATION_LOGIN}\n")
+        if "POST" in argv:
+            posted = True
+            return SimpleNamespace(stdout=json.dumps({"id": 41}))
+        if argv[:2] == ["api", "/repos/org/repo-a/issues/71/comments"]:
+            return SimpleNamespace(stdout=json.dumps([[winner] if posted else []]))
+        raise AssertionError(f"unexpected gh invocation: {argv!r}")
+
+    monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+    monkeypatch.setattr(time, "time", lambda: 1_699_999_000)
+
+    assert adapter.claim_strict_review_lease(71, _HEAD_SHA) is None
+    assert any("POST" in call for call in calls)
 
 
 def test_publish_rejects_a_losing_fence_before_writing_a_verdict(

@@ -246,6 +246,74 @@ def test_existing_durable_go_reconciles_the_label_without_a_second_review_job(
     assert ("mark_pr_implementation_go", (601,)) in github.mutation_log
 
 
+def test_existing_durable_nogo_resumes_containment_instead_of_retrying_a_live_lease(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A restart recognizes final NOGO separately from another worker's lease."""
+    strict_review = importlib.import_module("hephaestus.automation.pipeline.stages.strict_review")
+    github = FakeStageGitHub(
+        pr_state={"state": "OPEN", "headRefOid": _NEW_HEAD, "autoMergeRequest": None},
+        strict_artifact=StrictReviewArtifact(
+            is_go=False,
+            head_sha=_NEW_HEAD,
+            verdict="NOGO",
+            verdict_body="Missing safety check.\nGrade: F\nVerdict: NOGO",
+        ),
+    )
+    # This is the ambiguity a restart must resolve: a persisted terminal
+    # NOGO and a leftover competing lease are both present.  The terminal
+    # result wins; claiming again would otherwise return ``None`` and park.
+    github._strict_leases[(601, _NEW_HEAD)] = StrictReviewLease(_NEW_HEAD, "competing-worker", 999)
+    item = make_work_item(
+        stage=StageName.STRICT_REVIEW,
+        pr=601,
+        state=strict_review.REVIEW_WAIT,
+        payload={"strict_review_head": _NEW_HEAD},
+    )
+
+    result = strict_review.StrictReviewStage().step(item, make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.FAIL_BACK, "nogo")
+    assert github.strict_terminal_artifact_calls == [(601, _NEW_HEAD)]
+    assert github.strict_artifact_calls == []
+    assert github.strict_evidence_calls == []
+    assert not any(action == "claim_strict_review_lease" for action, _ in github.mutation_log)
+    assert not any(action == "publish_strict_review_artifact" for action, _ in github.mutation_log)
+    assert ("defer_auto_merge", (601,)) in github.mutation_log
+    assert ("mark_pr_implementation_no_go", (601,)) in github.mutation_log
+    assert item.payload["strict_review_feedback"].endswith("Grade: F\nVerdict: NOGO")
+
+
+def test_recovered_terminal_nogo_never_remediates_a_newer_head(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """Recovery retains the head fence before replaying terminal NOGO containment."""
+    strict_review = importlib.import_module("hephaestus.automation.pipeline.stages.strict_review")
+    github = FakeStageGitHub(
+        pr_state={"state": "OPEN", "headRefOid": _NEW_HEAD, "autoMergeRequest": None},
+        strict_artifact=StrictReviewArtifact(
+            is_go=False,
+            head_sha=_OLD_HEAD,
+            verdict="NOGO",
+            verdict_body="Old-head finding.\nGrade: F\nVerdict: NOGO",
+        ),
+    )
+    item = make_work_item(
+        stage=StageName.STRICT_REVIEW,
+        pr=601,
+        state=strict_review.REVIEW_WAIT,
+        payload={"strict_review_head": _OLD_HEAD},
+    )
+
+    result = strict_review.StrictReviewStage().step(item, make_ctx(github=github))
+
+    assert result == Continue(next_state=strict_review.HEAD_CHECK)
+    assert "strict_review_head" not in item.payload
+    assert "strict_review_feedback" not in item.payload
+    assert not any(action == "mark_pr_implementation_no_go" for action, _ in github.mutation_log)
+    assert 601 not in github.comments
+
+
 def test_head_check_prepares_an_isolated_pr_worktree_before_review(
     make_ctx: Any, make_work_item: Any
 ) -> None:
@@ -278,7 +346,49 @@ def test_head_check_prepares_an_isolated_pr_worktree_before_review(
     assert item.state == strict_review.HEAD_CHECK
     stage.on_job_done(item, JobResult(ok=True, value={"path": "/tmp/pr-601"}), make_ctx())
     assert item.worktree == "/tmp/pr-601"
+    assert item.payload["strict_review_worktree_head"] == _NEW_HEAD
     item.state = request.on_done_state
+    assert stage.step(item, make_ctx(github=github)) == Continue(
+        next_state=strict_review.HEAD_CHECK
+    )
+    item.state = strict_review.HEAD_CHECK
+    assert stage.step(item, make_ctx(github=github)) == Continue(
+        next_state=strict_review.REVIEW_WAIT
+    )
+
+
+def test_head_check_resyncs_an_existing_worktree_before_reviewing_a_new_head(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """An existing checkout is synchronized once for each captured remote head."""
+    strict_review = importlib.import_module("hephaestus.automation.pipeline.stages.strict_review")
+    github = FakeStageGitHub(
+        pr_state={"state": "OPEN", "headRefOid": _NEW_HEAD},
+        pr_head_branch="601-strict-gate",
+    )
+    item = make_work_item(
+        issue=1,
+        pr=601,
+        stage=StageName.STRICT_REVIEW,
+        state=strict_review.HEAD_CHECK,
+        payload={"strict_review_head": _OLD_HEAD, "strict_review_worktree_head": _OLD_HEAD},
+    )
+    item.worktree = "/tmp/old-pr-601"
+    stage = strict_review.StrictReviewStage()
+
+    request = stage.step(item, make_ctx(github=github))
+
+    assert isinstance(request, JobRequest)
+    assert isinstance(request.job, GitJob)
+    assert request.job.kwargs["sync_to_remote"] is True
+    assert item.payload["strict_review_head"] == _NEW_HEAD
+    stage.on_job_done(
+        item,
+        JobResult(ok=True, value={"path": "/tmp/old-pr-601", "dirty": False}),
+        make_ctx(),
+    )
+    assert item.payload["strict_review_worktree_head"] == _NEW_HEAD
+    item.state = strict_review.WORKTREE_WAIT
     assert stage.step(item, make_ctx(github=github)) == Continue(
         next_state=strict_review.HEAD_CHECK
     )

@@ -1577,8 +1577,17 @@ class PipelineGitHub:
             return None
         return dict(payload) if isinstance(payload, dict) else None
 
-    def strict_review_artifact(self, pr_number: int, head_sha: str) -> StrictReviewArtifact | None:
-        """Return only a current-head, elected, fenced v2 GO proof."""
+    def strict_review_terminal_artifact(
+        self, pr_number: int, head_sha: str
+    ) -> StrictReviewArtifact | None:
+        """Return one authenticated terminal result for the exact current head.
+
+        This is intentionally separate from the GO-only merge-proof accessor:
+        a durable NOGO must remain observable after a process crash so the
+        resumed strict-review stage can contain and fail back rather than
+        mistaking it for another coordinator's live lease.  Historical v1
+        NOGOs remain revocations, while only v2 GO may authorize a merge.
+        """
         if not self.repo or not re.fullmatch(r"[0-9a-fA-F]{40}", head_sha):
             return None
         login = self._strict_review_login()
@@ -1588,11 +1597,26 @@ class PipelineGitHub:
         if comments is None:
             return None
         terminal = self._terminal_strict_verdict(comments, head_sha)
-        if terminal is None or terminal.schema_version != 2 or not terminal.is_go:
+        if terminal is None:
             return None
         return StrictReviewArtifact(
-            is_go=True, head_sha=terminal.head_sha, verdict=terminal.verdict
+            is_go=terminal.is_go,
+            head_sha=terminal.head_sha,
+            verdict=terminal.verdict,
+            verdict_body=terminal.verdict_body,
+            schema_version=terminal.schema_version,
         )
+
+    def strict_review_artifact(self, pr_number: int, head_sha: str) -> StrictReviewArtifact | None:
+        """Return only a current-head, elected, fenced v2 GO proof."""
+        terminal = self.strict_review_terminal_artifact(pr_number, head_sha)
+        if terminal is None or not terminal.is_go:
+            return None
+        # ``strict_review_terminal_artifact`` can return a legacy NOGO for
+        # containment, but only a v2 result is merge authority.
+        if terminal.schema_version != 2:
+            return None
+        return terminal
 
     def claim_strict_review_lease(self, pr_number: int, head_sha: str) -> StrictReviewLease | None:
         """Append and elect one durable lease before a reviewer is dispatched."""
@@ -1625,9 +1649,14 @@ class PipelineGitHub:
         created.setdefault("databaseId", created_id)
         created.setdefault("body", body)
         created.setdefault("user", {"login": login})
-        elected = self._elected_lease(
-            self._strict_leases([*comments, created], head_sha), now_epoch
-        )
+        # Re-read GitHub after the append before electing. A competing
+        # coordinator can post a lower-ID lease between our pre-write snapshot
+        # and this response; dispatching from only the local snapshot would
+        # waste a second reviewer even though publication fencing later wins.
+        refreshed = self._owned_strict_review_comments(pr_number, login)
+        if refreshed is None:
+            return None
+        elected = self._elected_lease(self._strict_leases(refreshed, head_sha), now_epoch)
         if elected is None or elected.lease_id != lease_id or elected.comment_id != created_id:
             return None
         return elected

@@ -172,6 +172,7 @@ class StrictReviewStage(Stage):
             item.payload.pop("strict_review_verdict", None)
             item.payload.pop("strict_review_text", None)
             item.payload.pop("strict_review_failed", None)
+            item.payload.pop("strict_review_worktree_head", None)
             self._drop_lease(item)
             item.state = ENTER
         if not self._clear_go_and_verify_disabled(pr_number, ctx):
@@ -277,7 +278,11 @@ class StrictReviewStage(Stage):
             item.payload["retry_delay_s"] = 30
             return StageOutcome(Disposition.RETRY, "no_head_sha")
         item.payload["strict_review_head"] = head_sha
-        if not item.worktree:
+        # A reviewer must never inspect a local checkout whose commit has not
+        # been synchronized to this exact remote head. This is required for a
+        # restored/direct ingress as well as a normal push during review.
+        synced_worktree_head = str(item.payload.get("strict_review_worktree_head") or "")
+        if not item.worktree or synced_worktree_head.lower() != head_sha.lower():
             branch = item.branch or ctx.github.get_pr_head_branch(item.pr)  # type: ignore[arg-type]
             if not branch:
                 logger.warning(
@@ -321,6 +326,13 @@ class StrictReviewStage(Stage):
         if not head_sha:
             # Guarded by HEAD_CHECK; restart-safety fallback.
             return Continue(next_state=HEAD_CHECK)
+        # A terminal result can survive a coordinator restart.  It must be
+        # inspected before claiming a lease so a durable NOGO is not confused
+        # with a competing live lease and retried forever.  GO remains
+        # merge-authorized only through the v2 GO-only accessor below.
+        terminal = ctx.github.strict_review_terminal_artifact(item.pr, head_sha)  # type: ignore[arg-type]
+        if terminal is not None and not terminal.is_go:
+            return self._resume_terminal_nogo(item, ctx, head_sha, terminal.verdict_body)
         # A prior durable v2 GO can survive a coordinator restart.  It is
         # already globally elected and authenticated by the accessor, so no
         # second reviewer may be dispatched merely to recreate its label.
@@ -609,6 +621,40 @@ class StrictReviewStage(Stage):
         item.payload.pop("existing_pr_impl_go", None)
         return StageOutcome(Disposition.FAIL_BACK, "nogo")
 
+    def _resume_terminal_nogo(
+        self, item: WorkItem, ctx: StageContext, head_sha: str, verdict_text: str
+    ) -> StepResult:
+        """Resume durable NOGO containment without claiming or publishing a lease.
+
+        A crash may occur after the elected reviewer appends its immutable
+        NOGO but before it writes the PR-wide remediation label/comment.  The
+        durable result is neither a live lease nor permission to rerun the
+        reviewer.  Reconcile containment only after a fresh head check; a
+        moved head restarts cleanly and never receives stale feedback.
+        """
+        pr_number = item.pr
+        if pr_number is None:  # guarded by step(); narrowing
+            return StageOutcome(Disposition.FAIL_BACK, "nogo")
+        current_outcome = self._current_head_or_restart(
+            item, ctx, head_sha, action="terminal NOGO recovery"
+        )
+        if current_outcome is not None:
+            return current_outcome
+        self._drop_lease(item)
+        safe_verdict = verdict_text or "Independent strict review recorded a durable NOGO."
+        if not self._clear_go_and_verify_disabled(pr_number, ctx):
+            return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_disable_failed")
+        if not self._post_nogo_remediation(pr_number, ctx, safe_verdict):
+            return StageOutcome(Disposition.FINISH_FAIL, "strict_nogo_feedback_failed")
+        try:
+            ctx.github.mark_pr_implementation_no_go(pr_number)
+        except Exception as e:
+            logger.error("strict_review: failed to restore NOGO label on PR #%d: %s", pr_number, e)
+            return StageOutcome(Disposition.FINISH_FAIL, "strict_nogo_label_failed")
+        item.payload["strict_review_feedback"] = safe_verdict
+        item.payload.pop("existing_pr_impl_go", None)
+        return StageOutcome(Disposition.FAIL_BACK, "nogo")
+
     @staticmethod
     def _lease_from_payload(item: WorkItem) -> StrictReviewLease | None:
         """Reconstruct a persisted lease only when it still binds this head."""
@@ -680,10 +726,18 @@ class StrictReviewStage(Stage):
             value = result.value
             if isinstance(value, dict):
                 item.worktree = str(value.get("path") or "")
+                if value.get("dirty"):
+                    # The worker intentionally preserves dirty worktrees.
+                    # They cannot safely represent an exact remote PR head.
+                    item.payload["strict_review_worktree_failed"] = True
             elif isinstance(value, str):
                 item.worktree = value
             if not item.worktree:
                 item.payload["strict_review_worktree_failed"] = True
+            else:
+                synced_head = str(item.payload.get("strict_review_head") or "")
+                if not item.payload.get("strict_review_worktree_failed") and synced_head:
+                    item.payload["strict_review_worktree_head"] = synced_head
             return
         if item.state != REVIEW_WAIT:
             return

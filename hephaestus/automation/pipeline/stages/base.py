@@ -106,11 +106,20 @@ BACKOFF_CAP_S = 60
 
 @dataclass(frozen=True)
 class StrictReviewArtifact:
-    """Authenticated strict-review proof for one exact PR head."""
+    """Authenticated strict-review terminal result for one exact PR head.
+
+    ``strict_review_artifact`` exposes only a v2 GO as merge authority.  The
+    separate terminal-result accessor also returns a durable NOGO so a
+    restarted coordinator can tell "reviewer already rejected this head" from
+    "another reviewer still owns the live lease".  ``verdict_body`` is the
+    authenticated review output retained for idempotent NOGO remediation.
+    """
 
     is_go: bool
     head_sha: str
     verdict: str
+    verdict_body: str = ""
+    schema_version: int = 2
 
 
 @dataclass(frozen=True)
@@ -338,12 +347,27 @@ class StageGitHub(Protocol):
         """
         pass
 
+    def strict_review_terminal_artifact(
+        self, pr_number: int, head_sha: str
+    ) -> StrictReviewArtifact | None:
+        """Return an authenticated terminal strict result for ``head_sha``.
+
+        Unlike :meth:`strict_review_artifact`, this exposes a durable NOGO as
+        well as a v2 GO.  StrictReviewStage uses it only to resume containment
+        and fail back after a restart; MergeWaitStage must continue to use the
+        GO-only accessor for merge authority.  ``None`` means there is no
+        authenticated final result, which is deliberately distinct from a
+        competing live lease.
+        """
+        pass
+
     def claim_strict_review_lease(self, pr_number: int, head_sha: str) -> StrictReviewLease | None:
         """Claim the sole live strict-review lease for an exact PR head.
 
-        A ``None`` result is deliberately ambiguous (another valid holder,
-        an already-finalized generation, or unavailable durable evidence) and
-        callers must not dispatch another reviewer or publish a verdict.
+        Callers must first check :meth:`strict_review_terminal_artifact`.
+        After that check, ``None`` means a competing valid holder or
+        unavailable durable evidence; callers must not dispatch another
+        reviewer or publish a verdict.
         """
         pass
 

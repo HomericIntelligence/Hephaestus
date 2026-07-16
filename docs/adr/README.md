@@ -22,3 +22,4 @@ numbered, and listed here.
 | [0007](0007-dual-surface-required-checks.md) | Dual-surface required checks | Accepted |
 | [0008](0008-uv-only-development-environment.md) | uv is the sole development environment manager | Accepted |
 | [0009](0009-head-bound-strict-review-merge-gate.md) | Head-bound strict review controls queue-owned merge eligibility | Accepted |
+| [0010](0010-trusted-strict-review-proof.md) | Trusted strict-review proof context | Accepted |

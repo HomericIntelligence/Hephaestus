@@ -35,11 +35,12 @@ A piece of work is **done** when every item below is true.
 | 22 | Every review thread is resolved (including bot-authored threads) | Org ruleset `required_review_thread_resolution` |
 
 > **Which of these actually block the merge button?** Both the classic branch
-> protection contexts (`required-checks-gate` and the two Python 3.12 matrix
-> contexts) and the direct GitHub ruleset contexts documented in
+> protection contexts (`required-checks-gate`, the two Python 3.12 matrix
+> contexts, and—after its post-bootstrap enrollment—`strict-review-proof`) and the direct GitHub ruleset contexts documented in
 > [`docs/ci/required-checks.md`](ci/required-checks.md) do. The aggregate gate
-> excludes advisory `auto-merge-policy`; the queue's head-bound strict-review
-> gate, rather than that reporting check, is the automatic-merge authority.
+> excludes advisory `auto-merge-policy`; the separate trusted strict-review
+> proof and queue's head-bound gate, rather than that reporting check, are the
+> automatic-merge authority.
 
 ## For new features
 

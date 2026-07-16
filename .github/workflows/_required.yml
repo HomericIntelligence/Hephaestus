@@ -5,31 +5,15 @@ name: Required Checks
 
 on:
   pull_request:
-    # Default types are [opened, synchronize, reopened], which do NOT fire when
-    # auto-merge is toggled or labels are changed after PR creation — so
-    # auto-merge-policy's check was stuck with its PR-open verdict until the
-    # next push (the race that #680 papered over with `needs: lint`).
-    # Re-running on auto_merge_enabled / auto_merge_disabled, labeled /
-    # unlabeled, and ready_for_review makes that gate converge on the true
-    # state with no timing reliance. See auto-merge-policy below.
-    #
-    # IMPORTANT: a pull_request trigger applies to the WHOLE workflow, so the
-    # label / auto-merge event types would otherwise re-run EVERY job on each
-    # label change. Those four actions exist solely for pr-policy /
-    # auto-merge-policy to re-converge, so the `changes-gate` job below gates the
-    # 16 heavy jobs to skip on labeled/unlabeled/auto_merge_enabled/
-    # auto_merge_disabled — only the two policy jobs run on those events. The
-    # heavy jobs' results from the last code push still stand for the SHA, so
-    # branch-protection required checks remain satisfied.
+    # This workflow is the sole source of code-validation contexts. Label and
+    # auto-merge events are deliberately handled by dedicated policy/proof
+    # workflows: a skipped heavy job reports a successful context, so allowing
+    # those events here could mask a still-running or failed code-event check.
     types:
       - opened
       - synchronize
       - reopened
       - ready_for_review
-      - labeled
-      - unlabeled
-      - auto_merge_enabled
-      - auto_merge_disabled
   push:
     branches: [main]
 
@@ -41,13 +25,9 @@ permissions:
   contents: read
 
 jobs:
-  # Decides whether this event should run the 16 heavy jobs. A pull_request
-  # trigger fires the whole workflow, but the labeled / unlabeled /
-  # auto_merge_enabled / auto_merge_disabled actions exist only so pr-policy and
-  # auto-merge-policy re-converge — the heavy jobs must NOT re-run on them. This
-  # job always runs (no gate on itself) and the heavy jobs `needs:` it.
-  # ``github.event.action`` is a GitHub-controlled enum (empty on `push`), passed
-  # via env: and never interpolated into the script — injection-safe.
+  # The trigger admits only code events, so every dependent job runs. Retain a
+  # single output because the code-event contract is consumed by each job and
+  # makes a future trigger broadening explicit in review.
   changes-gate:
     name: changes-gate
     runs-on: ubuntu-24.04
@@ -61,18 +41,8 @@ jobs:
           ACTION: ${{ github.event.action }}
         run: |
           set -euo pipefail
-          # Heavy jobs skip ONLY on label / auto-merge PR actions. `push` has no
-          # action (empty) → falls to the default → code_event=true.
-          case "$ACTION" in
-            labeled | unlabeled | auto_merge_enabled | auto_merge_disabled)
-              echo "code_event=false" >> "$GITHUB_OUTPUT"
-              echo "Label/auto-merge event ($ACTION) — heavy jobs skipped; only policy jobs run."
-              ;;
-            *)
-              echo "code_event=true" >> "$GITHUB_OUTPUT"
-              echo "Code event (${ACTION:-push}) — heavy jobs run."
-              ;;
-          esac
+          echo "code_event=true" >> "$GITHUB_OUTPUT"
+          echo "Code event (${ACTION:-push}) — all validation jobs run."
 
   forbid-suppressions:
     name: forbid-suppressions
@@ -495,72 +465,6 @@ jobs:
           fi
           echo "OK: auto-merge is currently disabled"
 
-  strict-review-proof:
-    name: strict-review-proof
-    # This must run on every PR event, including `synchronize` and the label
-    # event emitted after strict_review publishes a GO artifact.  It is not
-    # gated by changes-gate: the result is a commit-bound required check, so a
-    # later pushed head cannot inherit an earlier head's auto-merge authority.
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      pull-requests: read
-    env:
-      GH_TOKEN: ${{ github.token }}
-      PR_NUMBER: ${{ github.event.pull_request.number }}
-      EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-      REPOSITORY: ${{ github.repository }}
-      # This repository Actions variable is a trusted configuration boundary.
-      # An unset value fails closed instead of accepting any comment author.
-      AUTOMATION_LOGIN: ${{ vars.HEPHAESTUS_AUTOMATION_LOGIN }}
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          persist-credentials: false
-
-      - name: Setup uv
-        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
-        with:
-          enable-cache: true
-
-      - name: Install the locked proof-verifier environment
-        run: uv sync --no-default-groups --locked
-
-      - name: Validate strict-review automation identity configuration
-        run: |
-          set -euo pipefail
-          if [ -z "$AUTOMATION_LOGIN" ]; then
-            echo "::error::HEPHAESTUS_AUTOMATION_LOGIN repository variable is required."
-            exit 1
-          fi
-
-      - name: Fetch strict-review artifacts for this PR
-        run: |
-          set -euo pipefail
-          gh api --paginate --slurp \
-            "/repos/$REPOSITORY/issues/$PR_NUMBER/comments?per_page=100" \
-            > strict-review-comments.json
-
-      - name: Require an authenticated exact-head strict GO
-        run: |
-          set -euo pipefail
-          uv run --no-default-groups --no-sync python -m hephaestus.automation.strict_review_proof \
-            --comments-json strict-review-comments.json \
-            --expected-head-sha "$EVENT_HEAD_SHA" \
-            --automation-login "$AUTOMATION_LOGIN"
-
-      - name: Verify the PR head did not move during proof validation
-        run: |
-          set -euo pipefail
-          live_head=$(gh pr view "$PR_NUMBER" --repo "$REPOSITORY" --json headRefOid --jq .headRefOid)
-          if [ "$live_head" != "$EVENT_HEAD_SHA" ]; then
-            echo "::error::PR head changed during strict-review proof validation."
-            exit 1
-          fi
-
   unit-tests:
     name: unit-tests
     runs-on: ubuntu-24.04
@@ -928,13 +832,10 @@ jobs:
   # ruleset context. See docs/ci/required-checks.md and the guard test
   # tests/unit/ci/test_required_checks_gate.py.
   #
-  # `if: always()` is mandatory: the heavy jobs skip on label / auto-merge PR
-  # actions (they gate on changes-gate.code_event), so without always() this job
-  # would itself skip and report neither success nor failure — deadlocking a
-  # required check. The step below PASSES when every needed job is `success` or
-  # `skipped` (skipped = legitimately gated off) and FAILS on `failure` /
-  # `cancelled`. auto-merge-policy is intentionally EXCLUDED — it is advisory
-  # (see the comment on that job) and must not gate merges.
+  # `if: always()` is mandatory so an upstream job failure becomes one durable
+  # aggregate result. The step below accepts a skipped dependency only for a
+  # legitimately conditional job; this workflow's trigger never creates
+  # skipped heavy-job contexts from a label or auto-merge event.
   required-checks-gate:
     name: required-checks-gate
     runs-on: ubuntu-24.04
@@ -949,7 +850,6 @@ jobs:
       - symlink-check
       - shellcheck
       - pr-policy
-      - strict-review-proof
       - unit-tests
       - integration-tests
       - shell-tests

@@ -3,10 +3,10 @@
 The queue's strict-review stage publishes an authenticated issue-comment
 artifact. That artifact is durable evidence, but a comment alone cannot stop
 GitHub auto-merge from accepting a later head while the coordinator is parked.
-The required-checks workflow invokes this module for each pull-request event;
-the resulting check is attached to that event's immutable head SHA. A new head
-therefore has no passing proof until it receives its own authenticated
-strict-review artifact.
+The dedicated trusted ``strict-review-proof`` workflow invokes this module for
+each pull-request event, then publishes its result as a commit status on that
+event's immutable head SHA. A new head therefore has no passing proof until it
+receives its own authenticated strict-review artifact.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.automation.strict_review_artifact import (
+    STRICT_REVIEW_ARTIFACT_MARKER,
     STRICT_REVIEW_ARTIFACT_V2_MARKER,
     parse_strict_review_artifact,
     parse_strict_review_lease,
@@ -142,6 +143,51 @@ def _artifact_uses_elected_live_lease(
     return bool(live_lease_ids and artifact.lease_comment_id == min(live_lease_ids))
 
 
+def _verdict_state_for_exact_head(
+    trusted: list[_TrustedComment], expected_head: str, leases: dict[int, _LeaseRecord]
+) -> tuple[bool, bool] | None:
+    """Return ``(GO, NOGO)`` for valid evidence, or ``None`` on ambiguity.
+
+    A malformed v2 result and a result whose immutable comment id predates its
+    referenced lease are protocol ambiguities.  They must fail the complete
+    proof rather than permit a previous GO to remain authoritative.
+    """
+    qualifying_go = False
+    terminal_nogo = False
+    for result_id, result_created_at, body in trusted:
+        if body.startswith(STRICT_REVIEW_ARTIFACT_MARKER):
+            legacy = parse_strict_review_artifact(body)
+            if (
+                legacy is not None
+                and legacy.schema_version == 1
+                and legacy.head_sha == expected_head
+                and not legacy.is_go
+            ):
+                terminal_nogo = True
+            continue
+        if not body.startswith(STRICT_REVIEW_ARTIFACT_V2_MARKER):
+            continue
+        artifact = parse_strict_review_artifact(body)
+        if artifact is None or artifact.schema_version != 2:
+            return None
+        if artifact.head_sha != expected_head:
+            continue
+        if artifact.lease_comment_id is None or result_id <= artifact.lease_comment_id:
+            return None
+        if not _artifact_uses_elected_live_lease(
+            artifact,
+            result_created_at,
+            expected_head=expected_head,
+            leases=leases,
+        ):
+            continue
+        if artifact.is_go:
+            qualifying_go = True
+        else:
+            terminal_nogo = True
+    return qualifying_go, terminal_nogo
+
+
 def has_trusted_strict_review_proof(
     raw_comments: object, expected_head_sha: str, automation_login: str
 ) -> bool:
@@ -166,29 +212,10 @@ def has_trusted_strict_review_proof(
         return False
     leases = _valid_leases(trusted, expected_head)
 
-    qualifying_go = False
-    terminal_nogo = False
-    for _result_id, result_created_at, body in trusted:
-        if not body.startswith(STRICT_REVIEW_ARTIFACT_V2_MARKER):
-            continue
-        artifact = parse_strict_review_artifact(body)
-        if artifact is None or artifact.schema_version != 2:
-            # A malformed v2 write by the trusted publisher must not leave
-            # an earlier GO as the only apparent terminal decision.
-            return False
-        if artifact.head_sha != expected_head:
-            continue
-        if not _artifact_uses_elected_live_lease(
-            artifact,
-            result_created_at,
-            expected_head=expected_head,
-            leases=leases,
-        ):
-            continue
-        if artifact.is_go:
-            qualifying_go = True
-        else:
-            terminal_nogo = True
+    verdict_state = _verdict_state_for_exact_head(trusted, expected_head, leases)
+    if verdict_state is None:
+        return False
+    qualifying_go, terminal_nogo = verdict_state
     return qualifying_go and not terminal_nogo
 
 
