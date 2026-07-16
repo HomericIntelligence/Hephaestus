@@ -198,6 +198,19 @@ class TestPerformanceWorkflow:
         ):
             assert argument in run
 
+    def test_lane_collects_before_running_the_bounded_profile(self) -> None:
+        """The workflow proves collection before it evaluates runtime limits."""
+        steps = self._load()["jobs"]["worker-pool-load"]["steps"]
+        collect = next(
+            step["run"]
+            for step in steps
+            if step.get("name") == "Verify performance suite collection"
+        )
+
+        assert "python -m pytest tests/performance" in collect
+        assert "--collect-only" in collect
+        assert '--override-ini="addopts="' in collect
+
     def test_lane_uploads_runtime_report(self) -> None:
         """The report is retained as an artifact even when a gate fails."""
         steps = self._load()["jobs"]["worker-pool-load"]["steps"]

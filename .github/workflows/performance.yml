@@ -23,9 +23,14 @@ jobs:
           python-version: "3.12"
       - name: Install test dependencies
         run: pip install -e ".[dev,automation]"
+      - name: Verify performance suite collection
+        run: >
+          python -m pytest tests/performance
+          --override-ini="addopts="
+          --collect-only -q --strict-markers
       - name: Run bounded worker-pool load tests
         run: >
-          pytest tests/performance
+          python -m pytest tests/performance
           --override-ini="addopts="
           -v --strict-markers
           --load-duration-s=30

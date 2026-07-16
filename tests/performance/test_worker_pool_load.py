@@ -189,6 +189,14 @@ def test_percentile_uses_nearest_rank(percentile: float, expected: float) -> Non
     assert _percentile([float(value) for value in range(1, 11)], percentile) == expected
 
 
+@pytest.mark.performance
+def test_p95_nearest_rank_includes_slow_tail_completion() -> None:
+    """A single slow tenth completion must be included in p95."""
+    end_to_end_samples = [10.0] * 9 + [1_000.0]
+
+    assert _latency_summary(end_to_end_samples).p95 == 1_000.0
+
+
 def _latency_summary(samples: list[float]) -> _LatencySummary:
     """Summarize a non-empty latency sample list in milliseconds."""
     return _LatencySummary(
