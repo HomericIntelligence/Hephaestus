@@ -23,11 +23,9 @@ Write-path boundary (epic tagging)
 Per the doc row "Epic tagging is the one seeding write; done BEFORE excluding",
 an untagged epic must receive ``state:skip``. The pipeline mutator guard
 (``tests/unit/automation/pipeline/test_pipeline_architecture.py``) forbids
-GitHub mutations in this module, so seeding only SURFACES the tag need: an
-epic without ``state:skip`` is excluded with reason prefix
-:data:`EPIC_NEEDS_SKIP_TAG`, and the caller — the coordinator slice (#1817) —
-executes the actual label write via the existing ``github_api.skip_epics``
-chokepoint before honoring the exclusion.
+GitHub mutations in this module, so seeding returns an explicit
+:class:`EpicSkipTagObligation` for the caller to discharge through the existing
+``github_api.skip_epics`` chokepoint before honoring the exclusion.
 """
 
 from __future__ import annotations
@@ -63,12 +61,6 @@ _LABEL_RANK = {
     STATE_IMPLEMENTATION_NO_GO: 3,
     STATE_IMPLEMENTATION_GO: 4,
 }
-
-#: Exclusion-reason prefix surfacing the one sanctioned seeding write to the
-#: caller: an epic that still lacks ``state:skip`` must be tagged (via the
-#: existing ``github_api.skip_epics`` chokepoint, executed by the coordinator,
-#: #1817) BEFORE the exclusion is final. See module docstring.
-EPIC_NEEDS_SKIP_TAG = "epic_needs_skip_tag"
 
 #: Classification result: ``(stage, reason)``. ``stage is None`` means the
 #: issue is EXCLUDED from the pipeline (state:skip / epic) — exclusion is NOT
@@ -118,6 +110,13 @@ class IssueFacts:
 
 
 @dataclass(frozen=True)
+class EpicSkipTagObligation:
+    """A required durable ``state:skip`` write before an epic is excluded."""
+
+    issue: int
+
+
+@dataclass(frozen=True)
 class SeedEntry:
     """One planned queue push produced by :func:`seed_from_cli`.
 
@@ -136,6 +135,8 @@ class SeedEntry:
         issue_body: Issue body copied into the issue WorkItem payload for
             planner/reviewer/implementer prompts.
         passed: Terminal result for entries clamped directly to ``finished``.
+        skip_tag_obligation: Durable write that must complete before this
+            entry's exclusion can be honored, when it is an untagged epic.
 
     """
 
@@ -148,6 +149,7 @@ class SeedEntry:
     issue_title: str = ""
     issue_body: str = ""
     passed: bool = True
+    skip_tag_obligation: EpicSkipTagObligation | None = None
 
 
 def _get_state_label(labels: set[str]) -> str | None:
@@ -241,10 +243,7 @@ def classify_issue(facts: IssueFacts) -> Classification:
         LOG.info("issue excluded: %s", reason)
         return None, reason
     if facts.is_epic:
-        # Untagged epic: surface the sanctioned write to the caller (see
-        # module docstring — the state:skip write executes at the coordinator
-        # via the existing skip_epics chokepoint, #1817).
-        reason = f"{EPIC_NEEDS_SKIP_TAG}: #{facts.number} is an epic without {STATE_SKIP}"
+        reason = f"#{facts.number} is an epic tracking issue"
         LOG.info("issue excluded: %s", reason)
         return None, reason
 
@@ -411,6 +410,39 @@ def seed_issue_from_github(issue_number: int, github: Any) -> IssueFacts:
     )
 
 
+def seed_entry_from_facts(facts: IssueFacts) -> SeedEntry:
+    """Build one issue seed entry and its required durable-write obligation.
+
+    Seeding remains pure: it can declare, but never execute, the write that
+    makes an epic exclusion durable.  Callers must discharge the typed
+    obligation before they consume the resulting ``stage=None`` entry.
+
+    Args:
+        facts: Normalized GitHub state for one issue.
+
+    Returns:
+        The classified entry, with an epic skip-tag obligation only when the
+        issue is an untagged epic.
+
+    """
+    stage, reason = classify_issue(facts)
+    obligation = (
+        EpicSkipTagObligation(issue=facts.number)
+        if facts.is_epic and STATE_SKIP not in facts.labels
+        else None
+    )
+    return SeedEntry(
+        kind="issue",
+        identifier=facts.number,
+        stage=stage,
+        reason=reason,
+        pr_number=facts.pr_number if facts.pr_is_open else None,
+        issue_title=facts.title,
+        issue_body=facts.body,
+        skip_tag_obligation=obligation,
+    )
+
+
 def seed_from_cli(
     repos: Sequence[str],
     issues: Sequence[int],
@@ -462,18 +494,7 @@ def seed_from_cli(
     ]
     for issue in issues:
         facts = seed_issue(issue)
-        stage, reason = classify_issue(facts)
-        entries.append(
-            SeedEntry(
-                kind="issue",
-                identifier=issue,
-                stage=stage,
-                reason=reason,
-                pr_number=facts.pr_number if facts.pr_is_open else None,
-                issue_title=facts.title,
-                issue_body=facts.body,
-            )
-        )
+        entries.append(seed_entry_from_facts(facts))
     for pr in prs:
         pr_state = github.gh_pr_state(pr) if github is not None else gh_pr_state(pr)
         state = str((pr_state or {}).get("state") or "").upper()
@@ -528,11 +549,12 @@ def seed_from_cli(
 
 
 __all__ = [
-    "EPIC_NEEDS_SKIP_TAG",
     "Classification",
+    "EpicSkipTagObligation",
     "IssueFacts",
     "SeedEntry",
     "classify_issue",
+    "seed_entry_from_facts",
     "seed_from_cli",
     "seed_issue",
 ]
