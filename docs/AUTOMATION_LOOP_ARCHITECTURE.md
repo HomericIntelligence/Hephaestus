@@ -353,18 +353,25 @@ Related: #1554 (original minor-thread deadlock this replaces), #1575
 
 **Steps**:
 
-1. [M] Capture the live PR head. A previously captured head that changed is
-   revoked: clear `state:implementation-go`, disable/readback auto-merge, and
-   restart. A containment failure is terminal and fail-closed.
+1. [M] On **every** ingress, revoke any earlier eligibility: clear
+   `state:implementation-go`, disable/readback auto-merge, then capture the
+   live PR head. A previously captured head that changed is restarted from a
+   fresh head check. A containment failure is terminal and fail-closed.
 2. [W:A] Run an independent reviewer in `sandbox="read-only"`, with a fresh
-   per-head/per-attempt session. All diff, CI, and prior-review input is
-   untrusted and nonce-fenced.
+   per-head/per-attempt session. Before dispatch, the coordinator fetches a
+   bounded, repo-scoped nonempty diff, CI summary, and authenticated prior
+   review, and checks the head both before and after that fetch. Missing,
+   malformed, oversized, or stale evidence is a fail-closed NOGO. All
+   evidence is untrusted and nonce-fenced.
 3. [M] Re-read the head before publishing. A GO publishes an authenticated,
    exact-grammar artifact for that head, reads it back, then applies
    `state:implementation-go`; any publish/readback/label failure is terminal.
-4. [M] A NOGO publishes the audit artifact, verifies auto-merge is disabled,
+4. [M] An explicit NOGO, infrastructure failure, or malformed verdict
+   publishes a head-bound NOGO invalidation, verifies auto-merge is disabled,
    records remediation, and fails back to a real implementation pass. It never
-   loops through an adopted PR without implementation work.
+   loops through an adopted PR without implementation work. An orphan PR has
+   no issue-bound implementation scope, so it remains fail-closed for manual
+   remediation after containment.
 
 **Verdicts**: ADVANCE (current-head GO) → ci; FAIL_BACK (`nogo`) →
 implementation; RETRY (`head_changed`) → strict_review; containment failures
@@ -400,8 +407,11 @@ feedback.
    shipped pure classifier imported by `hephaestus.automation.pipeline.stages.ci`
    and covered by
    `tests/unit/automation/pipeline/stages/test_classify_ci_state.py`. It returns
-   PENDING, GREEN, FAILING, or terminal states. If PENDING → RETRY with timer
-   backoff; if GREEN → ADVANCE; if FAILING → step 4.
+   PENDING, GREEN, FAILING, or terminal states. Before GREEN can advance,
+   re-read the head and require it still equals the strict-reviewed head with
+   a current GO label and authenticated proof; a rebase, CI-fix push, or
+   external push therefore re-enters `strict_review`. If PENDING → RETRY with
+   timer backoff; if GREEN → ADVANCE; if FAILING → step 4.
 4. [W:A] **CI fix step** (budget ci_fix = 1) — `ci_fix_orchestrator.py:498
    build_ci_fix_prompt`; escalation via `ci_fix_orchestrator.py:148
    force_engagement_prompt`.
@@ -436,9 +446,11 @@ LEARN_WAIT solely to preserve the existing post-merge learn dedupe.
 
 1. [M] **PREPARE**: for an open PR, read the current head and validate the
    matching authenticated strict-GO artifact and implementation-GO label.
-2. [M] **ARM/CONFIRM**: arm only from that prepared head; re-read the PR and
-   proof immediately after arming. A changed head, absent confirmation, or
-   record-write failure disables auto-merge and fails closed. A PR that merged
+2. [M] **ARM/CONFIRM**: arm only through GitHub's conditional
+   `--match-head-commit` request for that prepared head; re-read the PR,
+   current GO label, and proof immediately after arming. A changed head,
+   absent confirmation, or record-write failure disables auto-merge and fails
+   closed. A PR that merged
    in the race window follows the existing deduped learn path.
 3. [M] **POLL**: every armed poll revalidates current head and strict proof;
    drift revokes the arm and returns to strict review. An already-merged PR
