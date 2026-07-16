@@ -174,6 +174,7 @@ class StrictReviewStage(Stage):
 
     def _clear_go_and_verify_disabled(self, pr_number: int, ctx: StageContext) -> bool:
         """Durably clear the GO label and verify auto-merge is actually disabled."""
+        labels_cleared = True
         try:
             ctx.github.remove_labels(pr_number, [STATE_IMPLEMENTATION_GO])
         except Exception as e:
@@ -182,7 +183,11 @@ class StrictReviewStage(Stage):
                 pr_number,
                 e,
             )
-            return False
+            # Do not short-circuit containment: a failed label mutation says
+            # nothing about a pre-existing remote auto-merge arm.  We still
+            # must attempt the independent deferral below before stopping.
+            labels_cleared = False
+        deferred = True
         try:
             ctx.github.defer_auto_merge(pr_number)
         except Exception as e:
@@ -191,8 +196,9 @@ class StrictReviewStage(Stage):
                 pr_number,
                 e,
             )
-            return False
-        return self._auto_merge_is_disabled(pr_number, ctx)
+            deferred = False
+        disabled = deferred and self._auto_merge_is_disabled(pr_number, ctx)
+        return labels_cleared and disabled
 
     def _auto_merge_is_disabled(self, pr_number: int, ctx: StageContext) -> bool:
         """Read back the disabled state; ambiguity is containment failure."""
