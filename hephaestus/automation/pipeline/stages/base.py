@@ -330,7 +330,7 @@ class StageGitHub(Protocol):
         self, pr_number: int, head_sha: str, verdict_body: str, *, is_go: bool
     ) -> None:
         """Publish a validated strict-review GO or NOGO artifact for one head."""
-        ...
+        pass
 
     def strict_review_evidence(self, pr_number: int, head_sha: str) -> StrictReviewEvidence | None:
         """Return bounded evidence still bound to ``head_sha``, else ``None``.
