@@ -74,6 +74,7 @@ from hephaestus.automation.strict_review_artifact import (
 from hephaestus.constants import read_timeout_env
 from hephaestus.github.auto_merge import defer_auto_merge, defer_auto_merge_batch
 from hephaestus.github.client import gh_call
+from hephaestus.utils.file_lock import file_lock
 
 logger = logging.getLogger(__name__)
 
@@ -1578,27 +1579,32 @@ class PipelineGitHub:
         """
         if self._skip(f"claim drive-green learn for #{issue_number} (PR #{pr_number})"):
             return True
-        record = self._arming.load(issue_number) or {"pr_number": pr_number}
-        status = str(record.get("learn_status") or "").lower()
-        if status in {"succeeded", "failed", "in_progress"}:
-            return False
-        record["pr_number"] = pr_number
-        record["learn_status"] = "in_progress"
-        record["learn_attempted_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        if not self._arming.save(issue_number, record):
-            raise RuntimeError(
-                f"could not persist drive-green learn claim for issue #{issue_number}"
-            )
-        persisted = self._arming.load(issue_number)
-        if (
-            persisted is None
-            or persisted.get("pr_number") != pr_number
-            or persisted.get("learn_status") != "in_progress"
-        ):
-            raise RuntimeError(
-                f"could not verify drive-green learn claim for issue #{issue_number}"
-            )
-        return True
+        # Hold a stable sibling lock across read/check/write/readback. The
+        # JSON record is atomically replaced by save(), so it cannot itself be
+        # the lock inode. Every coordinator process takes this same lock before
+        # claiming, making only one external /learn dispatch possible.
+        with file_lock(self._arming.learn_claim_lock_path(issue_number)):
+            record = self._arming.load(issue_number) or {"pr_number": pr_number}
+            status = str(record.get("learn_status") or "").lower()
+            if status in {"succeeded", "failed", "in_progress"}:
+                return False
+            record["pr_number"] = pr_number
+            record["learn_status"] = "in_progress"
+            record["learn_attempted_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            if not self._arming.save(issue_number, record):
+                raise RuntimeError(
+                    f"could not persist drive-green learn claim for issue #{issue_number}"
+                )
+            persisted = self._arming.load(issue_number)
+            if (
+                persisted is None
+                or persisted.get("pr_number") != pr_number
+                or persisted.get("learn_status") != "in_progress"
+            ):
+                raise RuntimeError(
+                    f"could not verify drive-green learn claim for issue #{issue_number}"
+                )
+            return True
 
     def mark_drive_green_learn_result(self, issue_number: int, *, succeeded: bool) -> None:
         """Record the post-merge ``/learn`` outcome on the arming record.

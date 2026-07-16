@@ -8,7 +8,9 @@ place the ``StageGitHub`` protocol's dry-run contract is honored.
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from time import sleep
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -1464,6 +1466,31 @@ class TestDriveGreenArmingRecords:
         assert adapter.claim_drive_green_learn(31, 701) is False
         assert adapter.drive_green_learn_terminal(31) is False
         assert adapter.pending_drive_green_arms() == [(31, 701)]
+
+    def test_concurrent_learn_claims_allow_exactly_one_dispatch(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two coordinators racing on one issue cannot both claim /learn."""
+        original_save = adapter._arming.save
+
+        def delayed_save(issue_number: int, record: dict[str, Any]) -> bool:
+            # Without the stable claim lock both workers load an unclaimed
+            # record during this delay and would each report a successful
+            # claim. The lock holds the second worker outside the read.
+            sleep(0.05)
+            return original_save(issue_number, record)
+
+        monkeypatch.setattr(adapter._arming, "save", delayed_save)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(
+                pool.map(
+                    lambda _unused: adapter.claim_drive_green_learn(32, 702),
+                    range(2),
+                )
+            )
+
+        assert outcomes.count(True) == 1
+        assert outcomes.count(False) == 1
 
     def test_failed_learn_is_also_terminal(self, adapter: pg.PipelineGitHub) -> None:
         adapter.mark_drive_green_learn_result(4, succeeded=False)

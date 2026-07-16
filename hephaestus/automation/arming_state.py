@@ -60,6 +60,16 @@ class ArmingStateStore:
         """Return the arming-record path for ``issue_number``."""
         return self._state_dir_provider() / f"drive-green-armed-{issue_number}.json"
 
+    def learn_claim_lock_path(self, issue_number: int) -> Path:
+        """Return the stable sentinel used to serialize one /learn claim.
+
+        This lock is intentionally a sibling rather than the JSON record
+        itself: replacing the record atomically while a lock is held on that
+        record's inode would let a second process lock the replacement inode.
+        The sentinel is never replaced or removed by record persistence.
+        """
+        return self._state_dir_provider() / f"drive-green-armed-{issue_number}.learn.lock"
+
     def load(self, issue_number: int) -> dict[str, Any] | None:
         """Return the parsed arming record for ``issue_number`` or ``None``.
 
