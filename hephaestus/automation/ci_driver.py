@@ -70,7 +70,9 @@ logger = logging.getLogger(__name__)
 #: CiStage's ADVANCE target (MERGE_WAIT) is in scope, so a green PR flows
 #: straight into merge_wait; that stage verifies auto-merge is disabled and
 #: finishes with ``strict_gate_unavailable`` until #2055 supplies the gate.
-_CI_DRIVER_SCOPE_STAGES: frozenset[StageName] = frozenset({StageName.CI, StageName.MERGE_WAIT})
+_CI_DRIVER_SCOPE_STAGES: frozenset[StageName] = frozenset(
+    {StageName.STRICT_REVIEW, StageName.CI, StageName.MERGE_WAIT}
+)
 
 
 def _pr_is_failing(pr: dict[str, Any]) -> bool:

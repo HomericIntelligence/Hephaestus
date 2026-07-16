@@ -107,16 +107,16 @@ class TestClassifyIssue:
         assert stage is StageName.FINISHED
         assert "merged" in reason
 
-    def test_open_pr_with_impl_go_routes_to_ci(self) -> None:
-        """Open PR + state:implementation-go → ready for CI."""
+    def test_open_pr_with_impl_go_routes_to_strict_review(self) -> None:
+        """Open PR + state:implementation-go → ready for independent strict review."""
         stage, reason = classify_issue(
             _facts(labels={STATE_IMPLEMENTATION_GO}, pr_number=42, pr_is_open=True)
         )
-        assert stage is StageName.CI
+        assert stage is StageName.STRICT_REVIEW
         assert "implementation-go" in reason
 
-    def test_open_pr_with_pr_impl_go_routes_to_ci(self) -> None:
-        """Open PR + PR-level state:implementation-go → ready for CI."""
+    def test_open_pr_with_pr_impl_go_routes_to_strict_review(self) -> None:
+        """PR-level implementation-go also requires independent strict review."""
         stage, reason = classify_issue(
             _facts(
                 labels={STATE_PLAN_GO},
@@ -125,7 +125,7 @@ class TestClassifyIssue:
                 pr_has_implementation_go=True,
             )
         )
-        assert stage is StageName.CI
+        assert stage is StageName.STRICT_REVIEW
         assert "implementation-go" in reason
 
     def test_open_pr_without_impl_go_routes_to_pr_review(self) -> None:
@@ -333,7 +333,7 @@ class TestSeedIssueFetchLayer:
         assert facts.pr_has_implementation_go is True
         assert facts.pr_has_implementation_no_go is False
         stage, _ = classify_issue(facts)
-        assert stage is StageName.CI
+        assert stage is StageName.STRICT_REVIEW
 
     def test_merged_pr_found_when_open_lookup_misses(self) -> None:
         """A MERGED PR is surfaced by the merged lookup → pr_is_merged (finished row)."""
@@ -529,7 +529,7 @@ class TestSeedFromCli:
             SeedEntry(
                 kind="issue",
                 identifier=9,
-                stage=StageName.CI,
+                stage=StageName.STRICT_REVIEW,
                 reason=f"#9 open PR with {STATE_IMPLEMENTATION_GO}",
                 pr_number=77,
                 issue_title="A task",
@@ -551,8 +551,8 @@ class TestSeedFromCli:
 
         assert entry.skip_tag_obligation == EpicSkipTagObligation(issue=10)
 
-    def test_prs_arm_impl_go_routes_to_ci(self) -> None:
-        """A PR carrying state:implementation-go seeds into ci (GO short-circuit)."""
+    def test_prs_arm_impl_go_routes_to_strict_review(self) -> None:
+        """A legacy GO PR must obtain a fresh strict proof before CI."""
         with (
             patch("hephaestus.automation.pipeline.seeding.gh_pr_state", return_value=None),
             patch(
@@ -565,7 +565,7 @@ class TestSeedFromCli:
             SeedEntry(
                 kind="pr",
                 identifier=77,
-                stage=StageName.CI,
+                stage=StageName.STRICT_REVIEW,
                 reason=f"PR #77 carries {STATE_IMPLEMENTATION_GO}",
                 pr_number=77,
             )
@@ -621,7 +621,7 @@ class TestSeedFromCli:
             SeedEntry(
                 kind="pr",
                 identifier=77,
-                stage=StageName.CI,
+                stage=StageName.STRICT_REVIEW,
                 reason=f"PR #77 carries {STATE_IMPLEMENTATION_GO}",
                 pr_number=77,
             )
@@ -695,7 +695,7 @@ class TestSeedFromCli:
             ),
         ):
             entries = seed_from_cli([], [], [82])
-        assert entries[0].stage is StageName.CI
+        assert entries[0].stage is StageName.STRICT_REVIEW
 
     def test_order_repos_then_issues_then_prs(self) -> None:
         """Entries preserve CLI order: repos, then issues, then prs."""

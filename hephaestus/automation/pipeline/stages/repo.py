@@ -277,7 +277,7 @@ class RepoStage(Stage):
                     {
                         "kind": "pr",
                         "number": pr_number,
-                        "stage": StageName.CI,
+                        "stage": StageName.STRICT_REVIEW,
                         "reason": f"orphan PR #{pr_number} (drive-green-all)",
                     }
                 )

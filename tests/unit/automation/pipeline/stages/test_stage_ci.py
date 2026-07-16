@@ -6,7 +6,12 @@ from typing import Any
 
 from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobResult
 from hephaestus.automation.pipeline.routing import ROUTES, Disposition, StageName
-from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
+from hephaestus.automation.pipeline.stages import (
+    Continue,
+    JobRequest,
+    StageOutcome,
+    StrictReviewArtifact,
+)
 from hephaestus.automation.pipeline.stages.ci import (
     BACKOFF_CAP_S,
     CI_POLL_STARTED_AT,
@@ -27,7 +32,8 @@ from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 # Sanity anchors: the reasons this suite exercises are ROUTES rows.
 assert ROUTES[StageName.CI].fail_routes["fix_exhausted"] == StageName.IMPLEMENTATION
-assert ROUTES[StageName.CI].fail_routes["not_implementation_go"] == StageName.PR_REVIEW
+assert ROUTES[StageName.CI].fail_routes["not_implementation_go"] == StageName.STRICT_REVIEW
+assert ROUTES[StageName.CI].fail_routes["not_strict_review_go"] == StageName.STRICT_REVIEW
 assert ROUTES[StageName.CI].budgets == {"ci_fix": 1, "rebase": 2}
 
 GREEN_CHECKS = [
@@ -41,6 +47,7 @@ FAILING_CHECKS = [
 PENDING_CHECKS = [
     {"status": "in_progress", "conclusion": None, "required": True},
 ]
+STRICT_GO = StrictReviewArtifact(is_go=True, head_sha="", verdict="GO")
 # Legacy residual class: concluded, no "failure", but NOT all_green — the
 # tightened classifier routes it to the fix leg (never arms it).
 CANCELLED_CHECKS = [
@@ -52,6 +59,7 @@ class _FifoChecksGitHub(FakeStageGitHub):
     """FakeStageGitHub whose pr_checks pops a scripted FIFO (last repeats)."""
 
     def __init__(self, checks_fifo: list[list[dict[str, Any]]], **kwargs: Any) -> None:
+        kwargs.setdefault("strict_artifact", STRICT_GO)
         super().__init__(**kwargs)
         self._checks_fifo = list(checks_fifo)
 
@@ -86,6 +94,7 @@ def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int
 def _go_github(**kwargs: Any) -> FakeStageGitHub:
     """FakeStageGitHub for a PR that already carries implementation-go."""
     kwargs.setdefault("pr_impl_state", (True, False))
+    kwargs.setdefault("strict_artifact", STRICT_GO)
     return FakeStageGitHub(**kwargs)
 
 
@@ -296,6 +305,18 @@ class TestCiDiscover:
 
         assert isinstance(result, Continue)
         assert result.next_state == REBASE_WAIT
+
+    def test_implementation_go_without_current_strict_proof_fails_back(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A label alone cannot send an unproven head into CI maintenance."""
+        stage = CiStage()
+        ctx = make_ctx(github=FakeStageGitHub(pr_impl_state=(True, False)))
+        item = _item(make_work_item, state=DISCOVER)
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FAIL_BACK, "not_strict_review_go")
 
     def test_preset_branch_is_kept(self, make_ctx: Any, make_work_item: Any) -> None:
         """An item that already knows its branch never overwrites it."""

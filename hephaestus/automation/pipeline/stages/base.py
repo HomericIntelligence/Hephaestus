@@ -83,6 +83,7 @@ __all__ = [
     "StageName",
     "StageOutcome",
     "StepResult",
+    "StrictReviewArtifact",
     "WorkItem",
     "agent_provider",
     "stage_model",
@@ -99,6 +100,15 @@ GIT_JOB_TIMEOUT_S = 600
 #: Poll backoff cap in seconds (legacy ``min(2**attempt, 60)`` — shared by
 #: every stage that uses the legacy exponential poll delay.
 BACKOFF_CAP_S = 60
+
+
+@dataclass(frozen=True)
+class StrictReviewArtifact:
+    """Authenticated strict-review proof for one exact PR head."""
+
+    is_go: bool
+    head_sha: str
+    verdict: str
 
 
 @runtime_checkable
@@ -286,9 +296,26 @@ class StageGitHub(Protocol):
     def arm_auto_merge(self, pr_number: int) -> None:
         """Durably arm squash auto-merge after implementation GO.
 
-        Reserved for #2055's head-bound strict-review stage. No active #2054
-        pipeline stage may call it.
+        Reserved exclusively for ``MergeWaitStage`` after it has revalidated
+        #2055's head-bound strict-review proof. No earlier stage may call it.
         """
+        ...
+
+    # -- strict-review proof surface (#2055) ---------------------------------
+
+    def strict_review_artifact(self, pr_number: int, head_sha: str) -> StrictReviewArtifact | None:
+        """Return a current-head, authenticated strict GO proof or ``None``.
+
+        The adapter rejects absent, foreign, malformed, oversized, tampered,
+        stale, and NOGO artifacts.  Callers must treat ``None`` as no merge
+        authorization.
+        """
+        ...
+
+    def publish_strict_review_artifact(
+        self, pr_number: int, head_sha: str, verdict_body: str
+    ) -> None:
+        """Publish a strict-review artifact before writing implementation GO."""
         ...
 
     # -- merge_wait surface (#1816) ------------------------------------------

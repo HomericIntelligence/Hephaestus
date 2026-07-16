@@ -16,7 +16,11 @@ import pytest
 
 from hephaestus.automation.pipeline.events import StageEvent
 from hephaestus.automation.pipeline.routing import ROUTES, StageName
-from hephaestus.automation.pipeline.stages import StageContext, StageGitHub
+from hephaestus.automation.pipeline.stages import (
+    StageContext,
+    StageGitHub,
+    StrictReviewArtifact,
+)
 from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARGV
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.protocol import PLAN_COMMENT_MARKER
@@ -55,6 +59,7 @@ class FakeStageGitHub(FakeGitHub):
         pr_stuck: bool = False,
         learn_terminal: bool = False,
         resolve_count: int = 0,
+        strict_artifact: StrictReviewArtifact | None = None,
     ) -> None:
         """Initialize the fake with canned read answers.
 
@@ -111,6 +116,8 @@ class FakeStageGitHub(FakeGitHub):
         self._pr_stuck = pr_stuck
         self._learn_terminal = learn_terminal
         self._resolve_count = resolve_count
+        self._strict_artifact = strict_artifact
+        self.strict_artifact_calls: list[tuple[int, str]] = []
         self.arming_records: dict[int, tuple[int, str]] = {}
         self.learn_results: dict[int, bool] = {}
 
@@ -253,6 +260,17 @@ class FakeStageGitHub(FakeGitHub):
     def arm_auto_merge(self, pr_number: int) -> None:
         """Mirror pr_manager.enable_auto_merge_after_implementation_go."""
         self._log("arm_auto_merge", pr_number)
+
+    def strict_review_artifact(self, pr_number: int, head_sha: str) -> StrictReviewArtifact | None:
+        """Return the canned current-head strict-review proof, if any."""
+        self.strict_artifact_calls.append((pr_number, head_sha))
+        return self._strict_artifact
+
+    def publish_strict_review_artifact(
+        self, pr_number: int, head_sha: str, verdict_body: str
+    ) -> None:
+        """Record strict-review artifact publication before the GO label."""
+        self._log("publish_strict_review_artifact", pr_number, head_sha, verdict_body)
 
     def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
         """Mirror ci_driver.CIDriver._gh_pr_state (canned answer)."""

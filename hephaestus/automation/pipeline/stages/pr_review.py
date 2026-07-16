@@ -1021,14 +1021,14 @@ class PrReviewStage(Stage):
             )
             ctx.github.resolve_automation_threads(item.pr)
         logger.info(
-            "pr_review:%d: clean GO; strict review remains pending for PR #%d",
+            "pr_review:%d: clean GO; advancing PR #%d to strict review",
             item.issue,
             item.pr,
         )
         blocked_reason = self._write_internal_go(item.pr, ctx)
         if blocked_reason is not None:
             return StageOutcome(Disposition.FINISH_FAIL, blocked_reason)
-        return StageOutcome(Disposition.FINISH_FAIL, "strict_gate_unavailable")
+        return StageOutcome(Disposition.ADVANCE, "internal GO; strict review pending")
 
     @staticmethod
     def _gate_no_commit(item: WorkItem) -> Continue | None:

@@ -114,6 +114,7 @@ from hephaestus.automation.pipeline.stages import (
     Stage,
     StageContext,
     StageGitHub,
+    StrictReviewStage,
 )
 from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARGV
 from hephaestus.automation.pipeline.stages.repo import product_to_work_item
@@ -163,6 +164,7 @@ _DRAIN_ORDER: tuple[StageName, ...] = (
     StageName.FINISHED,
     StageName.MERGE_WAIT,
     StageName.CI,
+    StageName.STRICT_REVIEW,
     StageName.PR_REVIEW,
     StageName.IMPLEMENTATION,
     StageName.PLAN_REVIEW,
@@ -449,6 +451,7 @@ class Coordinator:
             StageName.PLAN_REVIEW: PlanReviewStage(),
             StageName.IMPLEMENTATION: ImplementationStage(),
             StageName.PR_REVIEW: PrReviewStage(),
+            StageName.STRICT_REVIEW: StrictReviewStage(),
             StageName.CI: CiStage(),
             StageName.MERGE_WAIT: MergeWaitStage(),
             StageName.FINISHED: FinishedStage(self.ledger, self.preserved),
@@ -1533,7 +1536,7 @@ class Coordinator:
             if has_go:
                 stage, reason, passed = self._scope_seed_decision(
                     scope_identifier,
-                    StageName.CI,
+                    StageName.STRICT_REVIEW,
                     f"PR #{pr} carries {STATE_IMPLEMENTATION_GO}",
                     scope_stages,
                 )
