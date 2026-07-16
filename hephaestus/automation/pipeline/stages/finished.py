@@ -1,6 +1,6 @@
 """Finished stage: record outcomes and clean up worktrees (epic #1809).
 
-Binding contract: docs/AUTOMATION_LOOP_ARCHITECTURE.md section "8. finished".
+Binding contract: docs/AUTOMATION_LOOP_ARCHITECTURE.md section "finished".
 
 The universal sink. States: ENTER -> RECORD -> CLEANUP -> DONE.
 
