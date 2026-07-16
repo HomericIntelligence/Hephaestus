@@ -123,7 +123,7 @@ class FakeStageGitHub(FakeGitHub):
         self._strict_artifact = strict_artifact
         self._strict_evidence = strict_evidence
         self.strict_artifact_calls: list[tuple[int, str]] = []
-        self.strict_evidence_calls: list[tuple[int, str]] = []
+        self.strict_evidence_calls: list[tuple[int, str, int]] = []
         self.arming_records: dict[int, tuple[int, str]] = {}
         self.learn_results: dict[int, bool] = {}
 
@@ -278,9 +278,11 @@ class FakeStageGitHub(FakeGitHub):
         """Record strict-review artifact publication before the state label."""
         self._log("publish_strict_review_artifact", pr_number, head_sha, verdict_body, is_go)
 
-    def strict_review_evidence(self, pr_number: int, head_sha: str) -> StrictReviewEvidence | None:
+    def strict_review_evidence(
+        self, pr_number: int, head_sha: str, issue_number: int
+    ) -> StrictReviewEvidence | None:
         """Return canned evidence only when it remains for the requested head."""
-        self.strict_evidence_calls.append((pr_number, head_sha))
+        self.strict_evidence_calls.append((pr_number, head_sha, issue_number))
         if self._strict_evidence is None or self._strict_evidence.head_sha != head_sha:
             return None
         return self._strict_evidence

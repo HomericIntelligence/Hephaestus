@@ -87,6 +87,8 @@ _STRICT_REVIEW_MAX_CHECKS = 200
 _STRICT_REVIEW_MAX_CI_STATUS_BYTES = 20_000
 _STRICT_REVIEW_MAX_PRIOR_REVIEW_BYTES = 20_000
 _STRICT_REVIEW_MAX_REVIEWS = 100
+_STRICT_REVIEW_MAX_ISSUE_TITLE_BYTES = 1_000
+_STRICT_REVIEW_MAX_ISSUE_BODY_BYTES = 80_000
 _NO_PRIOR_AUTOMATED_REVIEW = "No authenticated prior PR-review verdict is available."
 _PR_REVIEW_VERDICT_RE = re.compile(r"(?m)^Verdict:\s*(?:GO|NOGO)\s*$")
 
@@ -679,7 +681,9 @@ class PipelineGitHub:
             return "[... prior PR review truncated to its final bytes ...]\n" + suffix
         return _NO_PRIOR_AUTOMATED_REVIEW
 
-    def strict_review_evidence(self, pr_number: int, head_sha: str) -> StrictReviewEvidence | None:
+    def strict_review_evidence(  # noqa: C901 - every evidence channel must fail closed independently.
+        self, pr_number: int, head_sha: str, issue_number: int
+    ) -> StrictReviewEvidence | None:
         """Fetch complete, bounded strict-review evidence for one exact head.
 
         The initial and final PR-state reads bind the fetched diff and CI
@@ -690,6 +694,7 @@ class PipelineGitHub:
         if (
             self._repo_slug is None
             or pr_number <= 0
+            or issue_number <= 0
             or re.fullmatch(r"[0-9a-fA-F]{40}", head_sha) is None
         ):
             return None
@@ -712,6 +717,21 @@ class PipelineGitHub:
                 snapshot.get("reviews"), automation_login
             )
             if prior_verdict is None:
+                return None
+
+            issue_result = self._gh(["issue", "view", str(issue_number), "--json", "title,body"])
+            issue = json.loads(issue_result.stdout or "{}")
+            if not isinstance(issue, dict):
+                return None
+            issue_title = issue.get("title")
+            issue_body = issue.get("body")
+            if (
+                not isinstance(issue_title, str)
+                or not issue_title.strip()
+                or not isinstance(issue_body, str)
+                or len(issue_title.encode("utf-8")) > _STRICT_REVIEW_MAX_ISSUE_TITLE_BYTES
+                or len(issue_body.encode("utf-8")) > _STRICT_REVIEW_MAX_ISSUE_BODY_BYTES
+            ):
                 return None
 
             diff_result = self._gh(["pr", "diff", str(pr_number)])
@@ -748,6 +768,8 @@ class PipelineGitHub:
             return None
         return StrictReviewEvidence(
             head_sha=normalized_head,
+            issue_title=issue_title,
+            issue_body=issue_body,
             diff=diff,
             ci_status=ci_status,
             prior_pr_review_verdict=prior_verdict,
@@ -1026,6 +1048,27 @@ class PipelineGitHub:
         if record.get("learn_captured_at") or record.get("learn_succeeded_at"):
             return True
         return str(record.get("learn_status") or "").lower() in {"succeeded", "failed"}
+
+    def pending_drive_green_arms(self) -> list[tuple[int, int]]:
+        """Return non-terminal durable arm records for pipeline restart recovery."""
+        try:
+            paths = sorted(ensure_state_dir(self._repo_root).glob("drive-green-armed-*.json"))
+        except OSError as exc:
+            logger.warning("drive-green arm recovery scan failed: %s", exc)
+            return []
+        pending: list[tuple[int, int]] = []
+        for path in paths:
+            try:
+                issue_number = int(path.stem.rsplit("-", 1)[-1])
+            except ValueError:
+                continue
+            if self.drive_green_learn_terminal(issue_number):
+                continue
+            record = self._arming.load(issue_number)
+            pr_number = (record or {}).get("pr_number")
+            if isinstance(pr_number, int) and pr_number > 0:
+                pending.append((issue_number, pr_number))
+        return pending
 
     # -- mutator surface (dry-run honored here) -------------------------------
 
@@ -1489,19 +1532,29 @@ class PipelineGitHub:
             return
         if self.drive_green_learn_terminal(issue_number):
             return
-        self._arming.save(
-            issue_number,
-            {
-                "pr_number": pr_number,
-                "pr_head_branch": self.get_pr_head_branch(pr_number) or "",
-                "head_sha_at_arming": head_sha,
-                "armed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "learn_attempted_at": None,
-                "learn_captured_at": None,
-                "learn_status": None,
-                "learn_succeeded_at": None,
-            },
-        )
+        record = {
+            "pr_number": pr_number,
+            "pr_head_branch": self.get_pr_head_branch(pr_number) or "",
+            "head_sha_at_arming": head_sha,
+            "armed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "learn_attempted_at": None,
+            "learn_captured_at": None,
+            "learn_status": None,
+            "learn_succeeded_at": None,
+        }
+        if not self._arming.save(issue_number, record):
+            raise RuntimeError(
+                f"could not persist drive-green arming record for issue #{issue_number}"
+            )
+        persisted = self._arming.load(issue_number)
+        if (
+            persisted is None
+            or persisted.get("pr_number") != pr_number
+            or persisted.get("head_sha_at_arming") != head_sha
+        ):
+            raise RuntimeError(
+                f"could not verify drive-green arming record for issue #{issue_number}"
+            )
 
     def mark_drive_green_learn_result(self, issue_number: int, *, succeeded: bool) -> None:
         """Record the post-merge ``/learn`` outcome on the arming record.
@@ -1524,7 +1577,15 @@ class PipelineGitHub:
             record["learn_status"] = "failed"
             record["learn_succeeded_at"] = None
             record["learn_captured_at"] = None
-        self._arming.save(issue_number, record)
+        if not self._arming.save(issue_number, record):
+            raise RuntimeError(
+                f"could not persist drive-green learn result for issue #{issue_number}"
+            )
+        persisted = self._arming.load(issue_number)
+        if persisted is None or persisted.get("learn_status") != record["learn_status"]:
+            raise RuntimeError(
+                f"could not verify drive-green learn result for issue #{issue_number}"
+            )
 
     # -- repo-stage surface (#1817) -------------------------------------------
 

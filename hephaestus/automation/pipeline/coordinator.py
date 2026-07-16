@@ -1384,6 +1384,8 @@ class Coordinator:
         discovery_repos = [] if self.config.issues or self.config.prs else self.config.repos
         entries = _seeding.seed_from_cli(discovery_repos, [], [])
         default_repo = self.config.repos[0] if self.config.repos else ""
+        if not self.config.issues and not self.config.prs:
+            entries.extend(self._pending_arm_recovery_entries())
         if self.config.issues or self.config.prs:
             entries.extend(self._seed_direct_scope(default_repo))
         pushed = 0
@@ -1406,6 +1408,39 @@ class Coordinator:
             self._push_item(item, item.stage, enter=True)
             pushed += 1
         return pushed
+
+    def _pending_arm_recovery_entries(self) -> list[_seeding.SeedEntry]:
+        """Seed non-terminal durable arms through merge_wait after a restart."""
+        entries: list[_seeding.SeedEntry] = []
+        scope_stages = self.config.scope.stages if self.config.scope is not None else None
+        for repo in self.config.repos:
+            reader = getattr(self._ctx_for_repo(repo).github, "pending_drive_green_arms", None)
+            if not callable(reader):
+                continue
+            try:
+                records = reader()
+            except Exception as exc:
+                logger.warning("drive-green arm recovery read failed for %s: %s", repo, exc)
+                continue
+            for issue_number, pr_number in records:
+                stage, reason, passed = self._scope_seed_decision(
+                    issue_number,
+                    StageName.MERGE_WAIT,
+                    f"PR #{pr_number} has a pending durable drive-green arm record",
+                    scope_stages,
+                )
+                entries.append(
+                    _seeding.SeedEntry(
+                        kind="pr",
+                        identifier=pr_number,
+                        stage=stage,
+                        reason=reason,
+                        pr_number=pr_number,
+                        issue_number=issue_number,
+                        passed=passed,
+                    )
+                )
+        return entries
 
     def _clamp_seed_stage_to_scope(
         self,
@@ -1507,6 +1542,27 @@ class Coordinator:
             pr_state = github.gh_pr_state(pr)
             pr_state_name = ((pr_state or {}).get("state") or "").upper()
             if pr_state_name == "MERGED":
+                reader = getattr(github, "pending_drive_green_arms", None)
+                pending = set(reader()) if callable(reader) else set()
+                if issue_number is not None and (issue_number, pr) in pending:
+                    stage, reason, passed = self._scope_seed_decision(
+                        scope_identifier,
+                        StageName.MERGE_WAIT,
+                        f"PR #{pr} merged with a pending durable drive-green arm record",
+                        scope_stages,
+                    )
+                    entries.append(
+                        _seeding.SeedEntry(
+                            kind="pr",
+                            identifier=pr,
+                            stage=stage,
+                            reason=reason,
+                            pr_number=pr,
+                            issue_number=issue_number,
+                            passed=passed,
+                        )
+                    )
+                    continue
                 entries.append(
                     _seeding.SeedEntry(
                         kind="pr",
@@ -1534,6 +1590,21 @@ class Coordinator:
                 continue
             has_go, _has_no_go = github.pr_has_implementation_state_label(pr)
             if has_go:
+                if issue_number is None:
+                    entries.append(
+                        _seeding.SeedEntry(
+                            kind="pr",
+                            identifier=pr,
+                            stage=StageName.FINISHED,
+                            reason=(
+                                f"PR #{pr} has no linked issue; strict review requires "
+                                "task requirements"
+                            ),
+                            pr_number=pr,
+                            passed=False,
+                        )
+                    )
+                    continue
                 stage, reason, passed = self._scope_seed_decision(
                     scope_identifier,
                     StageName.STRICT_REVIEW,

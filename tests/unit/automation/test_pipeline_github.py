@@ -1355,6 +1355,18 @@ class TestStrictReviewEvidence:
                 )
             if argv == ["api", "user", "--jq", ".login"]:
                 return SimpleNamespace(stdout="hephaestus-bot\n")
+            if argv == [
+                "issue",
+                "view",
+                "2055",
+                "--json",
+                "title,body",
+                "--repo",
+                "org/repo-a",
+            ]:
+                return SimpleNamespace(
+                    stdout=json.dumps({"title": "Strict gate", "body": "Required."})
+                )
             if argv == ["pr", "diff", "71", "--repo", "org/repo-a"]:
                 if raise_on_diff:
                     raise RuntimeError("diff unavailable")
@@ -1396,10 +1408,12 @@ class TestStrictReviewEvidence:
     ) -> None:
         adapter, calls = self._adapter_with_responses(tmp_path, monkeypatch)
 
-        evidence = adapter.strict_review_evidence(71, self._head.upper())
+        evidence = adapter.strict_review_evidence(71, self._head.upper(), 2055)
 
         assert evidence is not None
         assert evidence.head_sha == self._head
+        assert evidence.issue_title == "Strict gate"
+        assert evidence.issue_body == "Required."
         assert evidence.diff.startswith("diff --git")
         assert "unit: status=completed, conclusion=success" in evidence.ci_status
         assert evidence.prior_pr_review_verdict == "Grade: A\nVerdict: GO"
@@ -1411,21 +1425,21 @@ class TestStrictReviewEvidence:
     ) -> None:
         adapter, _calls = self._adapter_with_responses(tmp_path, monkeypatch, diff=" \n")
 
-        assert adapter.strict_review_evidence(71, self._head) is None
+        assert adapter.strict_review_evidence(71, self._head, 2055) is None
 
     def test_head_change_during_hydration_invalidates_evidence(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         adapter, _calls = self._adapter_with_responses(tmp_path, monkeypatch, final_head="b" * 40)
 
-        assert adapter.strict_review_evidence(71, self._head) is None
+        assert adapter.strict_review_evidence(71, self._head, 2055) is None
 
     def test_evidence_read_error_fails_closed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         adapter, _calls = self._adapter_with_responses(tmp_path, monkeypatch, raise_on_diff=True)
 
-        assert adapter.strict_review_evidence(71, self._head) is None
+        assert adapter.strict_review_evidence(71, self._head, 2055) is None
 
 
 class TestDriveGreenArmingRecords:
@@ -1459,6 +1473,25 @@ class TestDriveGreenArmingRecords:
         record = adapter._arming.load(5)
         assert record is not None
         assert record["learn_status"] == "succeeded"  # evidence preserved
+
+    def test_pending_arm_scan_recovers_only_non_terminal_records(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(pg, "get_pr_head_branch", lambda n: "b")
+        adapter.arm_drive_green(6, 72, "face")
+
+        assert adapter.pending_drive_green_arms() == [(6, 72)]
+
+        adapter.mark_drive_green_learn_result(6, succeeded=True)
+        assert adapter.pending_drive_green_arms() == []
+
+    def test_arm_record_write_failure_is_not_silently_acknowledged(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(adapter._arming, "save", lambda _issue, _record: False)
+
+        with pytest.raises(RuntimeError, match="could not persist drive-green arming record"):
+            adapter.arm_drive_green(7, 73, "cafe")
 
 
 class TestRateBudget:

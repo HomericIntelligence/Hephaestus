@@ -31,7 +31,12 @@ from hephaestus.automation.pipeline.events import (
     ZeroThreadNogoAction,
 )
 from hephaestus.automation.pipeline.jobs import AgentJob, JobHandle, JobResult
-from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
+from hephaestus.automation.pipeline.routing import (
+    Disposition,
+    PipelineScope,
+    StageName,
+    StageOutcome,
+)
 from hephaestus.automation.pipeline.seeding import SeedEntry
 from hephaestus.automation.pipeline.stages import Continue, StrictReviewEvidence
 from hephaestus.automation.pipeline.stages.base import JobRequest
@@ -325,6 +330,8 @@ class TestQuiescence:
             pr_head_branch="strict-review-pr-601",
             strict_evidence=StrictReviewEvidence(
                 head_sha=head,
+                issue_title="Strict-review task",
+                issue_body="Review the current head.",
                 diff="diff --git a/file.py b/file.py\n+change",
                 ci_status="checks clean",
                 prior_pr_review_verdict="Grade: A\nVerdict: GO",
@@ -335,7 +342,7 @@ class TestQuiescence:
         item = WorkItem(
             repo="repo-a",
             kind=ItemKind.PR,
-            issue=None,
+            issue=1,
             pr=601,
             stage=StageName.STRICT_REVIEW,
             state="HEAD_CHECK",
@@ -1480,6 +1487,36 @@ class TestPipelineScopeWiring:
         assert entries[0].issue_body == "Use the real issue body."
         assert item.payload["issue_title"] == "Hydrate planner context"
         assert item.payload["issue_body"] == "Use the real issue body."
+
+    def test_direct_merged_pr_with_pending_arm_record_reenters_merge_wait(
+        self, tmp_path: Path
+    ) -> None:
+        """A restarted drive must not drop the post-merge learn handoff (#2055)."""
+
+        class _RecoveryGitHub(FakeStageGitHub):
+            def pending_drive_green_arms(self) -> list[tuple[int, int]]:
+                return [(2055, 601)]
+
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            prs=[601],
+            projects_dir=tmp_path,
+            scope=PipelineScope(frozenset({StageName.MERGE_WAIT})),
+        )
+        github = _RecoveryGitHub(
+            pr_issue=2055,
+            pr_state={"state": "MERGED", "headRefOid": "a" * 40},
+        )
+        coordinator = Coordinator(
+            config, github=github, pool=FakeWorkerPool(), install_signals=False
+        )
+
+        entries = coordinator._seed_direct_scope("repo-a")
+
+        assert len(entries) == 1
+        assert entries[0].stage is StageName.MERGE_WAIT
+        assert entries[0].issue_number == 2055
 
     def test_seed_pass_filters_closed_explicit_issues_before_classification(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

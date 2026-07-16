@@ -117,6 +117,8 @@ class StrictReviewEvidence:
     """Bounded current-head evidence supplied to the read-only strict reviewer."""
 
     head_sha: str
+    issue_title: str
+    issue_body: str
     diff: str
     ci_status: str
     prior_pr_review_verdict: str
@@ -332,14 +334,18 @@ class StageGitHub(Protocol):
         """Publish a validated strict-review GO or NOGO artifact for one head."""
         pass
 
-    def strict_review_evidence(self, pr_number: int, head_sha: str) -> StrictReviewEvidence | None:
+    def strict_review_evidence(
+        self, pr_number: int, head_sha: str, issue_number: int
+    ) -> StrictReviewEvidence | None:
         """Return bounded evidence still bound to ``head_sha``, else ``None``.
 
         A strict reviewer has a read-only agent sandbox and cannot safely
         rely on a mutable local checkout for the PR diff.  The coordinator
         accessor fetches this repo-scoped evidence and validates the live
         head both before and after the read; stages fail closed when it is
-        unavailable.
+        unavailable.  The linked issue title/body are part of this evidence:
+        without the task requirements, a reviewer cannot judge whether the
+        diff fulfils the work it is about to authorize for merge.
         """
         ...
 
@@ -362,10 +368,10 @@ class StageGitHub(Protocol):
 
         Reserved for #2055's strict-gated arming protocol. It mirrors
         ``ci_driver.CIDriver._arm_drive_green`` /
-        ``ArmingStateStore.save``: written immediately after
-        :meth:`arm_auto_merge` succeeds so a crash between arming and the
-        next POLL cannot lose the fact that this PR (at this head SHA) was
-        armed — the post-merge ``/learn`` dedupe keys off this record.
+        ``ArmingStateStore.save``: written and read back immediately before
+        :meth:`arm_auto_merge`, so a crash during the remote arm cannot lose
+        the fact that this PR (at this head SHA) was eligible to arm — the
+        post-merge ``/learn`` dedupe keys off this record.
         """
         ...
 

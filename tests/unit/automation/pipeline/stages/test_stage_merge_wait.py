@@ -60,6 +60,13 @@ class _ProofAwareGitHub(FakeStageGitHub):
         self._log("strict_review_artifact", pr_number, head_sha)
         return self._proof
 
+    def defer_auto_merge(self, pr_number: int) -> None:
+        """Model GitHub's confirmed disarm for read-back verification."""
+        self._log("defer_auto_merge", pr_number)
+        current = dict(self._states[-1])
+        current["autoMergeRequest"] = None
+        self._states = [current]
+
 
 class _MergeDuringArmGitHub(_ProofAwareGitHub):
     """The auto-merge request loses a race to an already-merged PR."""
@@ -82,6 +89,14 @@ class _MarkFailGitHub(FakeStageGitHub):
 
     def mark_drive_green_learn_result(self, issue_number: int, *, succeeded: bool) -> None:
         raise OSError("disk full")
+
+
+class _ArmRecordFailGitHub(_ProofAwareGitHub):
+    """The pre-arm recovery record cannot be acknowledged."""
+
+    def arm_drive_green(self, issue_number: int, pr_number: int, head_sha: str) -> None:
+        del issue_number, pr_number, head_sha
+        raise OSError("state directory unavailable")
 
 
 def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int = 20) -> Any:
@@ -260,6 +275,7 @@ class TestMergeWaitContainment:
         assert item.payload["merge_wait_started_at"] == 1001.0
         assert github.mutation_log == [
             ("strict_review_artifact", (601, "abc123")),
+            ("arm_drive_green", (1, 601, "abc123")),
             ("arm_auto_merge", (601, "abc123")),
         ]
 
@@ -278,6 +294,7 @@ class TestMergeWaitContainment:
         assert stage.step(item, ctx) == StageOutcome(Disposition.FINISH_FAIL, "arm_failed")
         assert github.mutation_log == [
             ("strict_review_artifact", (601, "abc123")),
+            ("arm_drive_green", (1, 601, "abc123")),
             ("arm_auto_merge", (601, "abc123")),
             ("defer_auto_merge", (601,)),
         ]
@@ -301,11 +318,23 @@ class TestMergeWaitContainment:
         assert stage.step(item, ctx) == StageOutcome(Disposition.FAIL_BACK, "arm_confirm_failed")
         assert github.mutation_log == [
             ("strict_review_artifact", (601, "abc123")),
+            ("arm_drive_green", (1, 601, "abc123")),
             ("arm_auto_merge", (601, "abc123")),
             ("strict_review_artifact", (601, "abc123")),
             ("defer_auto_merge", (601,)),
         ]
         assert item.armed is False
+
+    def test_arm_record_failure_prevents_the_remote_auto_merge_request(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A crash-recovery record must exist before the externally visible arm."""
+        stage = MergeWaitStage()
+        github = _ArmRecordFailGitHub(states=[OPEN_STATE], proof=_StrictGoArtifact())
+
+        result = stage.step(_item(make_work_item, state=ARM), make_ctx(github=github))
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "arm_record_failed")
+        assert all(action != "arm_auto_merge" for action, _ in github.mutation_log)
 
     def test_post_arm_head_drift_revokes_the_arm(self, make_ctx: Any, make_work_item: Any) -> None:
         """ARM confirms the same reviewed head after GitHub accepts the request."""
@@ -327,6 +356,7 @@ class TestMergeWaitContainment:
         assert stage.step(item, ctx) == StageOutcome(Disposition.FAIL_BACK, "arm_confirm_failed")
         assert github.mutation_log == [
             ("strict_review_artifact", (601, "abc123")),
+            ("arm_drive_green", (1, 601, "abc123")),
             ("arm_auto_merge", (601, "abc123")),
             ("strict_review_artifact", (601, "def456")),
             ("defer_auto_merge", (601,)),
@@ -458,7 +488,7 @@ class TestMergedPrLearn:
         ) == StageOutcome(Disposition.FINISH_PASS, "merged")
         assert disabled_pool.submitted == []
 
-    def test_failed_learn_and_failed_mark_never_fail_a_merged_pr(
+    def test_failed_learn_is_terminal_but_a_failed_mark_never_finishes_successfully(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
         stage = MergeWaitStage()
@@ -474,7 +504,7 @@ class TestMergedPrLearn:
         failing_ctx = make_ctx(github=_MarkFailGitHub(pr_state=MERGED_STATE))
         assert _drive(
             stage, _poll_item(make_work_item), failing_ctx, FakeWorkerPool()
-        ) == StageOutcome(Disposition.FINISH_PASS, "merged")
+        ) == StageOutcome(Disposition.FINISH_FAIL, "learn_result_persistence_failed")
 
     def test_learn_job_and_finish_state(self, make_ctx: Any, make_work_item: Any) -> None:
         stage = MergeWaitStage()

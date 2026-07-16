@@ -229,6 +229,11 @@ class StrictReviewStage(Stage):
         if item.pr is None:
             logger.warning("strict_review:%d: no PR on item; failing back", item.issue)
             return StageOutcome(Disposition.FAIL_BACK, "nogo")
+        if item.issue is None:
+            # The strict gate must judge the diff against an issue's concrete
+            # requirements.  A PR-only item cannot meet that contract, and a
+            # NOGO cannot safely enter the issue-bound implementation stage.
+            return StageOutcome(Disposition.FINISH_FAIL, "strict_review_orphan")
 
         if item.state == ENTER:
             return Continue(next_state=HEAD_CHECK)
@@ -314,7 +319,7 @@ class StrictReviewStage(Stage):
         if not head_sha:
             # Guarded by HEAD_CHECK; restart-safety fallback.
             return Continue(next_state=HEAD_CHECK)
-        evidence = ctx.github.strict_review_evidence(item.pr, head_sha)  # type: ignore[arg-type]
+        evidence = ctx.github.strict_review_evidence(item.pr, head_sha, item.issue)  # type: ignore[arg-type]
         if evidence is None or evidence.head_sha.lower() != head_sha.lower():
             logger.warning(
                 "strict_review:%s: current-head evidence unavailable for PR #%d; invalidating",
@@ -364,6 +369,8 @@ class StrictReviewStage(Stage):
                 "pr_number": item.pr,
                 "issue_number": issue,
                 "head_sha": head_sha,
+                "issue_title": evidence.issue_title,
+                "issue_body": evidence.issue_body,
                 "diff": evidence.diff,
                 "ci_status": evidence.ci_status,
                 "prior_pr_review_verdict": evidence.prior_pr_review_verdict,
@@ -535,25 +542,23 @@ class StrictReviewStage(Stage):
             if outcome is not None:
                 return outcome
             return Continue(next_state=HEAD_CHECK)
-        self._post_nogo_remediation(pr_number, ctx, verdict_text)
+        if not self._post_nogo_remediation(pr_number, ctx, verdict_text):
+            return StageOutcome(Disposition.FINISH_FAIL, "strict_nogo_feedback_failed")
         try:
             ctx.github.mark_pr_implementation_no_go(pr_number)
         except Exception as e:
-            logger.warning(
-                "strict_review: failed to mark PR #%d implementation-no-go (non-fatal): %s",
+            logger.error(
+                "strict_review: failed to mark PR #%d implementation-no-go: %s",
                 pr_number,
                 e,
             )
-        if item.issue is None:
-            # A PR-only/orphan item cannot safely enter the issue-bound
-            # implementation stage.  It is contained and left for a human.
-            return StageOutcome(Disposition.FINISH_FAIL, "strict_review_nogo_orphan")
+            return StageOutcome(Disposition.FINISH_FAIL, "strict_nogo_label_failed")
         item.payload["strict_review_feedback"] = verdict_text
         item.payload.pop("existing_pr_impl_go", None)
         return StageOutcome(Disposition.FAIL_BACK, "nogo")
 
     @staticmethod
-    def _post_nogo_remediation(pr_number: int, ctx: StageContext, verdict_text: str) -> None:
+    def _post_nogo_remediation(pr_number: int, ctx: StageContext, verdict_text: str) -> bool:
         """Durably post the NOGO verdict as fenced remediation feedback.
 
         Fenced (not raw-injected) since ``verdict_text`` is agent output
@@ -571,11 +576,13 @@ class StrictReviewStage(Stage):
         try:
             ctx.github.post_pr_comment(pr_number, body)
         except Exception as e:
-            logger.warning(
-                "strict_review: failed to post NOGO remediation comment on PR #%d (non-fatal): %s",
+            logger.error(
+                "strict_review: failed to post NOGO remediation comment on PR #%d: %s",
                 pr_number,
                 e,
             )
+            return False
+        return True
 
     def on_job_done(self, item: WorkItem, result: JobResult, ctx: StageContext) -> None:
         """Store the parsed verdict on the item payload (state still REVIEW_WAIT).

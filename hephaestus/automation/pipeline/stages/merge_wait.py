@@ -131,9 +131,11 @@ class MergeWaitStage(Stage):
         if item.state == LEARN_WAIT:
             return self._request_learn(item, ctx)
         if item.state == MW_FINISH:
-            # The PR merged; /learn already ran (best-effort) and its result
-            # was durably marked in on_job_done. A failed learn never flips
-            # a merged PR to failure.
+            if item.payload.pop("learn_result_persistence_failed", None):
+                return StageOutcome(Disposition.FINISH_FAIL, "learn_result_persistence_failed")
+            # The PR merged; /learn already ran and its result was durably
+            # marked in on_job_done. A failed learn is terminal too, but a
+            # failed durable write is not allowed to masquerade as success.
             return StageOutcome(Disposition.FINISH_PASS, "merged")
         logger.warning("merge_wait:%s: unknown state %r", item.issue, item.state)
         return StageOutcome(Disposition.FINISH_FAIL, f"unknown state: {item.state}")
@@ -167,6 +169,12 @@ class MergeWaitStage(Stage):
             or str(getattr(artifact, "head_sha", "")).lower() != head_sha.lower()
         ):
             return self._disable_and_fail(item, ctx, "strict_gate_unavailable", recoverable=True)
+        # Persist the recovery handoff before the remote arm. The arm RPC can
+        # succeed and the process can die before it returns or confirms; a
+        # later pipeline run needs this record to recover the merged PR's
+        # deduplicated learn path.
+        if not self._record_arm(item, ctx, head_sha):
+            return StageOutcome(Disposition.FINISH_FAIL, "arm_record_failed")
         try:
             ctx.github.arm_auto_merge(item.pr, head_sha)
         except Exception as exc:
@@ -203,8 +211,6 @@ class MergeWaitStage(Stage):
             or str(getattr(confirmed_artifact, "head_sha", "")).lower() != head_sha.lower()
         ):
             return self._disable_and_fail(item, ctx, "arm_confirm_failed", recoverable=True)
-        if not self._record_arm(item, ctx, head_sha):
-            return self._disable_and_fail(item, ctx, "arm_record_failed")
         item.armed = True
         return Continue(next_state=POLL)
 
@@ -224,10 +230,9 @@ class MergeWaitStage(Stage):
             return False
         return True
 
-    @staticmethod
     def _disable_and_fail(
-        item: WorkItem, ctx: StageContext, note: str, *, recoverable: bool = False
-    ) -> StageOutcome:
+        self, item: WorkItem, ctx: StageContext, note: str, *, recoverable: bool = False
+    ) -> StepResult:
         """Contain a failed gate condition before routing its outcome.
 
         Proof and head drift are recoverable only after containment and a
@@ -243,6 +248,18 @@ class MergeWaitStage(Stage):
                 "merge_wait: failed to disable auto-merge for PR #%d: %s",
                 item.pr,
                 exc,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_disable_failed")
+        disabled = ctx.github.gh_pr_state(item.pr)
+        terminal = _terminal_pr_outcome(disabled, item.pr)
+        if terminal is not None:
+            if terminal.disposition is Disposition.FINISH_PASS:
+                return self._route_merged(item, ctx)
+            return terminal
+        if disabled is None or bool(disabled.get("autoMergeRequest")):
+            logger.error(
+                "merge_wait: could not verify auto-merge disabled for PR #%d",
+                item.pr,
             )
             return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_disable_failed")
         item.armed = False
@@ -352,8 +369,9 @@ class MergeWaitStage(Stage):
             try:
                 ctx.github.mark_drive_green_learn_result(item.issue, succeeded=bool(result.ok))
             except Exception as exc:
-                logger.warning(
-                    "merge_wait:%d: failed to mark /learn result (non-fatal): %s",
+                logger.error(
+                    "merge_wait:%d: failed to durably mark /learn result: %s",
                     item.issue,
                     exc,
                 )
+                item.payload["learn_result_persistence_failed"] = True

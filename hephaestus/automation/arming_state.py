@@ -75,8 +75,8 @@ class ArmingStateStore:
         )
         return dict(record) if record is not None else None
 
-    def save(self, issue_number: int, record: dict[str, Any]) -> None:
-        """Persist the arming record. Best-effort; logs and swallows IO errors."""
+    def save(self, issue_number: int, record: dict[str, Any]) -> bool:
+        """Persist the arming record and report whether the write succeeded."""
         path = self.path(issue_number)
         try:
             write_secure(path, json.dumps(record, indent=2, sort_keys=True))
@@ -86,6 +86,8 @@ class ArmingStateStore:
                 issue_number,
                 exc,
             )
+            return False
+        return True
 
     def clear(self, issue_number: int) -> None:
         """Delete the arming record for ``issue_number`` if present."""
