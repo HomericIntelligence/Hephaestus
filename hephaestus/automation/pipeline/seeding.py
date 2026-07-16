@@ -135,6 +135,10 @@ class SeedEntry:
         issue_body: Issue body copied into the issue WorkItem payload for
             planner/reviewer/implementer prompts.
         passed: Terminal result for entries clamped directly to ``finished``.
+        merge_wait_recovery: Whether this entry was reconstructed from a
+            durable drive-green arm record.  Merge-wait consults that record
+            on entry to decide whether a confirmed remote arm can safely
+            resume POLL rather than invoke ARM again.
         skip_tag_obligation: Durable write that must complete before this
             entry's exclusion can be honored, when it is an untagged epic.
 
@@ -149,6 +153,7 @@ class SeedEntry:
     issue_title: str = ""
     issue_body: str = ""
     passed: bool = True
+    merge_wait_recovery: bool = False
     skip_tag_obligation: EpicSkipTagObligation | None = None
 
 

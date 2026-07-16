@@ -1475,6 +1475,43 @@ class TestDriveGreenArmingRecords:
         adapter.mark_drive_green_learn_result(3, succeeded=True)
         assert adapter.drive_green_learn_terminal(3) is True
 
+    def test_arm_phase_requires_exact_readback_confirmation(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pre-RPC intent cannot make restart recovery skip ARM."""
+        monkeypatch.setattr(pg, "get_pr_head_branch", lambda n: "1817-auto-impl")
+
+        adapter.arm_drive_green(8, 74, "face")
+        prepared = adapter._arming.load(8)
+        assert prepared is not None
+        assert prepared["auto_merge_arm_status"] == "prepared"
+        assert adapter.drive_green_arm_confirmed(8, 74) is False
+
+        adapter.confirm_drive_green_arm(8, 74, "face")
+
+        confirmed = adapter._arming.load(8)
+        assert confirmed is not None
+        assert confirmed["auto_merge_arm_status"] == "confirmed"
+        assert confirmed["auto_merge_confirmed_at"]
+        assert adapter.drive_green_arm_confirmed(8, 74) is True
+
+        # A retry at the same exact record must not downgrade confirmation.
+        adapter.arm_drive_green(8, 74, "face")
+        assert adapter.drive_green_arm_confirmed(8, 74) is True
+
+    def test_arm_confirmation_rejects_a_missing_or_mismatched_prepared_record(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A durable confirmation remains bound to the prepared PR and head."""
+        monkeypatch.setattr(pg, "get_pr_head_branch", lambda n: "branch")
+        adapter.arm_drive_green(9, 75, "cafe")
+
+        with pytest.raises(RuntimeError, match="missing or mismatched"):
+            adapter.confirm_drive_green_arm(9, 76, "cafe")
+        with pytest.raises(RuntimeError, match="missing or mismatched"):
+            adapter.confirm_drive_green_arm(9, 75, "other")
+        assert adapter.drive_green_arm_confirmed(9, 75) is False
+
     def test_learn_claim_is_durable_and_never_replayable(self, adapter: pg.PipelineGitHub) -> None:
         """A crash after dispatch claim is an explicit unknown, never a replay."""
         assert adapter.claim_drive_green_learn(31, 701) is True

@@ -27,6 +27,12 @@ from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 MERGED_STATE = {"state": "MERGED", "headRefOid": "abc123"}
 CLOSED_STATE = {"state": "CLOSED"}
 OPEN_STATE = {"state": "OPEN", "mergeStateStatus": "BEHIND", "headRefOid": "abc123"}
+ARMED_OPEN_STATE = {
+    "state": "OPEN",
+    "mergeStateStatus": "BEHIND",
+    "headRefOid": "abc123",
+    "autoMergeRequest": {"enabledAt": "now"},
+}
 
 
 class _StrictGoArtifact(StrictReviewArtifact):
@@ -95,6 +101,24 @@ class _ArmRecordFailGitHub(_ProofAwareGitHub):
     """The pre-arm recovery record cannot be acknowledged."""
 
     def arm_drive_green(self, issue_number: int, pr_number: int, head_sha: str) -> None:
+        del issue_number, pr_number, head_sha
+        raise OSError("state directory unavailable")
+
+
+class _RecordedArmGitHub(_ProofAwareGitHub):
+    """Models GitHub accepting an arm and returning it on read-back."""
+
+    def arm_auto_merge(self, pr_number: int, expected_head_sha: str) -> None:
+        self._log("arm_auto_merge", pr_number, expected_head_sha)
+        current = dict(self._states[-1])
+        current["autoMergeRequest"] = {"enabledAt": "now"}
+        self._states = [current]
+
+
+class _ConfirmArmFailGitHub(_RecordedArmGitHub):
+    """The remote arm succeeds but its durable confirmation cannot be saved."""
+
+    def confirm_drive_green_arm(self, issue_number: int, pr_number: int, head_sha: str) -> None:
         del issue_number, pr_number, head_sha
         raise OSError("state directory unavailable")
 
@@ -324,6 +348,86 @@ class TestMergeWaitContainment:
             ("defer_auto_merge", (601,)),
         ]
         assert item.armed is False
+
+    def test_arm_persists_confirmed_recovery_phase_after_remote_readback(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A successful remote arm is durably marked before POLL can begin."""
+        stage = MergeWaitStage()
+        github = _RecordedArmGitHub(states=[OPEN_STATE], proof=_StrictGoArtifact())
+        item = _item(make_work_item, state=ARM)
+
+        assert stage.step(item, make_ctx(github=github)) == Continue(next_state=POLL)
+        assert github.drive_green_arm_confirmed(1, 601) is True
+        assert github.mutation_log == [
+            ("strict_review_artifact", (601, "abc123")),
+            ("arm_drive_green", (1, 601, "abc123")),
+            ("arm_auto_merge", (601, "abc123")),
+            ("strict_review_artifact", (601, "abc123")),
+            ("confirm_drive_green_arm", (1, 601, "abc123")),
+        ]
+
+    def test_confirmation_persistence_failure_disarms_and_terminalizes(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An unjournaled remote arm must be contained rather than retried."""
+        stage = MergeWaitStage()
+        github = _ConfirmArmFailGitHub(states=[OPEN_STATE], proof=_StrictGoArtifact())
+        item = _item(make_work_item, state=ARM)
+
+        assert stage.step(item, make_ctx(github=github)) == StageOutcome(
+            Disposition.FINISH_FAIL, "arm_confirmation_record_failed"
+        )
+        assert github.mutation_log == [
+            ("strict_review_artifact", (601, "abc123")),
+            ("arm_drive_green", (1, 601, "abc123")),
+            ("arm_auto_merge", (601, "abc123")),
+            ("strict_review_artifact", (601, "abc123")),
+            ("defer_auto_merge", (601,)),
+        ]
+        assert item.armed is False
+
+    def test_confirmed_recovery_resumes_poll_without_rearming(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A confirmed arm restarts in POLL and never duplicate-enables it."""
+        stage = MergeWaitStage()
+        github = _ProofAwareGitHub(states=[ARMED_OPEN_STATE], proof=_StrictGoArtifact())
+        github.arming_records[1] = (601, "abc123")
+        github.confirmed_arming_records.add(1)
+        item = _item(make_work_item, state=ENTER)
+        item.payload["merge_wait_recovery"] = True
+        ctx = make_ctx(github=github)
+
+        assert stage.on_enter(item, ctx) is None
+        assert item.state == POLL
+        assert item.armed is True
+        assert item.payload["merge_wait_started_at"] == 1001.0
+        assert stage.step(item, ctx) == StageOutcome(Disposition.RETRY, "merge_pending")
+        assert all(action != "arm_auto_merge" for action, _ in github.mutation_log)
+
+    def test_prepared_recovery_confirms_a_live_arm_without_reenabling(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A crash between remote acceptance and journaling is also not re-armed."""
+        stage = MergeWaitStage()
+        github = _ProofAwareGitHub(states=[ARMED_OPEN_STATE], proof=_StrictGoArtifact())
+        github.arming_records[1] = (601, "abc123")
+        item = _item(make_work_item, state=ENTER)
+        item.payload["merge_wait_recovery"] = True
+        ctx = make_ctx(github=github)
+
+        assert stage.on_enter(item, ctx) is None
+        assert item.state == ENTER
+        assert stage.step(item, ctx) == Continue(next_state=ARM)
+        item.state = ARM
+        assert stage.step(item, ctx) == Continue(next_state=POLL)
+        assert github.drive_green_arm_confirmed(1, 601) is True
+        assert github.mutation_log == [
+            ("strict_review_artifact", (601, "abc123")),
+            ("confirm_drive_green_arm", (1, 601, "abc123")),
+        ]
+        assert all(action != "arm_auto_merge" for action, _ in github.mutation_log)
 
     def test_arm_record_failure_prevents_the_remote_auto_merge_request(
         self, make_ctx: Any, make_work_item: Any

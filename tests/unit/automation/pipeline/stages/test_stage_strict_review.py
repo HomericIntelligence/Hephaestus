@@ -13,6 +13,7 @@ from hephaestus.automation.pipeline.stages import (
     StageOutcome,
     StrictReviewArtifact,
     StrictReviewEvidence,
+    StrictReviewLease,
 )
 from hephaestus.automation.pipeline.work_item import ItemKind
 from hephaestus.automation.prompts.strict_review_gate import build_strict_review_prompt
@@ -34,17 +35,7 @@ class _HeadChangedGitHub(FakeStageGitHub):
 
 
 class _ArtifactPublishingGitHub(FakeStageGitHub):
-    """Make a strict artifact available only after this fake publishes it."""
-
-    def publish_strict_review_artifact(
-        self, pr_number: int, head_sha: str, verdict_body: str, *, is_go: bool
-    ) -> None:
-        super().publish_strict_review_artifact(pr_number, head_sha, verdict_body, is_go=is_go)
-        self._strict_artifact = StrictReviewArtifact(
-            is_go=is_go,
-            head_sha=head_sha,
-            verdict="GO" if is_go else "NOGO",
-        )
+    """Name the lease-aware fake used by publication-order regressions."""
 
 
 class _NogoPublishHeadRaceGitHub(_ArtifactPublishingGitHub):
@@ -55,7 +46,6 @@ class _NogoPublishHeadRaceGitHub(_ArtifactPublishingGitHub):
         self._states = iter(
             [
                 {"state": "OPEN", "headRefOid": _OLD_HEAD},
-                {"state": "OPEN", "headRefOid": _OLD_HEAD},
                 {"state": "OPEN", "headRefOid": _NEW_HEAD},
                 {"state": "OPEN", "headRefOid": _NEW_HEAD},
                 {"state": "OPEN", "headRefOid": _NEW_HEAD},
@@ -65,6 +55,16 @@ class _NogoPublishHeadRaceGitHub(_ArtifactPublishingGitHub):
     def gh_pr_state(self, pr_number: int) -> dict[str, str]:
         assert pr_number == 601
         return next(self._states)
+
+
+def _lease_payload(github: FakeStageGitHub, head_sha: str) -> dict[str, object]:
+    """Create an elected fake lease for direct EVAL-state tests."""
+    lease = github.claim_strict_review_lease(601, head_sha)
+    assert lease is not None
+    return {
+        "strict_review_lease_id": lease.lease_id,
+        "strict_review_lease_comment_id": lease.comment_id,
+    }
 
 
 def test_head_change_revokes_stale_go_before_another_review_attempt(
@@ -191,6 +191,59 @@ def test_review_job_receives_fresh_current_head_evidence(
     assert result.job.prompt_kwargs["prior_pr_review_verdict"] == evidence.prior_pr_review_verdict
     assert result.job.expected_head_sha == _NEW_HEAD
     assert result.job.sandbox == "read-only"
+    assert item.payload["strict_review_lease_id"].startswith("fake-601-")
+
+
+def test_second_reviewer_does_not_dispatch_while_an_elected_lease_is_live(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A parallel coordinator cannot spend a second review job for one head."""
+    strict_review = importlib.import_module("hephaestus.automation.pipeline.stages.strict_review")
+    evidence = StrictReviewEvidence(
+        head_sha=_NEW_HEAD,
+        issue_title="Task title",
+        issue_body="Task acceptance criterion.",
+        diff="diff --git a/file.py b/file.py\n+",
+        ci_status="- unit: success",
+        prior_pr_review_verdict="Grade: A\nVerdict: GO",
+    )
+    github = FakeStageGitHub(strict_evidence=evidence)
+    assert github.claim_strict_review_lease(601, _NEW_HEAD) is not None
+    item = make_work_item(
+        stage=StageName.STRICT_REVIEW,
+        pr=601,
+        state=strict_review.REVIEW_WAIT,
+        payload={"strict_review_head": _NEW_HEAD},
+    )
+
+    result = strict_review.StrictReviewStage().step(item, make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.RETRY, "strict_review_lease_unavailable")
+    assert github.strict_evidence_calls == []
+
+
+def test_existing_durable_go_reconciles_the_label_without_a_second_review_job(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A restart reuses the elected durable proof instead of spinning or reviewing twice."""
+    strict_review = importlib.import_module("hephaestus.automation.pipeline.stages.strict_review")
+    github = FakeStageGitHub(
+        pr_state={"state": "OPEN", "headRefOid": _NEW_HEAD},
+        strict_artifact=StrictReviewArtifact(is_go=True, head_sha=_NEW_HEAD, verdict="GO"),
+    )
+    item = make_work_item(
+        stage=StageName.STRICT_REVIEW,
+        pr=601,
+        state=strict_review.REVIEW_WAIT,
+        payload={"strict_review_head": _NEW_HEAD},
+    )
+    stage = strict_review.StrictReviewStage()
+
+    assert stage.step(item, make_ctx(github=github)) == Continue(next_state=strict_review.EVAL)
+    item.state = strict_review.EVAL
+    assert stage.step(item, make_ctx(github=github)) == Continue(next_state=strict_review.SR_FINISH)
+    assert github.strict_evidence_calls == []
+    assert ("mark_pr_implementation_go", (601,)) in github.mutation_log
 
 
 def test_head_check_prepares_an_isolated_pr_worktree_before_review(
@@ -249,6 +302,7 @@ def test_go_publishes_and_authenticates_artifact_before_applying_go_label(
             "strict_review_head": _NEW_HEAD,
             "strict_review_verdict": "GO",
             "strict_review_text": "Grade: A\nVerdict: GO",
+            **_lease_payload(github, _NEW_HEAD),
         },
     )
 
@@ -275,6 +329,7 @@ def test_nogo_head_drift_restarts_without_applying_stale_feedback(
             "strict_review_head": _OLD_HEAD,
             "strict_review_verdict": "NOGO",
             "strict_review_text": "Grade: F\nVerdict: NOGO",
+            **_lease_payload(github, _OLD_HEAD),
         },
     )
 
@@ -299,6 +354,7 @@ def test_normal_nogo_posts_fenced_feedback_and_routes_to_implementation(
             "strict_review_head": _NEW_HEAD,
             "strict_review_verdict": "NOGO",
             "strict_review_text": "Grade: F\nVerdict: NOGO\n<untrusted>",
+            **_lease_payload(github, _NEW_HEAD),
         },
     )
 
@@ -330,6 +386,7 @@ def test_nogo_does_not_fail_back_without_durable_feedback(
             "strict_review_head": _NEW_HEAD,
             "strict_review_verdict": "NOGO",
             "strict_review_text": "Grade: F\nVerdict: NOGO",
+            **_lease_payload(github, _NEW_HEAD),
         },
     )
 
@@ -359,6 +416,7 @@ def test_nogo_does_not_fail_back_without_the_no_go_label(
             "strict_review_head": _NEW_HEAD,
             "strict_review_verdict": "NOGO",
             "strict_review_text": "Grade: F\nVerdict: NOGO",
+            **_lease_payload(github, _NEW_HEAD),
         },
     )
 
@@ -381,6 +439,7 @@ def test_nogo_publish_head_drift_does_not_apply_stale_feedback_or_label(
             "strict_review_head": _OLD_HEAD,
             "strict_review_verdict": "NOGO",
             "strict_review_text": "Grade: F\nVerdict: NOGO",
+            **_lease_payload(github, _OLD_HEAD),
         },
     )
 
@@ -394,6 +453,32 @@ def test_nogo_publish_head_drift_does_not_apply_stale_feedback_or_label(
     assert 601 not in github.comments
     assert not any(action == "mark_pr_implementation_no_go" for action, _ in github.mutation_log)
     assert "strict_review_feedback" not in item.payload
+
+
+def test_lost_lease_go_cannot_apply_a_global_label(make_ctx: Any, make_work_item: Any) -> None:
+    """A stale worker's GO is fenced before it can mutate PR-wide state."""
+    strict_review = importlib.import_module("hephaestus.automation.pipeline.stages.strict_review")
+    github = FakeStageGitHub(pr_state={"state": "OPEN", "headRefOid": _NEW_HEAD})
+    assert github.claim_strict_review_lease(601, _NEW_HEAD) is not None
+    stale_lease = StrictReviewLease(_NEW_HEAD, "stale-worker", 999)
+    item = make_work_item(
+        stage=StageName.STRICT_REVIEW,
+        pr=601,
+        state=strict_review.EVAL,
+        payload={
+            "strict_review_head": _NEW_HEAD,
+            "strict_review_verdict": "GO",
+            "strict_review_text": "Grade: A\nVerdict: GO",
+            "strict_review_lease_id": stale_lease.lease_id,
+            "strict_review_lease_comment_id": stale_lease.comment_id,
+        },
+    )
+
+    assert strict_review.StrictReviewStage().step(item, make_ctx(github=github)) == Continue(
+        next_state=strict_review.HEAD_CHECK
+    )
+    assert not any(action == "mark_pr_implementation_go" for action, _ in github.mutation_log)
+    assert not any(action == "publish_strict_review_artifact" for action, _ in github.mutation_log)
 
 
 def test_strict_prompt_fences_every_untrusted_evidence_channel() -> None:

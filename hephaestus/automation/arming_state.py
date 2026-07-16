@@ -32,6 +32,13 @@ from ._review_utils import load_state_file
 
 logger = logging.getLogger(__name__)
 
+# ``armed_at`` records the intent written before the remote GraphQL mutation;
+# it is deliberately *not* evidence that GitHub accepted auto-merge.  The
+# pipeline therefore persists this small state machine so restart recovery can
+# distinguish a pre-RPC record from an arm that was read back from GitHub.
+ARM_STATUS_PREPARED = "prepared"
+ARM_STATUS_CONFIRMED = "confirmed"
+
 
 class ArmingStateStore:
     """Reads/writes per-issue drive-green arming records under ``state_dir``.

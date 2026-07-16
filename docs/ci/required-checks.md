@@ -48,7 +48,7 @@ regardless of how far behind `main` it is.
 
 ## Aggregate workflow coverage
 
-`_required.yml` defines ~19 jobs (`lint`, `pr-policy`, `unit-tests`,
+`_required.yml` defines ~20 jobs (`lint`, `pr-policy`, `strict-review-proof`, `unit-tests`,
 `build`, the `security/*` scans, `license-scan`, etc.). Enumerating each one individually in
 branch protection is brittle: renaming a job, adding a job, or splitting one
 silently changes what's required, and nobody notices until something slips
@@ -86,6 +86,30 @@ job failure.
 `auto-merge-policy` is deliberately **excluded** from the gate: it is advisory
 reporting only. The queue's head-bound `strict_review` and `merge_wait` stages
 are the sole automatic arming authority.
+
+### Commit-bound strict-review proof
+
+`strict-review-proof` is included in `required-checks-gate` and runs on every
+pull-request event, including `synchronize` and the label event emitted when
+the queue publishes a strict GO. It reads the event's immutable head SHA and
+requires the latest strict-review artifact from the configured automation
+identity to be a grammatically valid, digest-verified GO for that exact SHA.
+The job also verifies the live PR head did not move while it was validating.
+
+This closes the auto-merge timing gap: a push creates a new commit-bound check
+run, which cannot inherit the previous SHA's successful proof. GitHub therefore
+cannot auto-merge the new head until the strict reviewer publishes a fresh GO
+and the check succeeds for that head. Coordinator polling remains only a
+defense-in-depth containment control.
+
+Before enabling automatic arming, configure the public repository Actions
+variable to the login used by the automation credential. The check fails closed
+when it is unset; do not substitute the event actor or an arbitrary comment
+author.
+
+```bash
+gh variable set HEPHAESTUS_AUTOMATION_LOGIN --repo HomericIntelligence/Hephaestus --body 'mvillmow'
+```
 
 ## Adding a new gating job (runbook)
 

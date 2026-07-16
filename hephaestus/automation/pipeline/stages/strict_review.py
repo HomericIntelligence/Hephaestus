@@ -67,6 +67,7 @@ from .base import (
     StageContext,
     StageOutcome,
     StepResult,
+    StrictReviewLease,
     WorkItem,
     _terminal_pr_outcome,
     _worktree_path,
@@ -171,6 +172,7 @@ class StrictReviewStage(Stage):
             item.payload.pop("strict_review_verdict", None)
             item.payload.pop("strict_review_text", None)
             item.payload.pop("strict_review_failed", None)
+            self._drop_lease(item)
             item.state = ENTER
         if not self._clear_go_and_verify_disabled(pr_number, ctx):
             return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_disable_failed")
@@ -319,6 +321,37 @@ class StrictReviewStage(Stage):
         if not head_sha:
             # Guarded by HEAD_CHECK; restart-safety fallback.
             return Continue(next_state=HEAD_CHECK)
+        # A prior durable v2 GO can survive a coordinator restart.  It is
+        # already globally elected and authenticated by the accessor, so no
+        # second reviewer may be dispatched merely to recreate its label.
+        existing_go = ctx.github.strict_review_artifact(item.pr, head_sha)  # type: ignore[arg-type]
+        if existing_go is not None:
+            item.payload["strict_review_existing_go"] = True
+            item.payload["strict_review_verdict"] = "GO"
+            item.payload["strict_review_text"] = ""
+            item.payload.pop("strict_review_failed", None)
+            return Continue(next_state=EVAL)
+        lease = self._lease_from_payload(item)
+        if lease is None:
+            try:
+                lease = ctx.github.claim_strict_review_lease(item.pr, head_sha)  # type: ignore[arg-type]
+            except Exception as e:
+                logger.warning(
+                    "strict_review:%s: could not claim durable review lease for PR #%d: %s",
+                    item.issue,
+                    item.pr,
+                    e,
+                )
+                item.payload["retry_delay_s"] = 30
+                return StageOutcome(Disposition.RETRY, "strict_review_lease_unavailable")
+            if lease is None:
+                # A concurrent coordinator owns the elected lease (or a
+                # terminal NOGO has already fenced this generation).  Do not
+                # run a second reviewer or mutate labels from stale output.
+                item.payload["retry_delay_s"] = 30
+                return StageOutcome(Disposition.RETRY, "strict_review_lease_unavailable")
+            item.payload["strict_review_lease_id"] = lease.lease_id
+            item.payload["strict_review_lease_comment_id"] = lease.comment_id
         evidence = ctx.github.strict_review_evidence(item.pr, head_sha, item.issue)  # type: ignore[arg-type]
         if evidence is None or evidence.head_sha.lower() != head_sha.lower():
             logger.warning(
@@ -413,10 +446,10 @@ class StrictReviewStage(Stage):
             return self._handle_go(item, ctx, head_sha, verdict_text)
         return self._handle_nogo(item, ctx, head_sha, verdict_text)
 
-    def _handle_go(
-        self, item: WorkItem, ctx: StageContext, head_sha: str, verdict_text: str
-    ) -> StepResult:
-        """GO: publish the artifact BEFORE the label (doc contract), never arm."""
+    def _current_head_or_restart(
+        self, item: WorkItem, ctx: StageContext, head_sha: str, *, action: str
+    ) -> StepResult | None:
+        """Return a terminal/restart outcome unless this exact head remains live."""
         pr_number = item.pr
         if pr_number is None:  # guarded by step(); narrowing
             return StageOutcome(Disposition.FAIL_BACK, "nogo")
@@ -425,33 +458,65 @@ class StrictReviewStage(Stage):
         if terminal is not None:
             return terminal
         live_head = str((pr_state or {}).get("headRefOid") or "")
-        if not head_sha or live_head != head_sha:
-            logger.warning(
-                "strict_review:%s: head changed before GO publication (%s -> %s)",
-                item.issue,
-                head_sha[:12],
-                live_head[:12],
-            )
-            outcome = self._contain_and_revoke_on_entry(item, ctx)
-            if outcome is not None:
-                return outcome
+        if head_sha and live_head == head_sha:
+            return None
+        logger.info(
+            "strict_review:%s: head changed before %s (%s -> %s); restarting",
+            item.issue,
+            action,
+            head_sha[:12],
+            live_head[:12],
+        )
+        outcome = self._contain_and_revoke_on_entry(item, ctx)
+        return outcome if outcome is not None else Continue(next_state=HEAD_CHECK)
+
+    def _handle_go(
+        self, item: WorkItem, ctx: StageContext, head_sha: str, verdict_text: str
+    ) -> StepResult:
+        """GO: publish the artifact BEFORE the label (doc contract), never arm."""
+        pr_number = item.pr
+        if pr_number is None:  # guarded by step(); narrowing
+            return StageOutcome(Disposition.FAIL_BACK, "nogo")
+        current_outcome = self._current_head_or_restart(
+            item, ctx, head_sha, action="GO publication"
+        )
+        if current_outcome is not None:
+            return current_outcome
+        existing_go = bool(item.payload.pop("strict_review_existing_go", None))
+        lease = self._lease_from_payload(item)
+        if not existing_go and lease is None:
+            # A restored or stale job cannot manufacture a global GO label
+            # without its durable fencing token.
             return Continue(next_state=HEAD_CHECK)
         logger.info(
-            "strict_review:%s: GO for PR #%d at head %s; publishing artifact",
+            "strict_review:%s: GO for PR #%d at head %s; %s artifact",
             item.issue,
             pr_number,
             head_sha[:12],
+            "reconciling existing" if existing_go else "publishing fenced",
         )
-        try:
-            ctx.github.publish_strict_review_artifact(pr_number, head_sha, verdict_text, is_go=True)
-        except Exception as e:
-            logger.warning(
-                "strict_review: failed to publish GO artifact on PR #%d (non-fatal, "
-                "state:implementation-go NOT applied): %s",
-                pr_number,
-                e,
-            )
-            return StageOutcome(Disposition.FINISH_FAIL, "strict_go_artifact_failed")
+        if not existing_go:
+            if lease is None:
+                # Keep the protocol's type and runtime contracts aligned if
+                # a restored payload is unexpectedly incomplete.
+                return Continue(next_state=HEAD_CHECK)
+            try:
+                published_by_us = ctx.github.publish_strict_review_artifact(
+                    pr_number, head_sha, verdict_text, is_go=True, lease=lease
+                )
+            except Exception as e:
+                logger.warning(
+                    "strict_review: failed to publish GO artifact on PR #%d "
+                    "(state:implementation-go NOT applied): %s",
+                    pr_number,
+                    e,
+                )
+                return StageOutcome(Disposition.FINISH_FAIL, "strict_go_artifact_failed")
+            if not published_by_us:
+                # Lost/expired lease: neither label nor feedback may be
+                # written by this stale reviewer generation.
+                self._drop_lease(item)
+                return Continue(next_state=HEAD_CHECK)
         published = ctx.github.strict_review_artifact(pr_number, head_sha)
         if (
             published is None
@@ -465,15 +530,11 @@ class StrictReviewStage(Stage):
             return StageOutcome(Disposition.FINISH_FAIL, "strict_go_artifact_unverified")
         # A push can race the durable comment write.  Never attach a global
         # implementation-GO label to a newer, unreviewed head.
-        after_publish = ctx.github.gh_pr_state(pr_number)
-        after_terminal = _terminal_pr_outcome(after_publish, pr_number)
-        if after_terminal is not None:
-            return after_terminal
-        if str((after_publish or {}).get("headRefOid") or "") != head_sha:
-            outcome = self._contain_and_revoke_on_entry(item, ctx)
-            if outcome is not None:
-                return outcome
-            return Continue(next_state=HEAD_CHECK)
+        after_publish_outcome = self._current_head_or_restart(
+            item, ctx, head_sha, action="GO label"
+        )
+        if after_publish_outcome is not None:
+            return after_publish_outcome
         try:
             ctx.github.mark_pr_implementation_go(pr_number)
         except Exception as e:
@@ -494,34 +555,24 @@ class StrictReviewStage(Stage):
             return StageOutcome(Disposition.FAIL_BACK, "nogo")
         # A NOGO is as head-bound as a GO: never remediate or label a newer
         # head from a reviewer result that inspected an older one.
-        pr_state = ctx.github.gh_pr_state(pr_number)
-        terminal = _terminal_pr_outcome(pr_state, pr_number)
-        if terminal is not None:
-            return terminal
-        live_head = str((pr_state or {}).get("headRefOid") or "")
-        if not head_sha or live_head != head_sha:
-            logger.info(
-                "strict_review:%s: head changed before NOGO handling (%s -> %s); restarting",
-                item.issue,
-                head_sha[:12],
-                live_head[:12],
-            )
-            outcome = self._contain_and_revoke_on_entry(item, ctx)
-            if outcome is not None:
-                return outcome
+        current_outcome = self._current_head_or_restart(item, ctx, head_sha, action="NOGO handling")
+        if current_outcome is not None:
+            return current_outcome
+        lease = self._lease_from_payload(item)
+        if lease is None:
             return Continue(next_state=HEAD_CHECK)
         logger.info(
-            "strict_review:%s: NOGO for PR #%d; disabling auto-merge and remediating",
+            "strict_review:%s: NOGO for PR #%d; publishing fenced invalidation",
             item.issue,
             pr_number,
         )
-        if not self._clear_go_and_verify_disabled(pr_number, ctx):
-            return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_disable_failed")
         try:
-            # An authenticated current-head NOGO shadows any old GO proof.
-            # This must succeed before a same-head remediation can continue.
-            ctx.github.publish_strict_review_artifact(
-                pr_number, head_sha, verdict_text, is_go=False
+            # A stale reviewer must not even clear a label or post
+            # remediation.  First atomically fence its NOGO as the elected
+            # holder; only its successful immutable terminal write may cause
+            # global containment mutations.
+            published_by_us = ctx.github.publish_strict_review_artifact(
+                pr_number, head_sha, verdict_text, is_go=False, lease=lease
             )
         except Exception as e:
             logger.error(
@@ -530,18 +581,19 @@ class StrictReviewStage(Stage):
                 e,
             )
             return StageOutcome(Disposition.FINISH_FAIL, "strict_nogo_artifact_failed")
+        if not published_by_us:
+            self._drop_lease(item)
+            return Continue(next_state=HEAD_CHECK)
         # Publishing the old-head invalidation is safe, but a push can race
         # that write.  Do not post old-review feedback or apply the global
         # NOGO label to the new head; contain it and restart instead.
-        after_publish = ctx.github.gh_pr_state(pr_number)
-        after_terminal = _terminal_pr_outcome(after_publish, pr_number)
-        if after_terminal is not None:
-            return after_terminal
-        if str((after_publish or {}).get("headRefOid") or "") != head_sha:
-            outcome = self._contain_and_revoke_on_entry(item, ctx)
-            if outcome is not None:
-                return outcome
-            return Continue(next_state=HEAD_CHECK)
+        after_publish_outcome = self._current_head_or_restart(
+            item, ctx, head_sha, action="NOGO containment"
+        )
+        if after_publish_outcome is not None:
+            return after_publish_outcome
+        if not self._clear_go_and_verify_disabled(pr_number, ctx):
+            return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_disable_failed")
         if not self._post_nogo_remediation(pr_number, ctx, verdict_text):
             return StageOutcome(Disposition.FINISH_FAIL, "strict_nogo_feedback_failed")
         try:
@@ -556,6 +608,29 @@ class StrictReviewStage(Stage):
         item.payload["strict_review_feedback"] = verdict_text
         item.payload.pop("existing_pr_impl_go", None)
         return StageOutcome(Disposition.FAIL_BACK, "nogo")
+
+    @staticmethod
+    def _lease_from_payload(item: WorkItem) -> StrictReviewLease | None:
+        """Reconstruct a persisted lease only when it still binds this head."""
+        head_sha = str(item.payload.get("strict_review_head") or "").lower()
+        lease_id = item.payload.get("strict_review_lease_id")
+        comment_id = item.payload.get("strict_review_lease_comment_id")
+        if (
+            not head_sha
+            or not isinstance(lease_id, str)
+            or not lease_id
+            or not isinstance(comment_id, int)
+            or comment_id < 1
+        ):
+            return None
+        return StrictReviewLease(head_sha=head_sha, lease_id=lease_id, comment_id=comment_id)
+
+    @staticmethod
+    def _drop_lease(item: WorkItem) -> None:
+        """Forget an exhausted/lost fence before attempting a fresh election."""
+        item.payload.pop("strict_review_lease_id", None)
+        item.payload.pop("strict_review_lease_comment_id", None)
+        item.payload.pop("strict_review_existing_go", None)
 
     @staticmethod
     def _post_nogo_remediation(pr_number: int, ctx: StageContext, verdict_text: str) -> bool:

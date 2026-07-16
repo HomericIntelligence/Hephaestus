@@ -110,6 +110,22 @@ class TestRequiredChecksGate:
             "merges; see issue #1514 and docs/ci/required-checks.md"
         )
 
+    def test_strict_review_proof_is_commit_bound_and_gated(self, jobs: dict[str, Any]) -> None:
+        """A pushed head must receive its own required strict-review proof."""
+        proof = jobs["strict-review-proof"]
+        assert proof["if"] == "github.event_name == 'pull_request'"
+        assert "needs" not in proof, "proof must also run for labeled/synchronize events"
+        assert proof["permissions"] == {"contents": "read", "pull-requests": "read"}
+        assert proof["env"]["EVENT_HEAD_SHA"] == "${{ github.event.pull_request.head.sha }}"
+        assert proof["env"]["AUTOMATION_LOGIN"] == "${{ vars.HEPHAESTUS_AUTOMATION_LOGIN }}"
+        steps = proof["steps"]
+        rendered_steps = "\n".join(str(step.get("run", "")) for step in steps)
+        assert "strict_review_proof" in rendered_steps
+        assert "issues/$PR_NUMBER/comments" in rendered_steps
+        assert "headRefOid" in rendered_steps
+        assert "uv sync --no-default-groups --locked" in rendered_steps
+        assert "strict-review-proof" in jobs[GATE_JOB]["needs"]
+
     def test_gate_assertion_fires_on_unwired_job(self) -> None:
         """Negative-path: the invariant check must flag a job absent from needs:.
 

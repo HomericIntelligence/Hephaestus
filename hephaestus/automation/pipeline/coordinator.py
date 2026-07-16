@@ -1438,6 +1438,7 @@ class Coordinator:
                         pr_number=pr_number,
                         issue_number=issue_number,
                         passed=passed,
+                        merge_wait_recovery=True,
                     )
                 )
         return entries
@@ -1549,6 +1550,7 @@ class Coordinator:
                     pr_number=pr,
                     issue_number=issue,
                     passed=passed,
+                    merge_wait_recovery=True,
                 )
             )
             recovered_issues.add(issue)
@@ -1564,28 +1566,29 @@ class Coordinator:
         for pr in self.config.prs:
             issue_number = github.find_issue_for_pr(pr)
             scope_identifier = issue_number if issue_number is not None else pr
+            if issue_number is not None and (issue_number, pr) in pending_arms:
+                stage, reason, passed = self._scope_seed_decision(
+                    scope_identifier,
+                    StageName.MERGE_WAIT,
+                    f"PR #{pr} has a pending durable drive-green arm record",
+                    scope_stages,
+                )
+                entries.append(
+                    _seeding.SeedEntry(
+                        kind="pr",
+                        identifier=pr,
+                        stage=stage,
+                        reason=reason,
+                        pr_number=pr,
+                        issue_number=issue_number,
+                        passed=passed,
+                        merge_wait_recovery=True,
+                    )
+                )
+                continue
             pr_state = github.gh_pr_state(pr)
             pr_state_name = ((pr_state or {}).get("state") or "").upper()
             if pr_state_name == "MERGED":
-                if issue_number is not None and (issue_number, pr) in pending_arms:
-                    stage, reason, passed = self._scope_seed_decision(
-                        scope_identifier,
-                        StageName.MERGE_WAIT,
-                        f"PR #{pr} merged with a pending durable drive-green arm record",
-                        scope_stages,
-                    )
-                    entries.append(
-                        _seeding.SeedEntry(
-                            kind="pr",
-                            identifier=pr,
-                            stage=stage,
-                            reason=reason,
-                            pr_number=pr,
-                            issue_number=issue_number,
-                            passed=passed,
-                        )
-                    )
-                    continue
                 entries.append(
                     _seeding.SeedEntry(
                         kind="pr",
@@ -1699,6 +1702,8 @@ class Coordinator:
             item.payload["issue_body"] = entry.issue_body
         item.state = "ENTER"
         item.payload["entry_reason"] = entry.reason
+        if entry.merge_wait_recovery:
+            item.payload["merge_wait_recovery"] = True
         return item
 
     def _reseed_if_converged(self) -> bool:

@@ -25,9 +25,11 @@ import os
 import re
 import subprocess
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 from hephaestus.automation import github_api, pr_manager
 from hephaestus.automation._review_phase import _is_automation_owned_thread
@@ -38,10 +40,18 @@ from hephaestus.automation._review_utils import (
     find_merged_pr_for_issue,
     get_pr_head_branch,
 )
-from hephaestus.automation.arming_state import ArmingStateStore
+from hephaestus.automation.arming_state import (
+    ARM_STATUS_CONFIRMED,
+    ARM_STATUS_PREPARED,
+    ArmingStateStore,
+)
 from hephaestus.automation.ci_check_inspector import CICheckInspector
 from hephaestus.automation.git_utils import issue_auto_impl_branch_name
-from hephaestus.automation.pipeline.stages.base import StrictReviewArtifact, StrictReviewEvidence
+from hephaestus.automation.pipeline.stages.base import (
+    StrictReviewArtifact,
+    StrictReviewEvidence,
+    StrictReviewLease,
+)
 from hephaestus.automation.prompts.pr_review import (
     BLOCKING_SEVERITIES,
     SEVERITY_MARKER_PREFIX,
@@ -68,8 +78,14 @@ from hephaestus.automation.state_labels import (
 )
 from hephaestus.automation.strict_review_artifact import (
     STRICT_REVIEW_ARTIFACT_MARKER,
+    STRICT_REVIEW_ARTIFACT_V2_MARKER,
+    STRICT_REVIEW_LEASE_MARKER,
+    ParsedStrictArtifact,
+    ParsedStrictLease,
     parse_strict_review_artifact,
-    render_strict_review_artifact,
+    parse_strict_review_lease,
+    render_fenced_strict_review_artifact,
+    render_strict_review_lease,
 )
 from hephaestus.constants import read_timeout_env
 from hephaestus.github.auto_merge import defer_auto_merge, defer_auto_merge_batch
@@ -92,6 +108,7 @@ _STRICT_REVIEW_MAX_ISSUE_TITLE_BYTES = 1_000
 _STRICT_REVIEW_MAX_ISSUE_BODY_BYTES = 80_000
 _NO_PRIOR_AUTOMATED_REVIEW = "No authenticated prior PR-review verdict is available."
 _PR_REVIEW_VERDICT_RE = re.compile(r"(?m)^Verdict:\s*(?:GO|NOGO)\s*$")
+_STRICT_REVIEW_LEASE_TTL_S = 3_600
 
 
 def _split_threads(threads: list[dict[str, Any]]) -> tuple[int, int]:
@@ -1082,6 +1099,22 @@ class PipelineGitHub:
                 pending.append((issue_number, pr_number))
         return pending
 
+    def drive_green_arm_confirmed(self, issue_number: int, pr_number: int) -> bool:
+        """Return whether a durable record confirms GitHub armed this PR.
+
+        ``armed_at`` is written before the remote arm request, so it cannot
+        prove that the request succeeded.  Recovery may resume POLL only when
+        the post-request, exact-PR confirmation was also durably written.
+        Legacy records with no arm status deliberately return ``False`` and
+        take the conservative prepared-arm recovery path.
+        """
+        record = self._arming.load(issue_number) or {}
+        return (
+            record.get("pr_number") == pr_number
+            and record.get("auto_merge_arm_status") == ARM_STATUS_CONFIRMED
+            and bool(record.get("auto_merge_confirmed_at"))
+        )
+
     # -- mutator surface (dry-run honored here) -------------------------------
 
     def add_labels(self, issue_number: int, labels: list[str]) -> None:
@@ -1365,121 +1398,282 @@ class PipelineGitHub:
         self._automation_login = login
         return login
 
+    @staticmethod
+    def _strict_comment_id(comment: dict[str, Any]) -> int | None:
+        """Return a positive REST comment id without accepting ambiguous data."""
+        value = comment.get("databaseId", comment.get("id"))
+        if value is None:
+            return None
+        try:
+            identifier = int(value)
+        except (TypeError, ValueError):
+            return None
+        return identifier if identifier > 0 else None
+
+    @staticmethod
+    def _strict_comment_epoch(comment: dict[str, Any]) -> int | None:
+        """Return GitHub's server timestamp for a result comment, else ``None``."""
+        value = comment.get("created_at") or comment.get("createdAt")
+        if not isinstance(value, str):
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return None
+        return int(parsed.astimezone(timezone.utc).timestamp())
+
+    def _owned_strict_review_comments(
+        self, pr_number: int, login: str
+    ) -> list[dict[str, Any]] | None:
+        """Read only authenticated, id-bearing comments for strict state."""
+        if self._repo_slug is None:
+            return None
+        try:
+            comments = self._repo_issue_comments(pr_number)
+        except (OSError, RuntimeError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+            logger.warning("strict_review: comment read failed for PR #%d: %s", pr_number, exc)
+            return None
+        owned: list[dict[str, Any]] = []
+        for comment in comments:
+            user = comment.get("user")
+            author = user.get("login") if isinstance(user, dict) else None
+            if author != login or not isinstance(comment.get("body"), str):
+                continue
+            if self._strict_comment_id(comment) is None:
+                continue
+            owned.append(comment)
+        return owned
+
+    @staticmethod
+    def _strict_leases(
+        comments: list[dict[str, Any]], head_sha: str
+    ) -> list[tuple[StrictReviewLease, ParsedStrictLease]]:
+        """Parse valid leases for one exact head, ordered by immutable comment id."""
+        leases: list[tuple[StrictReviewLease, ParsedStrictLease]] = []
+        for comment in comments:
+            body = comment.get("body")
+            if not isinstance(body, str) or not body.startswith(STRICT_REVIEW_LEASE_MARKER):
+                continue
+            parsed = parse_strict_review_lease(body)
+            comment_id = PipelineGitHub._strict_comment_id(comment)
+            if parsed is None or comment_id is None or parsed.head_sha != head_sha.lower():
+                continue
+            leases.append(
+                (
+                    StrictReviewLease(
+                        head_sha=parsed.head_sha,
+                        lease_id=parsed.lease_id,
+                        comment_id=comment_id,
+                    ),
+                    parsed,
+                )
+            )
+        return sorted(leases, key=lambda item: item[0].comment_id)
+
+    @staticmethod
+    def _elected_lease(
+        leases: list[tuple[StrictReviewLease, ParsedStrictLease]], now_epoch: int
+    ) -> StrictReviewLease | None:
+        """Elect the earliest still-live immutable lease for one generation."""
+        for lease, parsed in leases:
+            if parsed.expires_at >= now_epoch:
+                return lease
+        return None
+
+    @classmethod
+    def _terminal_strict_verdict(
+        cls, comments: list[dict[str, Any]], head_sha: str
+    ) -> ParsedStrictArtifact | None:
+        """Return a valid terminal v2 verdict, with NOGO dominance.
+
+        A v2 result is accepted only when its lease was elected at the server
+        timestamp of the result.  An expired, delayed worker therefore cannot
+        turn a later generation into a stale terminal verdict.  A historical
+        v1 NOGO remains a fail-closed revocation; v1 GO is not authorization.
+        """
+        normalized_head = head_sha.lower()
+        leases = cls._strict_leases(comments, normalized_head)
+        lease_map = {(lease.lease_id, lease.comment_id): parsed for lease, parsed in leases}
+        valid: list[tuple[int, ParsedStrictArtifact]] = []
+        legacy_nogos: list[ParsedStrictArtifact] = []
+        for comment in comments:
+            body = comment.get("body")
+            comment_id = cls._strict_comment_id(comment)
+            if not isinstance(body, str) or comment_id is None:
+                continue
+            if body.startswith(STRICT_REVIEW_ARTIFACT_MARKER):
+                parsed_v1 = parse_strict_review_artifact(body)
+                if (
+                    parsed_v1 is not None
+                    and parsed_v1.schema_version == 1
+                    and parsed_v1.head_sha == normalized_head
+                    and not parsed_v1.is_go
+                ):
+                    legacy_nogos.append(parsed_v1)
+                continue
+            if not body.startswith(STRICT_REVIEW_ARTIFACT_V2_MARKER):
+                continue
+            parsed = parse_strict_review_artifact(body)
+            if (
+                parsed is None
+                or parsed.schema_version != 2
+                or parsed.head_sha != normalized_head
+                or parsed.lease_id is None
+                or parsed.lease_comment_id is None
+                or comment_id <= parsed.lease_comment_id
+            ):
+                continue
+            lease_record = lease_map.get((parsed.lease_id, parsed.lease_comment_id))
+            result_epoch = cls._strict_comment_epoch(comment)
+            if (
+                lease_record is None
+                or result_epoch is None
+                or result_epoch > lease_record.expires_at
+            ):
+                continue
+            elected = cls._elected_lease(leases, result_epoch)
+            if (
+                elected is None
+                or elected.lease_id != parsed.lease_id
+                or elected.comment_id != parsed.lease_comment_id
+            ):
+                continue
+            valid.append((comment_id, parsed))
+        if legacy_nogos:
+            return legacy_nogos[-1]
+        if not valid:
+            return None
+        # A valid NOGO is terminal for the head even if an earlier/later GO
+        # comment also exists (for example from a repeated network request).
+        nogos = [parsed for _id, parsed in valid if not parsed.is_go]
+        if nogos:
+            return nogos[-1]
+        return sorted(valid, key=lambda item: item[0])[-1][1]
+
+    def _append_strict_review_comment(self, pr_number: int, body: str) -> dict[str, Any] | None:
+        """Append one immutable strict-state comment and return its REST metadata."""
+        if self._repo_slug is None:
+            return None
+        owner, name = self._owner_name()
+        try:
+            with github_api._body_file(body) as path:
+                result = gh_call(
+                    [
+                        "api",
+                        "--method",
+                        "POST",
+                        f"/repos/{owner}/{name}/issues/{pr_number}/comments",
+                        "-F",
+                        f"body=@{path}",
+                    ]
+                )
+            payload = json.loads(result.stdout or "{}")
+        except (OSError, RuntimeError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+            logger.warning(
+                "strict_review: immutable comment write failed for PR #%d: %s", pr_number, exc
+            )
+            return None
+        return dict(payload) if isinstance(payload, dict) else None
+
     def strict_review_artifact(self, pr_number: int, head_sha: str) -> StrictReviewArtifact | None:
-        """Return only an authenticated, byte-verified GO artifact for ``head_sha``."""
+        """Return only a current-head, elected, fenced v2 GO proof."""
         if not self.repo or not re.fullmatch(r"[0-9a-fA-F]{40}", head_sha):
             return None
         login = self._strict_review_login()
         if login is None:
             return None
-        endpoint = f"/repos/{self.org}/{self.repo}/issues/{pr_number}/comments"
-        try:
-            result = gh_call(["api", endpoint, "--paginate", "--slurp"])
-            raw = json.loads(result.stdout or "[]")
-        except (OSError, RuntimeError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
-            logger.warning(
-                "strict_review_artifact: comment read failed for PR #%d: %s",
-                pr_number,
-                exc,
-            )
+        comments = self._owned_strict_review_comments(pr_number, login)
+        if comments is None:
             return None
-        # gh api --paginate can produce one JSON list per page.  Accept either
-        # form but reject all malformed entries rather than guessing at them.
-        pages = raw if isinstance(raw, list) else []
-        comments: list[dict[str, Any]] = []
-        for page in pages:
-            if isinstance(page, list):
-                comments.extend(entry for entry in page if isinstance(entry, dict))
-            elif isinstance(page, dict):
-                comments.append(page)
-        for comment in reversed(comments):
-            body = comment.get("body")
-            user = comment.get("user")
-            author = user.get("login") if isinstance(user, dict) else None
-            if author != login or not isinstance(body, str):
-                continue
-            if not body.startswith(STRICT_REVIEW_ARTIFACT_MARKER):
-                continue
-            parsed = parse_strict_review_artifact(body)
-            if parsed is None or not parsed.is_go:
-                return None
-            if parsed.head_sha != head_sha.lower():
-                return None
-            return StrictReviewArtifact(
-                is_go=True,
-                head_sha=parsed.head_sha,
-                verdict=parsed.verdict,
-            )
-        return None
+        terminal = self._terminal_strict_verdict(comments, head_sha)
+        if terminal is None or terminal.schema_version != 2 or not terminal.is_go:
+            return None
+        return StrictReviewArtifact(
+            is_go=True, head_sha=terminal.head_sha, verdict=terminal.verdict
+        )
+
+    def claim_strict_review_lease(self, pr_number: int, head_sha: str) -> StrictReviewLease | None:
+        """Append and elect one durable lease before a reviewer is dispatched."""
+        if (
+            self._skip(f"claim strict-review lease on PR #{pr_number}")
+            or self._repo_slug is None
+            or re.fullmatch(r"[0-9a-fA-F]{40}", head_sha) is None
+        ):
+            return None
+        login = self._strict_review_login()
+        if login is None:
+            return None
+        comments = self._owned_strict_review_comments(pr_number, login)
+        if comments is None or self._terminal_strict_verdict(comments, head_sha) is not None:
+            return None
+        now_epoch = int(time.time())
+        if self._elected_lease(self._strict_leases(comments, head_sha), now_epoch) is not None:
+            return None
+        lease_id = uuid4().hex
+        body = render_strict_review_lease(
+            head_sha, lease_id, expires_at=now_epoch + _STRICT_REVIEW_LEASE_TTL_S
+        )
+        created = self._append_strict_review_comment(pr_number, body)
+        if created is None:
+            return None
+        created_id = self._strict_comment_id(created)
+        if created_id is None:
+            return None
+        created = dict(created)
+        created.setdefault("databaseId", created_id)
+        created.setdefault("body", body)
+        created.setdefault("user", {"login": login})
+        elected = self._elected_lease(
+            self._strict_leases([*comments, created], head_sha), now_epoch
+        )
+        if elected is None or elected.lease_id != lease_id or elected.comment_id != created_id:
+            return None
+        return elected
 
     def publish_strict_review_artifact(
-        self, pr_number: int, head_sha: str, verdict_body: str, *, is_go: bool
-    ) -> None:
-        """Durably upsert an automation-owned strict-review artifact.
-
-        A foreign marker comment is untrusted evidence, not an upsert target:
-        changing or deleting it would let an attacker permanently block the
-        strict gate by creating a comment the automation identity cannot edit.
-        """
-        rendered = render_strict_review_artifact(
+        self,
+        pr_number: int,
+        head_sha: str,
+        verdict_body: str,
+        *,
+        is_go: bool,
+        lease: StrictReviewLease,
+    ) -> bool:
+        """Append a fenced v2 verdict only while the caller still owns the lease."""
+        if lease.head_sha.lower() != head_sha.lower():
+            return False
+        if self._skip(f"publish strict-review artifact on PR #{pr_number}"):
+            return True
+        login = self._strict_review_login()
+        if login is None:
+            return False
+        comments = self._owned_strict_review_comments(pr_number, login)
+        now_epoch = int(time.time())
+        if comments is None or self._terminal_strict_verdict(comments, head_sha) is not None:
+            return False
+        elected = self._elected_lease(self._strict_leases(comments, head_sha), now_epoch)
+        if elected != lease:
+            return False
+        rendered = render_fenced_strict_review_artifact(
             head_sha,
             verdict_body,
             is_go=is_go,
+            lease_id=lease.lease_id,
+            lease_comment_id=lease.comment_id,
         )
-        if self._skip(f"publish strict-review artifact on PR #{pr_number}"):
-            return
-        if self._repo_slug is None:
-            self.upsert_pr_comment(pr_number, STRICT_REVIEW_ARTIFACT_MARKER, rendered)
-            return
-        login = self._strict_review_login()
-        if login is None:
-            raise RuntimeError("could not resolve automation identity for strict-review artifact")
-        self._upsert_owned_strict_review_artifact(pr_number, rendered, login)
-
-    def _upsert_owned_strict_review_artifact(
-        self, pr_number: int, body: str, login: str
-    ) -> int | None:
-        """Create/update only marker comments authored by ``login``."""
-        comments = self._repo_issue_comments(pr_number)
-        matching = []
-        for comment in comments:
-            author_data = comment.get("user")
-            author = author_data.get("login") if isinstance(author_data, dict) else None
-            if (
-                author == login
-                and str(comment.get("body", "")).startswith(STRICT_REVIEW_ARTIFACT_MARKER)
-                and comment.get("databaseId") is not None
-            ):
-                matching.append(comment)
-        if not matching:
-            self.post_pr_comment(pr_number, body)
-            return None
-
-        owner, name = self._owner_name()
-        target_id = int(matching[-1]["databaseId"])
-        for duplicate in matching[:-1]:
-            duplicate_id = duplicate.get("databaseId")
-            if duplicate_id is not None:
-                gh_call(
-                    [
-                        "api",
-                        "--method",
-                        "DELETE",
-                        f"/repos/{owner}/{name}/issues/comments/{int(duplicate_id)}",
-                    ]
-                )
-        with github_api._body_file(body) as path:
-            gh_call(
-                [
-                    "api",
-                    "--method",
-                    "PATCH",
-                    f"/repos/{owner}/{name}/issues/comments/{target_id}",
-                    "-F",
-                    f"body=@{path}",
-                ]
-            )
-        return target_id
+        if self._append_strict_review_comment(pr_number, rendered) is None:
+            return False
+        refreshed = self._owned_strict_review_comments(pr_number, login)
+        terminal = self._terminal_strict_verdict(refreshed or [], head_sha)
+        return bool(
+            terminal is not None
+            and terminal.is_go == is_go
+            and terminal.schema_version == 2
+            and terminal.lease_id == lease.lease_id
+            and terminal.lease_comment_id == lease.comment_id
+        )
 
     def post_review_threads(
         self, pr_number: int, threads: list[dict[str, Any]], summary: str
@@ -1538,17 +1732,31 @@ class PipelineGitHub:
 
         Record shape mirrors ``ci_driver.CIDriver._arm_drive_green``; an
         already-terminal record is never overwritten (its learn evidence is
-        the /learn dedupe key).
+        the /learn dedupe key).  This is the durable ``prepared`` transition:
+        it precedes the remote request and is insufficient to resume POLL
+        until :meth:`confirm_drive_green_arm` records the remote read-back.
         """
         if self._skip(f"arm drive-green record for #{issue_number} (PR #{pr_number})"):
             return
         if self.drive_green_learn_terminal(issue_number):
+            return
+        existing = self._arming.load(issue_number)
+        if (
+            existing is not None
+            and existing.get("pr_number") == pr_number
+            and existing.get("head_sha_at_arming") == head_sha
+            and existing.get("auto_merge_arm_status") == ARM_STATUS_CONFIRMED
+            and existing.get("auto_merge_confirmed_at")
+        ):
+            # Never downgrade a durable confirmed arm to prepared if an
+            # in-process caller is retried after it has already confirmed.
             return
         record = {
             "pr_number": pr_number,
             "pr_head_branch": self.get_pr_head_branch(pr_number) or "",
             "head_sha_at_arming": head_sha,
             "armed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "auto_merge_arm_status": ARM_STATUS_PREPARED,
             "learn_attempted_at": None,
             "learn_captured_at": None,
             "learn_status": None,
@@ -1566,6 +1774,46 @@ class PipelineGitHub:
         ):
             raise RuntimeError(
                 f"could not verify drive-green arming record for issue #{issue_number}"
+            )
+
+    def confirm_drive_green_arm(self, issue_number: int, pr_number: int, head_sha: str) -> None:
+        """Persist and read back an exact-PR/head remote arm confirmation.
+
+        This transition occurs only after merge_wait has read a matching live
+        head, strict-GO proof, and ``autoMergeRequest`` from GitHub.  The
+        pre-arm record is intentionally not enough to take this transition:
+        accepting a mismatched record would let a restart skip ARM for a
+        different PR or commit.
+        """
+        if self._skip(f"confirm drive-green arm for #{issue_number} (PR #{pr_number})"):
+            return
+        record = self._arming.load(issue_number)
+        if (
+            record is None
+            or record.get("pr_number") != pr_number
+            or record.get("head_sha_at_arming") != head_sha
+        ):
+            raise RuntimeError(
+                f"cannot confirm missing or mismatched drive-green arm for issue #{issue_number}"
+            )
+        if record.get("auto_merge_arm_status") == ARM_STATUS_CONFIRMED:
+            return
+        record["auto_merge_arm_status"] = ARM_STATUS_CONFIRMED
+        record["auto_merge_confirmed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        if not self._arming.save(issue_number, record):
+            raise RuntimeError(
+                f"could not persist drive-green arm confirmation for issue #{issue_number}"
+            )
+        persisted = self._arming.load(issue_number)
+        if (
+            persisted is None
+            or persisted.get("pr_number") != pr_number
+            or persisted.get("head_sha_at_arming") != head_sha
+            or persisted.get("auto_merge_arm_status") != ARM_STATUS_CONFIRMED
+            or not persisted.get("auto_merge_confirmed_at")
+        ):
+            raise RuntimeError(
+                f"could not verify drive-green arm confirmation for issue #{issue_number}"
             )
 
     def claim_drive_green_learn(self, issue_number: int, pr_number: int) -> bool:

@@ -15,6 +15,7 @@ from .base import (
     StepResult,
     StrictReviewArtifact,
     StrictReviewEvidence,
+    StrictReviewLease,
 )
 from .ci import CiStage
 from .finished import FinishedStage
@@ -44,5 +45,6 @@ __all__ = [
     "StepResult",
     "StrictReviewArtifact",
     "StrictReviewEvidence",
+    "StrictReviewLease",
     "StrictReviewStage",
 ]

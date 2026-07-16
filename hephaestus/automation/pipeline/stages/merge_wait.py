@@ -15,9 +15,9 @@ learn path. POLL revalidates the proof before parking, so a head change revokes
 eligibility rather than waiting on a stale arm.
 
 - States: ENTER -> ARM -> POLL -> LEARN_WAIT -> MW_FINISH.
-- ARM [M]: prepare proof from the live head, arm, confirm, then record the
-  arming state before polling.  This is the only automatic call site for
-  ``arm_auto_merge``.
+- ARM [M]: persist a prepared record, arm, confirm both GitHub and the
+  durable record, then poll.  This is the only automatic call site for
+  ``arm_auto_merge``.  Confirmed recovery resumes POLL without re-arming.
 - POLL [M]: re-read PR state and the exact-head proof.  An open, still-proven
   auto-merge arm timer-parks; a missing proof is disarmed and terminalized;
   merged and closed PRs finish normally.
@@ -93,11 +93,15 @@ class MergeWaitStage(Stage):
     """Stage: arm only a current strict-review proof and contain drift."""
 
     def on_enter(self, item: WorkItem, ctx: StageContext) -> StageOutcome | None:
-        """Initialize the mini-state; the durable arming lives in ARM.
+        """Initialize the mini-state and restore a confirmed arm to POLL.
 
-        ARM is an [M] step of this stage so a restart re-runs it
-        idempotently via step() (an armed item skips re-arming). Nothing
-        durable is written here.
+        A recovery seed carries only the fact that an arming record exists.
+        The adapter distinguishes the durable pre-RPC ``prepared`` record
+        from a post-read-back ``confirmed`` record.  Only the latter can
+        resume POLL: that step immediately revalidates the current remote
+        arm, label, and exact-head proof.  Prepared and legacy records go to
+        ARM, where an already-live remote arm is contained/confirmed instead
+        of being enabled a second time.
 
         Args:
             item: The work item being processed.
@@ -107,6 +111,35 @@ class MergeWaitStage(Stage):
             None (always proceed to step()).
 
         """
+        if item.payload.pop("merge_wait_recovery", False):
+            if item.issue is None or item.pr is None:
+                return StageOutcome(Disposition.FINISH_FAIL, "invalid_arm_recovery")
+            confirmation_reader = getattr(ctx.github, "drive_green_arm_confirmed", None)
+            if not callable(confirmation_reader):
+                logger.error(
+                    "merge_wait:%d: adapter cannot read durable arm confirmation",
+                    item.issue,
+                )
+                return StageOutcome(Disposition.FINISH_FAIL, "arm_recovery_state_unavailable")
+            try:
+                confirmed = bool(confirmation_reader(item.issue, item.pr))
+            except Exception as exc:
+                logger.error(
+                    "merge_wait:%d: durable arm confirmation read failed: %s",
+                    item.issue,
+                    exc,
+                )
+                return StageOutcome(Disposition.FINISH_FAIL, "arm_recovery_state_unavailable")
+            if confirmed:
+                item.armed = True
+                item.payload.setdefault("merge_wait_started_at", ctx.now())
+                item.state = POLL
+                return None
+            # Keep this marker until ARM has inspected the live state.  A
+            # process can die after GitHub accepted the arm but before the
+            # confirmation transition reaches disk; do not duplicate-enable
+            # that already-live arm on recovery.
+            item.payload["merge_wait_prepared_recovery"] = True
         if not item.state:
             item.state = ENTER
         return None
@@ -140,7 +173,7 @@ class MergeWaitStage(Stage):
         logger.warning("merge_wait:%s: unknown state %r", item.issue, item.state)
         return StageOutcome(Disposition.FINISH_FAIL, f"unknown state: {item.state}")
 
-    def _arm(self, item: WorkItem, ctx: StageContext) -> StepResult:
+    def _arm(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901
         """Prepare, arm, and confirm exactly one current-head strict GO proof.
 
         Every read can race with a manual merge.  A merge observed before the
@@ -169,6 +202,17 @@ class MergeWaitStage(Stage):
             or str(getattr(artifact, "head_sha", "")).lower() != head_sha.lower()
         ):
             return self._disable_and_fail(item, ctx, "strict_gate_unavailable", recoverable=True)
+        if item.payload.pop("merge_wait_prepared_recovery", False) and bool(
+            (pr_state or {}).get("autoMergeRequest")
+        ):
+            # The previous process may have crashed after GitHub accepted the
+            # remote arm but before it durably recorded confirmation.  We now
+            # hold a fresh current-head proof and saw the live arm, so promote
+            # the prepared record and resume POLL without a second enable.
+            if not self._confirm_arm(item, ctx, head_sha):
+                return self._disable_and_fail(item, ctx, "arm_confirmation_record_failed")
+            item.armed = True
+            return Continue(next_state=POLL)
         # Persist the recovery handoff before the remote arm. The arm RPC can
         # succeed and the process can die before it returns or confirms; a
         # later pipeline run needs this record to recover the merged PR's
@@ -211,6 +255,11 @@ class MergeWaitStage(Stage):
             or str(getattr(confirmed_artifact, "head_sha", "")).lower() != head_sha.lower()
         ):
             return self._disable_and_fail(item, ctx, "arm_confirm_failed", recoverable=True)
+        if not self._confirm_arm(item, ctx, head_sha):
+            # GitHub is armed but recovery cannot prove that fact durably.
+            # Contain the remote arm before terminalizing rather than letting
+            # a future restart re-enable an already-valid request.
+            return self._disable_and_fail(item, ctx, "arm_confirmation_record_failed")
         item.armed = True
         return Continue(next_state=POLL)
 
@@ -224,6 +273,29 @@ class MergeWaitStage(Stage):
         except Exception as exc:
             logger.error(
                 "merge_wait: failed to persist arm record for PR #%d: %s",
+                item.pr,
+                exc,
+            )
+            return False
+        return True
+
+    @staticmethod
+    def _confirm_arm(item: WorkItem, ctx: StageContext, head_sha: str) -> bool:
+        """Durably promote a prepared arm after GitHub's exact-head read-back."""
+        if item.issue is None or item.pr is None:
+            return True
+        confirmer = getattr(ctx.github, "confirm_drive_green_arm", None)
+        if not callable(confirmer):
+            logger.error(
+                "merge_wait:%d: adapter cannot persist durable arm confirmation",
+                item.issue,
+            )
+            return False
+        try:
+            confirmer(item.issue, item.pr, head_sha)
+        except Exception as exc:
+            logger.error(
+                "merge_wait: failed to persist arm confirmation for PR #%d: %s",
                 item.pr,
                 exc,
             )

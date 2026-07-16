@@ -85,6 +85,7 @@ __all__ = [
     "StepResult",
     "StrictReviewArtifact",
     "StrictReviewEvidence",
+    "StrictReviewLease",
     "WorkItem",
     "agent_provider",
     "stage_model",
@@ -122,6 +123,15 @@ class StrictReviewEvidence:
     diff: str
     ci_status: str
     prior_pr_review_verdict: str
+
+
+@dataclass(frozen=True)
+class StrictReviewLease:
+    """One elected, immutable strict-review generation fence for a PR head."""
+
+    head_sha: str
+    lease_id: str
+    comment_id: int
 
 
 @runtime_checkable
@@ -328,10 +338,29 @@ class StageGitHub(Protocol):
         """
         pass
 
+    def claim_strict_review_lease(self, pr_number: int, head_sha: str) -> StrictReviewLease | None:
+        """Claim the sole live strict-review lease for an exact PR head.
+
+        A ``None`` result is deliberately ambiguous (another valid holder,
+        an already-finalized generation, or unavailable durable evidence) and
+        callers must not dispatch another reviewer or publish a verdict.
+        """
+        pass
+
     def publish_strict_review_artifact(
-        self, pr_number: int, head_sha: str, verdict_body: str, *, is_go: bool
-    ) -> None:
-        """Publish a validated strict-review GO or NOGO artifact for one head."""
+        self,
+        pr_number: int,
+        head_sha: str,
+        verdict_body: str,
+        *,
+        is_go: bool,
+        lease: StrictReviewLease,
+    ) -> bool:
+        """Append a verdict only when ``lease`` still owns this exact head.
+
+        Returns ``False`` when the fence is stale/lost; the stage must then
+        restart without touching global labels or remediation feedback.
+        """
         pass
 
     def strict_review_evidence(
