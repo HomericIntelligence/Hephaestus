@@ -176,7 +176,11 @@ class MergeWaitStage(Stage):
                 logger.info("merge_wait: PR #%d merged while arming: %s", item.pr, exc)
                 return self._route_merged(item, ctx)
             logger.warning("merge_wait: failed to arm auto-merge for PR #%d: %s", item.pr, exc)
-            return StageOutcome(Disposition.FINISH_FAIL, "arm_failed")
+            # A transport error is ambiguous: GitHub may have accepted the
+            # arm before the client observed the failure.  Contain that
+            # possible remote arm before terminalizing so a later push cannot
+            # merge without a proof for its head.
+            return self._disable_and_fail(item, ctx, "arm_failed")
         confirmed = ctx.github.gh_pr_state(item.pr)
         confirmed_terminal = _terminal_pr_outcome(confirmed, item.pr)
         if confirmed_terminal is not None:
