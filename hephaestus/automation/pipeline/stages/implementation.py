@@ -75,6 +75,7 @@ from hephaestus.automation.agent_config import (
     implementer_claude_timeout,
     implementer_model,
 )
+from hephaestus.automation.commit_policy import normalize_conventional_type
 from hephaestus.automation.prompts.advise import get_advise_prompt_builder
 from hephaestus.automation.prompts.implementation import (
     get_dirty_reused_worktree_decision_prompt,
@@ -888,7 +889,8 @@ class ImplementationStage(Stage):
             return self._git_retry(item, "commit_push failed")
 
         if item.pr is None:
-            title = item.payload.get("issue_title") or f"[Auto] Implement issue #{item.issue}"
+            raw_title = item.payload.get("issue_title") or f"Implement issue #{item.issue}"
+            title = normalize_conventional_type(str(raw_title))
             body = get_pr_description(
                 item.issue,
                 summary=item.payload.get("implement_summary", "")

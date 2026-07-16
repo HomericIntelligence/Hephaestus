@@ -270,9 +270,9 @@ class TestStrictGateBootstrapWorkflow:
         assert "auto-merge policy is terminal" in text
 
     def test_pr_policy_remains_independent_from_auto_merge_state(self) -> None:
-        """The hard PR policy keeps its body-only metadata check."""
+        """The hard PR policy fetches body/title metadata, not auto-merge state."""
         text = REQUIRED_WORKFLOW.read_text(encoding="utf-8")
-        assert "--json body\n" in text or "--json body \\" in text
+        assert "--json body,title" in text
 
 
 class TestRequiredPixiCheckWorkflow:

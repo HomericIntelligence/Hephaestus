@@ -6,7 +6,8 @@ updates:
       interval: "weekly"
     labels:
       - "dependencies"
-    # Dependabot auto-appends a colon after a prefix ending in ) → "chore(deps): ...".
+    # GitHub applies this prefix to commit subjects and PR titles; a trailing
+    # ) receives the Conventional Commit colon → "chore(deps): ...".
     # https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference
     commit-message:
       prefix: "chore(deps)"
@@ -22,6 +23,7 @@ updates:
     labels:
       - "dependencies"
       - "ci/cd"
+    # Same explicit title/subject prefix as the pip ecosystem above.
     commit-message:
       prefix: "chore(deps)"
     groups:

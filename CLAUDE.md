@@ -331,6 +331,11 @@ releases from signed `vX.Y.Z` tags; there are no release branches.
    `Closes:` are NOT accepted.
 2. Every commit MUST be cryptographically signed (`git commit -S`) and carry a
    DCO `Signed-off-by` trailer.
+3. The PR title MUST follow `type(scope)!: description` because it becomes the
+   squash-merge subject on `main`. Scope and `!` are optional. Check 3 also
+   validates every branch commit subject. See
+   [`docs/DEFINITION_OF_DONE.md`](docs/DEFINITION_OF_DONE.md) for accepted
+   forms and the pre-#2157 history cutover.
 
 `pr-policy` blocks PRs that fail those checks. During #2054's fail-closed
 bootstrap, auto-merge must also remain disabled: pipeline code verifies that
@@ -353,7 +358,7 @@ git push -u origin <branch-name>
 
 # 4. Create pull request
 gh pr create \
-  --title "[Type] Brief description" \
+  --title "fix(ci): align Conventional Commit enforcement" \
   --body "$(printf 'Summary of change.\n\nCloses #<issue-number>\n')"
 
 # 5. Keep auto-merge disabled. After an unconditional independent strict-review

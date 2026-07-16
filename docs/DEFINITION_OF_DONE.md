@@ -15,7 +15,7 @@ A piece of work is **done** when every item below is true.
 | 2 | PR body contains the literal line `Closes #<issue-number>` (capital C, no colon, on its own line) | CI gate `pr-policy` (`.github/workflows/_required.yml`) |
 | 3 | Every commit on the branch is cryptographically signed and DCO-signed (`git commit -S -s`) | CI gate `pr-policy` |
 | 4 | Auto-merge remains disabled during #2054's fail-closed bootstrap. An unconditional independent strict-review GO is required before a manual squash merge; #2055 restores queue-owned arming. | Advisory `auto-merge-policy` and human review |
-| 5 | Commit messages follow Conventional Commits (`type(scope): description`) | CI gate `pr-policy` (Check 3) + local `commit-msg` hook `conventional-commit-msg` |
+| 5 | The PR title uses an authored Conventional Commit form because it becomes the squash subject; each branch commit uses that form or a recognized Git-generated machinery form | CI gate `pr-policy` (Check 3) + local `commit-msg` hook `conventional-commit-msg` |
 | 6 | `pixi run ruff check hephaestus/ tests/` passes | CI job `lint` |
 | 7 | `pixi run ruff format --check hephaestus/ tests/` passes (no files would be reformatted) | CI job `lint` |
 | 8 | `pixi run mypy` returns `Success: no issues found in N source files` | CI job `lint` |
@@ -40,6 +40,25 @@ A piece of work is **done** when every item below is true.
 > [`docs/ci/required-checks.md`](ci/required-checks.md) do. The aggregate gate
 > excludes advisory `auto-merge-policy` during #2054 so it cannot block the
 > independently reviewed manual bootstrap merge.
+
+### Conventional Commit history boundary
+
+Authored subjects use `type(scope)!: description`, where scope and `!` are
+optional and type is one of `build`, `chore`, `ci`, `docs`, `feat`, `fix`,
+`perf`, `refactor`, `revert`, `style`, or `test`. PR titles must use this form
+without a Git-machinery exception because the title becomes the squash-merge
+subject on `main`.
+
+The local hook and branch-commit portion of Check 3 also accept Git-generated
+merge and revert subjects (prefixed with `Merge` or `Revert` followed by a
+space), plus `fixup!` and `squash!` subjects. Those exceptions do not apply to
+PR titles.
+
+Commits already present on `main` before the PR that closes issue #2157 are
+grandfathered and must not be rewritten. Rewriting published history would
+replace commit identities and invalidate existing signatures, tags, and
+downstream references. The PR closing #2157 establishes the cutover: its title
+and every later squash-merge title must satisfy the authored form above.
 
 ## For new features
 

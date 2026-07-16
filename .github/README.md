@@ -42,15 +42,17 @@ Builds and publishes the package to PyPI on version tag push (`v*`).
 ### Required Checks Workflow (`workflows/_required.yml`)
 
 The consolidated required-status-check gate that runs on every pull request to
-`main` (and on push to `main`). It aggregates lint, `pixi-check`,
-shellcheck, the `pr-policy` gate (enforces `Closes #N` and signed commits),
-unit/integration/shell tests, wheel build, security scans (pip-audit, Gitleaks,
-bandit), workflow-schema validation, and version-sync. It also runs the
-advisory `auto-merge-policy` job. During #2054's fail-closed bootstrap it
-signals any open PR with auto-merge armed; it is intentionally **not** a
-required check so it does not block the manually reviewed bootstrap merge.
-The privileged label-event auto-merge workflow was removed. #2055 restores
-queue-owned arming only after a head-bound independent strict-review proof.
+`main` (and on push to `main`). It aggregates lint, `pixi-check`, shellcheck,
+the `pr-policy` gate (enforces `Closes #N`, commit signatures and DCO trailers,
+the Conventional Commit PR title used for squash history, and every branch
+commit subject), unit/integration/shell tests, wheel build, security scans
+(pip-audit, Gitleaks, bandit), workflow-schema validation, and version-sync. It
+also runs the advisory `auto-merge-policy` job. During #2054's fail-closed
+bootstrap it signals any open PR with auto-merge armed; it is intentionally
+**not** a required check so it does not block the manually reviewed bootstrap
+merge. The privileged label-event auto-merge workflow was removed. #2055
+restores queue-owned arming only after a head-bound independent strict-review
+proof.
 
 ### Auto-Tag Workflow (`workflows/auto-tag.yml`)
 

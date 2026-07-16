@@ -465,18 +465,20 @@ hephaestus-check-complexity --help
 ## Contributing
 
 The `main` branch is protected; all changes go through a pull request. CI blocks
-PRs that fail its issue-reference, signature, and DCO checks. During #2054,
-auto-merge remains disabled through pipeline containment and reviewer control;
-the `auto-merge-policy` check reports armed PRs but is advisory so it does not
-block the independently reviewed manual bootstrap merge.
+PRs that fail its issue-reference, Conventional Commit title, signature, and DCO
+checks. During #2054, auto-merge remains disabled through pipeline containment
+and reviewer control; the `auto-merge-policy` check reports armed PRs but is
+advisory so it does not block the independently reviewed manual bootstrap merge.
 
 1. Create a feature branch named `<issue-number>-description`
    (`git checkout -b 123-amazing-feature`).
 2. Commit your changes **signed** (`git commit -S -m "feat(scope): add amazing feature"`),
    using [conventional commit](https://www.conventionalcommits.org/) messages.
 3. Push the branch (`git push -u origin 123-amazing-feature`).
-4. Open a pull request whose body contains the literal line `Closes #123`
-   (capital `C`, no colon, on its own line — `Fixes`/`Resolves` are **not** accepted).
+4. Open a pull request titled `type(scope): concise description` whose body
+   contains the literal line `Closes #123` (capital `C`, no colon, on its own
+   line — `Fixes`/`Resolves` are **not** accepted). The title becomes the
+   squash-merge subject on `main`.
 5. Keep auto-merge disabled while #2054's fail-closed policy is active. A
    bootstrap PR requires an unconditional independent strict-review GO before
    a manual squash merge; #2055 restores queue-owned auto-merge after a

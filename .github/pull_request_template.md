@@ -48,7 +48,7 @@ Closes #
 - [ ] Comments added in hard-to-understand areas
 - [ ] Documentation updated (if needed)
 - [ ] No new warnings introduced
-- [ ] Conventional commit message format used
+- [ ] PR title and authored commit subjects use Conventional Commit format
 - [ ] Branch named following convention: `<issue-number>-<description>`
 - [ ] Change meets the [Definition of Done](https://github.com/mvillmow/Hephaestus/blob/main/docs/DEFINITION_OF_DONE.md)
 

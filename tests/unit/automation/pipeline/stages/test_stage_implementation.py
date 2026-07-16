@@ -997,7 +997,37 @@ class TestCommitPushAndPrCreate:
         assert github.mutation_log[1] == ("defer_auto_merge", (1001,))
         # The PR body is a get_pr_description body carrying the closing line.
         assert "Closes #9" in github.prs[1001]["body"]
-        assert github.prs[1001]["title"] == "Add the widget"
+        assert github.prs[1001]["title"] == "chore: Add the widget"
+
+    def test_pr_create_preserves_conventional_issue_title(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """Already-conventional issue titles remain unchanged for the PR."""
+        github = FakeStageGitHub()
+        item = make_work_item(issue=9, state="PR_CREATE")
+        item.branch = "9-auto-impl"
+        item.payload["issue_title"] = "fix(ci): align commit enforcement"
+
+        ImplementationStage().step(item, make_ctx(github=github))
+
+        assert github.prs[1001]["title"] == "fix(ci): align commit enforcement"
+
+    def test_pr_create_normalizes_malformed_conventional_issue_title(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """Malformed authored titles cannot reach the strict PR-title gate."""
+        github = FakeStageGitHub()
+        item = make_work_item(issue=9, state="PR_CREATE")
+        item.branch = "9-auto-impl"
+        item.payload["issue_title"] = "fix(): align commit enforcement"
+
+        ImplementationStage().step(item, make_ctx(github=github))
+
+        assert github.prs[1001]["title"] == "chore: align commit enforcement"
 
     def test_pr_create_fails_explicitly_when_auto_merge_deferral_cannot_be_verified(
         self, make_ctx: Any, make_work_item: Any

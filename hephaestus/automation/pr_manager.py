@@ -28,6 +28,7 @@ from .agent_config import DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT
 from .ci_check_inspector import FAILING_CHECK_CONCLUSIONS
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import git_message_model, implementer_model
+from .commit_policy import ALLOWED_CONVENTIONAL_TYPES, normalize_conventional_type
 from .git_utils import get_repo_slug, issue_ref, run
 from .github_api import (
     OpenPrDiscoveryIncompleteError,
@@ -80,20 +81,6 @@ _AGENT_COMMIT_IDENTITIES = {
     "pi": ("Pi", "noreply@earendil.works"),
 }
 
-# Conventional-commit types the ``pr-policy`` CI gate accepts. MUST stay in sync
-# with ``ALLOWED_TYPES`` in ``scripts/check_conventional_commit.py`` (the gate's
-# source of truth); ``tests/.../test_pr_manager.py`` asserts the two sets match,
-# so drift fails CI rather than silently re-introducing #1587 (the automation
-# generating a ``security(audit):`` prefix the gate then rejects). The script is
-# not imported here to avoid inverting the scripts→library dependency direction.
-ALLOWED_CONVENTIONAL_TYPES = frozenset(
-    {"feat", "fix", "docs", "refactor", "test", "chore", "ci", "build", "perf", "style", "revert"}
-)
-
-# Leading ``type(scope)?: `` token of a conventional-commit subject. Scope is
-# optional; only the bare type is validated against the allowlist.
-_CONVENTIONAL_PREFIX = re.compile(r"^(?P<type>[a-z]+)(?P<scope>\([^)]*\))?(?P<bang>!)?:\s")
-
 
 def _git_timeout_kw(timeout: int | None) -> dict[str, Any]:
     """Return a ``run`` kwargs fragment only when a git timeout was provided."""
@@ -119,36 +106,6 @@ def _clear_local_committer_identity(worktree_path: Path, git_timeout: int | None
             log_errors=False,
             **_git_timeout_kw(git_timeout),
         )
-
-
-def _normalize_conventional_type(subject: str, *, default: str = "chore") -> str:
-    """Rewrite a subject's leading type to an allowlisted one if it is not already.
-
-    The commit/PR-message agent can emit a ``type(scope):`` whose type the
-    pr-policy gate forbids (e.g. ``security(audit):``), which blocks the PR and
-    triggers an expensive self-cleanup (#1587). This normalizes ONLY the leading
-    type token — scope, ``!``, and the description are preserved — to ``default``
-    when the type is not in :data:`ALLOWED_CONVENTIONAL_TYPES`. A subject with no
-    recognizable conventional prefix is prefixed with ``f"{default}: "`` so the
-    gate always sees a valid type.
-
-    Args:
-        subject: The one-line commit/PR subject from the agent.
-        default: The fallback type (must be in the allowlist).
-
-    Returns:
-        A subject whose leading type is allowlisted.
-
-    """
-    match = _CONVENTIONAL_PREFIX.match(subject)
-    if match is None:
-        return f"{default}: {subject.strip()}" if subject.strip() else f"{default}: update"
-    if match.group("type") in ALLOWED_CONVENTIONAL_TYPES:
-        return subject
-    scope = match.group("scope") or ""
-    bang = match.group("bang") or ""
-    rest = subject[match.end() :]
-    return f"{default}{scope}{bang}: {rest}"
 
 
 @dataclass(frozen=True)
@@ -466,7 +423,7 @@ def _generate_commit_message(
         # #1587: the agent can emit a type the pr-policy gate forbids
         # (e.g. ``security(audit):``). Normalize it locally so the automation
         # never produces a commit that fails its own required CI.
-        subject = _normalize_conventional_type(subject)
+        subject = normalize_conventional_type(subject)
         body = _strip_reserved_lines(_message_text(data.get("body")))
         parts = _CommitMessageParts(subject=subject, body=body)
         return _format_commit_message(
@@ -535,7 +492,7 @@ def _generate_pr_message(
             # #1587: normalize the PR title's conventional-commit type too — a
             # squash merge uses the PR title as the commit subject, so a forbidden
             # type here fails pr-policy exactly like a commit subject does.
-            title=_normalize_conventional_type(
+            title=normalize_conventional_type(
                 _single_line(data.get("title"), fallback=fallback.title, max_len=120)
             ),
             summary=_strip_reserved_lines(_message_text(data.get("summary"))) or fallback.summary,

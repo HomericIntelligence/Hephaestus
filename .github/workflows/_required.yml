@@ -11,15 +11,15 @@ on:
     # auto-merge-policy's check was stuck with its PR-open verdict until the
     # next push (the race that #680 papered over with `needs: lint`).
     # Re-running on auto_merge_enabled / auto_merge_disabled, labeled /
-    # unlabeled, and ready_for_review makes that gate converge on the true
-    # state with no timing reliance. See auto-merge-policy below.
+    # unlabeled, ready_for_review, and edited makes those gates converge on the
+    # true state with no timing reliance. See auto-merge-policy below.
     #
     # IMPORTANT: a pull_request trigger applies to the WHOLE workflow, so the
-    # label / auto-merge event types would otherwise re-run EVERY job on each
-    # label change. Those four actions exist solely for pr-policy /
+    # label / auto-merge / edited event types would otherwise re-run EVERY job
+    # on each metadata change. Those five actions exist solely for pr-policy /
     # auto-merge-policy to re-converge, so the `changes-gate` job below gates the
     # 16 heavy jobs to skip on labeled/unlabeled/auto_merge_enabled/
-    # auto_merge_disabled — only the two policy jobs run on those events. The
+    # auto_merge_disabled/edited — only the two policy jobs run on those events. The
     # heavy jobs' results from the last code push still stand for the SHA, so
     # branch-protection required checks remain satisfied.
     types:
@@ -31,6 +31,7 @@ on:
       - unlabeled
       - auto_merge_enabled
       - auto_merge_disabled
+      - edited
   push:
     branches: [main]
 
@@ -44,8 +45,9 @@ permissions:
 jobs:
   # Decides whether this event should run the 16 heavy jobs. A pull_request
   # trigger fires the whole workflow, but the labeled / unlabeled /
-  # auto_merge_enabled / auto_merge_disabled actions exist only so pr-policy and
-  # auto-merge-policy re-converge — the heavy jobs must NOT re-run on them. This
+  # auto_merge_enabled / auto_merge_disabled / edited actions exist only so
+  # pr-policy and auto-merge-policy re-converge — the heavy jobs must NOT re-run
+  # on them. This
   # job always runs (no gate on itself) and the heavy jobs `needs:` it.
   # ``github.event.action`` is a GitHub-controlled enum (empty on `push`), passed
   # via env: and never interpolated into the script — injection-safe.
@@ -62,12 +64,12 @@ jobs:
           ACTION: ${{ github.event.action }}
         run: |
           set -euo pipefail
-          # Heavy jobs skip ONLY on label / auto-merge PR actions. `push` has no
-          # action (empty) → falls to the default → code_event=true.
+          # Heavy jobs skip on policy-only PR actions. `push` has no action
+          # (empty) → falls to the default → code_event=true.
           case "$ACTION" in
-            labeled | unlabeled | auto_merge_enabled | auto_merge_disabled)
+            labeled | unlabeled | auto_merge_enabled | auto_merge_disabled | edited)
               echo "code_event=false" >> "$GITHUB_OUTPUT"
-              echo "Label/auto-merge event ($ACTION) — heavy jobs skipped; only policy jobs run."
+              echo "Policy-only event ($ACTION) — heavy jobs skipped; only policy jobs run."
               ;;
             *)
               echo "code_event=true" >> "$GITHUB_OUTPUT"
@@ -307,10 +309,12 @@ jobs:
 
   pr-policy:
     name: pr-policy
-    # Enforces the two HARD repo PR policies on every PR. Both checks are gated
-    # by `if: always()` so one failure still surfaces the other:
+    # Enforces the hard repo PR policies on every PR. Every check is gated by
+    # `if: always()` so one failure still surfaces the others:
     #   1. PR body contains `Closes #N` on its own line.
     #   2. Every commit on the PR has a verified signature.
+    #   3. The PR title and every commit subject follow Conventional Commits.
+    #   4. Every commit has a DCO Signed-off-by trailer.
     # The auto-merge ↔ implementation-review state machine moved to the separate
     # `auto-merge-policy` job (#1080) so its timing-sensitive verdict no longer
     # blocks merge — it is intentionally NOT in the required-checks ruleset.
@@ -349,13 +353,12 @@ jobs:
           REPO_NAME: ${{ github.event.repository.name }}
         run: |
           set -euo pipefail
-          # `gh pr view --json body` exposes the PR body (for the Closes #N
-          # check) but DOES NOT expose per-commit signatures; we use the GraphQL
-          # API for that. Two separate queries are fine here — the workflow runs
-          # at most once per PR event and the policy gate must be cheap to read
-          # and debug. (The auto-merge/labels read moved to auto-merge-policy.)
+          # `gh pr view --json body,title` exposes the PR body and the title that
+          # becomes the squash subject, but not per-commit signatures; the
+          # GraphQL API supplies those. (The auto-merge/labels read moved to
+          # auto-merge-policy.)
           gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
-            --json body \
+            --json body,title \
             > pr.json
           gh api graphql \
             -f query='query($owner:String!,$name:String!,$pr:Int!) {
@@ -426,20 +429,16 @@ jobs:
           fi
           echo "OK: all commits have verified signatures"
 
-      - name: "Check 3: commit subjects follow Conventional Commits"
+      - name: "Check 3: PR title and commit subjects follow Conventional Commits"
         if: always() && steps.fetch.outcome == 'success'
-        env:
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
-          # Dependabot subjects are auto-generated; exempt like Check 1 (#1070).
-          if [ "$PR_AUTHOR" = "dependabot[bot]" ]; then
-            echo "OK: Dependabot PR — Conventional Commit check is not applicable"
-            exit 0
-          fi
-          # Subject = first line of each commit message (GraphQL .commit.message
-          # verified to resolve). Pipe on stdin, one per line, into the shared
-          # validator (DoD row 5 / issue #1209). Empty set passes by design.
+          # The required squash merge uses the PR title as the main subject;
+          # Git machinery forms are not authored titles and are rejected here.
+          jq -r '.title // ""' pr.json \
+            | python3 scripts/check_conventional_commit.py --strict -
+
+          # Branch commits retain local-hook compatibility with Git machinery.
           jq -r '.data.repository.pullRequest.commits.nodes[]
                  | .commit.message | split("\n")[0]' commits.json \
             | python3 scripts/check_conventional_commit.py -
@@ -451,7 +450,7 @@ jobs:
         run: |
           set -euo pipefail
           # Dependabot commits are bot-authored, not human DCO attestations;
-          # exempt like Check 1 / Check 3 (#1070).
+          # exempt like Check 1 (#1070).
           if [ "$PR_AUTHOR" = "dependabot[bot]" ]; then
             echo "OK: Dependabot PR — DCO sign-off check is not applicable"
             exit 0

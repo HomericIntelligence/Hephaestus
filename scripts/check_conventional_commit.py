@@ -8,10 +8,14 @@ and the ``pr-policy`` CI job (each PR commit subject is piped on stdin via
 ``-``, one per line).
 
 Usage:
+    python scripts/check_conventional_commit.py [--strict] <message-file|->
+
     # commit-msg hook: validate the message file
     python scripts/check_conventional_commit.py .git/COMMIT_EDITMSG
     # CI: validate subjects piped on stdin
     printf '%s\\n' "fix(io): handle EOF" | python scripts/check_conventional_commit.py -
+    # PR title: reject Git machinery subjects
+    printf '%s\\n' "fix(io): handle EOF" | python scripts/check_conventional_commit.py --strict -
 """
 
 from __future__ import annotations
@@ -27,7 +31,7 @@ ALLOWED_TYPES = frozenset(
 _MACHINERY_PREFIXES = ("Merge ", "Revert ", "fixup!", "squash!")
 
 
-def validate_subject(subject: str) -> str | None:
+def validate_subject(subject: str, *, allow_machinery: bool = True) -> str | None:
     """Return an error string if *subject* is not a valid Conventional Commit, else None.
 
     Splits on the first colon only; extracts an optional ``(scope)`` via
@@ -35,6 +39,7 @@ def validate_subject(subject: str) -> str | None:
 
     Args:
         subject: A single commit subject line.
+        allow_machinery: Whether to accept Git-generated machinery subjects.
 
     Returns:
         ``None`` when the subject conforms, otherwise a human-readable error string.
@@ -44,7 +49,9 @@ def validate_subject(subject: str) -> str | None:
     if not subject.strip():
         return "empty commit subject"
     if subject.startswith(_MACHINERY_PREFIXES):
-        return None
+        if allow_machinery:
+            return None
+        return f"git machinery subject is not allowed in strict mode: {subject!r}"
     if ":" not in subject:
         return f"missing 'type(scope): ' prefix in: {subject!r}"
     prefix, message = subject.split(":", 1)
@@ -102,15 +109,17 @@ def main(argv: list[str] | None = None) -> int:
 
     """
     args = list(sys.argv[1:] if argv is None else argv)
-    if args[:1] in (["--help"], ["-h"]):
+    if any(arg in {"--help", "-h"} for arg in args):
         print(__doc__)
         return 0
+    strict = "--strict" in args
+    args = [arg for arg in args if arg != "--strict"]
     subjects = _subjects_from_args(args)
     # An empty subject set (no commits / empty stdin) is not a violation;
     # the pr-policy signing + Closes checks cover the empty-commits anomaly.
     failed = False
     for subject in subjects:
-        err = validate_subject(subject)
+        err = validate_subject(subject, allow_machinery=not strict)
         if err:
             print(f"FAILED: Conventional Commit check: {err}")
             failed = True
