@@ -248,6 +248,10 @@ class PipelineConfig:
     circuit_breaker_snapshot_provider: Callable[[], dict[str, dict[str, Any]]] | None = None
     event_log_path: Path | None = None
     projects_dir: Path = field(default_factory=lambda: Path.home() / "Projects")
+    # Optional exceptions to the normal ``projects_dir / repo`` checkout
+    # layout.  The loop runner only sets an entry for a matching noncanonical
+    # cwd checkout; unlisted repositories retain the conventional fallback.
+    repo_roots: dict[str, Path] = field(default_factory=dict)
     json_out: bool = False
     # Optional contiguous stage subset. When set, the coordinator routes items
     # through ``scope.trimmed_routes()`` instead of the full ``ROUTES`` table,
@@ -292,6 +296,11 @@ class _Paths:
     repo_root: Path
     worktree: Path
     projects_dir: Path
+
+
+def _effective_repo_root(config: PipelineConfig, repo: str) -> Path:
+    """Resolve *repo* to its explicit checkout or conventional projects path."""
+    return Path(config.repo_roots.get(repo, Path(config.projects_dir) / repo))
 
 
 class Coordinator:
@@ -446,7 +455,7 @@ class Coordinator:
         """Return the (cached, per-repo) StageContext for *repo*."""
         ctx = self._ctx_cache.get(repo)
         if ctx is None:
-            root = Path(self.config.projects_dir) / repo
+            root = _effective_repo_root(self.config, repo)
             ctx = StageContext(
                 config=self._stage_config,
                 org=self.config.org,
@@ -1711,7 +1720,7 @@ def run_pipeline(config: PipelineConfig) -> int:
         )
 
     repo = config.repos[0] if config.repos else ""
-    repo_root = Path(config.projects_dir) / repo if repo else Path(config.projects_dir)
+    repo_root = _effective_repo_root(config, repo) if repo else Path(config.projects_dir)
     github = (
         _github_for(repo, repo_root) if repo else PipelineGitHub(config.org, dry_run=config.dry_run)
     )
