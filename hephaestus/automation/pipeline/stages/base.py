@@ -433,7 +433,7 @@ class StageGitHub(Protocol):
         process dies after that boundary, a later process must not replay the
         externally visible ``/learn`` operation.
         """
-        ...
+        pass
 
     def claim_drive_green_learn(self, issue_number: int, pr_number: int) -> bool:
         """Durably claim one post-merge ``/learn`` dispatch.
@@ -444,7 +444,7 @@ class StageGitHub(Protocol):
         persistence cannot be acknowledged, so the caller fails closed before
         the agent can perform an external learning action.
         """
-        ...
+        pass
 
     def mark_drive_green_learn_result(self, issue_number: int, *, succeeded: bool) -> None:
         """Durably record the post-merge ``/learn`` outcome on the arming record.
