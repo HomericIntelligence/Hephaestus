@@ -21,7 +21,7 @@
 #   RUN_UNDER_GDB=0       Skip gdb entirely and exec the command directly
 #                         (local-dev escape hatch — gdb adds overhead).
 #   GDB_CMD_PREFIX        Optional command prefix inserted before `gdb`, e.g.
-#                         "uv run --" or "conda run -n env --", so gdb and
+#                         "uv run --", so gdb and
 #                         its inferior inherit an activated environment.
 #                         Default: empty (gdb is run directly).
 #

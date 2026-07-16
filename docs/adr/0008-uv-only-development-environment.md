@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-07-16
-- Tracks: no tracking issue
+- Tracks: #2235
 
 ## Context
 
