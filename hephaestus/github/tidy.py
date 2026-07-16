@@ -235,8 +235,8 @@ For EACH conflicted file:
 
 Resolution heuristics (from batch-pr-rebase-workflow v2.8.0, verified-ci):
 - `.github/workflows/**` → prefer trunk's version unless this branch is ADDING the workflow
-- `pixi.lock` → `git -C {worktree_path} show origin/{trunk}:pixi.lock > pixi.lock`;
-  then run `pixi install` inside the worktree to regenerate
+- `uv.lock` → `git -C {worktree_path} show origin/{trunk}:uv.lock > uv.lock`;
+  then run `uv sync` inside the worktree to regenerate
 - Feature code, tests → keep both sides' genuine additions; do NOT blindly take either side
 - Generated/binary files → take trunk's version
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# Tests for the project justfile — verifies recipes exist and stay in sync with pixi tasks.
+# Tests for the project justfile — verifies its public recipes exist.
 
 REPO_ROOT="$(git -C "$(dirname "$BATS_TEST_FILENAME")" rev-parse --show-toplevel)"
 JUSTFILE="${REPO_ROOT}/justfile"
@@ -88,40 +88,4 @@ JUSTFILE="${REPO_ROOT}/justfile"
     run grep -cE '<<\s*[A-Z_"'"'"']' "$JUSTFILE"
     # grep -c returns exit 1 when count is 0 — that is the success case here
     [ "$status" -eq 1 ] || [ "$output" = "0" ]
-}
-
-# ---------------------------------------------------------------------------
-# Every pixi [tasks] key has a matching justfile recipe
-# ---------------------------------------------------------------------------
-
-@test "all pixi tasks have a corresponding just recipe" {
-    local pixi_toml="${REPO_ROOT}/pixi.toml"
-    [ -f "$pixi_toml" ] || skip "pixi.toml not found"
-
-    # Get just recipe names (one per line, strip trailing spaces)
-    local just_recipes
-    just_recipes="$(just --justfile "$JUSTFILE" --list 2>/dev/null | tail -n +2 | awk '{print $1}')"
-
-    # Parse [tasks] keys from pixi.toml (section-bounded, skip comments and blank lines)
-    local missing=""
-    while IFS= read -r task; do
-        # 'audit' runs in a separate lint environment — skip for the default workflow.
-        # 'mypy' pixi task is exposed as 'typecheck' in the justfile (UX alias).
-        # 'mypy-pkg' is the package-only backend of 'typecheck' (no user-facing alias).
-        # 'dev-install' is a one-time setup hook documented in CONTRIBUTING.md.
-        case "$task" in
-            audit)        continue ;;
-            mypy)         continue ;;
-            mypy-pkg)     continue ;;
-            dev-install)  continue ;;
-        esac
-        if ! echo "$just_recipes" | grep -qx "$task"; then
-            missing="${missing} ${task}"
-        fi
-    done < <(sed -n '/^\[tasks\]/,/^\[/{ /^\[/d; /^#/d; /^$/d; s/ *=.*//p; }' "$pixi_toml")
-
-    if [ -n "$missing" ]; then
-        echo "pixi tasks missing from justfile:${missing}"
-        return 1
-    fi
 }

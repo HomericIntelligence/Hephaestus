@@ -12,10 +12,10 @@ New here? This is the shortest path from a fresh clone to a merged PR. Each step
 links to the full section below.
 
 1. **Set up the environment** ([Development Setup](#development-setup)) — install
-   Pixi, then `just bootstrap` (one command: deps + editable install + pre-commit
+   uv, then `just bootstrap` (one command: deps + editable install + pre-commit
    hooks).
 2. **Confirm the toolchain works** — run `just check` (lint + format-check +
-   typecheck) and `pixi run pytest tests/unit`. Green here means your machine is
+   typecheck) and `uv run pytest tests/unit`. Green here means your machine is
    ready.
 3. **Pick an issue** ([Code Contributions](#code-contributions)) — pick or open a
    GitHub issue, then branch as `<issue-number>-description`.
@@ -26,8 +26,8 @@ links to the full section below.
    body, and keep auto-merge disabled. After an unconditional independent
    strict-review GO, a maintainer performs the manual squash merge.
 
-If anything in steps 1–2 fails, see [Platform Support](#platform-support) — the
-pixi dev environment is `linux-64` only by design.
+If anything in steps 1–2 fails, see [Platform Support](#platform-support) for
+the supported Python versions and platform-specific test behavior.
 
 ## Planning artifacts
 
@@ -83,49 +83,49 @@ are cut on demand by pushing a signed `vX.Y.Z` git tag (see
 
 ## Development Setup
 
-1. Install Pixi: <https://pixi.sh/install/>
+1. Install uv: <https://uv.sh/install/>
 2. Clone your fork
 3. Bootstrap the project (installs deps, the editable package, and pre-commit
    hooks in one step): `just bootstrap`
 
-   `just bootstrap` wraps `pixi install`, `pixi run dev-install`, and
-   `pixi run pre-commit install`. If you do not have [`just`](https://just.systems/)
-   installed, run those three commands manually instead.
-4. Activate development environment: `pixi shell -e dev`
+   `just bootstrap` wraps `uv sync` and `uv run pre-commit install`. If you do
+   not have [`just`](https://just.systems/) installed, run those two commands
+   manually instead.
+4. Run project commands through the managed environment, for example
+   `uv run pytest tests/unit`.
 5. Before pushing, run the fast quality gate: `just check`
    (lint + format-check + typecheck). Run `just --list` to see every recipe.
 
 ### Platform Support
 
-The pixi developer environment and the published wheel intentionally cover
+The uv developer environment and the published wheel intentionally cover
 different platform sets. Contributors and downstream users should know which
 they are using:
 
 | Install path                        | Platforms supported                    | Python      |
 | ----------------------------------- | -------------------------------------- | ----------- |
-| `pixi install` (development)        | `linux-64` only                        | 3.10 (pinned by `pixi.toml`) |
+| `uv sync` (development) | Linux, macOS, Windows | 3.10+ (see `requires-python` in `pyproject.toml`) |
 | `pip install HomericIntelligence-Hephaestus` (wheel) | Linux, macOS, Windows (any OS) | 3.10+ (see `requires-python` in `pyproject.toml`) |
 
-Why the asymmetry:
+Platform notes:
 
-- **Pixi is Linux-64 only by design.** `pixi.toml` declares
-  `platforms = ["linux-64"]` with an explicit `# Do not re-enable` comment
-  next to the other entries. Full local reproduction of the development
-  environment (lint, mypy, test, pre-commit) is only supported on Linux.
-- **The wheel supports the broader matrix advertised in `pyproject.toml`.**
-  `requires-python` in `pyproject.toml` describes what `pip install` will accept.
-  No platform-restriction classifier is published, so the wheel is installable
-  on macOS and Windows.
+- **uv manages the development environment on every platform supported by its
+  selected Python interpreter.** The project requires Python 3.10+; `uv sync`
+  installs the editable checkout and the default development groups.
+- **Required CI currently runs on Linux.** Native-Windows runs skip tests marked
+  `requires_posix`; Linux, macOS, and WSL run those POSIX subprocess checks.
+- **The wheel supports the same Python range.** `requires-python` in
+  `pyproject.toml` describes what `pip install` accepts; no platform-restriction
+  classifier is published.
 - **Windows wheels pull in `tzdata` automatically.** The
   `"tzdata; platform_system == 'Windows'"` marker in `[project.dependencies]`
   exists because `hephaestus.github.rate_limit` uses `zoneinfo.ZoneInfo`,
   which has no IANA database bundled on Windows. POSIX installs skip this
   dependency.
 
-If you need to develop or run the test suite on macOS or Windows, install the
-wheel into a plain virtualenv (`pip install -e '.[dev]'`) — pixi tooling is
-not available there, and any subpackage with POSIX-only assumptions is out
-of scope for this project's supported development environment (track those separately).
+Use `uv sync` to develop and run the test suite on macOS, Linux, or Windows.
+Native-Windows runs skip only the tests explicitly marked `requires_posix`; do
+not substitute a second environment manager for the uv workflow.
 
 ### The `build/` directory
 
@@ -150,8 +150,8 @@ We follow these style guidelines:
 Run the development tools:
 
 ```bash
-pixi run format  # Format code with ruff format
-pixi run lint    # Lint with ruff check
+uv run ruff format hephaestus scripts tests
+uv run ruff check hephaestus scripts tests
 ```
 
 ## Testing
@@ -165,7 +165,7 @@ All contributions must include appropriate tests:
 Run tests with:
 
 ```bash
-pixi run test
+uv run pytest
 ```
 
 ### Test environment requirements
@@ -186,7 +186,7 @@ assumes a POSIX-like development environment. Specifically:
 
 These cases are tagged with the `requires_posix` pytest marker and are skipped
 automatically on `sys.platform == "win32"`. They run under macOS, Linux, and
-WSL with no extra setup beyond `pixi install`. Windows contributors using Git
+WSL with no extra setup beyond `uv sync`. Windows contributors using Git
 Bash / MSYS2 will execute them; pure-Windows-Python runs will skip them.
 Tracking: #742.
 
@@ -204,7 +204,7 @@ git tags, not stored in a file:
 - **Single source of truth**: the latest `vX.Y.Z` git tag. `pyproject.toml` declares
   `dynamic = ["version"]` with `[tool.hatch.version]` `source = "vcs"`; there is no
   static `[project].version`.
-- **`pixi.toml` has no version field** — this is intentional. A pre-commit hook
+- **`pyproject.toml` has no version field** — this is intentional. A pre-commit hook
   (`check-version-single-source`) rejects a `version` field in either file.
 
 ### Releasing a new version
@@ -215,22 +215,17 @@ computes the next semver string and prints the `git tag` commands to run.
 
 ## Dependency Updates
 
-- **Dependabot** is configured for `pip` (pyproject.toml dev extras) and is the
-  **sole** manager of `github-actions`. It opens PRs automatically for those.
-- **Renovate** (`renovate.json`) is configured with the `:pixi` preset and watches
-  **only** conda-forge / pixi dependencies in `pixi.toml` — the package ecosystem
-  Dependabot cannot parse. Renovate's GitHub Actions manager is explicitly disabled
-  (`"github-actions": { "enabled": false }`) so the two tools never double-manage
-  actions and emit duplicate PRs. Renovate opens grouped PRs on a weekly cadence,
-  matching Dependabot's schedule. To manually refresh the lock file outside of that
-  cycle:
+- **Dependabot** is configured for Python and GitHub Actions updates in
+  [`.github/dependabot.yml`](.github/dependabot.yml).
+- Refresh the lockfile deliberately when updating dependencies:
 
   ```bash
-  pixi update           # updates pixi.lock; commit alongside any range changes
+  uv lock --upgrade
+  uv sync
   ```
 
-- A pre-commit hook (`check-dep-sync`) verifies that any committed `requirements*.txt`
-  entries fall within the `pixi.toml` range; it does not initiate updates.
+  Review and commit the resulting `uv.lock` together with any corresponding
+  `pyproject.toml` change. `uv lock --check` is the CI consistency check.
 
 ## Pull Request Process
 
@@ -249,7 +244,7 @@ that state and the advisory `auto-merge-policy` reports any armed PR, but it is
 not a required check. An unconditional independent strict-review GO is required
 before a maintainer manually runs `gh pr merge --squash`.
 
-Also: ensure tests pass locally (`pixi run test`), keep commits to logical units with
+Also: ensure tests pass locally (`uv run pytest`), keep commits to logical units with
 [conventional commit](https://www.conventionalcommits.org/) messages, and never bypass
 pre-commit hooks with `--no-verify`.
 

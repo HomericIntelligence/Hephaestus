@@ -75,7 +75,7 @@ Every one of these comments MUST be resolved before you finish.
 
 4. After ALL sub-agents have returned, you (the coordinator) integrate their results and
    run the gates from the working directory:
-   - Run tests: `pixi run python -m pytest tests/ -v`
+   - Run tests: `uv run python -m pytest tests/ -v`
    - Run pre-commit: `pre-commit run --all-files`
    - Fix any issues found (you may edit files directly at this stage).
    - Commit all changes (do NOT push).

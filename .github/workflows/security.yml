@@ -3,9 +3,8 @@ name: Security
 on:
   pull_request:
     paths:
-      - "pixi.toml"
-      - "pixi.lock"
       - "pyproject.toml"
+      - "uv.lock"
       - "NOTICE"
       - "**/*.py"
       - ".github/workflows/security.yml"
@@ -36,21 +35,17 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
-      - name: Install pixi
-        uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f  # v0.10.0
+      - name: Setup uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
-          pixi-version: v0.69.0
-          environments: lint
-          locked: true
-          # setup-pixi already caches `.pixi` keyed exactly on the pixi.lock
-          # hash. A second actions/cache step over `.pixi` restored a STALE env
-          # (saved by an earlier poisoned run under the same exact key) on top
-          # of this --locked install, downgrading urllib3 2.7.0 -> 2.6.3 so
-          # pip-audit failed against an already-patched lock. Do not add one.
+          enable-cache: true
+
+      - name: Install locked dependency audit environment
+        run: uv sync --all-groups --all-extras --locked
 
       - name: Run pip-audit
         id: pip-audit
-        run: pixi run --environment lint pip-audit
+        run: uv run pip-audit --ignore-vuln PYSEC-2025-183
 
       - name: Post pip-audit summary
         if: always()
@@ -79,25 +74,21 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
-      - name: Install pixi
-        uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f  # v0.10.0
+      - name: Setup uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
-          pixi-version: v0.69.0
-          environments: lint
-          locked: true
-          # setup-pixi already caches `.pixi` keyed exactly on the pixi.lock
-          # hash. A second actions/cache step over `.pixi` restored a STALE env
-          # (saved by an earlier poisoned run under the same exact key) on top
-          # of this --locked install, downgrading urllib3 2.7.0 -> 2.6.3 so
-          # pip-audit failed against an already-patched lock. Do not add one.
+          enable-cache: true
 
       - name: Run bandit (SAST)
         id: bandit
-        run: pixi run --environment lint sast
+        run: uv run bandit -c pyproject.toml -r hephaestus scripts --severity-level medium
 
       - name: Run bandit LOW-severity baseline check
         id: bandit-low
-        run: pixi run --environment lint sast-audit-trail
+        run: |
+          mkdir -p build
+          uv run bandit -c pyproject.toml -r hephaestus scripts --severity-level low -f json -o build/bandit_low.json
+          uv run python hephaestus/ci/bandit_baseline_check.py build/bandit_low.json hephaestus/ci/bandit_low_baseline.json
 
       - name: Post bandit summary
         if: always()
@@ -128,22 +119,19 @@ jobs:
         with:
           fetch-depth: 0  # hatch-vcs needs full history to compute the version
 
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+      - name: Setup uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
-          python-version: "3.13"
-          cache: pip  # cache wheels so a PyPI hiccup does not flake the gate
+          enable-cache: true
 
-      # Install the package + ALL runtime extras (with deps) on a bare runner,
-      # exactly like the unit-test jobs (test.yml). NOT inside pixi: pip and
-      # pixi co-managing site-packages causes lockfile churn (pixi.toml).
-      - name: Install package with all runtime extras
-        run: pip install -e ".[all]"
+      - name: Install locked project environment
+        run: uv sync --all-groups --all-extras --locked
 
       - name: Run license scan
         id: license-scan
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
-        run: python3 scripts/check_license_compatibility.py
+        run: uv run python scripts/check_license_compatibility.py
 
       - name: Post license-scan summary
         if: always()

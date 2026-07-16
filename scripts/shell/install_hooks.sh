@@ -6,7 +6,7 @@
 # Usage:
 #   bash scripts/shell/install_hooks.sh
 #   # or, with the project environment already on PATH:
-#   pixi run pre-commit install
+#   uv run pre-commit install
 #
 # Hooks installed:
 #   pre-commit  — runs the lint/format/security hook suite before every commit
@@ -34,15 +34,14 @@ if ! git rev-parse --git-dir >/dev/null 2>&1; then
 fi
 
 # Resolve a pre-commit invocation. Prefer a directly-installed `pre-commit`;
-# fall back to `pixi run pre-commit` when only the pixi environment has it.
+# fall back to `uv run pre-commit` when only the project environment has it.
 if command -v pre-commit >/dev/null 2>&1; then
     pc() { pre-commit "$@"; }
-elif command -v pixi >/dev/null 2>&1; then
-    pc() { pixi run pre-commit "$@"; }
+elif command -v uv >/dev/null 2>&1; then
+    pc() { uv run pre-commit "$@"; }
 else
     echo "Error: pre-commit not found. Install it first:" >&2
-    echo "  pixi install   # then re-run this script" >&2
-    echo "  # or: pip install pre-commit" >&2
+    echo "  uv sync   # then re-run this script" >&2
     exit 1
 fi
 
@@ -54,4 +53,4 @@ pc install --hook-type pre-push
 
 echo ""
 echo "Hooks installed. They will run automatically on 'git commit' and 'git push'."
-echo "Run the full suite manually with: pixi run pre-commit run --all-files"
+echo "Run the full suite manually with: uv run pre-commit run --all-files"

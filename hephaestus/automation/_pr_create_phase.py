@@ -82,7 +82,7 @@ class PRCreatePhase(StageMixin):
         timeout_s = pre_pr_test_timeout()
         try:
             result = subprocess.run(
-                ["pixi", "run", "pytest", "tests/unit", "-q", "--tb=short"],
+                ["uv", "run", "pytest", "tests/unit", "-q", "--tb=short"],
                 cwd=worktree_path,
                 capture_output=True,
                 text=True,

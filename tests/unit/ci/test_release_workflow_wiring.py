@@ -108,7 +108,7 @@ class TestTestPyPIPublishStrictness:
 
 
 class TestSmokeInstallStep:
-    """The smoke-install must retry for propagation and use pixi, not ambient python."""
+    """The smoke-install must retry for propagation in a UV-created environment."""
 
     def _smoke_step(self) -> dict[str, Any]:
         steps = _steps("publish-testpypi")
@@ -116,9 +116,9 @@ class TestSmokeInstallStep:
         assert len(matches) == 1
         return matches[0]
 
-    def test_uses_pixi_run_python(self) -> None:
+    def test_uses_uv_to_create_the_smoke_environment(self) -> None:
         run = self._smoke_step()["run"]
-        assert "pixi run python -m venv" in run
+        assert "uv venv /tmp/testpypi-smoke" in run
 
     def test_retries_on_propagation_delay(self) -> None:
         run = self._smoke_step()["run"]
