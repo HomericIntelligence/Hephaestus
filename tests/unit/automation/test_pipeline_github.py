@@ -978,11 +978,22 @@ class TestRepoScopedAutoMerge:
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
 
-        pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).arm_auto_merge(7)
+        expected_head = "a" * 40
+        pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).arm_auto_merge(7, expected_head)
 
         assert calls == [
             (
-                ["pr", "merge", "7", "--auto", "--squash", "--repo", "org/repo-a"],
+                [
+                    "pr",
+                    "merge",
+                    "7",
+                    "--auto",
+                    "--squash",
+                    "--match-head-commit",
+                    expected_head,
+                    "--repo",
+                    "org/repo-a",
+                ],
                 {},
             )
         ]
@@ -1296,6 +1307,125 @@ class TestGhPrState:
         monkeypatch.setattr(pg, "gh_call", boom)
 
         assert adapter.gh_pr_state(7) is None
+
+
+class TestStrictReviewEvidence:
+    """Current-head evidence hydration for the independent strict reviewer."""
+
+    _head = "a" * 40
+
+    def _adapter_with_responses(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        diff: str = "diff --git a/a.py b/a.py\n+index 1..2 100644\n--- a/a.py\n+++ b/a.py\n+x\n",
+        final_head: str | None = None,
+        raise_on_diff: bool = False,
+    ) -> tuple[pg.PipelineGitHub, list[list[str]]]:
+        """Build an adapter with explicit repo-scoped evidence responses."""
+        calls: list[list[str]] = []
+        prior_review = "Grade: A\nVerdict: GO"
+
+        def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            if argv == [
+                "pr",
+                "view",
+                "71",
+                "--json",
+                "state,headRefOid,reviews",
+                "--repo",
+                "org/repo-a",
+            ]:
+                return SimpleNamespace(
+                    stdout=json.dumps(
+                        {
+                            "state": "OPEN",
+                            "headRefOid": self._head,
+                            "reviews": [
+                                {"author": {"login": "human"}, "body": "Verdict: NOGO"},
+                                {
+                                    "author": {"login": "hephaestus-bot"},
+                                    "body": prior_review,
+                                },
+                            ],
+                        }
+                    )
+                )
+            if argv == ["api", "user", "--jq", ".login"]:
+                return SimpleNamespace(stdout="hephaestus-bot\n")
+            if argv == ["pr", "diff", "71", "--repo", "org/repo-a"]:
+                if raise_on_diff:
+                    raise RuntimeError("diff unavailable")
+                return SimpleNamespace(stdout=diff)
+            if argv == [
+                "pr",
+                "checks",
+                "71",
+                "--json",
+                "name,state,bucket,workflow",
+                "--repo",
+                "org/repo-a",
+            ]:
+                return SimpleNamespace(stdout=json.dumps([{"name": "unit", "bucket": "pass"}]))
+            if argv == [
+                "pr",
+                "view",
+                "71",
+                "--json",
+                "state,headRefOid,mergedAt,mergeStateStatus,baseRefName,autoMergeRequest",
+                "--repo",
+                "org/repo-a",
+            ]:
+                return SimpleNamespace(
+                    stdout=json.dumps(
+                        {
+                            "state": "OPEN",
+                            "headRefOid": final_head if final_head is not None else self._head,
+                        }
+                    )
+                )
+            raise AssertionError(f"unexpected gh invocation: {argv!r}")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        return pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path), calls
+
+    def test_hydrates_bounded_repo_scoped_evidence_for_exact_head(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter, calls = self._adapter_with_responses(tmp_path, monkeypatch)
+
+        evidence = adapter.strict_review_evidence(71, self._head.upper())
+
+        assert evidence is not None
+        assert evidence.head_sha == self._head
+        assert evidence.diff.startswith("diff --git")
+        assert "unit: status=completed, conclusion=success" in evidence.ci_status
+        assert evidence.prior_pr_review_verdict == "Grade: A\nVerdict: GO"
+        assert ["pr", "diff", "71", "--repo", "org/repo-a"] in calls
+        assert all("--repo" in call for call in calls if call[0] == "pr")
+
+    def test_empty_diff_is_ambiguous_and_fails_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter, _calls = self._adapter_with_responses(tmp_path, monkeypatch, diff=" \n")
+
+        assert adapter.strict_review_evidence(71, self._head) is None
+
+    def test_head_change_during_hydration_invalidates_evidence(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter, _calls = self._adapter_with_responses(tmp_path, monkeypatch, final_head="b" * 40)
+
+        assert adapter.strict_review_evidence(71, self._head) is None
+
+    def test_evidence_read_error_fails_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter, _calls = self._adapter_with_responses(tmp_path, monkeypatch, raise_on_diff=True)
+
+        assert adapter.strict_review_evidence(71, self._head) is None
 
 
 class TestDriveGreenArmingRecords:

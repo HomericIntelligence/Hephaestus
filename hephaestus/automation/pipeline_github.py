@@ -41,7 +41,7 @@ from hephaestus.automation._review_utils import (
 from hephaestus.automation.arming_state import ArmingStateStore
 from hephaestus.automation.ci_check_inspector import CICheckInspector
 from hephaestus.automation.git_utils import issue_auto_impl_branch_name
-from hephaestus.automation.pipeline.stages.base import StrictReviewArtifact
+from hephaestus.automation.pipeline.stages.base import StrictReviewArtifact, StrictReviewEvidence
 from hephaestus.automation.prompts.pr_review import (
     BLOCKING_SEVERITIES,
     SEVERITY_MARKER_PREFIX,
@@ -78,6 +78,17 @@ from hephaestus.github.client import gh_call
 logger = logging.getLogger(__name__)
 
 _CLOSES_ISSUE_LINE_RE = re.compile(r"^Closes #(\d+)\s*$", re.MULTILINE)
+
+# The strict reviewer is a merge-eligibility gate.  Its evidence must fit a
+# single bounded prompt, and a PR outside this envelope fails closed for human
+# review rather than silently omitting a changed file/check/review result.
+_STRICT_REVIEW_MAX_DIFF_BYTES = 350_000
+_STRICT_REVIEW_MAX_CHECKS = 200
+_STRICT_REVIEW_MAX_CI_STATUS_BYTES = 20_000
+_STRICT_REVIEW_MAX_PRIOR_REVIEW_BYTES = 20_000
+_STRICT_REVIEW_MAX_REVIEWS = 100
+_NO_PRIOR_AUTOMATED_REVIEW = "No authenticated prior PR-review verdict is available."
+_PR_REVIEW_VERDICT_RE = re.compile(r"(?m)^Verdict:\s*(?:GO|NOGO)\s*$")
 
 
 def _split_threads(threads: list[dict[str, Any]]) -> tuple[int, int]:
@@ -604,6 +615,144 @@ class PipelineGitHub:
             return True
         return False
 
+    @staticmethod
+    def _strict_review_ci_status(checks: object) -> str | None:
+        """Render a bounded, schema-checked CI summary for strict review."""
+        if not isinstance(checks, list) or len(checks) > _STRICT_REVIEW_MAX_CHECKS:
+            return None
+        if not checks:
+            return "No CI check runs are currently reported by GitHub."
+
+        lines: list[str] = []
+        for check in checks:
+            if not isinstance(check, dict):
+                return None
+            name = check.get("name")
+            status = check.get("status")
+            conclusion = check.get("conclusion")
+            required = check.get("required")
+            if (
+                not isinstance(name, str)
+                or not name.strip()
+                or not isinstance(status, str)
+                or not status.strip()
+                or (conclusion is not None and not isinstance(conclusion, str))
+                or not isinstance(required, bool)
+            ):
+                return None
+            completion = conclusion if conclusion is not None else "pending"
+            requirement = "required" if required else "non-required"
+            lines.append(f"- {name}: status={status}, conclusion={completion}, {requirement}")
+        rendered = "\n".join(lines)
+        if len(rendered.encode("utf-8")) > _STRICT_REVIEW_MAX_CI_STATUS_BYTES:
+            return None
+        return rendered
+
+    @staticmethod
+    def _strict_review_prior_verdict(reviews: object, automation_login: str) -> str | None:
+        """Return the latest bounded, authenticated PR-review verdict text.
+
+        The prior review is context only, but it must still be selected from
+        the automation identity rather than an arbitrary human review.  No
+        matching prior review is a normal direct-PR/orphan case; malformed
+        response data is not.
+        """
+        if not isinstance(reviews, list) or len(reviews) > _STRICT_REVIEW_MAX_REVIEWS:
+            return None
+        for review in reversed(reviews):
+            if not isinstance(review, dict):
+                return None
+            author = review.get("author")
+            if not isinstance(author, dict) or author.get("login") != automation_login:
+                continue
+            body = review.get("body")
+            if not isinstance(body, str) or not _PR_REVIEW_VERDICT_RE.search(body):
+                continue
+            body_bytes = body.encode("utf-8")
+            if len(body_bytes) <= _STRICT_REVIEW_MAX_PRIOR_REVIEW_BYTES:
+                return body
+            # Retain the final output contract at the end of a long review;
+            # accepting an unbounded predecessor would defeat the prompt cap.
+            suffix = body_bytes[-_STRICT_REVIEW_MAX_PRIOR_REVIEW_BYTES:].decode(
+                "utf-8", errors="replace"
+            )
+            return "[... prior PR review truncated to its final bytes ...]\n" + suffix
+        return _NO_PRIOR_AUTOMATED_REVIEW
+
+    def strict_review_evidence(self, pr_number: int, head_sha: str) -> StrictReviewEvidence | None:
+        """Fetch complete, bounded strict-review evidence for one exact head.
+
+        The initial and final PR-state reads bind the fetched diff and CI
+        summary to ``head_sha``.  A concurrent push, read/schema error,
+        oversized/empty diff, or malformed context returns ``None`` so the
+        caller must fail closed instead of issuing an under-informed GO.
+        """
+        if (
+            self._repo_slug is None
+            or pr_number <= 0
+            or re.fullmatch(r"[0-9a-fA-F]{40}", head_sha) is None
+        ):
+            return None
+        normalized_head = head_sha.lower()
+        try:
+            snapshot_result = self._gh(
+                ["pr", "view", str(pr_number), "--json", "state,headRefOid,reviews"]
+            )
+            snapshot = json.loads(snapshot_result.stdout or "{}")
+            if not isinstance(snapshot, dict):
+                return None
+            if str(snapshot.get("state") or "").upper() != "OPEN":
+                return None
+            if str(snapshot.get("headRefOid") or "").lower() != normalized_head:
+                return None
+            automation_login = self._strict_review_login()
+            if automation_login is None:
+                return None
+            prior_verdict = self._strict_review_prior_verdict(
+                snapshot.get("reviews"), automation_login
+            )
+            if prior_verdict is None:
+                return None
+
+            diff_result = self._gh(["pr", "diff", str(pr_number)])
+            diff = diff_result.stdout
+            if not isinstance(diff, str) or not diff.strip():
+                return None
+            if len(diff.encode("utf-8")) > _STRICT_REVIEW_MAX_DIFF_BYTES:
+                return None
+
+            ci_status = self._strict_review_ci_status(self.pr_checks(pr_number))
+            if ci_status is None:
+                return None
+
+            confirmed = self.gh_pr_state(pr_number)
+            if (
+                confirmed is None
+                or str(confirmed.get("state") or "").upper() != "OPEN"
+                or str(confirmed.get("headRefOid") or "").lower() != normalized_head
+            ):
+                return None
+        except (
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+            subprocess.SubprocessError,
+            json.JSONDecodeError,
+        ) as exc:
+            logger.warning(
+                "strict_review_evidence: failed to hydrate evidence for PR #%d: %s",
+                pr_number,
+                exc,
+            )
+            return None
+        return StrictReviewEvidence(
+            head_sha=normalized_head,
+            diff=diff,
+            ci_status=ci_status,
+            prior_pr_review_verdict=prior_verdict,
+        )
+
     # -- read surface --------------------------------------------------------
 
     def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
@@ -1123,16 +1272,28 @@ class PipelineGitHub:
             return
         pr_manager.ensure_pr_auto_merge_deferred(pr_number)
 
-    def arm_auto_merge(self, pr_number: int) -> None:
+    def arm_auto_merge(self, pr_number: int, expected_head_sha: str) -> None:
         """Request squash auto-merge for MergeWait's verified strict-GO path.
 
         This adapter method deliberately does not check labels or artifacts:
         those are coordinator-stage facts that must be revalidated in
         ``MergeWaitStage._arm`` immediately before this sole automatic arm.
         """
+        if re.fullmatch(r"[0-9a-fA-F]{40}", expected_head_sha) is None:
+            raise ValueError("expected_head_sha must be a 40-character hex commit SHA")
         if self._skip(f"arm auto-merge on PR #{pr_number}"):
             return
-        self._gh(["pr", "merge", str(pr_number), "--auto", "--squash"])
+        self._gh(
+            [
+                "pr",
+                "merge",
+                str(pr_number),
+                "--auto",
+                "--squash",
+                "--match-head-commit",
+                expected_head_sha,
+            ]
+        )
 
     def _strict_review_login(self) -> str | None:
         """Resolve and cache the authenticated automation identity."""
@@ -1158,7 +1319,7 @@ class PipelineGitHub:
             return None
         endpoint = f"/repos/{self.org}/{self.repo}/issues/{pr_number}/comments"
         try:
-            result = gh_call(["api", endpoint, "--paginate"])
+            result = gh_call(["api", endpoint, "--paginate", "--slurp"])
             raw = json.loads(result.stdout or "[]")
         except (OSError, RuntimeError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
             logger.warning(
@@ -1197,16 +1358,13 @@ class PipelineGitHub:
         return None
 
     def publish_strict_review_artifact(
-        self, pr_number: int, head_sha: str, verdict_body: str
+        self, pr_number: int, head_sha: str, verdict_body: str, *, is_go: bool
     ) -> None:
-        """Durably upsert the exact-head strict-review artifact before a GO label."""
-        verdict_match = re.search(r"(?:^|\n)Verdict:\s*(GO|NOGO)\s*$", verdict_body)
-        if verdict_match is None:
-            raise ValueError("strict-review artifact requires an exact Verdict: GO|NOGO line")
+        """Durably upsert a stage-validated strict-review artifact for one head."""
         rendered = render_strict_review_artifact(
             head_sha,
             verdict_body,
-            is_go=verdict_match.group(1) == "GO",
+            is_go=is_go,
         )
         if self._skip(f"publish strict-review artifact on PR #{pr_number}"):
             return

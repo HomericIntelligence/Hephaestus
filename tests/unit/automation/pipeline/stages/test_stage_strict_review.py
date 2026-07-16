@@ -6,7 +6,12 @@ import importlib
 from typing import Any
 
 from hephaestus.automation.pipeline.routing import Disposition, StageName
-from hephaestus.automation.pipeline.stages import Continue, StageOutcome
+from hephaestus.automation.pipeline.stages import (
+    Continue,
+    JobRequest,
+    StageOutcome,
+    StrictReviewEvidence,
+)
 from hephaestus.automation.pipeline.work_item import ItemKind
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
@@ -88,3 +93,59 @@ def test_head_change_fails_closed_when_auto_merge_cannot_be_disarmed(
     result = strict_review.StrictReviewStage().on_enter(item, make_ctx(github=_DeferFailsGitHub()))
 
     assert result == StageOutcome(Disposition.FINISH_FAIL, "auto_merge_disable_failed")
+
+
+def test_review_job_receives_fresh_current_head_evidence(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """Strict review dispatches only with evidence bound to its captured head."""
+    strict_review = importlib.import_module("hephaestus.automation.pipeline.stages.strict_review")
+    evidence = StrictReviewEvidence(
+        head_sha=_NEW_HEAD,
+        diff="diff --git a/file.py b/file.py\n+",
+        ci_status="- unit: status=completed, conclusion=success, non-required",
+        prior_pr_review_verdict="Grade: A\nVerdict: GO",
+    )
+    github = FakeStageGitHub(strict_evidence=evidence)
+    item = make_work_item(
+        stage=StageName.STRICT_REVIEW,
+        pr=601,
+        state=strict_review.REVIEW_WAIT,
+        payload={"strict_review_head": _NEW_HEAD},
+    )
+
+    result = strict_review.StrictReviewStage().step(item, make_ctx(github=github))
+
+    assert isinstance(result, JobRequest)
+    assert github.strict_evidence_calls == [(601, _NEW_HEAD)]
+    assert result.job.prompt_kwargs["head_sha"] == _NEW_HEAD
+    assert result.job.prompt_kwargs["diff"] == evidence.diff
+    assert result.job.prompt_kwargs["ci_status"] == evidence.ci_status
+    assert result.job.prompt_kwargs["prior_pr_review_verdict"] == evidence.prior_pr_review_verdict
+
+
+def test_missing_current_head_evidence_fails_closed_to_real_implementation(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A read failure or empty/ambiguous diff becomes a durable strict NOGO."""
+    strict_review = importlib.import_module("hephaestus.automation.pipeline.stages.strict_review")
+    github = FakeStageGitHub(
+        pr_state={"state": "OPEN", "headRefOid": _NEW_HEAD, "autoMergeRequest": None}
+    )
+    item = make_work_item(
+        stage=StageName.STRICT_REVIEW,
+        pr=601,
+        state=strict_review.REVIEW_WAIT,
+        payload={"strict_review_head": _NEW_HEAD},
+    )
+
+    result = strict_review.StrictReviewStage().step(item, make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.FAIL_BACK, "nogo")
+    assert github.strict_evidence_calls == [(601, _NEW_HEAD)]
+    assert ("defer_auto_merge", (601,)) in github.mutation_log
+    assert ("mark_pr_implementation_no_go", (601,)) in github.mutation_log
+    assert any(
+        action == "publish_strict_review_artifact" and args[-1] is False
+        for action, args in github.mutation_log
+    )

@@ -32,7 +32,9 @@ def _published_artifact(
         return True
 
     monkeypatch.setattr(adapter, "upsert_pr_comment", capture)
-    adapter.publish_strict_review_artifact(71, _HEAD_SHA, verdict_body)
+    adapter.publish_strict_review_artifact(
+        71, _HEAD_SHA, verdict_body, is_go="Verdict: GO" in verdict_body
+    )
     return adapter, published
 
 

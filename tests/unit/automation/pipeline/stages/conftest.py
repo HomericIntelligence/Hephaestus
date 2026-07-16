@@ -20,6 +20,7 @@ from hephaestus.automation.pipeline.stages import (
     StageContext,
     StageGitHub,
     StrictReviewArtifact,
+    StrictReviewEvidence,
 )
 from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARGV
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
@@ -60,6 +61,7 @@ class FakeStageGitHub(FakeGitHub):
         learn_terminal: bool = False,
         resolve_count: int = 0,
         strict_artifact: StrictReviewArtifact | None = None,
+        strict_evidence: StrictReviewEvidence | None = None,
     ) -> None:
         """Initialize the fake with canned read answers.
 
@@ -91,6 +93,8 @@ class FakeStageGitHub(FakeGitHub):
                 True mirrors an issue whose post-merge /learn already ran
                 terminally (the #848 dedupe record).
             resolve_count: Canned return count for resolve_automation_threads.
+            strict_artifact: Canned authenticated strict-review artifact.
+            strict_evidence: Canned bounded evidence for a strict-review job.
 
         """
         super().__init__()
@@ -117,7 +121,9 @@ class FakeStageGitHub(FakeGitHub):
         self._learn_terminal = learn_terminal
         self._resolve_count = resolve_count
         self._strict_artifact = strict_artifact
+        self._strict_evidence = strict_evidence
         self.strict_artifact_calls: list[tuple[int, str]] = []
+        self.strict_evidence_calls: list[tuple[int, str]] = []
         self.arming_records: dict[int, tuple[int, str]] = {}
         self.learn_results: dict[int, bool] = {}
 
@@ -257,9 +263,9 @@ class FakeStageGitHub(FakeGitHub):
         self.gh_issue_upsert_comment(pr_number, marker_prefix, body)
         return True
 
-    def arm_auto_merge(self, pr_number: int) -> None:
+    def arm_auto_merge(self, pr_number: int, expected_head_sha: str) -> None:
         """Mirror pr_manager.enable_auto_merge_after_implementation_go."""
-        self._log("arm_auto_merge", pr_number)
+        self._log("arm_auto_merge", pr_number, expected_head_sha)
 
     def strict_review_artifact(self, pr_number: int, head_sha: str) -> StrictReviewArtifact | None:
         """Return the canned current-head strict-review proof, if any."""
@@ -267,10 +273,17 @@ class FakeStageGitHub(FakeGitHub):
         return self._strict_artifact
 
     def publish_strict_review_artifact(
-        self, pr_number: int, head_sha: str, verdict_body: str
+        self, pr_number: int, head_sha: str, verdict_body: str, *, is_go: bool
     ) -> None:
-        """Record strict-review artifact publication before the GO label."""
-        self._log("publish_strict_review_artifact", pr_number, head_sha, verdict_body)
+        """Record strict-review artifact publication before the state label."""
+        self._log("publish_strict_review_artifact", pr_number, head_sha, verdict_body, is_go)
+
+    def strict_review_evidence(self, pr_number: int, head_sha: str) -> StrictReviewEvidence | None:
+        """Return canned evidence only when it remains for the requested head."""
+        self.strict_evidence_calls.append((pr_number, head_sha))
+        if self._strict_evidence is None or self._strict_evidence.head_sha != head_sha:
+            return None
+        return self._strict_evidence
 
     def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
         """Mirror ci_driver.CIDriver._gh_pr_state (canned answer)."""
