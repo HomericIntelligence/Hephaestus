@@ -21,3 +21,4 @@ numbered, and listed here.
 | [0006](0006-queue-based-in-process-automation-pipeline.md) | Queue-based in-process automation pipeline | Accepted |
 | [0007](0007-dual-surface-required-checks.md) | Dual-surface required checks | Accepted |
 | [0008](0008-uv-only-development-environment.md) | uv is the sole development environment manager | Accepted |
+| [0009](0009-head-bound-strict-review-merge-gate.md) | Head-bound strict review controls queue-owned merge eligibility | Accepted |
