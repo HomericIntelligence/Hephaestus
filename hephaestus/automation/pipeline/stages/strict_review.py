@@ -235,7 +235,14 @@ class StrictReviewStage(Stage):
         if item.state == HEAD_CHECK:
             return self._head_check(item, ctx)
         if item.state == WORKTREE_WAIT:
-            return StageOutcome(Disposition.FINISH_FAIL, "strict_review_worktree_unfinished")
+            if item.payload.pop("strict_review_worktree_failed", None):
+                return StageOutcome(Disposition.FINISH_FAIL, "strict_review_worktree_failed")
+            if not item.worktree:
+                # A restored item cannot safely assume an unrecorded worker
+                # completion created a usable checkout.  Fail closed instead
+                # of sending the reviewer to the shared repository root.
+                return StageOutcome(Disposition.FINISH_FAIL, "strict_review_worktree_unfinished")
+            return Continue(next_state=HEAD_CHECK)
         if item.state == REVIEW_WAIT:
             return self._review_wait(item, ctx)
         if item.state == EVAL:
@@ -292,7 +299,12 @@ class StrictReviewStage(Stage):
                 },
                 descr="strict_review_worktree",
             )
-            return JobRequest(worktree_job, on_done_state=HEAD_CHECK)
+            # The coordinator invokes ``on_job_done`` before applying the
+            # handle's target state.  Record an explicit pending marker so
+            # the callback can identify this completion while the item is
+            # still in HEAD_CHECK, then transition through WORKTREE_WAIT.
+            item.payload["strict_review_worktree_pending"] = True
+            return JobRequest(worktree_job, on_done_state=WORKTREE_WAIT)
         return Continue(next_state=REVIEW_WAIT)
 
     def _review_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
@@ -511,6 +523,18 @@ class StrictReviewStage(Stage):
                 e,
             )
             return StageOutcome(Disposition.FINISH_FAIL, "strict_nogo_artifact_failed")
+        # Publishing the old-head invalidation is safe, but a push can race
+        # that write.  Do not post old-review feedback or apply the global
+        # NOGO label to the new head; contain it and restart instead.
+        after_publish = ctx.github.gh_pr_state(pr_number)
+        after_terminal = _terminal_pr_outcome(after_publish, pr_number)
+        if after_terminal is not None:
+            return after_terminal
+        if str((after_publish or {}).get("headRefOid") or "") != head_sha:
+            outcome = self._contain_and_revoke_on_entry(item, ctx)
+            if outcome is not None:
+                return outcome
+            return Continue(next_state=HEAD_CHECK)
         self._post_nogo_remediation(pr_number, ctx, verdict_text)
         try:
             ctx.github.mark_pr_implementation_no_go(pr_number)
@@ -562,7 +586,7 @@ class StrictReviewStage(Stage):
             ctx: Stage context.
 
         """
-        if item.state == WORKTREE_WAIT:
+        if item.payload.pop("strict_review_worktree_pending", None):
             if not result.ok:
                 logger.warning(
                     "strict_review:%s: isolated worktree setup failed: %s",

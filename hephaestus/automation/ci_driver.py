@@ -263,16 +263,16 @@ def _resolve_repo() -> tuple[str, str]:
 
 
 def main() -> int:
-    """Execute the CI driver workflow via the pipeline (ci → merge_wait scope).
+    """Execute the CI driver workflow via strict_review → ci → merge_wait.
 
     Parses the historical CI-driver argument surface, builds a
-    :class:`PipelineConfig` scoped to ``(ci, merge_wait)``, and dispatches to
-    the coordinator. Seeding is coordinator-owned: ``--issues`` route each
-    issue's open PR (implementation-go → CI), ``--prs`` route each PR by its
-    implementation-go label (``pr_discovery`` semantics), and — in no-scope
-    discovery mode (neither ``--issues`` nor ``--prs``) — ``drive_green_all``
-    plus repo discovery unions every open failing PR on the repo (the legacy
-    failing-PR / bot-PR sweep).
+    :class:`PipelineConfig` scoped to ``(strict_review, ci, merge_wait)``, and
+    dispatches to the coordinator. Seeding is coordinator-owned: ``--issues``
+    route each issue's open PR (implementation-go → strict_review), ``--prs``
+    route each PR by its implementation-go label (``pr_discovery`` semantics),
+    and — in no-scope discovery mode (neither ``--issues`` nor ``--prs``) —
+    ``drive_green_all`` plus repo discovery unions every open failing PR on the
+    repo (the legacy failing-PR / bot-PR sweep).
 
     Returns:
         Exit code: the coordinator's exit code (0 clean, non-zero on
@@ -295,7 +295,7 @@ def main() -> int:
 
     log = logging.getLogger(__name__)
     log.info(
-        "Starting CI driver (pipeline, ci→merge_wait scope) for issues: %s, direct PRs: %s",
+        "Starting CI driver (strict_review→ci→merge_wait) for issues: %s, direct PRs: %s",
         args.issues or "<discovery mode>",
         args.prs,
     )

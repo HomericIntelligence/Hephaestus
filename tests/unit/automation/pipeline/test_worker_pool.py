@@ -194,6 +194,34 @@ class TestWorkerPoolSubmitComplete:
         assert result.error is not None and "local_head_mismatch" in result.error
         invoke.assert_not_called()
 
+    def test_dirty_expected_head_worktree_blocks_agent_before_invocation(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+    ) -> None:
+        """Matching SHA alone is insufficient when local files differ from it."""
+        expected = "a" * 40
+        job = _agent_job(expected_head_sha=expected)
+        head_result = subprocess.CompletedProcess(
+            ["git", "rev-parse", "HEAD"], 0, stdout=expected + "\n", stderr=""
+        )
+        dirty_result = subprocess.CompletedProcess(
+            ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+            0,
+            stdout=" M implementation.py\n?? untracked.txt\n",
+            stderr="",
+        )
+        with (
+            patch(f"{_WP}.subprocess.run", side_effect=[head_result, dirty_result]),
+            patch(f"{_WP}.claude_invoke.invoke_claude_with_session") as invoke,
+        ):
+            pool.submit(job, StageName.STRICT_REVIEW)
+            _handle, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error is not None and "local_worktree_dirty" in result.error
+        invoke.assert_not_called()
+
     def test_submit_and_complete_build_test_job(
         self,
         pool: WorkerPool,

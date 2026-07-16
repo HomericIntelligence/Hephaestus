@@ -33,7 +33,7 @@ from hephaestus.automation.pipeline.events import (
 from hephaestus.automation.pipeline.jobs import AgentJob, JobHandle, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
 from hephaestus.automation.pipeline.seeding import SeedEntry
-from hephaestus.automation.pipeline.stages import Continue
+from hephaestus.automation.pipeline.stages import Continue, StrictReviewEvidence
 from hephaestus.automation.pipeline.stages.base import JobRequest
 from hephaestus.automation.pipeline.stages.pr_review import (
     REVIEW_ERROR_RETRY_CAP,
@@ -314,6 +314,44 @@ class TestQuiescence:
         reasons = sorted(result.reason for result in coordinator.ledger)
         assert any(reason.startswith("poisoned: boom") for reason in reasons)
         assert any(reason == "fine" for reason in reasons)
+
+    def test_direct_pr_worktree_completion_advances_without_resubmitting(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Coordinator completion order preserves a direct PR's synced worktree."""
+        head = "a" * 40
+        github = FakeStageGitHub(
+            pr_state={"state": "OPEN", "headRefOid": head, "autoMergeRequest": None},
+            pr_head_branch="strict-review-pr-601",
+            strict_evidence=StrictReviewEvidence(
+                head_sha=head,
+                diff="diff --git a/file.py b/file.py\n+change",
+                ci_status="checks clean",
+                prior_pr_review_verdict="Grade: A\nVerdict: GO",
+            ),
+        )
+        coordinator, pool, _ = make_coordinator(tmp_path, monkeypatch, github=github)
+        pool.queue_result(JobResult(ok=True, value={"path": str(tmp_path / "pr-601")}))
+        item = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.PR,
+            issue=None,
+            pr=601,
+            stage=StageName.STRICT_REVIEW,
+            state="HEAD_CHECK",
+        )
+
+        coordinator._run_item(item)
+        coordinator._drain_completions()
+
+        worktree_jobs = [
+            handle.job
+            for handle in pool.submitted
+            if getattr(handle.job, "op", "") == "create_worktree"
+        ]
+        assert len(worktree_jobs) == 1
+        assert item.worktree == str(tmp_path / "pr-601")
+        assert any(isinstance(handle.job, AgentJob) for handle in pool.submitted)
 
 
 def _fake_in_flight_item(coordinator: Coordinator, item: WorkItem) -> JobHandle:

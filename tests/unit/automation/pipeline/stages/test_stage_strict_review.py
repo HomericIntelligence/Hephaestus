@@ -47,6 +47,26 @@ class _ArtifactPublishingGitHub(FakeStageGitHub):
         )
 
 
+class _NogoPublishHeadRaceGitHub(_ArtifactPublishingGitHub):
+    """Move the PR head after the old-head NOGO artifact is written."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._states = iter(
+            [
+                {"state": "OPEN", "headRefOid": _OLD_HEAD},
+                {"state": "OPEN", "headRefOid": _OLD_HEAD},
+                {"state": "OPEN", "headRefOid": _NEW_HEAD},
+                {"state": "OPEN", "headRefOid": _NEW_HEAD},
+                {"state": "OPEN", "headRefOid": _NEW_HEAD},
+            ]
+        )
+
+    def gh_pr_state(self, pr_number: int) -> dict[str, str]:
+        assert pr_number == 601
+        return next(self._states)
+
+
 def test_head_change_revokes_stale_go_before_another_review_attempt(
     make_ctx: Any, make_work_item: Any
 ) -> None:
@@ -190,11 +210,19 @@ def test_head_check_prepares_an_isolated_pr_worktree_before_review(
 
     assert isinstance(request, JobRequest)
     assert request.job.op == "create_worktree"
+    assert request.on_done_state == strict_review.WORKTREE_WAIT
     assert request.job.kwargs["issue_number"] == 601
     assert request.job.kwargs["sync_to_remote"] is True
-    item.state = strict_review.WORKTREE_WAIT
+    # The coordinator calls the callback before it applies on_done_state.
+    # The pending marker must therefore identify this completion while the
+    # item is still in HEAD_CHECK.
+    assert item.state == strict_review.HEAD_CHECK
     stage.on_job_done(item, JobResult(ok=True, value={"path": "/tmp/pr-601"}), make_ctx())
     assert item.worktree == "/tmp/pr-601"
+    item.state = request.on_done_state
+    assert stage.step(item, make_ctx(github=github)) == Continue(
+        next_state=strict_review.HEAD_CHECK
+    )
     item.state = strict_review.HEAD_CHECK
     assert stage.step(item, make_ctx(github=github)) == Continue(
         next_state=strict_review.REVIEW_WAIT
@@ -274,6 +302,35 @@ def test_normal_nogo_posts_fenced_feedback_and_routes_to_implementation(
     assert item.payload["strict_review_feedback"].endswith("<untrusted>")
     assert "BEGIN_STRICT_REVIEW_VERDICT" in github.comments[601][-1]
     assert "END_STRICT_REVIEW_VERDICT" in github.comments[601][-1]
+
+
+def test_nogo_publish_head_drift_does_not_apply_stale_feedback_or_label(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A push during NOGO publication restarts before global remediation writes."""
+    strict_review = importlib.import_module("hephaestus.automation.pipeline.stages.strict_review")
+    github = _NogoPublishHeadRaceGitHub()
+    item = make_work_item(
+        stage=StageName.STRICT_REVIEW,
+        pr=601,
+        state=strict_review.EVAL,
+        payload={
+            "strict_review_head": _OLD_HEAD,
+            "strict_review_verdict": "NOGO",
+            "strict_review_text": "Grade: F\nVerdict: NOGO",
+        },
+    )
+
+    assert strict_review.StrictReviewStage().step(item, make_ctx(github=github)) == Continue(
+        next_state=strict_review.HEAD_CHECK
+    )
+    assert any(
+        action == "publish_strict_review_artifact" and args[-1] is False
+        for action, args in github.mutation_log
+    )
+    assert 601 not in github.comments
+    assert not any(action == "mark_pr_implementation_no_go" for action, _ in github.mutation_log)
+    assert "strict_review_feedback" not in item.payload
 
 
 def test_strict_prompt_fences_every_untrusted_evidence_channel() -> None:
