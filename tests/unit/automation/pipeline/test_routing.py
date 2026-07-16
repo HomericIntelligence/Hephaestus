@@ -221,6 +221,8 @@ class TestROUTES:
                 next=StageName.FINISHED,
                 fail_routes={
                     "closed": StageName.FINISHED,
+                    "strict_gate_unavailable": StageName.STRICT_REVIEW,
+                    "arm_confirm_failed": StageName.STRICT_REVIEW,
                     "*": StageName.FINISHED,
                 },
                 budgets={},

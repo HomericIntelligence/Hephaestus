@@ -75,6 +75,7 @@ from hephaestus.automation.agent_config import (
     implementer_claude_timeout,
     implementer_model,
 )
+from hephaestus.automation.prompts._shared import fence_content
 from hephaestus.automation.prompts.advise import get_advise_prompt_builder
 from hephaestus.automation.prompts.implementation import (
     get_dirty_reused_worktree_decision_prompt,
@@ -181,6 +182,7 @@ def build_implementation_prompt(
     branch_name: str = "",
     worktree_path: str = "",
     advise_findings: str = "",
+    strict_review_feedback: str = "",
 ) -> str:
     """Compose the implementation prompt with the advise-findings block.
 
@@ -197,6 +199,7 @@ def build_implementation_prompt(
         branch_name: Feature branch the worktree is on.
         worktree_path: Worktree the implementer works in.
         advise_findings: Advise-step findings; empty string means no block.
+        strict_review_feedback: Fail-closed strict-NOGO feedback to remediate.
 
     Returns:
         The full implementer prompt, with the findings block appended when
@@ -210,19 +213,40 @@ def build_implementation_prompt(
         branch_name=branch_name,
         worktree_path=worktree_path,
     )
-    if not advise_findings:
+    if not advise_findings and not strict_review_feedback:
         return prompt
-    block = "\n".join(
-        [
-            "",
-            "---",
-            "",
-            "## Prior Learnings from Team Knowledge Base",
-            "",
-            advise_findings,
-        ]
-    )
-    return prompt + block
+    blocks: list[str] = [prompt]
+    if advise_findings:
+        blocks.append(
+            "\n".join(
+                [
+                    "",
+                    "---",
+                    "",
+                    "## Prior Learnings from Team Knowledge Base",
+                    "",
+                    advise_findings,
+                ]
+            )
+        )
+    if strict_review_feedback:
+        fenced = fence_content()
+        blocks.append(
+            "\n".join(
+                [
+                    "",
+                    "---",
+                    "",
+                    "## Strict-review remediation (untrusted feedback)",
+                    "",
+                    fenced.untrusted_notice,
+                    fenced.fence("STRICT_REVIEW_NOGO", strict_review_feedback),
+                    "",
+                    "Address the concrete findings above before returning control to review.",
+                ]
+            )
+        )
+    return "".join(blocks)
 
 
 def build_test_fix_prompt(issue_number: int, prev_iteration: int, test_output: str) -> str:
@@ -349,7 +373,12 @@ class ImplementationStage(Stage):
         # Adopted-PR path: after the (clean or salvaged) worktree is
         # ready, skip the implement leg — the PR's code already exists;
         # pr_review's address leg drives it from here.
-        if item.payload.get("existing_pr_impl_go"):
+        if item.payload.get("strict_review_feedback"):
+            # A strict NOGO is a real remediation request, not the normal
+            # existing-PR adoption shortcut.  Preserve the synced PR branch
+            # but run implement/test/push with the fenced feedback.
+            adopted_next = IMPLEMENT_WAIT
+        elif item.payload.get("existing_pr_impl_go"):
             adopted_next = ADOPTED_CI
         else:
             adopted_next = ADOPTED if item.payload.get("existing_pr") else ADVISE_WAIT
@@ -458,6 +487,7 @@ class ImplementationStage(Stage):
                 "branch_name": item.branch,
                 "worktree_path": item.worktree,
                 "advise_findings": item.payload.get("advise_findings", ""),
+                "strict_review_feedback": item.payload.get("strict_review_feedback", ""),
             },
             descr="implement",
         )

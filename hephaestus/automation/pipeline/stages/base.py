@@ -84,6 +84,7 @@ __all__ = [
     "StageOutcome",
     "StepResult",
     "StrictReviewArtifact",
+    "StrictReviewEvidence",
     "WorkItem",
     "agent_provider",
     "stage_model",
@@ -109,6 +110,16 @@ class StrictReviewArtifact:
     is_go: bool
     head_sha: str
     verdict: str
+
+
+@dataclass(frozen=True)
+class StrictReviewEvidence:
+    """Bounded current-head evidence supplied to the read-only strict reviewer."""
+
+    head_sha: str
+    diff: str
+    ci_status: str
+    prior_pr_review_verdict: str
 
 
 @runtime_checkable
@@ -293,11 +304,14 @@ class StageGitHub(Protocol):
         """
         ...
 
-    def arm_auto_merge(self, pr_number: int) -> None:
-        """Durably arm squash auto-merge after implementation GO.
+    def arm_auto_merge(self, pr_number: int, expected_head_sha: str) -> None:
+        """Atomically arm squash auto-merge for one expected PR head.
 
         Reserved exclusively for ``MergeWaitStage`` after it has revalidated
-        #2055's head-bound strict-review proof. No earlier stage may call it.
+        #2055's head-bound strict-review proof.  The adapter must pass the
+        exact expected head to GitHub's conditional arm API so a push between
+        validation and arming cannot authorize a different commit. No earlier
+        stage may call it.
         """
         ...
 
@@ -313,9 +327,20 @@ class StageGitHub(Protocol):
         ...
 
     def publish_strict_review_artifact(
-        self, pr_number: int, head_sha: str, verdict_body: str
+        self, pr_number: int, head_sha: str, verdict_body: str, *, is_go: bool
     ) -> None:
-        """Publish a strict-review artifact before writing implementation GO."""
+        """Publish a validated strict-review GO or NOGO artifact for one head."""
+        ...
+
+    def strict_review_evidence(self, pr_number: int, head_sha: str) -> StrictReviewEvidence | None:
+        """Return bounded evidence still bound to ``head_sha``, else ``None``.
+
+        A strict reviewer has a read-only agent sandbox and cannot safely
+        rely on a mutable local checkout for the PR diff.  The coordinator
+        accessor fetches this repo-scoped evidence and validates the live
+        head both before and after the read; stages fail closed when it is
+        unavailable.
+        """
         ...
 
     # -- merge_wait surface (#1816) ------------------------------------------

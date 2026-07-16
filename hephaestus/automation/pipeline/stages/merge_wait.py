@@ -8,10 +8,11 @@ binding contract).
 
 ARM reads the live PR head, requires an authenticated strict-GO artifact for
 that exact head, requests squash auto-merge, and confirms that GitHub recorded
-the arm.  Any failed or ambiguous proof condition disables auto-merge and
-finishes failed; a merge observed in an arm race uses the normal deduplicated
-post-merge learn path.  POLL revalidates the proof before parking, so a head
-change revokes eligibility rather than waiting on a stale arm.
+the arm.  A failed or ambiguous proof condition disables auto-merge and fails
+back to ``strict_review``; inability to contain or persist the arm finishes
+failed. A merge observed in an arm race uses the normal deduplicated post-merge
+learn path. POLL revalidates the proof before parking, so a head change revokes
+eligibility rather than waiting on a stale arm.
 
 - States: ENTER -> ARM -> POLL -> LEARN_WAIT -> MW_FINISH.
 - ARM [M]: prepare proof from the live head, arm, confirm, then record the
@@ -89,7 +90,7 @@ def build_drive_green_learn_prompt(issue_number: int, pr_number: int) -> str:
 
 
 class MergeWaitStage(Stage):
-    """Stage: contain auto-merge until the strict-review gate is available."""
+    """Stage: arm only a current strict-review proof and contain drift."""
 
     def on_enter(self, item: WorkItem, ctx: StageContext) -> StageOutcome | None:
         """Initialize the mini-state; the durable arming lives in ARM.
@@ -155,12 +156,19 @@ class MergeWaitStage(Stage):
                 return self._route_merged(item, ctx)
             return terminal
         head_sha = str((pr_state or {}).get("headRefOid") or "")
+        has_go, _has_no_go = ctx.github.pr_has_implementation_state_label(item.pr)
+        if not has_go:
+            return self._disable_and_fail(item, ctx, "strict_gate_unavailable", recoverable=True)
         artifact_reader = getattr(ctx.github, "strict_review_artifact", None)
         artifact = artifact_reader(item.pr, head_sha) if callable(artifact_reader) else None
-        if artifact is None or not bool(getattr(artifact, "is_go", False)):
-            return self._disable_and_fail(item, ctx, "strict_gate_unavailable")
+        if (
+            artifact is None
+            or not bool(getattr(artifact, "is_go", False))
+            or str(getattr(artifact, "head_sha", "")).lower() != head_sha.lower()
+        ):
+            return self._disable_and_fail(item, ctx, "strict_gate_unavailable", recoverable=True)
         try:
-            ctx.github.arm_auto_merge(item.pr)
+            ctx.github.arm_auto_merge(item.pr, head_sha)
         except Exception as exc:
             raced = ctx.github.gh_pr_state(item.pr)
             raced_terminal = _terminal_pr_outcome(raced, item.pr)
@@ -175,24 +183,53 @@ class MergeWaitStage(Stage):
             if confirmed_terminal.disposition is Disposition.FINISH_PASS:
                 return self._route_merged(item, ctx)
             return confirmed_terminal
-        if not (confirmed or {}).get("autoMergeRequest"):
-            return self._disable_and_fail(item, ctx, "arm_confirm_failed")
-        if item.issue is not None:
-            try:
-                ctx.github.arm_drive_green(item.issue, item.pr, head_sha)
-            except Exception as exc:
-                logger.error(
-                    "merge_wait: failed to persist arm record for PR #%d: %s",
-                    item.pr,
-                    exc,
-                )
-                return self._disable_and_fail(item, ctx, "arm_record_failed")
+        confirmed_head = str((confirmed or {}).get("headRefOid") or "")
+        confirmed_has_go, _confirmed_has_no_go = ctx.github.pr_has_implementation_state_label(
+            item.pr
+        )
+        confirmed_artifact = (
+            artifact_reader(item.pr, confirmed_head) if callable(artifact_reader) else None
+        )
+        if (
+            confirmed_head != head_sha
+            or not (confirmed or {}).get("autoMergeRequest")
+            or not confirmed_has_go
+            or confirmed_artifact is None
+            or not bool(getattr(confirmed_artifact, "is_go", False))
+            or str(getattr(confirmed_artifact, "head_sha", "")).lower() != head_sha.lower()
+        ):
+            return self._disable_and_fail(item, ctx, "arm_confirm_failed", recoverable=True)
+        if not self._record_arm(item, ctx, head_sha):
+            return self._disable_and_fail(item, ctx, "arm_record_failed")
         item.armed = True
         return Continue(next_state=POLL)
 
     @staticmethod
-    def _disable_and_fail(item: WorkItem, ctx: StageContext, note: str) -> StageOutcome:
-        """Contain a failed gate condition by disabling auto-merge first."""
+    def _record_arm(item: WorkItem, ctx: StageContext, head_sha: str) -> bool:
+        """Persist a linked issue's arm record; orphan PRs have no learn scope."""
+        if item.issue is None or item.pr is None:
+            return True
+        try:
+            ctx.github.arm_drive_green(item.issue, item.pr, head_sha)
+        except Exception as exc:
+            logger.error(
+                "merge_wait: failed to persist arm record for PR #%d: %s",
+                item.pr,
+                exc,
+            )
+            return False
+        return True
+
+    @staticmethod
+    def _disable_and_fail(
+        item: WorkItem, ctx: StageContext, note: str, *, recoverable: bool = False
+    ) -> StageOutcome:
+        """Contain a failed gate condition before routing its outcome.
+
+        Proof and head drift are recoverable only after containment and a
+        fresh strict-review pass. Failures to disable auto-merge or to persist
+        an arm record stay terminal because their remote state is ambiguous.
+        """
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
         try:
@@ -205,7 +242,8 @@ class MergeWaitStage(Stage):
             )
             return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_disable_failed")
         item.armed = False
-        return StageOutcome(Disposition.FINISH_FAIL, note)
+        disposition = Disposition.FAIL_BACK if recoverable else Disposition.FINISH_FAIL
+        return StageOutcome(disposition, note)
 
     def _poll(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """POLL only the post-merge state needed for the deduped learn path."""
@@ -215,9 +253,16 @@ class MergeWaitStage(Stage):
         pr_state_str = ((gh_state or {}).get("state") or "").upper()
         if pr_state_str not in {"MERGED", "CLOSED"}:
             head_sha = str((gh_state or {}).get("headRefOid") or "")
+            has_go, _has_no_go = ctx.github.pr_has_implementation_state_label(item.pr)
             artifact_reader = getattr(ctx.github, "strict_review_artifact", None)
             artifact = artifact_reader(item.pr, head_sha) if callable(artifact_reader) else None
-            if item.armed and artifact is not None and bool(getattr(artifact, "is_go", False)):
+            if (
+                item.armed
+                and has_go
+                and artifact is not None
+                and bool(getattr(artifact, "is_go", False))
+                and str(getattr(artifact, "head_sha", "")).lower() == head_sha.lower()
+            ):
                 started = item.payload.get("merge_wait_started_at")
                 if started is None:
                     return StageOutcome(Disposition.FINISH_FAIL, "missing_merge_wait_started_at")
@@ -226,18 +271,7 @@ class MergeWaitStage(Stage):
                 # performs another merge mutation from this state.
                 item.payload["retry_delay_s"] = 30
                 return StageOutcome(Disposition.RETRY, "merge_pending")
-            try:
-                ctx.github.defer_auto_merge(item.pr)
-            except Exception as exc:
-                logger.error(
-                    "merge_wait:%s: failed to verify auto-merge disabled for PR #%d: %s",
-                    item.issue,
-                    item.pr,
-                    exc,
-                )
-                return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_disable_failed")
-            item.armed = False
-            return StageOutcome(Disposition.FINISH_FAIL, "strict_gate_unavailable")
+            return self._disable_and_fail(item, ctx, "strict_gate_unavailable", recoverable=True)
 
         started = item.payload.get("merge_wait_started_at")
         if started is None:
@@ -263,7 +297,7 @@ class MergeWaitStage(Stage):
         disabled by config — finishes PASS immediately without dispatching
         the session.
         """
-        if not getattr(ctx.config, "enable_learn", True):
+        if item.issue is None or not getattr(ctx.config, "enable_learn", True):
             return StageOutcome(Disposition.FINISH_PASS, "merged")
         if item.issue is not None and ctx.github.drive_green_learn_terminal(item.issue):
             logger.info(

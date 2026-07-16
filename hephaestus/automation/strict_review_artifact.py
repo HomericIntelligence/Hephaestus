@@ -38,9 +38,9 @@ STRICT_REVIEW_ARTIFACT_MARKER = "<!-- hephaestus-strict-review: v1 -->"
 MAX_ARTIFACT_BYTES = 20_000
 
 _HEADER_RE = re.compile(
-    r"\AHead-SHA:\s*([0-9a-fA-F]{40})\n"
-    r"Digest:\s*([0-9a-fA-F]{64})\n"
-    r"Verdict:\s*(GO|NOGO)\n",
+    r"\AHead-SHA: ([0-9a-fA-F]{40})\n"
+    r"Digest: ([0-9a-fA-F]{64})\n"
+    r"Verdict: (GO|NOGO)\n",
 )
 
 
@@ -88,13 +88,16 @@ def render_strict_review_artifact(head_sha: str, verdict_body: str, *, is_go: bo
         raise ValueError(f"head_sha must be a 40-character hex commit SHA, got {head_sha!r}")
     verdict_token = "GO" if is_go else "NOGO"
     digest = _digest(head_sha, verdict_token, verdict_body)
-    return (
+    rendered = (
         f"{STRICT_REVIEW_ARTIFACT_MARKER}\n"
         f"Head-SHA: {head_sha}\n"
         f"Digest: {digest}\n"
         f"Verdict: {verdict_token}\n"
         f"\n{verdict_body}"
     )
+    if len(rendered.encode("utf-8")) > MAX_ARTIFACT_BYTES:
+        raise ValueError("strict-review artifact exceeds the byte limit")
+    return rendered
 
 
 def parse_strict_review_artifact(body: str) -> ParsedStrictArtifact | None:
@@ -114,11 +117,10 @@ def parse_strict_review_artifact(body: str) -> ParsedStrictArtifact | None:
     """
     if len(body.encode("utf-8")) > MAX_ARTIFACT_BYTES:
         return None
-    if not body.startswith(STRICT_REVIEW_ARTIFACT_MARKER):
+    prefix = f"{STRICT_REVIEW_ARTIFACT_MARKER}\n"
+    if not body.startswith(prefix):
         return None
-    rest = body[len(STRICT_REVIEW_ARTIFACT_MARKER) :]
-    if rest.startswith("\n"):
-        rest = rest[1:]
+    rest = body[len(prefix) :]
     match = _HEADER_RE.match(rest)
     if match is None:
         return None
