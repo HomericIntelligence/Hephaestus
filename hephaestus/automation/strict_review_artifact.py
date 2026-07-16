@@ -14,7 +14,7 @@ Grammar (a single PR/issue comment body):
     Digest: <sha256-hex-of-verdict-body>
     Verdict: GO|NOGO
 
-    <verdict body — the reviewer's full output>
+    <verdict body — ending in the reviewer's exact Grade/Verdict contract>
 
 Every field is on its own line, in this exact order, immediately after the
 marker line. ``parse_strict_review_artifact`` returns ``None`` on ANY
@@ -42,6 +42,18 @@ _HEADER_RE = re.compile(
     r"Digest: ([0-9a-fA-F]{64})\n"
     r"Verdict: (GO|NOGO)\n",
 )
+
+# The artifact's authenticated header cannot be trusted independently of the
+# reviewer output it digests.  Keep this grammar identical to the strict gate:
+# arbitrary review prose may precede it, but the final two lines are the sole
+# machine verdict and must agree with the header token.
+_FINAL_VERDICT_RE = re.compile(r"(?m)^Grade: ([A-F][+-]?)\nVerdict: (GO|NOGO)[ \t]*\n?\Z")
+
+
+def _final_verdict_token(verdict_body: str) -> str | None:
+    """Return the exact terminal machine verdict from a strict-review body."""
+    match = _FINAL_VERDICT_RE.search(verdict_body)
+    return match.group(2) if match is not None else None
 
 
 @dataclass(frozen=True)
@@ -87,6 +99,10 @@ def render_strict_review_artifact(head_sha: str, verdict_body: str, *, is_go: bo
     if not re.fullmatch(r"[0-9a-fA-F]{40}", head_sha):
         raise ValueError(f"head_sha must be a 40-character hex commit SHA, got {head_sha!r}")
     verdict_token = "GO" if is_go else "NOGO"
+    if _final_verdict_token(verdict_body) != verdict_token:
+        raise ValueError(
+            "strict-review artifact body must end in the matching Grade/Verdict contract"
+        )
     digest = _digest(head_sha, verdict_token, verdict_body)
     rendered = (
         f"{STRICT_REVIEW_ARTIFACT_MARKER}\n"
@@ -104,9 +120,9 @@ def parse_strict_review_artifact(body: str) -> ParsedStrictArtifact | None:
     """Parse and digest-verify an artifact comment body.
 
     Returns ``None`` on ANY of: missing/wrong marker, oversized body,
-    malformed header grammar, or a digest that does not match the trailing
-    verdict body — a partial or tampered artifact is never partially
-    trusted.
+    malformed header grammar, a body whose final machine verdict is missing or
+    contradicts the header, or a digest that does not match the trailing
+    verdict body — a partial or tampered artifact is never partially trusted.
 
     Args:
         body: The full raw comment body.
@@ -130,6 +146,8 @@ def parse_strict_review_artifact(body: str) -> ParsedStrictArtifact | None:
         verdict_body = verdict_body[1:]
     actual_digest = _digest(head_sha, verdict_token, verdict_body)
     if actual_digest.lower() != digest.lower():
+        return None
+    if _final_verdict_token(verdict_body) != verdict_token:
         return None
     return ParsedStrictArtifact(
         head_sha=head_sha.lower(),

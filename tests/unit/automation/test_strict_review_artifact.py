@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,7 +13,9 @@ import pytest
 import hephaestus.automation.pipeline_github as pg
 from hephaestus.automation.strict_review_artifact import (
     MAX_ARTIFACT_BYTES,
+    STRICT_REVIEW_ARTIFACT_MARKER,
     parse_strict_review_artifact,
+    render_strict_review_artifact,
 )
 
 _HEAD_SHA = "a" * 40
@@ -62,6 +65,18 @@ def _read_artifact(
     return adapter.strict_review_artifact(71, _HEAD_SHA)
 
 
+def _digest_valid_artifact(*, header_verdict: str, verdict_body: str) -> str:
+    """Build a syntactically ordered, digest-valid artifact for parser negatives."""
+    digest = hashlib.sha256(f"{_HEAD_SHA}\n{header_verdict}\n{verdict_body}".encode()).hexdigest()
+    return (
+        f"{STRICT_REVIEW_ARTIFACT_MARKER}\n"
+        f"Head-SHA: {_HEAD_SHA}\n"
+        f"Digest: {digest}\n"
+        f"Verdict: {header_verdict}\n\n"
+        f"{verdict_body}"
+    )
+
+
 def test_valid_automation_artifact_round_trips_for_its_exact_head(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -105,6 +120,37 @@ def test_valid_nogo_artifact_never_authorizes(
     )
 
     assert _read_artifact(adapter, monkeypatch, body=published["body"]) is None
+
+
+@pytest.mark.parametrize(
+    ("header_verdict", "verdict_body"),
+    [
+        ("GO", "The review looks good but omitted its final contract."),
+        ("GO", "Grade: F\nVerdict: NOGO"),
+        ("NOGO", "Grade: A\nVerdict: GO"),
+    ],
+)
+def test_digest_valid_artifact_still_requires_matching_final_machine_verdict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    header_verdict: str,
+    verdict_body: str,
+) -> None:
+    """Digest/authorship cannot elevate a malformed or contradictory reviewer body."""
+    adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+    malformed = _digest_valid_artifact(
+        header_verdict=header_verdict,
+        verdict_body=verdict_body,
+    )
+
+    assert parse_strict_review_artifact(malformed) is None
+    assert _read_artifact(adapter, monkeypatch, body=malformed) is None
+
+
+def test_render_rejects_a_body_without_matching_final_machine_verdict() -> None:
+    """The producer cannot create an artifact the strict parser would reject."""
+    with pytest.raises(ValueError, match="matching Grade/Verdict"):
+        render_strict_review_artifact(_HEAD_SHA, "Grade: F\nVerdict: NOGO", is_go=True)
 
 
 def test_foreign_marker_does_not_block_automation_artifact_publication(
