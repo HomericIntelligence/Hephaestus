@@ -24,6 +24,39 @@ CLOSED_STATE = {"state": "CLOSED"}
 OPEN_STATE = {"state": "OPEN", "mergeStateStatus": "BEHIND", "headRefOid": "abc123"}
 
 
+class _StrictGoArtifact:
+    """Minimal trusted-proof value used at the merge-wait boundary."""
+
+    is_go = True
+
+
+class _ProofAwareGitHub(FakeStageGitHub):
+    """Fake with scripted head reads and the #2055 proof accessor."""
+
+    def __init__(self, *, states: list[dict[str, Any]], proof: object | None) -> None:
+        super().__init__(pr_state=states[0])
+        self._states = list(states)
+        self._proof = proof
+
+    def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
+        del pr_number
+        if len(self._states) > 1:
+            return self._states.pop(0)
+        return self._states[0]
+
+    def strict_review_artifact(self, pr_number: int, head_sha: str) -> object | None:
+        self._log("strict_review_artifact", pr_number, head_sha)
+        return self._proof
+
+
+class _MergeDuringArmGitHub(_ProofAwareGitHub):
+    """The auto-merge request loses a race to an already-merged PR."""
+
+    def arm_auto_merge(self, pr_number: int) -> None:
+        self._log("arm_auto_merge", pr_number)
+        raise RuntimeError("PR was merged before auto-merge could be armed")
+
+
 class _MarkFailGitHub(FakeStageGitHub):
     """mark_drive_green_learn_result raises (learn-record write failed)."""
 
@@ -152,6 +185,69 @@ class TestMergeWaitContainment:
         item = _item(make_work_item, pr=None, state=ARM)
 
         assert stage.step(item, ctx) == StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+
+    def test_missing_current_head_proof_disables_without_attempting_to_arm(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A label or prior review cannot replace a proof for this live head."""
+        stage = MergeWaitStage()
+        github = _ProofAwareGitHub(states=[OPEN_STATE], proof=None)
+        ctx = make_ctx(github=github)
+        item = _item(make_work_item, state=ARM)
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "strict_gate_unavailable"
+        )
+        assert github.mutation_log == [
+            ("strict_review_artifact", (601, "abc123")),
+            ("defer_auto_merge", (601,)),
+        ]
+        assert item.armed is False
+
+    def test_arm_failure_after_remote_merge_uses_the_deduped_learn_path(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An arm exception must not hide that the PR merged in the race window."""
+        stage = MergeWaitStage()
+        github = _MergeDuringArmGitHub(
+            states=[
+                OPEN_STATE,
+                {"state": "MERGED", "headRefOid": "abc123", "mergedAt": "now"},
+            ],
+            proof=_StrictGoArtifact(),
+        )
+        ctx = make_ctx(github=github)
+        item = _item(make_work_item, state=ARM)
+
+        assert stage.step(item, ctx) == Continue(next_state=LEARN_WAIT)
+        assert item.payload["merge_wait_started_at"] == 1001.0
+        assert github.mutation_log == [
+            ("strict_review_artifact", (601, "abc123")),
+            ("arm_auto_merge", (601,)),
+        ]
+
+    def test_arm_confirmation_failure_disables_auto_merge_again(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An unconfirmed arm must be revoked rather than treated as eligible."""
+        stage = MergeWaitStage()
+        github = _ProofAwareGitHub(
+            states=[
+                OPEN_STATE,
+                {"state": "OPEN", "headRefOid": "abc123", "autoMergeRequest": None},
+            ],
+            proof=_StrictGoArtifact(),
+        )
+        ctx = make_ctx(github=github)
+        item = _item(make_work_item, state=ARM)
+
+        assert stage.step(item, ctx) == StageOutcome(Disposition.FINISH_FAIL, "arm_confirm_failed")
+        assert github.mutation_log == [
+            ("strict_review_artifact", (601, "abc123")),
+            ("arm_auto_merge", (601,)),
+            ("defer_auto_merge", (601,)),
+        ]
+        assert item.armed is False
 
     def test_on_enter_initializes_enter_and_unknown_state_fails(
         self, make_ctx: Any, make_work_item: Any
