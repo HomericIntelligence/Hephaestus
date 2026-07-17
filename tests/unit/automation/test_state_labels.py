@@ -174,9 +174,9 @@ class TestIsEpic:
     """``is_epic`` excludes epic/roadmap TRACKING issues from the planning loop.
 
     An issue is an epic iff it carries an ``epic``/``roadmap`` label
-    (case-insensitive) OR its title contains ``epic``/``roadmap``. Native
-    GitHub issue types are not exposed by the installed ``gh``, so label +
-    title are the only available signals.
+    (case-insensitive) OR its title LEADS with ``epic``/``roadmap`` (within
+    the first three words, #2251). Native GitHub issue types are not exposed
+    by the installed ``gh``, so label + title are the only available signals.
     """
 
     def test_epic_label_marks_epic(self) -> None:
@@ -197,6 +197,23 @@ class TestIsEpic:
     def test_title_marker_does_not_match_inside_identifier(self) -> None:
         """Function names like skip_epics are code tasks, not epic trackers."""
         assert is_epic([], title="repo _discover calls skip_epics unguarded") is False
+
+    def test_mid_title_mention_is_not_epic(self) -> None:
+        """A bug report ABOUT epic handling is a code task (#2251).
+
+        Issue #2245 was skip-parked because its title mentioned "epic
+        labels" mid-sentence; only a title that LEADS with the marker names
+        a tracking issue.
+        """
+        assert (
+            is_epic([], title="Multi-repo loop tags state:skip epic labels on the wrong repo")
+            is False
+        )
+        assert is_epic([], title="Fix discovery so the roadmap is not re-planned") is False
+
+    def test_hyphenated_leading_marker_is_epic(self) -> None:
+        """Hyphens are token boundaries: a leading roadmap-YYYY still counts."""
+        assert is_epic([], title="Roadmap-2026 planning umbrella") is True
 
     def test_title_match_is_case_insensitive(self) -> None:
         assert is_epic([], title="EPIC umbrella issue") is True

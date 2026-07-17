@@ -149,6 +149,14 @@ def is_skipped(labels: Iterable[str]) -> bool:
     return has_label(labels, STATE_SKIP)
 
 
+#: How many leading whitespace-separated title tokens the ``is_epic`` title
+#: fallback inspects. Tracking issues LEAD with the marker ("Epic: ...",
+#: "Q3 Roadmap tracking"); an issue that merely mentions epics mid-sentence
+#: (e.g. a bug report about epic handling, #2251) is a code task and must
+#: not be excluded from planning.
+_EPIC_TITLE_LEADING_TOKENS = 3
+
+
 def is_epic(labels: Iterable[str], title: str = "") -> bool:
     """Return ``True`` iff the issue is an epic/roadmap tracking issue.
 
@@ -157,7 +165,11 @@ def is_epic(labels: Iterable[str], title: str = "") -> bool:
 
     * it carries a label whose name is in :data:`EPIC_LABELS`
       (``epic`` / ``roadmap``), **or**
-    * its ``title`` contains one of those markers as a standalone token.
+    * its ``title`` LEADS with one of those markers as a standalone token —
+      within the first :data:`_EPIC_TITLE_LEADING_TOKENS` words. A marker
+      appearing later in the title is a mention, not the naming convention
+      (#2251: a bug report titled "...tags state:skip epic labels..." was
+      skip-parked by the anywhere-in-title match).
 
     The title fallback catches the convention even when the label was not
     applied. Pure function (no I/O) so both discovery paths and unit tests can
@@ -173,9 +185,9 @@ def is_epic(labels: Iterable[str], title: str = "") -> bool:
     """
     if {label.lower() for label in labels} & set(EPIC_LABELS):
         return True
-    lowered_title = title.lower()
+    leading_title = " ".join(title.lower().split()[:_EPIC_TITLE_LEADING_TOKENS])
     return any(
-        re.search(rf"(?<![a-z0-9_]){re.escape(marker)}(?![a-z0-9_])", lowered_title)
+        re.search(rf"(?<![a-z0-9_]){re.escape(marker)}(?![a-z0-9_])", leading_title)
         for marker in EPIC_LABELS
     )
 
