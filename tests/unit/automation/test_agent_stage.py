@@ -51,9 +51,7 @@ def test_build_parser_supports_prompt_dir_override(tmp_path: Path) -> None:
     """The stage CLI should honor the shared CLI-only prompt overlay selector."""
     template = tmp_path / "agent_stage" / "skill_prefix.j2"
     template.parent.mkdir()
-    template.write_text(
-        "HARNESS {{ stage }}\n{{ skill_text }}\n{{ prompt }}\n", encoding="utf-8"
-    )
+    template.write_text("HARNESS {{ stage }}\n{{ skill_text }}\n{{ prompt }}\n", encoding="utf-8")
 
     prompt_file = tmp_path / "prompt.md"
     skill_file = tmp_path / "skill.md"
