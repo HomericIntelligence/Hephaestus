@@ -26,8 +26,6 @@ importers continue to work unchanged.
 # or ``prompts._STRICT_GRADING_AND_ANTI_INFLATION``. The ``as`` aliases tell
 # ruff these are intentional re-exports, not unused imports.
 from ._shared import (
-    _TERSE_OUTPUT_DIRECTIVE as _TERSE_OUTPUT_DIRECTIVE,
-    _UNTRUSTED_NOTICE as _UNTRUSTED_NOTICE,
     FencedContent as FencedContent,
     _fence_untrusted as _fence_untrusted,
     _iteration_guidance as _iteration_guidance,
@@ -36,6 +34,8 @@ from ._shared import (
     _prompts_logger as _prompts_logger,
     _relativize_path as _relativize_path,
     fence_content as fence_content,
+    get_terse_output_directive as get_terse_output_directive,
+    get_untrusted_notice as get_untrusted_notice,
 )
 from ._strict_rubric import (
     _FULL_SWEEP_SUFFIX as _FULL_SWEEP_SUFFIX,
@@ -49,25 +49,14 @@ from ._strict_rubric import (
     _STRICT_REVIEW_OUTPUT_FORMAT as _STRICT_REVIEW_OUTPUT_FORMAT,
     _STRICT_REVIEW_RUBRIC as _STRICT_REVIEW_RUBRIC,
 )
-from .address_review import (
-    ADDRESS_REVIEW_PROMPT,
-    build_unaddressed_directive,
-    get_address_review_prompt,
-)
+from .address_review import build_unaddressed_directive, get_address_review_prompt
 from .advise import (
-    ADVISE_PROMPT,
-    CODEX_ADVISE_PROMPT,
     get_advise_prompt,
     get_advise_prompt_builder,
     get_codex_advise_prompt,
 )
-from .follow_up import FOLLOW_UP_PROMPT, get_follow_up_prompt
+from .follow_up import get_follow_up_prompt
 from .implementation import (
-    DIRTY_REUSED_WORKTREE_DECISION_PROMPT,
-    DIRTY_REUSED_WORKTREE_PROMPT,
-    IMPL_LOOP_REVIEW_PROMPT,
-    IMPL_RESUME_FEEDBACK_PROMPT,
-    IMPLEMENTATION_PROMPT,
     get_dirty_reused_worktree_decision_prompt,
     get_dirty_reused_worktree_prompt,
     get_impl_loop_review_prompt,
@@ -75,15 +64,11 @@ from .implementation import (
     get_implementation_prompt,
 )
 from .planning import (
-    PLAN_LOOP_REVIEW_PROMPT,
-    PLAN_PROMPT,
-    PLAN_REVIEW_PROMPT,
     get_plan_loop_review_prompt,
     get_plan_prompt,
     get_plan_review_prompt,
 )
 from .pr_review import (
-    PR_REVIEW_ANALYSIS_PROMPT,
     get_comment_difficulty_prompt,
     get_pr_description,
     get_pr_review_analysis_prompt,
@@ -91,19 +76,6 @@ from .pr_review import (
 )
 
 __all__ = [
-    "ADDRESS_REVIEW_PROMPT",
-    "ADVISE_PROMPT",
-    "CODEX_ADVISE_PROMPT",
-    "DIRTY_REUSED_WORKTREE_DECISION_PROMPT",
-    "DIRTY_REUSED_WORKTREE_PROMPT",
-    "FOLLOW_UP_PROMPT",
-    "IMPLEMENTATION_PROMPT",
-    "IMPL_LOOP_REVIEW_PROMPT",
-    "IMPL_RESUME_FEEDBACK_PROMPT",
-    "PLAN_LOOP_REVIEW_PROMPT",
-    "PLAN_PROMPT",
-    "PLAN_REVIEW_PROMPT",
-    "PR_REVIEW_ANALYSIS_PROMPT",
     "FencedContent",
     "build_unaddressed_directive",
     "fence_content",
@@ -124,4 +96,6 @@ __all__ = [
     "get_pr_description",
     "get_pr_review_analysis_prompt",
     "get_review_validation_prompt",
+    "get_terse_output_directive",
+    "get_untrusted_notice",
 ]

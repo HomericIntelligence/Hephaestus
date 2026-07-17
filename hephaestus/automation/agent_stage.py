@@ -17,6 +17,7 @@ from hephaestus.agents.runtime import (
 from hephaestus.automation.agent_config import normalize_claude_model
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 from hephaestus.io.utils import write_secure
+from hephaestus.prompts import PromptCatalog
 from hephaestus.utils.terminal import install_sigtstp_only, terminal_guard
 
 
@@ -60,12 +61,8 @@ def read_prompt(prompt_file: Path, skill_file: Path | None, stage: str) -> str:
     if skill_file is None:
         return prompt
     skill_text = skill_file.read_text(encoding="utf-8")
-    return (
-        f"You are running Hephaestus agent stage `{stage}`.\n\n"
-        "Use these skill instructions as authoritative context for this stage:\n\n"
-        f"{skill_text}\n\n"
-        "---\n\n"
-        f"{prompt}"
+    return PromptCatalog.current().render(
+        "agent_stage/skill_prefix.j2", stage=stage, skill_text=skill_text, prompt=prompt
     )
 
 

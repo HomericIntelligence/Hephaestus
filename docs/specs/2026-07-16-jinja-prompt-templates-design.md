@@ -21,7 +21,7 @@ an input artifact, not a Hephaestus default template.
 ## Layout
 
 ```
-hephaestus/automation/prompts/
+hephaestus/prompts/
   templates/
     default/
       address_review/
@@ -56,16 +56,16 @@ missing variables fail closed and preserve existing prompt formatting.
 Python owns dynamic/safety-sensitive values.  In particular, it creates the
 per-render nonce and fully fenced untrusted-content blocks before passing them
 to the template.  Templates never construct a fence around raw GitHub content.
-The catalog permits only registered template names and reports the resolved
-source for diagnostics.
+The catalog accepts only safe, relative `.j2` paths.  Prompt builders own the
+set of template names they render; an override cannot escape its selected
+directory or cause arbitrary Python-source loading.
 
 ## Override resolution
 
 The prompt root has the established Hephaestus precedence:
 
-1. explicit `--prompt-dir PATH` command option;
-2. `HEPHAESTUS_PROMPT_DIR` environment variable;
-3. packaged `templates/default` resources.
+1. optional explicit `--prompt-dir PATH` command option, when supplied;
+2. packaged `templates/default` resources.
 
 An override root must be an existing directory.  It is layered ahead of the
 packaged default loader: an override file wins; a missing file falls through
@@ -76,13 +76,12 @@ callers may construct and pass a catalog directly.
 
 ## Compatibility and tests
 
-Before deleting a Python literal, representative deterministic workloads are
-captured as legacy parity fixtures.  The test suite renders every built-in
-prompt variant that changes text (provider, review iteration, prior-review,
-nitpick, and fenced-content paths) and asserts exact equality with its legacy
-fixture.  Separate tests cover template fragments, partial harness overrides,
-override failures, strict undefined values, package-resource loading, and
-wheel/sdist inclusion.
+Before deleting a Python literal, deterministic representative workloads are
+captured as legacy parity fixtures.  The test suite covers complete prompts,
+shared fragments, partial harness overrides, strict undefined values,
+package-resource loading, and wheel/sdist inclusion.  The migration must add
+coverage for every text-changing variant (provider, review iteration,
+prior-review, nitpick, and fenced-content paths) before it is complete.
 
 The parity fixture is a deliberate compatibility oracle, not a prose-quality
 snapshot: the product requirement is exact instantiated prompt preservation.

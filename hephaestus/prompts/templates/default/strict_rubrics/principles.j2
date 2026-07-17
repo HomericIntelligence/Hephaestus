@@ -1,0 +1,67 @@
+
+**Software-engineering principles (graded — each can DROP a verdict, not just keep it):**
+
+P1 — KISS — Keep It Simple Stupid.
+    Is this the simplest solution that meets the requirement? Flag any
+    abstraction layer, generic interface, configuration knob, or
+    indirection without a current concrete consumer. Robust ≠ defensive
+    cruft. A robust simple solution beats a defensive complex one.
+
+P2 — YAGNI — You Ain't Gonna Need It.
+    Every diff hunk / planned-change must map to a stated requirement
+    in THIS issue. Flag scope creep, opportunistic refactors mixed in,
+    or "while we're here" additions. Features built for hypothetical
+    future requirements are findings.
+    CARVE-OUT — toolchain-forced incidental churn is ACCEPTABLE and
+    must NOT be flagged as YAGNI/scope-creep: edits the linter,
+    formatter, or pre-commit hooks FORCE in order to land the change
+    (whitespace/formatting normalization, import sorting, trailing-
+    newline fixes, type annotations required to pass mypy, lint
+    auto-fixes). The test is intent, not size: churn the toolchain
+    requires is fine; churn the author CHOSE (opportunistic refactors,
+    unrelated rewrites, "while we're here" feature work) is still a
+    finding.
+
+P3 — TDD — Test Driven Development.
+    Do tests drive the implementation? Look for test-first evidence:
+    tests that define behavior contracts, high coverage of edge cases,
+    and tests that landed alongside (not after) the code. For plan
+    reviews: does the plan name the tests that will define each
+    acceptance criterion? For impl reviews: does the diff include tests
+    proportional to the production code?
+
+P4 — DRY — Don't Repeat Yourself.
+    If two near-identical code/text blocks exist, prefer extracting a
+    helper — UNLESS the extraction would itself add complexity. Flag
+    BOTH "left duplicated where it should be DRYed" AND "DRYed
+    prematurely into an over-general helper". Cite specific
+    duplications with file:line.
+
+P5 — SOLID — five sub-principles, grade each that applies:
+    - SRP (Single Responsibility): each module/class/function has ONE
+      reason to change.
+    - OCP (Open-Closed): open for extension, closed for modification.
+    - LSP (Liskov Substitution): subtypes substitutable for base types.
+    - ISP (Interface Segregation): no client forced to depend on
+      methods it doesn't use.
+    - DIP (Dependency Inversion): high-level depends on abstractions,
+      not concretions.
+    Flag the specific sub-principle violated; vague "SOLID violation"
+    is insufficient.
+
+P6 — Modularity — develop independent modules through well-defined
+    interfaces. Evaluate coupling, cohesion, and whether module
+    boundaries align with domain boundaries. Flag implicit coupling
+    (shared globals, unexported state, hidden initialization order).
+
+P7 — POLA — Principle Of Least Astonishment.
+    Create intuitive and predictable interfaces. Flag surprising
+    defaults, inconsistent naming, non-obvious side effects, silent
+    failures, or behavior that contradicts the docstring/name.
+
+**Verdict floor (mandatory):** if ANY of P1–P7 reveals a critical or
+major finding, the verdict CANNOT be GO even if every other
+dimension scores A. Reviewer must explicitly downgrade and cite the
+offending principle by name (e.g. "Verdict: NOGO — P2/YAGNI: diff adds
+a config flag with no current consumer; P7/POLA: new flag's default
+inverts the existing convention.").

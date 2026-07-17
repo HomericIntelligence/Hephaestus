@@ -27,6 +27,7 @@ from hephaestus.agents.runtime import (
     run_agent_text,
     uses_direct_agent_runner,
 )
+from hephaestus.automation.prompts.catalog import PromptCatalog
 from hephaestus.cli.utils import (
     configure_cli_logging,
     configure_github_throttle_from_args,
@@ -109,18 +110,8 @@ def _build_coordinator_prompt(prs: list[dict[str, Any]]) -> str:
     The 'EXECUTE - do not return a plan' wording follows team knowledge;
     the 'do not background' wording follows known agent patterns.
     """
-    lines = [
-        "You are auditing multiple open PRs. EXECUTE the audit - do NOT return a plan.",
-        "For EACH PR listed below, emit ONE ```json fenced block with keys:",
-        "  pr_number (int), verdict (one of: GO|NOGO|UNSURE),",
-        "  summary (str, <= 500 chars), findings (list[str]).",
-        "Do NOT background. Do NOT exit early. Read-only tools only (Read/Grep/Glob).",
-        "",
-        "Open PRs:",
-    ]
-    for pr in prs:
-        lines.append(f"- PR #{pr['number']}: {pr['title']} ({pr.get('url', '')})")
-    return "\n".join(lines)
+    prs_text = "\n".join(f"- PR #{pr['number']}: {pr['title']} ({pr.get('url', '')})" for pr in prs)
+    return PromptCatalog.current().render("audit/coordinator.j2", prs_text=prs_text)
 
 
 def run_audit_coordinator(

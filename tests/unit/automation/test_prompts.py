@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 
 from hephaestus.automation import prompts
+from hephaestus.automation.prompts._shared import get_untrusted_notice
 
 
 class TestImplementationPrompt:
@@ -426,7 +427,7 @@ class TestUntrustedFencing:
             issue_body=self.INJECTION,
         )
         assert self._fence_present(out, "ISSUE_BODY")
-        assert prompts._UNTRUSTED_NOTICE in out
+        assert get_untrusted_notice() in out
 
     def test_plan_loop_review_prompt_fences_untrusted_fields(self) -> None:
         """get_plan_loop_review_prompt fences all untrusted planning-loop fields."""
@@ -445,7 +446,7 @@ class TestUntrustedFencing:
         assert self._fence_present(out, "ADVISE_FINDINGS")
         assert self._fence_present(out, "PLAN_TEXT")
         assert self._fence_present(out, "PRIOR_REVIEW")
-        assert prompts._UNTRUSTED_NOTICE in out
+        assert get_untrusted_notice() in out
 
     def test_plan_review_prompt_fences_untrusted_fields(self) -> None:
         """get_plan_review_prompt fences title, body, and plan text."""
@@ -458,7 +459,7 @@ class TestUntrustedFencing:
         assert self._fence_present(out, "ISSUE_TITLE")
         assert self._fence_present(out, "ISSUE_BODY")
         assert self._fence_present(out, "PLAN_TEXT")
-        assert prompts._UNTRUSTED_NOTICE in out
+        assert get_untrusted_notice() in out
 
     def test_impl_loop_review_prompt_fences_untrusted_fields(self) -> None:
         """get_impl_loop_review_prompt fences issue_body and diff_text."""
@@ -473,7 +474,7 @@ class TestUntrustedFencing:
         )
         assert self._fence_present(out, "ISSUE_BODY")
         assert self._fence_present(out, "DIFF_TEXT")
-        assert prompts._UNTRUSTED_NOTICE in out
+        assert get_untrusted_notice() in out
 
     def test_pr_review_analysis_prompt_fences_advise_findings(self) -> None:
         """get_pr_review_analysis_prompt fences advise findings before review."""
@@ -485,7 +486,7 @@ class TestUntrustedFencing:
         )
         assert self._fence_present(out, "ISSUE_BODY")
         assert self._fence_present(out, "ADVISE_FINDINGS")
-        assert prompts._UNTRUSTED_NOTICE in out
+        assert get_untrusted_notice() in out
 
     def test_dirty_reused_worktree_decision_prompt_fences_status_and_diff(self) -> None:
         """Dirty worktree branch/status/diff inputs are untrusted and fenced."""
@@ -497,7 +498,7 @@ class TestUntrustedFencing:
         assert self._fence_present(out, "BRANCH_NAME")
         assert self._fence_present(out, "GIT_STATUS")
         assert self._fence_present(out, "GIT_DIFF_HEAD")
-        assert prompts._UNTRUSTED_NOTICE in out
+        assert get_untrusted_notice() in out
 
     def test_refactored_prompt_builders_include_untrusted_notice(self) -> None:
         """Prompt builders using shared fencing still carry the notice."""
@@ -590,7 +591,7 @@ class TestUntrustedFencing:
         ]
 
         for name, out in rendered_prompts:
-            assert prompts._UNTRUSTED_NOTICE in out, name
+            assert get_untrusted_notice() in out, name
 
 
 class TestSharedRubricConstants:
