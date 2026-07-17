@@ -26,6 +26,7 @@ def test_legacy_prompt_constant_remains_a_jinja_backed_format_template() -> None
     from hephaestus.automation.prompts import PLAN_PROMPT
 
     assert PLAN_PROMPT.format(issue_number=99) == get_plan_prompt(99)
+    assert PLAN_PROMPT.format("unused positional argument", issue_number=99) == get_plan_prompt(99)
 
 
 def test_harness_template_replaces_only_the_matching_default(tmp_path: Path) -> None:

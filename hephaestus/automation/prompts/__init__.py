@@ -111,8 +111,11 @@ class _LegacyPromptTemplate(str):
 
     def format(self, *args: Any, **kwargs: Any) -> str:
         """Render through Jinja while preserving the historical ``.format`` API."""
-        if args:
-            return super().format(*args, **kwargs)
+        # The legacy templates only used named replacement fields, so callers
+        # could (and did) pass otherwise-unused positional values.  ``str``
+        # accepts those extras; preserve that permissiveness while rendering
+        # the external Jinja source instead of applying ``str.format`` to it.
+        del args
         return PromptCatalog.current().render(self._template_name, **kwargs)
 
 
