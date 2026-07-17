@@ -53,6 +53,21 @@ def test_default_catalog_has_no_implicit_override() -> None:
     assert get_plan_prompt(12).startswith("\nCreate an implementation plan")
 
 
+def test_later_cli_parse_without_prompt_dir_resets_prior_override(tmp_path: Path) -> None:
+    """An in-process CLI invocation cannot leak its overlay into the next one."""
+    template = tmp_path / "planning" / "plan.j2"
+    template.parent.mkdir()
+    template.write_text("CLI {{ issue_number }}\n", encoding="utf-8")
+
+    parser = build_automation_parser("test parser")
+    parser.parse_args(["--prompt-dir", str(tmp_path)])
+    assert get_plan_prompt(42) == "CLI 42\n"
+
+    parser.parse_args([])
+
+    assert get_plan_prompt(42).startswith("\nCreate an implementation plan")
+
+
 def test_harness_can_override_a_shared_prompt_fragment(tmp_path: Path) -> None:
     """A shared fragment override applies inside an otherwise default prompt."""
     fragment = tmp_path / "shared" / "terse_output_directive.j2"

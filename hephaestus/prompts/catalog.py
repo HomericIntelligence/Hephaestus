@@ -100,6 +100,23 @@ class _PromptDirAction(argparse.Action):
 
 def add_prompt_dir_argument(parser: argparse.ArgumentParser) -> None:
     """Add the optional CLI-only harness prompt override selector."""
+    # ``PromptCatalog.current()`` is used by prompt builders that do not receive
+    # an explicit catalog.  Reset that process-local selection before every
+    # parse, including parses without ``--prompt-dir``: a previous in-process
+    # command must not leak its harness overlay into the next command.
+    if not getattr(parser, "_hephaestus_prompt_catalog_reset", False):
+        parse_known_args = parser.parse_known_args
+
+        def reset_catalog_before_parse(
+            args: Sequence[str] | None = None,
+            namespace: argparse.Namespace | None = None,
+        ) -> tuple[argparse.Namespace, list[str]]:
+            PromptCatalog.clear_current()
+            return parse_known_args(args, namespace)
+
+        parser.parse_known_args = reset_catalog_before_parse  # type: ignore[assignment]
+        parser._hephaestus_prompt_catalog_reset = True  # type: ignore[attr-defined]
+
     parser.add_argument(
         "--prompt-dir",
         type=Path,
