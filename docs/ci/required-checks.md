@@ -63,10 +63,10 @@ The merge-group payload has no `pull_request` object, so the job posts its same
 successful context through a merge-group-only step while the code, build,
 security, schema, and test jobs validate the synthetic commit.
 
-Odysseus is the sole activation authority. This repository PR must not mutate
-live rulesets or branch protection. After this workflow change merges and
-receives human workflow review, the Odysseus operator may stage the repository
-ruleset's `merge_queue` rule with the approved policy: `SQUASH`, `ALLGREEN`,
+The designated rollout operator applies the live configuration. This repository
+PR must not mutate live rulesets or branch protection. After this workflow
+change merges, the operator may stage the repository ruleset's `merge_queue`
+rule with the approved policy: `SQUASH`, `ALLGREEN`,
 maximum 10 queue builds, maximum 5 merged entries per group, minimum 1 entry,
 a 5-minute minimum wait, and a 60-minute check timeout. Activation remains
 incomplete until the issue records the live read-back and a representative

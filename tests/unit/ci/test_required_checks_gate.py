@@ -111,18 +111,12 @@ class TestRequiredChecksGate:
             "merges; see issue #1514 and docs/ci/required-checks.md"
         )
 
-    def test_required_workflow_has_expected_code_and_policy_triggers(
+    def test_required_workflow_cannot_replace_code_validation_on_non_code_events(
         self, workflow: dict[object, Any]
     ) -> None:
-        """Only code events and a policy-only body edit may trigger this workflow."""
+        """Non-code events must not emit skipped heavy-job contexts for a code head."""
         trigger = workflow[True]["pull_request"]
-        assert trigger["types"] == [
-            "opened",
-            "synchronize",
-            "reopened",
-            "edited",
-            "ready_for_review",
-        ]
+        assert trigger["types"] == ["opened", "synchronize", "reopened", "ready_for_review"]
 
     def test_strict_review_proof_uses_a_trusted_base_workflow(self, jobs: dict[str, Any]) -> None:
         """A candidate PR must not control the executable merge-authorization verifier."""

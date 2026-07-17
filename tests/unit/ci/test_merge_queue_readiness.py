@@ -29,7 +29,6 @@ PULL_REQUEST_TYPES = [
     "opened",
     "synchronize",
     "reopened",
-    "edited",
     "ready_for_review",
 ]
 
@@ -87,19 +86,10 @@ def test_required_workflows_preserve_pull_request_and_push_behavior() -> None:
 
 @pytest.mark.parametrize(
     "action",
-    ["edited"],
-)
-def test_policy_only_pull_request_actions_skip_heavy_jobs(action: str, tmp_path: Path) -> None:
-    """Policy refresh events must not spend runners on code checks."""
-    assert _changes_gate_code_event(action, tmp_path) is False
-
-
-@pytest.mark.parametrize(
-    "action",
-    ["", "opened", "synchronize", "reopened", "ready_for_review", "checks_requested"],
+    ["", "opened", "synchronize", "reopened", "ready_for_review", "checks_requested", "edited"],
 )
 def test_code_and_merge_group_actions_run_heavy_jobs(action: str, tmp_path: Path) -> None:
-    """Code-bearing PR, push, and merge-group events must retain full CI."""
+    """The gate never permits a skipped heavy-job context for a shared head."""
     assert _changes_gate_code_event(action, tmp_path) is True
 
 
