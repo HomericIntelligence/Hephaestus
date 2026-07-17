@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +12,6 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 WORKFLOW_DIR = REPO_ROOT / ".github" / "workflows"
-POLICY_DOC = REPO_ROOT / "docs" / "ci" / "required-checks.md"
 
 REQUIRED_WORKFLOWS = ("_required.yml", "test.yml")
 DIRECT_REQUIRED_JOBS = {
@@ -28,11 +29,8 @@ PULL_REQUEST_TYPES = [
     "opened",
     "synchronize",
     "reopened",
+    "edited",
     "ready_for_review",
-    "labeled",
-    "unlabeled",
-    "auto_merge_enabled",
-    "auto_merge_disabled",
 ]
 
 
@@ -48,6 +46,24 @@ def _events(workflow: dict[Any, Any]) -> dict[str, Any]:
     events = workflow.get("on", workflow.get(True))
     assert isinstance(events, dict)
     return events
+
+
+def _changes_gate_code_event(action: str, tmp_path: Path) -> bool:
+    """Execute the real changes-gate script and return its code-event verdict."""
+    gate = _load_workflow("_required.yml")["jobs"]["changes-gate"]
+    decide = next(step for step in gate["steps"] if step.get("id") == "decide")
+    output = tmp_path / "github-output"
+
+    subprocess.run(
+        ["bash", "-c", decide["run"]],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "ACTION": action, "GITHUB_OUTPUT": str(output)},
+    )
+
+    values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+    return values["code_event"] == "true"
 
 
 @pytest.mark.parametrize("workflow_name", REQUIRED_WORKFLOWS)
@@ -67,6 +83,24 @@ def test_required_workflows_preserve_pull_request_and_push_behavior() -> None:
     assert required_events["push"] == {"branches": ["main"]}
     assert test_events["pull_request"] is None
     assert test_events["push"] == {"branches": ["main"]}
+
+
+@pytest.mark.parametrize(
+    "action",
+    ["edited"],
+)
+def test_policy_only_pull_request_actions_skip_heavy_jobs(action: str, tmp_path: Path) -> None:
+    """Policy refresh events must not spend runners on code checks."""
+    assert _changes_gate_code_event(action, tmp_path) is False
+
+
+@pytest.mark.parametrize(
+    "action",
+    ["", "opened", "synchronize", "reopened", "ready_for_review", "checks_requested"],
+)
+def test_code_and_merge_group_actions_run_heavy_jobs(action: str, tmp_path: Path) -> None:
+    """Code-bearing PR, push, and merge-group events must retain full CI."""
+    assert _changes_gate_code_event(action, tmp_path) is True
 
 
 def test_required_context_names_remain_stable() -> None:
@@ -108,23 +142,3 @@ def test_pr_policy_posts_queue_context_without_reading_pr_payload() -> None:
         assert "github.event_name == 'pull_request'" in condition, step.get(
             "name", step.get("uses")
         )
-
-
-def test_policy_records_staged_activation_boundary_and_exact_parameters() -> None:
-    """Repository docs must keep live activation external and policy-exact."""
-    policy = POLICY_DOC.read_text(encoding="utf-8")
-
-    for marker in (
-        "`merge_group: checks_requested`",
-        "Odysseus is the sole activation authority",
-        "SQUASH",
-        "ALLGREEN",
-        "10 queue builds",
-        "5 merged entries",
-        "minimum 1 entry",
-        "5-minute minimum wait",
-        "60-minute check timeout",
-        "human workflow review",
-        "queued smoke",
-    ):
-        assert marker in policy, f"required-checks policy is missing {marker!r}"

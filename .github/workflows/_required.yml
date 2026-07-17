@@ -7,12 +7,13 @@ on:
   pull_request:
     # This workflow is the sole source of code-validation contexts. Label and
     # auto-merge events are deliberately handled by dedicated policy/proof
-    # workflows: a skipped heavy job reports a successful context, so allowing
-    # those events here could mask a still-running or failed code-event check.
+    # workflows. An edited PR body needs the policy gate to re-evaluate, but
+    # must not re-run heavy code checks for the unchanged head SHA.
     types:
       - opened
       - synchronize
       - reopened
+      - edited
       - ready_for_review
   push:
     branches: [main]
@@ -27,9 +28,8 @@ permissions:
   contents: read
 
 jobs:
-  # The trigger admits only code events, so every dependent job runs. Retain a
-  # single output because the code-event contract is consumed by each job and
-  # makes a future trigger broadening explicit in review.
+  # The edited action refreshes PR policy only; all code and merge-group events
+  # run the full validation set. The output keeps the distinction explicit.
   changes-gate:
     name: changes-gate
     runs-on: ubuntu-24.04
@@ -43,8 +43,16 @@ jobs:
           ACTION: ${{ github.event.action }}
         run: |
           set -euo pipefail
-          echo "code_event=true" >> "$GITHUB_OUTPUT"
-          echo "Code event (${ACTION:-push}) — all validation jobs run."
+          case "$ACTION" in
+            edited)
+              echo "code_event=false" >> "$GITHUB_OUTPUT"
+              echo "PR body edit — heavy jobs skipped; policy jobs run."
+              ;;
+            *)
+              echo "code_event=true" >> "$GITHUB_OUTPUT"
+              echo "Code event (${ACTION:-push}) — heavy jobs run."
+              ;;
+          esac
 
   forbid-suppressions:
     name: forbid-suppressions
