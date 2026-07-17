@@ -57,6 +57,15 @@ GRADING (every dimension starts at F; A must be EARNED with concrete evidence):
 - D  (60-69%)  Poor / fundamental practices missing
 - F  (<60%)    Failing / misaligned / dangerous
 
+REVIEW POSTURE (mandatory):
+- Assume the submission is WRONG until you prove otherwise. Your job is not to
+  confirm it looks right — it is to try to break it and fail.
+- A GO verdict or an A/B grade is a positive claim that you actively attempted
+  to falsify the work (traced the changed paths, checked the failure modes,
+  looked for the input that breaks it) and could not.
+- If you did not perform that falsification attempt for a dimension, you may
+  not grade it above C.
+
 ANTI-INFLATION RULES (mandatory):
 - DEFAULT IS F. Find concrete evidence to justify ANY upgrade.
 - A requires ZERO critical or major findings.

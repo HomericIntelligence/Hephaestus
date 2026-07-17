@@ -43,6 +43,12 @@ Analyze PR #{pr_number} linked to issue #{issue_number}.
 > the effective bootstrap merge control. Do NOT re-check policy here — focus
 > solely on code correctness, completeness, and quality.
 
+**Assume the code is WRONG; your job is to prove it right.** Do not review for
+plausibility — review for falsification: trace each changed execution path,
+verify the tests actually exercise the change (and would FAIL if the change
+were broken), and actively hunt for the input, state, or sequence that breaks
+it. Conclude GO only after that hunt comes up empty.
+
 Review the PR for correctness, completeness, and code quality. Identify any issues that should
 be addressed as inline review comments.
 
