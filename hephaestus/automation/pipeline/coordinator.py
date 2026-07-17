@@ -129,8 +129,11 @@ from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_GO
 logger = logging.getLogger(__name__)
 
 #: Warn when any stage.step() call exceeds this duration (seconds) — the
-#: stage protocol promises short (<~5s) main-thread steps.
-_STEP_WATCHDOG_S = 5.0
+#: stage protocol promises short (<~15s) main-thread steps. 5s proved too
+#: tight in practice: routine repo-stage steps (clone + label reads over the
+#: network) breached it on nearly every multi-repo run, burying real stalls
+#: in noise (#2247).
+_STEP_WATCHDOG_S = 15.0
 
 #: Grace period for graceful shutdown (drain in-flight jobs up to this long).
 _DEFAULT_GRACE_S = 30.0
@@ -1125,7 +1128,7 @@ class Coordinator:
     def _step_with_watchdog(
         self, stage: Stage, item: WorkItem, ctx: StageContext
     ) -> StageStepResult:
-        """Run one stage.step, warning when it breaches the <~5s contract."""
+        """Run one stage.step, warning when it breaches the <~15s contract."""
         t0 = time.monotonic()
         result = stage.step(item, ctx)
         elapsed = time.monotonic() - t0
