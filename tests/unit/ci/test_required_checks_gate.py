@@ -111,10 +111,10 @@ class TestRequiredChecksGate:
             "merges; see issue #1514 and docs/ci/required-checks.md"
         )
 
-    def test_required_workflow_cannot_replace_code_validation_on_label_events(
+    def test_required_workflow_cannot_replace_code_validation_on_non_code_events(
         self, workflow: dict[object, Any]
     ) -> None:
-        """Label updates must not emit skipped heavy-job contexts for a code head."""
+        """Non-code events must not emit skipped heavy-job contexts for a code head."""
         trigger = workflow[True]["pull_request"]
         assert trigger["types"] == ["opened", "synchronize", "reopened", "ready_for_review"]
 

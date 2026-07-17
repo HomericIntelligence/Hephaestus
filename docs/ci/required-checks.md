@@ -48,6 +48,30 @@ between two independently-green PRs — is rare and caught post-merge by CI on
 `main`, so it does not justify the churn. `strict: false` lets a green PR merge
 regardless of how far behind `main` it is.
 
+## Merge queue readiness and activation boundary
+
+The two workflows that supply required contexts, `_required.yml` and
+`test.yml`, handle `merge_group: checks_requested` in addition to their existing
+`pull_request` and `push` events. The queue therefore evaluates the same three
+classic contexts and nine direct ruleset contexts listed above against the
+synthetic merge-group commit. Context names, workflow permissions, and release
+triggers are unchanged.
+
+`pr-policy` is the repository-specific exception: PR body and commit-policy
+checks run on the source `pull_request`, whose payload contains the PR metadata.
+The merge-group payload has no `pull_request` object, so the job posts its same
+successful context through a merge-group-only step while the code, build,
+security, schema, and test jobs validate the synthetic commit.
+
+The designated rollout operator applies the live configuration. This repository
+PR must not mutate live rulesets or branch protection. After this workflow
+change merges, the operator may stage the repository ruleset's `merge_queue`
+rule with the approved policy: `SQUASH`, `ALLGREEN`,
+maximum 10 queue builds, maximum 5 merged entries per group, minimum 1 entry,
+a 5-minute minimum wait, and a 60-minute check timeout. Activation remains
+incomplete until the issue records the live read-back and a representative
+queued smoke result; issue #2243 stays open for those post-merge steps.
+
 ## Aggregate workflow coverage
 
 `_required.yml` defines ~20 code-validation jobs (`lint`, `pr-policy`, `unit-tests`,
