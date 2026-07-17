@@ -424,6 +424,7 @@ else
         if [ "$os_id" != "ubuntu" ] && [ "$os_id" != "debian" ]; then
             check_fail "tailscale — pinned install requires Ubuntu or Debian (found ID='$os_id'); install manually from https://tailscale.com/download"
         else
+            # shellcheck disable=SC1091
             codename="$(. /etc/os-release && echo "${VERSION_CODENAME:-noble}")"
             keyring="/usr/share/keyrings/tailscale-archive-keyring.gpg"
             listfile="/etc/apt/sources.list.d/tailscale.list"

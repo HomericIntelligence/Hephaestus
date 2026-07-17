@@ -247,19 +247,19 @@ jobs:
         assert validate_workflow(wf) == []
 
 
-class TestStrictGateBootstrapWorkflow:
-    """Regression tests for the temporary fail-closed auto-merge policy."""
+class TestStrictGateWorkflow:
+    """Regression tests for queue-owned strict-review auto-merge policy."""
 
     def test_label_triggered_auto_merge_workflow_is_removed(self) -> None:
         """No privileged label-event workflow can bypass the strict gate."""
         assert not AUTO_MERGE_ON_GO_WORKFLOW.exists()
 
-    def test_advisory_policy_requires_auto_merge_to_remain_disabled(self) -> None:
-        """The baseline warns on every open armed PR without waiting or arming."""
+    def test_advisory_policy_reports_without_authorizing_an_arm(self) -> None:
+        """The workflow reports state; the queue remains the sole armer."""
         text = REQUIRED_WORKFLOW.read_text(encoding="utf-8")
         assert "auto-merge-policy" in text
-        assert "strict-review gate is unavailable" in text
-        assert "auto-merge is disabled pending the queue-owned strict-review gate" in text
+        assert "queue-owned strict-review and merge-wait controls are authoritative" in text
+        assert "auto-merge is currently disabled" in text
         assert "Waiting for label-triggered auto-merge workflow" not in text
         assert "gh pr merge $PR_NUMBER --auto --squash" not in text
         assert "sleep 10" not in text

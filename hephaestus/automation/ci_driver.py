@@ -2,22 +2,23 @@
 
 Epic #1809 made the queue-based pipeline
 (:mod:`hephaestus.automation.pipeline.coordinator`) the single implementation
-of the drive-green (``ci`` → ``merge_wait``) flow. This module is now the
+of the drive-green (``strict_review`` → ``ci`` → ``merge_wait``) flow. This module is now the
 console-script entry point only: :func:`main` parses the historical CI-driver
 argument surface (``--issues`` / ``--prs``, ``--max-fix-iterations``, the
 poll/timeout + GitHub-throttle flags, ``--all`` / bot-PR toggles), builds a
 :class:`~hephaestus.automation.pipeline.coordinator.PipelineConfig` trimmed to
-the ``(ci, merge_wait)`` stage scope via
+the ``(strict_review, ci, merge_wait)`` stage scope via
 :class:`~hephaestus.automation.pipeline.routing.PipelineScope`, seeds the
 requested issues / PRs (and, in no-scope discovery mode, the repo-wide failing-PR
 sweep via ``drive_green_all``), and dispatches to
 :func:`~hephaestus.automation.pipeline.coordinator.run_pipeline`.
 
 The per-issue drive-green orchestration the legacy ``CIDriver`` used to own
-(discover → rebase → poll → fix → push → contain auto-merge → stop until the
-strict-review gate exists) now lives entirely in ``pipeline/stages/ci.py`` and
-``pipeline/stages/merge_wait.py``. The pure classifiers those stages share with
-the legacy loop live in ``ci_run_coordinator.py`` (``classify_ci_state`` /
+(independent review → discover → rebase → poll → fix → push → conditionally arm
+the reviewed head) now lives in ``pipeline/stages/strict_review.py``,
+``pipeline/stages/ci.py``, and ``pipeline/stages/merge_wait.py``. The pure
+classifiers those stages share with the legacy loop live in
+``ci_run_coordinator.py`` (``classify_ci_state`` /
 ``classify_pr_merge_state``); the PR-discovery semantics live in
 ``pr_discovery.py``. :class:`CIDriver` is retained as an importable placeholder
 for the package's public API surface (:mod:`hephaestus.automation`); it no longer
@@ -65,12 +66,12 @@ logger = logging.getLogger(__name__)
 # re-exported above for backward compatibility — ``_pr_is_failing`` below and
 # ``loop_repo_manager._count_failing_prs`` both consume it from here.
 
-#: Contiguous stage subset the CI-driver CLI runs: the CI drive-green loop
-#: (CI) followed by the containment-only merge-wait stage (MERGE_WAIT).
-#: CiStage's ADVANCE target (MERGE_WAIT) is in scope, so a green PR flows
-#: straight into merge_wait; that stage verifies auto-merge is disabled and
-#: finishes with ``strict_gate_unavailable`` until #2055 supplies the gate.
-_CI_DRIVER_SCOPE_STAGES: frozenset[StageName] = frozenset({StageName.CI, StageName.MERGE_WAIT})
+#: Contiguous stage subset the CI-driver CLI runs: independent strict review,
+#: CI drive-green, then the sole conditional merge-wait arm. A green PR reaches
+#: merge_wait only after an exact-head strict-GO proof, which it revalidates.
+_CI_DRIVER_SCOPE_STAGES: frozenset[StageName] = frozenset(
+    {StageName.STRICT_REVIEW, StageName.CI, StageName.MERGE_WAIT}
+)
 
 
 def _pr_is_failing(pr: dict[str, Any]) -> bool:
@@ -262,16 +263,16 @@ def _resolve_repo() -> tuple[str, str]:
 
 
 def main() -> int:
-    """Execute the CI driver workflow via the pipeline (ci → merge_wait scope).
+    """Execute the CI driver workflow via strict_review → ci → merge_wait.
 
     Parses the historical CI-driver argument surface, builds a
-    :class:`PipelineConfig` scoped to ``(ci, merge_wait)``, and dispatches to
-    the coordinator. Seeding is coordinator-owned: ``--issues`` route each
-    issue's open PR (implementation-go → CI), ``--prs`` route each PR by its
-    implementation-go label (``pr_discovery`` semantics), and — in no-scope
-    discovery mode (neither ``--issues`` nor ``--prs``) — ``drive_green_all``
-    plus repo discovery unions every open failing PR on the repo (the legacy
-    failing-PR / bot-PR sweep).
+    :class:`PipelineConfig` scoped to ``(strict_review, ci, merge_wait)``, and
+    dispatches to the coordinator. Seeding is coordinator-owned: ``--issues``
+    route each issue's open PR (implementation-go → strict_review), ``--prs``
+    route each PR by its implementation-go label (``pr_discovery`` semantics),
+    and — in no-scope discovery mode (neither ``--issues`` nor ``--prs``) —
+    ``drive_green_all`` plus repo discovery unions every open failing PR on the
+    repo (the legacy failing-PR / bot-PR sweep).
 
     Returns:
         Exit code: the coordinator's exit code (0 clean, non-zero on
@@ -294,7 +295,7 @@ def main() -> int:
 
     log = logging.getLogger(__name__)
     log.info(
-        "Starting CI driver (pipeline, ci→merge_wait scope) for issues: %s, direct PRs: %s",
+        "Starting CI driver (strict_review→ci→merge_wait) for issues: %s, direct PRs: %s",
         args.issues or "<discovery mode>",
         args.prs,
     )

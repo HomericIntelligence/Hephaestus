@@ -31,9 +31,14 @@ from hephaestus.automation.pipeline.events import (
     ZeroThreadNogoAction,
 )
 from hephaestus.automation.pipeline.jobs import AgentJob, JobHandle, JobResult
-from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
+from hephaestus.automation.pipeline.routing import (
+    Disposition,
+    PipelineScope,
+    StageName,
+    StageOutcome,
+)
 from hephaestus.automation.pipeline.seeding import SeedEntry
-from hephaestus.automation.pipeline.stages import Continue
+from hephaestus.automation.pipeline.stages import Continue, StrictReviewEvidence
 from hephaestus.automation.pipeline.stages.base import JobRequest
 from hephaestus.automation.pipeline.stages.pr_review import (
     REVIEW_ERROR_RETRY_CAP,
@@ -314,6 +319,46 @@ class TestQuiescence:
         reasons = sorted(result.reason for result in coordinator.ledger)
         assert any(reason.startswith("poisoned: boom") for reason in reasons)
         assert any(reason == "fine" for reason in reasons)
+
+    def test_direct_pr_worktree_completion_advances_without_resubmitting(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Coordinator completion order preserves a direct PR's synced worktree."""
+        head = "a" * 40
+        github = FakeStageGitHub(
+            pr_state={"state": "OPEN", "headRefOid": head, "autoMergeRequest": None},
+            pr_head_branch="strict-review-pr-601",
+            strict_evidence=StrictReviewEvidence(
+                head_sha=head,
+                issue_title="Strict-review task",
+                issue_body="Review the current head.",
+                diff="diff --git a/file.py b/file.py\n+change",
+                ci_status="checks clean",
+                prior_pr_review_verdict="Grade: A\nVerdict: GO",
+            ),
+        )
+        coordinator, pool, _ = make_coordinator(tmp_path, monkeypatch, github=github)
+        pool.queue_result(JobResult(ok=True, value={"path": str(tmp_path / "pr-601")}))
+        item = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.PR,
+            issue=1,
+            pr=601,
+            stage=StageName.STRICT_REVIEW,
+            state="HEAD_CHECK",
+        )
+
+        coordinator._run_item(item)
+        coordinator._drain_completions()
+
+        worktree_jobs = [
+            handle.job
+            for handle in pool.submitted
+            if getattr(handle.job, "op", "") == "create_worktree"
+        ]
+        assert len(worktree_jobs) == 1
+        assert item.worktree == str(tmp_path / "pr-601")
+        assert any(isinstance(handle.job, AgentJob) for handle in pool.submitted)
 
 
 def _fake_in_flight_item(coordinator: Coordinator, item: WorkItem) -> JobHandle:
@@ -1442,6 +1487,156 @@ class TestPipelineScopeWiring:
         assert entries[0].issue_body == "Use the real issue body."
         assert item.payload["issue_title"] == "Hydrate planner context"
         assert item.payload["issue_body"] == "Use the real issue body."
+
+    def test_direct_merged_pr_with_pending_arm_record_reenters_merge_wait(
+        self, tmp_path: Path
+    ) -> None:
+        """A restarted drive must not drop the post-merge learn handoff (#2055)."""
+
+        class _RecoveryGitHub(FakeStageGitHub):
+            def pending_drive_green_arms(self) -> list[tuple[int, int]]:
+                return [(2055, 601)]
+
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            prs=[601],
+            projects_dir=tmp_path,
+            scope=PipelineScope(frozenset({StageName.MERGE_WAIT})),
+        )
+        github = _RecoveryGitHub(
+            pr_issue=2055,
+            pr_state={"state": "MERGED", "headRefOid": "a" * 40},
+        )
+        coordinator = Coordinator(
+            config, github=github, pool=FakeWorkerPool(), install_signals=False
+        )
+
+        entries = coordinator._seed_direct_scope("repo-a")
+
+        assert len(entries) == 1
+        assert entries[0].stage is StageName.MERGE_WAIT
+        assert entries[0].issue_number == 2055
+        assert entries[0].merge_wait_recovery is True
+
+    def test_direct_open_pr_with_pending_arm_record_bypasses_strict_review(
+        self, tmp_path: Path
+    ) -> None:
+        """An explicit PR restart preserves its durable arm handoff too."""
+
+        class _RecoveryGitHub(FakeStageGitHub):
+            def pending_drive_green_arms(self) -> list[tuple[int, int]]:
+                return [(2055, 601)]
+
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            prs=[601],
+            projects_dir=tmp_path,
+            scope=PipelineScope(frozenset({StageName.MERGE_WAIT})),
+        )
+        coordinator = Coordinator(
+            config,
+            github=_RecoveryGitHub(
+                pr_issue=2055,
+                pr_state={"state": "OPEN", "headRefOid": "a" * 40},
+            ),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+
+        entries = coordinator._seed_direct_scope("repo-a")
+        item = coordinator._entry_to_item(entries[0], "repo-a")
+
+        assert len(entries) == 1
+        assert entries[0].stage is StageName.MERGE_WAIT
+        assert entries[0].merge_wait_recovery is True
+        assert item.payload["merge_wait_recovery"] is True
+
+    def test_repo_recovery_seed_marks_merge_wait_reconstruction(self, tmp_path: Path) -> None:
+        """The no-CLI-scope recovery scan carries the same stage handoff."""
+
+        class _RecoveryGitHub(FakeStageGitHub):
+            def pending_drive_green_arms(self) -> list[tuple[int, int]]:
+                return [(2055, 601)]
+
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            projects_dir=tmp_path,
+            scope=PipelineScope(frozenset({StageName.MERGE_WAIT})),
+        )
+        coordinator = Coordinator(
+            config,
+            github=_RecoveryGitHub(),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+
+        entries = coordinator._pending_arm_recovery_entries()
+        item = coordinator._entry_to_item(entries[0], "repo-a")
+
+        assert len(entries) == 1
+        assert entries[0].stage is StageName.MERGE_WAIT
+        assert entries[0].merge_wait_recovery is True
+        assert item.payload["merge_wait_recovery"] is True
+
+    def test_direct_merged_issue_with_pending_arm_record_reenters_merge_wait(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue-scoped restart preserves the same post-merge learn handoff."""
+
+        class _RecoveryGitHub(FakeStageGitHub):
+            def pending_drive_green_arms(self) -> list[tuple[int, int]]:
+                return [(2055, 601)]
+
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            issues=[2055],
+            projects_dir=tmp_path,
+            scope=PipelineScope(frozenset({StageName.MERGE_WAIT})),
+        )
+        github = _RecoveryGitHub(merged_pr=601)
+        coordinator = Coordinator(
+            config, github=github, pool=FakeWorkerPool(), install_signals=False
+        )
+
+        entries = coordinator._seed_direct_scope("repo-a")
+
+        assert len(entries) == 1
+        assert entries[0].stage is StageName.MERGE_WAIT
+        assert entries[0].pr_number == 601
+        assert entries[0].merge_wait_recovery is True
+
+    def test_issue_scoped_pending_arm_recovers_before_closed_issue_filter(
+        self, tmp_path: Path
+    ) -> None:
+        """A merged PR's closed issue still restores its unconsumed learn record."""
+
+        class _RecoveryGitHub(FakeStageGitHub):
+            def pending_drive_green_arms(self) -> list[tuple[int, int]]:
+                return [(2055, 601)]
+
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            issues=[2055],
+            projects_dir=tmp_path,
+            scope=PipelineScope(frozenset({StageName.MERGE_WAIT})),
+        )
+        coordinator = Coordinator(
+            config,
+            github=_RecoveryGitHub(merged_pr=601),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+
+        assert coordinator._seed_pass() == 1
+        assert coordinator.items[0].stage is StageName.MERGE_WAIT
+        assert coordinator.items[0].issue == 2055
+        assert coordinator.items[0].pr == 601
+        assert coordinator.items[0].payload["merge_wait_recovery"] is True
 
     def test_seed_pass_filters_closed_explicit_issues_before_classification(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

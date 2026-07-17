@@ -1,6 +1,6 @@
 """FinishedStage tests: ledger record, cleanup branches (#1817).
 
-Doc section "8. finished": record ItemResult [M]; worktree cleanup [W:G] —
+Doc section "finished": record ItemResult [M]; worktree cleanup [W:G] —
 remove on pass, preserve on fail (preserved list feeds the summary footer).
 Terminal: no outgoing routes.
 """
@@ -69,7 +69,11 @@ def _item(
 def _finished_doc_section() -> str:
     """Return the architecture doc's finished-stage section."""
     text = ARCHITECTURE_DOC.read_text(encoding="utf-8")
-    match = re.search(r"### 8\. finished\n(?P<section>.*?)(?=\n## ROUTES table)", text, re.S)
+    match = re.search(
+        r"^### \d+\. finished\n(?P<section>.*?)(?=^## ROUTES table)",
+        text,
+        re.M | re.S,
+    )
     assert match is not None
     return match.group("section")
 

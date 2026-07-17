@@ -36,6 +36,12 @@ class AgentJob:
     prompt_kwargs: dict[str, Any] = field(default_factory=dict)
     output_format: str = "text"
     parse: Callable[[str], Any] | None = None  # e.g. claude_invoke.parse_review_verdict
+    # When present, the worker captures ``git rev-parse HEAD`` in ``cwd`` and
+    # refuses to invoke the agent unless it equals this remote-reviewed SHA.
+    expected_head_sha: str = ""
+    # Existing agent jobs retain the established write-capable default; the
+    # independent strict-review stage explicitly requests ``read-only``.
+    sandbox: str = "workspace-write"
     descr: str = ""
 
 

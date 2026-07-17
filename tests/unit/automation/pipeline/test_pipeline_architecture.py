@@ -206,6 +206,22 @@ def test_legacy_auto_merge_coordinator_is_fail_closed() -> None:
     assert any(isinstance(node, ast.Constant) and node.value is False for node in ast.walk(method))
 
 
+def test_merge_wait_is_the_sole_pipeline_auto_merge_armer() -> None:
+    """Only the post-proof merge-wait stage may call the arming capability."""
+    callers: set[str] = set()
+    for path in _PIPELINE.glob("stages/*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        if any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "arm_auto_merge"
+            for node in ast.walk(tree)
+        ):
+            callers.add(path.stem)
+
+    assert callers == {"merge_wait"}
+
+
 def _sleep_violations(tree: ast.AST, filename: str, *, allow_time_import: bool) -> list[str]:
     """AST-collect time.sleep usage/imports (issue #1816, AC1).
 

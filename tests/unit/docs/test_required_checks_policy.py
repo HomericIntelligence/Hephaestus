@@ -61,6 +61,7 @@ def test_policy_documents_live_dual_enforcement() -> None:
         "`required-checks-gate`",
         "`test (ubuntu-latest, 3.12, unit)`",
         "`test (ubuntu-latest, 3.12, integration)`",
+        "`strict-review-proof`",
     ):
         assert context in text
     for context in (
@@ -118,6 +119,7 @@ def test_runbook_validates_exact_live_context_inventories() -> None:
         "required-checks-gate",
         "test (ubuntu-latest, 3.12, unit)",
         "test (ubuntu-latest, 3.12, integration)",
+        "strict-review-proof",
     ]
     assert _runbook_contexts("expected_ruleset") == [
         "lint",

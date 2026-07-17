@@ -16,8 +16,9 @@ contract):
   ``payload["base_branch"]`` for REBASE_WAIT, mirroring merge_wait's
   ``_route_dirty``; verify the PR carries ``state:implementation-go``
   (``ctx.github.pr_has_implementation_state_label``, the legacy
-  ``_pr_has_implementation_go`` gate) — a PR without it fails back
-  ``not_implementation_go`` (routes to pr_review).
+  ``_pr_has_implementation_go`` gate) AND an authenticated strict-GO proof
+  for the same current head. A missing label or proof fails back to
+  ``strict_review``; CI maintenance is never a proof substitute.
 - REBASE_WAIT [W:G] -> REBASE_PUSH_WAIT [W:G]: optional mechanical rebase
   (re-housed ``_attempt_mechanical_rebase`` :1094 — the worker pool's
   ``op="rebase"`` is ``git_utils.rebase_worktree_onto``, which never
@@ -122,6 +123,7 @@ PUSH_WAIT = "PUSH_WAIT"
 POLL_DEADLINE = 25
 
 CI_POLL_STARTED_AT = "ci_poll_started_at"
+STRICT_REVIEW_PROVEN_HEAD = "strict_review_proven_head"
 
 
 def build_ci_fix_prompt(
@@ -296,9 +298,9 @@ class CiStage(Stage):
 
         Re-houses ``_drive_issue``'s entry facts: the drive needs an open PR
         (``pr_discovery`` semantics via ``ctx.github.find_pr_for_issue``) and
-        the PR must already carry ``state:implementation-go`` (the legacy
-        ``_pr_has_implementation_go`` gate) — a PR that lost or never had it
-        regresses to pr_review (``not_implementation_go``), never arms. The
+        the PR must already carry ``state:implementation-go`` plus an exact-
+        head strict-GO artifact — a PR that lost either regresses to
+        strict_review, never arms. The
         PR's real base ref is captured into ``payload["base_branch"]`` from
         the same ``gh_pr_state`` read (mirrors ``merge_wait._route_dirty``'s
         ``baseRefName`` capture), so REBASE_WAIT targets the PR's actual
@@ -318,9 +320,9 @@ class CiStage(Stage):
         if terminal is not None:
             return terminal
         try:
-            # A direct CI seed can carry a legacy implementation-GO label.
-            # Contain that PR before any worktree/CI work while #2055 adds
-            # the head-bound strict-review gate.
+            # A direct CI seed can carry a stale implementation-GO label.
+            # Contain it before any worktree/CI work; strict_review remains
+            # the only stage that can restore current-head eligibility.
             ctx.github.defer_auto_merge(item.pr)
         except Exception as e:
             logger.error(
@@ -360,6 +362,23 @@ class CiStage(Stage):
                 item.pr,
             )
             return StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
+        head_sha = str((gh_state or {}).get("headRefOid") or "")
+        if not head_sha:
+            logger.info(
+                "ci:%s: PR #%d head is unavailable; regressing to strict review",
+                item.issue,
+                item.pr,
+            )
+            return StageOutcome(Disposition.FAIL_BACK, "not_strict_review_go")
+        artifact = ctx.github.strict_review_artifact(item.pr, head_sha)
+        if artifact is None or not artifact.is_go or artifact.head_sha.lower() != head_sha.lower():
+            logger.info(
+                "ci:%s: PR #%d has no strict GO for its current head; regressing",
+                item.issue,
+                item.pr,
+            )
+            return StageOutcome(Disposition.FAIL_BACK, "not_strict_review_go")
+        item.payload[STRICT_REVIEW_PROVEN_HEAD] = head_sha
         return Continue(next_state=REBASE_WAIT)
 
     def _request_rebase(self, item: WorkItem, ctx: StageContext) -> StepResult:
@@ -478,6 +497,9 @@ class CiStage(Stage):
             return StageOutcome(Disposition.RETRY, "ci_pending")
         if conclusion in (CiConclusion.GREEN, CiConclusion.NO_CHECKS):
             # NO_CHECKS is the legacy "no CI configured" success case.
+            strict_outcome = self._verify_current_strict_proof(item, ctx)
+            if strict_outcome is not None:
+                return strict_outcome
             return StageOutcome(Disposition.ADVANCE, conclusion.value)
         # FAILING: enter the fix leg while budget remains.
         if item.attempts.get("ci_fix", 0) < ctx.budget("ci_fix"):
@@ -604,6 +626,7 @@ class CiStage(Stage):
                     "ci:%s: mechanical rebase failed (non-fatal): %s", item.issue, result.error
                 )
             return
+
         if item.state == FIX_WAIT:
             item.attempts["ci_fix"] = item.attempts.get("ci_fix", 0) + 1
             if not result.ok:
@@ -623,6 +646,36 @@ class CiStage(Stage):
                 item.payload.pop("ci_poll_count", None)
                 item.payload.pop("retry_delay_s", None)
             return
+
+    @staticmethod
+    def _verify_current_strict_proof(item: WorkItem, ctx: StageContext) -> StageOutcome | None:
+        """Reject CI success after any head-changing CI maintenance.
+
+        CI can mechanically rebase or push a repair after DISCOVER.  Those
+        writes invalidate the strict proof, so a green check is not enough to
+        reach merge_wait: the current head must still be the reviewed head and
+        carry both the label and exact-head authenticated GO artifact.
+        """
+        if item.pr is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        state = ctx.github.gh_pr_state(item.pr)
+        terminal = _terminal_pr_outcome(state, item.pr)
+        if terminal is not None:
+            return terminal
+        current_head = str((state or {}).get("headRefOid") or "")
+        proven_head = str(item.payload.get(STRICT_REVIEW_PROVEN_HEAD) or "")
+        has_go, _has_no_go = ctx.github.pr_has_implementation_state_label(item.pr)
+        artifact = ctx.github.strict_review_artifact(item.pr, current_head)
+        if (
+            not current_head
+            or current_head != proven_head
+            or not has_go
+            or artifact is None
+            or not artifact.is_go
+            or artifact.head_sha.lower() != current_head.lower()
+        ):
+            return StageOutcome(Disposition.FAIL_BACK, "not_strict_review_go")
+        return None
 
 
 def _ci_poll_max_wait(ctx: StageContext) -> int:

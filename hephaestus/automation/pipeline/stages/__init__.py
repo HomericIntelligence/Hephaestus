@@ -13,6 +13,9 @@ from .base import (
     StageGitHub,
     StageOutcome,
     StepResult,
+    StrictReviewArtifact,
+    StrictReviewEvidence,
+    StrictReviewLease,
 )
 from .ci import CiStage
 from .finished import FinishedStage
@@ -22,6 +25,7 @@ from .plan_review import PlanReviewStage
 from .planning import PlanningStage
 from .pr_review import PrReviewStage
 from .repo import RepoStage
+from .strict_review import StrictReviewStage
 
 __all__ = [
     "CiStage",
@@ -39,4 +43,8 @@ __all__ = [
     "StageGitHub",
     "StageOutcome",
     "StepResult",
+    "StrictReviewArtifact",
+    "StrictReviewEvidence",
+    "StrictReviewLease",
+    "StrictReviewStage",
 ]

@@ -74,3 +74,19 @@ class TestFileLock:
         # Must not raise, and must not require/lock anything.
         with file_lock(tmp_path / "x.lock"):
             pass
+
+    def test_no_fcntl_required_lock_fails_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-idempotent caller can reject a no-op lock on Windows."""
+        real_import = builtins.__import__
+
+        def fake_import(name: str, *args: object, **kwargs: object) -> object:
+            if name == "fcntl":
+                raise ImportError("simulated: no fcntl on this platform")
+            return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+        with pytest.raises(LockUnavailableError, match="Exclusive file locking is unavailable"):
+            with file_lock(tmp_path / "x.lock", require_exclusive=True):
+                pass

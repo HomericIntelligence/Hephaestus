@@ -60,9 +60,10 @@ from .pr_review_core import (
 logger = logging.getLogger(__name__)
 
 #: Single-stage scope the PR-review CLI runs: the read-only analyze + post-inline
-#: + GO/NOGO review loop (PR_REVIEW). PrReviewStage's ADVANCE target (CI) is out
-#: of scope, so ``PipelineScope`` rewrites it to FINISHED — a GO'd review simply
-#: finishes (this CLI does not drive CI or arm auto-merge).
+#: + GO/NOGO review loop (PR_REVIEW). PrReviewStage's ADVANCE target
+#: (STRICT_REVIEW) is out of scope, so ``PipelineScope`` rewrites it to
+#: FINISHED — a GO'd review simply finishes (this CLI does not perform strict
+#: review, drive CI, or arm auto-merge).
 _PR_REVIEWER_SCOPE_STAGES: frozenset[StageName] = frozenset({StageName.PR_REVIEW})
 
 

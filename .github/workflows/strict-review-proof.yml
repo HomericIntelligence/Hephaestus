@@ -1,0 +1,124 @@
+name: Strict Review Proof
+
+# This must be a separate pull_request_target workflow. It runs the trusted
+# base revision's verifier, never candidate PR code, while binding its result
+# to the PR event's immutable head SHA. The narrowly scoped status-write token
+# and no-head-checkout policy are mandatory because this job is merge authorization.
+on:
+  pull_request_target:
+    # This job receives `statuses: write`, so only the protected production
+    # base branch may define the trusted publisher.
+    branches: [main]
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+      - labeled
+      - unlabeled
+      - auto_merge_enabled
+      - auto_merge_disabled
+
+concurrency:
+  group: strict-review-proof-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+  # `pull_request_target` job checks attach to the base SHA. Publish the
+  # verifier result as a status on EVENT_HEAD_SHA instead, so branch protection
+  # evaluates the proof against the candidate commit it authorizes.
+  statuses: write
+
+jobs:
+  strict-review-proof:
+    # Keep this native base-SHA check distinct from the explicit head-SHA
+    # status context below; GitHub treats same-named checks and statuses as
+    # separate required results.
+    name: publish-strict-review-proof
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      REPOSITORY: ${{ github.repository }}
+      # This repository Actions variable is a trusted configuration boundary.
+      # An unset value fails closed instead of accepting any comment author.
+      AUTOMATION_LOGIN: ${{ vars.HEPHAESTUS_AUTOMATION_LOGIN }}
+    steps:
+      - name: Invalidate any earlier strict-review proof for this head
+        run: |
+          set -euo pipefail
+          # This must run before checkout, setup, or artifact fetching. If a
+          # later trusted step fails, the pending exact-head status remains a
+          # fail-closed replacement for any earlier success.
+          gh api --method POST \
+            "/repos/$REPOSITORY/statuses/$EVENT_HEAD_SHA" \
+            -f state=pending \
+            -f context="strict-review-proof" \
+            -f description="Trusted strict-review proof is being revalidated." \
+            -f target_url="$GITHUB_SERVER_URL/$REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          # Never execute a PR-controlled verifier in an authorization job.
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        with:
+          enable-cache: true
+
+      - name: Install the locked trusted verifier environment
+        run: uv sync --no-default-groups --locked
+
+      - name: Validate strict-review automation identity configuration
+        run: |
+          set -euo pipefail
+          if [ -z "$AUTOMATION_LOGIN" ]; then
+            echo "::error::HEPHAESTUS_AUTOMATION_LOGIN repository variable is required."
+            exit 1
+          fi
+
+      - name: Fetch strict-review artifacts for this PR
+        run: |
+          set -euo pipefail
+          gh api --paginate --slurp \
+            "/repos/$REPOSITORY/issues/$PR_NUMBER/comments?per_page=100" \
+            > strict-review-comments.json
+
+      - name: Verify and publish an exact-head strict-review proof status
+        run: |
+          set -euo pipefail
+          status_state=failure
+          status_description="Strict-review GO is absent or no longer current."
+          proof_exit=1
+
+          if uv run --no-default-groups --no-sync python -m hephaestus.automation.strict_review_proof \
+            --comments-json strict-review-comments.json \
+            --expected-head-sha "$EVENT_HEAD_SHA" \
+            --automation-login "$AUTOMATION_LOGIN"; then
+            if live_head=$(gh pr view "$PR_NUMBER" --repo "$REPOSITORY" --json headRefOid --jq .headRefOid) && \
+              [ "$live_head" = "$EVENT_HEAD_SHA" ]; then
+              status_state=success
+              status_description="Authenticated strict-review GO matches this head."
+              proof_exit=0
+            else
+              echo "::error::PR head changed or could not be read during strict-review proof validation."
+              status_description="PR head changed or could not be read during validation."
+            fi
+          fi
+
+          # A pull_request_target workflow's own job check belongs to the
+          # base SHA. This explicit, trusted status is the direct classic
+          # context on the immutable candidate SHA required for merging.
+          gh api --method POST \
+            "/repos/$REPOSITORY/statuses/$EVENT_HEAD_SHA" \
+            -f state="$status_state" \
+            -f context="strict-review-proof" \
+            -f description="$status_description" \
+            -f target_url="$GITHUB_SERVER_URL/$REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          exit "$proof_exit"

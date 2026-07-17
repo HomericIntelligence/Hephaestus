@@ -193,7 +193,7 @@ Examples:
     parser.add_argument(
         "--no-auto-merge",
         action="store_true",
-        help="(Deprecated, ignored) auto-merge stays disabled pending the strict-review gate",
+        help="(Deprecated, ignored) merge authorization is owned by strict_review and merge_wait",
     )
     parser.add_argument(
         "--no-learn",
@@ -539,7 +539,9 @@ def main() -> int:
         nitpick=args.nitpick,
         projects_dir=resolve_projects_dir(None, prefer_cwd_parent=True),
         json_out=args.json,
-        scope=PipelineScope(frozenset({StageName.IMPLEMENTATION, StageName.PR_REVIEW})),
+        scope=PipelineScope(
+            frozenset({StageName.IMPLEMENTATION, StageName.PR_REVIEW, StageName.STRICT_REVIEW})
+        ),
     )
 
     rc = run_pipeline(config)

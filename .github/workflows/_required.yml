@@ -5,31 +5,15 @@ name: Required Checks
 
 on:
   pull_request:
-    # Default types are [opened, synchronize, reopened], which do NOT fire when
-    # auto-merge is toggled or labels are changed after PR creation — so
-    # auto-merge-policy's check was stuck with its PR-open verdict until the
-    # next push (the race that #680 papered over with `needs: lint`).
-    # Re-running on auto_merge_enabled / auto_merge_disabled, labeled /
-    # unlabeled, and ready_for_review makes that gate converge on the true
-    # state with no timing reliance. See auto-merge-policy below.
-    #
-    # IMPORTANT: a pull_request trigger applies to the WHOLE workflow, so the
-    # label / auto-merge event types would otherwise re-run EVERY job on each
-    # label change. Those four actions exist solely for pr-policy /
-    # auto-merge-policy to re-converge, so the `changes-gate` job below gates the
-    # 16 heavy jobs to skip on labeled/unlabeled/auto_merge_enabled/
-    # auto_merge_disabled — only the two policy jobs run on those events. The
-    # heavy jobs' results from the last code push still stand for the SHA, so
-    # branch-protection required checks remain satisfied.
+    # This workflow is the sole source of code-validation contexts. Label and
+    # auto-merge events are deliberately handled by dedicated policy/proof
+    # workflows: a skipped heavy job reports a successful context, so allowing
+    # those events here could mask a still-running or failed code-event check.
     types:
       - opened
       - synchronize
       - reopened
       - ready_for_review
-      - labeled
-      - unlabeled
-      - auto_merge_enabled
-      - auto_merge_disabled
   push:
     branches: [main]
 
@@ -41,13 +25,9 @@ permissions:
   contents: read
 
 jobs:
-  # Decides whether this event should run the 16 heavy jobs. A pull_request
-  # trigger fires the whole workflow, but the labeled / unlabeled /
-  # auto_merge_enabled / auto_merge_disabled actions exist only so pr-policy and
-  # auto-merge-policy re-converge — the heavy jobs must NOT re-run on them. This
-  # job always runs (no gate on itself) and the heavy jobs `needs:` it.
-  # ``github.event.action`` is a GitHub-controlled enum (empty on `push`), passed
-  # via env: and never interpolated into the script — injection-safe.
+  # The trigger admits only code events, so every dependent job runs. Retain a
+  # single output because the code-event contract is consumed by each job and
+  # makes a future trigger broadening explicit in review.
   changes-gate:
     name: changes-gate
     runs-on: ubuntu-24.04
@@ -61,18 +41,8 @@ jobs:
           ACTION: ${{ github.event.action }}
         run: |
           set -euo pipefail
-          # Heavy jobs skip ONLY on label / auto-merge PR actions. `push` has no
-          # action (empty) → falls to the default → code_event=true.
-          case "$ACTION" in
-            labeled | unlabeled | auto_merge_enabled | auto_merge_disabled)
-              echo "code_event=false" >> "$GITHUB_OUTPUT"
-              echo "Label/auto-merge event ($ACTION) — heavy jobs skipped; only policy jobs run."
-              ;;
-            *)
-              echo "code_event=true" >> "$GITHUB_OUTPUT"
-              echo "Code event (${ACTION:-push}) — heavy jobs run."
-              ;;
-          esac
+          echo "code_event=true" >> "$GITHUB_OUTPUT"
+          echo "Code event (${ACTION:-push}) — all validation jobs run."
 
   forbid-suppressions:
     name: forbid-suppressions
@@ -452,10 +422,9 @@ jobs:
 
   auto-merge-policy:
     name: auto-merge-policy
-    # Advisory (NOT a required check): #2054 temporarily makes every automatic
-    # armer fail closed while #2055 introduces the head-bound strict-review gate.
-    # This job signals any still-armed open PR but intentionally does not block
-    # manual bootstrap merges after an independent strict review.
+    # Advisory (NOT a required check): the queue's strict_review and
+    # merge_wait stages are the authoritative head-bound arming gate. This
+    # job reports observable PR state but never substitutes for that protocol.
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -466,7 +435,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
     steps:
-      - name: "Auto-merge remains disabled pending strict-review gate"
+      - name: "Report auto-merge state"
         run: |
           set -euo pipefail
           gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
@@ -480,7 +449,7 @@ jobs:
               and (.state == "OPEN" or .state == "MERGED" or .state == "CLOSED")
               and (.autoMergeRequest == null or (.autoMergeRequest | type == "object"))
             ' pr.json > /dev/null; then
-            echo "::error::Incomplete PR state response; cannot verify auto-merge is disabled."
+            echo "::error::Incomplete PR state response; cannot report auto-merge state."
             exit 1
           fi
           pr_state=$(jq -r '.state' pr.json)
@@ -491,12 +460,10 @@ jobs:
 
           state=$(jq -r '.autoMergeRequest' pr.json)
           if [ "$state" != "null" ] && [ -n "$state" ]; then
-            msg="::error::Auto-merge is enabled while the strict-review gate is unavailable."
-            msg+=" Remove it with: gh pr merge $PR_NUMBER --disable-auto"
-            echo "$msg"
-            exit 1
+            echo "::notice::Auto-merge is armed; queue-owned strict-review and merge-wait controls are authoritative."
+            exit 0
           fi
-          echo "OK: auto-merge is disabled pending the queue-owned strict-review gate"
+          echo "OK: auto-merge is currently disabled"
 
   unit-tests:
     name: unit-tests
@@ -865,13 +832,10 @@ jobs:
   # ruleset context. See docs/ci/required-checks.md and the guard test
   # tests/unit/ci/test_required_checks_gate.py.
   #
-  # `if: always()` is mandatory: the heavy jobs skip on label / auto-merge PR
-  # actions (they gate on changes-gate.code_event), so without always() this job
-  # would itself skip and report neither success nor failure — deadlocking a
-  # required check. The step below PASSES when every needed job is `success` or
-  # `skipped` (skipped = legitimately gated off) and FAILS on `failure` /
-  # `cancelled`. auto-merge-policy is intentionally EXCLUDED — it is advisory
-  # (see the comment on that job) and must not gate merges.
+  # `if: always()` is mandatory so an upstream job failure becomes one durable
+  # aggregate result. The step below accepts a skipped dependency only for a
+  # legitimately conditional job; this workflow's trigger never creates
+  # skipped heavy-job contexts from a label or auto-merge event.
   required-checks-gate:
     name: required-checks-gate
     runs-on: ubuntu-24.04

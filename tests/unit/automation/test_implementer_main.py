@@ -81,7 +81,9 @@ def test_main_builds_implementation_scope_and_dispatches(tmp_path: Path) -> None
     assert config.dry_run is True
     # Scope is trimmed to exactly implementation + pr_review.
     assert config.scope is not None
-    assert config.scope.stages == frozenset({StageName.IMPLEMENTATION, StageName.PR_REVIEW})
+    assert config.scope.stages == frozenset(
+        {StageName.IMPLEMENTATION, StageName.PR_REVIEW, StageName.STRICT_REVIEW}
+    )
 
 
 def test_main_maps_max_workers_to_worker_pool(tmp_path: Path) -> None:

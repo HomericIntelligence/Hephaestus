@@ -15,8 +15,8 @@ This file describes the typical development workflow for Hephaestus.
 
 1. **Automated Checks**: All PRs must pass pre-commit hooks, the three classic branch-protection contexts (`required-checks-gate`, `test (ubuntu-latest, 3.12, unit)`, and `test (ubuntu-latest, 3.12, integration)`), and the direct ruleset contexts in `docs/ci/required-checks.md`.
 2. **PR Policy Gate**: The `pr-policy` CI gate enforces the `Closes #<issue-number>` body line and cryptographically signed commits (`git commit -S`). See `CLAUDE.md` §"Working with GitHub" for the canonical policy.
-3. **Independent Strict Review**: During #2054's bootstrap, keep auto-merge disabled. An unconditional independent strict-review GO is required before a maintainer merges.
-4. **Merge**: Use a manual squash merge (`gh pr merge --squash`) only after the strict-review gate and required checks pass.
+3. **Independent Strict Review**: `strict_review` is the only automatic producer of `state:implementation-go`; its authenticated GO proof is bound to the exact PR head.
+4. **Merge**: Do not manually enable auto-merge. After the strict-review gate and required checks pass, `merge_wait` conditionally arms only that reviewed head.
 
 ## Testing Workflow
 

@@ -25,6 +25,12 @@ def test_path_filename_format(tmp_path: Path) -> None:
     assert store.path(123) == tmp_path / "drive-green-armed-123.json"
 
 
+def test_learn_claim_lock_uses_a_stable_sibling_path(tmp_path: Path) -> None:
+    """The claim lock is not the JSON inode that atomic writes replace."""
+    store = _store(tmp_path)
+    assert store.learn_claim_lock_path(123) == tmp_path / "drive-green-armed-123.learn.lock"
+
+
 def test_provider_resolved_live_not_at_construction(tmp_path: Path) -> None:
     """The store reads state_dir on each call, following reassignment."""
     # The driver reassigns ``state_dir`` after __init__; the store must follow.

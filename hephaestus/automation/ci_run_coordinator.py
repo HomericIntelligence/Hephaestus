@@ -31,8 +31,8 @@ class CiConclusion(enum.Enum):
 
 #: The legacy ``all_green`` conclusion set (``ci_driver._drive_issue`` /
 #: ``CIDriveRunCoordinator.drive_issue``): a PR is GREEN only when every
-#: required check concluded in one of these. #2054 still contains any existing
-#: auto-merge request and terminates until the strict-review gate exists.
+#: required check concluded in one of these. CI containment revokes any stale
+#: auto-merge request before a repair can change the reviewed head.
 GREEN_CONCLUSIONS: frozenset[str] = frozenset({"success", "skipped", "neutral"})
 
 

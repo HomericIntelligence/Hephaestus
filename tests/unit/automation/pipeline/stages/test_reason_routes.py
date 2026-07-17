@@ -25,6 +25,7 @@ from hephaestus.automation.pipeline.stages import (
     plan_review,
     planning,
     pr_review,
+    strict_review,
 )
 
 _STAGE_MODULES: dict[StageName, ModuleType] = {
@@ -32,6 +33,7 @@ _STAGE_MODULES: dict[StageName, ModuleType] = {
     StageName.PLAN_REVIEW: plan_review,
     StageName.IMPLEMENTATION: implementation,
     StageName.PR_REVIEW: pr_review,
+    StageName.STRICT_REVIEW: strict_review,
     StageName.CI: ci,
     StageName.MERGE_WAIT: merge_wait,
 }
@@ -45,7 +47,8 @@ _EXPECTED_REASONS: dict[StageName, set[str]] = {
     # its ROUTES row entry (-> FINISHED) documents the same destination.
     StageName.PR_REVIEW: {"agent_error"},
     # no_pr/timeout are emitted as FINISH_FAIL (terminal), not FAIL_BACK.
-    StageName.CI: {"fix_exhausted", "not_implementation_go"},
+    StageName.STRICT_REVIEW: {"nogo"},
+    StageName.CI: {"fix_exhausted", "not_implementation_go", "not_strict_review_go"},
     # #2054 terminalizes merge_wait; it emits no cross-stage FAIL_BACK reason.
     StageName.MERGE_WAIT: set(),
 }
@@ -109,9 +112,11 @@ def test_named_reasons_route_where_the_doc_says() -> None:
     assert ROUTES[StageName.PR_REVIEW].fail_routes["human_blocked"] == StageName.FINISHED
     assert ROUTES[StageName.IMPLEMENTATION].fail_routes["plan_not_go"] == StageName.PLAN_REVIEW
     assert (
-        ROUTES[StageName.IMPLEMENTATION].fail_routes["already_implementation_go_pr"] == StageName.CI
+        ROUTES[StageName.IMPLEMENTATION].fail_routes["already_implementation_go_pr"]
+        == StageName.STRICT_REVIEW
     )
     assert ROUTES[StageName.CI].fail_routes["fix_exhausted"] == StageName.IMPLEMENTATION
-    assert ROUTES[StageName.CI].fail_routes["not_implementation_go"] == StageName.PR_REVIEW
+    assert ROUTES[StageName.CI].fail_routes["not_implementation_go"] == StageName.STRICT_REVIEW
+    assert ROUTES[StageName.CI].fail_routes["not_strict_review_go"] == StageName.STRICT_REVIEW
     assert ROUTES[StageName.CI].fail_routes["no_pr"] == StageName.FINISHED
     assert ROUTES[StageName.MERGE_WAIT].fail_routes["closed"] == StageName.FINISHED

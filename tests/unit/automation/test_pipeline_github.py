@@ -8,10 +8,13 @@ place the ``StageGitHub`` protocol's dry-run contract is honored.
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
+from multiprocessing import get_context
 from pathlib import Path
+from time import sleep
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -21,6 +24,21 @@ import hephaestus.automation.pr_manager as pr_manager_mod
 from hephaestus.automation.pipeline.stages.base import StageGitHub
 from hephaestus.automation.protocol import PLAN_COMMENT_MARKER, PLAN_REVIEW_PREFIX
 from hephaestus.automation.state_labels import STATE_PLAN_GO
+from hephaestus.utils.file_lock import LockUnavailableError
+
+
+def _claim_drive_green_learn_from_process(repo_root: str, start_barrier: Any, results: Any) -> None:
+    """Race one real adapter claim from a separate process for lock coverage."""
+    adapter = pg.PipelineGitHub("org", dry_run=False, repo_root=Path(repo_root))
+    original_save = adapter._arming.save
+
+    def delayed_save(issue_number: int, record: dict[str, Any]) -> bool:
+        sleep(0.1)
+        return original_save(issue_number, record)
+
+    with patch.object(adapter._arming, "save", side_effect=delayed_save):
+        start_barrier.wait()
+        results.put(adapter.claim_drive_green_learn(33, 703))
 
 
 @pytest.fixture
@@ -967,7 +985,7 @@ class TestRepoScopedAutoMerge:
         with pytest.raises(RuntimeError, match="could not verify auto-merge disabled"):
             pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).defer_auto_merge(7)
 
-    def test_arm_auto_merge_rejects_direct_arming(
+    def test_arm_auto_merge_uses_scoped_squash_auto_merge(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         calls: list[tuple[list[str], dict[str, object]]] = []
@@ -978,10 +996,25 @@ class TestRepoScopedAutoMerge:
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
 
-        with pytest.raises(RuntimeError, match="strict-review gate unavailable"):
-            pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).arm_auto_merge(7)
+        expected_head = "a" * 40
+        pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).arm_auto_merge(7, expected_head)
 
-        assert calls == []
+        assert calls == [
+            (
+                [
+                    "pr",
+                    "merge",
+                    "7",
+                    "--auto",
+                    "--squash",
+                    "--match-head-commit",
+                    expected_head,
+                    "--repo",
+                    "org/repo-a",
+                ],
+                {},
+            )
+        ]
 
 
 class TestCreatePr:
@@ -1294,6 +1327,139 @@ class TestGhPrState:
         assert adapter.gh_pr_state(7) is None
 
 
+class TestStrictReviewEvidence:
+    """Current-head evidence hydration for the independent strict reviewer."""
+
+    _head = "a" * 40
+
+    def _adapter_with_responses(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        diff: str = "diff --git a/a.py b/a.py\n+index 1..2 100644\n--- a/a.py\n+++ b/a.py\n+x\n",
+        final_head: str | None = None,
+        raise_on_diff: bool = False,
+    ) -> tuple[pg.PipelineGitHub, list[list[str]]]:
+        """Build an adapter with explicit repo-scoped evidence responses."""
+        calls: list[list[str]] = []
+        prior_review = "Grade: A\nVerdict: GO"
+
+        def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            if argv == [
+                "pr",
+                "view",
+                "71",
+                "--json",
+                "state,headRefOid,reviews",
+                "--repo",
+                "org/repo-a",
+            ]:
+                return SimpleNamespace(
+                    stdout=json.dumps(
+                        {
+                            "state": "OPEN",
+                            "headRefOid": self._head,
+                            "reviews": [
+                                {"author": {"login": "human"}, "body": "Verdict: NOGO"},
+                                {
+                                    "author": {"login": "hephaestus-bot"},
+                                    "body": prior_review,
+                                },
+                            ],
+                        }
+                    )
+                )
+            if argv == ["api", "user", "--jq", ".login"]:
+                return SimpleNamespace(stdout="hephaestus-bot\n")
+            if argv == [
+                "issue",
+                "view",
+                "2055",
+                "--json",
+                "title,body",
+                "--repo",
+                "org/repo-a",
+            ]:
+                return SimpleNamespace(
+                    stdout=json.dumps({"title": "Strict gate", "body": "Required."})
+                )
+            if argv == ["pr", "diff", "71", "--repo", "org/repo-a"]:
+                if raise_on_diff:
+                    raise RuntimeError("diff unavailable")
+                return SimpleNamespace(stdout=diff)
+            if argv == [
+                "pr",
+                "checks",
+                "71",
+                "--json",
+                "name,state,bucket,workflow",
+                "--repo",
+                "org/repo-a",
+            ]:
+                return SimpleNamespace(stdout=json.dumps([{"name": "unit", "bucket": "pass"}]))
+            if argv == [
+                "pr",
+                "view",
+                "71",
+                "--json",
+                "state,headRefOid,mergedAt,mergeStateStatus,baseRefName,autoMergeRequest",
+                "--repo",
+                "org/repo-a",
+            ]:
+                return SimpleNamespace(
+                    stdout=json.dumps(
+                        {
+                            "state": "OPEN",
+                            "headRefOid": final_head if final_head is not None else self._head,
+                        }
+                    )
+                )
+            raise AssertionError(f"unexpected gh invocation: {argv!r}")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        return pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path), calls
+
+    def test_hydrates_bounded_repo_scoped_evidence_for_exact_head(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter, calls = self._adapter_with_responses(tmp_path, monkeypatch)
+
+        evidence = adapter.strict_review_evidence(71, self._head.upper(), 2055)
+
+        assert evidence is not None
+        assert evidence.head_sha == self._head
+        assert evidence.issue_title == "Strict gate"
+        assert evidence.issue_body == "Required."
+        assert evidence.diff.startswith("diff --git")
+        assert "unit: status=completed, conclusion=success" in evidence.ci_status
+        assert evidence.prior_pr_review_verdict == "Grade: A\nVerdict: GO"
+        assert ["pr", "diff", "71", "--repo", "org/repo-a"] in calls
+        assert all("--repo" in call for call in calls if call[0] == "pr")
+
+    def test_empty_diff_is_ambiguous_and_fails_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter, _calls = self._adapter_with_responses(tmp_path, monkeypatch, diff=" \n")
+
+        assert adapter.strict_review_evidence(71, self._head, 2055) is None
+
+    def test_head_change_during_hydration_invalidates_evidence(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter, _calls = self._adapter_with_responses(tmp_path, monkeypatch, final_head="b" * 40)
+
+        assert adapter.strict_review_evidence(71, self._head, 2055) is None
+
+    def test_evidence_read_error_fails_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter, _calls = self._adapter_with_responses(tmp_path, monkeypatch, raise_on_diff=True)
+
+        assert adapter.strict_review_evidence(71, self._head, 2055) is None
+
+
 class TestDriveGreenArmingRecords:
     """arm_drive_green / learn-terminal / learn-result over ArmingStateStore."""
 
@@ -1308,6 +1474,115 @@ class TestDriveGreenArmingRecords:
 
         adapter.mark_drive_green_learn_result(3, succeeded=True)
         assert adapter.drive_green_learn_terminal(3) is True
+
+    def test_arm_phase_requires_exact_readback_confirmation(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pre-RPC intent cannot make restart recovery skip ARM."""
+        monkeypatch.setattr(pg, "get_pr_head_branch", lambda n: "1817-auto-impl")
+
+        adapter.arm_drive_green(8, 74, "face")
+        prepared = adapter._arming.load(8)
+        assert prepared is not None
+        assert prepared["auto_merge_arm_status"] == "prepared"
+        assert adapter.drive_green_arm_confirmed(8, 74) is False
+
+        adapter.confirm_drive_green_arm(8, 74, "face")
+
+        confirmed = adapter._arming.load(8)
+        assert confirmed is not None
+        assert confirmed["auto_merge_arm_status"] == "confirmed"
+        assert confirmed["auto_merge_confirmed_at"]
+        assert adapter.drive_green_arm_confirmed(8, 74) is True
+
+        # A retry at the same exact record must not downgrade confirmation.
+        adapter.arm_drive_green(8, 74, "face")
+        assert adapter.drive_green_arm_confirmed(8, 74) is True
+
+    def test_arm_confirmation_rejects_a_missing_or_mismatched_prepared_record(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A durable confirmation remains bound to the prepared PR and head."""
+        monkeypatch.setattr(pg, "get_pr_head_branch", lambda n: "branch")
+        adapter.arm_drive_green(9, 75, "cafe")
+
+        with pytest.raises(RuntimeError, match="missing or mismatched"):
+            adapter.confirm_drive_green_arm(9, 76, "cafe")
+        with pytest.raises(RuntimeError, match="missing or mismatched"):
+            adapter.confirm_drive_green_arm(9, 75, "other")
+        assert adapter.drive_green_arm_confirmed(9, 75) is False
+
+    def test_learn_claim_is_durable_and_never_replayable(self, adapter: pg.PipelineGitHub) -> None:
+        """A crash after dispatch claim is an explicit unknown, never a replay."""
+        assert adapter.claim_drive_green_learn(31, 701) is True
+        assert adapter.drive_green_learn_inflight(31) is True
+        assert adapter.claim_drive_green_learn(31, 701) is False
+        assert adapter.drive_green_learn_terminal(31) is False
+        assert adapter.pending_drive_green_arms() == [(31, 701)]
+
+    def test_concurrent_learn_claims_allow_exactly_one_dispatch(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two coordinators racing on one issue cannot both claim /learn."""
+        original_save = adapter._arming.save
+
+        def delayed_save(issue_number: int, record: dict[str, Any]) -> bool:
+            # Without the stable claim lock both workers load an unclaimed
+            # record during this delay and would each report a successful
+            # claim. The lock holds the second worker outside the read.
+            sleep(0.05)
+            return original_save(issue_number, record)
+
+        monkeypatch.setattr(adapter._arming, "save", delayed_save)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(
+                pool.map(
+                    lambda _unused: adapter.claim_drive_green_learn(32, 702),
+                    range(2),
+                )
+            )
+
+        assert outcomes.count(True) == 1
+        assert outcomes.count(False) == 1
+
+    def test_process_racing_learn_claims_allow_exactly_one_dispatch(self, tmp_path: Path) -> None:
+        """The claim lock coordinates separate automation-loop processes."""
+        pytest.importorskip("fcntl")
+        context = get_context("spawn")
+        start_barrier = context.Barrier(2)
+        results = context.Queue()
+        processes = [
+            context.Process(
+                target=_claim_drive_green_learn_from_process,
+                args=(str(tmp_path), start_barrier, results),
+            )
+            for _ in range(2)
+        ]
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(timeout=10)
+            assert process.exitcode == 0
+
+        outcomes = [results.get(timeout=1) for _ in processes]
+        assert outcomes.count(True) == 1
+        assert outcomes.count(False) == 1
+
+    def test_learn_claim_fails_closed_without_an_exclusive_lock(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The pipeline refuses an external /learn action if locking is absent."""
+        unavailable_lock = MagicMock(side_effect=LockUnavailableError("exclusive lock unsupported"))
+        monkeypatch.setattr(pg, "file_lock", unavailable_lock)
+
+        with pytest.raises(LockUnavailableError, match="exclusive lock unsupported"):
+            adapter.claim_drive_green_learn(34, 704)
+
+        unavailable_lock.assert_called_once_with(
+            adapter._arming.learn_claim_lock_path(34),
+            require_exclusive=True,
+        )
+        assert adapter._arming.load(34) is None
 
     def test_failed_learn_is_also_terminal(self, adapter: pg.PipelineGitHub) -> None:
         adapter.mark_drive_green_learn_result(4, succeeded=False)
@@ -1325,6 +1600,25 @@ class TestDriveGreenArmingRecords:
         record = adapter._arming.load(5)
         assert record is not None
         assert record["learn_status"] == "succeeded"  # evidence preserved
+
+    def test_pending_arm_scan_recovers_only_non_terminal_records(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(pg, "get_pr_head_branch", lambda n: "b")
+        adapter.arm_drive_green(6, 72, "face")
+
+        assert adapter.pending_drive_green_arms() == [(6, 72)]
+
+        adapter.mark_drive_green_learn_result(6, succeeded=True)
+        assert adapter.pending_drive_green_arms() == []
+
+    def test_arm_record_write_failure_is_not_silently_acknowledged(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(adapter._arming, "save", lambda _issue, _record: False)
+
+        with pytest.raises(RuntimeError, match="could not persist drive-green arming record"):
+            adapter.arm_drive_green(7, 73, "cafe")
 
 
 class TestRateBudget:

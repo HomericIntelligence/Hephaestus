@@ -549,12 +549,19 @@ class TestSeedingEdges:
     def test_pr_entry_becomes_pr_item(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        seed = [SeedEntry(kind="pr", identifier=88, stage=StageName.CI, reason="impl-go")]
+        seed = [
+            SeedEntry(
+                kind="pr",
+                identifier=88,
+                stage=StageName.STRICT_REVIEW,
+                reason="impl-go",
+            )
+        ]
         coordinator = _coordinator(tmp_path, monkeypatch, seed=seed)
 
         coordinator._seed_pass()
 
-        item = coordinator.queues[StageName.CI].snapshot()[0]
+        item = coordinator.queues[StageName.STRICT_REVIEW].snapshot()[0]
         assert item.kind is ItemKind.PR and item.pr == 88 and item.repo == "repo-a"
 
     def test_issue_entry_with_pr_preserves_pr_number(
@@ -621,7 +628,7 @@ class TestSeedingEdges:
         coordinator._seed_pass()
 
         assert created == [("target-repo", tmp_path / "target-repo")]
-        item = coordinator.queues[StageName.CI].snapshot()[0]
+        item = coordinator.queues[StageName.STRICT_REVIEW].snapshot()[0]
         assert item.repo == "target-repo"
         assert item.kind is ItemKind.ISSUE
         assert item.issue == 1818
@@ -661,7 +668,7 @@ class TestSeedingEdges:
         coordinator._seed_pass()
 
         assert created == [("target-repo", tmp_path / "target-repo")]
-        item = coordinator.queues[StageName.CI].snapshot()[0]
+        item = coordinator.queues[StageName.STRICT_REVIEW].snapshot()[0]
         assert item.repo == "target-repo"
         assert item.kind is ItemKind.PR
         assert item.issue == 1818

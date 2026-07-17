@@ -74,8 +74,9 @@ class AutoMergeCoordinator:
     def arm_all_unarmed_open_prs(self, open_prs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Contain every open PR retained by the legacy final-sweep API.
 
-        The historical name is kept for compatibility, but #2054 reverses its
-        behavior: an existing arm is disabled and a new arm is never created.
+        The historical name is kept for compatibility, but the queue's
+        strict-review gate reverses its behavior: an existing arm is disabled
+        and a new arm is never created here.
         Open PRs remain in the result so callers report that manual action is
         still required. A malformed record or failed disable/readback raises so
         callers cannot report an unverified arm as ordinary remaining work.
@@ -239,7 +240,7 @@ class AutoMergeCoordinator:
         )
 
     def enable_auto_merge(self, pr_number: int, is_bot_pr: bool = False) -> bool:
-        """Refuse legacy automatic arming until the strict-review gate exists.
+        """Refuse legacy automatic arming; MergeWaitStage is the sole armer.
 
         The queue pipeline is the production entry point, but compatibility
         callers must be fail-closed too: a stale implementation-GO label must
@@ -249,7 +250,7 @@ class AutoMergeCoordinator:
         if not self.defer_auto_merge(pr_number):
             logger.error("Could not verify auto-merge disabled for PR #%s", pr_number)
             return False
-        logger.error("Refusing to arm auto-merge for PR #%s until #2055 lands", pr_number)
+        logger.error("Refusing legacy auto-merge arm for PR #%s; use MergeWaitStage", pr_number)
         return False
 
     def pr_has_implementation_go(self, pr_number: int) -> bool:
