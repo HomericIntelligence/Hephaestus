@@ -59,7 +59,7 @@ may change incompatibly in a minor release.
 
 ## Console-Script Stability Tiers
 
-Hephaestus installs 53 console scripts via `[project.scripts]` in
+Hephaestus installs 48 console scripts via `[project.scripts]` in
 `pyproject.toml`. Each is classified into one of three tiers:
 
 - **Stable** — covered by the [deprecation policy](#deprecation-policy). CLI
