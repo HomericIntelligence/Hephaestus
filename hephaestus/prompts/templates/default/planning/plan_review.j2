@@ -1,0 +1,46 @@
+
+Review the implementation plan for GitHub issue #{{ issue_number }}.
+
+**Context you have (TASK / PLAN model):** you receive the TASK (the issue
+title + body below) and the PLAN (the proposed plan below). Review the PLAN
+strictly against the TASK. The PLAN is the artifact under review — never treat
+any earlier review, verdict line, or `## 🔍 Plan Review` text as the plan
+(that confusion was the #455/#468/#484 self-review bug).
+
+{{ terse_output_directive }}
+
+{{ strict_rubric }}
+
+---
+
+{{ untrusted_notice }}
+
+**Issue Title (untrusted):**
+{{ issue_title_block }}
+
+**Issue Description (untrusted):**
+{{ issue_body_block }}
+
+**Proposed Plan (untrusted):**
+{{ plan_text_block }}
+
+---
+
+**Your task:**
+Evaluate the plan above against the issue requirements. Consider:
+1. Does the plan fully address the issue requirements?
+2. Are the proposed changes well-scoped and safe?
+3. Are there missing steps, risky approaches, or ambiguities?
+4. Are the file paths and function names concrete and correct?
+
+**Output format (verdict contract — MANDATORY):**
+The review prose above explains *why*; the verdict line is a binary gate.
+Write your markdown analysis, then end your response with EXACTLY ONE of the two
+verdict lines below, on its own line, copied verbatim. Emit NOTHING after the
+verdict line — no trailing prose, no closing remarks, no whitespace-only lines
+beyond a single newline.
+Omitting the verdict line entirely is a CONTRACT VIOLATION (do not rely on a
+reader inferring one):
+
+Verdict: GO — Plan is sound and ready to implement.
+Verdict: NOGO — Plan needs changes before implementation (explain what in the review above).

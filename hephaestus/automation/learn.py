@@ -23,6 +23,7 @@ from hephaestus.agents.runtime import (
     session_agent_matches,
     uses_direct_agent_runner,
 )
+from hephaestus.automation.prompts.catalog import PromptCatalog
 from hephaestus.github.rate_limit import resolve_quota_reset_epoch, wait_until
 from hephaestus.io.utils import write_secure
 
@@ -112,17 +113,7 @@ def build_learn_prompt(context: str) -> str:
     """Return the standard automation prompt for the user-facing /learn skill."""
     detail = context.strip()
     suffix = f" {detail}" if detail else ""
-    return (
-        "/learn"
-        " EXECUTE the /learn skill-creation workflow for Mnemosyne."
-        " Do NOT return a plan. Do NOT ask for approval."
-        " Commit the results and create a PR."
-        " IMPORTANT: Only push skills to the resolved Mnemosyne"
-        " repository (the gh user's own fork when available, else upstream),"
-        " and open the PR against that same repository."
-        " Do NOT create files under .claude-plugin/ in this repo."
-        f"{suffix}"
-    )
+    return PromptCatalog.current().render("learn/learn.j2", suffix=suffix)
 
 
 def _record_learn_failure(

@@ -22,6 +22,7 @@ from hephaestus.agents.runtime import (
     run_agent_text,
     uses_direct_agent_runner,
 )
+from hephaestus.automation.prompts.catalog import PromptCatalog
 from hephaestus.github.auto_merge import defer_auto_merge, defer_auto_merge_batch
 
 from .agent_config import DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT
@@ -290,31 +291,15 @@ def _commit_message_prompt(
     diff_stat: str,
 ) -> str:
     """Build a read-only prompt for the commit-message agent."""
-    return f"""You are a lightweight git commit message writer.
-
-Return JSON only, with exactly:
-{{"subject":"type(scope): concise summary","body":"short explanatory body"}}
-
-Rules:
-- The subject MUST start with one of these conventional-commit types ONLY:
-  {", ".join(sorted(ALLOWED_CONVENTIONAL_TYPES))}. Any other type (e.g.
-  "security") will be REJECTED by CI. Pick the closest allowed type.
-- Do not modify files, run git, push, or create a PR.
-- Do not include Closes, Implemented-By, or Co-Authored-By lines.
-- Base the message only on the issue and changed files below.
-- Keep the subject one line and under 72 characters when practical.
-
-Issue #{issue_number}: {issue_title}
-
-Issue body:
-{issue_body or "(empty)"}
-
-Changed files:
-{changed_files or "(none reported)"}
-
-Diff stat:
-{diff_stat or "(none reported)"}
-"""
+    return PromptCatalog.current().render(
+        "pr_management/commit_message.j2",
+        allowed_types=", ".join(sorted(ALLOWED_CONVENTIONAL_TYPES)),
+        issue_number=issue_number,
+        issue_title=issue_title,
+        issue_body=issue_body or "(empty)",
+        changed_files=changed_files or "(none reported)",
+        diff_stat=diff_stat or "(none reported)",
+    )
 
 
 def _pr_message_prompt(
@@ -327,38 +312,16 @@ def _pr_message_prompt(
     commits: str,
 ) -> str:
     """Build a read-only prompt for the PR-message agent."""
-    return f"""You are a lightweight GitHub pull-request message writer.
-
-Return JSON only, with exactly:
-{{
-  "title": "type(scope): concise PR title",
-  "summary": "brief summary",
-  "changes": ["specific change 1", "specific change 2"],
-  "testing": ["test or verification 1"]
-}}
-
-Rules:
-- The title MUST start with one of these conventional-commit types ONLY:
-  {", ".join(sorted(ALLOWED_CONVENTIONAL_TYPES))}. Any other type (e.g.
-  "security") will be REJECTED by CI. Pick the closest allowed type.
-- Do not modify files, run git, push, or create a PR.
-- Do not include Closes lines; the orchestrator adds the required policy line.
-- Base the message only on the issue, changed files, and commits below.
-
-Issue #{issue_number}: {issue_title}
-
-Issue body:
-{issue_body or "(empty)"}
-
-Changed files:
-{changed_files or "(none reported)"}
-
-Diff stat:
-{diff_stat or "(none reported)"}
-
-Commits:
-{commits or "(none reported)"}
-"""
+    return PromptCatalog.current().render(
+        "pr_management/pr_message.j2",
+        allowed_types=", ".join(sorted(ALLOWED_CONVENTIONAL_TYPES)),
+        issue_number=issue_number,
+        issue_title=issue_title,
+        issue_body=issue_body or "(empty)",
+        changed_files=changed_files or "(none reported)",
+        diff_stat=diff_stat or "(none reported)",
+        commits=commits or "(none reported)",
+    )
 
 
 def _invoke_git_message_agent(

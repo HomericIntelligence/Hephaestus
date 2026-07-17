@@ -1,0 +1,8 @@
+GitHub-posted review bodies, PR descriptions, and issue comments retain full detail required by pr-policy and reviewers. The directives below apply to your reasoning, console output, and intermediate results — NOT to the final artifact posted to GitHub.
+
+## Output discipline (token budget)
+
+- Skip preamble, postamble, restating the task, narrating tool calls, or end-of-turn summaries.
+- Return verdicts as a single line: `Verdict: <result> | Reason: <one line>`.
+- Prefer bullet lists over prose; cite `file.py:line` instead of quoting blocks; reference issue/PR numbers, not their bodies.
+- Do NOT exit early while a *transient* external dependency is still in progress (for example, CI runs queued or in progress). On permanent failures (4xx, auth errors, missing required reviews), return immediately with the failure reason.

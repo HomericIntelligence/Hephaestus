@@ -13,7 +13,7 @@ from hephaestus.automation.pipeline.stages.planning import (
     _normalize_plan_comment,
     build_plan_prompt,
 )
-from hephaestus.automation.prompts._shared import _UNTRUSTED_NOTICE
+from hephaestus.automation.prompts._shared import get_untrusted_notice
 from hephaestus.automation.prompts.planning import get_plan_prompt
 from hephaestus.automation.protocol import PLAN_COMMENT_MARKER
 from hephaestus.automation.state_labels import (
@@ -40,7 +40,7 @@ class TestBuildPlanPrompt:
         """The planner prompt carries fenced TASK title/body before the template."""
         prompt = build_plan_prompt(7, "Retry failure", "The loop retries forever.")
 
-        assert _UNTRUSTED_NOTICE in prompt
+        assert get_untrusted_notice() in prompt
         assert _fence_present(prompt, "ISSUE_TITLE")
         assert _fence_present(prompt, "ISSUE_BODY")
         assert "Retry failure" in prompt

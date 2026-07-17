@@ -1,105 +1,7 @@
 """Follow-up prompt: identify in-scope follow-ups discovered during implementation."""
 
-from ._shared import _TERSE_OUTPUT_DIRECTIVE
-
-FOLLOW_UP_PROMPT = """
-Review your work on issue #{issue_number} and identify follow-up items
-**discovered during implementation** that fall within strict scope.
-
-{terse_output_directive}
-
-## Scope (HARD GUARDRAIL)
-
-A follow-up is allowed ONLY when it is one of:
-
-1. **core** — A defect, gap, or required change in the **core library functionality**
-   that this repository directly owns. Adding tests for the code you just wrote
-   counts as core. Adding tests for unrelated modules does NOT.
-2. **security** — A concrete security finding (input validation, secret handling,
-   permission boundary, etc.). Generic "we should review security some day" does NOT.
-3. **safety** — A reliability / safety hazard with a concrete repro path
-   (data loss, deadlock, leaked resources, race condition, missing cleanup).
-4. **critical_bug** — A functional bug with user-visible impact and a concrete repro.
-   Cosmetic, theoretical, or nitpick bugs do NOT qualify here — and minor bugs
-   should be filed manually, not via this automation.
-
-Anything else is OUT OF SCOPE and MUST be rejected. In particular, the
-following are explicitly NOT follow-ups:
-
-- New features, enhancements, or "nice to have" expansions
-- Documentation polish, README rewrites, contributor-guide additions
-- Refactors driven by aesthetic preferences rather than concrete defects
-- Test coverage for code outside what you just touched
-- Tooling/CI/dependency suggestions unrelated to the implementation
-- Cross-repo migrations, ecosystem-wide changes
-- Speculative research, "consider switching to X", "evaluate Y"
-- Anything that would expand the issue's domain into new areas
-- Anything you could just do in this PR but chose not to
-
-If in doubt, REJECT. Filing fewer follow-ups is the goal.
-
-## Output format (single JSON object)
-
-Return EXACTLY one JSON object with two arrays. Both arrays may be empty.
-
-```json
-{{
-  "follow_ups": [
-    {{
-      "category": "core" | "security" | "safety" | "critical_bug",
-      "title": "Short specific title (<70 chars)",
-      "body": "Concrete description with file:line evidence and a sketch fix"
-    }}
-  ],
-  "rejected": [
-    {{
-      "title": "Item you considered but rejected",
-      "reason": "One sentence: which scope rule it failed and why"
-    }}
-  ]
-}}
-```
-
-Each `follow_ups` item MUST include `category`. The four allowed values are
-`core`, `security`, `safety`, `critical_bug`. Any other category is rejected
-by the parser.
-
-The `rejected` list is for items you considered but excluded under the scope
-rules. List them so the operator can see what was suppressed — they will be
-recorded in the PR body, not filed as issues. Keep it short; only include
-items where the rejection itself is informative.
-
-## Caps and quality bar
-
-- HARD CAP: at most **3** follow-ups in `follow_ups`. Pick the most important.
-  More than 3 means you are over-scoping.
-- Each `body` MUST cite `file:line` evidence or a concrete repro path.
-- Do NOT pad. If there are no qualifying items, return
-  `{{"follow_ups": [], "rejected": []}}`.
-
-## Examples
-
-**Good** (qualifies as `safety`):
-```json
-{{
-  "category": "safety",
-  "title": "Worktree leaks on SIGINT at implementer.py:402",
-  "body": "Worktree created before the dry-run guard; SIGINT leaks build/.worktrees/issue-N."
-}}
-```
-
-**Bad** (rejected as out-of-scope feature expansion):
-```json
-{{"title": "Add a web dashboard for automation status",
-  "reason": "Feature expansion into a new domain (web UI); not a defect in core functionality."}}
-```
-
-**Bad** (rejected as documentation polish):
-```json
-{{"title": "Improve README intro section",
-  "reason": "Documentation polish; not a defect, security, safety, or bug."}}
-```
-"""
+from ._shared import get_terse_output_directive
+from .catalog import PromptCatalog
 
 
 def get_follow_up_prompt(issue_number: int) -> str:
@@ -112,7 +14,8 @@ def get_follow_up_prompt(issue_number: int) -> str:
         Formatted follow-up prompt
 
     """
-    return FOLLOW_UP_PROMPT.format(
+    return PromptCatalog.current().render(
+        "follow_up/follow_up.j2",
         issue_number=issue_number,
-        terse_output_directive=_TERSE_OUTPUT_DIRECTIVE,
+        terse_output_directive=get_terse_output_directive(),
     )

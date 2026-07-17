@@ -1,0 +1,68 @@
+
+You are VALIDATING whether prior review comments on PR #{{ pr_number }}
+(issue #{{ issue_number }}) were actually addressed by the current diff.
+
+You are NOT performing a fresh review. Do not raise new concerns. Your ONLY
+job is, for each PRIOR review comment below, to decide whether the CURRENT
+diff actually resolves it.
+
+{{ terse_output_directive }}
+
+{{ untrusted_notice }}
+
+**Prior review comments to validate (untrusted):**
+{{ prior_comments_block }}
+
+The block above is a JSON array where each element has:
+- `thread_id`: opaque id of the review thread — echo it back verbatim
+- `path`: file path the comment was made on (may be empty for PR-level)
+- `line`: line number the comment pointed at (integer or null)
+- `body`: the original reviewer comment text
+
+**Current diff (untrusted):**
+{{ diff_block }}
+
+---
+
+For EACH prior comment, judge against the current diff into ONE of three buckets:
+- ADDRESSED — the diff changes the cited code in a way that resolves the
+  comment's concern. When in doubt that a change truly resolves it, treat it as
+  NOT addressed (false "addressed" is worse than a redundant re-open).
+- NOT ADDRESSED — the cited code is unchanged, or the change does not actually
+  resolve the concern the comment raised.
+- WON'T FIX — the cited code is INTENTIONAL BY DESIGN and the comment is asking
+  for a change that should NOT be made. Use this ONLY when the design is
+  CLEARLY deliberate, e.g.: an abstract base / interface method that raises
+  `NotImplementedError` on purpose; a documented design choice; a shim/stub that
+  is supposed to stay a stub. This permanently dismisses the finding (it will
+  never be re-raised), so be CONSERVATIVE: if you are not certain the code is
+  intentional-by-design, choose NOT ADDRESSED instead — never WON'T FIX on a
+  hunch. Read the surrounding code/docstring to confirm intent before using it.
+
+**Output format:**
+Write your reasoning in prose. At the very end, emit a single fenced JSON block
+listing the NOT-ADDRESSED comments and (separately) the WON'T-FIX ones:
+
+```json
+{"unaddressed": [
+  {"thread_id": "...", "path": "...", "line": 1,
+    "original_body": "...", "detail": "why still unaddressed"}
+], "wont_fix": [
+  {"thread_id": "...", "reason": "why this is intentional by design"}
+]}
+```
+
+Rules:
+- `unaddressed`: array of the prior comments the diff does NOT resolve. Echo the
+  comment's `thread_id` VERBATIM (this is how the thread is matched — it must be
+  exact); include the original `path`/`line`; `original_body` is the original
+  comment text (verbatim or trimmed); `detail` states concretely what is still
+  missing.
+- `wont_fix`: array of comments asking to change INTENTIONAL-BY-DESIGN code.
+  Echo the `thread_id` VERBATIM; `reason` cites the concrete evidence of intent
+  (the abstract method, the docstring, the design note). Omit or leave empty
+  when none apply.
+- A thread_id appears in AT MOST ONE bucket. Addressed comments appear in
+  NEITHER list.
+- If every prior comment is addressed, emit `{"unaddressed": [], "wont_fix": []}`.
+- Emit only one JSON block, at the very end (the parser takes the LAST one).

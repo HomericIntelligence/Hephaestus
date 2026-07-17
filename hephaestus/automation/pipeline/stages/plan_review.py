@@ -66,6 +66,7 @@ from hephaestus.automation.prompts.planning import (
 )
 from hephaestus.automation.session_naming import AGENT_PLAN_REVIEWER, AGENT_PLANNER
 from hephaestus.automation.state_labels import apply_plan_verdict, is_plan_go
+from hephaestus.prompts import PromptCatalog
 
 from .base import (
     AgentJob,
@@ -131,19 +132,10 @@ def build_amend_prompt(
     """
     prompt = build_plan_prompt(issue_number, issue_title, issue_body, advise_findings)
     fenced = fence_content()
-    feedback = "\n".join(
-        [
-            "",
-            "---",
-            "",
-            fenced.untrusted_notice,
-            "",
-            "## Prior reviewer critique — your previous plan got NOGO",
-            "",
-            "Address every concrete finding below in your revised plan:",
-            "",
-            fenced.fence("PRIOR_REVIEW", prior_review),
-        ]
+    feedback = PromptCatalog.current().render(
+        "planning/amend_feedback.j2",
+        untrusted_notice=fenced.untrusted_notice,
+        prior_review_block=fenced.fence("PRIOR_REVIEW", prior_review),
     )
     return prompt + feedback
 
