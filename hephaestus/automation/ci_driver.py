@@ -232,7 +232,7 @@ Examples:
         default=1,
         help=(
             "Number of CI-fix attempts per failing PR before giving up "
-            "(default: 1). The issue-major loop passes its --max-merge-attempts "
+            "(default: 1). The issue-major loop passes its --drive-green-loops "
             "here so a PR that will not go green is abandoned after N tries."
         ),
     )
