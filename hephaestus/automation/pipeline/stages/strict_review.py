@@ -508,10 +508,6 @@ class StrictReviewStage(Stage):
             "reconciling existing" if existing_go else "publishing fenced",
         )
         if not existing_go:
-            if lease is None:
-                # Keep the protocol's type and runtime contracts aligned if
-                # a restored payload is unexpectedly incomplete.
-                return Continue(next_state=HEAD_CHECK)
             try:
                 published_by_us = ctx.github.publish_strict_review_artifact(
                     pr_number, head_sha, verdict_text, is_go=True, lease=lease
