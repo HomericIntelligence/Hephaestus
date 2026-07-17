@@ -22,6 +22,7 @@ dependency under an incompatible license, an unrecognized license string, or a
 missing runtime extra fails CI. When you add a non-vendored copyleft extra
 here, also add it to that script's ALLOWED_EXTRA_COPYLEFT map.
 
+  Jinja2        BSD-3-Clause
   packaging     Apache-2.0 OR BSD-2-Clause
   pyyaml        MIT
   pydantic      MIT

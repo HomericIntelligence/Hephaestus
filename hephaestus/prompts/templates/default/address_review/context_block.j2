@@ -1,0 +1,8 @@
+{% if task_block %}**Task — the linked issue (untrusted):**
+{{ task_block }}{% endif %}{% if task_review_block %}{% if task_block %}
+
+{% endif %}**Task review — the plan-review verdict (untrusted):**
+{{ task_review_block }}{% endif %}{% if diff_block %}{% if task_block or task_review_block %}
+
+{% endif %}**Current implementation diff (untrusted):**
+{{ diff_block }}{% endif %}

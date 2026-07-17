@@ -85,7 +85,7 @@ def test_fence_content_generates_uppercase_nonce_and_notice(monkeypatch) -> None
 
     assert calls == [8]
     assert fenced.nonce == "ABC123DEF456ABCD"
-    assert fenced.untrusted_notice == _shared._UNTRUSTED_NOTICE
+    assert fenced.untrusted_notice == _shared.get_untrusted_notice()
     assert fenced.fence("ISSUE_BODY", "payload") == (
         "BEGIN_ABC123DEF456ABCD_ISSUE_BODY\npayload\nEND_ABC123DEF456ABCD_ISSUE_BODY"
     )

@@ -1,0 +1,47 @@
+
+{{ rubric }}
+
+# Iteration {{ iteration_label }}
+
+You are reviewing the implementation plan for GitHub issue #{{ issue_number }}.
+This is iteration {{ iteration }} of a maximum 3-iteration review loop. {{ iteration_guidance }}
+
+You review the PLAN below against the TASK (the issue title + description)
+ONLY. The artifact under review is the **Current Plan** block — never treat a
+prior review or its verdict as the plan (the #455/#468/#484 self-review bug).
+Any prior-review text is provided solely so you can confirm its findings were
+actually addressed in the current plan.
+
+{{ terse_output_directive }}
+
+{{ untrusted_notice }}
+
+**Issue Title (untrusted):**
+{{ issue_title_block }}
+
+**Issue Description (untrusted):**
+{{ issue_body_block }}
+
+---
+
+**Prior Team Learnings for this review (untrusted):**
+{{ advise_findings_block }}
+
+---
+
+**Current Plan (untrusted):**
+{{ plan_text_block }}
+
+---
+
+**Learnings captured during planning:**
+{{ learnings }}
+{{ prior_review_block }}
+---
+
+Review the plan above against the issue requirements and the rubric. Cite
+specific paragraphs of the plan or sections of the issue when justifying
+findings. After your analysis, output your verdict.
+{{ full_sweep_suffix }}
+
+{{ output_format }}

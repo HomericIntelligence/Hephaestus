@@ -17,7 +17,7 @@ from hephaestus.automation.pipeline.stages.plan_review import (
     PlanReviewStage,
     build_amend_prompt,
 )
-from hephaestus.automation.prompts._shared import _UNTRUSTED_NOTICE
+from hephaestus.automation.prompts._shared import get_untrusted_notice
 from hephaestus.automation.prompts.planning import get_plan_prompt
 from hephaestus.automation.protocol import PLAN_COMMENT_MARKER
 from hephaestus.automation.state_labels import (
@@ -55,7 +55,7 @@ class TestBuildAmendPrompt:
         )
 
         assert get_plan_prompt(42) in prompt  # template reused inside the composed prompt
-        assert _UNTRUSTED_NOTICE in prompt
+        assert get_untrusted_notice() in prompt
         assert _fence_present(prompt, "ISSUE_TITLE")
         assert _fence_present(prompt, "ISSUE_BODY")
         assert _fence_present(prompt, "ADVISE_FINDINGS")

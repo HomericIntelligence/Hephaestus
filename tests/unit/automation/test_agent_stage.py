@@ -11,6 +11,7 @@ import pytest
 
 from hephaestus.agents.runtime import AgentRunResult
 from hephaestus.automation import agent_stage
+from hephaestus.prompts import PromptCatalog
 
 
 def _args(tmp_path: Path, *, agent: str = "claude") -> argparse.Namespace:
@@ -44,6 +45,43 @@ def test_read_prompt_prepends_skill_instructions(tmp_path: Path) -> None:
     assert "Hephaestus agent stage `review`" in prompt
     assert "strict instructions" in prompt
     assert prompt.endswith("do the work")
+
+
+def test_build_parser_supports_prompt_dir_override(tmp_path: Path) -> None:
+    """The stage CLI should honor the shared CLI-only prompt overlay selector."""
+    template = tmp_path / "agent_stage" / "skill_prefix.j2"
+    template.parent.mkdir()
+    template.write_text("HARNESS {{ stage }}\n{{ skill_text }}\n{{ prompt }}\n", encoding="utf-8")
+
+    prompt_file = tmp_path / "prompt.md"
+    skill_file = tmp_path / "skill.md"
+    prompt_file.write_text("stage prompt", encoding="utf-8")
+    skill_file.write_text("strict instructions", encoding="utf-8")
+
+    parser = agent_stage.build_parser()
+    try:
+        parser.parse_args(
+            [
+                "--prompt-file",
+                str(prompt_file),
+                "--repo-root",
+                str(tmp_path),
+                "--stage",
+                "review",
+                "--output",
+                str(tmp_path / "out.txt"),
+                "--prompt-dir",
+                str(tmp_path),
+            ]
+        )
+
+        prompt = agent_stage.read_prompt(prompt_file, skill_file, "review")
+
+        assert prompt.startswith("HARNESS review")
+        assert "stage prompt" in prompt
+        assert "strict instructions" in prompt
+    finally:
+        PromptCatalog.clear_current()
 
 
 def test_run_agent_dispatches_claude_and_writes_outputs(

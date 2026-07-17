@@ -96,6 +96,7 @@ from hephaestus.automation.state_labels import (
     is_plan_go,
     is_skipped,
 )
+from hephaestus.prompts import PromptCatalog
 
 from .base import (
     GIT_JOB_TIMEOUT_S,
@@ -218,32 +219,17 @@ def build_implementation_prompt(
     blocks: list[str] = [prompt]
     if advise_findings:
         blocks.append(
-            "\n".join(
-                [
-                    "",
-                    "---",
-                    "",
-                    "## Prior Learnings from Team Knowledge Base",
-                    "",
-                    advise_findings,
-                ]
+            PromptCatalog.current().render(
+                "implementation/advise_append.j2", advise_findings=advise_findings
             )
         )
     if strict_review_feedback:
         fenced = fence_content()
         blocks.append(
-            "\n".join(
-                [
-                    "",
-                    "---",
-                    "",
-                    "## Strict-review remediation (untrusted feedback)",
-                    "",
-                    fenced.untrusted_notice,
-                    fenced.fence("STRICT_REVIEW_NOGO", strict_review_feedback),
-                    "",
-                    "Address the concrete findings above before returning control to review.",
-                ]
+            PromptCatalog.current().render(
+                "implementation/strict_remediation.j2",
+                untrusted_notice=fenced.untrusted_notice,
+                feedback_block=fenced.fence("STRICT_REVIEW_NOGO", strict_review_feedback),
             )
         )
     return "".join(blocks)
@@ -265,9 +251,8 @@ def build_test_fix_prompt(issue_number: int, prev_iteration: int, test_output: s
         The resume prompt carrying the test-failure feedback block.
 
     """
-    review_text = (
-        "The pre-PR unit-test run failed. Fix ONLY what the failures below "
-        "require, then the tests will be re-run.\n\n" + test_output
+    review_text = PromptCatalog.current().render(
+        "implementation/test_failure_review.j2", test_output=test_output
     )
     return get_impl_resume_feedback_prompt(
         issue_number=issue_number,

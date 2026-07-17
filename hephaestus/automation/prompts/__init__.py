@@ -21,13 +21,17 @@ of phase-grouped submodules. It re-exports every public symbol so existing
 importers continue to work unchanged.
 """
 
+from __future__ import annotations
+
+from typing import Any
+
+from hephaestus.prompts import PromptCatalog
+
 # Re-export private helpers/constants for tests and internal callers that
 # previously did ``from hephaestus.automation.prompts import _fence_untrusted``
 # or ``prompts._STRICT_GRADING_AND_ANTI_INFLATION``. The ``as`` aliases tell
 # ruff these are intentional re-exports, not unused imports.
 from ._shared import (
-    _TERSE_OUTPUT_DIRECTIVE as _TERSE_OUTPUT_DIRECTIVE,
-    _UNTRUSTED_NOTICE as _UNTRUSTED_NOTICE,
     FencedContent as FencedContent,
     _fence_untrusted as _fence_untrusted,
     _iteration_guidance as _iteration_guidance,
@@ -36,6 +40,8 @@ from ._shared import (
     _prompts_logger as _prompts_logger,
     _relativize_path as _relativize_path,
     fence_content as fence_content,
+    get_terse_output_directive as get_terse_output_directive,
+    get_untrusted_notice as get_untrusted_notice,
 )
 from ._strict_rubric import (
     _FULL_SWEEP_SUFFIX as _FULL_SWEEP_SUFFIX,
@@ -49,25 +55,14 @@ from ._strict_rubric import (
     _STRICT_REVIEW_OUTPUT_FORMAT as _STRICT_REVIEW_OUTPUT_FORMAT,
     _STRICT_REVIEW_RUBRIC as _STRICT_REVIEW_RUBRIC,
 )
-from .address_review import (
-    ADDRESS_REVIEW_PROMPT,
-    build_unaddressed_directive,
-    get_address_review_prompt,
-)
+from .address_review import build_unaddressed_directive, get_address_review_prompt
 from .advise import (
-    ADVISE_PROMPT,
-    CODEX_ADVISE_PROMPT,
     get_advise_prompt,
     get_advise_prompt_builder,
     get_codex_advise_prompt,
 )
-from .follow_up import FOLLOW_UP_PROMPT, get_follow_up_prompt
+from .follow_up import get_follow_up_prompt
 from .implementation import (
-    DIRTY_REUSED_WORKTREE_DECISION_PROMPT,
-    DIRTY_REUSED_WORKTREE_PROMPT,
-    IMPL_LOOP_REVIEW_PROMPT,
-    IMPL_RESUME_FEEDBACK_PROMPT,
-    IMPLEMENTATION_PROMPT,
     get_dirty_reused_worktree_decision_prompt,
     get_dirty_reused_worktree_prompt,
     get_impl_loop_review_prompt,
@@ -75,20 +70,63 @@ from .implementation import (
     get_implementation_prompt,
 )
 from .planning import (
-    PLAN_LOOP_REVIEW_PROMPT,
-    PLAN_PROMPT,
-    PLAN_REVIEW_PROMPT,
     get_plan_loop_review_prompt,
     get_plan_prompt,
     get_plan_review_prompt,
 )
 from .pr_review import (
-    PR_REVIEW_ANALYSIS_PROMPT,
     get_comment_difficulty_prompt,
     get_pr_description,
     get_pr_review_analysis_prompt,
     get_review_validation_prompt,
 )
+
+_LEGACY_PROMPT_TEMPLATES = {
+    "ADDRESS_REVIEW_PROMPT": "address_review/address_review.j2",
+    "ADVISE_PROMPT": "advise/advise.j2",
+    "CODEX_ADVISE_PROMPT": "advise/direct.j2",
+    "DIRTY_REUSED_WORKTREE_DECISION_PROMPT": "implementation/dirty_worktree.j2",
+    "DIRTY_REUSED_WORKTREE_PROMPT": "implementation/dirty_worktree.j2",
+    "FOLLOW_UP_PROMPT": "follow_up/follow_up.j2",
+    "IMPLEMENTATION_PROMPT": "implementation/implementation.j2",
+    "IMPL_LOOP_REVIEW_PROMPT": "implementation/loop_review.j2",
+    "IMPL_RESUME_FEEDBACK_PROMPT": "implementation/resume_feedback.j2",
+    "PLAN_LOOP_REVIEW_PROMPT": "planning/plan_loop_review.j2",
+    "PLAN_PROMPT": "planning/plan.j2",
+    "PLAN_REVIEW_PROMPT": "planning/plan_review.j2",
+    "PR_REVIEW_ANALYSIS_PROMPT": "pr_review/analysis.j2",
+}
+
+
+class _LegacyPromptTemplate(str):
+    """String-compatible bridge for deprecated ``*_PROMPT.format(...)`` users."""
+
+    _template_name: str
+
+    def __new__(cls, template_name: str) -> _LegacyPromptTemplate:
+        catalog = PromptCatalog.current()
+        instance = super().__new__(cls, catalog.source(template_name))
+        instance._template_name = template_name
+        return instance
+
+    def format(self, *args: Any, **kwargs: Any) -> str:
+        """Render through Jinja while preserving the historical ``.format`` API."""
+        # The legacy templates only used named replacement fields, so callers
+        # could (and did) pass otherwise-unused positional values.  ``str``
+        # accepts those extras; preserve that permissiveness while rendering
+        # the external Jinja source instead of applying ``str.format`` to it.
+        del args
+        return PromptCatalog.current().render(self._template_name, **kwargs)
+
+
+def __getattr__(name: str) -> _LegacyPromptTemplate:
+    """Lazily retain deprecated prompt-string exports without Python prose."""
+    try:
+        template_name = _LEGACY_PROMPT_TEMPLATES[name]
+    except KeyError as exc:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from exc
+    return _LegacyPromptTemplate(template_name)
+
 
 __all__ = [
     "ADDRESS_REVIEW_PROMPT",
@@ -124,4 +162,6 @@ __all__ = [
     "get_pr_description",
     "get_pr_review_analysis_prompt",
     "get_review_validation_prompt",
+    "get_terse_output_directive",
+    "get_untrusted_notice",
 ]

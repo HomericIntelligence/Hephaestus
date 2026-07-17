@@ -53,6 +53,7 @@ from typing import TYPE_CHECKING, Any, TypeVar, overload
 from pydantic import BaseModel
 
 from hephaestus.agents.runtime import add_agent_argument, session_agent_matches
+from hephaestus.automation.prompts.catalog import add_prompt_dir_argument
 from hephaestus.cli.utils import (
     add_dry_run_arg,
     add_github_throttle_args,
@@ -391,6 +392,7 @@ def build_automation_parser(
 
     if add_agent:
         add_agent_argument(parser)
+    add_prompt_dir_argument(parser)
     if add_max_workers:
         add_max_workers_arg(parser, default=max_workers_default, help_text=max_workers_help)
     if add_parallel:

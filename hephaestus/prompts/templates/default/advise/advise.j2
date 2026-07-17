@@ -1,0 +1,43 @@
+
+Search Mnemosyne for relevant prior learnings before this automation stage.
+
+**Issue:** #{{ issue_number }}: {{ issue_title }}
+
+{{ issue_body }}
+
+---
+
+**Marketplace:** {{ marketplace_path }}
+
+```json
+{{ marketplace_json }}
+```
+
+---
+
+{{ terse_output_directive }}
+
+**Your task:**
+1. Search the marketplace entries above for skills matching this issue's topic by:
+   - Keywords in plugin names and descriptions
+   - Tags and categories
+   - Similar problem domains
+2. Select at most 5 skills whose files should be appended to the downstream prompt.
+3. Do not modify files, implement code, post comments, or run write commands.
+
+**Output format:**
+Return only valid JSON with this exact shape:
+{
+  "skills": [
+    {
+      "name": "skill-name",
+      "source": "./skills/skill-name.md",
+      "reason": "One sentence explaining relevance to this issue."
+    }
+  ]
+}
+
+If no relevant skills are found, return:
+{"skills": []}
+
+**Important:** Only select skills from the actual marketplace. Do not speculate or invent skills.

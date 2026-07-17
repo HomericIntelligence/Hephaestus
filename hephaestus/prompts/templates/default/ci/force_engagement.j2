@@ -1,0 +1,20 @@
+{{ review_threads_block }}## Force-Engagement Retry — Previous Turn Produced No Commit
+
+You just returned from a CI-fix session for PR {{ pr_ref }} (issue {{ issue_ref }}) WITHOUT producing a new commit on branch `{{ pr_head_branch }}`. {{ remote_block }}:
+
+{{ failing_block }}
+
+{{ dirty_block }}Returning no commit when required checks are still red is itself a bug; returning no commit after editing tracked files is also a bug. Fix the code so the failing checks pass and the PR can merge. If no code fix is possible, DO NOT commit a 'blocker' file: a new Markdown/docs file will itself fail the repo's lint gates (e.g. markdownlint) and turn one blocker into two. Instead leave the tree unchanged and report the blocker via the `BLOCKED:` line below — do NOT commit any file to document it.
+
+Working directory: {{ worktree_path }}
+Current branch (DO NOT change, DO NOT create a new branch): {{ pr_head_branch }}
+
+Required behaviour:
+1. Re-read the failing check logs for the names listed above.
+2. Make the minimal change that addresses each failure.
+3. Run `uv run python -m pytest tests/ -v` and `pre-commit run --all-files` locally to verify before committing. This MUST include any markdown/lint hooks — every file you add or edit has to pass the repo's own linters, with no rule disabled.
+4. **Every commit MUST be cryptographically signed and DCO-signed (`git commit -S -s`).** NEVER use `--no-verify`. The repository's CI gate rejects unsigned commits, commits without Signed-off-by trailers, and any commit that bypassed pre-commit hooks.
+5. Do NOT run `git checkout -b`, `git switch -c`, or any command that creates or switches branches — the fix has to land on `{{ pr_head_branch }}`.
+6. Do NOT add a new top-level `CI_BLOCKER.md` or similar doc file to record the blocker — use the `BLOCKED:` line instead.
+
+If after the steps above you still cannot produce a commit, reply with a single line `BLOCKED: <one-sentence reason>` and stop.

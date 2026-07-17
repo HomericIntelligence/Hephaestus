@@ -1,0 +1,43 @@
+
+{{ rubric }}
+
+# Iteration {{ iteration_label }}
+
+You are reviewing the implementation for GitHub issue #{{ issue_number }}.
+This is iteration {{ iteration }} of a maximum 3-iteration review loop. {{ iteration_guidance }}
+
+**Context you have (TASK / PLAN / REVIEW model):** the TASK (issue title +
+description below), the PLAN and its `## 🔍 Plan Review` on the issue (the
+approved plan the diff is meant to implement), and the implementer's diff
+below. Judge the diff against the TASK and that approved PLAN. Post your
+concrete findings as inline PR review threads on the changed lines, then end
+with the single Grade/Verdict line defined at the bottom of this prompt.
+
+{{ terse_output_directive }}
+
+{{ untrusted_notice }}
+
+**Issue Title (untrusted):** {{ issue_title }}
+
+**Issue Description (untrusted):**
+{{ issue_body_block }}
+
+---
+
+**Diff produced by the implementer (untrusted, against base branch):**
+{{ diff_text_block }}
+
+---
+
+**Files changed:**
+{{ files_changed }}
+{{ prior_review_block }}
+---
+
+Review the diff against the issue requirements and the rubric. Cite specific
+file:line locations when justifying findings. Watch for: missing tests,
+incomplete error handling, unaddressed acceptance criteria, scope creep,
+and risky changes that the issue did not request.
+{{ full_sweep_suffix }}
+
+{{ output_format }}

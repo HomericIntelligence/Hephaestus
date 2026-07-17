@@ -4,64 +4,8 @@ from collections.abc import Callable
 
 from hephaestus.agents.runtime import uses_direct_agent_runner
 
-from ._shared import _TERSE_OUTPUT_DIRECTIVE, _relativize_path
-
-ADVISE_PROMPT = """
-Search Mnemosyne for relevant prior learnings before this automation stage.
-
-**Issue:** #{issue_number}: {issue_title}
-
-{issue_body}
-
----
-
-**Marketplace:** {marketplace_path}
-
-```json
-{marketplace_json}
-```
-
----
-
-{terse_output_directive}
-
-**Your task:**
-1. Search the marketplace entries above for skills matching this issue's topic by:
-   - Keywords in plugin names and descriptions
-   - Tags and categories
-   - Similar problem domains
-2. Select at most 5 skills whose files should be appended to the downstream prompt.
-3. Do not modify files, implement code, post comments, or run write commands.
-
-**Output format:**
-Return only valid JSON with this exact shape:
-{{
-  "skills": [
-    {{
-      "name": "skill-name",
-      "source": "./skills/skill-name.md",
-      "reason": "One sentence explaining relevance to this issue."
-    }}
-  ]
-}}
-
-If no relevant skills are found, return:
-{{"skills": []}}
-
-**Important:** Only select skills from the actual marketplace. Do not speculate or invent skills.
-"""
-
-DIRECT_AGENT_ADVISE_PROMPT = (
-    ADVISE_PROMPT
-    + """
-
-**Direct-agent automation constraints:**
-- Do not invoke `$advise`; this prompt is already the advise step.
-- Do not clone or update Mnemosyne yourself; use the marketplace path above.
-- Do not implement, commit, push, create a PR, or modify files.
-"""
-)
-CODEX_ADVISE_PROMPT = DIRECT_AGENT_ADVISE_PROMPT
+from ._shared import _relativize_path, get_terse_output_directive
+from .catalog import PromptCatalog
 
 
 def get_advise_prompt(
@@ -89,13 +33,14 @@ def get_advise_prompt(
 
     """
     safe_marketplace_path = _relativize_path(marketplace_path, repo_root)
-    return ADVISE_PROMPT.format(
+    return PromptCatalog.current().render(
+        "advise/advise.j2",
         issue_number=issue_number,
         issue_title=issue_title,
         issue_body=issue_body,
         marketplace_path=safe_marketplace_path,
         marketplace_json=marketplace_json,
-        terse_output_directive=_TERSE_OUTPUT_DIRECTIVE,
+        terse_output_directive=get_terse_output_directive(),
     )
 
 
@@ -117,13 +62,14 @@ def get_codex_advise_prompt(
     read-only and non-recursive.
     """
     safe_marketplace_path = _relativize_path(marketplace_path, repo_root)
-    return DIRECT_AGENT_ADVISE_PROMPT.format(
+    return PromptCatalog.current().render(
+        "advise/direct.j2",
         issue_number=issue_number,
         issue_title=issue_title,
         issue_body=issue_body,
         marketplace_path=safe_marketplace_path,
         marketplace_json=marketplace_json,
-        terse_output_directive=_TERSE_OUTPUT_DIRECTIVE,
+        terse_output_directive=get_terse_output_directive(),
     )
 
 

@@ -1,0 +1,17 @@
+
+**Required output format (verdict contract — MANDATORY):**
+
+End your response with EXACTLY these two lines, in this order, each on its own
+line, and emit NOTHING after them (no trailing prose, no closing remarks):
+
+```
+Grade: <A|B|C|D|F>
+Verdict: <GO|NOGO>
+```
+
+The `Verdict:` line MUST be present and MUST read either `Verdict: GO` or
+`Verdict: NOGO`. Omitting it, or writing any other token, is a
+CONTRACT VIOLATION (do not rely on a reader inferring the verdict). GO is
+reserved for cases where you are CONFIDENT the artifact is ready as-is. Any
+major finding, missing dimension coverage, or "needs another iteration"
+critique → Verdict: NOGO. When in doubt, NOGO.

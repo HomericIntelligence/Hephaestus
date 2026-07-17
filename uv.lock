@@ -601,6 +601,7 @@ wheels = [
 name = "homericintelligence-hephaestus"
 source = { editable = "." }
 dependencies = [
+    { name = "jinja2" },
     { name = "packaging" },
     { name = "pyyaml" },
     { name = "tzdata", marker = "sys_platform == 'win32'" },
@@ -659,6 +660,7 @@ dev = [
 requires-dist = [
     { name = "defusedxml", marker = "extra == 'all'", specifier = ">=0.7,<1" },
     { name = "defusedxml", marker = "extra == 'xml'", specifier = ">=0.7,<1" },
+    { name = "jinja2", specifier = ">=3.1,<4" },
     { name = "jsonschema", marker = "extra == 'all'", specifier = ">=4.0,<5" },
     { name = "jsonschema", marker = "extra == 'schema'", specifier = ">=4.0,<5" },
     { name = "nats-py", marker = "extra == 'all'", specifier = ">=2.6,<3" },
