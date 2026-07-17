@@ -52,7 +52,7 @@ head-bound strict-review proof:
     ``payload["merge_wait_started_at"]`` (stamped at ARM; missing in POLL
     is an invariant failure, not a new stamp) and ``HEPH_PR_MERGE_MAX_WAIT``
     (default 1800s, exactly the legacy ``_wait_for_pr_terminal`` budget).
-    The queue CLI's ``--max-merge-attempts`` feeds the ``merge`` budget:
+    The queue CLI's ``--drive-green-loops`` feeds the ``merge`` budget:
     once pending polls reach that count, the issue is durably tagged
     ``state:skip`` and the item SKIPs.
 - LEARN_WAIT [W:A]: the drive-green learnings session (re-housed

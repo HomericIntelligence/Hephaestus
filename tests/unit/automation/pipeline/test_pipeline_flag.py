@@ -162,11 +162,11 @@ def test_build_pipeline_config_maps_drive_green_phase_to_ci_scope(
     assert config.scope.stages == frozenset({StageName.CI, StageName.MERGE_WAIT})
 
 
-def test_build_pipeline_config_maps_max_merge_attempts_to_budget(
+def test_build_pipeline_config_maps_drive_green_loops_to_budget(
     dispatch: dict[str, MagicMock],
 ) -> None:
-    """The loop CLI's merge-attempt flag must tune the merge_wait budget."""
-    loop_runner.main(["--max-merge-attempts", "3"])
+    """The loop CLI's drive-green loop cap must tune the merge_wait budget."""
+    loop_runner.main(["--drive-green-loops", "3"])
 
     (config,) = dispatch["run_pipeline"].call_args.args
     assert config.budget_overrides["merge"] == 3
