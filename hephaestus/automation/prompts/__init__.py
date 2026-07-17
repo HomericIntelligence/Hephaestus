@@ -21,6 +21,12 @@ of phase-grouped submodules. It re-exports every public symbol so existing
 importers continue to work unchanged.
 """
 
+from __future__ import annotations
+
+from typing import Any
+
+from hephaestus.prompts import PromptCatalog
+
 # Re-export private helpers/constants for tests and internal callers that
 # previously did ``from hephaestus.automation.prompts import _fence_untrusted``
 # or ``prompts._STRICT_GRADING_AND_ANTI_INFLATION``. The ``as`` aliases tell
@@ -75,7 +81,63 @@ from .pr_review import (
     get_review_validation_prompt,
 )
 
+_LEGACY_PROMPT_TEMPLATES = {
+    "ADDRESS_REVIEW_PROMPT": "address_review/address_review.j2",
+    "ADVISE_PROMPT": "advise/advise.j2",
+    "CODEX_ADVISE_PROMPT": "advise/direct.j2",
+    "DIRTY_REUSED_WORKTREE_DECISION_PROMPT": "implementation/dirty_worktree.j2",
+    "DIRTY_REUSED_WORKTREE_PROMPT": "implementation/dirty_worktree.j2",
+    "FOLLOW_UP_PROMPT": "follow_up/follow_up.j2",
+    "IMPLEMENTATION_PROMPT": "implementation/implementation.j2",
+    "IMPL_LOOP_REVIEW_PROMPT": "implementation/loop_review.j2",
+    "IMPL_RESUME_FEEDBACK_PROMPT": "implementation/resume_feedback.j2",
+    "PLAN_LOOP_REVIEW_PROMPT": "planning/plan_loop_review.j2",
+    "PLAN_PROMPT": "planning/plan.j2",
+    "PLAN_REVIEW_PROMPT": "planning/plan_review.j2",
+    "PR_REVIEW_ANALYSIS_PROMPT": "pr_review/analysis.j2",
+}
+
+
+class _LegacyPromptTemplate(str):
+    """String-compatible bridge for deprecated ``*_PROMPT.format(...)`` users."""
+
+    _template_name: str
+
+    def __new__(cls, template_name: str) -> _LegacyPromptTemplate:
+        catalog = PromptCatalog.current()
+        instance = super().__new__(cls, catalog.source(template_name))
+        instance._template_name = template_name
+        return instance
+
+    def format(self, *args: Any, **kwargs: Any) -> str:
+        """Render through Jinja while preserving the historical ``.format`` API."""
+        if args:
+            return super().format(*args, **kwargs)
+        return PromptCatalog.current().render(self._template_name, **kwargs)
+
+
+def __getattr__(name: str) -> _LegacyPromptTemplate:
+    """Lazily retain deprecated prompt-string exports without Python prose."""
+    try:
+        template_name = _LEGACY_PROMPT_TEMPLATES[name]
+    except KeyError as exc:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from exc
+    return _LegacyPromptTemplate(template_name)
+
 __all__ = [
+    "ADDRESS_REVIEW_PROMPT",
+    "ADVISE_PROMPT",
+    "CODEX_ADVISE_PROMPT",
+    "DIRTY_REUSED_WORKTREE_DECISION_PROMPT",
+    "DIRTY_REUSED_WORKTREE_PROMPT",
+    "FOLLOW_UP_PROMPT",
+    "IMPLEMENTATION_PROMPT",
+    "IMPL_LOOP_REVIEW_PROMPT",
+    "IMPL_RESUME_FEEDBACK_PROMPT",
+    "PLAN_LOOP_REVIEW_PROMPT",
+    "PLAN_PROMPT",
+    "PLAN_REVIEW_PROMPT",
+    "PR_REVIEW_ANALYSIS_PROMPT",
     "FencedContent",
     "build_unaddressed_directive",
     "fence_content",

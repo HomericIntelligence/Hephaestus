@@ -69,6 +69,21 @@ class PromptCatalog:
 
     def render(self, template_name: str, /, **context: Any) -> str:
         """Render one safe, relative prompt template name."""
+        self._validate_template_name(template_name)
+        return self._environment.get_template(template_name).render(**context)
+
+    def source(self, template_name: str) -> str:
+        """Return a template's source for legacy string-template compatibility."""
+        self._validate_template_name(template_name)
+        loader = self._environment.loader
+        if loader is None:  # pragma: no cover - every catalog configures a loader
+            raise RuntimeError("Prompt catalog has no template loader")
+        source, _, _ = loader.get_source(self._environment, template_name)
+        return source
+
+    @staticmethod
+    def _validate_template_name(template_name: str) -> None:
+        """Reject absolute or traversal template names before loading."""
         path = PurePosixPath(template_name)
         if (
             path.is_absolute()
@@ -77,7 +92,6 @@ class PromptCatalog:
             or "\\" in template_name
         ):
             raise ValueError(f"Invalid prompt template name: {template_name!r}")
-        return self._environment.get_template(template_name).render(**context)
 
 
 class _PromptDirAction(argparse.Action):

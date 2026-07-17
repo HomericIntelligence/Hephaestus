@@ -21,6 +21,13 @@ def test_default_catalog_render_preserves_planning_compatibility() -> None:
     )
 
 
+def test_legacy_prompt_constant_remains_a_jinja_backed_format_template() -> None:
+    """Existing ``PLAN_PROMPT.format`` callers retain their rendered prompt."""
+    from hephaestus.automation.prompts import PLAN_PROMPT
+
+    assert PLAN_PROMPT.format(issue_number=99) == get_plan_prompt(99)
+
+
 def test_harness_template_replaces_only_the_matching_default(tmp_path: Path) -> None:
     """A harness may replace one named template without copying the default tree."""
     override = tmp_path / "planning" / "plan.j2"
