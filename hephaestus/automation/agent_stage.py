@@ -17,7 +17,7 @@ from hephaestus.agents.runtime import (
 from hephaestus.automation.agent_config import normalize_claude_model
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 from hephaestus.io.utils import write_secure
-from hephaestus.prompts import PromptCatalog
+from hephaestus.prompts import PromptCatalog, add_prompt_dir_argument
 from hephaestus.utils.terminal import install_sigtstp_only, terminal_guard
 
 
@@ -31,6 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--log-file", help="Where to write combined agent stdout/stderr")
     parser.add_argument("--skill-file", help="Optional skill instructions to prepend to the prompt")
     add_agent_argument(parser)
+    add_prompt_dir_argument(parser)
     parser.add_argument("--model", default="", help="Optional agent model override")
     parser.add_argument(
         "--sandbox",

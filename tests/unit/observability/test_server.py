@@ -13,6 +13,24 @@ import pytest
 from hephaestus.observability.metrics import MetricsRegistry
 
 
+def _loopback_sockets_supported() -> bool:
+    """Return True when the sandbox permits binding a local loopback socket."""
+    try:
+        with socket.socket() as listener:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(("127.0.0.1", 0))
+    except OSError:
+        return False
+    return True
+
+
+_requires_loopback_socket = pytest.mark.skipif(
+    not _loopback_sockets_supported(),
+    reason="loopback sockets unavailable in this environment",
+)
+
+
+@_requires_loopback_socket
 def test_server_serves_metrics_and_health_then_releases_port() -> None:
     """The server has a bounded lifecycle and serves live registry state."""
     server_module = importlib.import_module("hephaestus.observability.server")
@@ -58,6 +76,7 @@ def test_server_rejects_non_loopback_host() -> None:
         server_module.MetricsHTTPServer(MetricsRegistry(), host="0.0.0.0")
 
 
+@_requires_loopback_socket
 def test_health_provider_failure_returns_bounded_service_unavailable() -> None:
     """A bad health provider cannot crash the server thread or leak its error."""
     server_module = importlib.import_module("hephaestus.observability.server")
