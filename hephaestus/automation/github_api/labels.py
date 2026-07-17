@@ -9,12 +9,20 @@ import hephaestus.automation.github_api as _api
 from ..state_labels import STATE_SKIP, is_skipped
 
 
-def _label_cache_key() -> str:
+def _label_cache_key(repo: tuple[str, str] | None = None) -> str:
     """Repo slug ("owner/name") keying the label cache, or "" if unresolved.
 
     ``get_repo_info`` is memoized per repo root (git_utils._repo_info_cache),
     so this is a cached dict lookup after the first call, not a git subprocess.
+
+    Args:
+        repo: Explicit ``(owner, name)`` owning the labels. When omitted the
+            slug is resolved from the ambient working directory.
+
     """
+    if repo is not None:
+        owner, name = repo
+        return f"{owner}/{name}"
     try:
         owner, name = _api.get_repo_info()
     except RuntimeError:
@@ -22,7 +30,20 @@ def _label_cache_key() -> str:
     return f"{owner}/{name}"
 
 
-def gh_list_labels(refresh: bool = False, *, raise_on_error: bool = False) -> set[str]:
+def _with_repo(cmd: list[str], repo: tuple[str, str] | None) -> list[str]:
+    """Append an explicit ``--repo owner/name`` selector when *repo* is given."""
+    if repo is None:
+        return cmd
+    owner, name = repo
+    return [*cmd, "--repo", f"{owner}/{name}"]
+
+
+def gh_list_labels(
+    refresh: bool = False,
+    *,
+    raise_on_error: bool = False,
+    repo: tuple[str, str] | None = None,
+) -> set[str]:
     """Return the set of label names that exist in the current repository.
 
     Cached per repo slug under a lock (ThreadSafeCache) so concurrent per-repo
@@ -33,15 +54,19 @@ def gh_list_labels(refresh: bool = False, *, raise_on_error: bool = False) -> se
         refresh: If True, bypass the in-process cache for the current repo and re-fetch.
         raise_on_error: If True, propagate label-list failures instead of
             returning an empty set.
+        repo: ``(owner, name)`` of the repository to list. When omitted the
+            repo is resolved from the ambient working directory, which is
+            correct only for single-repo callers (#2245).
 
     Returns:
         Set of existing label names.
 
     """
-    key = _label_cache_key()
+    key = _label_cache_key(repo)
 
     def _fetch() -> set[str]:
-        result = _api._gh_call(["label", "list", "--json", "name", "--limit", "200"])
+        cmd = _with_repo(["label", "list", "--json", "name", "--limit", "200"], repo)
+        result = _api._gh_call(cmd)
         data = json.loads(result.stdout)
         return {item["name"] for item in data}
 
@@ -56,24 +81,35 @@ def gh_list_labels(refresh: bool = False, *, raise_on_error: bool = False) -> se
         return set()
 
 
-def gh_create_label(name: str, color: str = "ededed", description: str = "") -> None:
+def gh_create_label(
+    name: str,
+    color: str = "ededed",
+    description: str = "",
+    *,
+    repo: tuple[str, str] | None = None,
+) -> None:
     """Create a GitHub label, updating it if it already exists.
 
     Args:
         name: Label name
         color: Hex color without leading ``#`` (default: neutral grey)
         description: Optional short description
+        repo: ``(owner, name)`` of the repository to create the label in.
+            When omitted the repo is resolved from the ambient working
+            directory (#2245).
 
     """
     cmd = ["label", "create", name, "--color", color, "--force"]
     if description:
         cmd.extend(["--description", description])
-    _api._gh_call(cmd)
-    _api._label_cache.add_to_entry(_label_cache_key(), name)
+    _api._gh_call(_with_repo(cmd, repo))
+    _api._label_cache.add_to_entry(_label_cache_key(repo), name)
     _api.logger.info("Created missing label '%s'", name)
 
 
-def gh_issue_add_labels(issue_number: int, labels: list[str]) -> None:
+def gh_issue_add_labels(
+    issue_number: int, labels: list[str], repo: tuple[str, str] | None = None
+) -> None:
     """Add labels to an existing issue, auto-creating any that don't exist yet.
 
     Idempotent: applying a label the issue already has is a no-op from
@@ -83,24 +119,31 @@ def gh_issue_add_labels(issue_number: int, labels: list[str]) -> None:
     work — the first reviewer pass creates the labels).
 
     Args:
-        issue_number: Issue to label.
+        issue_number: Issue to label, meaningful only within *repo*.
         labels: Label names to add. Empty list is a no-op.
+        repo: ``(owner, name)`` of the repository owning *issue_number*. When
+            omitted the repo is resolved from the ambient working directory,
+            which is correct only for single-repo callers. The multi-repo
+            loop MUST pass this explicitly: an issue number carries no repo,
+            so ambient resolution wrote other repos' epic ``state:skip`` tags
+            onto whatever repo the loop was launched from — silently, since
+            a colliding issue number returns 200, not 404 (#2245).
 
     """
     if not labels:
         return
-    existing = _api.gh_list_labels()
+    existing = _api.gh_list_labels(repo=repo)
     for label in labels:
         if label not in existing:
-            _api.gh_create_label(label)
+            _api.gh_create_label(label, repo=repo)
     cmd = ["issue", "edit", str(issue_number)]
     for label in labels:
         cmd += ["--add-label", label]
-    _api._gh_call(cmd)
+    _api._gh_call(_with_repo(cmd, repo))
     _api.logger.info("Added labels %s to issue #%s", labels, issue_number)
 
 
-def skip_epics(epics_labels: dict[int, list[str]]) -> None:
+def skip_epics(epics_labels: dict[int, list[str]], repo: tuple[str, str] | None = None) -> None:
     """Tag excluded epic/roadmap issues with ``state:skip``, idempotently.
 
     Called by the discovery chokepoints after :func:`~hephaestus.automation.
@@ -112,12 +155,15 @@ def skip_epics(epics_labels: dict[int, list[str]]) -> None:
 
     Args:
         epics_labels: Mapping of epic issue number → its current label names.
+        repo: ``(owner, name)`` of the repository owning the epics. Required
+            for multi-repo callers; when omitted the write resolves against
+            the ambient working directory (#2245).
 
     """
     for number, labels in epics_labels.items():
         if is_skipped(labels):
             continue
-        _api.gh_issue_add_labels(number, [STATE_SKIP])
+        _api.gh_issue_add_labels(number, [STATE_SKIP], repo=repo)
         _api.logger.info("Issue #%s is an epic/roadmap tracking issue; tagged state:skip", number)
 
 

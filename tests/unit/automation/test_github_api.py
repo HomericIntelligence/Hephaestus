@@ -1237,7 +1237,7 @@ class TestGhListLabelsRepoKeyedConcurrency:
         # cache could otherwise pass by running the threads sequentially).
         overlap = threading.Barrier(2, timeout=5)
 
-        def mock_key_fn() -> str:
+        def mock_key_fn(repo: Any = None) -> str:
             """Return the currently-patched repo slug based on thread context."""
             import threading
 
@@ -1314,7 +1314,7 @@ class TestGhIssueAddLabels:
     ) -> None:
         """A label not yet present in the repo is created before the edit call."""
         gh_issue_add_labels(42, ["state:plan-go"])
-        mock_create.assert_called_once_with("state:plan-go")
+        mock_create.assert_called_once_with("state:plan-go", repo=None)
 
     @patch("hephaestus.automation.github_api._gh_call")
     @patch("hephaestus.automation.github_api.gh_list_labels", return_value={"bug"})
@@ -1343,8 +1343,8 @@ class TestSkipEpics:
         """Each epic without state:skip gets exactly one add-label call."""
         skip_epics({10: ["epic"], 11: ["roadmap", "bug"]})
         assert mock_add.call_count == 2
-        mock_add.assert_any_call(10, ["state:skip"])
-        mock_add.assert_any_call(11, ["state:skip"])
+        mock_add.assert_any_call(10, ["state:skip"], repo=None)
+        mock_add.assert_any_call(11, ["state:skip"], repo=None)
 
     @patch("hephaestus.automation.github_api.gh_issue_add_labels")
     def test_skips_already_skipped_epic(self, mock_add: Any) -> None:
@@ -1355,12 +1355,92 @@ class TestSkipEpics:
     @patch("hephaestus.automation.github_api.gh_issue_add_labels")
     def test_mixed_skipped_and_unskipped(self, mock_add: Any) -> None:
         skip_epics({10: ["epic", "state:skip"], 11: ["roadmap"]})
-        mock_add.assert_called_once_with(11, ["state:skip"])
+        mock_add.assert_called_once_with(11, ["state:skip"], repo=None)
 
     @patch("hephaestus.automation.github_api.gh_issue_add_labels")
     def test_empty_mapping_is_noop(self, mock_add: Any) -> None:
         skip_epics({})
         mock_add.assert_not_called()
+
+    @patch("hephaestus.automation.github_api.gh_issue_add_labels")
+    def test_threads_owning_repo_to_add_labels(self, mock_add: Any) -> None:
+        """An explicit (owner, name) reaches the add-label write (#2245)."""
+        skip_epics({81: ["epic"]}, repo=("HomericIntelligence", "Proteus"))
+        mock_add.assert_called_once_with(
+            81, ["state:skip"], repo=("HomericIntelligence", "Proteus")
+        )
+
+
+class TestLabelRepoScoping:
+    """Explicit-repo threading for label reads/writes (#2245).
+
+    An issue number is meaningless without a repo: ambient-cwd resolution in
+    the multi-repo loop wrote other repos' epic ``state:skip`` tags onto the
+    launch-directory repo, silently on number collision (200, not 404).
+    """
+
+    def teardown_method(self) -> None:
+        _github_api_module._label_cache.clear()
+
+    @patch("hephaestus.automation.github_api.gh_create_label")
+    @patch("hephaestus.automation.github_api.gh_list_labels", return_value={"state:skip"})
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_add_labels_appends_repo_selector(
+        self, mock_gh_call: Any, mock_list: Any, mock_create: Any
+    ) -> None:
+        """The issue-edit write carries --repo owner/name when repo is given."""
+        gh_issue_add_labels(81, ["state:skip"], repo=("HomericIntelligence", "Proteus"))
+        cmd = mock_gh_call.call_args[0][0]
+        assert cmd[:3] == ["issue", "edit", "81"]
+        assert cmd[-2:] == ["--repo", "HomericIntelligence/Proteus"]
+        mock_list.assert_called_once_with(repo=("HomericIntelligence", "Proteus"))
+        mock_create.assert_not_called()
+
+    @patch("hephaestus.automation.github_api.gh_create_label")
+    @patch("hephaestus.automation.github_api.gh_list_labels", return_value=set())
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_add_labels_creates_missing_label_in_owning_repo(
+        self, mock_gh_call: Any, mock_list: Any, mock_create: Any
+    ) -> None:
+        """Auto-created labels land in the owning repo, not the ambient one."""
+        gh_issue_add_labels(81, ["state:skip"], repo=("HomericIntelligence", "Proteus"))
+        mock_create.assert_called_once_with("state:skip", repo=("HomericIntelligence", "Proteus"))
+
+    @patch("hephaestus.automation.github_api.gh_create_label")
+    @patch("hephaestus.automation.github_api.gh_list_labels", return_value={"state:skip"})
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_add_labels_without_repo_stays_ambient(
+        self, mock_gh_call: Any, mock_list: Any, mock_create: Any
+    ) -> None:
+        """Omitting repo preserves the previous ambient-cwd behaviour."""
+        gh_issue_add_labels(81, ["state:skip"])
+        cmd = mock_gh_call.call_args[0][0]
+        assert "--repo" not in cmd
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_list_labels_scopes_fetch_and_cache_to_repo(self, mock_gh_call: Any) -> None:
+        """Explicit repo scopes the gh call and keys the cache by that slug."""
+        result = Mock()
+        result.stdout = '[{"name": "bug"}]'
+        mock_gh_call.return_value = result
+        labels = gh_list_labels(repo=("HomericIntelligence", "Proteus"))
+        assert labels == {"bug"}
+        cmd = mock_gh_call.call_args[0][0]
+        assert cmd[-2:] == ["--repo", "HomericIntelligence/Proteus"]
+        # Cached under the explicit slug — a second call for the SAME repo
+        # hits the cache, a different repo re-fetches.
+        gh_list_labels(repo=("HomericIntelligence", "Proteus"))
+        assert mock_gh_call.call_count == 1
+        gh_list_labels(repo=("HomericIntelligence", "Hermes"))
+        assert mock_gh_call.call_count == 2
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_create_label_appends_repo_selector(self, mock_gh_call: Any) -> None:
+        """Gh label create carries --repo owner/name when repo is given."""
+        gh_create_label("state:skip", repo=("HomericIntelligence", "Proteus"))
+        cmd = mock_gh_call.call_args[0][0]
+        assert cmd[:3] == ["label", "create", "state:skip"]
+        assert cmd[-2:] == ["--repo", "HomericIntelligence/Proteus"]
 
 
 class TestGhIssueRemoveLabels:

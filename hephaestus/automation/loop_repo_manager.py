@@ -242,8 +242,11 @@ def _list_open_issue_numbers(org: str, repo: str) -> list[int]:
             )
         epic_labels = {m["number"]: m["labels"] for m in meta if m["number"] in epic_set}
         # Best-effort skip-tagging: never let a label write break discovery.
+        # The owning repo is passed explicitly — this runs in the multi-repo
+        # parent process, where ambient cwd resolution wrote other repos'
+        # epic numbers onto the launch-directory repo (#2245).
         try:
-            skip_epics(epic_labels)
+            skip_epics(epic_labels, repo=(org, repo))
         except Exception as exc:  # pragma: no cover - defensive
             LOG.warning("[%s] could not tag excluded epics state:skip: %s", repo, exc)
     return kept
