@@ -67,6 +67,7 @@ from .base import (
     StageContext,
     StageOutcome,
     StepResult,
+    StrictReviewCIState,
     StrictReviewLease,
     WorkItem,
     _terminal_pr_outcome,
@@ -319,9 +320,52 @@ class StrictReviewStage(Stage):
             return JobRequest(worktree_job, on_done_state=WORKTREE_WAIT)
         return Continue(next_state=REVIEW_WAIT)
 
+    def _strict_review_ci_state(
+        self, item: WorkItem, ctx: StageContext, pr_number: int, head_sha: str
+    ) -> StrictReviewCIState | StepResult:
+        """Return ready CI state or the safe outcome for a non-ready snapshot."""
+        try:
+            ci_state = ctx.github.strict_review_ci_state(pr_number, head_sha)
+        except Exception as e:
+            logger.warning(
+                "strict_review:%s: could not read required CI status for PR #%d: %s",
+                item.issue,
+                pr_number,
+                e,
+            )
+            item.payload["retry_delay_s"] = 30
+            return StageOutcome(Disposition.RETRY, "strict_review_ci_unavailable")
+        if ci_state.status == "stale_head":
+            # The readiness read fences the same head before and after its
+            # policy/check snapshot.  It has not acquired a lease or changed
+            # remote state, so restart cleanly through HEAD_CHECK.
+            return Continue(next_state=HEAD_CHECK)
+        if ci_state.status == "pending":
+            logger.info(
+                "strict_review:%s: required CI still pending for PR #%d: %s",
+                item.issue,
+                pr_number,
+                ", ".join(ci_state.pending_check_names),
+            )
+            item.payload["retry_delay_s"] = 30
+            return StageOutcome(Disposition.RETRY, "strict_review_ci_pending")
+        if ci_state.status != "ready":
+            logger.warning(
+                "strict_review:%s: invalid required-CI readiness %r for PR #%d",
+                item.issue,
+                ci_state.status,
+                pr_number,
+            )
+            item.payload["retry_delay_s"] = 30
+            return StageOutcome(Disposition.RETRY, "strict_review_ci_unavailable")
+        return ci_state
+
     def _review_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """REVIEW_WAIT [W:A]: submit the read-only, per-head/per-attempt review job."""
         issue = _issue_number(item)
+        pr_number = item.pr
+        if pr_number is None:  # guarded by step(); preserve protocol narrowing
+            return StageOutcome(Disposition.FAIL_BACK, "nogo")
         head_sha = str(item.payload.get("strict_review_head") or "")
         if not head_sha:
             # Guarded by HEAD_CHECK; restart-safety fallback.
@@ -330,39 +374,22 @@ class StrictReviewStage(Stage):
         # inspected before claiming a lease so a durable NOGO is not confused
         # with a competing live lease and retried forever.  GO remains
         # merge-authorized only through the v2 GO-only accessor below.
-        terminal = ctx.github.strict_review_terminal_artifact(item.pr, head_sha)  # type: ignore[arg-type]
+        terminal = ctx.github.strict_review_terminal_artifact(pr_number, head_sha)
         if terminal is not None and not terminal.is_go:
             return self._resume_terminal_nogo(item, ctx, head_sha, terminal.verdict_body)
         # A prior durable v2 GO can survive a coordinator restart.  It is
         # already globally elected and authenticated by the accessor, so no
         # second reviewer may be dispatched merely to recreate its label.
-        existing_go = ctx.github.strict_review_artifact(item.pr, head_sha)  # type: ignore[arg-type]
+        existing_go = ctx.github.strict_review_artifact(pr_number, head_sha)
         if existing_go is not None:
             item.payload["strict_review_existing_go"] = True
             item.payload["strict_review_verdict"] = "GO"
             item.payload["strict_review_text"] = ""
             item.payload.pop("strict_review_failed", None)
             return Continue(next_state=EVAL)
-        try:
-            pending_checks = ctx.github.pending_required_check_names(item.pr)  # type: ignore[arg-type]
-        except Exception as e:
-            logger.warning(
-                "strict_review:%s: could not read required CI status for PR #%d: %s",
-                item.issue,
-                item.pr,
-                e,
-            )
-            item.payload["retry_delay_s"] = 30
-            return StageOutcome(Disposition.RETRY, "strict_review_ci_unavailable")
-        if pending_checks:
-            logger.info(
-                "strict_review:%s: required CI still pending for PR #%d: %s",
-                item.issue,
-                item.pr,
-                ", ".join(pending_checks),
-            )
-            item.payload["retry_delay_s"] = 30
-            return StageOutcome(Disposition.RETRY, "strict_review_ci_pending")
+        ci_state = self._strict_review_ci_state(item, ctx, pr_number, head_sha)
+        if not isinstance(ci_state, StrictReviewCIState):
+            return ci_state
         lease = self._lease_from_payload(item)
         if lease is None:
             try:
@@ -384,7 +411,9 @@ class StrictReviewStage(Stage):
                 return StageOutcome(Disposition.RETRY, "strict_review_lease_unavailable")
             item.payload["strict_review_lease_id"] = lease.lease_id
             item.payload["strict_review_lease_comment_id"] = lease.comment_id
-        evidence = ctx.github.strict_review_evidence(item.pr, head_sha, item.issue)  # type: ignore[arg-type]
+        evidence = ctx.github.strict_review_evidence(
+            pr_number, head_sha, issue, ci_status=ci_state.ci_status
+        )
         if evidence is None or evidence.head_sha.lower() != head_sha.lower():
             logger.warning(
                 "strict_review:%s: current-head evidence unavailable for PR #%d; invalidating",

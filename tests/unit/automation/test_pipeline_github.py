@@ -1259,6 +1259,348 @@ class TestReadSurface:
         assert adapter.pending_required_check_names(7) == ["test"]
 
 
+class TestStrictReviewCiState:
+    """The strict gate must retain the distinction erased by legacy CI polling."""
+
+    _head = "a" * 40
+
+    def _adapter(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        required: set[tuple[str, int]],
+        runs: list[dict[str, Any]],
+        statuses: list[dict[str, str]] | None = None,
+        states: list[dict[str, str]] | None = None,
+    ) -> pg.PipelineGitHub:
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        snapshots = iter(
+            states
+            or [
+                {"state": "OPEN", "headRefOid": self._head, "baseRefName": "main"},
+                {"state": "OPEN", "headRefOid": self._head, "baseRefName": "main"},
+            ]
+        )
+        monkeypatch.setattr(adapter, "gh_pr_state", lambda _pr: next(snapshots))
+        monkeypatch.setattr(adapter, "_strict_review_required_bindings", lambda _base: required)
+        monkeypatch.setattr(adapter, "_strict_review_check_runs", lambda _head: runs)
+        monkeypatch.setattr(adapter, "_strict_review_commit_statuses", lambda _head: statuses or [])
+        return adapter
+
+    def test_required_contexts_with_no_reported_runs_are_pending(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fresh-head ``no checks reported`` must park, not authorize review."""
+        adapter = self._adapter(
+            tmp_path, monkeypatch, required={("lint", 15368), ("unit-tests", 15368)}, runs=[]
+        )
+
+        state = adapter.strict_review_ci_state(71, self._head)
+
+        assert state.status == "pending"
+        assert state.pending_check_names == ("lint", "unit-tests")
+
+    def test_no_required_contexts_preserve_the_no_ci_ready_case(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A repository with no CI policy remains a valid strict-review target."""
+        adapter = self._adapter(tmp_path, monkeypatch, required=set(), runs=[])
+
+        state = adapter.strict_review_ci_state(71, self._head)
+
+        assert state.status == "ready"
+        assert state.pending_check_names == ()
+
+    def test_missing_or_inflight_required_contexts_are_pending(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter = self._adapter(
+            tmp_path,
+            monkeypatch,
+            required={("lint", 15368), ("unit-tests", 15368)},
+            runs=[
+                {"name": "lint", "status": "completed", "conclusion": "success", "app_id": 15368},
+                {
+                    "name": "unit-tests",
+                    "status": "in_progress",
+                    "conclusion": None,
+                    "app_id": 15368,
+                },
+            ],
+        )
+
+        state = adapter.strict_review_ci_state(71, self._head)
+
+        assert state.status == "pending"
+        assert state.pending_check_names == ("unit-tests",)
+
+    def test_completed_required_failure_is_ready_for_genuine_review_containment(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter = self._adapter(
+            tmp_path,
+            monkeypatch,
+            required={("lint", 15368)},
+            runs=[
+                {"name": "lint", "status": "completed", "conclusion": "failure", "app_id": 15368}
+            ],
+        )
+
+        state = adapter.strict_review_ci_state(71, self._head)
+
+        assert state.status == "ready"
+
+    def test_same_named_check_from_another_app_remains_pending(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A context is current only when its protection-bound app published it."""
+        adapter = self._adapter(
+            tmp_path,
+            monkeypatch,
+            required={("lint", 15368)},
+            runs=[{"name": "lint", "status": "completed", "conclusion": "success", "app_id": 7}],
+        )
+
+        state = adapter.strict_review_ci_state(71, self._head)
+
+        assert state.status == "pending"
+        assert state.pending_check_names == ("lint",)
+
+    def test_pending_same_name_commit_status_blocks_a_completed_check_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GitHub requires both status surfaces when a context exists on both."""
+        adapter = self._adapter(
+            tmp_path,
+            monkeypatch,
+            required={("lint", 15368)},
+            runs=[
+                {"name": "lint", "status": "completed", "conclusion": "success", "app_id": 15368}
+            ],
+            statuses=[{"context": "lint", "state": "pending"}],
+        )
+
+        state = adapter.strict_review_ci_state(71, self._head)
+
+        assert state.status == "pending"
+        assert state.pending_check_names == ("lint",)
+
+    def test_completed_same_name_commit_status_requires_an_authenticated_publisher(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A terminal status cannot prove that the bound app produced it."""
+        adapter = self._adapter(
+            tmp_path,
+            monkeypatch,
+            required={("lint", 15368)},
+            runs=[
+                {"name": "lint", "status": "completed", "conclusion": "success", "app_id": 15368}
+            ],
+            statuses=[{"context": "lint", "state": "success"}],
+        )
+
+        with pytest.raises(ValueError, match="cannot authenticate"):
+            adapter.strict_review_ci_state(71, self._head)
+
+    def test_commit_status_history_uses_only_each_contexts_latest_value(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A completed status must supersede its older queued submission."""
+
+        def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            assert argv == [
+                "api",
+                "--paginate",
+                "--slurp",
+                f"repos/org/repo-a/commits/{self._head}/status?per_page=100",
+            ]
+            return SimpleNamespace(
+                stdout=json.dumps(
+                    [
+                        {
+                            "total_count": 2,
+                            "statuses": [
+                                {"context": "lint", "state": "success"},
+                                {"context": "lint", "state": "pending"},
+                            ],
+                        }
+                    ]
+                )
+            )
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+
+        assert adapter._strict_review_commit_statuses(self._head) == [
+            {"context": "lint", "state": "success"}
+        ]
+
+    def test_own_post_artifact_proof_is_not_a_pre_review_dependency(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Waiting on strict-review-proof here would deadlock every fresh head."""
+        adapter = self._adapter(
+            tmp_path,
+            monkeypatch,
+            required={("lint", 15368), ("strict-review-proof", 15368)},
+            runs=[
+                {"name": "lint", "status": "completed", "conclusion": "success", "app_id": 15368}
+            ],
+        )
+
+        state = adapter.strict_review_ci_state(71, self._head)
+
+        assert state.status == "ready"
+
+    def test_head_drift_during_readiness_restarts_before_review(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter = self._adapter(
+            tmp_path,
+            monkeypatch,
+            required={("lint", 15368)},
+            runs=[
+                {"name": "lint", "status": "completed", "conclusion": "success", "app_id": 15368}
+            ],
+            states=[
+                {"state": "OPEN", "headRefOid": self._head, "baseRefName": "main"},
+                {"state": "OPEN", "headRefOid": "b" * 40, "baseRefName": "main"},
+            ],
+        )
+
+        state = adapter.strict_review_ci_state(71, self._head)
+
+        assert state.status == "stale_head"
+
+    def test_policy_read_error_is_not_conflated_with_no_requirements(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        snapshot = {"state": "OPEN", "headRefOid": self._head, "baseRefName": "main"}
+        monkeypatch.setattr(adapter, "gh_pr_state", lambda _pr: snapshot)
+        monkeypatch.setattr(
+            adapter,
+            "_strict_review_required_bindings",
+            lambda _base: (_ for _ in ()).throw(RuntimeError("policy unavailable")),
+        )
+
+        with pytest.raises(RuntimeError, match="policy unavailable"):
+            adapter.strict_review_ci_state(71, self._head)
+
+    def test_policy_bindings_union_every_rules_page_and_classic_protection(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[list[str]] = []
+
+        def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            if argv == [
+                "api",
+                "--paginate",
+                "--slurp",
+                "repos/org/repo-a/rules/branches/main?per_page=100",
+            ]:
+                return SimpleNamespace(
+                    stdout=json.dumps(
+                        [
+                            [
+                                {
+                                    "type": "required_status_checks",
+                                    "parameters": {
+                                        "required_status_checks": [
+                                            {"context": "ruleset-check", "integration_id": 15368}
+                                        ]
+                                    },
+                                }
+                            ],
+                            [
+                                {
+                                    "type": "required_status_checks",
+                                    "parameters": {
+                                        "required_status_checks": [
+                                            {
+                                                "context": "second-page-check",
+                                                "integration_id": 15368,
+                                            }
+                                        ]
+                                    },
+                                },
+                            ],
+                        ]
+                    )
+                )
+            if argv == ["api", "repos/org/repo-a/branches/main"]:
+                return SimpleNamespace(
+                    stdout=json.dumps(
+                        {
+                            "protected": True,
+                            "protection": {
+                                "enabled": True,
+                                "required_status_checks": {
+                                    "checks": [{"context": "classic-check", "app_id": 15368}]
+                                },
+                            },
+                        }
+                    )
+                )
+            raise AssertionError(f"unexpected gh invocation: {argv!r}")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+
+        assert adapter._strict_review_required_bindings("main") == {
+            ("classic-check", 15368),
+            ("ruleset-check", 15368),
+            ("second-page-check", 15368),
+        }
+        assert calls == [
+            [
+                "api",
+                "--paginate",
+                "--slurp",
+                "repos/org/repo-a/rules/branches/main?per_page=100",
+            ],
+            ["api", "repos/org/repo-a/branches/main"],
+        ]
+
+    def test_unprotected_branch_snapshot_preserves_ruleset_only_policy(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A readable branch snapshot distinguishes no classic policy from masked access."""
+
+        def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            if argv[:4] == [
+                "api",
+                "--paginate",
+                "--slurp",
+                "repos/org/repo-a/rules/branches/main?per_page=100",
+            ]:
+                return SimpleNamespace(stdout=json.dumps([[]]))
+            if argv == ["api", "repos/org/repo-a/branches/main"]:
+                return SimpleNamespace(stdout=json.dumps({"protected": False, "protection": None}))
+            raise AssertionError(f"unexpected gh invocation: {argv!r}")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+
+        assert adapter._strict_review_required_bindings("main") == set()
+
+    @pytest.mark.parametrize(
+        "snapshot",
+        [
+            {"protected": True, "protection": None},
+            {"protected": True, "protection": {}},
+        ],
+    )
+    def test_protected_branch_without_readable_protection_fails_closed(
+        self, snapshot: object
+    ) -> None:
+        """A protected branch must not turn a masked classic policy into no policy."""
+        with pytest.raises(ValueError, match="protection"):
+            pg.PipelineGitHub._required_bindings_from_branch(snapshot)
+
+
 class TestUnresolvedThreads:
     """count_unresolved_threads mirrors #1152: counts only, resolves nothing."""
 
@@ -1332,7 +1674,7 @@ class TestStrictReviewEvidence:
 
     _head = "a" * 40
 
-    def _adapter_with_responses(
+    def _adapter_with_responses(  # noqa: C901 - explicit GitHub response fixture.
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -1413,9 +1755,74 @@ class TestStrictReviewEvidence:
                         {
                             "state": "OPEN",
                             "headRefOid": final_head if final_head is not None else self._head,
+                            "baseRefName": "main",
                         }
                     )
                 )
+            if argv == [
+                "api",
+                "--paginate",
+                "--slurp",
+                "repos/org/repo-a/rules/branches/main?per_page=100",
+            ]:
+                return SimpleNamespace(
+                    stdout=json.dumps(
+                        [
+                            [
+                                {
+                                    "type": "required_status_checks",
+                                    "parameters": {
+                                        "required_status_checks": [
+                                            {"context": "unit", "integration_id": 15368}
+                                        ]
+                                    },
+                                }
+                            ]
+                        ]
+                    )
+                )
+            if argv == ["api", "repos/org/repo-a/branches/main"]:
+                return SimpleNamespace(
+                    stdout=json.dumps(
+                        {
+                            "protected": True,
+                            "protection": {
+                                "enabled": True,
+                                "required_status_checks": {"checks": []},
+                            },
+                        }
+                    )
+                )
+            if argv == [
+                "api",
+                "--paginate",
+                "--slurp",
+                f"repos/org/repo-a/commits/{self._head}/check-runs?per_page=100",
+            ]:
+                return SimpleNamespace(
+                    stdout=json.dumps(
+                        [
+                            {
+                                "total_count": 1,
+                                "check_runs": [
+                                    {
+                                        "name": "unit",
+                                        "status": "completed",
+                                        "conclusion": "success",
+                                        "app": {"id": 15368},
+                                    }
+                                ],
+                            }
+                        ]
+                    )
+                )
+            if argv == [
+                "api",
+                "--paginate",
+                "--slurp",
+                f"repos/org/repo-a/commits/{self._head}/status?per_page=100",
+            ]:
+                return SimpleNamespace(stdout=json.dumps([{"total_count": 0, "statuses": []}]))
             raise AssertionError(f"unexpected gh invocation: {argv!r}")
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)

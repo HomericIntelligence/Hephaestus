@@ -54,7 +54,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, TypeAlias, runtime_checkable
+from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 
 from hephaestus.agents.runtime import DEFAULT_AGENT
 from hephaestus.automation.state_labels import STATE_SKIP
@@ -84,6 +84,7 @@ __all__ = [
     "StageOutcome",
     "StepResult",
     "StrictReviewArtifact",
+    "StrictReviewCIState",
     "StrictReviewEvidence",
     "StrictReviewLease",
     "WorkItem",
@@ -132,6 +133,22 @@ class StrictReviewEvidence:
     diff: str
     ci_status: str
     prior_pr_review_verdict: str
+
+
+@dataclass(frozen=True)
+class StrictReviewCIState:
+    """Head-bound required-CI readiness for the strict-review gate.
+
+    A strict reviewer may run only when ``status`` is ``"ready"``.  A
+    ``"pending"`` result timer-parks before a lease exists, while a
+    ``"stale_head"`` result restarts the head-bound state machine.  Adapters
+    raise on unreadable policy or check state so callers fail closed instead
+    of conflating an error with an empty check list.
+    """
+
+    status: Literal["ready", "pending", "stale_head"]
+    ci_status: str = ""
+    pending_check_names: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -387,8 +404,20 @@ class StageGitHub(Protocol):
         """
         pass
 
+    def strict_review_ci_state(self, pr_number: int, head_sha: str) -> StrictReviewCIState:
+        """Return current-head strict-review CI readiness.
+
+        This is intentionally distinct from
+        :meth:`pending_required_check_names`, whose legacy empty-list
+        contract cannot distinguish a fresh GitHub ``no checks reported``
+        response from a repository with no required CI.  The strict gate
+        must make that distinction before it creates a lease or dispatches a
+        reviewer.
+        """
+        ...
+
     def strict_review_evidence(
-        self, pr_number: int, head_sha: str, issue_number: int
+        self, pr_number: int, head_sha: str, issue_number: int, *, ci_status: str | None = None
     ) -> StrictReviewEvidence | None:
         """Return bounded evidence still bound to ``head_sha``, else ``None``.
 
@@ -398,7 +427,10 @@ class StageGitHub(Protocol):
         head both before and after the read; stages fail closed when it is
         unavailable.  The linked issue title/body are part of this evidence:
         without the task requirements, a reviewer cannot judge whether the
-        diff fulfils the work it is about to authorize for merge.
+        diff fulfils the work it is about to authorize for merge.  The stage
+        supplies its just-read ``ci_status`` snapshot after the head-bound
+        readiness gate; callers that omit it cause the adapter to obtain one
+        and fail closed unless CI is ready.
         """
         ...
 

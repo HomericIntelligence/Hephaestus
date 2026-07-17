@@ -14,6 +14,7 @@ from .base import (
     StageOutcome,
     StepResult,
     StrictReviewArtifact,
+    StrictReviewCIState,
     StrictReviewEvidence,
     StrictReviewLease,
 )
@@ -44,6 +45,7 @@ __all__ = [
     "StageOutcome",
     "StepResult",
     "StrictReviewArtifact",
+    "StrictReviewCIState",
     "StrictReviewEvidence",
     "StrictReviewLease",
     "StrictReviewStage",

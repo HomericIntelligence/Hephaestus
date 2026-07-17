@@ -20,6 +20,7 @@ from hephaestus.automation.pipeline.stages import (
     StageContext,
     StageGitHub,
     StrictReviewArtifact,
+    StrictReviewCIState,
     StrictReviewEvidence,
     StrictReviewLease,
 )
@@ -57,6 +58,7 @@ class FakeStageGitHub(FakeGitHub):
         pr_state: dict[str, Any] | None = None,
         failing_checks: list[str] | None = None,
         pending_checks: list[str] | None = None,
+        strict_ci_state: StrictReviewCIState | None = None,
         checks: list[dict[str, Any]] | None = None,
         pr_stuck: bool = False,
         learn_terminal: bool = False,
@@ -88,6 +90,7 @@ class FakeStageGitHub(FakeGitHub):
                 PR-state read); ``None`` mirrors a transient read failure.
             failing_checks: Canned answer for failing_required_check_names.
             pending_checks: Canned answer for pending_required_check_names.
+            strict_ci_state: Canned head-bound strict-review CI readiness.
             checks: Canned answer for pr_checks (all checks for CI polling).
             pr_stuck: Canned answer for pr_is_genuinely_stuck.
             learn_terminal: Seed answer for drive_green_learn_terminal —
@@ -117,6 +120,7 @@ class FakeStageGitHub(FakeGitHub):
         self._pr_state = pr_state
         self._failing_checks = list(failing_checks or [])
         self._pending_checks = list(pending_checks or [])
+        self._strict_ci_state = strict_ci_state
         self._checks = list(checks or [])
         self._pr_stuck = pr_stuck
         self._learn_terminal = learn_terminal
@@ -346,9 +350,10 @@ class FakeStageGitHub(FakeGitHub):
         return True
 
     def strict_review_evidence(
-        self, pr_number: int, head_sha: str, issue_number: int
+        self, pr_number: int, head_sha: str, issue_number: int, *, ci_status: str | None = None
     ) -> StrictReviewEvidence | None:
         """Return canned evidence only when it remains for the requested head."""
+        del ci_status
         self.strict_evidence_calls.append((pr_number, head_sha, issue_number))
         if self._strict_evidence is None or self._strict_evidence.head_sha != head_sha:
             return None
@@ -368,6 +373,17 @@ class FakeStageGitHub(FakeGitHub):
         """Mirror CICheckInspector.pending_required_check_names (canned answer)."""
         del pr_number  # single canned answer; not per-PR keyed
         return list(self._pending_checks)
+
+    def strict_review_ci_state(self, pr_number: int, head_sha: str) -> StrictReviewCIState:
+        """Mirror PipelineGitHub's head-bound strict-review CI readiness."""
+        del pr_number, head_sha  # single canned answer; not per-PR keyed
+        if self._strict_ci_state is not None:
+            return self._strict_ci_state
+        if self._pending_checks:
+            return StrictReviewCIState(
+                status="pending", pending_check_names=tuple(self._pending_checks)
+            )
+        return StrictReviewCIState(status="ready", ci_status="- unit: success")
 
     def pr_checks(self, pr_number: int) -> list[dict[str, Any]]:
         """Mirror gh_pr_checks (returns all checks for CI classification)."""

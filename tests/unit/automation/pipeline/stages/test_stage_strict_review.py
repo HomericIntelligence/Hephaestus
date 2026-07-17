@@ -14,6 +14,7 @@ from hephaestus.automation.pipeline.stages import (
     JobRequest,
     StageOutcome,
     StrictReviewArtifact,
+    StrictReviewCIState,
     StrictReviewEvidence,
     StrictReviewLease,
 )
@@ -252,10 +253,10 @@ def test_required_ci_status_read_failure_retries_without_strict_review_work(
         payload={"strict_review_head": _NEW_HEAD},
     )
 
-    def _raise_status_read(_pr_number: int) -> list[str]:
+    def _raise_status_read(_pr_number: int, _head_sha: str) -> StrictReviewCIState:
         raise OSError("GitHub checks unavailable")
 
-    monkeypatch.setattr(github, "pending_required_check_names", _raise_status_read)
+    monkeypatch.setattr(github, "strict_review_ci_state", _raise_status_read)
 
     result = strict_review.StrictReviewStage().step(item, make_ctx(github=github))
 
@@ -263,6 +264,26 @@ def test_required_ci_status_read_failure_retries_without_strict_review_work(
     assert item.payload["retry_delay_s"] == 30
     assert "strict_review_lease_id" not in item.payload
     assert "strict_review_attempt" not in item.payload
+    assert github.strict_evidence_calls == []
+    assert github.mutation_log == []
+
+
+def test_stale_ci_snapshot_restarts_before_creating_a_lease(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A push during the readiness read must restart head fencing cleanly."""
+    strict_review = importlib.import_module("hephaestus.automation.pipeline.stages.strict_review")
+    github = FakeStageGitHub(strict_ci_state=StrictReviewCIState(status="stale_head"))
+    item = make_work_item(
+        stage=StageName.STRICT_REVIEW,
+        pr=601,
+        state=strict_review.REVIEW_WAIT,
+        payload={"strict_review_head": _NEW_HEAD},
+    )
+
+    result = strict_review.StrictReviewStage().step(item, make_ctx(github=github))
+
+    assert result == Continue(next_state=strict_review.HEAD_CHECK)
     assert github.strict_evidence_calls == []
     assert github.mutation_log == []
 
@@ -319,6 +340,34 @@ def test_existing_durable_go_reconciles_the_label_without_a_second_review_job(
     assert ("mark_pr_implementation_go", (601,)) in github.mutation_log
 
 
+def test_existing_durable_go_recovers_before_pending_ci_lookup(
+    make_ctx: Any, make_work_item: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A durable GO never waits on a fresh CI query or starts another review."""
+    strict_review = importlib.import_module("hephaestus.automation.pipeline.stages.strict_review")
+    github = FakeStageGitHub(
+        pr_state={"state": "OPEN", "headRefOid": _NEW_HEAD},
+        strict_artifact=StrictReviewArtifact(is_go=True, head_sha=_NEW_HEAD, verdict="GO"),
+    )
+    item = make_work_item(
+        stage=StageName.STRICT_REVIEW,
+        pr=601,
+        state=strict_review.REVIEW_WAIT,
+        payload={"strict_review_head": _NEW_HEAD},
+    )
+
+    def _pending_ci_must_not_run(_pr_number: int, _head_sha: str) -> StrictReviewCIState:
+        raise AssertionError("durable GO must recover before checking pending CI")
+
+    monkeypatch.setattr(github, "strict_review_ci_state", _pending_ci_must_not_run)
+
+    result = strict_review.StrictReviewStage().step(item, make_ctx(github=github))
+
+    assert result == Continue(next_state=strict_review.EVAL)
+    assert github.strict_evidence_calls == []
+    assert not any(action == "claim_strict_review_lease" for action, _ in github.mutation_log)
+
+
 def test_existing_durable_nogo_resumes_containment_instead_of_retrying_a_live_lease(
     make_ctx: Any, make_work_item: Any
 ) -> None:
@@ -355,6 +404,39 @@ def test_existing_durable_nogo_resumes_containment_instead_of_retrying_a_live_le
     assert ("defer_auto_merge", (601,)) in github.mutation_log
     assert ("mark_pr_implementation_no_go", (601,)) in github.mutation_log
     assert item.payload["strict_review_feedback"].endswith("Grade: F\nVerdict: NOGO")
+
+
+def test_existing_terminal_nogo_recovers_before_pending_ci_lookup(
+    make_ctx: Any, make_work_item: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A durable terminal NOGO retains containment without a fresh CI query."""
+    strict_review = importlib.import_module("hephaestus.automation.pipeline.stages.strict_review")
+    github = FakeStageGitHub(
+        pr_state={"state": "OPEN", "headRefOid": _NEW_HEAD, "autoMergeRequest": None},
+        strict_artifact=StrictReviewArtifact(
+            is_go=False,
+            head_sha=_NEW_HEAD,
+            verdict="NOGO",
+            verdict_body="Missing safety check.\nGrade: F\nVerdict: NOGO",
+        ),
+    )
+    item = make_work_item(
+        stage=StageName.STRICT_REVIEW,
+        pr=601,
+        state=strict_review.REVIEW_WAIT,
+        payload={"strict_review_head": _NEW_HEAD},
+    )
+
+    def _pending_ci_must_not_run(_pr_number: int, _head_sha: str) -> StrictReviewCIState:
+        raise AssertionError("durable NOGO must recover before checking pending CI")
+
+    monkeypatch.setattr(github, "strict_review_ci_state", _pending_ci_must_not_run)
+
+    result = strict_review.StrictReviewStage().step(item, make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.FAIL_BACK, "nogo")
+    assert github.strict_evidence_calls == []
+    assert not any(action == "claim_strict_review_lease" for action, _ in github.mutation_log)
 
 
 def test_recovered_terminal_nogo_never_remediates_a_newer_head(

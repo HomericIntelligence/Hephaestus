@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import quote
 from uuid import uuid4
 
 from hephaestus.automation import github_api, pr_manager
@@ -49,6 +50,7 @@ from hephaestus.automation.ci_check_inspector import CICheckInspector
 from hephaestus.automation.git_utils import issue_auto_impl_branch_name
 from hephaestus.automation.pipeline.stages.base import (
     StrictReviewArtifact,
+    StrictReviewCIState,
     StrictReviewEvidence,
     StrictReviewLease,
 )
@@ -109,6 +111,9 @@ _STRICT_REVIEW_MAX_ISSUE_BODY_BYTES = 80_000
 _NO_PRIOR_AUTOMATED_REVIEW = "No authenticated prior PR-review verdict is available."
 _PR_REVIEW_VERDICT_RE = re.compile(r"(?m)^Verdict:\s*(?:GO|NOGO)\s*$")
 _STRICT_REVIEW_LEASE_TTL_S = 3_600
+# This is the strict gate's own post-artifact authorization context.  It must
+# never be a prerequisite of the reviewer that creates its artifact.
+_STRICT_REVIEW_PROOF_CONTEXT = "strict-review-proof"
 
 
 def _split_threads(threads: list[dict[str, Any]]) -> tuple[int, int]:
@@ -700,7 +705,7 @@ class PipelineGitHub:
         return _NO_PRIOR_AUTOMATED_REVIEW
 
     def strict_review_evidence(  # noqa: C901 - every evidence channel must fail closed independently.
-        self, pr_number: int, head_sha: str, issue_number: int
+        self, pr_number: int, head_sha: str, issue_number: int, *, ci_status: str | None = None
     ) -> StrictReviewEvidence | None:
         """Fetch complete, bounded strict-review evidence for one exact head.
 
@@ -759,8 +764,12 @@ class PipelineGitHub:
             if len(diff.encode("utf-8")) > _STRICT_REVIEW_MAX_DIFF_BYTES:
                 return None
 
-            ci_status = self._strict_review_ci_status(self.pr_checks(pr_number))
             if ci_status is None:
+                ci_state = self.strict_review_ci_state(pr_number, normalized_head)
+                if ci_state.status != "ready":
+                    return None
+                ci_status = ci_state.ci_status
+            if not ci_status:
                 return None
 
             confirmed = self.gh_pr_state(pr_number)
@@ -1009,6 +1018,379 @@ class PipelineGitHub:
             required = [c for c in checks if c.get("required")] or checks
             return [c.get("name", "") for c in required if c.get("status") != "completed"]
         return self._inspector.pending_required_check_names(pr_number)
+
+    @staticmethod
+    def _required_bindings_from_rule(rule: dict[str, Any]) -> set[tuple[str, int]]:
+        """Validate one effective required-status-check rule's bindings."""
+        bindings: set[tuple[str, int]] = set()
+        parameters = rule.get("parameters")
+        if not isinstance(parameters, dict):
+            raise ValueError("required-status-check rule had no parameter object")
+        checks = parameters.get("required_status_checks")
+        if not isinstance(checks, list):
+            raise ValueError("required-status-check rule had no check list")
+        for check in checks:
+            if not isinstance(check, dict):
+                raise ValueError("required-status-check rule contained a non-object check")
+            context = check.get("context")
+            integration_id = check.get("integration_id")
+            if not isinstance(context, str) or not context.strip():
+                raise ValueError("required-status-check rule contained an invalid context")
+            if isinstance(integration_id, bool) or not isinstance(integration_id, int):
+                raise ValueError("required-status-check rule contained an invalid integration id")
+            bindings.add((context, integration_id))
+        return bindings
+
+    @classmethod
+    def _required_bindings_from_rule_pages(cls, pages: object) -> set[tuple[str, int]]:
+        """Validate paginated effective rules and retain each app binding."""
+        if not isinstance(pages, list):
+            raise ValueError("effective branch rules response was not a page list")
+        bindings: set[tuple[str, int]] = set()
+        for page in pages:
+            if not isinstance(page, list):
+                raise ValueError("effective branch rules response contained a non-list page")
+            for rule in page:
+                if not isinstance(rule, dict):
+                    raise ValueError("effective branch rules response contained a non-object rule")
+                if rule.get("type") == "required_status_checks":
+                    bindings.update(cls._required_bindings_from_rule(rule))
+        return bindings
+
+    @staticmethod
+    def _required_bindings_from_classic_protection(payload: object) -> set[tuple[str, int]]:
+        """Validate classic branch-protection contexts and their app bindings."""
+        if not isinstance(payload, dict):
+            raise ValueError("classic required-status-check response was not an object")
+        checks = payload.get("checks")
+        if not isinstance(checks, list):
+            raise ValueError("classic required-status-check response had no check list")
+        bindings: set[tuple[str, int]] = set()
+        for check in checks:
+            if not isinstance(check, dict):
+                raise ValueError(
+                    "classic required-status-check response contained a non-object check"
+                )
+            context = check.get("context")
+            app_id = check.get("app_id")
+            if not isinstance(context, str) or not context.strip():
+                raise ValueError(
+                    "classic required-status-check response contained an invalid context"
+                )
+            if isinstance(app_id, bool) or not isinstance(app_id, int):
+                raise ValueError(
+                    "classic required-status-check response contained an invalid app id"
+                )
+            bindings.add((context, app_id))
+        return bindings
+
+    @classmethod
+    def _required_bindings_from_branch(cls, payload: object) -> set[tuple[str, int]]:
+        """Extract classic status-check bindings from the readable branch snapshot."""
+        if not isinstance(payload, dict):
+            raise ValueError("branch snapshot was not an object")
+        protected = payload.get("protected")
+        protection = payload.get("protection")
+        if not isinstance(protected, bool):
+            raise ValueError("branch snapshot had no protected flag")
+        if not protected:
+            return set()
+        if not isinstance(protection, dict):
+            raise ValueError("protected branch snapshot had no protection object")
+        enabled = protection.get("enabled")
+        if not isinstance(enabled, bool):
+            raise ValueError("branch protection snapshot had no enabled flag")
+        if not enabled:
+            return set()
+        required_status_checks = protection.get("required_status_checks")
+        if required_status_checks is None:
+            return set()
+        return cls._required_bindings_from_classic_protection(required_status_checks)
+
+    def _strict_review_required_bindings(self, base_ref: str) -> set[tuple[str, int]]:
+        """Read the live union of classic/effective required check bindings.
+
+        ``rules/branches/{base}`` already contains every inherited and
+        repository ruleset that applies to the base branch.  The readable
+        branch snapshot exposes classic requirements without treating an
+        access-masked branch-protection 404 as an empty policy.
+        """
+        if self._repo_slug is None:
+            raise RuntimeError("strict-review CI readiness requires a repo-scoped adapter")
+        encoded_base = quote(base_ref, safe="")
+        rules_result = gh_call(
+            [
+                "api",
+                "--paginate",
+                "--slurp",
+                f"repos/{self._repo_slug}/rules/branches/{encoded_base}?per_page=100",
+            ]
+        )
+        rule_pages = json.loads(rules_result.stdout or "[]")
+        bindings = self._required_bindings_from_rule_pages(rule_pages)
+        branch_result = gh_call(["api", f"repos/{self._repo_slug}/branches/{encoded_base}"])
+        branch = json.loads(branch_result.stdout or "{}")
+        bindings.update(self._required_bindings_from_branch(branch))
+        return bindings
+
+    @staticmethod
+    def _normalize_strict_review_check_run(raw_run: object) -> dict[str, Any]:
+        """Validate one app-identified Check Runs API record."""
+        if not isinstance(raw_run, dict):
+            raise ValueError("check-run response contained a non-object run")
+        name = raw_run.get("name")
+        status = raw_run.get("status")
+        conclusion = raw_run.get("conclusion")
+        app = raw_run.get("app")
+        if not isinstance(name, str) or not name.strip() or not isinstance(status, str):
+            raise ValueError("check-run response contained an invalid name or status")
+        if conclusion is not None and not isinstance(conclusion, str):
+            raise ValueError("check-run response contained an invalid conclusion")
+        if not isinstance(app, dict):
+            raise ValueError("check-run response contained no app identity")
+        app_id = app.get("id")
+        if isinstance(app_id, bool) or not isinstance(app_id, int):
+            raise ValueError("check-run response contained an invalid app identity")
+        return {
+            "name": name,
+            "status": status.lower(),
+            "conclusion": conclusion.lower() if isinstance(conclusion, str) else None,
+            "app_id": app_id,
+        }
+
+    def _strict_review_check_runs(self, head_sha: str) -> list[dict[str, Any]]:
+        """Read a bounded, app-identified current-head check-run snapshot."""
+        if self._repo_slug is None:
+            raise RuntimeError("strict-review CI readiness requires a repo-scoped adapter")
+        result = gh_call(
+            [
+                "api",
+                "--paginate",
+                "--slurp",
+                (
+                    f"repos/{self._repo_slug}/commits/{quote(head_sha, safe='')}"
+                    "/check-runs?per_page=100"
+                ),
+            ]
+        )
+        pages = json.loads(result.stdout or "[]")
+        if not isinstance(pages, list):
+            raise ValueError("check-run response was not a page list")
+        runs: list[dict[str, Any]] = []
+        expected_total: int | None = None
+        for page in pages:
+            if not isinstance(page, dict):
+                raise ValueError("check-run response contained a non-object page")
+            total_count = page.get("total_count")
+            raw_runs = page.get("check_runs")
+            if isinstance(total_count, bool) or not isinstance(total_count, int):
+                raise ValueError("check-run response contained an invalid total count")
+            if not isinstance(raw_runs, list):
+                raise ValueError("check-run response contained no check-run list")
+            expected_total = (
+                total_count if expected_total is None else max(expected_total, total_count)
+            )
+            runs.extend(self._normalize_strict_review_check_run(raw_run) for raw_run in raw_runs)
+        if expected_total is None or expected_total != len(runs):
+            raise ValueError("check-run pagination was incomplete")
+        if len(runs) > _STRICT_REVIEW_MAX_CHECKS:
+            raise ValueError("check-run response exceeded the strict-review evidence limit")
+        return runs
+
+    @staticmethod
+    def _normalize_strict_review_commit_status(raw_status: object) -> dict[str, str]:
+        """Validate one Commit Statuses API record."""
+        if not isinstance(raw_status, dict):
+            raise ValueError("commit-status response contained a non-object status")
+        context = raw_status.get("context")
+        state = raw_status.get("state")
+        if not isinstance(context, str) or not context.strip() or not isinstance(state, str):
+            raise ValueError("commit-status response contained an invalid context or state")
+        normalized_state = state.lower()
+        if normalized_state not in {"success", "failure", "error", "pending"}:
+            raise ValueError("commit-status response contained an unknown state")
+        return {"context": context, "state": normalized_state}
+
+    def _strict_review_commit_statuses(self, head_sha: str) -> list[dict[str, str]]:
+        """Read a bounded current-head commit-status snapshot.
+
+        GitHub requires both a Check Run and a commit status when they share
+        a protected context, so pending statuses must be a strict-review
+        prerequisite even though their API does not expose the publisher app
+        identity used to satisfy a bound Check Run requirement.
+        """
+        if self._repo_slug is None:
+            raise RuntimeError("strict-review CI readiness requires a repo-scoped adapter")
+        result = gh_call(
+            [
+                "api",
+                "--paginate",
+                "--slurp",
+                f"repos/{self._repo_slug}/commits/{quote(head_sha, safe='')}/status?per_page=100",
+            ]
+        )
+        pages = json.loads(result.stdout or "[]")
+        if not isinstance(pages, list):
+            raise ValueError("commit-status response was not a page list")
+        all_statuses: list[dict[str, str]] = []
+        expected_total: int | None = None
+        for page in pages:
+            if not isinstance(page, dict):
+                raise ValueError("commit-status response contained a non-object page")
+            total_count = page.get("total_count")
+            raw_statuses = page.get("statuses")
+            if isinstance(total_count, bool) or not isinstance(total_count, int):
+                raise ValueError("commit-status response contained an invalid total count")
+            if not isinstance(raw_statuses, list):
+                raise ValueError("commit-status response contained no status list")
+            expected_total = (
+                total_count if expected_total is None else max(expected_total, total_count)
+            )
+            all_statuses.extend(
+                self._normalize_strict_review_commit_status(raw_status)
+                for raw_status in raw_statuses
+            )
+        if expected_total is None or expected_total != len(all_statuses):
+            raise ValueError("commit-status pagination was incomplete")
+        if len(all_statuses) > _STRICT_REVIEW_MAX_CHECKS:
+            raise ValueError("commit-status response exceeded the strict-review evidence limit")
+        # GitHub documents this endpoint as reverse chronological.  Branch
+        # protection evaluates the latest value for a context, not a stale
+        # queued status that an earlier reporter left behind.  Keep the first
+        # occurrence while retaining the endpoint's ordering across pages.
+        latest_by_context: set[str] = set()
+        latest_statuses: list[dict[str, str]] = []
+        for status in all_statuses:
+            if status["context"] in latest_by_context:
+                continue
+            latest_by_context.add(status["context"])
+            latest_statuses.append(status)
+        return latest_statuses
+
+    def strict_review_ci_state(self, pr_number: int, head_sha: str) -> StrictReviewCIState:
+        """Return the strict gate's head-bound required-CI readiness.
+
+        The legacy ``gh pr checks`` wrapper represents GitHub's fresh-head
+        ``no checks reported`` response as ``[]``.  Strict review needs a
+        stronger contract: it compares that snapshot with the live classic
+        and effective-ruleset required context inventory, so absent required
+        runs are timer-parked rather than dispatched to a reviewer as an
+        apparent all-clear.
+        """
+        if self._repo_slug is None:
+            raise RuntimeError("strict-review CI readiness requires a repo-scoped adapter")
+        normalized_head = head_sha.lower()
+        before = self.gh_pr_state(pr_number)
+        if (
+            before is None
+            or str(before.get("state") or "").upper() != "OPEN"
+            or str(before.get("headRefOid") or "").lower() != normalized_head
+        ):
+            return StrictReviewCIState(status="stale_head")
+        base_ref = before.get("baseRefName")
+        if not isinstance(base_ref, str) or not base_ref:
+            raise ValueError("PR base branch was unavailable for strict-review CI readiness")
+        required_bindings = self._strict_review_required_bindings(base_ref)
+        # The proof context is intentionally required for merge, but it is
+        # emitted by the trusted workflow only after this stage publishes the
+        # artifact.  Including it in the pre-review readiness set would make
+        # strict review wait on its own output forever.
+        required_bindings = {
+            binding for binding in required_bindings if binding[0] != _STRICT_REVIEW_PROOF_CONTEXT
+        }
+        if not required_bindings:
+            ci_status = "No pre-review required CI checks are configured for this PR's base branch."
+            pending: tuple[str, ...] = ()
+        else:
+            runs = self._strict_review_check_runs(normalized_head)
+            statuses = self._strict_review_commit_statuses(normalized_head)
+            required_contexts = {binding[0] for binding in required_bindings}
+
+            def _matches(binding: tuple[str, int], run: dict[str, Any]) -> bool:
+                return binding[0] == run["name"] and (
+                    binding[1] == -1 or binding[1] == run["app_id"]
+                )
+
+            required_runs = [
+                {
+                    "name": run["name"],
+                    "status": run["status"],
+                    "conclusion": run["conclusion"],
+                    "required": True,
+                }
+                for run in runs
+                if any(_matches(binding, run) for binding in required_bindings)
+            ]
+            pending_status_contexts = {
+                status["context"]
+                for status in statuses
+                if status["context"] in required_contexts and status["state"] == "pending"
+            }
+            # The Commit Status API identifies a creator but not the GitHub
+            # App id bound by branch protection.  A pending same-name status
+            # is enough to defer review safely; a terminal status cannot be
+            # accepted as evidence because its publisher cannot be bound to
+            # the required app.  Refuse to start a strict review until that
+            # ambiguous status is gone rather than treating it as a pass (or
+            # routing a potentially unrelated failure to implementation).
+            completed_ambiguous_status_contexts = {
+                status["context"]
+                for status in statuses
+                if status["context"] in required_contexts and status["state"] != "pending"
+            }
+            if completed_ambiguous_status_contexts:
+                contexts = ", ".join(sorted(completed_ambiguous_status_contexts))
+                raise ValueError(
+                    "cannot authenticate the publisher of completed required commit statuses: "
+                    f"{contexts}"
+                )
+            status_evidence = [
+                {
+                    "name": f"{status['context']} (commit status)",
+                    "status": "in_progress" if status["state"] == "pending" else "completed",
+                    "conclusion": (
+                        None
+                        if status["state"] == "pending"
+                        else "success"
+                        if status["state"] == "success"
+                        else "failure"
+                    ),
+                    "required": True,
+                }
+                for status in statuses
+                if status["context"] in required_contexts
+            ]
+            rendered_ci_status = self._strict_review_ci_status(required_runs + status_evidence)
+            if rendered_ci_status is None:
+                raise ValueError(
+                    "required check-run response was malformed for strict-review CI readiness"
+                )
+            ci_status = rendered_ci_status
+            pending = tuple(
+                sorted(
+                    {
+                        binding[0]
+                        for binding in required_bindings
+                        if not any(_matches(binding, run) for run in runs)
+                        or any(
+                            _matches(binding, run) and run["status"] != "completed" for run in runs
+                        )
+                    }
+                    | pending_status_contexts
+                )
+            )
+        after = self.gh_pr_state(pr_number)
+        if (
+            after is None
+            or str(after.get("state") or "").upper() != "OPEN"
+            or str(after.get("headRefOid") or "").lower() != normalized_head
+        ):
+            return StrictReviewCIState(status="stale_head")
+        if pending:
+            return StrictReviewCIState(
+                status="pending", ci_status=ci_status, pending_check_names=pending
+            )
+        return StrictReviewCIState(status="ready", ci_status=ci_status)
 
     def pr_checks(self, pr_number: int) -> list[dict[str, Any]]:
         """All checks for the PR (``gh_pr_checks``)."""
