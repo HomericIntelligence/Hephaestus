@@ -59,25 +59,19 @@ def _build_context_block(
     Returns an empty string when none are supplied (the resume path already
     carries this context in its transcript).
     """
-    sections: list[str] = []
-    if task_block.strip():
-        sections.append(
-            "**Task — the linked issue (untrusted):**\n"
-            + _fence_untrusted("TASK", task_block, nonce)
-        )
-    if task_review_block.strip():
-        sections.append(
-            "**Task review — the plan-review verdict (untrusted):**\n"
-            + _fence_untrusted("TASK_REVIEW", task_review_block, nonce)
-        )
-    if diff_text.strip():
-        sections.append(
-            "**Current implementation diff (untrusted):**\n"
-            + _fence_untrusted("DIFF", diff_text, nonce)
-        )
-    if not sections:
+    if not any((task_block.strip(), task_review_block.strip(), diff_text.strip())):
         return ""
-    return "\n" + "\n\n".join(sections) + "\n"
+    context = PromptCatalog.current().render(
+        "address_review/context_block.j2",
+        task_block=_fence_untrusted("TASK", task_block, nonce) if task_block.strip() else "",
+        task_review_block=(
+            _fence_untrusted("TASK_REVIEW", task_review_block, nonce)
+            if task_review_block.strip()
+            else ""
+        ),
+        diff_block=_fence_untrusted("DIFF", diff_text, nonce) if diff_text.strip() else "",
+    )
+    return f"\n{context}\n"
 
 
 def get_address_review_prompt(

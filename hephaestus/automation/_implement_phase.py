@@ -28,6 +28,7 @@ from hephaestus.agents.runtime import (
 )
 from hephaestus.github.rate_limit import wait_until
 from hephaestus.io.utils import write_secure
+from hephaestus.prompts import PromptCatalog
 
 from ._review_utils import log_file_path
 from ._stage_context import StageMixin
@@ -55,7 +56,9 @@ def _prepend_advise(advise_findings: str, prompt: str) -> str:
     findings = advise_findings.strip()
     if not findings or findings.startswith("<!-- advise step skipped"):
         return prompt
-    return f"## Prior Learnings from Team Knowledge Base\n\n{findings}\n\n---\n\n{prompt}"
+    return PromptCatalog.current().render(
+        "implementation/advise_prepend.j2", findings=findings, prompt=prompt
+    )
 
 
 def _claude_quota_reset_epoch(*texts: str) -> int | None:

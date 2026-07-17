@@ -506,10 +506,10 @@ def run_advise(
                 issue_number,
                 parse_err,
             )
-            retry_prompt = (
-                advise_prompt
-                + "\n\nIMPORTANT: Return ONLY a JSON object of the form "
-                + '{"skills": [...]}. No prose, no code fences, no commentary.'
+            from hephaestus.prompts import PromptCatalog
+
+            retry_prompt = PromptCatalog.current().render(
+                "advise/json_retry.j2", advise_prompt=advise_prompt
             )
             selector_output = invoke(retry_prompt)
             selected = parse_selected_skills(selector_output, mnemosyne_root)

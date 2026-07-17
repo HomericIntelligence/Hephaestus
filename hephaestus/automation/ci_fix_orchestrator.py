@@ -170,17 +170,13 @@ class CIFixOrchestrator:
         dirty_lines = dirty_tracked_changes or []
         dirty_block = "\n".join(f"- {line}" for line in dirty_lines)
         if dirty_block:
-            dirty_block = (
-                "\n\nThe local worktree also contains uncommitted tracked changes "
-                "or relevant untracked files from the previous turn. Review this "
-                "existing work first and either commit it after verification or "
-                f"amend it before committing:\n\n{dirty_block}\n"
+            dirty_block = PromptCatalog.current().render(
+                "ci/dirty_worktree_block.j2", dirty_block=dirty_block
             )
         remote_block = (
-            "The required CI checks below are STILL failing on the remote"
+            PromptCatalog.current().render("ci/remote_checks_failing.j2").strip()
             if failing_check_names
-            else "The remote checks may be green, but the PR still needs a committed "
-            "repair before the driver can push"
+            else PromptCatalog.current().render("ci/remote_repair_needed.j2").strip()
         )
         return PromptCatalog.current().render(
             "ci/force_engagement.j2",
