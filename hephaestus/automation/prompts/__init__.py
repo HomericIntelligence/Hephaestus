@@ -127,6 +127,7 @@ def __getattr__(name: str) -> _LegacyPromptTemplate:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from exc
     return _LegacyPromptTemplate(template_name)
 
+
 __all__ = [
     "ADDRESS_REVIEW_PROMPT",
     "ADVISE_PROMPT",
