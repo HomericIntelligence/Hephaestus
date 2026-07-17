@@ -73,3 +73,23 @@ _PLAN_LOOP_STRICT_RUBRIC = get_plan_loop_strict_rubric()
 _IMPL_LOOP_STRICT_RUBRIC = get_implementation_loop_strict_rubric()
 _PR_STRICT_RUBRIC = get_pr_strict_rubric()
 _FULL_SWEEP_SUFFIX = get_full_sweep_suffix()
+
+__all__ = [
+    "_FULL_SWEEP_SUFFIX",
+    "_IMPL_LOOP_STRICT_RUBRIC",
+    "_PLAN_LOOP_STRICT_RUBRIC",
+    "_PLAN_STRICT_RUBRIC",
+    "_PR_STRICT_RUBRIC",
+    "_PR_STRICT_RUBRIC_DIMENSIONS",
+    "_SEVEN_PRINCIPLES_DIMENSIONS",
+    "_STRICT_GRADING_AND_ANTI_INFLATION",
+    "_STRICT_REVIEW_OUTPUT_FORMAT",
+    "_STRICT_REVIEW_RUBRIC",
+    "build_strict_review_rubric",
+    "get_full_sweep_suffix",
+    "get_implementation_loop_strict_rubric",
+    "get_plan_loop_strict_rubric",
+    "get_plan_strict_rubric",
+    "get_pr_strict_rubric",
+    "get_strict_review_output_format",
+]
