@@ -69,6 +69,8 @@ from .base import (
     StepResult,
     StrictReviewLease,
     WorkItem,
+    _build_rebase_job,
+    _require_item_worktree,
     _terminal_pr_outcome,
     _worktree_path,
     agent_provider,
@@ -83,6 +85,8 @@ HEAD_CHECK = "HEAD_CHECK"
 WORKTREE_WAIT = "WORKTREE_WAIT"
 REVIEW_WAIT = "REVIEW_WAIT"
 EVAL = "EVAL"
+SR_REBASE_WAIT = "SR_REBASE_WAIT"
+SR_REBASE_PUSH_WAIT = "SR_REBASE_PUSH_WAIT"
 SR_FINISH = "SR_FINISH"
 FINISH = SR_FINISH
 
@@ -109,6 +113,17 @@ def parse_strict_review_verdict(text: str) -> ReviewVerdict:
     if match is None:
         return ReviewVerdict(grade=None, verdict="AMBIGUOUS", raw=text)
     return ReviewVerdict(grade=match.group(1), verdict=match.group(2), raw=text)
+
+
+def _record_rebase_job(item: WorkItem, result: JobResult) -> None:
+    """Consume the rebase budget and record the pre-review rebase result.
+
+    A failed push leaves the remote head unchanged; HEAD_CHECK re-classifies
+    the PR (still BEHIND -> budget-bounded retry or review as-is) (#2268).
+    """
+    if item.state == SR_REBASE_WAIT:
+        item.attempts["rebase"] = item.attempts.get("rebase", 0) + 1
+        item.payload["rebase_clean"] = bool(result.ok and result.value)
 
 
 def _issue_number(item: WorkItem) -> int:
@@ -251,6 +266,8 @@ class StrictReviewStage(Stage):
                 # of sending the reviewer to the shared repository root.
                 return StageOutcome(Disposition.FINISH_FAIL, "strict_review_worktree_unfinished")
             return Continue(next_state=HEAD_CHECK)
+        if item.state in (SR_REBASE_WAIT, SR_REBASE_PUSH_WAIT):
+            return self._rebase_leg(item, ctx)
         if item.state == REVIEW_WAIT:
             return self._review_wait(item, ctx)
         if item.state == EVAL:
@@ -317,7 +334,86 @@ class StrictReviewStage(Stage):
             # still in HEAD_CHECK, then transition through WORKTREE_WAIT.
             item.payload["strict_review_worktree_pending"] = True
             return JobRequest(worktree_job, on_done_state=WORKTREE_WAIT)
+        # Precondition gate (#2268): a strict review runs only on a
+        # conflict-free head that is current with its base. Conflicts need a
+        # real implementation session; a merely-BEHIND head gets ONE
+        # mechanical rebase+push first so the reviewer judges the FINAL head
+        # (this also removes the review -> ci-rebase -> head-change ->
+        # re-review churn of the pre-#2268 ordering).
+        item.payload["base_branch"] = str((pr_state or {}).get("baseRefName") or "main")
+        mergeable = str((pr_state or {}).get("mergeable") or "").upper()
+        merge_state = str((pr_state or {}).get("mergeStateStatus") or "").upper()
+        if mergeable == "CONFLICTING":
+            logger.info(
+                "strict_review:%s: PR #%d has unresolved merge conflicts; "
+                "routing to implementation before any strict review",
+                item.issue,
+                item.pr,
+            )
+            return StageOutcome(Disposition.FAIL_BACK, "merge_conflict")
+        if (
+            merge_state == "BEHIND"
+            and not ctx.dry_run
+            and item.attempts.get("rebase", 0) < ctx.budget("rebase")
+        ):
+            return Continue(next_state=SR_REBASE_WAIT)
         return Continue(next_state=REVIEW_WAIT)
+
+    def _rebase_leg(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Dispatch the two pre-review rebase states (#2268)."""
+        if item.state == SR_REBASE_WAIT:
+            return self._request_rebase(item, ctx)
+        return self._request_rebase_push(item, ctx)
+
+    def _request_rebase(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """SR_REBASE_WAIT [W:G]: rebase a BEHIND head before it is reviewed.
+
+        Shares the ``rebase`` lifetime budget (consumed in ``on_job_done``)
+        and the mechanical rebase job with the ci/merge_wait stages, so the
+        pre-review rebase cannot loop unbounded (#2268).
+        """
+        if item.attempts.get("rebase", 0) >= ctx.budget("rebase"):
+            return Continue(next_state=REVIEW_WAIT)
+        missing_worktree = _require_item_worktree(item, "strict_review", "pre-review rebase")
+        if missing_worktree is not None:
+            return missing_worktree
+        item.payload.pop("rebase_clean", None)
+        return JobRequest(
+            _build_rebase_job(item, ctx, descr="strict_review_pre_rebase"),
+            on_done_state=SR_REBASE_PUSH_WAIT,
+        )
+
+    def _request_rebase_push(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """SR_REBASE_PUSH_WAIT [W:G]: push the clean pre-review rebase.
+
+        A conflicting mechanical rebase means the head cannot be made current
+        without a real implementation session — fail back ``merge_conflict``
+        rather than reviewing a stale head (#2268). The push lands the new
+        head; HEAD_CHECK then re-captures it (and re-syncs the reviewer
+        worktree) so the review binds to the FINAL head.
+        """
+        if not item.payload.pop("rebase_clean", None):
+            logger.info(
+                "strict_review:%s: mechanical pre-review rebase of PR #%d hit "
+                "conflicts; routing to implementation",
+                item.issue,
+                item.pr,
+            )
+            return StageOutcome(Disposition.FAIL_BACK, "merge_conflict")
+        missing_worktree = _require_item_worktree(item, "strict_review", "pre-review rebase push")
+        if missing_worktree is not None:
+            return missing_worktree
+        push_job = GitJob(
+            repo=item.repo,
+            op="push",
+            timeout_s=GIT_JOB_TIMEOUT_S,
+            kwargs={
+                "cwd": _worktree_path(item, ctx),
+                "branch": item.branch or None,
+            },
+            descr="push_strict_review_pre_rebase",
+        )
+        return JobRequest(push_job, on_done_state=HEAD_CHECK)
 
     def _review_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """REVIEW_WAIT [W:A]: submit the read-only, per-head/per-attempt review job."""
@@ -364,6 +460,28 @@ class StrictReviewStage(Stage):
                 return StageOutcome(Disposition.RETRY, "strict_review_lease_unavailable")
             item.payload["strict_review_lease_id"] = lease.lease_id
             item.payload["strict_review_lease_comment_id"] = lease.comment_id
+        if getattr(ctx.config, "strict_review_bypass", False):
+            # Operator bypass (#2268): the second sanctioned path to
+            # ``state:implementation-go``. The artifact stays lease-fenced
+            # and head-bound so the single-producer/sole-armer invariants and
+            # merge_wait revalidation are untouched; only the reviewer
+            # session is skipped, and the artifact records the bypass.
+            logger.warning(
+                "strict_review:%d: OPERATOR BYPASS (--strict-review-bypass) — "
+                "accepting internal review GO for PR #%d at head %s without "
+                "an independent strict review session",
+                issue,
+                item.pr,
+                head_sha[:12],
+            )
+            return self._handle_go(
+                item,
+                ctx,
+                head_sha,
+                "Strict review BYPASSED by operator (--strict-review-bypass): "
+                "internal review GO accepted without an independent strict "
+                "review session.\nGrade: C\nVerdict: GO",
+            )
         evidence = ctx.github.strict_review_evidence(item.pr, head_sha, item.issue)  # type: ignore[arg-type]
         if evidence is None or evidence.head_sha.lower() != head_sha.lower():
             logger.warning(
@@ -508,6 +626,8 @@ class StrictReviewStage(Stage):
             "reconciling existing" if existing_go else "publishing fenced",
         )
         if not existing_go:
+            if lease is None:  # guarded above; kept for type narrowing
+                return Continue(next_state=HEAD_CHECK)
             try:
                 published_by_us = ctx.github.publish_strict_review_artifact(
                     pr_number, head_sha, verdict_text, is_go=True, lease=lease
@@ -710,6 +830,9 @@ class StrictReviewStage(Stage):
             ctx: Stage context.
 
         """
+        if item.state in (SR_REBASE_WAIT, SR_REBASE_PUSH_WAIT):
+            _record_rebase_job(item, result)
+            return
         if item.payload.pop("strict_review_worktree_pending", None):
             if not result.ok:
                 logger.warning(

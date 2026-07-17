@@ -664,6 +664,16 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "Pass --nitpick to review phases (reviewer emits nitpick comments)",
         ),
         _store_true(
+            "--strict-review-bypass",
+            "strict_review_bypass",
+            "Operator bypass (#2268): accept an internal review GO as "
+            "state:implementation-go without an independent strict-review "
+            "session. The strict_review stage still claims the head-bound "
+            "lease and publishes a GO artifact recording the bypass, so "
+            "merge_wait revalidation and the single-producer/sole-armer "
+            "invariants are unchanged.",
+        ),
+        _store_true(
             "--drive-green-all",
             "drive_green_all",
             "Pass --all to the drive-green phase: drive every open PR, including those "

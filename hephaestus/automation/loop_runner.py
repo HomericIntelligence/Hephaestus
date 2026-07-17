@@ -200,6 +200,7 @@ class LoopConfig:
     no_advise: bool = False
     nitpick: bool = False
     drive_green_all: bool = False
+    strict_review_bypass: bool = False
     run_pre_pr_tests: bool = False
     # ``model`` is the catch-all applied to every phase when set; per-phase
     # fields below take precedence over it.
@@ -312,6 +313,18 @@ def _build_parser() -> argparse.ArgumentParser:
         "--nitpick",
         action="store_true",
         help="Pass --nitpick to review phases (reviewer emits nitpick comments)",
+    )
+    p.add_argument(
+        "--strict-review-bypass",
+        action="store_true",
+        help=(
+            "Operator bypass (#2268): accept an internal review GO as "
+            "state:implementation-go without an independent strict-review "
+            "session. The strict_review stage still claims the head-bound "
+            "lease and publishes a GO artifact recording the bypass, so "
+            "merge_wait revalidation and the single-producer/sole-armer "
+            "invariants are unchanged."
+        ),
     )
     p.add_argument(
         "--drive-green-all",
@@ -641,6 +654,7 @@ def _build_pipeline_config(
         no_advise=cfg.no_advise,
         nitpick=cfg.nitpick,
         drive_green_all=cfg.drive_green_all,
+        strict_review_bypass=cfg.strict_review_bypass,
         include_bot_prs=True,
         include_all_authors=cfg.drive_green_all,
         run_pre_pr_tests=cfg.run_pre_pr_tests,
@@ -777,6 +791,7 @@ def main(argv: list[str] | None = None) -> int:
         no_advise=args.no_advise,
         nitpick=args.nitpick,
         drive_green_all=args.drive_green_all,
+        strict_review_bypass=args.strict_review_bypass,
         run_pre_pr_tests=args.run_pre_pr_tests,
         model=args.model,
         planner_model=args.planner_model,

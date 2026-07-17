@@ -636,3 +636,191 @@ def test_missing_current_head_evidence_fails_closed_to_real_implementation(
         action == "publish_strict_review_artifact" and args[-1] is False
         for action, args in github.mutation_log
     )
+
+
+class _MergeStateGitHub(FakeStageGitHub):
+    """Report a fixed mergeable/mergeStateStatus alongside the live head."""
+
+    def __init__(self, *, mergeable: str = "MERGEABLE", merge_state: str = "CLEAN") -> None:
+        super().__init__()
+        self._mergeable = mergeable
+        self._merge_state = merge_state
+
+    def gh_pr_state(self, pr_number: int) -> dict[str, str]:
+        return {
+            "state": "OPEN",
+            "headRefOid": _OLD_HEAD,
+            "baseRefName": "main",
+            "mergeable": self._mergeable,
+            "mergeStateStatus": self._merge_state,
+        }
+
+
+def _synced_item(make_work_item: Any, **overrides: Any) -> Any:
+    """Build an item in HEAD_CHECK whose reviewer worktree is already synced."""
+    item = make_work_item(
+        stage=StageName.STRICT_REVIEW,
+        pr=601,
+        state="HEAD_CHECK",
+        payload={
+            "strict_review_worktree_head": _OLD_HEAD,
+            **overrides.pop("payload", {}),
+        },
+        **overrides,
+    )
+    item.worktree = "/tmp/wt/601"
+    item.branch = "601-auto-impl"
+    return item
+
+
+class TestStrictReviewPreconditionGate:
+    """#2268: strict reviews run only on conflict-free, current heads."""
+
+    def test_conflicting_pr_fails_back_before_any_review(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Unresolved conflicts route to implementation, never to a reviewer."""
+        import hephaestus.automation.pipeline.stages.strict_review as strict_review
+
+        stage = strict_review.StrictReviewStage()
+        ctx = make_ctx(github=_MergeStateGitHub(mergeable="CONFLICTING"))
+        item = _synced_item(make_work_item)
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FAIL_BACK, "merge_conflict")
+
+    def test_behind_pr_rebases_before_review(self, make_ctx: Any, make_work_item: Any) -> None:
+        """A BEHIND head gets the mechanical pre-review rebase leg first."""
+        import hephaestus.automation.pipeline.stages.strict_review as strict_review
+
+        stage = strict_review.StrictReviewStage()
+        ctx = make_ctx(github=_MergeStateGitHub(merge_state="BEHIND"))
+        item = _synced_item(make_work_item)
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, Continue)
+        assert result.next_state == strict_review.SR_REBASE_WAIT
+
+        item.state = strict_review.SR_REBASE_WAIT
+        rebase_request = stage.step(item, ctx)
+        assert isinstance(rebase_request, JobRequest)
+        assert isinstance(rebase_request.job, GitJob)
+        assert rebase_request.job.op == "rebase"
+        assert rebase_request.on_done_state == strict_review.SR_REBASE_PUSH_WAIT
+        assert item.payload["base_branch"] == "main"
+
+    def test_current_clean_pr_proceeds_to_review(self, make_ctx: Any, make_work_item: Any) -> None:
+        """A mergeable, current head reaches REVIEW_WAIT unchanged."""
+        import hephaestus.automation.pipeline.stages.strict_review as strict_review
+
+        stage = strict_review.StrictReviewStage()
+        ctx = make_ctx(github=_MergeStateGitHub())
+        item = _synced_item(make_work_item)
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, Continue)
+        assert result.next_state == strict_review.REVIEW_WAIT
+
+    def test_conflicting_mechanical_rebase_routes_to_implementation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A rebase that hit conflicts must not review the stale head."""
+        import hephaestus.automation.pipeline.stages.strict_review as strict_review
+
+        stage = strict_review.StrictReviewStage()
+        ctx = make_ctx(github=_MergeStateGitHub(merge_state="BEHIND"))
+        item = _synced_item(make_work_item)
+        item.state = strict_review.SR_REBASE_PUSH_WAIT  # no rebase_clean flag
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FAIL_BACK, "merge_conflict")
+
+    def test_clean_rebase_pushes_then_recaptures_head(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The pushed rebase re-enters HEAD_CHECK so the review binds the new head."""
+        import hephaestus.automation.pipeline.stages.strict_review as strict_review
+
+        stage = strict_review.StrictReviewStage()
+        ctx = make_ctx(github=_MergeStateGitHub(merge_state="BEHIND"))
+        item = _synced_item(make_work_item, payload={"rebase_clean": True})
+        item.state = strict_review.SR_REBASE_PUSH_WAIT
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.op == "push"
+        assert result.on_done_state == strict_review.HEAD_CHECK
+
+    def test_rebase_budget_spent_reviews_as_is(self, make_ctx: Any, make_work_item: Any) -> None:
+        """A budget-exhausted BEHIND head is reviewed rather than looped."""
+        import hephaestus.automation.pipeline.stages.strict_review as strict_review
+
+        stage = strict_review.StrictReviewStage()
+        ctx = make_ctx(github=_MergeStateGitHub(merge_state="BEHIND"))
+        item = _synced_item(make_work_item)
+        item.attempts["rebase"] = 2  # ROUTES lifetime budget
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, Continue)
+        assert result.next_state == strict_review.REVIEW_WAIT
+
+
+class TestStrictReviewBypass:
+    """#2268: the operator bypass is the second path to implementation-go."""
+
+    def test_bypass_publishes_fenced_go_without_reviewer_session(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Bypass claims the lease, publishes a head-bound GO, applies the label."""
+        import hephaestus.automation.pipeline.stages.strict_review as strict_review
+
+        stage = strict_review.StrictReviewStage()
+        github = _MergeStateGitHub()
+        ctx = make_ctx(github=github)
+        ctx.config.strict_review_bypass = True
+        item = _synced_item(make_work_item, payload={"strict_review_head": _OLD_HEAD})
+        item.state = strict_review.REVIEW_WAIT
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, Continue)
+        assert result.next_state == strict_review.SR_FINISH
+        published = github.strict_review_artifact(601, _OLD_HEAD)
+        assert published is not None and published.is_go
+        publish_entries = [
+            e for e in github.mutation_log if e[0] == "publish_strict_review_artifact"
+        ]
+        assert len(publish_entries) == 1
+        assert "BYPASSED by operator" in str(publish_entries[0][1][2])
+        assert ("mark_pr_implementation_go", (601,)) in github.mutation_log
+
+    def test_no_bypass_still_dispatches_reviewer(self, make_ctx: Any, make_work_item: Any) -> None:
+        """Without the flag the reviewer AgentJob path is unchanged."""
+        import hephaestus.automation.pipeline.stages.strict_review as strict_review
+
+        stage = strict_review.StrictReviewStage()
+        github = _MergeStateGitHub()
+        github._strict_evidence = StrictReviewEvidence(
+            head_sha=_OLD_HEAD,
+            issue_title="t",
+            issue_body="b",
+            diff="d",
+            ci_status="green",
+            prior_pr_review_verdict="GO",
+        )
+        ctx = make_ctx(github=github)
+        item = _synced_item(make_work_item, payload={"strict_review_head": _OLD_HEAD})
+        item.state = strict_review.REVIEW_WAIT
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)
+        assert result.job.sandbox == "read-only"

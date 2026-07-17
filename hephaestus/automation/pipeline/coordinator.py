@@ -222,6 +222,9 @@ class PipelineConfig:
     no_advise: bool = False
     nitpick: bool = False
     drive_green_all: bool = False
+    # Operator bypass (#2268): strict_review publishes a head-bound,
+    # lease-fenced GO artifact without a reviewer session.
+    strict_review_bypass: bool = False
     include_bot_prs: bool = True
     include_all_authors: bool = False
     # When False, the CI stage's pre-fix mechanical rebase is skipped and every
@@ -287,6 +290,9 @@ class _StageRunConfig:
     dry_run: bool = False
     nitpick: bool = False
     drive_green_all: bool = False
+    # Operator bypass (#2268): strict_review publishes a head-bound,
+    # lease-fenced GO artifact without a reviewer session.
+    strict_review_bypass: bool = False
     include_bot_prs: bool = True
     include_all_authors: bool = False
     enable_mechanical_rebase: bool = True
@@ -432,6 +438,7 @@ class Coordinator:
             dry_run=config.dry_run,
             nitpick=config.nitpick,
             drive_green_all=config.drive_green_all,
+            strict_review_bypass=config.strict_review_bypass,
             include_bot_prs=config.include_bot_prs,
             include_all_authors=config.include_all_authors,
             enable_mechanical_rebase=config.enable_mechanical_rebase,

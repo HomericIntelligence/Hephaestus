@@ -352,7 +352,8 @@ Related: #1554 (original minor-thread deadlock this replaces), #1575
 
 ### 6. strict_review
 
-**States**: ENTER → HEAD_CHECK → WORKTREE_WAIT → REVIEW_WAIT → EVAL → FINISH.
+**States**: ENTER → HEAD_CHECK → WORKTREE_WAIT → (SR_REBASE_WAIT →
+SR_REBASE_PUSH_WAIT →) REVIEW_WAIT → EVAL → FINISH.
 
 **Steps**:
 
@@ -360,7 +361,13 @@ Related: #1554 (original minor-thread deadlock this replaces), #1575
    `state:implementation-go`, disable/readback auto-merge, then capture the
    live PR head. A previously captured head that changed is restarted from a
    fresh head check. A containment failure is terminal and fail-closed.
-2. [W:G] For a direct PR or a missing worktree, synchronize an isolated
+2. [M] Precondition gate (#2268): a strict review runs only on a
+   conflict-free head that is current with its base. `mergeable ==
+   CONFLICTING` fails back `merge_conflict` → implementation (a conflicting
+   mechanical pre-review rebase does the same); a merely-BEHIND head gets one
+   mechanical rebase+push (shared `rebase` lifetime budget) and re-enters
+   HEAD_CHECK so the reviewer judges the FINAL head.
+3. [W:G] For a direct PR or a missing worktree, synchronize an isolated
    worktree to the captured PR branch without refreshing it from the base
    branch. [W:A] Run an independent reviewer there in `sandbox="read-only"`,
    with a fresh per-head/per-attempt session and the expected remote SHA. The
@@ -370,19 +377,25 @@ Related: #1554 (original minor-thread deadlock this replaces), #1575
    review, and checks the head both before and after that fetch. Missing,
    malformed, oversized, or stale evidence is a fail-closed NOGO. All evidence
    is untrusted and nonce-fenced.
-3. [M] Re-read the head before publishing. A GO publishes an authenticated,
+4. [M] Re-read the head before publishing. A GO publishes an authenticated,
    exact-grammar artifact for that head, reads it back, then applies
    `state:implementation-go`; any publish/readback/label failure is terminal.
-4. [M] An explicit NOGO, infrastructure failure, or malformed verdict
+5. [M] An explicit NOGO, infrastructure failure, or malformed verdict
    publishes a head-bound NOGO invalidation, verifies auto-merge is disabled,
    records remediation, and fails back to a real implementation pass. It never
    loops through an adopted PR without implementation work. An orphan PR has
    no issue-bound implementation scope, so it remains fail-closed for manual
    remediation after containment.
 
-**Verdicts**: ADVANCE (current-head GO) → ci; FAIL_BACK (`nogo`) →
-implementation; RETRY (`head_changed`) → strict_review; containment failures
-finish failed.
+**Verdicts**: ADVANCE (current-head GO) → ci; FAIL_BACK (`nogo`,
+`merge_conflict`) → implementation; RETRY (`head_changed`) → strict_review;
+containment failures finish failed.
+
+**Operator bypass** (#2268, `--strict-review-bypass`): the second sanctioned
+path to `state:implementation-go`. REVIEW_WAIT skips the reviewer session and
+publishes a lease-fenced, head-bound GO artifact whose body records the
+bypass; the precondition gate, artifact grammar, single-producer and
+sole-armer invariants, and merge_wait revalidation are unchanged.
 
 **Budgets**: `strict_review_iter` = 1 per current-head attempt.
 
@@ -511,7 +524,7 @@ globally bounded.
 | plan_review | implementation | planning (nogo, default), finished(fail) on plan_cycles_exhausted | plan_review_iter=3, plan_cycles=2 |
 | implementation | pr_review | plan_review (plan_not_go), strict_review (already_implementation_go_pr), finished(fail) on exhaustion | implement=2, test_fix=1 |
 | pr_review | strict_review | implementation (agent_error), finished(fail) on human_blocked or failed disable verification, finished(skip) on exhaustion | pr_review_iter=3, pr_review_hard=6 |
-| strict_review | ci | implementation (nogo), strict_review (head_changed), finished(fail) on containment failure | strict_review_iter=1 |
+| strict_review | ci | implementation (nogo, merge_conflict), strict_review (head_changed), finished(fail) on containment failure | strict_review_iter=1 |
 | ci | merge_wait | implementation (fix_exhausted, missing_worktree), strict_review (not_implementation_go, not_strict_review_go), finished(fail) on no_pr or auto_merge_disable_failed | ci_fix=1, rebase=2 |
 | merge_wait | finished(pass) | strict_review on proof/head drift; finished(fail) on containment failure; existing merged PRs learn then pass | merge/poll bounded by routes |
 | finished | — | — | — |

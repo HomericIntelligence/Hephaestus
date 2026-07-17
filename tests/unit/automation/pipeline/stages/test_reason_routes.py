@@ -47,7 +47,7 @@ _EXPECTED_REASONS: dict[StageName, set[str]] = {
     # its ROUTES row entry (-> FINISHED) documents the same destination.
     StageName.PR_REVIEW: {"agent_error"},
     # no_pr/timeout are emitted as FINISH_FAIL (terminal), not FAIL_BACK.
-    StageName.STRICT_REVIEW: {"nogo"},
+    StageName.STRICT_REVIEW: {"nogo", "merge_conflict"},
     StageName.CI: {"fix_exhausted", "not_implementation_go", "not_strict_review_go"},
     # #2054 terminalizes merge_wait; it emits no cross-stage FAIL_BACK reason.
     StageName.MERGE_WAIT: set(),

@@ -200,6 +200,7 @@ class TestROUTES:
                 next=StageName.CI,
                 fail_routes={
                     "nogo": StageName.IMPLEMENTATION,
+                    "merge_conflict": StageName.IMPLEMENTATION,
                     "head_changed": StageName.STRICT_REVIEW,
                     "*": StageName.STRICT_REVIEW,
                 },

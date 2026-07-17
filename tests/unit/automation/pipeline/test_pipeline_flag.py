@@ -166,6 +166,16 @@ def test_build_pipeline_config_maps_drive_green_phase_to_ci_scope(
     )
 
 
+def test_build_pipeline_config_maps_strict_review_bypass(
+    dispatch: dict[str, MagicMock],
+) -> None:
+    """The operator bypass flag must reach the pipeline config (#2268)."""
+    loop_runner.main(["--strict-review-bypass"])
+
+    (config,) = dispatch["run_pipeline"].call_args.args
+    assert config.strict_review_bypass is True
+
+
 def test_build_pipeline_config_maps_drive_green_loops_to_budget(
     dispatch: dict[str, MagicMock],
 ) -> None:

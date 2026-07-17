@@ -132,6 +132,10 @@ ROUTES: dict[StageName, Route] = {
         next=StageName.CI,
         fail_routes={
             "nogo": StageName.IMPLEMENTATION,
+            # Precondition gate (#2268): unresolved conflicts (or a
+            # conflicting mechanical pre-review rebase) need a real
+            # implementation session before any strict review runs.
+            "merge_conflict": StageName.IMPLEMENTATION,
             "head_changed": StageName.STRICT_REVIEW,
             "*": StageName.STRICT_REVIEW,
         },

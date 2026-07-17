@@ -48,6 +48,10 @@ _REASON_BUDGET: dict[str, str | None] = {
     "plan_not_go": None,
     "already_implementation_go_pr": None,
     "head_changed": None,
+    # #2268 precondition gate: the route itself consumes no budget (the
+    # mechanical pre-review rebase consumes the shared "rebase" budget in
+    # strict_review.on_job_done).
+    "merge_conflict": None,
     "agent_error": None,
     "human_blocked": None,
     "exhaustion": None,

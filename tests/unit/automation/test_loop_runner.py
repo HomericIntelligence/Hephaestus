@@ -132,6 +132,12 @@ def test_parse_args_accepts_github_throttle_options() -> None:
     assert args.gh_global_burst == 11.0
 
 
+def test_parse_args_accepts_strict_review_bypass() -> None:
+    """--strict-review-bypass is parsed; default is False (#2268)."""
+    assert loop_runner._parse_args(["--strict-review-bypass"]).strict_review_bypass is True
+    assert loop_runner._parse_args([]).strict_review_bypass is False
+
+
 def test_parse_args_accepts_drive_green_loops() -> None:
     """--drive-green-loops is parsed; default is 5 (#2246, was --max-merge-attempts #1560)."""
     assert loop_runner._parse_args(["--drive-green-loops", "3"]).drive_green_loops == 3
