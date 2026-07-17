@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+import pytest
+
 from hephaestus.automation._review_utils import build_automation_parser
 from hephaestus.automation.prompts.catalog import PromptCatalog
 from hephaestus.automation.prompts.planning import (
@@ -56,6 +58,14 @@ def test_prompt_dir_cli_flag_selects_the_optional_override(tmp_path: Path) -> No
 
 def test_default_catalog_has_no_implicit_override() -> None:
     """Only an optional CLI-selected catalog may enable an override."""
+    PromptCatalog.clear_current()
+
+    assert get_plan_prompt(12).startswith("\nCreate an implementation plan")
+
+
+def test_environment_does_not_select_a_prompt_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Harness overrides are deliberately CLI-only, never environment-selected."""
+    monkeypatch.setenv("HEPHAESTUS_PROMPT_DIR", "/does/not/exist")
     PromptCatalog.clear_current()
 
     assert get_plan_prompt(12).startswith("\nCreate an implementation plan")
