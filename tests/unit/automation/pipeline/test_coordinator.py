@@ -323,7 +323,7 @@ class TestQuiescence:
     def test_direct_pr_worktree_completion_advances_without_resubmitting(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Coordinator completion order preserves a direct PR's synced worktree."""
+        """Direct strict setup remains auxiliary until read-only review completes."""
         head = "a" * 40
         github = FakeStageGitHub(
             pr_state={"state": "OPEN", "headRefOid": head, "autoMergeRequest": None},
@@ -349,7 +349,11 @@ class TestQuiescence:
         )
 
         coordinator._run_item(item)
-        coordinator._drain_completions()
+        # Drain only the detached-worktree completion. The next completion is
+        # the read-only review itself; promotion is intentionally deferred
+        # until that callback has finished.
+        handle, result = coordinator.completion_q.get_nowait()
+        coordinator._handle_completion(handle, result)
 
         worktree_jobs = [
             handle.job
@@ -357,7 +361,10 @@ class TestQuiescence:
             if getattr(handle.job, "op", "") == "create_worktree"
         ]
         assert len(worktree_jobs) == 1
-        assert item.worktree == str(tmp_path / "pr-601")
+        assert not item.worktree
+        assert item.payload["strict_review_worktree"] == str(tmp_path / "pr-601")
+        assert item.payload["strict_review_worktrees"] == [str(tmp_path / "pr-601")]
+        assert "strict_review_worktree_promoted" not in item.payload
         assert any(isinstance(handle.job, AgentJob) for handle in pool.submitted)
 
 

@@ -299,6 +299,29 @@ class TestGate:
         assert item.payload["existing_pr"] is True
         assert github.mutation_log == [("defer_auto_merge", (1001,))]
 
+    def test_gate_strict_nogo_uses_promoted_detached_worktree_for_remediation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A direct PR NOGO repairs the reviewed detached checkout, not a new writer."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub(pr_head_branch="1-real-branch")
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="GATE")
+        item.branch = "1-real-branch"
+        item.worktree = "/tmp/repo/build/.worktrees/strict-review-pr-1001"
+        item.payload.update(
+            {
+                "strict_review_worktree_promoted": True,
+                "strict_review_feedback": "Grade: F\nVerdict: NOGO",
+            }
+        )
+
+        result = stage.step(item, ctx)
+
+        assert result == Continue(next_state="IMPLEMENT_WAIT")
+        assert item.worktree == "/tmp/repo/build/.worktrees/strict-review-pr-1001"
+        assert github.mutation_log == [("defer_auto_merge", (1001,))]
+
     def test_gate_existing_pr_fails_closed_when_auto_merge_deferral_cannot_be_verified(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -959,6 +982,22 @@ class TestCommitPushAndPrCreate:
             "agent": "claude",
         }
         assert result.on_done_state == "PR_CREATE"
+
+    def test_promoted_strict_worktree_commit_push_uses_explicit_head_ref(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Detached strict-review remediation cannot rely on an attached branch."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
+        item.branch = "1-auto-impl"
+        item.worktree = "/tmp/repo/build/.worktrees/strict-review-pr-1"
+        item.payload["strict_review_worktree_promoted"] = True
+
+        result = stage.step(item, make_ctx())
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.kwargs["push_ref"] == "HEAD:1-auto-impl"
 
     def test_commit_push_no_commit_sets_skip_payload(
         self, make_ctx: Any, make_work_item: Any

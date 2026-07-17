@@ -48,6 +48,8 @@ from __future__ import annotations
 
 import logging
 import re
+from pathlib import Path
+from uuid import uuid4
 
 from hephaestus.automation.agent_config import pr_reviewer_claude_timeout, reviewer_model
 from hephaestus.automation.claude_invoke import ReviewVerdict
@@ -57,6 +59,7 @@ from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_GO
 
 from .base import (
     GIT_JOB_TIMEOUT_S,
+    STRICT_REVIEW_WORKTREE_PROMOTED,
     AgentJob,
     Continue,
     Disposition,
@@ -70,7 +73,6 @@ from .base import (
     StrictReviewLease,
     WorkItem,
     _terminal_pr_outcome,
-    _worktree_path,
     agent_provider,
     stage_model,
 )
@@ -88,6 +90,9 @@ FINISH = SR_FINISH
 
 #: HTML-comment marker for the NOGO remediation feedback comment.
 STRICT_REVIEW_NOGO_MARKER = "<!-- hephaestus-strict-review-nogo -->"
+_STRICT_REVIEW_WORKTREE = "strict_review_worktree"
+_STRICT_REVIEW_WORKTREES = "strict_review_worktrees"
+_STRICT_REVIEW_WORKTREE_NAME = "strict_review_worktree_name"
 
 # Unlike the general review-loop parser, the merge-authorizing strict gate
 # accepts only the final, exact output contract.  A diff or prior review may
@@ -114,6 +119,45 @@ def parse_strict_review_verdict(text: str) -> ReviewVerdict:
 def _issue_number(item: WorkItem) -> int:
     """Return a stable issue id; orphan PRs use zero for review-session scope."""
     return item.issue if item.issue is not None else 0
+
+
+def _strict_review_worktree(item: WorkItem) -> Path | None:
+    """Return the current auxiliary strict-review checkout, if setup completed."""
+    value = item.payload.get(_STRICT_REVIEW_WORKTREE)
+    return Path(value) if isinstance(value, str) and value else None
+
+
+def _record_strict_review_worktree(item: WorkItem, path: str) -> None:
+    """Track a strict auxiliary path once for later cleanup or preservation."""
+    paths = item.payload.get(_STRICT_REVIEW_WORKTREES)
+    if not isinstance(paths, list):
+        paths = []
+        item.payload[_STRICT_REVIEW_WORKTREES] = paths
+    if path not in paths:
+        paths.append(path)
+
+
+def _promote_strict_review_worktree(item: WorkItem) -> None:
+    """Promote a completed direct-review checkout to its writable worktree.
+
+    The strict checkout deliberately remains detached and read-only while the
+    independent review runs. Once the review has completed, a direct PR item
+    has no separate implementation worktree to drive CI or remediate a NOGO.
+    Promoting only this owned auxiliary checkout preserves the implementation
+    writer when one already exists; downstream push jobs use the payload flag
+    to send ``HEAD`` explicitly to the original PR branch.
+    """
+    strict_worktree = _strict_review_worktree(item)
+    if strict_worktree is not None and (
+        not item.worktree or item.payload.get(STRICT_REVIEW_WORKTREE_PROMOTED)
+    ):
+        item.worktree = str(strict_worktree)
+        item.payload[STRICT_REVIEW_WORKTREE_PROMOTED] = True
+
+
+def _new_strict_review_worktree_name(pr_number: int) -> str:
+    """Return a unique, path-safe directory name for one strict-review setup."""
+    return f"strict-review-pr-{pr_number}-{uuid4().hex}"
 
 
 class StrictReviewStage(Stage):
@@ -173,6 +217,8 @@ class StrictReviewStage(Stage):
             item.payload.pop("strict_review_text", None)
             item.payload.pop("strict_review_failed", None)
             item.payload.pop("strict_review_worktree_head", None)
+            item.payload.pop(_STRICT_REVIEW_WORKTREE, None)
+            item.payload.pop(_STRICT_REVIEW_WORKTREE_NAME, None)
             self._drop_lease(item)
             item.state = ENTER
         if not self._clear_go_and_verify_disabled(pr_number, ctx):
@@ -245,10 +291,10 @@ class StrictReviewStage(Stage):
         if item.state == WORKTREE_WAIT:
             if item.payload.pop("strict_review_worktree_failed", None):
                 return StageOutcome(Disposition.FINISH_FAIL, "strict_review_worktree_failed")
-            if not item.worktree:
+            if _strict_review_worktree(item) is None:
                 # A restored item cannot safely assume an unrecorded worker
-                # completion created a usable checkout.  Fail closed instead
-                # of sending the reviewer to the shared repository root.
+                # completion created a usable isolated checkout. Fail closed
+                # instead of sending the reviewer to the writer checkout.
                 return StageOutcome(Disposition.FINISH_FAIL, "strict_review_worktree_unfinished")
             return Continue(next_state=HEAD_CHECK)
         if item.state == REVIEW_WAIT:
@@ -262,18 +308,21 @@ class StrictReviewStage(Stage):
 
     def _head_check(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """HEAD_CHECK [M]: capture the PR's live head SHA before dispatching review."""
+        pr_number = item.pr
+        if pr_number is None:  # defensive: step() normally guards this
+            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
         if item.payload.pop("strict_review_worktree_failed", None):
             return StageOutcome(Disposition.FINISH_FAIL, "strict_review_worktree_failed")
-        terminal = _terminal_pr_outcome(ctx.github.gh_pr_state(item.pr), item.pr)  # type: ignore[arg-type]
+        terminal = _terminal_pr_outcome(ctx.github.gh_pr_state(pr_number), pr_number)
         if terminal is not None:
             return terminal
-        pr_state = ctx.github.gh_pr_state(item.pr)  # type: ignore[arg-type]
+        pr_state = ctx.github.gh_pr_state(pr_number)
         head_sha = str((pr_state or {}).get("headRefOid") or "")
         if not head_sha:
             logger.warning(
                 "strict_review:%s: could not read PR #%d head SHA; retrying",
                 item.issue,
-                item.pr,
+                pr_number,
             )
             item.payload["retry_delay_s"] = 30
             return StageOutcome(Disposition.RETRY, "no_head_sha")
@@ -281,18 +330,31 @@ class StrictReviewStage(Stage):
         # A reviewer must never inspect a local checkout whose commit has not
         # been synchronized to this exact remote head. This is required for a
         # restored/direct ingress as well as a normal push during review.
+        strict_worktree = _strict_review_worktree(item)
         synced_worktree_head = str(item.payload.get("strict_review_worktree_head") or "")
-        if not item.worktree or synced_worktree_head.lower() != head_sha.lower():
-            branch = item.branch or ctx.github.get_pr_head_branch(item.pr)  # type: ignore[arg-type]
+        if strict_worktree is None or synced_worktree_head.lower() != head_sha.lower():
+            # A new remote head must get a fresh directory.  Retain prior
+            # auxiliary paths for FinishedStage cleanup/preservation, but do
+            # not reset or reuse their directory while another coordinator may
+            # still be reading it.
+            if synced_worktree_head and synced_worktree_head.lower() != head_sha.lower():
+                item.payload.pop(_STRICT_REVIEW_WORKTREE, None)
+                item.payload.pop(_STRICT_REVIEW_WORKTREE_NAME, None)
+                item.payload.pop("strict_review_worktree_head", None)
+            branch = item.branch or ctx.github.get_pr_head_branch(pr_number)
             if not branch:
                 logger.warning(
                     "strict_review:%s: could not resolve PR #%d head branch",
                     item.issue,
-                    item.pr,
+                    pr_number,
                 )
                 item.payload["retry_delay_s"] = 30
                 return StageOutcome(Disposition.RETRY, "no_head_branch")
             item.branch = branch
+            worktree_name = item.payload.get(_STRICT_REVIEW_WORKTREE_NAME)
+            if not isinstance(worktree_name, str) or not worktree_name:
+                worktree_name = _new_strict_review_worktree_name(pr_number)
+                item.payload[_STRICT_REVIEW_WORKTREE_NAME] = worktree_name
             # A direct PR/drive-green entry has no implementation worktree.
             # Create and sync an isolated checkout before a read-only reviewer
             # can inspect files, so its local Read/Glob context is this exact
@@ -302,11 +364,22 @@ class StrictReviewStage(Stage):
                 op="create_worktree",
                 timeout_s=GIT_JOB_TIMEOUT_S,
                 kwargs={
-                    "issue_number": item.issue if item.issue is not None else item.pr,
+                    "issue_number": item.issue if item.issue is not None else pr_number,
                     "branch_name": branch,
                     "refresh_base": False,
+                    # Strict review must never reuse the implementation
+                    # worktree or any external worktree that holds this branch.
+                    # It reviews a fresh detached checkout at a role-specific
+                    # managed path instead.
+                    "detached": True,
+                    "worktree_name": worktree_name,
                     "sync_to_remote": True,
-                    "pr_number": item.pr,
+                    # Only the worker knows whether creation finished before
+                    # sync failed. It removes that detached checkout there,
+                    # preventing an uncreated planned path from being
+                    # preserved as a FinishedStage phantom.
+                    "cleanup_on_sync_failure": True,
+                    "pr_number": pr_number,
                     "repo_root": str(ctx.paths.repo_root),
                 },
                 descr="strict_review_worktree",
@@ -330,19 +403,26 @@ class StrictReviewStage(Stage):
         # inspected before claiming a lease so a durable NOGO is not confused
         # with a competing live lease and retried forever.  GO remains
         # merge-authorized only through the v2 GO-only accessor below.
+        strict_worktree = _strict_review_worktree(item)
         terminal = ctx.github.strict_review_terminal_artifact(item.pr, head_sha)  # type: ignore[arg-type]
         if terminal is not None and not terminal.is_go:
+            _promote_strict_review_worktree(item)
             return self._resume_terminal_nogo(item, ctx, head_sha, terminal.verdict_body)
         # A prior durable v2 GO can survive a coordinator restart.  It is
         # already globally elected and authenticated by the accessor, so no
         # second reviewer may be dispatched merely to recreate its label.
         existing_go = ctx.github.strict_review_artifact(item.pr, head_sha)  # type: ignore[arg-type]
         if existing_go is not None:
+            _promote_strict_review_worktree(item)
             item.payload["strict_review_existing_go"] = True
             item.payload["strict_review_verdict"] = "GO"
             item.payload["strict_review_text"] = ""
             item.payload.pop("strict_review_failed", None)
             return Continue(next_state=EVAL)
+        if strict_worktree is None:
+            # The reviewer must never obtain a lease or inspect the writer
+            # checkout when isolated setup did not complete.
+            return StageOutcome(Disposition.FINISH_FAIL, "strict_review_worktree_unfinished")
         lease = self._lease_from_payload(item)
         if lease is None:
             try:
@@ -403,7 +483,7 @@ class StrictReviewStage(Stage):
             agent=agent_provider(ctx),
             model=stage_model(ctx, "reviewer", reviewer_model),
             prompt_builder=build_strict_review_prompt,
-            cwd=_worktree_path(item, ctx),
+            cwd=strict_worktree,
             timeout_s=pr_reviewer_claude_timeout(),
             session_agent=strict_review_agent(head_sha, attempt),
             expected_head_sha=head_sha,
@@ -720,23 +800,27 @@ class StrictReviewStage(Stage):
                 item.payload["strict_review_worktree_failed"] = True
                 return
             value = result.value
+            worktree_path = ""
             if isinstance(value, dict):
-                item.worktree = str(value.get("path") or "")
+                worktree_path = str(value.get("path") or "")
                 if value.get("dirty"):
                     # The worker intentionally preserves dirty worktrees.
                     # They cannot safely represent an exact remote PR head.
                     item.payload["strict_review_worktree_failed"] = True
             elif isinstance(value, str):
-                item.worktree = value
-            if not item.worktree:
+                worktree_path = value
+            if not worktree_path:
                 item.payload["strict_review_worktree_failed"] = True
             else:
+                item.payload[_STRICT_REVIEW_WORKTREE] = worktree_path
+                _record_strict_review_worktree(item, worktree_path)
                 synced_head = str(item.payload.get("strict_review_head") or "")
                 if not item.payload.get("strict_review_worktree_failed") and synced_head:
                     item.payload["strict_review_worktree_head"] = synced_head
             return
         if item.state != REVIEW_WAIT:
             return
+        _promote_strict_review_worktree(item)
         if not result.ok:
             logger.warning("strict_review:%s: review job failed: %s", item.issue, result.error)
             item.payload["strict_review_failed"] = True

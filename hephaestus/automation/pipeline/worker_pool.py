@@ -68,6 +68,15 @@ def _repo_lock_path(repo: str, lock_dir: Path | None = None) -> Path:
     return lock_dir / f"git-{repo.replace('/', '_')}.lock"
 
 
+def _is_within_resolved_root(candidate: Path, repo_root: Path) -> bool:
+    """Return whether two already-resolved paths keep *candidate* in *repo_root*."""
+    try:
+        candidate.relative_to(repo_root)
+    except ValueError:
+        return False
+    return True
+
+
 @dataclass
 class _RepoLockEntry:
     """In-process git lock plus active/waiting user count."""
@@ -620,16 +629,32 @@ class WorkerPool:
         """Create a worktree and optionally sync an adopted PR branch."""
         kwargs = dict(job.kwargs)
         sync_to_remote = bool(kwargs.pop("sync_to_remote", False))
+        cleanup_on_sync_failure = bool(kwargs.pop("cleanup_on_sync_failure", False))
         pr_number = kwargs.pop("pr_number", None)
         repo_root_kwarg = kwargs.pop("repo_root", None)
-        repo_root = Path(repo_root_kwarg) if repo_root_kwarg else get_repo_root()
+        repo_root_input = Path(repo_root_kwarg) if repo_root_kwarg else get_repo_root()
+        repo_root = repo_root_input.resolve(strict=False)
+        if cleanup_on_sync_failure and not kwargs.get("detached"):
+            return JobResult(
+                ok=False,
+                error="cleanup_on_sync_failure is only supported for detached worktrees",
+            )
         base_dir = repo_root / "build" / ".worktrees"
+        resolved_base_dir = base_dir.resolve(strict=False)
+        if not _is_within_resolved_root(resolved_base_dir, repo_root):
+            return JobResult(
+                ok=False,
+                error=(
+                    f"worktree base {resolved_base_dir} escaped resolved repo root {repo_root} "
+                    f"for job.repo={job.repo!r}"
+                ),
+            )
         manager = WorktreeManager(base_dir=base_dir, repo_root=repo_root)
         created = manager.create_worktree(**kwargs, timeout=job.timeout_s)
         if created is None:
             return JobResult(ok=True)
-        worktree_path = Path(created)
-        if repo_root not in worktree_path.parents and worktree_path != repo_root:
+        worktree_path = Path(created).resolve(strict=False)
+        if not _is_within_resolved_root(worktree_path, repo_root):
             return JobResult(
                 ok=False,
                 error=(
@@ -662,12 +687,34 @@ class WorkerPool:
             status = status_result.stdout or ""
             diff = diff_result.stdout or ""
         elif branch_name:
-            git_utils.sync_worktree_to_remote_branch(
-                worktree_path,
-                branch_name,
-                pr_number=int(pr_number) if pr_number is not None else None,
-                timeout=job.timeout_s,
-            )
+            try:
+                git_utils.sync_worktree_to_remote_branch(
+                    worktree_path,
+                    branch_name,
+                    pr_number=int(pr_number) if pr_number is not None else None,
+                    timeout=job.timeout_s,
+                )
+            except Exception:
+                if cleanup_on_sync_failure:
+                    try:
+                        git_utils.run(
+                            ["git", "worktree", "remove", "--force", str(worktree_path)],
+                            cwd=repo_root,
+                            timeout=job.timeout_s,
+                        )
+                        git_utils.run(
+                            ["git", "worktree", "prune"],
+                            cwd=repo_root,
+                            check=False,
+                            timeout=job.timeout_s,
+                        )
+                    except Exception as cleanup_error:
+                        logger.warning(
+                            "failed to remove strict worktree after sync failure (%s): %s",
+                            worktree_path,
+                            cleanup_error,
+                        )
+                raise
         return JobResult(
             ok=True,
             value={
@@ -728,9 +775,23 @@ class WorkerPool:
         )
         if not changed:
             return JobResult(ok=True, value=False)
-        git_utils.push_branch(
-            str(job.kwargs.get("branch", "HEAD")),
-            Path(worktree_path),
-            timeout=job.timeout_s,
-        )
+        if "push_ref" in job.kwargs:
+            push_ref = job.kwargs["push_ref"]
+            if not isinstance(push_ref, str) or not push_ref:
+                return JobResult(ok=False, error="commit_push push_ref must be a non-empty string")
+            branch_value = job.kwargs.get("branch")
+            branch = str(branch_value) if branch_value else None
+            git_utils.push_current_branch_with_lease_on_divergence(
+                cwd=Path(worktree_path),
+                branch=branch,
+                push_ref=push_ref,
+                timeout=job.timeout_s,
+            )
+        else:
+            # Preserve the attached-writer behavior for existing callers.
+            git_utils.push_branch(
+                str(job.kwargs.get("branch", "HEAD")),
+                Path(worktree_path),
+                timeout=job.timeout_s,
+            )
         return JobResult(ok=True, value=changed)

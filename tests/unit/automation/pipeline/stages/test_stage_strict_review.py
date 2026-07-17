@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import importlib
+import re
+from pathlib import Path
 from typing import Any
 
+from hephaestus.automation.claude_invoke import ReviewVerdict
 from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageName
 from hephaestus.automation.pipeline.stages import (
@@ -175,8 +178,12 @@ def test_review_job_receives_fresh_current_head_evidence(
         stage=StageName.STRICT_REVIEW,
         pr=601,
         state=strict_review.REVIEW_WAIT,
-        payload={"strict_review_head": _NEW_HEAD},
+        payload={
+            "strict_review_head": _NEW_HEAD,
+            "strict_review_worktree": "/tmp/strict-review-601",
+        },
     )
+    item.worktree = "/tmp/writer-601"
 
     result = strict_review.StrictReviewStage().step(item, make_ctx(github=github))
 
@@ -191,7 +198,193 @@ def test_review_job_receives_fresh_current_head_evidence(
     assert result.job.prompt_kwargs["prior_pr_review_verdict"] == evidence.prior_pr_review_verdict
     assert result.job.expected_head_sha == _NEW_HEAD
     assert result.job.sandbox == "read-only"
+    assert result.job.cwd == Path("/tmp/strict-review-601")
+    assert item.worktree == "/tmp/writer-601"
     assert item.payload["strict_review_lease_id"].startswith("fake-601-")
+
+
+def test_review_wait_fails_closed_before_claiming_a_lease_without_an_auxiliary_worktree(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """The strict reviewer never claims a lease before isolated setup completed."""
+    strict_review = importlib.import_module("hephaestus.automation.pipeline.stages.strict_review")
+    github = FakeStageGitHub(
+        strict_evidence=StrictReviewEvidence(
+            head_sha=_NEW_HEAD,
+            issue_title="Task title",
+            issue_body="Task acceptance criterion.",
+            diff="diff --git a/file.py b/file.py\n+",
+            ci_status="- unit: success",
+            prior_pr_review_verdict="Grade: A\nVerdict: GO",
+        )
+    )
+    item = make_work_item(
+        stage=StageName.STRICT_REVIEW,
+        pr=601,
+        state=strict_review.REVIEW_WAIT,
+        payload={"strict_review_head": _NEW_HEAD},
+    )
+    item.worktree = "/tmp/writer-601"
+
+    result = strict_review.StrictReviewStage().step(item, make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.FINISH_FAIL, "strict_review_worktree_unfinished")
+    assert not any(action == "claim_strict_review_lease" for action, _ in github.mutation_log)
+
+
+def test_completed_direct_review_promotes_only_its_auxiliary_worktree(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A direct PR gets a writable checkout only after its read-only review ends."""
+    strict_review = importlib.import_module("hephaestus.automation.pipeline.stages.strict_review")
+    item = make_work_item(
+        kind=ItemKind.PR,
+        issue=1,
+        pr=601,
+        stage=StageName.STRICT_REVIEW,
+        state=strict_review.REVIEW_WAIT,
+        payload={
+            "strict_review_head": _NEW_HEAD,
+            "strict_review_worktree": "/tmp/repo/build/.worktrees/strict-review-pr-601",
+        },
+    )
+    stage = strict_review.StrictReviewStage()
+
+    assert not item.worktree
+    stage.on_job_done(
+        item,
+        JobResult(
+            ok=True,
+            value=ReviewVerdict(grade="A", verdict="GO", raw="Grade: A\nVerdict: GO"),
+        ),
+        make_ctx(),
+    )
+
+    assert item.worktree == "/tmp/repo/build/.worktrees/strict-review-pr-601"
+    assert item.payload["strict_review_worktree_promoted"] is True
+
+
+def test_completed_review_replaces_an_older_promoted_detached_worktree(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A new reviewed head supersedes only an earlier promoted strict checkout."""
+    strict_review = importlib.import_module("hephaestus.automation.pipeline.stages.strict_review")
+    item = make_work_item(
+        kind=ItemKind.PR,
+        issue=1,
+        pr=601,
+        stage=StageName.STRICT_REVIEW,
+        state=strict_review.REVIEW_WAIT,
+        payload={
+            "strict_review_head": _NEW_HEAD,
+            "strict_review_worktree": "/tmp/repo/build/.worktrees/strict-review-pr-601-new",
+            "strict_review_worktree_promoted": True,
+        },
+    )
+    item.worktree = "/tmp/repo/build/.worktrees/strict-review-pr-601-old"
+
+    strict_review.StrictReviewStage().on_job_done(
+        item,
+        JobResult(
+            ok=True,
+            value=ReviewVerdict(grade="A", verdict="GO", raw="Grade: A\nVerdict: GO"),
+        ),
+        make_ctx(),
+    )
+
+    assert item.worktree == "/tmp/repo/build/.worktrees/strict-review-pr-601-new"
+    assert item.payload["strict_review_worktree_promoted"] is True
+
+
+def test_direct_pr_strict_go_promotes_isolated_checkout_for_ci_rebase(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """Direct PR GO drives rebase/push from its own checkout and explicit ref."""
+    from hephaestus.automation.pipeline.stages.ci import (
+        DISCOVER as CI_DISCOVER,
+        ENTER as CI_ENTER,
+        REBASE_PUSH_WAIT as CI_REBASE_PUSH_WAIT,
+        REBASE_WAIT as CI_REBASE_WAIT,
+        CiStage,
+    )
+
+    strict_review = importlib.import_module("hephaestus.automation.pipeline.stages.strict_review")
+    github = FakeStageGitHub(
+        pr_state={"state": "OPEN", "headRefOid": _NEW_HEAD, "baseRefName": "main"},
+        pr_head_branch="601-real-branch",
+        pr_impl_state=(True, False),
+        strict_evidence=StrictReviewEvidence(
+            head_sha=_NEW_HEAD,
+            issue_title="Task title",
+            issue_body="Task acceptance criterion.",
+            diff="diff --git a/file.py b/file.py\n+",
+            ci_status="- unit: success",
+            prior_pr_review_verdict="Grade: A\nVerdict: GO",
+        ),
+    )
+    ctx = make_ctx(github=github)
+    item = make_work_item(
+        kind=ItemKind.PR,
+        issue=1,
+        pr=601,
+        stage=StageName.STRICT_REVIEW,
+        state=strict_review.HEAD_CHECK,
+    )
+    strict_stage = strict_review.StrictReviewStage()
+
+    setup = strict_stage.step(item, ctx)
+
+    assert isinstance(setup, JobRequest)
+    assert isinstance(setup.job, GitJob)
+    assert setup.job.kwargs["detached"] is True
+    worktree_name = setup.job.kwargs["worktree_name"]
+    strict_path = f"/tmp/repo/build/.worktrees/{worktree_name}"
+    assert item.worktree != "/private/tmp/external-writer"
+    strict_stage.on_job_done(item, JobResult(ok=True, value={"path": strict_path}), ctx)
+
+    item.state = strict_review.WORKTREE_WAIT
+    assert strict_stage.step(item, ctx) == Continue(next_state=strict_review.HEAD_CHECK)
+    item.state = strict_review.HEAD_CHECK
+    assert strict_stage.step(item, ctx) == Continue(next_state=strict_review.REVIEW_WAIT)
+    item.state = strict_review.REVIEW_WAIT
+    review = strict_stage.step(item, ctx)
+    assert isinstance(review, JobRequest)
+    assert isinstance(review.job, AgentJob)
+    assert review.job.cwd == Path(strict_path)
+    strict_stage.on_job_done(
+        item,
+        JobResult(
+            ok=True,
+            value=ReviewVerdict(grade="A", verdict="GO", raw="Grade: A\nVerdict: GO"),
+        ),
+        ctx,
+    )
+    assert item.worktree == strict_path
+    assert item.payload["strict_review_worktree_promoted"] is True
+
+    item.state = strict_review.EVAL
+    assert strict_stage.step(item, ctx) == Continue(next_state=strict_review.SR_FINISH)
+    item.state = strict_review.SR_FINISH
+    assert strict_stage.step(item, ctx) == StageOutcome(Disposition.ADVANCE, "strict review GO")
+
+    ci_stage = CiStage()
+    item.stage = StageName.CI
+    item.state = CI_ENTER
+    assert ci_stage.step(item, ctx) == Continue(next_state=CI_DISCOVER)
+    item.state = CI_DISCOVER
+    assert ci_stage.step(item, ctx) == Continue(next_state=CI_REBASE_WAIT)
+    item.state = CI_REBASE_WAIT
+    rebase = ci_stage.step(item, ctx)
+    assert isinstance(rebase, JobRequest)
+    assert isinstance(rebase.job, GitJob)
+    assert rebase.job.op == "rebase"
+    assert rebase.job.kwargs["cwd"] == Path(strict_path)
+    ci_stage.on_job_done(item, JobResult(ok=True, value=True), ctx)
+    item.state = CI_REBASE_PUSH_WAIT
+    push = ci_stage.step(item, ctx)
+    assert isinstance(push, JobRequest)
+    assert isinstance(push.job, GitJob)
+    assert push.job.kwargs["push_ref"] == "HEAD:601-real-branch"
 
 
 def test_second_reviewer_does_not_dispatch_while_an_elected_lease_is_live(
@@ -213,7 +406,10 @@ def test_second_reviewer_does_not_dispatch_while_an_elected_lease_is_live(
         stage=StageName.STRICT_REVIEW,
         pr=601,
         state=strict_review.REVIEW_WAIT,
-        payload={"strict_review_head": _NEW_HEAD},
+        payload={
+            "strict_review_head": _NEW_HEAD,
+            "strict_review_worktree": "/tmp/strict-review-601",
+        },
     )
 
     result = strict_review.StrictReviewStage().step(item, make_ctx(github=github))
@@ -235,7 +431,10 @@ def test_existing_durable_go_reconciles_the_label_without_a_second_review_job(
         stage=StageName.STRICT_REVIEW,
         pr=601,
         state=strict_review.REVIEW_WAIT,
-        payload={"strict_review_head": _NEW_HEAD},
+        payload={
+            "strict_review_head": _NEW_HEAD,
+            "strict_review_worktree": "/tmp/strict-review-601",
+        },
     )
     stage = strict_review.StrictReviewStage()
 
@@ -268,7 +467,10 @@ def test_existing_durable_nogo_resumes_containment_instead_of_retrying_a_live_le
         stage=StageName.STRICT_REVIEW,
         pr=601,
         state=strict_review.REVIEW_WAIT,
-        payload={"strict_review_head": _NEW_HEAD},
+        payload={
+            "strict_review_head": _NEW_HEAD,
+            "strict_review_worktree": "/tmp/strict-review-601",
+        },
     )
 
     result = strict_review.StrictReviewStage().step(item, make_ctx(github=github))
@@ -330,6 +532,7 @@ def test_head_check_prepares_an_isolated_pr_worktree_before_review(
         stage=StageName.STRICT_REVIEW,
         state=strict_review.HEAD_CHECK,
     )
+    item.worktree = "/tmp/writer-601"
     stage = strict_review.StrictReviewStage()
 
     request = stage.step(item, make_ctx(github=github))
@@ -340,12 +543,18 @@ def test_head_check_prepares_an_isolated_pr_worktree_before_review(
     assert request.on_done_state == strict_review.WORKTREE_WAIT
     assert request.job.kwargs["issue_number"] == 1
     assert request.job.kwargs["sync_to_remote"] is True
+    assert request.job.kwargs["detached"] is True
+    assert re.fullmatch(r"strict-review-pr-601-[0-9a-f]{32}", request.job.kwargs["worktree_name"])
+    assert item.payload["strict_review_worktree_name"] == request.job.kwargs["worktree_name"]
+    planned = f"/tmp/repo/build/.worktrees/{request.job.kwargs['worktree_name']}"
     # The coordinator calls the callback before it applies on_done_state.
     # The pending marker must therefore identify this completion while the
     # item is still in HEAD_CHECK.
     assert item.state == strict_review.HEAD_CHECK
-    stage.on_job_done(item, JobResult(ok=True, value={"path": "/tmp/pr-601"}), make_ctx())
-    assert item.worktree == "/tmp/pr-601"
+    stage.on_job_done(item, JobResult(ok=True, value={"path": planned}), make_ctx())
+    assert item.worktree == "/tmp/writer-601"
+    assert item.payload["strict_review_worktree"] == planned
+    assert item.payload["strict_review_worktrees"] == [planned]
     assert item.payload["strict_review_worktree_head"] == _NEW_HEAD
     item.state = request.on_done_state
     assert stage.step(item, make_ctx(github=github)) == Continue(
@@ -357,10 +566,10 @@ def test_head_check_prepares_an_isolated_pr_worktree_before_review(
     )
 
 
-def test_head_check_resyncs_an_existing_worktree_before_reviewing_a_new_head(
+def test_worktree_setup_failure_does_not_record_a_phantom_auxiliary(
     make_ctx: Any, make_work_item: Any
 ) -> None:
-    """An existing checkout is synchronized once for each captured remote head."""
+    """Only a worker-confirmed checkout is retained for final cleanup."""
     strict_review = importlib.import_module("hephaestus.automation.pipeline.stages.strict_review")
     github = FakeStageGitHub(
         pr_state={"state": "OPEN", "headRefOid": _NEW_HEAD},
@@ -371,9 +580,75 @@ def test_head_check_resyncs_an_existing_worktree_before_reviewing_a_new_head(
         pr=601,
         stage=StageName.STRICT_REVIEW,
         state=strict_review.HEAD_CHECK,
-        payload={"strict_review_head": _OLD_HEAD, "strict_review_worktree_head": _OLD_HEAD},
     )
-    item.worktree = "/tmp/old-pr-601"
+    stage = strict_review.StrictReviewStage()
+
+    request = stage.step(item, make_ctx(github=github))
+
+    assert isinstance(request, JobRequest)
+    stage.on_job_done(item, JobResult(ok=False, error="remote sync failed"), make_ctx())
+
+    assert "strict_review_worktrees" not in item.payload
+    assert "strict_review_worktree" not in item.payload
+    assert not item.worktree
+
+
+def test_independent_strict_items_receive_distinct_auxiliary_worktree_names(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """Concurrent coordinators cannot remove or recreate one shared strict path."""
+    strict_review = importlib.import_module("hephaestus.automation.pipeline.stages.strict_review")
+    github = FakeStageGitHub(
+        pr_state={"state": "OPEN", "headRefOid": _NEW_HEAD},
+        pr_head_branch="601-strict-gate",
+    )
+    first = make_work_item(
+        kind=ItemKind.PR,
+        issue=1,
+        pr=601,
+        stage=StageName.STRICT_REVIEW,
+        state=strict_review.HEAD_CHECK,
+    )
+    second = make_work_item(
+        kind=ItemKind.PR,
+        issue=1,
+        pr=601,
+        stage=StageName.STRICT_REVIEW,
+        state=strict_review.HEAD_CHECK,
+    )
+    stage = strict_review.StrictReviewStage()
+
+    first_request = stage.step(first, make_ctx(github=github))
+    second_request = stage.step(second, make_ctx(github=github))
+
+    assert isinstance(first_request, JobRequest)
+    assert isinstance(second_request, JobRequest)
+    assert first_request.job.kwargs["worktree_name"] != second_request.job.kwargs["worktree_name"]
+
+
+def test_head_check_replaces_an_auxiliary_worktree_before_reviewing_a_new_head(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A new PR head receives a distinct auxiliary checkout, not the writer."""
+    strict_review = importlib.import_module("hephaestus.automation.pipeline.stages.strict_review")
+    github = FakeStageGitHub(
+        pr_state={"state": "OPEN", "headRefOid": _NEW_HEAD},
+        pr_head_branch="601-strict-gate",
+    )
+    item = make_work_item(
+        issue=1,
+        pr=601,
+        stage=StageName.STRICT_REVIEW,
+        state=strict_review.HEAD_CHECK,
+        payload={
+            "strict_review_head": _OLD_HEAD,
+            "strict_review_worktree": "/tmp/strict-old-pr-601",
+            "strict_review_worktree_name": "strict-review-pr-601-old",
+            "strict_review_worktrees": ["/tmp/strict-old-pr-601"],
+            "strict_review_worktree_head": _OLD_HEAD,
+        },
+    )
+    item.worktree = "/tmp/writer-pr-601"
     stage = strict_review.StrictReviewStage()
 
     request = stage.step(item, make_ctx(github=github))
@@ -381,12 +656,20 @@ def test_head_check_resyncs_an_existing_worktree_before_reviewing_a_new_head(
     assert isinstance(request, JobRequest)
     assert isinstance(request.job, GitJob)
     assert request.job.kwargs["sync_to_remote"] is True
+    assert request.job.kwargs["worktree_name"] != "strict-review-pr-601-old"
     assert item.payload["strict_review_head"] == _NEW_HEAD
+    planned = f"/tmp/repo/build/.worktrees/{request.job.kwargs['worktree_name']}"
     stage.on_job_done(
         item,
-        JobResult(ok=True, value={"path": "/tmp/old-pr-601", "dirty": False}),
+        JobResult(ok=True, value={"path": planned, "dirty": False}),
         make_ctx(),
     )
+    assert item.worktree == "/tmp/writer-pr-601"
+    assert item.payload["strict_review_worktree"] == planned
+    assert item.payload["strict_review_worktrees"] == [
+        "/tmp/strict-old-pr-601",
+        planned,
+    ]
     assert item.payload["strict_review_worktree_head"] == _NEW_HEAD
     item.state = strict_review.WORKTREE_WAIT
     assert stage.step(item, make_ctx(github=github)) == Continue(
@@ -623,7 +906,10 @@ def test_missing_current_head_evidence_fails_closed_to_real_implementation(
         stage=StageName.STRICT_REVIEW,
         pr=601,
         state=strict_review.REVIEW_WAIT,
-        payload={"strict_review_head": _NEW_HEAD},
+        payload={
+            "strict_review_head": _NEW_HEAD,
+            "strict_review_worktree": "/tmp/strict-review-601",
+        },
     )
 
     result = strict_review.StrictReviewStage().step(item, make_ctx(github=github))

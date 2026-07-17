@@ -112,6 +112,7 @@ from .base import (
     StepResult,
     WorkItem,
     _issue_labels,
+    _promoted_worktree_push_ref,
     _terminal_pr_outcome,
     _worktree_path,
     agent_provider,
@@ -552,16 +553,19 @@ class ImplementationStage(Stage):
         if item.payload.get("tests_failed"):
             return Continue(next_state=TESTFIX_WAIT)
         logger.info("implementation:%d: requesting commit+push job", issue)
+        push_kwargs: dict[str, object] = {
+            "issue_number": issue,
+            "worktree_path": item.worktree,
+            "branch": item.branch,
+            "agent": agent_provider(ctx),
+        }
+        if push_ref := _promoted_worktree_push_ref(item):
+            push_kwargs["push_ref"] = push_ref
         push_job = GitJob(
             repo=item.repo,
             op="commit_push",
             timeout_s=GIT_JOB_TIMEOUT_S,
-            kwargs={
-                "issue_number": issue,
-                "worktree_path": item.worktree,
-                "branch": item.branch,
-                "agent": agent_provider(ctx),
-            },
+            kwargs=push_kwargs,
             descr="commit_push",
         )
         return JobRequest(push_job, on_done_state=PR_CREATE)
@@ -806,6 +810,26 @@ class ImplementationStage(Stage):
         )
         return Continue(next_state=WORKTREE_WAIT)
 
+    @staticmethod
+    def _existing_pr_worktree_route(item: WorkItem, existing_pr: int) -> Continue:
+        """Choose an existing PR's worktree route without replacing a strict writer."""
+        if item.payload.get("strict_review_feedback") and _promoted_worktree_push_ref(item):
+            # The checkout was promoted only after its read-only reviewer
+            # completed. It is an owned detached writer now, so do not create
+            # a second attached checkout for this same PR branch.
+            logger.info(
+                "implementation:%d: remediating strict NOGO in promoted detached worktree",
+                item.issue,
+            )
+            return Continue(next_state=IMPLEMENT_WAIT)
+        logger.info(
+            "implementation:%d: existing PR #%d (branch %r); preparing adopted worktree",
+            item.issue,
+            existing_pr,
+            item.branch,
+        )
+        return Continue(next_state=WORKTREE_WAIT)
+
     def _gate(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """GATE [M]: existing-PR fast path, then the plan-review verdict gate.
 
@@ -877,13 +901,7 @@ class ImplementationStage(Stage):
             # (the _review_existing_pr branch-assumption bug). Auto-merge was
             # already verified disabled above before the branch was inspected.
             item.payload["existing_pr"] = True
-            logger.info(
-                "implementation:%d: existing PR #%d (branch %r); preparing adopted worktree",
-                item.issue,
-                existing_pr,
-                item.branch,
-            )
-            return Continue(next_state=WORKTREE_WAIT)
+            return self._existing_pr_worktree_route(item, existing_pr)
 
         # At-or-past (never equality): plan-go OR already implementation-go
         # both satisfy the gate; anything earlier fails back to plan_review.

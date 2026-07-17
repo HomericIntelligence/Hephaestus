@@ -784,6 +784,61 @@ class TestCreateWorktreeBranchCollision:
         ]
         assert add_calls == [], "must NOT run `git worktree add` when reusing"
 
+    def test_detached_worktree_does_not_reuse_branch_holder_or_writer_worktree(
+        self, worktree_mocks: Any, tmp_path: Any
+    ) -> None:
+        """A strict checkout is detached from both branch holders and writer paths."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+        external = tmp_path.parent / "external-pr-worktree"
+        writer_path = manager.base_dir / "issue-2269"
+        writer_path.mkdir(parents=True)
+        writer_sentinel = writer_path / "implementation.py"
+        writer_sentinel.write_text("writer work must remain untouched")
+        worktree_path = manager.base_dir / "strict-review-pr-2275"
+
+        with (
+            patch.object(
+                manager,
+                "list_worktrees",
+                return_value=[
+                    {
+                        "path": str(external),
+                        "branch": "refs/heads/2269-strict-review-lease-type",
+                    }
+                ],
+            ),
+            patch.object(manager, "_local_branch_exists", return_value=True),
+            patch.object(
+                manager,
+                "_worktree_holding_branch",
+                side_effect=AssertionError("detached worktrees must not reuse branch holders"),
+            ),
+        ):
+            result = manager.create_worktree(
+                2269,
+                "2269-strict-review-lease-type",
+                detached=True,
+                worktree_name="strict-review-pr-2275",
+            )
+
+        assert result == worktree_path
+        assert manager.worktrees[2269] == worktree_path
+        assert writer_sentinel.exists()
+        add_argv = next(
+            call.args[0]
+            for call in worktree_mocks.run.call_args_list
+            if call.args[0][:3] == ["git", "worktree", "add"]
+        )
+        assert add_argv == [
+            "git",
+            "worktree",
+            "add",
+            "--detach",
+            str(worktree_path),
+            "2269-strict-review-lease-type",
+        ]
+
     def test_no_reuse_when_branch_not_checked_out_elsewhere(
         self, worktree_mocks: Any, tmp_path: Any
     ) -> None:

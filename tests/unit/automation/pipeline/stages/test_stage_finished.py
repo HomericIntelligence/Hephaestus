@@ -143,7 +143,36 @@ class TestCleanup:
             "repo_root": str(ctx.paths.repo_root),
             "force": True,
         }
-        assert result.on_done_state == "DONE"
+        assert result.on_done_state == "CLEANUP"
+
+    def test_pass_removes_writer_and_strict_auxiliaries_sequentially(
+        self, stage: FinishedStage, make_ctx: Any
+    ) -> None:
+        """A completed item removes every distinct strict-review checkout."""
+        ctx = make_ctx()
+        item = _item(passed=True, worktree="/wt/issue-42", state="CLEANUP")
+        item.payload["strict_review_worktrees"] = [
+            "/wt/strict-42-a",
+            "/wt/strict-42-b",
+            "/wt/strict-42-a",
+        ]
+
+        first = stage.step(item, ctx)
+        assert isinstance(first, JobRequest)
+        assert first.job.kwargs["worktree_path"] == "/wt/issue-42"
+        stage.on_job_done(item, JobResult(ok=True), ctx)
+
+        second = stage.step(item, ctx)
+        assert isinstance(second, JobRequest)
+        assert second.job.kwargs["worktree_path"] == "/wt/strict-42-a"
+        stage.on_job_done(item, JobResult(ok=True), ctx)
+
+        third = stage.step(item, ctx)
+        assert isinstance(third, JobRequest)
+        assert third.job.kwargs["worktree_path"] == "/wt/strict-42-b"
+        stage.on_job_done(item, JobResult(ok=True), ctx)
+
+        assert stage.step(item, ctx) == Continue(next_state="DONE")
 
     def test_fail_with_worktree_preserves_for_debugging(
         self,
@@ -158,6 +187,29 @@ class TestCleanup:
 
         assert isinstance(result, Continue) and result.next_state == "DONE"
         assert preserved == [("repo-a", 42, "/wt/issue-42")]
+
+    def test_fail_preserves_writer_and_strict_auxiliaries(
+        self,
+        stage: FinishedStage,
+        preserved: list[tuple[str, int, str]],
+        make_ctx: Any,
+    ) -> None:
+        """A failed item retains every unique workspace for diagnosis."""
+        item = _item(passed=False, reason="boom", worktree="/wt/issue-42", state="CLEANUP")
+        item.payload["strict_review_worktrees"] = [
+            "/wt/strict-42-a",
+            "/wt/strict-42-a",
+            "/wt/strict-42-b",
+        ]
+
+        result = stage.step(item, make_ctx())
+
+        assert isinstance(result, Continue) and result.next_state == "DONE"
+        assert preserved == [
+            ("repo-a", 42, "/wt/issue-42"),
+            ("repo-a", 42, "/wt/strict-42-a"),
+            ("repo-a", 42, "/wt/strict-42-b"),
+        ]
 
     def test_fail_preserve_is_idempotent(
         self,

@@ -209,6 +209,8 @@ class WorktreeManager:
         branch_name: str | None = None,
         *,
         refresh_base: bool = False,
+        detached: bool = False,
+        worktree_name: str | None = None,
         timeout: int | None = None,
     ) -> Path:
         """Create a new worktree for an issue.
@@ -222,6 +224,13 @@ class WorktreeManager:
                 so each issue branches off the latest trunk; no-op when the base
                 is explicitly pinned. Default False preserves prior behavior for
                 all other callers (review, address-review, ci-driver).
+            detached: When True, create a detached checkout and never reuse a
+                worktree holding ``branch_name``. Used by read-only strict review
+                so another writer checkout is never reset or exposed to the
+                reviewer.
+            worktree_name: Optional single-component directory name below
+                ``base_dir``. Strict review uses a role-specific name rather than
+                the issue implementation worktree path.
             timeout: Optional timeout in seconds for each git command.
 
         Returns:
@@ -232,17 +241,25 @@ class WorktreeManager:
 
         """
         with self.lock:
-            if issue_number in self.worktrees:
-                logger.warning("Worktree for issue #%s already exists", issue_number)
-                return self.worktrees[issue_number]
-
             if refresh_base:
                 self.refresh_base_branch(timeout=timeout)
 
             if branch_name is None:
                 branch_name = f"{issue_number}-auto"
 
-            worktree_path = self.base_dir / f"issue-{issue_number}"
+            worktree_dir_name = worktree_name or f"issue-{issue_number}"
+            if (
+                not worktree_dir_name
+                or worktree_dir_name in {".", ".."}
+                or Path(worktree_dir_name).name != worktree_dir_name
+            ):
+                raise ValueError("worktree_name must be a single non-empty directory name")
+            worktree_path = self.base_dir / worktree_dir_name
+
+            existing_for_issue = self.worktrees.get(issue_number)
+            if existing_for_issue == worktree_path:
+                logger.warning("Worktree for issue #%s already exists", issue_number)
+                return existing_for_issue
 
             # Reuse, don't collide: git forbids the same branch in two worktrees.
             # When ``branch_name`` is already checked out elsewhere (e.g. a PR
@@ -251,16 +268,17 @@ class WorktreeManager:
             # with "already used by worktree at ..." (exit 128). Return that
             # existing worktree and register it under this issue; the caller then
             # syncs it to the PR head (fetch + reset --hard origin/<branch>).
-            existing = self._worktree_holding_branch(branch_name, timeout=timeout)
-            if existing is not None and existing != worktree_path:
-                logger.info(
-                    "Branch %s already checked out at %s — reusing that worktree for issue #%s",
-                    branch_name,
-                    existing,
-                    issue_number,
-                )
-                self.worktrees[issue_number] = existing
-                return existing
+            if not detached:
+                existing = self._worktree_holding_branch(branch_name, timeout=timeout)
+                if existing is not None and existing != worktree_path:
+                    logger.info(
+                        "Branch %s already checked out at %s — reusing that worktree for issue #%s",
+                        branch_name,
+                        existing,
+                        issue_number,
+                    )
+                    self.worktrees[issue_number] = existing
+                    return existing
 
             if self._reuse_existing_dirty_worktree(issue_number, worktree_path, timeout=timeout):
                 return worktree_path
@@ -275,12 +293,19 @@ class WorktreeManager:
             try:
                 with file_lock(self._git_metadata_lock_path()):
                     try:
-                        self._add_worktree_for_branch(
-                            worktree_path,
-                            branch_name,
-                            refresh_base=refresh_base,
-                            timeout=timeout,
-                        )
+                        if detached:
+                            self._add_detached_worktree(
+                                worktree_path,
+                                branch_name,
+                                timeout=timeout,
+                            )
+                        else:
+                            self._add_worktree_for_branch(
+                                worktree_path,
+                                branch_name,
+                                refresh_base=refresh_base,
+                                timeout=timeout,
+                            )
                     except Exception:
                         self.worktrees.pop(issue_number, None)
                         self._remove_worktree_path_forcefully(worktree_path, timeout=timeout)
@@ -291,6 +316,33 @@ class WorktreeManager:
 
             except Exception as e:
                 raise RuntimeError(f"Failed to create worktree: {e}") from e
+
+    def _add_detached_worktree(
+        self,
+        worktree_path: Path,
+        branch_name: str,
+        *,
+        timeout: int | None = None,
+    ) -> None:
+        """Add an isolated detached worktree sourced from a branch or its base.
+
+        A detached checkout can share the commit named by ``branch_name`` with
+        another worktree without sharing that worktree's directory or attached
+        branch. The caller may subsequently synchronize this throwaway checkout
+        to the remote PR head.
+        """
+        if self._local_branch_exists(branch_name, timeout=timeout):
+            source = branch_name
+        elif self._remote_branch_exists(branch_name, timeout=timeout):
+            run(["git", "fetch", "origin", branch_name], cwd=self.repo_root, **_timeout_kw(timeout))
+            source = f"origin/{branch_name}"
+        else:
+            source = self._resolve_base_branch(timeout=timeout)
+        run(
+            ["git", "worktree", "add", "--detach", str(worktree_path), source],
+            cwd=self.repo_root,
+            **_timeout_kw(timeout),
+        )
 
     def _remove_worktree_path_forcefully(
         self,

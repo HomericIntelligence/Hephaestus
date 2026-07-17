@@ -440,6 +440,34 @@ class TestCiRebase:
 
         assert result == StageOutcome(Disposition.FAIL_BACK, "missing_worktree")
 
+    def test_promoted_direct_strict_worktree_rebases_and_pushes_explicit_ref(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A reviewed detached checkout becomes a safe direct-PR CI writer."""
+        stage = CiStage()
+        ctx = make_ctx(github=_go_github())
+        item = _item(make_work_item, state=REBASE_WAIT)
+        item.worktree = "/tmp/repo/build/.worktrees/strict-review-pr-501"
+        item.payload["strict_review_worktree_promoted"] = True
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.op == "rebase"
+        assert str(result.job.kwargs["cwd"]) == item.worktree
+        assert item.attempts.get("rebase", 0) == 0
+
+        stage.on_job_done(item, JobResult(ok=True, value=True), ctx)
+        item.state = REBASE_PUSH_WAIT
+        push = stage.step(item, ctx)
+
+        assert isinstance(push, JobRequest)
+        assert isinstance(push.job, GitJob)
+        assert push.job.op == "push"
+        assert str(push.job.kwargs["cwd"]) == item.worktree
+        assert push.job.kwargs["push_ref"] == "HEAD:1-auto-impl"
+
     def test_failed_rebase_is_best_effort(self, make_ctx: Any, make_work_item: Any) -> None:
         """A failed rebase counts the budget, records not-clean, no routing flag."""
         stage = CiStage()

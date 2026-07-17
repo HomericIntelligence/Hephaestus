@@ -810,6 +810,57 @@ class TestGitOps:
             "diff": "",
         }
 
+    def test_strict_sync_failure_removes_the_created_detached_worktree(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """Strict setup does not leave a cleanup phantom when remote sync fails."""
+        worktree_path = tmp_path / "build" / ".worktrees" / "strict-review-pr-7"
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 7,
+                "branch_name": "7-existing",
+                "detached": True,
+                "worktree_name": "strict-review-pr-7",
+                "repo_root": str(tmp_path),
+                "sync_to_remote": True,
+                "pr_number": 70,
+                "cleanup_on_sync_failure": True,
+            },
+        )
+        instance = MagicMock()
+        instance.create_worktree.return_value = worktree_path
+        with (
+            patch(f"{_WP}.WorktreeManager", return_value=instance),
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+            patch(
+                f"{_WP}.git_utils.sync_worktree_to_remote_branch",
+                side_effect=subprocess.CalledProcessError(1, ["git", "fetch"]),
+            ),
+            patch(f"{_WP}.git_utils.run") as mock_run,
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        instance.create_worktree.assert_called_once_with(
+            issue_number=7,
+            branch_name="7-existing",
+            detached=True,
+            worktree_name="strict-review-pr-7",
+            timeout=60,
+        )
+        mock_run.assert_any_call(
+            ["git", "worktree", "remove", "--force", str(worktree_path)],
+            cwd=tmp_path,
+            timeout=60,
+        )
+        assert result.ok is False
+
     def test_create_worktree_defaults_repo_root_to_ambient_cwd(
         self,
         pool: WorkerPool,
@@ -854,11 +905,16 @@ class TestGitOps:
                 "issue_number": 107,
                 "branch_name": "107-auto-impl",
                 "repo_root": str(repo_root),
+                "sync_to_remote": True,
+                "pr_number": 107,
             },
         )
         instance = MagicMock()
         instance.create_worktree.return_value = tmp_path / "Hephaestus" / "issue-107"
-        with patch(f"{_WP}.WorktreeManager", return_value=instance):
+        with (
+            patch(f"{_WP}.WorktreeManager", return_value=instance),
+            patch(f"{_WP}.git_utils.sync_worktree_to_remote_branch") as mock_sync,
+        ):
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
@@ -866,6 +922,51 @@ class TestGitOps:
         assert result.error is not None
         assert "escaped resolved repo root" in result.error
         assert str(repo_root) in result.error
+        mock_sync.assert_not_called()
+
+    def test_symlinked_worktree_base_is_rejected_before_external_create_or_cleanup(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A symlinked managed base never creates, syncs, or cleans an external path."""
+        repo_root = tmp_path / "repo"
+        external_root = tmp_path / "external"
+        worktree_base = repo_root / "build" / ".worktrees"
+        worktree_base.parent.mkdir(parents=True)
+        external_root.mkdir()
+        worktree_base.symlink_to(external_root, target_is_directory=True)
+        job = GitJob(
+            repo="repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 107,
+                "branch_name": "107-auto-impl",
+                "detached": True,
+                "worktree_name": "strict-review-pr-107",
+                "repo_root": str(repo_root),
+                "sync_to_remote": True,
+                "cleanup_on_sync_failure": True,
+                "pr_number": 107,
+            },
+        )
+        instance = MagicMock()
+        with (
+            patch(f"{_WP}.WorktreeManager", return_value=instance),
+            patch(f"{_WP}.git_utils.sync_worktree_to_remote_branch") as mock_sync,
+            patch(f"{_WP}.git_utils.run") as mock_run,
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error is not None
+        assert "escaped resolved repo root" in result.error
+        instance.create_worktree.assert_not_called()
+        mock_sync.assert_not_called()
+        mock_run.assert_not_called()
 
     def test_remove_worktree_dispatch(
         self,
@@ -1030,6 +1131,45 @@ class TestGitOps:
         mock_push.assert_called_once_with("5-auto", tmp_path, timeout=60)
         assert result.ok is True
         assert result.value is True  # value carries commit_if_changes' bool
+
+    def test_commit_push_with_explicit_ref_uses_lease_push(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A promoted detached worktree pushes HEAD to its named PR branch."""
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 5,
+                "worktree_path": tmp_path,
+                "branch": "5-auto",
+                "push_ref": "HEAD:5-auto",
+                "agent": "claude",
+            },
+        )
+        with (
+            patch("hephaestus.automation.git_utils.commit_if_changes", return_value=True),
+            patch("hephaestus.automation.git_utils.push_branch") as mock_legacy_push,
+            patch(
+                "hephaestus.automation.git_utils.push_current_branch_with_lease_on_divergence"
+            ) as mock_lease_push,
+        ):
+            pool.submit(job, StageName.CI)
+            _, result = completion_q.get(timeout=10)
+
+        mock_legacy_push.assert_not_called()
+        mock_lease_push.assert_called_once_with(
+            cwd=tmp_path,
+            branch="5-auto",
+            push_ref="HEAD:5-auto",
+            timeout=60,
+        )
+        assert result.ok is True
+        assert result.value is True
 
     def test_commit_push_value_false_does_not_push_when_nothing_committed(
         self,

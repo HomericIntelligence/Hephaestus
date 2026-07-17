@@ -665,6 +665,24 @@ def _require_item_worktree(item: WorkItem, stage_name: str, action: str) -> Stag
     return StageOutcome(Disposition.FAIL_BACK, "missing_worktree")
 
 
+STRICT_REVIEW_WORKTREE_PROMOTED = "strict_review_worktree_promoted"
+
+
+def _promoted_worktree_push_ref(item: WorkItem) -> str | None:
+    """Return an explicit remote refspec for a promoted detached checkout.
+
+    Strict review starts in a detached checkout so it can never move an
+    implementation writer. Once that review has completed, a direct PR item
+    may promote the checkout to its writer. Its local HEAD remains detached,
+    so every later mutation must push ``HEAD`` to the already-resolved PR
+    branch explicitly rather than relying on an attached branch or Git's
+    default upstream.
+    """
+    if item.payload.get(STRICT_REVIEW_WORKTREE_PROMOTED) and item.branch:
+        return f"HEAD:{item.branch}"
+    return None
+
+
 def _build_rebase_job(item: WorkItem, ctx: StageContext, *, descr: str) -> GitJob:
     """Build the mechanical rebase-onto-base GitJob (shared base-ref capture).
 

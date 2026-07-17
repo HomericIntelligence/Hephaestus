@@ -97,6 +97,7 @@ from .base import (
     StepResult,
     WorkItem,
     _build_rebase_job,
+    _promoted_worktree_push_ref,
     _require_item_worktree,
     _terminal_pr_outcome,
     _worktree_path,
@@ -418,14 +419,17 @@ class CiStage(Stage):
         missing_worktree = _require_item_worktree(item, "ci", "mechanical rebase push")
         if missing_worktree is not None:
             return missing_worktree
+        push_kwargs: dict[str, object] = {
+            "cwd": _worktree_path(item, ctx),
+            "branch": item.branch or None,
+        }
+        if push_ref := _promoted_worktree_push_ref(item):
+            push_kwargs["push_ref"] = push_ref
         push_job = GitJob(
             repo=item.repo,
             op="push",
             timeout_s=GIT_JOB_TIMEOUT_S,
-            kwargs={
-                "cwd": _worktree_path(item, ctx),
-                "branch": item.branch or None,
-            },
+            kwargs=push_kwargs,
             descr="push_mechanical_rebase",
         )
         return JobRequest(push_job, on_done_state=POLL)
@@ -572,16 +576,19 @@ class CiStage(Stage):
         missing_worktree = _require_item_worktree(item, "ci", "CI fix push")
         if missing_worktree is not None:
             return missing_worktree
+        push_kwargs: dict[str, object] = {
+            "issue_number": item.issue if item.issue is not None else 0,
+            "worktree_path": _worktree_path(item, ctx),
+            "branch": item.branch,
+            "agent": AGENT_CI_DRIVER,
+        }
+        if push_ref := _promoted_worktree_push_ref(item):
+            push_kwargs["push_ref"] = push_ref
         push_job = GitJob(
             repo=item.repo,
             op="commit_push",
             timeout_s=GIT_JOB_TIMEOUT_S,
-            kwargs={
-                "issue_number": item.issue if item.issue is not None else 0,
-                "worktree_path": _worktree_path(item, ctx),
-                "branch": item.branch,
-                "agent": AGENT_CI_DRIVER,
-            },
+            kwargs=push_kwargs,
             descr="push_ci_fix",
         )
         return JobRequest(push_job, on_done_state=POLL)
