@@ -280,6 +280,23 @@ class TestCiDiscover:
 
         assert result == StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
 
+    def test_orphan_pr_without_go_proceeds_to_rebase(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A --drive-green-all orphan PR (no issue) is driven, not regressed (#2252).
+
+        pr_review terminates PR-only items, so the old FAIL_BACK route
+        dropped every swept-in PR instead of driving it green.
+        """
+        stage = CiStage()
+        ctx = make_ctx(github=FakeStageGitHub(pr_impl_state=(False, False)))
+        item = _item(make_work_item, state=DISCOVER, issue=None)
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, Continue)
+        assert result.next_state == REBASE_WAIT
+
     def test_preset_branch_is_kept(self, make_ctx: Any, make_work_item: Any) -> None:
         """An item that already knows its branch never overwrites it."""
         stage = CiStage()
