@@ -32,6 +32,13 @@ from ._review_utils import load_state_file
 
 logger = logging.getLogger(__name__)
 
+# ``armed_at`` records the intent written before the remote GraphQL mutation;
+# it is deliberately *not* evidence that GitHub accepted auto-merge.  The
+# pipeline therefore persists this small state machine so restart recovery can
+# distinguish a pre-RPC record from an arm that was read back from GitHub.
+ARM_STATUS_PREPARED = "prepared"
+ARM_STATUS_CONFIRMED = "confirmed"
+
 
 class ArmingStateStore:
     """Reads/writes per-issue drive-green arming records under ``state_dir``.
@@ -60,6 +67,16 @@ class ArmingStateStore:
         """Return the arming-record path for ``issue_number``."""
         return self._state_dir_provider() / f"drive-green-armed-{issue_number}.json"
 
+    def learn_claim_lock_path(self, issue_number: int) -> Path:
+        """Return the stable sentinel used to serialize one /learn claim.
+
+        This lock is intentionally a sibling rather than the JSON record
+        itself: replacing the record atomically while a lock is held on that
+        record's inode would let a second process lock the replacement inode.
+        The sentinel is never replaced or removed by record persistence.
+        """
+        return self._state_dir_provider() / f"drive-green-armed-{issue_number}.learn.lock"
+
     def load(self, issue_number: int) -> dict[str, Any] | None:
         """Return the parsed arming record for ``issue_number`` or ``None``.
 
@@ -75,8 +92,8 @@ class ArmingStateStore:
         )
         return dict(record) if record is not None else None
 
-    def save(self, issue_number: int, record: dict[str, Any]) -> None:
-        """Persist the arming record. Best-effort; logs and swallows IO errors."""
+    def save(self, issue_number: int, record: dict[str, Any]) -> bool:
+        """Persist the arming record and report whether the write succeeded."""
         path = self.path(issue_number)
         try:
             write_secure(path, json.dumps(record, indent=2, sort_keys=True))
@@ -86,6 +103,8 @@ class ArmingStateStore:
                 issue_number,
                 exc,
             )
+            return False
+        return True
 
     def clear(self, issue_number: int) -> None:
         """Delete the arming record for ``issue_number`` if present."""

@@ -521,7 +521,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
         _store_true(
             "--no-auto-merge",
             "no_auto_merge",
-            "(Deprecated, ignored) auto-merge stays disabled pending the strict-review gate",
+            "(Deprecated, ignored) merge authorization is owned by strict_review and merge_wait",
         ),
         _dry_run_spec(
             _dry_help("Suppress GitHub mutations and git pushes (no PR creation, no commits).")
@@ -838,7 +838,7 @@ def test_parser_action_specs_are_preserved(
 
 
 def test_ci_driver_help_describes_the_strict_review_gate() -> None:
-    """The CI driver must not advertise automatic merging while #2054 is active."""
+    """The CI driver advertises the queue-owned strict-review gate."""
     description = ci_driver._build_parser().description or ""
 
     assert "strict-review auto-merge gate" in description

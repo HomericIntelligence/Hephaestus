@@ -16,7 +16,13 @@ import pytest
 
 from hephaestus.automation.pipeline.events import StageEvent
 from hephaestus.automation.pipeline.routing import ROUTES, StageName
-from hephaestus.automation.pipeline.stages import StageContext, StageGitHub
+from hephaestus.automation.pipeline.stages import (
+    StageContext,
+    StageGitHub,
+    StrictReviewArtifact,
+    StrictReviewEvidence,
+    StrictReviewLease,
+)
 from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARGV
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.protocol import PLAN_COMMENT_MARKER
@@ -55,6 +61,8 @@ class FakeStageGitHub(FakeGitHub):
         pr_stuck: bool = False,
         learn_terminal: bool = False,
         resolve_count: int = 0,
+        strict_artifact: StrictReviewArtifact | None = None,
+        strict_evidence: StrictReviewEvidence | None = None,
     ) -> None:
         """Initialize the fake with canned read answers.
 
@@ -86,6 +94,8 @@ class FakeStageGitHub(FakeGitHub):
                 True mirrors an issue whose post-merge /learn already ran
                 terminally (the #848 dedupe record).
             resolve_count: Canned return count for resolve_automation_threads.
+            strict_artifact: Canned authenticated strict-review artifact.
+            strict_evidence: Canned bounded evidence for a strict-review job.
 
         """
         super().__init__()
@@ -111,8 +121,18 @@ class FakeStageGitHub(FakeGitHub):
         self._pr_stuck = pr_stuck
         self._learn_terminal = learn_terminal
         self._resolve_count = resolve_count
+        self._strict_artifact = strict_artifact
+        self._strict_evidence = strict_evidence
+        self._strict_leases: dict[tuple[int, str], StrictReviewLease] = {}
+        self._strict_terminal: set[tuple[int, str]] = set()
+        self._next_strict_comment_id = 1
+        self.strict_artifact_calls: list[tuple[int, str]] = []
+        self.strict_terminal_artifact_calls: list[tuple[int, str]] = []
+        self.strict_evidence_calls: list[tuple[int, str, int]] = []
         self.arming_records: dict[int, tuple[int, str]] = {}
+        self.confirmed_arming_records: set[int] = set()
         self.learn_results: dict[int, bool] = {}
+        self.learn_claims: set[int] = set()
 
     def _issue_labels(self, issue_number: int) -> set[str]:
         """Return the issue's label set, seeding it on first access."""
@@ -250,9 +270,89 @@ class FakeStageGitHub(FakeGitHub):
         self.gh_issue_upsert_comment(pr_number, marker_prefix, body)
         return True
 
-    def arm_auto_merge(self, pr_number: int) -> None:
+    def arm_auto_merge(self, pr_number: int, expected_head_sha: str) -> None:
         """Mirror pr_manager.enable_auto_merge_after_implementation_go."""
-        self._log("arm_auto_merge", pr_number)
+        self._log("arm_auto_merge", pr_number, expected_head_sha)
+
+    def strict_review_artifact(self, pr_number: int, head_sha: str) -> StrictReviewArtifact | None:
+        """Return the canned current-head strict-review proof, if any."""
+        self.strict_artifact_calls.append((pr_number, head_sha))
+        if (
+            self._strict_artifact is None
+            or not self._strict_artifact.is_go
+            or self._strict_artifact.head_sha.lower() != head_sha.lower()
+        ):
+            return None
+        return self._strict_artifact
+
+    def strict_review_terminal_artifact(
+        self, pr_number: int, head_sha: str
+    ) -> StrictReviewArtifact | None:
+        """Return any canned current-head terminal strict result for recovery."""
+        self.strict_terminal_artifact_calls.append((pr_number, head_sha))
+        if (
+            self._strict_artifact is None
+            or self._strict_artifact.head_sha.lower() != head_sha.lower()
+        ):
+            return None
+        return self._strict_artifact
+
+    def claim_strict_review_lease(self, pr_number: int, head_sha: str) -> StrictReviewLease | None:
+        """Claim one fake immutable lease, rejecting competing reviewers."""
+        key = (pr_number, head_sha.lower())
+        if (
+            key in self._strict_terminal
+            or key in self._strict_leases
+            or (
+                self._strict_artifact is not None
+                and self._strict_artifact.head_sha.lower() == head_sha.lower()
+            )
+        ):
+            return None
+        lease = StrictReviewLease(
+            head_sha=head_sha.lower(),
+            lease_id=f"fake-{pr_number}-{self._next_strict_comment_id}",
+            comment_id=self._next_strict_comment_id,
+        )
+        self._next_strict_comment_id += 1
+        self._strict_leases[key] = lease
+        self._log("claim_strict_review_lease", pr_number, head_sha, lease)
+        return lease
+
+    def publish_strict_review_artifact(
+        self,
+        pr_number: int,
+        head_sha: str,
+        verdict_body: str,
+        *,
+        is_go: bool,
+        lease: StrictReviewLease,
+    ) -> bool:
+        """Publish only while the fake's elected lease still matches exactly."""
+        key = (pr_number, head_sha.lower())
+        if (
+            self._strict_leases.get(key) != lease
+            or lease.head_sha.lower() != head_sha.lower()
+            or key in self._strict_terminal
+        ):
+            return False
+        self._strict_terminal.add(key)
+        self._strict_artifact = StrictReviewArtifact(
+            is_go=is_go,
+            head_sha=head_sha.lower(),
+            verdict="GO" if is_go else "NOGO",
+        )
+        self._log("publish_strict_review_artifact", pr_number, head_sha, verdict_body, lease, is_go)
+        return True
+
+    def strict_review_evidence(
+        self, pr_number: int, head_sha: str, issue_number: int
+    ) -> StrictReviewEvidence | None:
+        """Return canned evidence only when it remains for the requested head."""
+        self.strict_evidence_calls.append((pr_number, head_sha, issue_number))
+        if self._strict_evidence is None or self._strict_evidence.head_sha != head_sha:
+            return None
+        return self._strict_evidence
 
     def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
         """Mirror ci_driver.CIDriver._gh_pr_state (canned answer)."""
@@ -277,7 +377,24 @@ class FakeStageGitHub(FakeGitHub):
     def arm_drive_green(self, issue_number: int, pr_number: int, head_sha: str) -> None:
         """Mirror ci_driver.CIDriver._arm_drive_green (records the arming record)."""
         self.arming_records[issue_number] = (pr_number, head_sha)
+        self.confirmed_arming_records.discard(issue_number)
         self._log("arm_drive_green", issue_number, pr_number, head_sha)
+
+    def confirm_drive_green_arm(self, issue_number: int, pr_number: int, head_sha: str) -> None:
+        """Mirror the read-back-confirmed durable drive-green arm transition."""
+        if self.arming_records.get(issue_number) != (pr_number, head_sha):
+            raise RuntimeError("arm record is missing or mismatched")
+        self.confirmed_arming_records.add(issue_number)
+        self._log("confirm_drive_green_arm", issue_number, pr_number, head_sha)
+
+    def drive_green_arm_confirmed(self, issue_number: int, pr_number: int) -> bool:
+        """Return whether the canned arming record was confirmed remotely."""
+        record = self.arming_records.get(issue_number)
+        return (
+            record is not None
+            and record[0] == pr_number
+            and issue_number in self.confirmed_arming_records
+        )
 
     def pr_is_genuinely_stuck(self, pr_number: int) -> bool:
         """Mirror pr_manager.pr_is_genuinely_stuck (canned answer)."""
@@ -293,9 +410,22 @@ class FakeStageGitHub(FakeGitHub):
         """
         return self._learn_terminal or issue_number in self.learn_results
 
+    def drive_green_learn_inflight(self, issue_number: int) -> bool:
+        """Mirror a durable pre-dispatch /learn claim."""
+        return issue_number in self.learn_claims
+
+    def claim_drive_green_learn(self, issue_number: int, pr_number: int) -> bool:
+        """Record the pre-dispatch claim unless another run already owns it."""
+        if self.drive_green_learn_terminal(issue_number) or issue_number in self.learn_claims:
+            return False
+        self.learn_claims.add(issue_number)
+        self._log("claim_drive_green_learn", issue_number, pr_number)
+        return True
+
     def mark_drive_green_learn_result(self, issue_number: int, *, succeeded: bool) -> None:
         """Mirror post_merge_processor.mark_drive_green_learn_result [durable]."""
         self.learn_results[issue_number] = succeeded
+        self.learn_claims.discard(issue_number)
         self._log("mark_drive_green_learn_result", issue_number, succeeded)
 
     def ensure_state_labels(self) -> None:

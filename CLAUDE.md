@@ -335,12 +335,12 @@ The required CI gate `pr-policy` and the PR reviewer enforce:
 2. Every commit MUST be cryptographically signed (`git commit -S`) and carry a
    DCO `Signed-off-by` trailer.
 
-`pr-policy` blocks PRs that fail those checks. During #2054's fail-closed
-bootstrap, auto-merge must also remain disabled: pipeline code verifies that
-state, `auto-merge-policy` reports armed PRs advisory-only, and the PR reviewer
-requires an unconditional independent strict-review GO before a maintainer
-manually squash-merges. #2055 will restore queue-owned arming after a
-head-bound strict-review proof.
+`pr-policy` blocks PRs that fail those checks. The queue's #2055
+head-bound strict-review gate is the sole automatic producer of
+`state:implementation-go`; it requires an authenticated artifact for the exact
+current head. `merge_wait` is the sole automatic armer and revalidates that
+artifact before and after arming. Branch protection and required reviews still
+govern whether GitHub merges the PR.
 
 ```bash
 # 1. Create feature branch
@@ -359,8 +359,8 @@ gh pr create \
   --title "[Type] Brief description" \
   --body "$(printf 'Summary of change.\n\nCloses #<issue-number>\n')"
 
-# 5. Keep auto-merge disabled. After an unconditional independent strict-review
-#    GO, bootstrap PRs are merged manually with the repository's squash method.
+# 5. Do not use --admin or bypass branch protection. Queue-owned auto-merge,
+#    when eligible, is armed only by merge_wait after strict review.
 ```
 
 ### Commit Message Format

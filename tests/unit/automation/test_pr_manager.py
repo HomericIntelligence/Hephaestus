@@ -556,7 +556,7 @@ class TestCreatePR:
             "_gh_call",
             side_effect=lambda *_args, **_kwargs: next(responses),
         ):
-            with pytest.raises(RuntimeError, match="strict-review gate unavailable"):
+            with pytest.raises(RuntimeError, match="only MergeWaitStage may arm"):
                 pr_manager.enable_auto_merge_after_implementation_go(42)
 
     def test_invokes_gh_pr_create(self) -> None:

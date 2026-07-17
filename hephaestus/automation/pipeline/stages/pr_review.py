@@ -11,8 +11,8 @@ contract):
 
 - States: ENTER -> REVIEW_WAIT -> VALIDATE_WAIT -> POST -> DIFFICULTY_WAIT
   -> ADDRESS_WAIT -> PUSH_WAIT -> EVAL -> (loop to REVIEW_WAIT) or terminal
-  ``strict_gate_unavailable``. ``FOLLOWUP_WAIT`` remains only to drain legacy
-  persisted work; a #2054 clean GO never enters it.
+  advance to ``strict_review``. ``FOLLOWUP_WAIT`` remains only to drain legacy
+  persisted work; a clean GO never enters it.
 - Budgets: ``pr_review_iter`` = 3 (soft cap), ``pr_review_hard`` = 6 (hard
   cap; rounds 4-6 are admitted ONLY while the unresolved-thread count
   strictly decreases — the #1554 progress-aware extension, legacy
@@ -43,8 +43,8 @@ contract):
   thread -> downgraded to NOGO (address + re-review). Clean GO ->
   ``_write_internal_go`` performs one final human-thread live-read, verifies
   auto-merge is disabled, and posts an informational artifact. It does not
-  apply ``state:implementation-go`` or arm auto-merge until #2055 adds the
-  head-bound strict-review gate. Every
+  apply ``state:implementation-go`` or arm auto-merge; the head-bound
+  strict-review gate owns that authorization. Every
   real non-GO round durably writes ``state:implementation-no-go`` (doc
   section 5 owned label, "NOGO verdict, before retry/regress"; legacy
   ``_apply_impl_review_verdict`` -> ``mark_pr_implementation_no_go``
@@ -354,8 +354,8 @@ class PrReviewStage(Stage):
     - EVAL [M]: re-housed ``_evaluate_go_verdict`` + budget gate (see
       module docstring).
     - FOLLOWUP_WAIT (legacy persisted work only): submit the follow-up job,
-      then PR_FINISH -> FINISHED. A #2054 clean GO terminates at EVAL with
-      ``strict_gate_unavailable`` instead.
+      then PR_FINISH -> FINISHED. A clean GO advances to ``strict_review``
+      from EVAL instead.
     """
 
     def on_enter(self, item: WorkItem, ctx: StageContext) -> StageOutcome | None:
@@ -1021,14 +1021,14 @@ class PrReviewStage(Stage):
             )
             ctx.github.resolve_automation_threads(item.pr)
         logger.info(
-            "pr_review:%d: clean GO; strict review remains pending for PR #%d",
+            "pr_review:%d: clean GO; advancing PR #%d to strict review",
             item.issue,
             item.pr,
         )
         blocked_reason = self._write_internal_go(item.pr, ctx)
         if blocked_reason is not None:
             return StageOutcome(Disposition.FINISH_FAIL, blocked_reason)
-        return StageOutcome(Disposition.FINISH_FAIL, "strict_gate_unavailable")
+        return StageOutcome(Disposition.ADVANCE, "internal GO; strict review pending")
 
     @staticmethod
     def _gate_no_commit(item: WorkItem) -> Continue | None:
@@ -1223,9 +1223,9 @@ class PrReviewStage(Stage):
     def _write_internal_go(pr_number: int, ctx: StageContext) -> str | None:
         """Record clean internal review while preserving the strict-review gate.
 
-        The temporary #2054 baseline neither applies ``state:implementation-go``
-        nor arms auto-merge. It proves the PR is unarmed before publishing the
-        internal result, so a stale label cannot merge it before #2055 lands.
+        Internal pr_review neither applies ``state:implementation-go`` nor
+        arms auto-merge. It proves the PR is unarmed before publishing its
+        internal result; strict_review owns the later head-bound eligibility.
 
         Args:
             pr_number: GitHub PR number that earned the clean GO.

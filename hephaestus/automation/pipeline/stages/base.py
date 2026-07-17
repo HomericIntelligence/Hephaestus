@@ -83,6 +83,9 @@ __all__ = [
     "StageName",
     "StageOutcome",
     "StepResult",
+    "StrictReviewArtifact",
+    "StrictReviewEvidence",
+    "StrictReviewLease",
     "WorkItem",
     "agent_provider",
     "stage_model",
@@ -99,6 +102,45 @@ GIT_JOB_TIMEOUT_S = 600
 #: Poll backoff cap in seconds (legacy ``min(2**attempt, 60)`` — shared by
 #: every stage that uses the legacy exponential poll delay.
 BACKOFF_CAP_S = 60
+
+
+@dataclass(frozen=True)
+class StrictReviewArtifact:
+    """Authenticated strict-review terminal result for one exact PR head.
+
+    ``strict_review_artifact`` exposes only a v2 GO as merge authority.  The
+    separate terminal-result accessor also returns a durable NOGO so a
+    restarted coordinator can tell "reviewer already rejected this head" from
+    "another reviewer still owns the live lease".  ``verdict_body`` is the
+    authenticated review output retained for idempotent NOGO remediation.
+    """
+
+    is_go: bool
+    head_sha: str
+    verdict: str
+    verdict_body: str = ""
+    schema_version: int = 2
+
+
+@dataclass(frozen=True)
+class StrictReviewEvidence:
+    """Bounded current-head evidence supplied to the read-only strict reviewer."""
+
+    head_sha: str
+    issue_title: str
+    issue_body: str
+    diff: str
+    ci_status: str
+    prior_pr_review_verdict: str
+
+
+@dataclass(frozen=True)
+class StrictReviewLease:
+    """One elected, immutable strict-review generation fence for a PR head."""
+
+    head_sha: str
+    lease_id: str
+    comment_id: int
 
 
 @runtime_checkable
@@ -257,11 +299,11 @@ class StageGitHub(Protocol):
         ...
 
     def defer_auto_merge(self, pr_number: int) -> None:
-        """Durably ensure auto-merge stays DISABLED until strict proof exists.
+        """Durably disable auto-merge whenever a stage must revoke eligibility.
 
-        The adapter must read back disabled state for an open PR. #2054 calls
-        this before every PR-stage ingress and transition; #2055 will retain
-        the check before its strict-gated arming protocol.
+        The adapter must read back disabled state for an open PR. Strict review
+        and merge wait use this containment boundary before fresh review and
+        whenever a current-head proof becomes invalid.
         """
         ...
 
@@ -278,16 +320,85 @@ class StageGitHub(Protocol):
     def mark_pr_implementation_go(self, pr_number: int) -> None:
         """Durably apply ``state:implementation-go`` to the PR.
 
-        Reserved for #2055's head-bound strict-review stage. #2054's internal
-        review does not call it, so a label cannot authorize an auto-merge.
+        Reserved for the head-bound strict-review stage. Internal pr_review
+        does not call it, and the label alone never authorizes auto-merge.
         """
         ...
 
-    def arm_auto_merge(self, pr_number: int) -> None:
-        """Durably arm squash auto-merge after implementation GO.
+    def arm_auto_merge(self, pr_number: int, expected_head_sha: str) -> None:
+        """Atomically arm squash auto-merge for one expected PR head.
 
-        Reserved for #2055's head-bound strict-review stage. No active #2054
-        pipeline stage may call it.
+        Reserved exclusively for ``MergeWaitStage`` after it has revalidated
+        #2055's head-bound strict-review proof.  The adapter must pass the
+        exact expected head to GitHub's conditional arm API so a push between
+        validation and arming cannot authorize a different commit. No earlier
+        stage may call it.
+        """
+        pass
+
+    # -- strict-review proof surface (#2055) ---------------------------------
+
+    def strict_review_artifact(self, pr_number: int, head_sha: str) -> StrictReviewArtifact | None:
+        """Return a current-head, authenticated strict GO proof or ``None``.
+
+        The adapter rejects absent, foreign, malformed, oversized, tampered,
+        stale, and NOGO artifacts.  Callers must treat ``None`` as no merge
+        authorization.
+        """
+        pass
+
+    def strict_review_terminal_artifact(
+        self, pr_number: int, head_sha: str
+    ) -> StrictReviewArtifact | None:
+        """Return an authenticated terminal strict result for ``head_sha``.
+
+        Unlike :meth:`strict_review_artifact`, this exposes a durable NOGO as
+        well as a v2 GO.  StrictReviewStage uses it only to resume containment
+        and fail back after a restart; MergeWaitStage must continue to use the
+        GO-only accessor for merge authority.  ``None`` means there is no
+        authenticated final result, which is deliberately distinct from a
+        competing live lease.
+        """
+        pass
+
+    def claim_strict_review_lease(self, pr_number: int, head_sha: str) -> StrictReviewLease | None:
+        """Claim the sole live strict-review lease for an exact PR head.
+
+        Callers must first check :meth:`strict_review_terminal_artifact`.
+        After that check, ``None`` means a competing valid holder or
+        unavailable durable evidence; callers must not dispatch another
+        reviewer or publish a verdict.
+        """
+        pass
+
+    def publish_strict_review_artifact(
+        self,
+        pr_number: int,
+        head_sha: str,
+        verdict_body: str,
+        *,
+        is_go: bool,
+        lease: StrictReviewLease,
+    ) -> bool:
+        """Append a verdict only when ``lease`` still owns this exact head.
+
+        Returns ``False`` when the fence is stale/lost; the stage must then
+        restart without touching global labels or remediation feedback.
+        """
+        pass
+
+    def strict_review_evidence(
+        self, pr_number: int, head_sha: str, issue_number: int
+    ) -> StrictReviewEvidence | None:
+        """Return bounded evidence still bound to ``head_sha``, else ``None``.
+
+        A strict reviewer has a read-only agent sandbox and cannot safely
+        rely on a mutable local checkout for the PR diff.  The coordinator
+        accessor fetches this repo-scoped evidence and validates the live
+        head both before and after the read; stages fail closed when it is
+        unavailable.  The linked issue title/body are part of this evidence:
+        without the task requirements, a reviewer cannot judge whether the
+        diff fulfils the work it is about to authorize for merge.
         """
         ...
 
@@ -310,10 +421,10 @@ class StageGitHub(Protocol):
 
         Reserved for #2055's strict-gated arming protocol. It mirrors
         ``ci_driver.CIDriver._arm_drive_green`` /
-        ``ArmingStateStore.save``: written immediately after
-        :meth:`arm_auto_merge` succeeds so a crash between arming and the
-        next POLL cannot lose the fact that this PR (at this head SHA) was
-        armed — the post-merge ``/learn`` dedupe keys off this record.
+        ``ArmingStateStore.save``: written and read back immediately before
+        :meth:`arm_auto_merge`, so a crash during the remote arm cannot lose
+        the fact that this PR (at this head SHA) was eligible to arm — the
+        post-merge ``/learn`` dedupe keys off this record.
         """
         ...
 
@@ -367,14 +478,35 @@ class StageGitHub(Protocol):
         """
         ...
 
+    def drive_green_learn_inflight(self, issue_number: int) -> bool:
+        """Return whether a durable post-merge ``/learn`` claim is in flight.
+
+        An ``in_progress`` claim is deliberately distinct from a terminal
+        outcome. It is written and read back before the agent starts. If a
+        process dies after that boundary, a later process must not replay the
+        externally visible ``/learn`` operation.
+        """
+        pass
+
+    def claim_drive_green_learn(self, issue_number: int, pr_number: int) -> bool:
+        """Durably claim one post-merge ``/learn`` dispatch.
+
+        Returns ``True`` only after an ``in_progress`` record for this issue
+        and PR has been persisted and read back. ``False`` means a terminal
+        or previously in-flight claim already owns the dispatch. Raises when
+        persistence cannot be acknowledged, so the caller fails closed before
+        the agent can perform an external learning action.
+        """
+        pass
+
     def mark_drive_green_learn_result(self, issue_number: int, *, succeeded: bool) -> None:
         """Durably record the post-merge ``/learn`` outcome on the arming record.
 
         Mirrors ``post_merge_processor.mark_drive_green_learn_result``:
-        written as soon as the learn job completes (success or failure
-        alike) and BEFORE the FINISH_PASS outcome, so a restart can never
-        replay ``/learn`` for the same merged PR —
-        :meth:`drive_green_learn_terminal` reads this record back.
+        written as soon as the learn job completes (success or failure alike)
+        and BEFORE the FINISH_PASS outcome. The preceding durable in-flight
+        claim prevents a restart from replaying ``/learn`` if this final
+        outcome write fails.
         """
         ...
 

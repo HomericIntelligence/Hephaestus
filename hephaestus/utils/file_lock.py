@@ -55,7 +55,9 @@ def _open_secure_lock_file(path: Path) -> TextIO:
 
 
 @contextmanager
-def file_lock(path: Path, *, blocking: bool = True) -> Iterator[None]:
+def file_lock(
+    path: Path, *, blocking: bool = True, require_exclusive: bool = False
+) -> Iterator[None]:
     """Hold an exclusive cross-process advisory lock on ``path``.
 
     Acquires ``fcntl.flock(LOCK_EX)`` on a sentinel file for the duration of the
@@ -68,18 +70,26 @@ def file_lock(path: Path, *, blocking: bool = True) -> Iterator[None]:
         path: Sentinel file backing the lock. Created if absent.
         blocking: When True (default) block until the lock is free. When False,
             raise :class:`LockUnavailableError` immediately if another holder exists.
+        require_exclusive: When True, raise :class:`LockUnavailableError` if
+            this platform has no reliable ``fcntl`` lock rather than degrading
+            to a no-op. Use for non-idempotent external side effects.
 
     Yields:
         None. Use as ``with file_lock(path): ...``.
 
     Raises:
-        LockUnavailableError: ``blocking=False`` and the lock is already held.
+        LockUnavailableError: ``blocking=False`` and the lock is already held,
+            or ``require_exclusive=True`` without a supported lock primitive.
         RuntimeError: ``path`` exists and is a symlink.
 
     """
     try:
         import fcntl
     except ImportError:  # pragma: no cover - Windows path
+        if require_exclusive:
+            raise LockUnavailableError(
+                f"Exclusive file locking is unavailable on this platform: {path}"
+            ) from None
         # No advisory locking available; degrade to a no-op so callers stay
         # portable. The guarded race is simply unprotected on this platform.
         yield

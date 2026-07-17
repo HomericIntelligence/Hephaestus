@@ -438,8 +438,10 @@ def _pipeline_scope_for_phases(phases: tuple[str, ...]) -> PipelineScope | None:
 
     ``None`` preserves the default full pipeline, including repo discovery.
     Partial selections use the same stage ownership as the focused wrapper
-    CLIs: plan = planning+plan_review, implement = implementation+pr_review,
-    drive-green = ci+merge_wait.
+    CLIs: plan = planning+plan_review, implement = implementation+pr_review+
+    strict_review, drive-green = strict_review+ci+merge_wait.  The overlap
+    makes either operational entry point safe for a legacy implementation-GO
+    PR that still needs a current-head independent review.
     """
     selected = set(phases)
     if selected == set(ALL_SELECTABLE):
@@ -449,8 +451,16 @@ def _pipeline_scope_for_phases(phases: tuple[str, ...]) -> PipelineScope | None:
 
     stage_sets = {
         "plan": (StageName.PLANNING, StageName.PLAN_REVIEW),
-        "implement": (StageName.IMPLEMENTATION, StageName.PR_REVIEW),
-        "drive-green": (StageName.CI, StageName.MERGE_WAIT),
+        "implement": (
+            StageName.IMPLEMENTATION,
+            StageName.PR_REVIEW,
+            StageName.STRICT_REVIEW,
+        ),
+        "drive-green": (
+            StageName.STRICT_REVIEW,
+            StageName.CI,
+            StageName.MERGE_WAIT,
+        ),
     }
     stages = frozenset(
         stage for phase in ALL_SELECTABLE if phase in selected for stage in stage_sets[phase]

@@ -1,9 +1,9 @@
 # Runbook: CI-Driver Stall
 
-This runbook is inactive during the #2054 fail-closed bootstrap. The queue
-pipeline does not arm, retry, rebase, or address an open PR from `merge_wait`.
-It verifies auto-merge is disabled, records `strict_gate_unavailable`, and
-preserves post-merge learn only for a PR that was already merged.
+Use this runbook when a PR has completed independent `strict_review`, has a
+current-head authenticated GO proof, and remains blocked after CI is green.
+`merge_wait` is the sole automatic armer; it revalidates the proof and current
+head immediately before and after its conditional arm request.
 
 ## Containment
 
@@ -17,23 +17,22 @@ gh pr view <N> --json state,autoMergeRequest
 ```
 
 An unreadable state, a failed disable request, or a read-back that remains armed
-is a blocking failure. Do not retry the legacy CI-driver recovery flow and do
-not enable auto-merge manually.
+is a blocking failure. Do not enable auto-merge manually.
 
 ## Resolution
 
-Obtain an unconditional independent strict-review GO and green required checks.
-A maintainer may then perform a manual squash merge:
+Confirm the exact current head has both `state:implementation-go` and a
+strict-GO artifact, then rerun the bounded drive-green scope. It will either
+conditionally arm the reviewed head or safely return it to `strict_review`:
 
 ```bash
-gh pr merge <N> --squash
+uv run hephaestus-automation-loop --prs <N> --phases drive-green --loops 1 --max-workers 1
 ```
 
 ## Follow-Up
 
-Issue #2055 will add the head-bound strict-review proof and its single-authority
-merge gate. It must provide a new runbook for any strict-gated recovery behavior
-before this runbook is expanded again.
+If the proof is absent, stale, NOGO, or the head differs, do not attempt to arm:
+the pipeline must obtain a new strict review for the live head.
 
 ## See Also
 

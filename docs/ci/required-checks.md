@@ -9,13 +9,15 @@ commands below before relying on this record for an operational merge decision.
 A PR can merge to `main` only when every enforced classic branch-protection
 context and direct ruleset **required status check** is green.
 
-Classic branch protection currently requires:
+After the #2055 bootstrap workflow has landed and its context is registered,
+classic branch protection requires:
 
 | Required context | Source |
 |------------------|--------|
 | `required-checks-gate` | `.github/workflows/_required.yml` |
 | `test (ubuntu-latest, 3.12, unit)` | `.github/workflows/test.yml` |
 | `test (ubuntu-latest, 3.12, integration)` | `.github/workflows/test.yml` |
+| `strict-review-proof` | `.github/workflows/strict-review-proof.yml` |
 
 The active ruleset currently requires these direct contexts:
 
@@ -48,7 +50,7 @@ regardless of how far behind `main` it is.
 
 ## Aggregate workflow coverage
 
-`_required.yml` defines ~19 jobs (`lint`, `pr-policy`, `unit-tests`,
+`_required.yml` defines ~20 code-validation jobs (`lint`, `pr-policy`, `unit-tests`,
 `build`, the `security/*` scans, `license-scan`, etc.). Enumerating each one individually in
 branch protection is brittle: renaming a job, adding a job, or splitting one
 silently changes what's required, and nobody notices until something slips
@@ -58,12 +60,13 @@ through.
 > required list (only the two `test` contexts were), so a PR with red lint
 > merged anyway. See issues #1313 / #1315.
 
-`required-checks-gate` `needs:` every gating job and reports one aggregate
-workflow result. It is a **classic branch-protection context**, not a direct
-ruleset context. Keep its `needs:` list complete (enforced by a test — see
-below): every included job participates in the classic protection gate. Make
-an explicit GitHub-ruleset change only when a job also needs its own direct
-ruleset context.
+`required-checks-gate` `needs:` every code-validation job and reports one
+aggregate workflow result. It is a **classic branch-protection context**, not a
+direct ruleset context. Keep its `needs:` list complete (enforced by a test —
+see below): every included job participates in the classic protection gate.
+The separate authorization proof is also a classic context because it cannot
+run in the PR-code workflow without letting candidate code control merge
+authority.
 
 ### How the gate works
 
@@ -76,25 +79,56 @@ required-checks-gate:
       # FAIL on `failure` / `cancelled`.
 ```
 
-`if: always()` is mandatory. Several heavy jobs gate on
-`changes-gate.outputs.code_event` and **skip** on label / auto-merge PR events.
-Without `always()` the gate would itself skip — reporting neither success nor
-failure — and **deadlock** a required check. Treating `skipped` as acceptable
-lets those legitimately-gated-off events pass while still failing on any real
-job failure.
+`if: always()` is mandatory so an upstream failure produces a durable aggregate
+result. This workflow accepts only code events: label and auto-merge events
+never create a second run whose skipped heavy jobs could replace an in-flight
+or failed code-validation context for the same commit.
 
 `auto-merge-policy` is deliberately **excluded** from the gate: it is advisory
-and, during #2054's fail-closed bootstrap, flags any open PR with auto-merge
-enabled. It must not block the independently reviewed manual bootstrap merge.
+reporting only. The queue's head-bound `strict_review` and `merge_wait` stages
+are the sole automatic arming authority.
+
+### Commit-bound strict-review proof
+
+`strict-review-proof` is a separate, directly required
+`pull_request_target` workflow, restricted to the `main` base branch. It runs on every relevant pull-request event,
+including `synchronize` and the label event emitted when the queue publishes a
+strict GO, but checks out the immutable **base** revision rather than PR code.
+This prevents a candidate PR from changing the verifier that grants it merge
+authority. The trusted job reads the event's immutable head SHA and requires
+an authenticated, elected v2 GO artifact for that exact SHA. It also treats an
+authenticated exact-head v1 or v2 NOGO as terminal denial and verifies the
+live PR head did not move while it was validating. A `pull_request_target`
+job's native Actions check belongs to the base SHA, so the trusted workflow
+explicitly posts its `strict-review-proof` success or failure commit status to
+the event head using its narrowly scoped `statuses: write` token.
+
+This closes the auto-merge timing gap: a push creates a new commit-bound proof
+status, which cannot inherit the previous SHA's successful proof. GitHub therefore
+cannot auto-merge the new head until the strict reviewer publishes a fresh GO
+and the check succeeds for that head. Coordinator polling remains only a
+defense-in-depth containment control. The workflow must first land on `main`,
+then a subsequent PR event must emit its context before an operator adds
+`strict-review-proof` to classic branch protection; #2055 is a manual-squash
+bootstrap under the temporary merge policy.
+
+Before enabling automatic arming, configure the public repository Actions
+variable to the login used by the automation credential. The check fails closed
+when it is unset; do not substitute the event actor or an arbitrary comment
+author.
+
+```bash
+gh variable set HEPHAESTUS_AUTOMATION_LOGIN --repo HomericIntelligence/Hephaestus --body 'mvillmow'
+```
 
 ## Adding a new gating job (runbook)
 
-1. Add the job to `.github/workflows/_required.yml` as usual.
+1. Add a code-validation job to `.github/workflows/_required.yml` as usual.
 2. Add its job **key** to the `required-checks-gate` `needs:` list.
-3. Decide whether it also needs an independently visible direct ruleset context.
-   If so, update the GitHub ruleset after auditing the existing bindings. The
-   aggregate gate already makes all jobs in its `needs:` list block through
-   classic branch protection.
+3. Put a trusted authorization job in a separate base-controlled workflow and
+   add its context to protection only after that workflow has run on `main`.
+4. Decide whether any job also needs an independently visible direct ruleset
+   context. Update the policy only after auditing the existing bindings.
 
 The guard test `tests/unit/ci/test_required_checks_gate.py` fails if a job is
 added to `_required.yml` without being wired into the gate (excepting the
@@ -133,14 +167,22 @@ gh ruleset check --default --repo "$repo"
 ```
 
 The branch snapshot must expose every classic check's `app_id`. The applicable
-rules snapshot retains every ruleset check's `integration_id`. The classic
-surface requires the aggregate gate plus the two Python 3.12 matrix contexts;
-the single applicable status-check ruleset requires the nine direct contexts
-listed above. Abort rather than rebuilding either array when the response shape
-or effective contract is unexpected:
+rules snapshot retains every ruleset check's `integration_id`. After the
+trusted proof workflow has landed and emitted a context, the classic surface
+requires the aggregate gate, two Python 3.12 matrix contexts, and the strict
+proof; the single applicable status-check ruleset requires the nine direct
+contexts listed above. Abort rather than rebuilding either array when the
+response shape or effective contract is unexpected:
 
 ```bash
 expected_classic='[
+  "required-checks-gate",
+  "test (ubuntu-latest, 3.12, unit)",
+  "test (ubuntu-latest, 3.12, integration)",
+  "strict-review-proof"
+]'
+
+expected_bootstrap_classic='[
   "required-checks-gate",
   "test (ubuntu-latest, 3.12, unit)",
   "test (ubuntu-latest, 3.12, integration)"
@@ -158,10 +200,37 @@ expected_ruleset='[
   "pr-policy"
 ]'
 
-jq -e --argjson expected_classic "$expected_classic" '
+jq -e --argjson expected_classic "$expected_classic" \
+  --argjson expected_bootstrap_classic "$expected_bootstrap_classic" '
   ((.checks | type) == "array")
   and all(.checks[]; has("context") and has("app_id"))
-  and (([.checks[].context] | sort) == ($expected_classic | sort))
+  and (
+    ([.checks[].context] | sort) == ($expected_classic | sort)
+    or ([.checks[].context] | sort) == ($expected_bootstrap_classic | sort)
+  )
+' "$state_dir/branch.before.json"
+
+# The trusted workflow publishes its status with the GitHub Actions app. Reuse
+# the app binding already recorded for an existing Actions-only required check;
+# an absent, wildcard, or conflicting id is not safe for this enrollment.
+trusted_actions_app_id=$(jq -er '
+  [.checks[] | select(.context == "required-checks-gate") | .app_id]
+  | unique
+  | if length == 1 and .[0] != null and .[0] != -1 then .[0]
+    else error("required-checks-gate must have one concrete GitHub Actions app_id")
+    end
+' "$state_dir/branch.before.json")
+
+# In the normal (already enrolled) path, reject an unbound or differently
+# bound proof context before any repair is attempted. The bootstrap inventory
+# legitimately has no proof context yet.
+jq -e --argjson expected_bootstrap_classic "$expected_bootstrap_classic" \
+  --argjson trusted_actions_app_id "$trusted_actions_app_id" '
+  ([.checks[].context] | sort) == ($expected_bootstrap_classic | sort)
+  or (
+    [.checks[] | select(.context == "strict-review-proof") | .app_id]
+    == [$trusted_actions_app_id]
+  )
 ' "$state_dir/branch.before.json"
 
 jq -e --argjson expected_ruleset "$expected_ruleset" '
@@ -179,6 +248,75 @@ jq -e --argjson expected_ruleset "$expected_ruleset" '
     )
 ' "$state_dir/rules.before.json"
 ```
+
+### One-time strict-review-proof enrollment
+
+The #2055 bootstrap PR cannot enforce a workflow that does not yet exist on
+`main`; it must receive its independent strict review and be manually squash
+merged. After that merge, let an ordinary PR trigger the trusted workflow and
+confirm that it publishes the `strict-review-proof` commit status on that PR's
+head. Only when the initial snapshot has the three-context
+`expected_bootstrap_classic` inventory (rather than the four-context normal
+inventory) perform this source-pinned, administrator-authorized enrollment.
+It preserves the read-back check list and its bindings exactly, adding only the
+new context with the verified GitHub Actions app id; it never changes the
+ruleset:
+
+```bash
+jq -e --argjson expected_bootstrap_classic "$expected_bootstrap_classic" '
+  ((.checks | type) == "array")
+  and all(.checks[]; has("context") and has("app_id"))
+  and (([.checks[].context] | sort) == ($expected_bootstrap_classic | sort))
+' "$state_dir/branch.before.json"
+
+enrollment_payload=$(jq --argjson trusted_actions_app_id "$trusted_actions_app_id" '
+  {
+    strict: .strict,
+    checks: (
+      .checks + [{context: "strict-review-proof", app_id: $trusted_actions_app_id}]
+    )
+  }
+' "$state_dir/branch.before.json")
+
+printf '%s\n' "$enrollment_payload" > "$state_dir/strict-proof-enrollment-payload.json"
+
+gh api -X PATCH \
+  -H "Accept: application/vnd.github+json" \
+  "repos/$repo/branches/$branch/protection/required_status_checks" \
+  --input "$state_dir/strict-proof-enrollment-payload.json" \
+  > "$state_dir/strict-proof-enrollment.json"
+
+gh api \
+  -H "Accept: application/vnd.github+json" \
+  "repos/$repo/branches/$branch/protection/required_status_checks" \
+  > "$state_dir/branch.enrolled.json"
+
+jq -e --argjson expected_classic "$expected_classic" \
+  --argjson trusted_actions_app_id "$trusted_actions_app_id" '
+  ((.checks | type) == "array")
+  and all(.checks[]; has("context") and has("app_id"))
+  and (([.checks[].context] | sort) == ($expected_classic | sort))
+  and (
+    [.checks[] | select(.context == "strict-review-proof") | .app_id]
+    == [$trusted_actions_app_id]
+  )
+' "$state_dir/branch.enrolled.json"
+
+jq -S '.checks | map(select(.context != "strict-review-proof")) | sort_by(.context)' \
+  "$state_dir/branch.before.json" > "$state_dir/checks.pre-enrollment.json"
+jq -S '.checks | map(select(.context != "strict-review-proof")) | sort_by(.context)' \
+  "$state_dir/branch.enrolled.json" > "$state_dir/checks.post-enrollment.json"
+cmp -s "$state_dir/checks.pre-enrollment.json" "$state_dir/checks.post-enrollment.json"
+
+# Use the completed enrollment as the baseline for the normal strict-mode
+# repair and its no-context-drift comparisons below.
+cp "$state_dir/branch.enrolled.json" "$state_dir/branch.before.json"
+```
+
+The final comparison proves the update preserved every existing context and
+app binding, while the preceding equality check pins the proof to the trusted
+GitHub Actions app. If either condition fails, stop and escalate it as a
+branch-protection policy decision.
 
 Once both assertions pass, patch only the strict-mode field. Do not send
 `contexts` or `checks`; omitting them preserves the existing context and

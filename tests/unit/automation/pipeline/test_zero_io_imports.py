@@ -74,6 +74,10 @@ _CAPABILITY_EXEMPT: dict[str, dict[str, frozenset[str] | None]] = {
     # verdict in-worker (#1815), so the stage attaches parse_review_verdict
     # as AgentJob.parse. No other claude_invoke symbol is permitted.
     "pr_review.py": {"hephaestus.automation.claude_invoke": frozenset({"parse_review_verdict"})},
+    # strict_review.py owns a stricter final-verdict parser locally. It may
+    # import only the immutable verdict value needed to return AgentJob.parse
+    # results; invocation helpers and the general parser remain forbidden.
+    "strict_review.py": {"hephaestus.automation.claude_invoke": frozenset({"ReviewVerdict"})},
 }
 
 
@@ -251,6 +255,29 @@ def test_plan_review_exemption_is_symbol_scoped() -> None:
         for v in violations
     )
     assert not any(":1:" in v for v in violations)
+
+
+def test_strict_review_exemption_is_symbol_scoped() -> None:
+    """The strict gate may import only its immutable verdict value."""
+    synthetic_source = (
+        "from hephaestus.automation.claude_invoke import ReviewVerdict\n"
+        "from hephaestus.automation.claude_invoke import parse_review_verdict\n"
+        "from hephaestus.automation.claude_invoke import invoke_claude_with_session\n"
+        "import hephaestus.automation.claude_invoke\n"
+    )
+    tree = ast.parse(synthetic_source, filename="<synthetic-strict-review>")
+    violations = _collect_violations(
+        tree, "strict_review.py", _CAPABILITY_EXEMPT["strict_review.py"]
+    )
+
+    assert len(violations) == 3, violations
+    assert any("import parse_review_verdict" in violation for violation in violations)
+    assert any("import invoke_claude_with_session" in violation for violation in violations)
+    assert any(
+        violation.startswith("strict_review.py:4: import hephaestus.automation.claude_invoke")
+        for violation in violations
+    )
+    assert not any(":1:" in violation for violation in violations)
 
 
 def test_forbidden_detects_synthetic_forbidden_import() -> None:
