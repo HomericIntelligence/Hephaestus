@@ -294,6 +294,7 @@ class TestCiDiscover:
 
         result = stage.step(item, ctx)
 
+        assert isinstance(result, Continue)
         assert result.next_state == REBASE_WAIT
 
     def test_preset_branch_is_kept(self, make_ctx: Any, make_work_item: Any) -> None:
