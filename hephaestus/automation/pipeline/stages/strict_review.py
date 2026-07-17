@@ -496,19 +496,17 @@ class StrictReviewStage(Stage):
             return current_outcome
         existing_go = bool(item.payload.pop("strict_review_existing_go", None))
         lease = self._lease_from_payload(item)
-        if not existing_go and lease is None:
-            # A restored or stale job cannot manufacture a global GO label
-            # without its durable fencing token.
-            return Continue(next_state=HEAD_CHECK)
-        logger.info(
-            "strict_review:%s: GO for PR #%d at head %s; %s artifact",
-            item.issue,
-            pr_number,
-            head_sha[:12],
-            "reconciling existing" if existing_go else "publishing fenced",
-        )
         if not existing_go:
-            assert lease is not None  # guarded above; narrows for the typed GitHub boundary
+            if lease is None:
+                # A restored or stale job cannot manufacture a global GO label
+                # without its durable fencing token.
+                return Continue(next_state=HEAD_CHECK)
+            logger.info(
+                "strict_review:%s: GO for PR #%d at head %s; publishing fenced artifact",
+                item.issue,
+                pr_number,
+                head_sha[:12],
+            )
             try:
                 published_by_us = ctx.github.publish_strict_review_artifact(
                     pr_number, head_sha, verdict_text, is_go=True, lease=lease
@@ -526,6 +524,13 @@ class StrictReviewStage(Stage):
                 # written by this stale reviewer generation.
                 self._drop_lease(item)
                 return Continue(next_state=HEAD_CHECK)
+        else:
+            logger.info(
+                "strict_review:%s: GO for PR #%d at head %s; reconciling existing artifact",
+                item.issue,
+                pr_number,
+                head_sha[:12],
+            )
         published = ctx.github.strict_review_artifact(pr_number, head_sha)
         if (
             published is None
