@@ -145,7 +145,7 @@ class TestRetryDelayConsumption:
 
 
 class TestStepWatchdog:
-    """WARN when a stage.step breaches the <~5s protocol contract."""
+    """WARN when a stage.step breaches the <~15s protocol contract."""
 
     def test_watchdog_warns_on_slow_step(
         self,
