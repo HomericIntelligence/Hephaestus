@@ -186,9 +186,10 @@ class LoopConfig:
     # default is ``ALL_SELECTABLE`` (set in the parser), so an operator opts
     # into the blocking drive-green by default.
     phases: tuple[str, ...] = ALL_PHASES
-    # Bound on per-issue drive-green merge attempts before the issue is tagged
-    # ``state:skip`` (#1560). Defaults to 1, matching the CIDriver default.
-    max_merge_attempts: int = 1
+    # Bound on per-issue drive-green loop iterations before the issue is
+    # tagged ``state:skip`` (#2246, previously ``max_merge_attempts`` #1560).
+    # Defaults to 5 so one transient failure no longer parks an issue.
+    drive_green_loops: int = 5
     # When True (default), never dispatch two issues whose plans touch the same
     # file concurrently — defer the later one (#1623).
     serialize_file_overlap: bool = True
@@ -248,13 +249,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--loops", type=int, default=5, help="Number of loop iterations (default: 5)")
     p.add_argument(
-        "--max-merge-attempts",
+        "--drive-green-loops",
         type=int,
-        default=1,
+        default=5,
         help=(
-            "Per-issue drive-green merge attempts before the issue is tagged "
-            "state:skip and the worker moves on (default: 1, matching the prior "
-            "drive-green retry budget)."
+            "Per-issue drive-green loop iterations before the issue is tagged "
+            "state:skip and the worker moves on (default: 5; replaces "
+            "--max-merge-attempts, whose default of 1 skip-parked issues on a "
+            "single transient failure)."
         ),
     )
     p.add_argument(
@@ -632,7 +634,7 @@ def _build_pipeline_config(
         include_bot_prs=True,
         include_all_authors=cfg.drive_green_all,
         run_pre_pr_tests=cfg.run_pre_pr_tests,
-        budget_overrides={"merge": cfg.max_merge_attempts},
+        budget_overrides={"merge": cfg.drive_green_loops},
         serialize_file_overlap=cfg.serialize_file_overlap,
         metrics_port=cfg.metrics_port,
         circuit_breaker_snapshot_provider=circuit_breaker_snapshot_provider,
@@ -754,7 +756,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg = LoopConfig(
         loops=args.loops,
         max_workers=args.max_workers,
-        max_merge_attempts=args.max_merge_attempts,
+        drive_green_loops=args.drive_green_loops,
         serialize_file_overlap=args.serialize_file_overlap,
         parallel_repos=args.parallel_repos,
         phases=phases,

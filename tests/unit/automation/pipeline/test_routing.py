@@ -247,8 +247,8 @@ class TestROUTES:
         assert routing.__file__ is not None
         source = Path(routing.__file__).read_text(encoding="utf-8")
         assert "loop_runner.py:" not in source
-        assert "LoopConfig.max_merge_attempts" in source
-        assert "--max-merge-attempts" in source
+        assert "LoopConfig.drive_green_loops" in source
+        assert "--drive-green-loops" in source
 
 
 class TestPipelineScope:

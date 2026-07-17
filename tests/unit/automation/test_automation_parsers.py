@@ -453,7 +453,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             1,
             help_text=(
                 "Number of CI-fix attempts per failing PR before giving up (default: 1). "
-                "The issue-major loop passes its --max-merge-attempts here so a PR that "
+                "The issue-major loop passes its --drive-green-loops here so a PR that "
                 "will not go green is abandoned after N tries."
             ),
         ),
@@ -591,14 +591,15 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             default=6,
         ),
         _action_spec(
-            ("--max-merge-attempts",),
-            "max_merge_attempts",
+            ("--drive-green-loops",),
+            "drive_green_loops",
             "_StoreAction",
-            1,
+            5,
             help_text=(
-                "Per-issue drive-green merge attempts before the issue is tagged "
-                "state:skip and the worker moves on (default: 1, matching the prior "
-                "drive-green retry budget)."
+                "Per-issue drive-green loop iterations before the issue is tagged "
+                "state:skip and the worker moves on (default: 5; replaces "
+                "--max-merge-attempts, whose default of 1 skip-parked issues on a "
+                "single transient failure)."
             ),
         ),
         _action_spec(

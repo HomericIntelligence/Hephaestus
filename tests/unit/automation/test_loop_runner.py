@@ -132,10 +132,10 @@ def test_parse_args_accepts_github_throttle_options() -> None:
     assert args.gh_global_burst == 11.0
 
 
-def test_parse_args_accepts_max_merge_attempts() -> None:
-    """--max-merge-attempts is parsed; default is 1 (#1560)."""
-    assert loop_runner._parse_args(["--max-merge-attempts", "3"]).max_merge_attempts == 3
-    assert loop_runner._parse_args([]).max_merge_attempts == 1
+def test_parse_args_accepts_drive_green_loops() -> None:
+    """--drive-green-loops is parsed; default is 5 (#2246, was --max-merge-attempts #1560)."""
+    assert loop_runner._parse_args(["--drive-green-loops", "3"]).drive_green_loops == 3
+    assert loop_runner._parse_args([]).drive_green_loops == 5
 
 
 def test_parse_args_accepts_issue_scope() -> None:
