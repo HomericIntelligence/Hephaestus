@@ -508,6 +508,7 @@ class StrictReviewStage(Stage):
             "reconciling existing" if existing_go else "publishing fenced",
         )
         if not existing_go:
+            assert lease is not None  # guarded above; narrows for the typed GitHub boundary
             try:
                 published_by_us = ctx.github.publish_strict_review_artifact(
                     pr_number, head_sha, verdict_text, is_go=True, lease=lease
