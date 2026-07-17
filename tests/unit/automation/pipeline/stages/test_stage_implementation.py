@@ -1050,7 +1050,10 @@ class TestCommitPushAndPrCreate:
 
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.SKIP
-        assert github.mutation_log == [("gh_issue_add_labels", (9, (STATE_SKIP,)))]
+        assert github.mutation_log == [
+            ("gh_issue_add_labels", (9, (STATE_SKIP,))),
+            ("gh_issue_upsert_comment", (9, "<!-- hephaestus-state-skip-reason -->")),
+        ]
 
     def test_skip_label_write_is_non_fatal(self, make_ctx: Any, make_work_item: Any) -> None:
         """A failing state:skip write never turns the SKIP into a crash."""

@@ -63,6 +63,31 @@ ALL_IMPLEMENTATION_STATE_LABELS = (STATE_IMPLEMENTATION_NO_GO, STATE_IMPLEMENTAT
 #: selected issues that also carry ``state:plan-go`` and have no open PR.
 STATE_SKIP = "state:skip"
 
+#: Marker keying the single skip-reason comment per issue (#2256). Every
+#: ``state:skip`` application upserts one comment starting with this marker so
+#: the reason survives outside ephemeral run logs.
+SKIP_REASON_MARKER = "<!-- hephaestus-state-skip-reason -->"
+
+
+def format_skip_reason_comment(reason: str) -> str:
+    """Render the marker-keyed comment body documenting a ``state:skip`` write.
+
+    Args:
+        reason: Human-readable explanation of why automation applied the label.
+
+    Returns:
+        The full comment body, starting with :data:`SKIP_REASON_MARKER`.
+
+    """
+    return (
+        f"{SKIP_REASON_MARKER}\n"
+        f"**Automation applied `state:skip`.**\n\n"
+        f"Reason: {reason}\n\n"
+        f"Remove the label to make the issue eligible for the automation loop "
+        f"again (see docs/runbooks/state-skip-revival.md)."
+    )
+
+
 #: Label names that mark a TRACKING issue (an epic / roadmap) rather than a code
 #: task. Epics and roadmaps are checklists of child work; the planning loop must
 #: not plan or implement them directly (their deliverable is a body edit, not a

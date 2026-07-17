@@ -203,6 +203,10 @@ class FakeStageGitHub(FakeGitHub):
         labels.difference_update(remove)
         self._log("edit_labels", issue_number, tuple(add), tuple(remove))
 
+    def upsert_issue_comment(self, issue_number: int, marker: str, body: str) -> None:
+        """Mirror the generic marker-keyed comment upsert (#2256)."""
+        self.gh_issue_upsert_comment(issue_number, marker, body)
+
     def upsert_plan_comment(self, issue_number: int, body: str) -> None:
         """Mirror the coordinator plan-comment upsert (PLAN_COMMENT_MARKER-keyed).
 
