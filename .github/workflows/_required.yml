@@ -16,6 +16,8 @@ on:
       - ready_for_review
   push:
     branches: [main]
+  merge_group:
+    types: [checks_requested]
 
 concurrency:
   group: required-${{ github.workflow }}-${{ github.head_ref || github.sha }}
@@ -25,9 +27,9 @@ permissions:
   contents: read
 
 jobs:
-  # The trigger admits only code events, so every dependent job runs. Retain a
-  # single output because the code-event contract is consumed by each job and
-  # makes a future trigger broadening explicit in review.
+  # The trigger admits only code and merge-group events, so every dependent job
+  # runs. Retain a single output because the code-event contract is consumed by
+  # each job and makes a future trigger broadening explicit in review.
   changes-gate:
     name: changes-gate
     runs-on: ubuntu-24.04
@@ -42,7 +44,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "code_event=true" >> "$GITHUB_OUTPUT"
-          echo "Code event (${ACTION:-push}) — all validation jobs run."
+          echo "Code or merge-group event (${ACTION:-push}) — all validation jobs run."
 
   forbid-suppressions:
     name: forbid-suppressions
@@ -271,13 +273,17 @@ jobs:
     # The auto-merge ↔ implementation-review state machine moved to the separate
     # `auto-merge-policy` job (#1080) so its timing-sensitive verdict no longer
     # blocks merge — it is intentionally NOT in the required-checks ruleset.
-    # Push events are skipped because there is no PR to inspect.
+    # Push events are skipped because there is no PR to inspect. Merge-group
+    # events post this required context through a dedicated step because the
+    # PR-specific policy was already checked on the source PR and the synthetic
+    # merge-group payload has no pull_request object.
     #
     # This gate intentionally has NO `needs:` — it runs immediately so the body
     # and signature checks report without depending on another job's timing.
     # The earlier `needs: lint` workaround (#680) only delayed the read and left
     # a required-check-skipped-on-lint-failure wrinkle.
-    if: github.event_name == 'pull_request'
+    if: >-
+      github.event_name == 'pull_request' || github.event_name == 'merge_group'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -287,6 +293,11 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
     steps:
+      - name: Confirm PR policy was evaluated before queue entry
+        if: github.event_name == 'merge_group'
+        run: >-
+          echo "PR policy applies to the source PR; merge-group checks validate the synthetic commit."
+
       # Check 3 invokes scripts/check_conventional_commit.py from the repo tree,
       # so the source must be on disk. Pin the checkout to the PR head SHA: the
       # default bare checkout resolves refs/pull/N/merge, which GitHub computes
@@ -295,12 +306,14 @@ jobs:
       # immutable object id (not an attacker-controllable ref name), and the
       # validator ships with the PR until it lands on main.
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        if: github.event_name == 'pull_request'
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
 
       - name: "Fetch PR metadata"
         id: fetch
+        if: github.event_name == 'pull_request'
         env:
           REPO_OWNER: ${{ github.repository_owner }}
           REPO_NAME: ${{ github.event.repository.name }}
@@ -335,7 +348,9 @@ jobs:
           echo "Fetched metadata for PR #$PR_NUMBER"
 
       - name: "Check 1: PR body contains 'Closes #N'"
-        if: always() && steps.fetch.outcome == 'success'
+        if: >-
+          github.event_name == 'pull_request' && always() &&
+          steps.fetch.outcome == 'success'
         env:
           # PR author login (github.event.pull_request.user.login), passed via
           # env so the untrusted value never interpolates into the run script.
@@ -363,7 +378,9 @@ jobs:
           fi
 
       - name: "Check 2: every commit is signed"
-        if: always() && steps.fetch.outcome == 'success'
+        if: >-
+          github.event_name == 'pull_request' && always() &&
+          steps.fetch.outcome == 'success'
         run: |
           set -euo pipefail
           # Build "<oid> <isValid>" rows from the GraphQL response. A null
@@ -384,7 +401,9 @@ jobs:
           echo "OK: all commits have verified signatures"
 
       - name: "Check 3: commit subjects follow Conventional Commits"
-        if: always() && steps.fetch.outcome == 'success'
+        if: >-
+          github.event_name == 'pull_request' && always() &&
+          steps.fetch.outcome == 'success'
         env:
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
@@ -402,7 +421,9 @@ jobs:
             | python3 scripts/check_conventional_commit.py -
 
       - name: "Check 4: every commit carries a DCO Signed-off-by trailer"
-        if: always() && steps.fetch.outcome == 'success'
+        if: >-
+          github.event_name == 'pull_request' && always() &&
+          steps.fetch.outcome == 'success'
         env:
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |

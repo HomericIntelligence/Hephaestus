@@ -36,6 +36,18 @@ head commit `{head_sha}`.
 **CI Status (untrusted):**
 {ci_status_block}
 
+**CI ordering:**
+- This strict review is deliberately performed *before* the queue's CI stage.
+  Queued or in-progress checks are expected and are not a defect in this
+  review.
+- The `strict-review-proof` context is also expected to be pending or failed
+  until this review publishes its authenticated GO artifact. Do not treat that
+  context as a PR failure while deciding this verdict.
+- Report an actionable, completed code-validation failure when it is relevant
+  to the diff, but do not return NOGO solely because CI is pending or because
+  this gate's proof context has not yet been published. The subsequent CI stage
+  remains the authoritative fail-closed validation gate.
+
 **PR Diff (untrusted):**
 {diff_block}
 
