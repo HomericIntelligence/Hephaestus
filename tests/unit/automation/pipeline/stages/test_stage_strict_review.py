@@ -5,6 +5,8 @@ from __future__ import annotations
 import importlib
 from typing import Any
 
+import pytest
+
 from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageName
 from hephaestus.automation.pipeline.stages import (
@@ -192,6 +194,77 @@ def test_review_job_receives_fresh_current_head_evidence(
     assert result.job.expected_head_sha == _NEW_HEAD
     assert result.job.sandbox == "read-only"
     assert item.payload["strict_review_lease_id"].startswith("fake-601-")
+
+
+def test_pending_required_ci_blocks_new_strict_review_work_after_durable_recovery(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """Queued or in-progress required CI must block a new strict review pass."""
+    strict_review = importlib.import_module("hephaestus.automation.pipeline.stages.strict_review")
+    github = FakeStageGitHub(
+        pending_checks=["unit"],
+        strict_evidence=StrictReviewEvidence(
+            head_sha=_NEW_HEAD,
+            issue_title="Task title",
+            issue_body="Task acceptance criterion.",
+            diff="diff --git a/file.py b/file.py\n+",
+            ci_status="- unit: pending",
+            prior_pr_review_verdict="Grade: A\nVerdict: GO",
+        ),
+    )
+    item = make_work_item(
+        stage=StageName.STRICT_REVIEW,
+        pr=601,
+        state=strict_review.REVIEW_WAIT,
+        payload={"strict_review_head": _NEW_HEAD},
+    )
+
+    result = strict_review.StrictReviewStage().step(item, make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.RETRY, "strict_review_ci_pending")
+    assert item.payload["retry_delay_s"] == 30
+    assert "strict_review_lease_id" not in item.payload
+    assert "strict_review_feedback" not in item.payload
+    assert "strict_review_attempt" not in item.payload
+    assert github.strict_evidence_calls == []
+    assert github.mutation_log == []
+
+
+def test_required_ci_status_read_failure_retries_without_strict_review_work(
+    make_ctx: Any, make_work_item: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreadable required-CI status must not dispatch a strict reviewer."""
+    strict_review = importlib.import_module("hephaestus.automation.pipeline.stages.strict_review")
+    github = FakeStageGitHub(
+        strict_evidence=StrictReviewEvidence(
+            head_sha=_NEW_HEAD,
+            issue_title="Task title",
+            issue_body="Task acceptance criterion.",
+            diff="diff --git a/file.py b/file.py\n+",
+            ci_status="- unit: unknown",
+            prior_pr_review_verdict="Grade: A\nVerdict: GO",
+        )
+    )
+    item = make_work_item(
+        stage=StageName.STRICT_REVIEW,
+        pr=601,
+        state=strict_review.REVIEW_WAIT,
+        payload={"strict_review_head": _NEW_HEAD},
+    )
+
+    def _raise_status_read(_pr_number: int) -> list[str]:
+        raise OSError("GitHub checks unavailable")
+
+    monkeypatch.setattr(github, "pending_required_check_names", _raise_status_read)
+
+    result = strict_review.StrictReviewStage().step(item, make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.RETRY, "strict_review_ci_unavailable")
+    assert item.payload["retry_delay_s"] == 30
+    assert "strict_review_lease_id" not in item.payload
+    assert "strict_review_attempt" not in item.payload
+    assert github.strict_evidence_calls == []
+    assert github.mutation_log == []
 
 
 def test_second_reviewer_does_not_dispatch_while_an_elected_lease_is_live(

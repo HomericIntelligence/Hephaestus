@@ -343,6 +343,26 @@ class StrictReviewStage(Stage):
             item.payload["strict_review_text"] = ""
             item.payload.pop("strict_review_failed", None)
             return Continue(next_state=EVAL)
+        try:
+            pending_checks = ctx.github.pending_required_check_names(item.pr)  # type: ignore[arg-type]
+        except Exception as e:
+            logger.warning(
+                "strict_review:%s: could not read required CI status for PR #%d: %s",
+                item.issue,
+                item.pr,
+                e,
+            )
+            item.payload["retry_delay_s"] = 30
+            return StageOutcome(Disposition.RETRY, "strict_review_ci_unavailable")
+        if pending_checks:
+            logger.info(
+                "strict_review:%s: required CI still pending for PR #%d: %s",
+                item.issue,
+                item.pr,
+                ", ".join(pending_checks),
+            )
+            item.payload["retry_delay_s"] = 30
+            return StageOutcome(Disposition.RETRY, "strict_review_ci_pending")
         lease = self._lease_from_payload(item)
         if lease is None:
             try:
