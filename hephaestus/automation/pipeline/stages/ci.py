@@ -341,6 +341,19 @@ class CiStage(Stage):
         item.payload["base_branch"] = str((gh_state or {}).get("baseRefName") or "main")
         has_go, _has_no_go = ctx.github.pr_has_implementation_state_label(item.pr)
         if not has_go:
+            if item.issue is None:
+                # Orphan PR swept in by --drive-green-all (#2252): there is
+                # no issue-flow reviewer gate to regress to — pr_review
+                # terminates PR-only items — and the sweep's contract is
+                # mechanical drive-green (rebase + CI classification), not
+                # review. Merge containment is unaffected: defer_auto_merge
+                # ran above and merge_wait stays fail-closed (#2054).
+                logger.info(
+                    "ci:None: orphan PR #%d lacks state:implementation-go; "
+                    "proceeding with drive-green (no issue-flow gate)",
+                    item.pr,
+                )
+                return Continue(next_state=REBASE_WAIT)
             logger.info(
                 "ci:%s: PR #%d lacks state:implementation-go; regressing to pr_review",
                 item.issue,
