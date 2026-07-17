@@ -202,6 +202,7 @@ class MergeWaitStage(Stage):
             if not self._confirm_arm(item, ctx, head_sha):
                 return self._disable_and_fail(item, ctx, "arm_confirmation_record_failed")
             item.armed = True
+            item.payload["merge_wait_head"] = head_sha
             return Continue(next_state=POLL)
         # Persist the recovery handoff before the remote arm. The arm RPC can
         # succeed and the process can die before it returns or confirms; a
@@ -245,6 +246,7 @@ class MergeWaitStage(Stage):
             # a future restart re-enable an already-valid request.
             return self._disable_and_fail(item, ctx, "arm_confirmation_record_failed")
         item.armed = True
+        item.payload["merge_wait_head"] = head_sha
         return Continue(next_state=POLL)
 
     @staticmethod
@@ -329,8 +331,16 @@ class MergeWaitStage(Stage):
         gh_state = ctx.github.gh_pr_state(item.pr)
         pr_state_str = ((gh_state or {}).get("state") or "").upper()
         if pr_state_str not in {"MERGED", "CLOSED"}:
+            armed_head = str(item.payload.get("merge_wait_head") or "")
+            current_head = str((gh_state or {}).get("headRefOid") or "")
             has_go, _has_no_go = ctx.github.pr_has_implementation_state_label(item.pr)
-            if item.armed and bool((gh_state or {}).get("autoMergeRequest")) and has_go:
+            if (
+                item.armed
+                and armed_head
+                and current_head == armed_head
+                and bool((gh_state or {}).get("autoMergeRequest"))
+                and has_go
+            ):
                 started = item.payload.get("merge_wait_started_at")
                 if started is None:
                     return StageOutcome(Disposition.FINISH_FAIL, "missing_merge_wait_started_at")

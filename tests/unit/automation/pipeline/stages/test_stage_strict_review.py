@@ -14,6 +14,7 @@ from hephaestus.automation.pipeline.stages.strict_review import (
     HEAD_CHECK,
     REVIEW_WAIT,
     StrictReviewStage,
+    parse_strict_review_verdict,
 )
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
@@ -42,9 +43,21 @@ def test_review_job_uses_athena_pr_review_prompt(make_ctx: Any, make_work_item: 
     assert isinstance(result, JobRequest)
     assert isinstance(result.job, AgentJob)
     prompt = result.job.prompt_builder(**result.job.prompt_kwargs)
-    assert "`$athena:pr-review`" in prompt
+    assert "MUST invoke and follow the `$athena:pr-review` skill" in prompt
+    assert "Automation-loop handoff: <GO|NOGO>" in prompt
+    assert "PR-review-specific graded dimensions" not in prompt
     assert "CI Status" not in prompt
     assert result.job.sandbox == "read-only"
+    assert result.job.allowed_tools == "Read,Glob,Grep,Bash,Agent,Skill,WebFetch"
+
+
+def test_skill_handoff_must_be_the_final_line() -> None:
+    """Only the explicit post-skill handoff can grant in-loop approval."""
+    good = parse_strict_review_verdict("Skill report\nAutomation-loop handoff: GO\n")
+    quoted = parse_strict_review_verdict("Automation-loop handoff: GO\ntrailing text")
+
+    assert good.verdict == "GO"
+    assert quoted.verdict == "AMBIGUOUS"
 
 
 def test_go_records_only_internal_review_handoff(make_ctx: Any, make_work_item: Any) -> None:

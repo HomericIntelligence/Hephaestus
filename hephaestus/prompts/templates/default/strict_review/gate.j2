@@ -1,6 +1,9 @@
 
-You are the INDEPENDENT STRICT-REVIEW GATE for PR #{{ pr_number }} (issue #{{ issue_number }}),
-head commit `{{ head_sha }}`.
+You MUST invoke and follow the `$athena:pr-review` skill for PR #{{ pr_number }}
+(issue #{{ issue_number }}), head commit `{{ head_sha }}`. The skill is the
+authoritative review procedure for this stage; do not substitute this wrapper
+prompt or its rubric for the skill. If the skill is unavailable or cannot
+complete its full read-only review, return NOGO.
 
 **Your role is deliberately narrow and adversarial to the prior reviewer:**
 - You are a SECOND, INDEPENDENT reviewer — do not assume the prior pr_review
@@ -10,6 +13,12 @@ head commit `{{ head_sha }}`.
   response's text.
 - You run in a fresh, read-only session scoped to this exact head commit. You
   are not resuming any prior transcript.
+- The operator explicitly scoped this invocation to a CI-free form of the
+  skill. Do not run or use a skill step that reads CI/CD checks, statuses,
+  artifacts, workflows, or merge readiness; do not invoke
+  `collect_evidence.py`. Complete every remaining read-only review step and
+  report that CI/CD evidence was intentionally excluded. The automation loop
+  must neither consider nor modify CI/CD.
 
 {{ untrusted_notice }}
 
@@ -19,34 +28,19 @@ head commit `{{ head_sha }}`.
 **Issue requirements (untrusted — judge the diff against these requirements):**
 {{ issue_requirements_block }}
 
-**CI Status (untrusted):**
-{{ ci_status_block }}
-
-**CI ordering:**
-- This strict review is deliberately performed *before* the queue's CI stage.
-  Queued or in-progress checks are expected and are not a defect in this
-  review.
-- The `strict-review-proof` context is also expected to be pending or failed
-  until this review publishes its authenticated GO artifact. Do not treat that
-  context as a PR failure while deciding this verdict.
-- Report an actionable, completed code-validation failure when it is relevant
-  to the diff, but do not return NOGO solely because CI is pending or because
-  this gate's proof context has not yet been published. The subsequent CI stage
-  remains the authoritative fail-closed validation gate.
-
 **PR Diff (untrusted):**
 {{ diff_block }}
 
 ---
 
-{{ strict_rubric }}
+Complete the skill's full CI-free report and its required output. Then append
+exactly one final line, with nothing after it:
 
-{{ terse_output_directive }}
+```
+Automation-loop handoff: <GO|NOGO>
+```
 
----
-
-This is the FINAL gate before `state:implementation-go` and eligibility for
-auto-merge arming. A GO verdict here is the ONLY thing that can authorize the
-label; be exactly as rigorous as the anti-inflation rules above demand.
-
-{{ output_format }}
+Use `GO` only when the skill's own CI-free conclusion is GO. Map `CONDITIONAL
+GO` and `NO-GO` to `NOGO`. This handoff only records that this exact head was
+reviewed; the strict-review stage applies `state:implementation-go` only after
+it verifies this head is still current.

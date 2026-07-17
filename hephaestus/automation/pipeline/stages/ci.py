@@ -79,6 +79,7 @@ from hephaestus.automation.agent_config import (
 from hephaestus.automation.ci_fix_orchestrator import CIFixOrchestrator
 from hephaestus.automation.ci_run_coordinator import CiConclusion, classify_ci_state
 from hephaestus.automation.session_naming import AGENT_CI_DRIVER
+from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_GO
 
 from .base import (
     BACKOFF_CAP_S as _BACKOFF_CAP_S,
@@ -494,6 +495,23 @@ class CiStage(Stage):
             except Exception as exc:
                 logger.error("ci:%s: failed to mark implementation-go: %s", item.issue, exc)
                 return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_label_failed")
+            # Labels do not have an expected-head precondition. Re-read after
+            # writing so a concurrent push cannot leave an unreviewed head
+            # labelled eligible; this remains loop-local containment rather
+            # than an external proof or status protocol.
+            review_outcome = self._verify_current_pr_review(item, ctx)
+            if review_outcome is not None:
+                try:
+                    ctx.github.remove_labels(item.pr, [STATE_IMPLEMENTATION_GO])
+                    ctx.github.defer_auto_merge(item.pr)
+                except Exception as exc:
+                    logger.error(
+                        "ci:%s: could not revoke implementation-go after head drift: %s",
+                        item.issue,
+                        exc,
+                    )
+                    return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_revoke_failed")
+                return review_outcome
             return StageOutcome(Disposition.ADVANCE, conclusion.value)
         # FAILING: enter the fix leg while budget remains.
         if item.attempts.get("ci_fix", 0) < ctx.budget("ci_fix"):

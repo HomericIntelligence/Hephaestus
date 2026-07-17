@@ -24,8 +24,9 @@ links to the full section below.
 5. **Open the PR** ([Pull Request Process](#pull-request-process)) — sign every
    commit (`git commit -S`), put `Closes #<issue-number>` on its own line in the
    body, and keep auto-merge disabled. After an unconditional independent
-   current-head strict-review GO, the queue may conditionally arm the PR in
-   `merge_wait`; do not enable auto-merge manually.
+   current-head `$athena:pr-review` GO, the loop observes required checks (or
+   no configured checks), applies `state:implementation-go`, then may
+   conditionally arm the PR in `merge_wait`; do not enable auto-merge manually.
 
 If anything in steps 1–2 fails, see [Platform Support](#platform-support) for
 the supported Python versions and platform-specific test behavior.

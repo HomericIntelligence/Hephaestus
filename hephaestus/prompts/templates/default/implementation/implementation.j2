@@ -93,6 +93,6 @@ After you return, the orchestrator will:
    the queue's independent strict-review stage alone may publish a head-bound
    proof and implementation-GO label.
 
-Missing `Closes #N` or signed-commit policy will be blocked by the required CI
-gate. Only the queue's strict-review and merge-wait stages may authorize and
+Missing `Closes #N` or signed-commit policy is enforced outside the automation
+loop. Only the queue's strict-review and merge-wait stages may authorize and
 arm automatic merge. This policy applies to every PR — no exceptions.

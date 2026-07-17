@@ -358,11 +358,12 @@ Related: #1554 (original minor-thread deadlock this replaces), #1575
    fresh head check. A containment failure is terminal and fail-closed.
 2. [W:G] For a direct PR or a missing worktree, synchronize an isolated
    worktree to the captured PR branch without refreshing it from the base
-   branch. [W:A] Run an independent reviewer there in `sandbox="read-only"`,
-   with a fresh per-head/per-attempt session and the expected remote SHA. The
-   worker rejects a local-HEAD mismatch or any tracked/untracked local change
-   before invoking the agent. Before dispatch, the coordinator fetches a
-   bounded, repo-scoped nonempty diff, CI summary, and authenticated prior
+   branch. [W:A] Explicitly invoke `$athena:pr-review` there in
+   `sandbox="read-only"`, with a fresh per-head/per-attempt session and the
+   expected remote SHA. The worker grants only the skill's read-only tool
+   contract and rejects a local-HEAD mismatch or any tracked/untracked local
+   change before invocation. Before dispatch, the coordinator fetches a
+   bounded, repo-scoped nonempty diff and authenticated prior
    review, and checks the head both before and after that fetch. Missing,
    malformed, oversized, or stale evidence is a fail-closed NOGO. All evidence
    is untrusted and nonce-fenced.

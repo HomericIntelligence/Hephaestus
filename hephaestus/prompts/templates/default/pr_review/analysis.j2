@@ -12,9 +12,6 @@ Analyze PR #{{ pr_number }} linked to issue #{{ issue_number }}.
 **PR Description (untrusted):**
 {{ pr_description_block }}
 
-**CI Status (untrusted):**
-{{ ci_status_block }}
-
 **PR Diff (untrusted):**
 {{ pr_diff_block }}
 
@@ -28,10 +25,9 @@ Analyze PR #{{ pr_number }} linked to issue #{{ issue_number }}.
 
 **Code-quality review:**
 
-> Note: `Closes #N` and signed-commit policy are enforced by the required
-> GitHub CI gate `pr-policy`. `auto-merge-policy` is advisory; the queue's
+> Note: repository submission policy is enforced outside this loop. The queue's
 > independent strict-review and merge-wait stages control any automatic arm.
-> Do NOT re-check policy here — focus
+> Do NOT re-check submission policy here — focus
 > solely on code correctness, completeness, and quality.
 
 Review the PR for correctness, completeness, and code quality. Identify any issues that should

@@ -85,25 +85,26 @@ FINISH = SR_FINISH
 STRICT_REVIEW_NOGO_MARKER = "<!-- hephaestus-strict-review-nogo -->"
 
 # Unlike the general review-loop parser, this loop-authorization stage
-# accepts only the final, exact output contract.  A diff or prior review may
-# legitimately contain a quoted ``Verdict: GO`` line; taking the *first* such
-# line would let untrusted evidence choose the gate result.
-_STRICT_FINAL_VERDICT_RE = re.compile(r"(?m)^Grade: ([A-F][+-]?)\nVerdict: (GO|NOGO)[ \t]*\n?\Z")
+# accepts only the final, exact handoff emitted after the complete Athena
+# skill report. A diff or prior review may legitimately contain a quoted
+# ``Verdict: GO`` line; taking the first such line would let untrusted evidence
+# choose the gate result.
+_STRICT_FINAL_VERDICT_RE = re.compile(r"(?m)^Automation-loop handoff: (GO|NOGO)[ \t]*\n?\Z")
 
 
 def parse_strict_review_verdict(text: str) -> ReviewVerdict:
-    """Parse only the final exact strict-review verdict contract.
+    """Parse only the final exact Athena review handoff.
 
     The generic review parser intentionally supports legacy variants and
     therefore finds the first matching line.  This gate has a stronger
-    authorization contract: the final two lines must be the exact grade and
-    GO/NOGO verdict requested by its prompt.  Anything else is ambiguous and
-    is handled as a fail-closed NOGO by :meth:`StrictReviewStage._eval`.
+    authorization contract: the final line must be the exact GO/NOGO handoff
+    requested by its prompt. Anything else is ambiguous and is handled as a
+    fail-closed NOGO by :meth:`StrictReviewStage._eval`.
     """
     match = _STRICT_FINAL_VERDICT_RE.search(text)
     if match is None:
         return ReviewVerdict(grade=None, verdict="AMBIGUOUS", raw=text)
-    return ReviewVerdict(grade=match.group(1), verdict=match.group(2), raw=text)
+    return ReviewVerdict(grade=None, verdict=match.group(1), raw=text)
 
 
 def _issue_number(item: WorkItem) -> int:
@@ -363,6 +364,7 @@ class StrictReviewStage(Stage):
             session_agent=strict_review_agent(head_sha, attempt),
             expected_head_sha=head_sha,
             sandbox="read-only",
+            allowed_tools="Read,Glob,Grep,Bash,Agent,Skill,WebFetch",
             # The bounded issue/diff/prior-review context is fetched by the
             # coordinator adapter; no CI state is an input to this review.
             prompt_kwargs={

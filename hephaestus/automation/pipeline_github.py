@@ -965,11 +965,18 @@ class PipelineGitHub:
         return self._inspector.pending_required_check_names(pr_number)
 
     def pr_checks(self, pr_number: int) -> list[dict[str, Any]]:
-        """All checks for the PR (``gh_pr_checks``)."""
+        """Read required checks for the PR (``gh_pr_checks --required``)."""
         if self._repo_slug is not None:
             try:
                 result = self._gh(
-                    ["pr", "checks", str(pr_number), "--json", "name,state,bucket,workflow"],
+                    [
+                        "pr",
+                        "checks",
+                        str(pr_number),
+                        "--required",
+                        "--json",
+                        "name,state,bucket,workflow",
+                    ],
                     log_on_error=False,
                 )
             except subprocess.CalledProcessError as exc:

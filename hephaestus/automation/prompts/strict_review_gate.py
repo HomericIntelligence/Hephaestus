@@ -1,13 +1,12 @@
-"""In-loop ``$athena:pr-review`` prompt for an independent second opinion.
+"""Build the in-loop ``$athena:pr-review`` prompt for one PR head.
 
-The prompt is rendered through the active catalog and fences all untrusted
-input. The strict stage owns the resulting label decision.
+The catalog template supplies the skill handoff; this builder fences every
+untrusted field and supplies the exact head the strict stage captured.
 """
 
 from __future__ import annotations
 
-from ._shared import fence_content, get_terse_output_directive
-from ._strict_rubric import get_pr_strict_rubric, get_strict_review_output_format
+from ._shared import fence_content
 from .catalog import PromptCatalog
 
 
@@ -20,11 +19,7 @@ def build_strict_review_prompt(
     diff: str = "",
     prior_pr_review_verdict: str = "",
 ) -> str:
-    """Build the strict-review prompt for one head/attempt.
-
-    All free-text fields are fenced as untrusted content (issue requirements,
-    diff, and the prior reviewer's verdict text).
-    """
+    """Build the CI-free strict-review prompt for one captured PR head."""
     fenced = fence_content()
     return PromptCatalog.current().render(
         "strict_review/gate.j2",
@@ -37,9 +32,6 @@ def build_strict_review_prompt(
             "ISSUE_REQUIREMENTS", f"# {issue_title}\n\n{issue_body}"
         ),
         diff_block=fenced.fence("PR_DIFF", diff),
-        strict_rubric=get_pr_strict_rubric(),
-        terse_output_directive=get_terse_output_directive(),
-        output_format=get_strict_review_output_format(),
     )
 
 

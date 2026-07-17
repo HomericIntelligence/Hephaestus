@@ -194,13 +194,15 @@ class TestWorkerPoolSubmitComplete:
         assert result.ok is True
         assert mock_session.call_args.kwargs["sandbox"] == "read-only"
 
-    def test_read_only_agent_job_scopes_claude_to_read_tools(
+    def test_read_only_agent_job_scopes_claude_to_declared_tools(
         self,
         pool: WorkerPool,
         completion_q: CompletionQueue,
     ) -> None:
-        """Strict-review Claude jobs receive no write or shell capability."""
-        job = _agent_job(sandbox="read-only")
+        """A read-only job propagates its explicit tool contract to Claude."""
+        job = _agent_job(
+            sandbox="read-only", allowed_tools="Read,Glob,Grep,Bash,Agent,Skill,WebFetch"
+        )
         with (
             patch(f"{_WP}.resolve_agent", return_value="claude"),
             patch(
@@ -212,7 +214,9 @@ class TestWorkerPoolSubmitComplete:
             _handle, result = completion_q.get(timeout=10)
 
         assert result.ok is True
-        assert invoke.call_args.kwargs["allowed_tools"] == "Read,Glob,Grep"
+        assert (
+            invoke.call_args.kwargs["allowed_tools"] == "Read,Glob,Grep,Bash,Agent,Skill,WebFetch"
+        )
         assert invoke.call_args.kwargs["permission_mode"] == "dontAsk"
 
     def test_expected_head_mismatch_blocks_agent_before_invocation(
