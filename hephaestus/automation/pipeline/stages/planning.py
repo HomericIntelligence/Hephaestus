@@ -278,6 +278,7 @@ class PlanningStage(Stage):
                 prompt_builder=get_advise_prompt_builder(ctx.config.agent),
                 cwd=ctx.paths.worktree,
                 timeout_s=advise_claude_timeout(),
+                allowed_tools="Read,Glob,Grep",
                 session_agent=AGENT_ADVISE,
                 # Issue title/body and the Mnemosyne marketplace path are
                 # seeded into item.payload by the coordinator (#1817), which
@@ -302,6 +303,7 @@ class PlanningStage(Stage):
                 prompt_builder=build_plan_prompt,
                 cwd=ctx.paths.worktree,
                 timeout_s=planner_claude_timeout(),
+                allowed_tools="Read,Glob,Grep",
                 session_agent=AGENT_PLANNER,
                 # build_plan_prompt composes get_plan_prompt with the issue
                 # title/body and advise findings in-worker, mirroring the

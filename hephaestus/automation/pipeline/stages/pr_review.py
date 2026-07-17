@@ -457,6 +457,7 @@ class PrReviewStage(Stage):
             prompt_builder=get_pr_review_analysis_prompt,
             cwd=_worktree_path(item, ctx),
             timeout_s=pr_reviewer_claude_timeout(),
+            allowed_tools="Read,Glob,Grep",
             session_agent=AGENT_PR_REVIEWER,
             # Diff / body / CI context are seeded into item.payload by
             # the coordinator (#1817), which owns the gh reads.
@@ -498,6 +499,7 @@ class PrReviewStage(Stage):
             prompt_builder=get_review_validation_prompt,
             cwd=_worktree_path(item, ctx),
             timeout_s=pr_reviewer_claude_timeout(),
+            allowed_tools="Read,Glob,Grep",
             session_agent=AGENT_PR_REVIEWER,
             prompt_kwargs={
                 "pr_number": item.pr,
@@ -521,6 +523,7 @@ class PrReviewStage(Stage):
             prompt_builder=get_comment_difficulty_prompt,
             cwd=_worktree_path(item, ctx),
             timeout_s=pr_reviewer_claude_timeout(),
+            allowed_tools="Read,Glob,Grep",
             session_agent=AGENT_COMMENT_CLASSIFIER,
             prompt_kwargs={
                 "issue_number": item.issue,
@@ -560,6 +563,7 @@ class PrReviewStage(Stage):
             prompt_builder=get_follow_up_prompt,
             cwd=_worktree_path(item, ctx),
             timeout_s=follow_up_claude_timeout(),
+            allowed_tools="Read,Glob,Grep",
             session_agent=AGENT_IMPLEMENTER,  # resume implementer session (legacy parity)
             prompt_kwargs={"issue_number": item.issue},
             descr="follow_up",
@@ -679,6 +683,7 @@ class PrReviewStage(Stage):
                 prompt_builder=get_address_review_prompt,
                 cwd=_worktree_path(item, ctx),
                 timeout_s=address_review_claude_timeout(),
+                allowed_tools="Read,Write,Edit,Glob,Grep,Bash,Task,Skill",
                 session_agent=AGENT_ADDRESS_REVIEW,
                 prompt_kwargs={
                     "pr_number": item.pr,
@@ -703,6 +708,7 @@ class PrReviewStage(Stage):
             prompt_builder=get_impl_resume_feedback_prompt,
             cwd=_worktree_path(item, ctx),
             timeout_s=implementer_claude_timeout(),
+            allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
             session_agent=AGENT_IMPLEMENTER,
             prompt_kwargs={
                 "issue_number": item.issue,

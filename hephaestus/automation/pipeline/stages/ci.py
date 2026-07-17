@@ -550,6 +550,7 @@ class CiStage(Stage):
             prompt_builder=prompt_builder,
             cwd=_worktree_path(item, ctx),
             timeout_s=ci_driver_claude_timeout(),
+            allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
             session_agent=AGENT_CI_DRIVER,
             prompt_kwargs=prompt_kwargs,
             descr="force_engagement" if escalate else "ci_fix",

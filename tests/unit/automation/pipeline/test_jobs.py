@@ -36,6 +36,36 @@ class TestGitJobValidation:
             GitJob(repo="test/repo", op="invalid", timeout_s=60)
 
 
+class TestAgentJobAllowedTools:
+    """Tests for the fail-closed AgentJob.allowed_tools contract (#2162)."""
+
+    def test_default_scope_is_read_only(self) -> None:
+        job = AgentJob(
+            repo="test/repo",
+            issue=123,
+            agent="claude",
+            model="opus-4-8",
+            prompt_builder=lambda: "prompt",
+            cwd=Path("/tmp"),
+            timeout_s=60,
+        )
+        assert job.allowed_tools == "Read,Glob,Grep"
+
+    @pytest.mark.parametrize("bad", ["", "   ", "\t"])
+    def test_agent_job_rejects_empty_allowed_tools(self, bad: str) -> None:
+        with pytest.raises(ValueError, match="allowed_tools"):
+            AgentJob(
+                repo="test/repo",
+                issue=123,
+                agent="claude",
+                model="opus-4-8",
+                prompt_builder=lambda: "prompt",
+                cwd=Path("/tmp"),
+                timeout_s=60,
+                allowed_tools=bad,
+            )
+
+
 class TestJobDataclassesFrozen:
     """Tests that job dataclasses are frozen."""
 

@@ -21,20 +21,14 @@ CALL_SITES = [
     ("pr_review_core.py", {"Read", "Glob", "Grep"}, False),
     ("plan_reviewer.py", {"Read", "Glob", "Grep"}, False),
     ("review_validator.py", {"Read", "Glob", "Grep"}, False),
-    # planner.py was re-pointed at the queue-based pipeline (#1820): its
-    # planning agent calls now go through the pipeline stages'
-    # ``AgentJob``/worker pool, not a direct ``invoke_claude_with_session``
-    # call site, so it is no longer scanned here.
-    # ci_driver.py was re-pointed at the queue-based pipeline (#1822): its
-    # CI-fix / drive-green agent calls now go through the pipeline stages'
-    # ``AgentJob``/worker pool (``pipeline/stages/ci.py`` + ``merge_wait.py``),
-    # not a direct ``invoke_claude_with_session`` call site, so it is no longer
-    # scanned here.
-    # implementer.py was re-pointed at the queue-based pipeline (#1821): its
-    # implementation agent calls now go through the pipeline stages'
-    # ``AgentJob``/worker pool (the legacy per-issue phase runner was deleted),
-    # not a direct ``invoke_claude_with_session`` call site, so it is no longer
-    # scanned here.
+    # Direct invoke_claude_with_session call sites remain covered here.
+    # The queue-pipeline migration (#1820-#1823) re-pointed planner.py,
+    # implementer.py, and ci_driver.py at the pipeline stages'
+    # ``AgentJob``/worker pool, so they no longer have a direct
+    # ``invoke_claude_with_session`` call site to scan here. Those
+    # AgentJob call sites are enforced independently by
+    # pipeline/test_agent_allowed_tools_scoping.py, and the worker's
+    # forwarding of the scope by test_worker_pool.py.
     ("comment_difficulty.py", {"Read", "Glob", "Grep"}, False),
 ]
 

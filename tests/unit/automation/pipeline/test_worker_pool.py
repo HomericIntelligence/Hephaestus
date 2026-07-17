@@ -145,6 +145,31 @@ class TestWorkerPoolSubmitComplete:
         assert result.ok is True
         assert "Test output" in str(result.value)
 
+    def test_submit_forwards_agent_allowed_tools(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+    ) -> None:
+        """The worker forwards job.allowed_tools into the Claude invocation.
+
+        The AST policy test can only assert call-site declarations; this proves
+        WorkerPool cannot silently drop the scope on the way to Claude (#2162).
+        """
+        job = _agent_job(allowed_tools="Read,Glob,Grep")
+
+        with (
+            patch(f"{_WP}.resolve_agent", return_value="claude"),
+            patch(
+                f"{_WP}.claude_invoke.invoke_claude_with_session",
+                return_value=("output", "session-id"),
+            ) as mock_invoke,
+        ):
+            pool.submit(job, StageName.PLANNING)
+            _handle, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        assert mock_invoke.call_args.kwargs["allowed_tools"] == job.allowed_tools
+
     def test_submit_and_complete_non_claude_agent_job(
         self,
         pool: WorkerPool,

@@ -378,6 +378,7 @@ class ImplementationStage(Stage):
             prompt_builder=get_dirty_reused_worktree_decision_prompt,
             cwd=_worktree_path(item, ctx),
             timeout_s=implementer_claude_timeout(),
+            allowed_tools="Read,Glob,Grep",
             session_agent=AGENT_IMPLEMENTER,
             prompt_kwargs={
                 "branch_name": item.branch,
@@ -428,6 +429,7 @@ class ImplementationStage(Stage):
             prompt_builder=get_advise_prompt_builder(ctx.config.agent),
             cwd=_worktree_path(item, ctx),
             timeout_s=advise_claude_timeout(),
+            allowed_tools="Read,Glob,Grep",
             session_agent=AGENT_ADVISE,
             prompt_kwargs={
                 "issue_number": item.issue,
@@ -464,6 +466,7 @@ class ImplementationStage(Stage):
             prompt_builder=build_implementation_prompt,
             cwd=_worktree_path(item, ctx),
             timeout_s=implementer_claude_timeout(),
+            allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
             session_agent=AGENT_IMPLEMENTER,
             prompt_kwargs={
                 "issue_number": item.issue,
@@ -521,6 +524,7 @@ class ImplementationStage(Stage):
             prompt_builder=build_test_fix_prompt,
             cwd=_worktree_path(item, ctx),
             timeout_s=implementer_claude_timeout(),
+            allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
             session_agent=AGENT_IMPLEMENTER,
             prompt_kwargs={
                 "issue_number": item.issue,

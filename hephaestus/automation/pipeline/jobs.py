@@ -32,6 +32,7 @@ class AgentJob:
     prompt_builder: Callable[..., str]
     cwd: Path
     timeout_s: int
+    allowed_tools: str = "Read,Glob,Grep"
     session_agent: str = ""
     prompt_kwargs: dict[str, Any] = field(default_factory=dict)
     output_format: str = "text"
@@ -43,6 +44,16 @@ class AgentJob:
     # independent strict-review stage explicitly requests ``read-only``.
     sandbox: str = "workspace-write"
     descr: str = ""
+
+    def __post_init__(self) -> None:
+        """Fail closed on an empty scope so a bypass can never reach Claude.
+
+        The worker forwards ``allowed_tools`` verbatim into
+        :func:`invoke_claude_with_session`; an empty/whitespace value would
+        silently drop the least-privilege gate, so reject it at construction.
+        """
+        if not isinstance(self.allowed_tools, str) or not self.allowed_tools.strip():
+            raise ValueError("AgentJob.allowed_tools must be a non-empty string")
 
 
 @dataclass(frozen=True)

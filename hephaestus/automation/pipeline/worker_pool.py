@@ -398,6 +398,7 @@ class WorkerPool:
                         model=job.model,
                         cwd=job.cwd,
                         timeout=job.timeout_s,
+                        allowed_tools=job.allowed_tools,
                         output_format=job.output_format,
                         **claude_kwargs,
                     )
