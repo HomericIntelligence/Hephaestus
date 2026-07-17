@@ -64,6 +64,7 @@ nats = [
 # pydantic. CI verifies the library-side import surface stays clean via
 # tests/unit/validation/test_import_surface.py.
 automation = [
+    "Jinja2>=3.1,<4",
     "pydantic>=2.12.5,<3",
 ]
 all = [

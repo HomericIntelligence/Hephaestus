@@ -17,6 +17,7 @@ from ._strict_rubric import (
     _PLAN_STRICT_RUBRIC,
     _STRICT_REVIEW_OUTPUT_FORMAT,
 )
+from .catalog import PromptCatalog
 
 PLAN_PROMPT = """
 Create an implementation plan for GitHub issue #{issue_number}.
@@ -229,9 +230,10 @@ findings. After your analysis, output your verdict.
 """
 
 
-def get_plan_prompt(issue_number: int) -> str:
+def get_plan_prompt(issue_number: int, *, catalog: PromptCatalog | None = None) -> str:
     """Get the planning prompt for an issue."""
-    return PLAN_PROMPT.format(
+    return (catalog or PromptCatalog.from_environment()).render(
+        "planning/plan.j2",
         issue_number=issue_number,
         terse_output_directive=_TERSE_OUTPUT_DIRECTIVE,
     )

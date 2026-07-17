@@ -609,6 +609,7 @@ dependencies = [
 [package.optional-dependencies]
 all = [
     { name = "defusedxml" },
+    { name = "jinja2" },
     { name = "jsonschema" },
     { name = "nats-py" },
     { name = "pydantic" },
@@ -616,6 +617,7 @@ all = [
     { name = "tomli", marker = "python_full_version < '3.11'" },
 ]
 automation = [
+    { name = "jinja2" },
     { name = "pydantic" },
 ]
 github = [
@@ -659,6 +661,8 @@ dev = [
 requires-dist = [
     { name = "defusedxml", marker = "extra == 'all'", specifier = ">=0.7,<1" },
     { name = "defusedxml", marker = "extra == 'xml'", specifier = ">=0.7,<1" },
+    { name = "jinja2", marker = "extra == 'all'", specifier = ">=3.1,<4" },
+    { name = "jinja2", marker = "extra == 'automation'", specifier = ">=3.1,<4" },
     { name = "jsonschema", marker = "extra == 'all'", specifier = ">=4.0,<5" },
     { name = "jsonschema", marker = "extra == 'schema'", specifier = ">=4.0,<5" },
     { name = "nats-py", marker = "extra == 'all'", specifier = ">=2.6,<3" },
