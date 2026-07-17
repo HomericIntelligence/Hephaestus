@@ -25,11 +25,9 @@ import os
 import re
 import subprocess
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from uuid import uuid4
 
 from hephaestus.automation import github_api, pr_manager
 from hephaestus.automation._review_phase import _is_automation_owned_thread
@@ -48,9 +46,7 @@ from hephaestus.automation.arming_state import (
 from hephaestus.automation.ci_check_inspector import CICheckInspector
 from hephaestus.automation.git_utils import issue_auto_impl_branch_name
 from hephaestus.automation.pipeline.stages.base import (
-    StrictReviewArtifact,
     StrictReviewEvidence,
-    StrictReviewLease,
 )
 from hephaestus.automation.prompts.pr_review import (
     BLOCKING_SEVERITIES,
@@ -76,17 +72,6 @@ from hephaestus.automation.state_labels import (
     is_implementation_go,
     is_plan_go,
 )
-from hephaestus.automation.strict_review_artifact import (
-    STRICT_REVIEW_ARTIFACT_MARKER,
-    STRICT_REVIEW_ARTIFACT_V2_MARKER,
-    STRICT_REVIEW_LEASE_MARKER,
-    ParsedStrictArtifact,
-    ParsedStrictLease,
-    parse_strict_review_artifact,
-    parse_strict_review_lease,
-    render_fenced_strict_review_artifact,
-    render_strict_review_lease,
-)
 from hephaestus.constants import read_timeout_env
 from hephaestus.github.auto_merge import defer_auto_merge, defer_auto_merge_batch
 from hephaestus.github.client import gh_call
@@ -96,19 +81,16 @@ logger = logging.getLogger(__name__)
 
 _CLOSES_ISSUE_LINE_RE = re.compile(r"^Closes #(\d+)\s*$", re.MULTILINE)
 
-# The strict reviewer is a merge-eligibility gate.  Its evidence must fit a
-# single bounded prompt, and a PR outside this envelope fails closed for human
-# review rather than silently omitting a changed file/check/review result.
+# The in-loop PR reviewer needs a complete, bounded prompt. A PR outside this
+# envelope fails closed rather than silently omitting changed-file or review
+# context.
 _STRICT_REVIEW_MAX_DIFF_BYTES = 350_000
-_STRICT_REVIEW_MAX_CHECKS = 200
-_STRICT_REVIEW_MAX_CI_STATUS_BYTES = 20_000
 _STRICT_REVIEW_MAX_PRIOR_REVIEW_BYTES = 20_000
 _STRICT_REVIEW_MAX_REVIEWS = 100
 _STRICT_REVIEW_MAX_ISSUE_TITLE_BYTES = 1_000
 _STRICT_REVIEW_MAX_ISSUE_BODY_BYTES = 80_000
 _NO_PRIOR_AUTOMATED_REVIEW = "No authenticated prior PR-review verdict is available."
 _PR_REVIEW_VERDICT_RE = re.compile(r"(?m)^Verdict:\s*(?:GO|NOGO)\s*$")
-_STRICT_REVIEW_LEASE_TTL_S = 3_600
 
 
 def _split_threads(threads: list[dict[str, Any]]) -> tuple[int, int]:
@@ -232,7 +214,6 @@ class PipelineGitHub:
             # is truthful; only mutators log-and-skip.
             options_provider=lambda: SimpleNamespace(dry_run=False),
         )
-        self._automation_login: str | None = None
 
     @property
     def _repo_slug(self) -> str | None:
@@ -636,39 +617,6 @@ class PipelineGitHub:
         return False
 
     @staticmethod
-    def _strict_review_ci_status(checks: object) -> str | None:
-        """Render a bounded, schema-checked CI summary for strict review."""
-        if not isinstance(checks, list) or len(checks) > _STRICT_REVIEW_MAX_CHECKS:
-            return None
-        if not checks:
-            return "No CI check runs are currently reported by GitHub."
-
-        lines: list[str] = []
-        for check in checks:
-            if not isinstance(check, dict):
-                return None
-            name = check.get("name")
-            status = check.get("status")
-            conclusion = check.get("conclusion")
-            required = check.get("required")
-            if (
-                not isinstance(name, str)
-                or not name.strip()
-                or not isinstance(status, str)
-                or not status.strip()
-                or (conclusion is not None and not isinstance(conclusion, str))
-                or not isinstance(required, bool)
-            ):
-                return None
-            completion = conclusion if conclusion is not None else "pending"
-            requirement = "required" if required else "non-required"
-            lines.append(f"- {name}: status={status}, conclusion={completion}, {requirement}")
-        rendered = "\n".join(lines)
-        if len(rendered.encode("utf-8")) > _STRICT_REVIEW_MAX_CI_STATUS_BYTES:
-            return None
-        return rendered
-
-    @staticmethod
     def _strict_review_prior_verdict(reviews: object, automation_login: str) -> str | None:
         """Return the latest bounded, authenticated PR-review verdict text.
 
@@ -702,10 +650,10 @@ class PipelineGitHub:
     def strict_review_evidence(  # noqa: C901 - every evidence channel must fail closed independently.
         self, pr_number: int, head_sha: str, issue_number: int
     ) -> StrictReviewEvidence | None:
-        """Fetch complete, bounded strict-review evidence for one exact head.
+        """Fetch complete, bounded PR-review context for one exact head.
 
-        The initial and final PR-state reads bind the fetched diff and CI
-        summary to ``head_sha``.  A concurrent push, read/schema error,
+        The initial and final PR-state reads bind the fetched diff to
+        ``head_sha``. A concurrent push, read/schema error,
         oversized/empty diff, or malformed context returns ``None`` so the
         caller must fail closed instead of issuing an under-informed GO.
         """
@@ -728,7 +676,7 @@ class PipelineGitHub:
                 return None
             if str(snapshot.get("headRefOid") or "").lower() != normalized_head:
                 return None
-            automation_login = self._strict_review_login()
+            automation_login = self._reviewer_login()
             if automation_login is None:
                 return None
             prior_verdict = self._strict_review_prior_verdict(
@@ -759,10 +707,6 @@ class PipelineGitHub:
             if len(diff.encode("utf-8")) > _STRICT_REVIEW_MAX_DIFF_BYTES:
                 return None
 
-            ci_status = self._strict_review_ci_status(self.pr_checks(pr_number))
-            if ci_status is None:
-                return None
-
             confirmed = self.gh_pr_state(pr_number)
             if (
                 confirmed is None
@@ -789,9 +733,19 @@ class PipelineGitHub:
             issue_title=issue_title,
             issue_body=issue_body,
             diff=diff,
-            ci_status=ci_status,
             prior_pr_review_verdict=prior_verdict,
         )
+
+    @staticmethod
+    def _reviewer_login() -> str | None:
+        """Return the automation identity used to select prior-review context."""
+        try:
+            result = gh_call(["api", "user", "--jq", ".login"])
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            logger.warning("pr_review_evidence: could not resolve automation login: %s", exc)
+            return None
+        login = str(result.stdout or "").strip()
+        return login or None
 
     # -- read surface --------------------------------------------------------
 
@@ -1361,10 +1315,10 @@ class PipelineGitHub:
         pr_manager.ensure_pr_auto_merge_deferred(pr_number)
 
     def arm_auto_merge(self, pr_number: int, expected_head_sha: str) -> None:
-        """Request squash auto-merge for MergeWait's verified strict-GO path.
+        """Request squash auto-merge for MergeWait's approved-label path.
 
-        This adapter method deliberately does not check labels or artifacts:
-        those are coordinator-stage facts that must be revalidated in
+        This adapter method deliberately does not check labels: that is a
+        coordinator-stage fact revalidated in
         ``MergeWaitStage._arm`` immediately before this sole automatic arm.
         """
         if re.fullmatch(r"[0-9a-fA-F]{40}", expected_head_sha) is None:
@@ -1381,327 +1335,6 @@ class PipelineGitHub:
                 "--match-head-commit",
                 expected_head_sha,
             ]
-        )
-
-    def _strict_review_login(self) -> str | None:
-        """Resolve and cache the authenticated automation identity."""
-        if self._automation_login is not None:
-            return self._automation_login
-        try:
-            result = gh_call(["api", "user", "--jq", ".login"])
-        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
-            logger.warning("strict_review_artifact: could not resolve automation login: %s", exc)
-            return None
-        login = str(result.stdout or "").strip()
-        if not login:
-            return None
-        self._automation_login = login
-        return login
-
-    @staticmethod
-    def _strict_comment_id(comment: dict[str, Any]) -> int | None:
-        """Return a positive REST comment id without accepting ambiguous data."""
-        value = comment.get("databaseId", comment.get("id"))
-        if value is None:
-            return None
-        try:
-            identifier = int(value)
-        except (TypeError, ValueError):
-            return None
-        return identifier if identifier > 0 else None
-
-    @staticmethod
-    def _strict_comment_epoch(comment: dict[str, Any]) -> int | None:
-        """Return GitHub's server timestamp for a result comment, else ``None``."""
-        value = comment.get("created_at") or comment.get("createdAt")
-        if not isinstance(value, str):
-            return None
-        try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-        if parsed.tzinfo is None:
-            return None
-        return int(parsed.astimezone(timezone.utc).timestamp())
-
-    def _owned_strict_review_comments(
-        self, pr_number: int, login: str
-    ) -> list[dict[str, Any]] | None:
-        """Read only authenticated, id-bearing comments for strict state."""
-        if self._repo_slug is None:
-            return None
-        try:
-            comments = self._repo_issue_comments(pr_number)
-        except (OSError, RuntimeError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
-            logger.warning("strict_review: comment read failed for PR #%d: %s", pr_number, exc)
-            return None
-        owned: list[dict[str, Any]] = []
-        for comment in comments:
-            user = comment.get("user")
-            author = user.get("login") if isinstance(user, dict) else None
-            if author != login or not isinstance(comment.get("body"), str):
-                continue
-            if self._strict_comment_id(comment) is None:
-                continue
-            owned.append(comment)
-        return owned
-
-    @staticmethod
-    def _strict_leases(
-        comments: list[dict[str, Any]], head_sha: str
-    ) -> list[tuple[StrictReviewLease, ParsedStrictLease]]:
-        """Parse valid leases for one exact head, ordered by immutable comment id."""
-        leases: list[tuple[StrictReviewLease, ParsedStrictLease]] = []
-        for comment in comments:
-            body = comment.get("body")
-            if not isinstance(body, str) or not body.startswith(STRICT_REVIEW_LEASE_MARKER):
-                continue
-            parsed = parse_strict_review_lease(body)
-            comment_id = PipelineGitHub._strict_comment_id(comment)
-            if parsed is None or comment_id is None or parsed.head_sha != head_sha.lower():
-                continue
-            leases.append(
-                (
-                    StrictReviewLease(
-                        head_sha=parsed.head_sha,
-                        lease_id=parsed.lease_id,
-                        comment_id=comment_id,
-                    ),
-                    parsed,
-                )
-            )
-        return sorted(leases, key=lambda item: item[0].comment_id)
-
-    @staticmethod
-    def _elected_lease(
-        leases: list[tuple[StrictReviewLease, ParsedStrictLease]], now_epoch: int
-    ) -> StrictReviewLease | None:
-        """Elect the earliest still-live immutable lease for one generation."""
-        for lease, parsed in leases:
-            if parsed.expires_at >= now_epoch:
-                return lease
-        return None
-
-    @classmethod
-    def _terminal_strict_verdict(
-        cls, comments: list[dict[str, Any]], head_sha: str
-    ) -> ParsedStrictArtifact | None:
-        """Return a valid terminal v2 verdict, with NOGO dominance.
-
-        A v2 result is accepted only when its lease was elected at the server
-        timestamp of the result.  An expired, delayed worker therefore cannot
-        turn a later generation into a stale terminal verdict.  A historical
-        v1 NOGO remains a fail-closed revocation; v1 GO is not authorization.
-        """
-        normalized_head = head_sha.lower()
-        leases = cls._strict_leases(comments, normalized_head)
-        lease_map = {(lease.lease_id, lease.comment_id): parsed for lease, parsed in leases}
-        valid: list[tuple[int, ParsedStrictArtifact]] = []
-        legacy_nogos: list[ParsedStrictArtifact] = []
-        for comment in comments:
-            body = comment.get("body")
-            comment_id = cls._strict_comment_id(comment)
-            if not isinstance(body, str) or comment_id is None:
-                continue
-            if body.startswith(STRICT_REVIEW_ARTIFACT_MARKER):
-                parsed_v1 = parse_strict_review_artifact(body)
-                if (
-                    parsed_v1 is not None
-                    and parsed_v1.schema_version == 1
-                    and parsed_v1.head_sha == normalized_head
-                    and not parsed_v1.is_go
-                ):
-                    legacy_nogos.append(parsed_v1)
-                continue
-            if not body.startswith(STRICT_REVIEW_ARTIFACT_V2_MARKER):
-                continue
-            parsed = parse_strict_review_artifact(body)
-            if (
-                parsed is None
-                or parsed.schema_version != 2
-                or parsed.head_sha != normalized_head
-                or parsed.lease_id is None
-                or parsed.lease_comment_id is None
-                or comment_id <= parsed.lease_comment_id
-            ):
-                continue
-            lease_record = lease_map.get((parsed.lease_id, parsed.lease_comment_id))
-            result_epoch = cls._strict_comment_epoch(comment)
-            if (
-                lease_record is None
-                or result_epoch is None
-                or result_epoch > lease_record.expires_at
-            ):
-                continue
-            elected = cls._elected_lease(leases, result_epoch)
-            if (
-                elected is None
-                or elected.lease_id != parsed.lease_id
-                or elected.comment_id != parsed.lease_comment_id
-            ):
-                continue
-            valid.append((comment_id, parsed))
-        if legacy_nogos:
-            return legacy_nogos[-1]
-        if not valid:
-            return None
-        # A valid NOGO is terminal for the head even if an earlier/later GO
-        # comment also exists (for example from a repeated network request).
-        nogos = [parsed for _id, parsed in valid if not parsed.is_go]
-        if nogos:
-            return nogos[-1]
-        return sorted(valid, key=lambda item: item[0])[-1][1]
-
-    def _append_strict_review_comment(self, pr_number: int, body: str) -> dict[str, Any] | None:
-        """Append one immutable strict-state comment and return its REST metadata."""
-        if self._repo_slug is None:
-            return None
-        owner, name = self._owner_name()
-        try:
-            with github_api._body_file(body) as path:
-                result = gh_call(
-                    [
-                        "api",
-                        "--method",
-                        "POST",
-                        f"/repos/{owner}/{name}/issues/{pr_number}/comments",
-                        "-F",
-                        f"body=@{path}",
-                    ]
-                )
-            payload = json.loads(result.stdout or "{}")
-        except (OSError, RuntimeError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
-            logger.warning(
-                "strict_review: immutable comment write failed for PR #%d: %s", pr_number, exc
-            )
-            return None
-        return dict(payload) if isinstance(payload, dict) else None
-
-    def strict_review_terminal_artifact(
-        self, pr_number: int, head_sha: str
-    ) -> StrictReviewArtifact | None:
-        """Return one authenticated terminal result for the exact current head.
-
-        This is intentionally separate from the GO-only merge-proof accessor:
-        a durable NOGO must remain observable after a process crash so the
-        resumed strict-review stage can contain and fail back rather than
-        mistaking it for another coordinator's live lease.  Historical v1
-        NOGOs remain revocations, while only v2 GO may authorize a merge.
-        """
-        if not self.repo or not re.fullmatch(r"[0-9a-fA-F]{40}", head_sha):
-            return None
-        login = self._strict_review_login()
-        if login is None:
-            return None
-        comments = self._owned_strict_review_comments(pr_number, login)
-        if comments is None:
-            return None
-        terminal = self._terminal_strict_verdict(comments, head_sha)
-        if terminal is None:
-            return None
-        return StrictReviewArtifact(
-            is_go=terminal.is_go,
-            head_sha=terminal.head_sha,
-            verdict=terminal.verdict,
-            verdict_body=terminal.verdict_body,
-            schema_version=terminal.schema_version,
-        )
-
-    def strict_review_artifact(self, pr_number: int, head_sha: str) -> StrictReviewArtifact | None:
-        """Return only a current-head, elected, fenced v2 GO proof."""
-        terminal = self.strict_review_terminal_artifact(pr_number, head_sha)
-        if terminal is None or not terminal.is_go:
-            return None
-        # ``strict_review_terminal_artifact`` can return a legacy NOGO for
-        # containment, but only a v2 result is merge authority.
-        if terminal.schema_version != 2:
-            return None
-        return terminal
-
-    def claim_strict_review_lease(self, pr_number: int, head_sha: str) -> StrictReviewLease | None:
-        """Append and elect one durable lease before a reviewer is dispatched."""
-        if (
-            self._skip(f"claim strict-review lease on PR #{pr_number}")
-            or self._repo_slug is None
-            or re.fullmatch(r"[0-9a-fA-F]{40}", head_sha) is None
-        ):
-            return None
-        login = self._strict_review_login()
-        if login is None:
-            return None
-        comments = self._owned_strict_review_comments(pr_number, login)
-        if comments is None or self._terminal_strict_verdict(comments, head_sha) is not None:
-            return None
-        now_epoch = int(time.time())
-        if self._elected_lease(self._strict_leases(comments, head_sha), now_epoch) is not None:
-            return None
-        lease_id = uuid4().hex
-        body = render_strict_review_lease(
-            head_sha, lease_id, expires_at=now_epoch + _STRICT_REVIEW_LEASE_TTL_S
-        )
-        created = self._append_strict_review_comment(pr_number, body)
-        if created is None:
-            return None
-        created_id = self._strict_comment_id(created)
-        if created_id is None:
-            return None
-        created = dict(created)
-        created.setdefault("databaseId", created_id)
-        created.setdefault("body", body)
-        created.setdefault("user", {"login": login})
-        # Re-read GitHub after the append before electing. A competing
-        # coordinator can post a lower-ID lease between our pre-write snapshot
-        # and this response; dispatching from only the local snapshot would
-        # waste a second reviewer even though publication fencing later wins.
-        refreshed = self._owned_strict_review_comments(pr_number, login)
-        if refreshed is None:
-            return None
-        elected = self._elected_lease(self._strict_leases(refreshed, head_sha), now_epoch)
-        if elected is None or elected.lease_id != lease_id or elected.comment_id != created_id:
-            return None
-        return elected
-
-    def publish_strict_review_artifact(
-        self,
-        pr_number: int,
-        head_sha: str,
-        verdict_body: str,
-        *,
-        is_go: bool,
-        lease: StrictReviewLease,
-    ) -> bool:
-        """Append a fenced v2 verdict only while the caller still owns the lease."""
-        if lease.head_sha.lower() != head_sha.lower():
-            return False
-        if self._skip(f"publish strict-review artifact on PR #{pr_number}"):
-            return True
-        login = self._strict_review_login()
-        if login is None:
-            return False
-        comments = self._owned_strict_review_comments(pr_number, login)
-        now_epoch = int(time.time())
-        if comments is None or self._terminal_strict_verdict(comments, head_sha) is not None:
-            return False
-        elected = self._elected_lease(self._strict_leases(comments, head_sha), now_epoch)
-        if elected != lease:
-            return False
-        rendered = render_fenced_strict_review_artifact(
-            head_sha,
-            verdict_body,
-            is_go=is_go,
-            lease_id=lease.lease_id,
-            lease_comment_id=lease.comment_id,
-        )
-        if self._append_strict_review_comment(pr_number, rendered) is None:
-            return False
-        refreshed = self._owned_strict_review_comments(pr_number, login)
-        terminal = self._terminal_strict_verdict(refreshed or [], head_sha)
-        return bool(
-            terminal is not None
-            and terminal.is_go == is_go
-            and terminal.schema_version == 2
-            and terminal.lease_id == lease.lease_id
-            and terminal.lease_comment_id == lease.comment_id
         )
 
     def post_review_threads(
@@ -1809,7 +1442,7 @@ class PipelineGitHub:
         """Persist and read back an exact-PR/head remote arm confirmation.
 
         This transition occurs only after merge_wait has read a matching live
-        head, strict-GO proof, and ``autoMergeRequest`` from GitHub.  The
+        head, approval label, and ``autoMergeRequest`` from GitHub. The
         pre-arm record is intentionally not enough to take this transition:
         accepting a mismatched record would let a restart skip ARM for a
         different PR or commit.

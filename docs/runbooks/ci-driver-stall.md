@@ -1,9 +1,8 @@
 # Runbook: CI-Driver Stall
 
-Use this runbook when a PR has completed independent `strict_review`, has a
-current-head authenticated GO proof, and remains blocked after CI is green.
-`merge_wait` is the sole automatic armer; it revalidates the proof and current
-head immediately before and after its conditional arm request.
+Use this runbook when a PR carries loop-owned `state:implementation-go` and
+remains blocked after the automation loop has observed CI. `merge_wait` is the
+sole automatic armer and conditionally arms the current head.
 
 ## Containment
 
@@ -21,9 +20,9 @@ is a blocking failure. Do not enable auto-merge manually.
 
 ## Resolution
 
-Confirm the exact current head has both `state:implementation-go` and a
-strict-GO artifact, then rerun the bounded drive-green scope. It will either
-conditionally arm the reviewed head or safely return it to `strict_review`:
+Confirm the PR has `state:implementation-go`, then rerun the bounded
+drive-green scope. It will either conditionally arm the current head or return
+it to the loop's PR-review pass:
 
 ```bash
 uv run hephaestus-automation-loop --prs <N> --phases drive-green --loops 1 --max-workers 1
@@ -31,8 +30,8 @@ uv run hephaestus-automation-loop --prs <N> --phases drive-green --loops 1 --max
 
 ## Follow-Up
 
-If the proof is absent, stale, NOGO, or the head differs, do not attempt to arm:
-the pipeline must obtain a new strict review for the live head.
+If the label is absent, do not attempt to arm: the loop must complete its
+review and CI-observation path first.
 
 ## See Also
 

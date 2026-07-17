@@ -8,11 +8,11 @@ from pathlib import Path
 from .catalog import PromptCatalog
 
 _DEFAULT_PLUGIN_SKILLS_SUBPATH = Path(".claude/plugins/marketplaces/Hephaestus/skills")
-_STRICT_SKILL_NAME = "review-pr-strict"
+_STRICT_SKILL_NAME = "pr-review"
 
 
 def _skill_reference() -> str:
-    """Resolve the optional installed strict-review skill reference."""
+    """Resolve the installed Athena pr-review skill when available."""
     override = os.environ.get("HEPHAESTUS_PLUGIN_SKILLS_DIR")
     skills_dir = Path(override) if override else Path.home() / _DEFAULT_PLUGIN_SKILLS_SUBPATH
     candidate = skills_dir / _STRICT_SKILL_NAME / "SKILL.md"
@@ -24,11 +24,11 @@ def build_strict_review_rubric() -> str:
     skill_ref = _skill_reference()
     if skill_ref:
         skill_line = (
-            "`review-pr-strict` skill (rubric summarized below — refer to the full skill at\n"
+            "`$athena:pr-review` skill (rubric summarized below — refer to the full skill at\n"
             f"`{skill_ref}`\nif available):"
         )
     else:
-        skill_line = "`review-pr-strict` skill (rubric summarized below):"
+        skill_line = "`$athena:pr-review` skill (rubric summarized below):"
     return PromptCatalog.current().render("strict_rubrics/reviewer.j2", skill_line=skill_line)
 
 
@@ -38,26 +38,32 @@ def _fragment(name: str) -> str:
 
 
 def get_strict_review_output_format() -> str:
+    """Return the strict review's verdict-format fragment."""
     return _fragment("review_output_format")
 
 
 def get_plan_strict_rubric() -> str:
+    """Return the strict plan-review rubric."""
     return _fragment("plan")
 
 
 def get_plan_loop_strict_rubric() -> str:
+    """Return the iterative plan-review rubric."""
     return _fragment("plan_loop")
 
 
 def get_implementation_loop_strict_rubric() -> str:
+    """Return the iterative implementation-review rubric."""
     return _fragment("implementation_loop")
 
 
 def get_pr_strict_rubric() -> str:
+    """Return the PR-review rubric."""
     return _fragment("pr")
 
 
 def get_full_sweep_suffix() -> str:
+    """Return the final review sweep fragment."""
     return _fragment("full_sweep")
 
 

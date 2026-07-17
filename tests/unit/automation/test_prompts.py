@@ -155,7 +155,7 @@ class TestPRReviewAnalysisPrompt:
         assert "D1 — Correctness & completeness" in out
         assert "D2 — Diff review of CHANGED lines only" in out
         assert "D3 — Inline-comment quality" in out
-        assert "D4 — CI failure analysis" in out
+        assert "D4 — Verification evidence" in out
         # D5 — runnable-evidence gate for metric/training-run claims (ADR-014).
         assert "D5 — Runnable evidence for metric / training-run claims" in out
         assert "committed into the diff" in out

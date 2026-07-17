@@ -1644,24 +1644,9 @@ class Coordinator:
                 continue
             has_go, _has_no_go = github.pr_has_implementation_state_label(pr)
             if has_go:
-                if issue_number is None:
-                    entries.append(
-                        _seeding.SeedEntry(
-                            kind="pr",
-                            identifier=pr,
-                            stage=StageName.FINISHED,
-                            reason=(
-                                f"PR #{pr} has no linked issue; strict review requires "
-                                "task requirements"
-                            ),
-                            pr_number=pr,
-                            passed=False,
-                        )
-                    )
-                    continue
                 stage, reason, passed = self._scope_seed_decision(
                     scope_identifier,
-                    StageName.STRICT_REVIEW,
+                    StageName.MERGE_WAIT,
                     f"PR #{pr} carries {STATE_IMPLEMENTATION_GO}",
                     scope_stages,
                 )

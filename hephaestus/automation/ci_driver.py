@@ -66,9 +66,9 @@ logger = logging.getLogger(__name__)
 # re-exported above for backward compatibility — ``_pr_is_failing`` below and
 # ``loop_repo_manager._count_failing_prs`` both consume it from here.
 
-#: Contiguous stage subset the CI-driver CLI runs: independent strict review,
-#: CI drive-green, then the sole conditional merge-wait arm. A green PR reaches
-#: merge_wait only after an exact-head strict-GO proof, which it revalidates.
+#: Contiguous stage subset the CI-driver CLI runs: in-loop `$athena:pr-review`,
+#: CI observation, then the sole conditional merge-wait arm. A PR reaches
+#: merge_wait only after the loop applies its implementation-go label.
 _CI_DRIVER_SCOPE_STAGES: frozenset[StageName] = frozenset(
     {StageName.STRICT_REVIEW, StageName.CI, StageName.MERGE_WAIT}
 )

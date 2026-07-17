@@ -1391,16 +1391,6 @@ class TestStrictReviewEvidence:
                 return SimpleNamespace(stdout=diff)
             if argv == [
                 "pr",
-                "checks",
-                "71",
-                "--json",
-                "name,state,bucket,workflow",
-                "--repo",
-                "org/repo-a",
-            ]:
-                return SimpleNamespace(stdout=json.dumps([{"name": "unit", "bucket": "pass"}]))
-            if argv == [
-                "pr",
                 "view",
                 "71",
                 "--json",
@@ -1433,9 +1423,9 @@ class TestStrictReviewEvidence:
         assert evidence.issue_title == "Strict gate"
         assert evidence.issue_body == "Required."
         assert evidence.diff.startswith("diff --git")
-        assert "unit: status=completed, conclusion=success" in evidence.ci_status
         assert evidence.prior_pr_review_verdict == "Grade: A\nVerdict: GO"
         assert ["pr", "diff", "71", "--repo", "org/repo-a"] in calls
+        assert not any(call[:2] == ["pr", "checks"] for call in calls)
         assert all("--repo" in call for call in calls if call[0] == "pr")
 
     def test_empty_diff_is_ambiguous_and_fails_closed(

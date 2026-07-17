@@ -10,7 +10,7 @@ from hephaestus.automation.prompts import _strict_rubric as sr
 def test_skill_reference_uses_env_var_when_set(tmp_path, monkeypatch):
     """When HEPHAESTUS_PLUGIN_SKILLS_DIR is set, _skill_reference() uses it."""
     skill_dir = tmp_path / "skills"
-    skill_path = skill_dir / "review-pr-strict" / "SKILL.md"
+    skill_path = skill_dir / "pr-review" / "SKILL.md"
     skill_path.parent.mkdir(parents=True)
     skill_path.write_text("stub")
     monkeypatch.setenv("HEPHAESTUS_PLUGIN_SKILLS_DIR", str(skill_dir))
@@ -36,7 +36,7 @@ def test_rubric_contains_no_hardcoded_home_path(monkeypatch, tmp_path):
 def test_rubric_includes_skill_path_when_file_exists(tmp_path, monkeypatch):
     """When SKILL.md exists, rubric prompt includes the resolved path."""
     skill_dir = tmp_path / "skills"
-    skill_md = skill_dir / "review-pr-strict" / "SKILL.md"
+    skill_md = skill_dir / "pr-review" / "SKILL.md"
     skill_md.parent.mkdir(parents=True)
     skill_md.write_text("stub")
     monkeypatch.setenv("HEPHAESTUS_PLUGIN_SKILLS_DIR", str(skill_dir))

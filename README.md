@@ -455,10 +455,10 @@ hephaestus-check-complexity --help
 ## Contributing
 
 The `main` branch is protected; all changes go through a pull request. CI blocks
-PRs that fail its issue-reference, signature, and DCO checks. The pipeline
-arms auto-merge only in `merge_wait`, after `strict_review` has published and
-the pipeline has revalidated a current-head authenticated GO proof. The
-`auto-merge-policy` check is advisory; the queue gate is authoritative.
+PRs that fail its issue-reference, signature, and DCO checks. The loop runs
+`$athena:pr-review`, observes CI (with `NO_CHECKS` supported), writes
+`state:implementation-go`, then arms only in `merge_wait`. The
+`auto-merge-policy` check is advisory; no CI workflow authorizes the loop.
 
 1. Create a feature branch named `<issue-number>-description`
    (`git checkout -b 123-amazing-feature`).
@@ -467,9 +467,8 @@ the pipeline has revalidated a current-head authenticated GO proof. The
 3. Push the branch (`git push -u origin 123-amazing-feature`).
 4. Open a pull request whose body contains the literal line `Closes #123`
    (capital `C`, no colon, on its own line — `Fixes`/`Resolves` are **not** accepted).
-5. Do not enable auto-merge manually. The queue's independent strict-review
-   stage and `merge_wait` are its sole automatic authority, and only arm after
-   a current-head authenticated GO proof.
+5. Do not enable auto-merge manually. The automation loop's review, label, and
+   `merge_wait` stages are its sole automatic authority.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full process.
 

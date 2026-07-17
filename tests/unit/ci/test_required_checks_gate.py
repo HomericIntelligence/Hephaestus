@@ -20,7 +20,6 @@ from hephaestus.ci.required_checks_gate import GATE_JOB, _unwired_jobs
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 REQUIRED_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "_required.yml"
-STRICT_PROOF_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "strict-review-proof.yml"
 
 # Jobs intentionally NOT gated by required-checks-gate:
 #   - auto-merge-policy: advisory only (see its comment in _required.yml); must
@@ -117,41 +116,6 @@ class TestRequiredChecksGate:
         """Non-code events must not emit skipped heavy-job contexts for a code head."""
         trigger = workflow[True]["pull_request"]
         assert trigger["types"] == ["opened", "synchronize", "reopened", "ready_for_review"]
-
-    def test_strict_review_proof_uses_a_trusted_base_workflow(self, jobs: dict[str, Any]) -> None:
-        """A candidate PR must not control the executable merge-authorization verifier."""
-        with open(STRICT_PROOF_WORKFLOW, encoding="utf-8") as f:
-            proof_workflow = yaml.safe_load(f)
-        trigger = proof_workflow[True]["pull_request_target"]
-        assert {"labeled", "synchronize"} <= set(trigger["types"])
-        assert trigger["branches"] == ["main"]
-        proof = proof_workflow["jobs"]["strict-review-proof"]
-        assert proof["name"] == "publish-strict-review-proof"
-        assert proof_workflow["permissions"] == {
-            "contents": "read",
-            "pull-requests": "read",
-            "statuses": "write",
-        }
-        assert proof["env"]["EVENT_HEAD_SHA"] == "${{ github.event.pull_request.head.sha }}"
-        assert proof["env"]["AUTOMATION_LOGIN"] == "${{ vars.HEPHAESTUS_AUTOMATION_LOGIN }}"
-        steps = proof["steps"]
-        pending = steps[0]
-        assert pending["name"] == "Invalidate any earlier strict-review proof for this head"
-        assert "state=pending" in pending["run"]
-        assert "/statuses/$EVENT_HEAD_SHA" in pending["run"]
-        rendered_steps = "\n".join(str(step.get("run", "")) for step in steps)
-        assert "strict_review_proof" in rendered_steps
-        assert "issues/$PR_NUMBER/comments" in rendered_steps
-        assert "headRefOid" in rendered_steps
-        assert "/statuses/$EVENT_HEAD_SHA" in rendered_steps
-        assert 'context="strict-review-proof"' in rendered_steps
-        assert 'state="$status_state"' in rendered_steps
-        assert "uv sync --no-default-groups --locked" in rendered_steps
-        checkout = next(
-            step for step in steps if step.get("uses", "").startswith("actions/checkout")
-        )
-        assert checkout["with"]["ref"] == "${{ github.event.pull_request.base.sha }}"
-        assert "strict-review-proof" not in jobs[GATE_JOB]["needs"]
 
     def test_gate_assertion_fires_on_unwired_job(self) -> None:
         """Negative-path: the invariant check must flag a job absent from needs:.

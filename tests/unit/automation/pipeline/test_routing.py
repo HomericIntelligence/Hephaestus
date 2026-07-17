@@ -181,7 +181,7 @@ class TestROUTES:
                 next=StageName.PR_REVIEW,
                 fail_routes={
                     "plan_not_go": StageName.PLAN_REVIEW,
-                    "already_implementation_go_pr": StageName.STRICT_REVIEW,
+                    "already_implementation_go_pr": StageName.MERGE_WAIT,
                     "*": StageName.FINISHED,
                 },
                 budgets={"implement": 2, "test_fix": 1},
@@ -210,7 +210,7 @@ class TestROUTES:
                 fail_routes={
                     "fix_exhausted": StageName.IMPLEMENTATION,
                     "not_implementation_go": StageName.STRICT_REVIEW,
-                    "not_strict_review_go": StageName.STRICT_REVIEW,
+                    "review_stale": StageName.STRICT_REVIEW,
                     "missing_worktree": StageName.IMPLEMENTATION,
                     "no_pr": StageName.FINISHED,
                     "*": StageName.CI,
@@ -221,7 +221,7 @@ class TestROUTES:
                 next=StageName.FINISHED,
                 fail_routes={
                     "closed": StageName.FINISHED,
-                    "strict_gate_unavailable": StageName.STRICT_REVIEW,
+                    "not_implementation_go": StageName.STRICT_REVIEW,
                     "arm_confirm_failed": StageName.STRICT_REVIEW,
                     "*": StageName.FINISHED,
                 },
@@ -232,10 +232,10 @@ class TestROUTES:
         assert expected == ROUTES
 
     def test_ci_requires_strict_review_before_maintenance(self) -> None:
-        """Both absent implementation state and absent proof return to strict review."""
+        """Both absent implementation state and stale review return to strict review."""
         ci_route = ROUTES[StageName.CI]
         assert ci_route.fail_routes["not_implementation_go"] is StageName.STRICT_REVIEW
-        assert ci_route.fail_routes["not_strict_review_go"] is StageName.STRICT_REVIEW
+        assert ci_route.fail_routes["review_stale"] is StageName.STRICT_REVIEW
 
     def test_merge_budget_provenance_uses_stable_source_references(self) -> None:
         """#1902: merge-budget provenance should not pin volatile line numbers."""

@@ -13,9 +13,7 @@ from .base import (
     StageGitHub,
     StageOutcome,
     StepResult,
-    StrictReviewArtifact,
     StrictReviewEvidence,
-    StrictReviewLease,
 )
 from .ci import CiStage
 from .finished import FinishedStage
@@ -43,8 +41,6 @@ __all__ = [
     "StageGitHub",
     "StageOutcome",
     "StepResult",
-    "StrictReviewArtifact",
     "StrictReviewEvidence",
-    "StrictReviewLease",
     "StrictReviewStage",
 ]

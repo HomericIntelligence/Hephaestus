@@ -334,7 +334,7 @@ class TestStrictGateWorkflow:
         """The workflow reports state; the queue remains the sole armer."""
         text = REQUIRED_WORKFLOW.read_text(encoding="utf-8")
         assert "auto-merge-policy" in text
-        assert "queue-owned strict-review and merge-wait controls are authoritative" in text
+        assert "automation loop owns review" in text
         assert "auto-merge is currently disabled" in text
         assert "Waiting for label-triggered auto-merge workflow" not in text
         assert "gh pr merge $PR_NUMBER --auto --squash" not in text

@@ -333,7 +333,6 @@ class TestQuiescence:
                 issue_title="Strict-review task",
                 issue_body="Review the current head.",
                 diff="diff --git a/file.py b/file.py\n+change",
-                ci_status="checks clean",
                 prior_pr_review_verdict="Grade: A\nVerdict: GO",
             ),
         )

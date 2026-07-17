@@ -48,7 +48,7 @@ _EXPECTED_REASONS: dict[StageName, set[str]] = {
     StageName.PR_REVIEW: {"agent_error"},
     # no_pr/timeout are emitted as FINISH_FAIL (terminal), not FAIL_BACK.
     StageName.STRICT_REVIEW: {"nogo"},
-    StageName.CI: {"fix_exhausted", "not_implementation_go", "not_strict_review_go"},
+    StageName.CI: {"fix_exhausted", "not_implementation_go", "review_stale"},
     # #2054 terminalizes merge_wait; it emits no cross-stage FAIL_BACK reason.
     StageName.MERGE_WAIT: set(),
 }
@@ -109,14 +109,13 @@ def test_scan_is_not_vacuous() -> None:
 def test_named_reasons_route_where_the_doc_says() -> None:
     """The doc's key cross-stage arrows hold for the emitted vocabulary."""
     assert ROUTES[StageName.PR_REVIEW].fail_routes["agent_error"] == StageName.IMPLEMENTATION
-    assert ROUTES[StageName.PR_REVIEW].fail_routes["human_blocked"] == StageName.FINISHED
     assert ROUTES[StageName.IMPLEMENTATION].fail_routes["plan_not_go"] == StageName.PLAN_REVIEW
     assert (
         ROUTES[StageName.IMPLEMENTATION].fail_routes["already_implementation_go_pr"]
-        == StageName.STRICT_REVIEW
+        == StageName.MERGE_WAIT
     )
     assert ROUTES[StageName.CI].fail_routes["fix_exhausted"] == StageName.IMPLEMENTATION
     assert ROUTES[StageName.CI].fail_routes["not_implementation_go"] == StageName.STRICT_REVIEW
-    assert ROUTES[StageName.CI].fail_routes["not_strict_review_go"] == StageName.STRICT_REVIEW
+    assert ROUTES[StageName.CI].fail_routes["review_stale"] == StageName.STRICT_REVIEW
     assert ROUTES[StageName.CI].fail_routes["no_pr"] == StageName.FINISHED
     assert ROUTES[StageName.MERGE_WAIT].fail_routes["closed"] == StageName.FINISHED

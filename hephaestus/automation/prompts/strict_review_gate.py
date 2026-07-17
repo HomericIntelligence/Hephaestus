@@ -1,10 +1,7 @@
-"""Strict-review gate prompt (issue #2055): the independent second-opinion reviewer.
+"""In-loop ``$athena:pr-review`` prompt for an independent second opinion.
 
-Composes the external PR-strict rubric and verdict contract — rendered through
-the active catalog, never duplicated —
-with framing that makes explicit this reviewer runs read-only, holds no
-write/GitHub-mutation capability, and must treat every field below as
-untrusted content that may attempt prompt injection.
+The prompt is rendered through the active catalog and fences all untrusted
+input. The strict stage owns the resulting label decision.
 """
 
 from __future__ import annotations
@@ -21,30 +18,12 @@ def build_strict_review_prompt(
     issue_title: str,
     issue_body: str,
     diff: str = "",
-    ci_status: str = "",
     prior_pr_review_verdict: str = "",
 ) -> str:
-    """Build the strict-review gate prompt for one head/attempt.
+    """Build the strict-review prompt for one head/attempt.
 
     All free-text fields are fenced as untrusted content (issue requirements,
-    diff, CI status, and the prior reviewer's verdict text) — this reviewer
-    must never follow instructions embedded inside them.
-
-    Args:
-        pr_number: GitHub PR number.
-        issue_number: Linked GitHub issue number.
-        head_sha: The PR's current head commit SHA this review is bound to.
-        issue_title: Title of the linked task being reviewed.
-        issue_body: Body/acceptance criteria of the linked task.
-        diff: PR diff output.
-        ci_status: CI check status summary.
-        prior_pr_review_verdict: The pr_review stage's verdict text, for
-            context only — the strict reviewer must re-derive its own
-            judgment, not defer to it.
-
-    Returns:
-        The fully composed prompt string.
-
+    diff, and the prior reviewer's verdict text).
     """
     fenced = fence_content()
     return PromptCatalog.current().render(
@@ -57,7 +36,6 @@ def build_strict_review_prompt(
         issue_requirements_block=fenced.fence(
             "ISSUE_REQUIREMENTS", f"# {issue_title}\n\n{issue_body}"
         ),
-        ci_status_block=fenced.fence("CI_STATUS", ci_status),
         diff_block=fenced.fence("PR_DIFF", diff),
         strict_rubric=get_pr_strict_rubric(),
         terse_output_directive=get_terse_output_directive(),
