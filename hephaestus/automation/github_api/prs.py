@@ -247,8 +247,8 @@ def gh_pr_create(
     2. Every commit on *branch* (vs *base*) must be cryptographically signed.
 
     ``auto_merge`` is retained for API compatibility but ignored: only
-    ``MergeWaitStage`` may conditionally arm after a head-bound strict-review
-    proof.
+    ``MergeWaitStage`` may conditionally arm after loop-owned PR review
+    in-loop review handoff.
 
     The CI gate (``.github/workflows/_required.yml`` job ``pr-policy``) and the
     PR review prompt re-check the same three properties, so a slip past one
@@ -259,7 +259,7 @@ def gh_pr_create(
         title: PR title
         body: PR description
         auto_merge: Deprecated compatibility flag; ignored because this is not
-            the strict-gated MergeWaitStage armer.
+            the label-gated MergeWaitStage armer.
         base: Base branch to compare against for signed-commit validation
 
     Returns:
@@ -341,7 +341,7 @@ def gh_pr_create(
 
         if auto_merge:
             _api.logger.warning(
-                "Ignoring auto_merge=True for PR #%s while the strict-review gate is unavailable",
+                "Ignoring auto_merge=True for PR #%s while the PR-review gate is unavailable",
                 pr_number,
             )
         if not defer_auto_merge(pr_number, lambda args: _api._gh_call(args, check=False)):

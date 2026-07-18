@@ -233,6 +233,37 @@ class TestRunPrReviewAnalysis:
             )
         assert captured["agent"] == "pr-reviewer-r1"
 
+    def test_claude_review_scope_can_run_athena_pr_review_skill(self, tmp_path: Path) -> None:
+        """The legacy review path keeps the skill's read-only helper surface."""
+        captured: dict[str, str] = {}
+
+        def _fake_invoke(**kwargs: object) -> tuple[str, str]:
+            captured["allowed_tools"] = str(kwargs["allowed_tools"])
+            return (
+                '{"result": "```json\\n{\\"comments\\": [], \\"summary\\": \\"ok\\"}\\n```"}',
+                "",
+            )
+
+        with (
+            patch("hephaestus.automation.pr_review_core.get_repo_root", return_value=tmp_path),
+            patch("hephaestus.automation.pr_review_core.get_repo_slug", return_value="Repo"),
+            patch(
+                "hephaestus.automation.pr_review_core.invoke_claude_with_session",
+                side_effect=_fake_invoke,
+            ),
+        ):
+            run_pr_review_analysis(
+                pr_number=1,
+                issue_number=1,
+                worktree_path=tmp_path,
+                context={"pr_diff": "d"},
+                agent="claude",
+                state_dir=tmp_path,
+                dry_run=False,
+            )
+
+        assert captured["allowed_tools"] == "Read,Glob,Grep,Bash,Skill,Agent,WebFetch"
+
     def test_error_envelope_propagates_not_parsed_as_verdict(self, tmp_path: Path) -> None:
         """An is_error:true envelope must raise, not be parsed into a bogus verdict.
 
@@ -548,10 +579,10 @@ class TestReviewPrInline:
 
 
 class TestVerdictFromProseNotSummary:
-    """The verdict (Verdict: GO/NOGO) lives in the review PROSE, not the JSON summary.
+    """The Grade/Verdict pair lives in review prose, not the JSON summary.
 
     Regression for the AMBIGUOUS misread: review_pr_inline must return the
-    verdict-bearing prose so parse_review_verdict sees `Verdict: NOGO`, even
+    verdict-bearing prose so parse_review_verdict sees `Grade`/`Verdict`, even
     though the JSON `summary` field (posted to GitHub) carries no verdict line.
     """
 
@@ -559,7 +590,7 @@ class TestVerdictFromProseNotSummary:
         """run_pr_review_analysis returns the prose body (carrying Verdict:) as review_text."""
         prose = (
             "## Review\nFindings here.\n\n"
-            "Verdict: NOGO — two real defects.\n\n"
+            "Grade: F\nVerdict: NOGO — two real defects.\n\n"
             '```json\n{"comments": [], "summary": "two defects (no verdict here)"}\n```'
         )
         # Claude wraps the prose in a JSON result envelope.
@@ -587,7 +618,7 @@ class TestVerdictFromProseNotSummary:
             )
         # summary is the JSON field (no verdict); review_text is the prose (has verdict).
         assert out["summary"] == "two defects (no verdict here)"
-        assert "Verdict: NOGO" in out["review_text"]
+        assert "Grade: F\nVerdict: NOGO" in out["review_text"]
 
     def test_review_pr_inline_returns_verdict_text_not_summary(self, tmp_path: Path) -> None:
         """review_pr_inline returns the verdict-bearing prose, so the loop parses NOGO."""
@@ -598,7 +629,7 @@ class TestVerdictFromProseNotSummary:
                 {"path": "a.py", "line": 1, "side": "RIGHT", "severity": "major", "body": "x"}
             ],
             "summary": "a defect (no verdict token here)",
-            "review_text": "## Review\nProse.\n\nVerdict: NOGO — a real defect.\n",
+            "review_text": "## Review\nProse.\n\nGrade: F\nVerdict: NOGO — a real defect.\n",
         }
         with (
             patch(

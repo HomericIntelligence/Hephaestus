@@ -9,17 +9,19 @@ from unittest.mock import patch
 
 import pytest
 
-from hephaestus.automation.claude_invoke import ReviewVerdict, parse_review_verdict
+from hephaestus.automation.claude_invoke import ReviewVerdict
 from hephaestus.automation.pipeline.events import ZeroThreadNogoAction
 from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages.pr_review import (
+    ADOPT_WORKTREE_WAIT,
     PR_FINISH,
     REVIEW_ERROR_RETRY_CAP,
     PrReviewStage,
     _surviving_threads,
 )
+from hephaestus.automation.pipeline.work_item import ItemKind
 from hephaestus.automation.prompts.address_review import get_address_review_prompt
 from hephaestus.automation.prompts.implementation import get_impl_resume_feedback_prompt
 from hephaestus.automation.state_labels import STATE_SKIP
@@ -29,7 +31,9 @@ from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 def _verdict(kind: str) -> ReviewVerdict:
     """Build a ReviewVerdict of the given kind for EVAL tests."""
-    return ReviewVerdict(grade=None, verdict=kind, raw=f"review text ({kind})")
+    return ReviewVerdict(
+        grade="A" if kind == "GO" else "F", verdict=kind, raw=f"review text ({kind})"
+    )
 
 
 def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int = 80) -> Any:
@@ -56,6 +60,42 @@ def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int
 class TestPrReviewStageOnEnter:
     """on_enter cycle-relative counter reset (attempts are per-lifetime)."""
 
+    def test_on_enter_hydrates_authoritative_pr_review_context(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Every PR review receives the current diff and PR description."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(
+            pr_review_context={
+                "pr_diff": "diff --git a/example.py b/example.py\n+new line\n",
+                "pr_description": "Closes #1\n\nReview this implementation.",
+            }
+        )
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="ENTER")
+
+        assert stage.on_enter(item, ctx) is None
+        assert item.payload["pr_diff"] == "diff --git a/example.py b/example.py\n+new line\n"
+        assert item.payload["pr_description"] == "Closes #1\n\nReview this implementation."
+
+    def test_on_enter_stops_when_pr_review_context_is_unavailable(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A review may not issue a verdict without its authoritative inputs."""
+
+        class ContextUnavailableGitHub(FakeStageGitHub):
+            def pr_review_context(self, pr_number: int) -> dict[str, str] | None:
+                del pr_number
+                return None
+
+        stage = PrReviewStage()
+        ctx = make_ctx(github=ContextUnavailableGitHub())
+        item = make_work_item(issue=1, pr=1001, state="ENTER")
+
+        assert stage.on_enter(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "pr_review_context_unavailable"
+        )
+
     def test_on_enter_defers_auto_merge_and_proceeds(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -75,7 +115,7 @@ class TestPrReviewStageOnEnter:
         stage = PrReviewStage()
         github = FakeStageGitHub()
         ctx = make_ctx(github=github, dry_run=True)
-        item = make_work_item(issue=1, pr=1001, state="ENTER")
+        item = make_work_item(issue=1, pr=1001, kind=ItemKind.PR, state="ENTER")
 
         assert stage.on_enter(item, ctx) is None
         assert github.mutation_log == [("defer_auto_merge", (1001,))]
@@ -184,6 +224,81 @@ class TestPrReviewStageStep:
         assert result.disposition == Disposition.FAIL_BACK
         assert result.note == "agent_error"
 
+    def test_direct_pr_without_worktree_adopts_before_review(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A direct PR adopts its exact branch without entering implementation."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(pr_head_branch="review-pr")
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, kind=ItemKind.PR, state="ENTER")
+        assert item.worktree == ""
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.op == "create_worktree"
+        assert result.on_done_state == ADOPT_WORKTREE_WAIT
+        assert result.job.kwargs == {
+            "issue_number": 1,
+            "branch_name": "review-pr",
+            "refresh_base": False,
+            "isolated": True,
+            "sync_to_remote": True,
+            "pr_number": 1001,
+            "repo_root": str(ctx.paths.repo_root),
+        }
+        assert item.payload["existing_pr"] is True
+        assert item.payload["direct_pr_worktree_pending"] is True
+        assert "agent_error_failback" not in item.payload
+
+    def test_issue_seeded_existing_pr_without_worktree_adopts_before_review(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Drive-green issue seeds adopt their existing PR checkout too."""
+        stage = PrReviewStage()
+        ctx = make_ctx(github=FakeStageGitHub(pr_head_branch="review-pr"))
+        item = make_work_item(issue=1, pr=1001, kind=ItemKind.ISSUE, state="ENTER")
+        item.payload["existing_pr"] = True
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.op == "create_worktree"
+        assert result.job.kwargs["isolated"] is True
+
+    def test_direct_pr_adoption_completion_enters_review_wait(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Completion is recorded before the coordinator changes WAIT state."""
+        stage = PrReviewStage()
+        ctx = make_ctx(github=FakeStageGitHub(pr_head_branch="review-pr"))
+        item = make_work_item(
+            issue=1,
+            pr=1001,
+            kind=ItemKind.PR,
+            state="ENTER",
+        )
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"path": "/tmp/review-pr", "dirty": False}),
+            ctx,
+        )
+        # ``Coordinator._handle_completion`` assigns on_done_state only after
+        # this callback, so mirror its durable ordering exactly.
+        item.state = ADOPT_WORKTREE_WAIT
+        result = stage.step(item, ctx)
+
+        assert result == Continue(next_state="REVIEW_WAIT")
+        assert item.worktree == "/tmp/review-pr"
+        assert item.payload["direct_pr_worktree"] == "/tmp/review-pr"
+        assert "direct_pr_worktree_pending" not in item.payload
+
     def test_enter_advances_to_review(self, make_ctx: Any, make_work_item: Any) -> None:
         """ENTER advances to REVIEW_WAIT."""
         stage = PrReviewStage()
@@ -198,7 +313,7 @@ class TestPrReviewStageStep:
     def test_review_wait_requests_review_with_in_worker_parse(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """REVIEW_WAIT submits the inline review job; verdict parsed in-worker.
+        """REVIEW_WAIT submits an in-worker parse retaining verdict and comments.
 
         A submission is NOT an iteration: counters advance only in EVAL and
         only for real verdicts (#1554/#1794).
@@ -213,9 +328,66 @@ class TestPrReviewStageStep:
         assert isinstance(result.job, AgentJob)  # narrow the job union
         assert result.on_done_state == "VALIDATE_WAIT"
         assert result.job.descr == "review"
-        assert result.job.parse is parse_review_verdict  # verdict parsed in-worker
+        assert result.job.sandbox == "read-only"
+        assert result.job.allowed_tools == "Read,Glob,Grep,Bash,Skill,Agent,WebFetch"
+        assert result.job.parse is not None
         assert result.job.prompt_kwargs["pr_number"] == 1001
         assert item.attempts["pr_review_iter"] == 0  # submission burns nothing
+
+    def test_review_parse_posts_structured_nogo_comments_and_routes_to_remediation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Structured NOGO comments survive the worker boundary and are actionable."""
+        events: list[Any] = []
+        stage = PrReviewStage()
+        github = FakeStageGitHub(unresolved=[(1, 0)], by_severity=[(1, 0, 0)])
+        ctx = make_ctx(github=github, event_fn=events.append)
+        item = make_work_item(issue=1, pr=1001, state="REVIEW_WAIT")
+        item.worktree = "/tmp/wt"
+        response = (
+            "This must be fixed.\n\nVerdict: NOGO\n\n```json\n"
+            '{"comments":[{"path":"hephaestus/automation/pipeline/stages/pr_review.py",'
+            '"line":500,"side":"RIGHT","severity":"critical","body":"race"}],'
+            '"summary":"race found"}\n```'
+        )
+
+        review_request = stage.step(item, ctx)
+        assert isinstance(review_request, JobRequest)
+        assert isinstance(review_request.job, AgentJob)
+        assert review_request.job.parse is not None
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value=review_request.job.parse(response)),
+            ctx,
+        )
+        assert item.payload["review_threads"] == [
+            {
+                "path": "hephaestus/automation/pipeline/stages/pr_review.py",
+                "line": 500,
+                "side": "RIGHT",
+                "severity": "critical",
+                "body": "race",
+            }
+        ]
+
+        item.state = "VALIDATE_WAIT"
+        stage.on_job_done(item, JobResult(ok=True, value='{"unaddressed": []}'), ctx)
+        item.state = "POST"
+        post = stage.step(item, ctx)
+        assert post == Continue(next_state="DIFFICULTY_WAIT")
+        assert github.reviews[1001][0]["comments"] == item.payload["review_threads"]
+
+        item.state = "DIFFICULTY_WAIT"
+        stage.on_job_done(item, JobResult(ok=True, value="critical"), ctx)
+        item.state = "ADDRESS_WAIT"
+        stage.on_job_done(item, JobResult(ok=True, value="addressed"), ctx)
+        item.state = "PUSH_WAIT"
+        stage.on_job_done(item, JobResult(ok=True, value=True), ctx)
+        item.state = "EVAL"
+
+        assert stage.step(item, ctx) == Continue(next_state="REVIEW_WAIT")
+        assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
+        assert events == []
 
     def test_review_wait_forwards_nitpick_config(self, make_ctx: Any, make_work_item: Any) -> None:
         """--nitpick must reach the strict PR-review prompt."""
@@ -228,6 +400,25 @@ class TestPrReviewStageStep:
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)
         assert result.job.prompt_kwargs["include_nitpicks"] is True
+
+    def test_validation_and_difficulty_jobs_are_read_only(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Review-only analysis never receives write-capable agent permissions."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="VALIDATE_WAIT")
+
+        validation = stage.step(item, ctx)
+        assert isinstance(validation, JobRequest)
+        assert isinstance(validation.job, AgentJob)
+        assert validation.job.sandbox == "read-only"
+
+        item.state = "DIFFICULTY_WAIT"
+        difficulty = stage.step(item, ctx)
+        assert isinstance(difficulty, JobRequest)
+        assert isinstance(difficulty.job, AgentJob)
+        assert difficulty.job.sandbox == "read-only"
 
     def test_review_wait_clears_stale_round_payload(
         self, make_ctx: Any, make_work_item: Any
@@ -321,17 +512,22 @@ class TestPrReviewStageStep:
     def test_post_with_zero_open_automation_threads_skips_to_eval(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """No open automation threads: nothing to address, go straight to EVAL."""
+        """A zero-finding review still posts its final grade and verdict."""
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(0, 0)])
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, pr=1001, state="POST")
+        item.payload["review_verdict"] = _verdict("GO")
+        item.payload["review_text"] = "Grade: A\nVerdict: GO\nAll clear."
 
         result = stage.step(item, ctx)
 
         assert isinstance(result, Continue)
         assert result.next_state == "EVAL"
-        assert github.mutation_log == []  # no threads -> no post
+        assert github.mutation_log == [("gh_pr_review_post", (1001, "COMMENT"))]
+        assert github.reviews[1001][0]["comments"] == []
+        assert "Total grade: A" in github.reviews[1001][0]["summary"]
+        assert "Verdict: GO" in github.reviews[1001][0]["summary"]
 
     def test_difficulty_wait_requests_classification(
         self, make_ctx: Any, make_work_item: Any
@@ -416,6 +612,20 @@ class TestPrReviewStageStep:
         }
         assert result.on_done_state == "EVAL"
 
+    def test_address_refuses_fork_head_without_base_origin_write(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A fetched fork head may be reviewed but never addressed via origin."""
+        stage = PrReviewStage()
+        ctx = make_ctx(github=FakeStageGitHub(pr_head_writable=False))
+        item = make_work_item(issue=1, pr=1001, state="ADDRESS_WAIT")
+        item.payload["existing_pr"] = True
+        item.worktree = "/tmp/detached-pr-review"
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "pr_head_not_writable")
+
     def test_followup_wait_requests_follow_up(self, make_ctx: Any, make_work_item: Any) -> None:
         """Legacy FOLLOWUP_WAIT submits the follow-up job, then finishes."""
         stage = PrReviewStage()
@@ -487,10 +697,10 @@ class TestEvalVerdicts:
         assert stage.on_enter(item, ctx) is None
         assert github.mutation_log == [("defer_auto_merge", (1001,))]
 
-    def test_go_with_zero_threads_defers_and_advances_to_strict_review(
+    def test_go_with_zero_threads_marks_implementation_go_and_advances_to_merge_wait(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """Clean internal GO defers auto-merge before publishing its artifact."""
+        """The single PR-review gate marks GO; merge_wait remains the sole armer."""
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(0, 0)])
         ctx = make_ctx(github=github)
@@ -501,15 +711,13 @@ class TestEvalVerdicts:
         result = stage.step(item, ctx)
 
         assert isinstance(result, StageOutcome)
-        assert result == StageOutcome(Disposition.ADVANCE, "internal GO; strict review pending")
+        assert result == StageOutcome(Disposition.ADVANCE, "review GO; merge wait pending")
         assert github.mutation_log == [
             ("defer_auto_merge", (1001,)),
-            ("gh_issue_upsert_comment", (1001, "<!-- hephaestus-pr-review-go -->")),
+            ("mark_pr_implementation_go", (1001,)),
         ]
-        assert "<!-- hephaestus-pr-review-go -->" in github.comments[1001][0]
-        assert "Automated PR review result: GO" in github.comments[1001][0]
-        assert "strict review remains required" in github.comments[1001][0]
-        assert "armed auto-merge" not in github.comments[1001][0]
+        assert not github.comments.get(1001)
+        assert ("arm_auto_merge", (1001,)) not in github.mutation_log
         assert item.attempts["pr_review_iter"] == 1  # real verdict counted
 
     def test_clean_go_recheck_fails_closed_when_auto_merge_deferral_cannot_be_verified(
@@ -533,10 +741,10 @@ class TestEvalVerdicts:
         )
         assert 1001 not in github.comments
 
-    def test_clean_go_only_records_pending_strict_review(
+    def test_clean_go_marks_the_loop_owned_approval_label(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """Internal review cannot grant eligibility or arm auto-merge by itself."""
+        """PR review grants eligibility but never arms auto-merge itself."""
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(0, 0)])
         ctx = make_ctx(github=github)
@@ -546,20 +754,17 @@ class TestEvalVerdicts:
 
         result = stage.step(item, ctx)
 
-        assert result == StageOutcome(Disposition.ADVANCE, "internal GO; strict review pending")
+        assert result == StageOutcome(Disposition.ADVANCE, "review GO; merge wait pending")
         assert github.mutation_log == [
             ("defer_auto_merge", (1001,)),
-            ("gh_issue_upsert_comment", (1001, "<!-- hephaestus-pr-review-go -->")),
+            ("mark_pr_implementation_go", (1001,)),
         ]
-        assert "strict review remains required" in github.comments[1001][0]
+        assert ("arm_auto_merge", (1001,)) not in github.mutation_log
 
-    def test_go_clean_artifact_is_upserted_not_duplicated(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """Clean GO leaves one marker-keyed durable comment across retries."""
+    def test_clean_go_applies_the_approval_label(self, make_ctx: Any, make_work_item: Any) -> None:
+        """Clean GO applies the review-owned approval label."""
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(0, 0)])
-        github.comments[1001] = ["<!-- hephaestus-pr-review-go -->\nstale"]
         ctx = make_ctx(github=github)
         ctx.config.enable_follow_up = False
         item = make_work_item(issue=1, pr=1001, state="EVAL")
@@ -568,9 +773,26 @@ class TestEvalVerdicts:
         result = stage.step(item, ctx)
 
         assert isinstance(result, StageOutcome)
-        assert result == StageOutcome(Disposition.ADVANCE, "internal GO; strict review pending")
-        assert len(github.comments[1001]) == 1
-        assert "stale" not in github.comments[1001][0]
+        assert result == StageOutcome(Disposition.ADVANCE, "review GO; merge wait pending")
+        assert ("mark_pr_implementation_go", (1001,)) in github.mutation_log
+
+    def test_ungraded_go_is_converted_to_nogo_and_cannot_advance(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A malformed GO cannot apply implementation-go or reach merge wait."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(unresolved=[(0, 0)])
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="EVAL")
+        item.payload["review_verdict"] = ReviewVerdict(grade=None, verdict="GO", raw="Verdict: GO")
+
+        result = stage.step(item, ctx)
+
+        assert result == Continue(next_state="REVIEW_WAIT")
+        assert ("mark_pr_implementation_go", (1001,)) not in github.mutation_log
+        assert ("mark_pr_implementation_no_go", (1001,)) not in github.mutation_log
+        assert item.payload["review_verdict"].grade == "F"
+        assert item.payload["review_verdict"].verdict == "NOGO"
 
     def test_go_rechecks_human_threads_and_defers_auto_merge(
         self, make_ctx: Any, make_work_item: Any
@@ -595,10 +817,10 @@ class TestEvalVerdicts:
         assert ("arm_auto_merge", (1001,)) not in github.mutation_log
         assert "Automation stand-down" in github.comments[1001][0]
 
-    def test_go_with_follow_up_enabled_advances_to_strict_review(
+    def test_go_with_follow_up_enabled_advances_to_merge_wait(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A clean GO bypasses legacy follow-up work for strict review."""
+        """A clean GO bypasses legacy follow-up work for merge wait."""
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(0, 0)])
         ctx = make_ctx(github=github)
@@ -607,12 +829,9 @@ class TestEvalVerdicts:
 
         result = stage.step(item, ctx)
 
-        assert result == StageOutcome(Disposition.ADVANCE, "internal GO; strict review pending")
+        assert result == StageOutcome(Disposition.ADVANCE, "review GO; merge wait pending")
         assert github.mutation_log[0] == ("defer_auto_merge", (1001,))
-        assert github.mutation_log[1] == (
-            "gh_issue_upsert_comment",
-            (1001, "<!-- hephaestus-pr-review-go -->"),
-        )
+        assert github.mutation_log[1] == ("mark_pr_implementation_go", (1001,))
 
     def test_go_with_human_thread_is_human_blocked_and_unlabeled(
         self, make_ctx: Any, make_work_item: Any
@@ -719,8 +938,8 @@ class TestEvalVerdicts:
 
         This is the regression case from #1856: previously a GO with minor
         automation threads would deadlock to skip because `unresolved == 0`
-        never held. Now severity filtering allows the internal GO to terminate
-        at the strict-review gate.
+        never held. Now severity filtering allows the GO to advance to merge
+        wait.
         """
         stage = PrReviewStage()
         github = FakeStageGitHub(by_severity=[(0, 2, 0)])  # 0 blocking, 2 minor, 0 human
@@ -732,11 +951,11 @@ class TestEvalVerdicts:
         result = stage.step(item, ctx)
 
         assert isinstance(result, StageOutcome)
-        assert result == StageOutcome(Disposition.ADVANCE, "internal GO; strict review pending")
-        # Should resolve the minor threads and preserve the strict-review gate.
+        assert result == StageOutcome(Disposition.ADVANCE, "review GO; merge wait pending")
+        # Should resolve minor threads before entering merge wait.
         assert ("resolve_automation_threads", (1001,)) in github.mutation_log
         assert ("defer_auto_merge", (1001,)) in github.mutation_log
-        assert ("mark_pr_implementation_go", (1001,)) not in github.mutation_log
+        assert ("mark_pr_implementation_go", (1001,)) in github.mutation_log
         assert ("arm_auto_merge", (1001,)) not in github.mutation_log
 
     def test_go_with_blocking_automation_thread_downgrades(
@@ -796,11 +1015,11 @@ class TestEvalVerdicts:
         result = stage.step(item, ctx)
 
         assert isinstance(result, StageOutcome)
-        assert result == StageOutcome(Disposition.ADVANCE, "internal GO; strict review pending")
+        assert result == StageOutcome(Disposition.ADVANCE, "review GO; merge wait pending")
         # resolve should NOT be in the log
         assert ("resolve_automation_threads", (1001,)) not in github.mutation_log
         assert ("defer_auto_merge", (1001,)) in github.mutation_log
-        assert ("mark_pr_implementation_go", (1001,)) not in github.mutation_log
+        assert ("mark_pr_implementation_go", (1001,)) in github.mutation_log
 
 
 class TestEvalErrorNoBurn:
@@ -1150,11 +1369,11 @@ class TestFullWalks:
     """Full pool-driven walks of the whole stage (canonical FakeWorkerPool)."""
 
     def test_nogo_round_then_clean_go_walk(self, make_ctx: Any, make_work_item: Any) -> None:
-        """ENTER -> NOGO round (address leg) -> internal GO -> strict review.
+        """ENTER -> NOGO round (address leg) -> GO -> merge wait.
 
         Round 1: review NOGO, 2 automation threads open -> difficulty ->
         address -> push -> EVAL loops. Round 2: review GO, all threads
-        resolved -> durable artifact -> strict-review advance.
+        resolved -> merge-wait advance.
         """
         stage = PrReviewStage()
         # POST calls count_unresolved_threads once per round; EVAL calls the
@@ -1184,7 +1403,7 @@ class TestFullWalks:
         outcome = _drive(stage, item, ctx, pool)
 
         assert isinstance(outcome, StageOutcome)
-        assert outcome == StageOutcome(Disposition.ADVANCE, "internal GO; strict review pending")
+        assert outcome == StageOutcome(Disposition.ADVANCE, "review GO; merge wait pending")
         assert [h.job.descr for h in pool.submitted] == [
             "review",
             "validate",
@@ -1195,13 +1414,9 @@ class TestFullWalks:
             "validate",
         ]
         assert item.attempts["pr_review_iter"] == 2  # two real rounds
-        assert github.mutation_log == [
-            ("defer_auto_merge", (1001,)),
-            ("mark_pr_implementation_no_go", (1001,)),  # round 1 NOGO recorded (M2)
-            ("defer_auto_merge", (1001,)),
-            ("defer_auto_merge", (1001,)),
-            ("gh_issue_upsert_comment", (1001, "<!-- hephaestus-pr-review-go -->")),
-        ]
+        assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
+        assert ("mark_pr_implementation_go", (1001,)) in github.mutation_log
+        assert github.mutation_log.count(("gh_pr_review_post", (1001, "COMMENT"))) == 2
 
     def test_exhaustion_walk_applies_skip(self, make_ctx: Any, make_work_item: Any) -> None:
         """Three plateaued NOGO rounds exhaust the soft budget -> state:skip."""
@@ -1278,7 +1493,7 @@ class TestFullWalks:
 
         outcome = _drive(PrReviewStage(), item, ctx, pool)
 
-        assert outcome == StageOutcome(Disposition.ADVANCE, "internal GO; strict review pending")
+        assert outcome == StageOutcome(Disposition.ADVANCE, "review GO; merge wait pending")
         assert [handle.job.descr for handle in pool.submitted] == [
             "review",
             "validate",

@@ -1,8 +1,8 @@
 """Tests for the thin ``hephaestus-drive-prs-green`` CLI wrapper (issue #1822).
 
 ``ci_driver.main()`` no longer runs a legacy ``CIDriver`` orchestration loop; it
-parses the historical CI-driver argument surface, builds a ``PipelineConfig``
-trimmed to the ``(ci, merge_wait)`` stage scope, and dispatches to
+parses the historical driver argument surface, builds a ``PipelineConfig``
+trimmed to the ``(pr_review, merge_wait)`` stage scope, and dispatches to
 ``pipeline.coordinator.run_pipeline``. Seeding (issues / PRs / the repo-wide
 failing-PR sweep) is coordinator-owned. These tests exercise the wrapper end to
 end with ``run_pipeline`` (and repo resolution) mocked so no live agent or
@@ -59,7 +59,7 @@ def _run_main_capturing_config(argv: list[str], *, rc: int = 0) -> dict[str, Any
 
 
 class TestModuleSurface:
-    """The wrapper keeps ``main``, the slim ``CIDriver`` placeholder, and the predicate."""
+    """The wrapper keeps ``main`` and the slim ``CIDriver`` placeholder."""
 
     def test_main_callable(self) -> None:
         assert callable(ci_driver_mod.main)
@@ -67,15 +67,9 @@ class TestModuleSurface:
     def test_cidriver_class_exposed(self) -> None:
         assert hasattr(ci_driver_mod, "CIDriver")
 
-    def test_pr_is_failing_exposed(self) -> None:
-        assert callable(ci_driver_mod._pr_is_failing)
 
-    def test_failing_check_conclusions_reexported(self) -> None:
-        assert isinstance(ci_driver_mod.FAILING_CHECK_CONCLUSIONS, frozenset | set)
-
-
-def test_main_builds_ci_merge_wait_scope_and_dispatches() -> None:
-    """--issues N builds a (ci, merge_wait) scoped config and returns rc."""
+def test_main_builds_review_merge_wait_scope_and_dispatches() -> None:
+    """--issues N builds a PR-review through merge-wait scoped config and returns rc."""
     captured = _run_main_capturing_config(["--issues", "123", "--dry-run"], rc=0)
 
     assert captured["rc"] == 0
@@ -84,15 +78,13 @@ def test_main_builds_ci_merge_wait_scope_and_dispatches() -> None:
     assert config.repos == ["widget"]
     assert config.issues == [123]
     assert config.dry_run is True
-    # Scope is trimmed to exactly ci + merge_wait.
+    # Direct PRs without an approval label must receive PR review first.
     assert config.scope is not None
-    assert config.scope.stages == frozenset(
-        {StageName.STRICT_REVIEW, StageName.CI, StageName.MERGE_WAIT}
-    )
+    assert config.scope.stages == frozenset({StageName.PR_REVIEW, StageName.MERGE_WAIT})
 
 
 def test_main_scoped_run_disables_drive_green_all() -> None:
-    """A scoped run (--issues) must not widen to the repo-wide failing-PR sweep."""
+    """A scoped run (--issues) must not widen to the repo-wide PR sweep."""
     captured = _run_main_capturing_config(["--issues", "5", "--dry-run"])
 
     assert captured["config"].drive_green_all is False
@@ -108,7 +100,7 @@ def test_main_prs_scope_disables_drive_green_all() -> None:
 
 
 def test_main_discovery_mode_enables_drive_green_all() -> None:
-    """No --issues/--prs enables the coordinator's repo-wide failing-PR sweep."""
+    """No --issues/--prs enables the coordinator's repo-wide PR sweep."""
     captured = _run_main_capturing_config(["--dry-run"])
 
     config = captured["config"]
@@ -153,43 +145,6 @@ def test_main_no_advise_propagates() -> None:
     captured = _run_main_capturing_config(["--issues", "5", "--no-advise", "--dry-run"])
 
     assert captured["config"].no_advise is True
-
-
-def test_main_default_enables_mechanical_rebase() -> None:
-    """Without --no-mechanical-rebase the config keeps the rebase enabled (default)."""
-    captured = _run_main_capturing_config(["--issues", "5", "--dry-run"])
-
-    assert captured["config"].enable_mechanical_rebase is True
-
-
-def test_main_no_mechanical_rebase_propagates() -> None:
-    """--no-mechanical-rebase flows to PipelineConfig.enable_mechanical_rebase=False."""
-    captured = _run_main_capturing_config(["--issues", "5", "--no-mechanical-rebase", "--dry-run"])
-
-    assert captured["config"].enable_mechanical_rebase is False
-
-
-def test_main_poll_max_wait_propagates() -> None:
-    """--poll-max-wait flows to PipelineConfig.poll_max_wait."""
-    captured = _run_main_capturing_config(["--issues", "5", "--poll-max-wait", "42", "--dry-run"])
-
-    assert captured["config"].poll_max_wait == 42
-
-
-def test_main_default_ci_fix_budget_is_one() -> None:
-    """Without --max-fix-iterations the ci_fix budget override defaults to 1."""
-    captured = _run_main_capturing_config(["--issues", "5", "--dry-run"])
-
-    assert captured["config"].budget_overrides == {"ci_fix": 1}
-
-
-def test_main_max_fix_iterations_sets_ci_fix_budget() -> None:
-    """--max-fix-iterations N wires the ci_fix budget override to N."""
-    captured = _run_main_capturing_config(
-        ["--issues", "5", "--max-fix-iterations", "3", "--dry-run"]
-    )
-
-    assert captured["config"].budget_overrides == {"ci_fix": 3}
 
 
 def test_main_dedupes_issue_and_pr_lists() -> None:

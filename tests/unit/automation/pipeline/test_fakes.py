@@ -55,7 +55,7 @@ class TestFakeWorkerPool:
         """Every job type produces exactly one immediate ok completion."""
         fake = FakeWorkerPool()
         for job in _jobs():
-            handle = fake.submit(job, StageName.CI)
+            handle = fake.submit(job, StageName.PR_REVIEW)
             got_handle, result = fake.completion_q.get_nowait()
             assert got_handle is handle
             assert result.ok is True
@@ -73,7 +73,7 @@ class TestFakeWorkerPool:
 
         fake.submit(agent, StageName.PLANNING)
         _, r1 = fake.completion_q.get_nowait()
-        fake.submit(build, StageName.CI)
+        fake.submit(build, StageName.PR_REVIEW)
         _, r2 = fake.completion_q.get_nowait()
         fake.submit(git, StageName.MERGE_WAIT)
         _, r3 = fake.completion_q.get_nowait()
@@ -88,7 +88,7 @@ class TestFakeWorkerPool:
         for job in _jobs():
             fake = FakeWorkerPool()
             fake.queue_result(JobResult(ok=False, error="scripted failure"))
-            fake.submit(job, StageName.CI)
+            fake.submit(job, StageName.PR_REVIEW)
             _, result = fake.completion_q.get_nowait()
             assert result.ok is False
             assert result.error == "scripted failure"
@@ -107,8 +107,8 @@ class TestFakeWorkerPool:
         """Identical job specs still yield distinct, dict-keyable handles."""
         fake = FakeWorkerPool()
         _, _, git = _jobs()
-        h1 = fake.submit(git, StageName.CI)
-        h2 = fake.submit(git, StageName.CI)
+        h1 = fake.submit(git, StageName.PR_REVIEW)
+        h2 = fake.submit(git, StageName.PR_REVIEW)
         assert h1 is not h2
         assert h1 != h2  # identity equality (eq=False)
         assert len({h1: 1, h2: 2}) == 2

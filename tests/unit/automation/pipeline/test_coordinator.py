@@ -30,7 +30,7 @@ from hephaestus.automation.pipeline.events import (
     PrReviewZeroThreadNogoEvent,
     ZeroThreadNogoAction,
 )
-from hephaestus.automation.pipeline.jobs import AgentJob, JobHandle, JobResult
+from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobHandle, JobResult
 from hephaestus.automation.pipeline.routing import (
     Disposition,
     PipelineScope,
@@ -38,7 +38,7 @@ from hephaestus.automation.pipeline.routing import (
     StageOutcome,
 )
 from hephaestus.automation.pipeline.seeding import SeedEntry
-from hephaestus.automation.pipeline.stages import Continue, StrictReviewEvidence
+from hephaestus.automation.pipeline.stages import Continue
 from hephaestus.automation.pipeline.stages.base import JobRequest
 from hephaestus.automation.pipeline.stages.pr_review import (
     REVIEW_ERROR_RETRY_CAP,
@@ -320,45 +320,99 @@ class TestQuiescence:
         assert any(reason.startswith("poisoned: boom") for reason in reasons)
         assert any(reason == "fine" for reason in reasons)
 
-    def test_direct_pr_worktree_completion_advances_without_resubmitting(
+    def test_pr_review_adoption_records_completion_before_wait_state(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Coordinator completion order preserves a direct PR's synced worktree."""
-        head = "a" * 40
-        github = FakeStageGitHub(
-            pr_state={"state": "OPEN", "headRefOid": head, "autoMergeRequest": None},
-            pr_head_branch="strict-review-pr-601",
-            strict_evidence=StrictReviewEvidence(
-                head_sha=head,
-                issue_title="Strict-review task",
-                issue_body="Review the current head.",
-                diff="diff --git a/file.py b/file.py\n+change",
-                ci_status="checks clean",
-                prior_pr_review_verdict="Grade: A\nVerdict: GO",
-            ),
-        )
+        """Direct PR review honors the coordinator's callback-before-state order."""
+        github = FakeStageGitHub(pr_head_branch="review-pr")
         coordinator, pool, _ = make_coordinator(tmp_path, monkeypatch, github=github)
-        pool.queue_result(JobResult(ok=True, value={"path": str(tmp_path / "pr-601")}))
+        worktree = tmp_path / "build" / ".worktrees" / "pr-review-pr-601"
+        pool.queue_result(JobResult(ok=True, value={"path": str(worktree), "dirty": False}))
+        # Stop after the review job is submitted. This keeps the assertion at
+        # the adoption boundary while exercising the real completion drain.
+        pool.queue_result(JobResult(ok=False, interrupted=True, error="stop"))
         item = WorkItem(
             repo="repo-a",
             kind=ItemKind.PR,
             issue=1,
             pr=601,
-            stage=StageName.STRICT_REVIEW,
-            state="HEAD_CHECK",
+            stage=StageName.PR_REVIEW,
+            state="ENTER",
+            payload={"_enter_pending": True},
         )
 
         coordinator._run_item(item)
         coordinator._drain_completions()
 
-        worktree_jobs = [
-            handle.job
-            for handle in pool.submitted
-            if getattr(handle.job, "op", "") == "create_worktree"
-        ]
-        assert len(worktree_jobs) == 1
-        assert item.worktree == str(tmp_path / "pr-601")
-        assert any(isinstance(handle.job, AgentJob) for handle in pool.submitted)
+        assert item.worktree == str(worktree)
+        assert item.payload["direct_pr_worktree"] == str(worktree)
+        assert item.state == "REVIEW_WAIT"
+        jobs = [handle.job for handle in pool.submitted]
+        assert isinstance(jobs[0], GitJob)
+        assert jobs[0].kwargs["isolated"] is True
+
+    def test_issue_seed_with_existing_pr_marks_pr_review_adoption(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue-scoped drive-green input retains its existing-PR provenance."""
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+        entry = SeedEntry(
+            kind="issue",
+            identifier=601,
+            stage=StageName.PR_REVIEW,
+            reason="open PR awaiting review",
+            pr_number=701,
+        )
+
+        item = coordinator._entry_to_item(entry, "repo-a")
+
+        assert item.kind is ItemKind.ISSUE
+        assert item.pr == 701
+        assert item.payload["existing_pr"] is True
+
+    def test_direct_unlinked_pr_finishes_failed_before_review(self, tmp_path: Path) -> None:
+        """A PR number cannot substitute for linked issue requirements."""
+        coordinator = Coordinator(
+            PipelineConfig(org="org", repos=["repo-a"], prs=[701], projects_dir=tmp_path),
+            github=FakeStageGitHub(pr_issue=None),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+
+        entries = coordinator._seed_direct_scope("repo-a")
+
+        assert len(entries) == 1
+        assert entries[0].stage is StageName.FINISHED
+        assert entries[0].passed is False
+        assert "no linked issue" in entries[0].reason
+
+    def test_direct_pr_with_linked_issue_preserves_full_review_context(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A real resolved issue remains available to the downstream gates."""
+        github = FakeStageGitHub(
+            pr_issue=700,
+            issue_title="Review the migration",
+            issue_body="Preserve the requirements context.",
+            pr_review_context={
+                "pr_diff": "diff --git a/a.py b/a.py\n+@@ -1 +1 @@\n-old\n+new\n",
+                "pr_description": "Closes #700\n\nCarry review inputs.",
+            },
+        )
+        config = PipelineConfig(org="org", repos=["repo-a"], prs=[701], projects_dir=tmp_path)
+        coordinator = Coordinator(
+            config, github=github, pool=FakeWorkerPool(), install_signals=False
+        )
+
+        entries = coordinator._seed_direct_scope("repo-a")
+        item = coordinator._entry_to_item(entries[0], "repo-a")
+
+        assert item.pr == 701
+        assert item.issue == 700
+        assert item.payload["issue_title"] == "Review the migration"
+        assert item.payload["issue_body"] == "Preserve the requirements context."
+        assert item.payload["pr_diff"].startswith("diff --git")
+        assert item.payload["pr_description"].startswith("Closes #700")
 
 
 def _fake_in_flight_item(coordinator: Coordinator, item: WorkItem) -> JobHandle:
@@ -490,12 +544,12 @@ class TestDrainOrder:
     """Downstream-first queue draining."""
 
     def test_downstream_first(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """merge_wait drains before ci ... before planning before repo."""
+        """merge_wait drains before review, planning, and repo."""
         coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
         for stage in (
             StageName.PLANNING,
             StageName.MERGE_WAIT,
-            StageName.CI,
+            StageName.PR_REVIEW,
             StageName.REPO,
         ):
             coordinator.stages[stage] = StubStage(StageOutcome(Disposition.FINISH_PASS, "x"))
@@ -503,7 +557,7 @@ class TestDrainOrder:
         coordinator._push_item(
             _issue_item(2, StageName.MERGE_WAIT), StageName.MERGE_WAIT, enter=True
         )
-        coordinator._push_item(_issue_item(3, StageName.CI), StageName.CI, enter=True)
+        coordinator._push_item(_issue_item(3, StageName.PR_REVIEW), StageName.PR_REVIEW, enter=True)
         repo_item = WorkItem(repo="repo-a", kind=ItemKind.REPO, stage=StageName.REPO)
         coordinator._push_item(repo_item, StageName.REPO, enter=True)
         coordinator.event_log.clear()
@@ -511,8 +565,8 @@ class TestDrainOrder:
         coordinator._drain_queues()
 
         drained = [entry[1] for entry in coordinator.event_log if entry[0] == "drain"]
-        assert drained.index("merge_wait") < drained.index("ci")
-        assert drained.index("ci") < drained.index("planning")
+        assert drained.index("merge_wait") < drained.index("pr_review")
+        assert drained.index("pr_review") < drained.index("planning")
         assert drained.index("planning") < drained.index("repo")
 
 
@@ -1456,7 +1510,6 @@ class TestPipelineScopeWiring:
     def _scoped_config(
         self, tmp_path: Path, *, issues: list[int], force: bool = False
     ) -> PipelineConfig:
-        from hephaestus.automation.pipeline.routing import PipelineScope
 
         return PipelineConfig(
             org="org",
@@ -1520,156 +1573,6 @@ class TestPipelineScopeWiring:
         assert entries[0].issue_body == "Use the real issue body."
         assert item.payload["issue_title"] == "Hydrate planner context"
         assert item.payload["issue_body"] == "Use the real issue body."
-
-    def test_direct_merged_pr_with_pending_arm_record_reenters_merge_wait(
-        self, tmp_path: Path
-    ) -> None:
-        """A restarted drive must not drop the post-merge learn handoff (#2055)."""
-
-        class _RecoveryGitHub(FakeStageGitHub):
-            def pending_drive_green_arms(self) -> list[tuple[int, int]]:
-                return [(2055, 601)]
-
-        config = PipelineConfig(
-            org="org",
-            repos=["repo-a"],
-            prs=[601],
-            projects_dir=tmp_path,
-            scope=PipelineScope(frozenset({StageName.MERGE_WAIT})),
-        )
-        github = _RecoveryGitHub(
-            pr_issue=2055,
-            pr_state={"state": "MERGED", "headRefOid": "a" * 40},
-        )
-        coordinator = Coordinator(
-            config, github=github, pool=FakeWorkerPool(), install_signals=False
-        )
-
-        entries = coordinator._seed_direct_scope("repo-a")
-
-        assert len(entries) == 1
-        assert entries[0].stage is StageName.MERGE_WAIT
-        assert entries[0].issue_number == 2055
-        assert entries[0].merge_wait_recovery is True
-
-    def test_direct_open_pr_with_pending_arm_record_bypasses_strict_review(
-        self, tmp_path: Path
-    ) -> None:
-        """An explicit PR restart preserves its durable arm handoff too."""
-
-        class _RecoveryGitHub(FakeStageGitHub):
-            def pending_drive_green_arms(self) -> list[tuple[int, int]]:
-                return [(2055, 601)]
-
-        config = PipelineConfig(
-            org="org",
-            repos=["repo-a"],
-            prs=[601],
-            projects_dir=tmp_path,
-            scope=PipelineScope(frozenset({StageName.MERGE_WAIT})),
-        )
-        coordinator = Coordinator(
-            config,
-            github=_RecoveryGitHub(
-                pr_issue=2055,
-                pr_state={"state": "OPEN", "headRefOid": "a" * 40},
-            ),
-            pool=FakeWorkerPool(),
-            install_signals=False,
-        )
-
-        entries = coordinator._seed_direct_scope("repo-a")
-        item = coordinator._entry_to_item(entries[0], "repo-a")
-
-        assert len(entries) == 1
-        assert entries[0].stage is StageName.MERGE_WAIT
-        assert entries[0].merge_wait_recovery is True
-        assert item.payload["merge_wait_recovery"] is True
-
-    def test_repo_recovery_seed_marks_merge_wait_reconstruction(self, tmp_path: Path) -> None:
-        """The no-CLI-scope recovery scan carries the same stage handoff."""
-
-        class _RecoveryGitHub(FakeStageGitHub):
-            def pending_drive_green_arms(self) -> list[tuple[int, int]]:
-                return [(2055, 601)]
-
-        config = PipelineConfig(
-            org="org",
-            repos=["repo-a"],
-            projects_dir=tmp_path,
-            scope=PipelineScope(frozenset({StageName.MERGE_WAIT})),
-        )
-        coordinator = Coordinator(
-            config,
-            github=_RecoveryGitHub(),
-            pool=FakeWorkerPool(),
-            install_signals=False,
-        )
-
-        entries = coordinator._pending_arm_recovery_entries()
-        item = coordinator._entry_to_item(entries[0], "repo-a")
-
-        assert len(entries) == 1
-        assert entries[0].stage is StageName.MERGE_WAIT
-        assert entries[0].merge_wait_recovery is True
-        assert item.payload["merge_wait_recovery"] is True
-
-    def test_direct_merged_issue_with_pending_arm_record_reenters_merge_wait(
-        self, tmp_path: Path
-    ) -> None:
-        """Issue-scoped restart preserves the same post-merge learn handoff."""
-
-        class _RecoveryGitHub(FakeStageGitHub):
-            def pending_drive_green_arms(self) -> list[tuple[int, int]]:
-                return [(2055, 601)]
-
-        config = PipelineConfig(
-            org="org",
-            repos=["repo-a"],
-            issues=[2055],
-            projects_dir=tmp_path,
-            scope=PipelineScope(frozenset({StageName.MERGE_WAIT})),
-        )
-        github = _RecoveryGitHub(merged_pr=601)
-        coordinator = Coordinator(
-            config, github=github, pool=FakeWorkerPool(), install_signals=False
-        )
-
-        entries = coordinator._seed_direct_scope("repo-a")
-
-        assert len(entries) == 1
-        assert entries[0].stage is StageName.MERGE_WAIT
-        assert entries[0].pr_number == 601
-        assert entries[0].merge_wait_recovery is True
-
-    def test_issue_scoped_pending_arm_recovers_before_closed_issue_filter(
-        self, tmp_path: Path
-    ) -> None:
-        """A merged PR's closed issue still restores its unconsumed learn record."""
-
-        class _RecoveryGitHub(FakeStageGitHub):
-            def pending_drive_green_arms(self) -> list[tuple[int, int]]:
-                return [(2055, 601)]
-
-        config = PipelineConfig(
-            org="org",
-            repos=["repo-a"],
-            issues=[2055],
-            projects_dir=tmp_path,
-            scope=PipelineScope(frozenset({StageName.MERGE_WAIT})),
-        )
-        coordinator = Coordinator(
-            config,
-            github=_RecoveryGitHub(merged_pr=601),
-            pool=FakeWorkerPool(),
-            install_signals=False,
-        )
-
-        assert coordinator._seed_pass() == 1
-        assert coordinator.items[0].stage is StageName.MERGE_WAIT
-        assert coordinator.items[0].issue == 2055
-        assert coordinator.items[0].pr == 601
-        assert coordinator.items[0].payload["merge_wait_recovery"] is True
 
     def test_seed_pass_filters_closed_explicit_issues_before_classification(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1736,8 +1639,6 @@ class TestPipelineScopeWiring:
         scope. force is a redo knob for work at-or-past the scope, not a
         fast-forward that advances un-started upstream work into it.
         """
-        from hephaestus.automation.pipeline.routing import PipelineScope
-
         # Scope starts at IMPLEMENTATION; PLANNING is pre-scope.
         scope = PipelineScope(frozenset({StageName.IMPLEMENTATION, StageName.PR_REVIEW}))
         config = self._scoped_config(tmp_path, issues=[1], force=True)
@@ -1769,21 +1670,19 @@ class TestConfigWiring:
     """PipelineConfig fields reach the per-repo StageContext the stages read."""
 
     def test_budget_override_takes_precedence_over_routes_default(self, tmp_path: Path) -> None:
-        """budget_overrides={"ci_fix": N} overrides the ROUTES ci_fix default (1)."""
+        """Budget overrides take precedence over the routing-table default."""
         config = PipelineConfig(
             org="org",
             repos=["repo-a"],
             projects_dir=tmp_path,
-            budget_overrides={"ci_fix": 3},
+            budget_overrides={"merge": 3},
         )
         coordinator = Coordinator(
             config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
         )
         ctx = coordinator._ctx_for_repo("repo-a")
 
-        assert ctx.budget("ci_fix") == 3
-        # A non-overridden key still resolves from ROUTES (rebase default 2).
-        assert ctx.budget("rebase") == 2
+        assert ctx.budget("merge") == 3
 
     def test_drive_green_filters_flow_to_stage_config(self, tmp_path: Path) -> None:
         """Discovery flags survive the coordinator's stage-config copy."""
@@ -1802,53 +1701,3 @@ class TestConfigWiring:
 
         assert ctx.config.include_bot_prs is False
         assert ctx.config.include_all_authors is True
-
-    def test_no_budget_override_uses_routes_default(self, tmp_path: Path) -> None:
-        """Without an override the ci_fix budget is the ROUTES default (1)."""
-        config = PipelineConfig(org="org", repos=["repo-a"], projects_dir=tmp_path)
-        coordinator = Coordinator(
-            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
-        )
-        ctx = coordinator._ctx_for_repo("repo-a")
-
-        assert ctx.budget("ci_fix") == 1
-
-    def test_enable_mechanical_rebase_flows_to_stage_config(self, tmp_path: Path) -> None:
-        """enable_mechanical_rebase=False reaches ctx.config (read by stages/ci.py)."""
-        config = PipelineConfig(
-            org="org",
-            repos=["repo-a"],
-            projects_dir=tmp_path,
-            enable_mechanical_rebase=False,
-        )
-        coordinator = Coordinator(
-            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
-        )
-        ctx = coordinator._ctx_for_repo("repo-a")
-
-        assert ctx.config.enable_mechanical_rebase is False
-
-    def test_poll_max_wait_flows_to_stage_config(self, tmp_path: Path) -> None:
-        """poll_max_wait reaches ctx.config for wall-clock CI polling."""
-        config = PipelineConfig(
-            org="org",
-            repos=["repo-a"],
-            projects_dir=tmp_path,
-            poll_max_wait=42,
-        )
-        coordinator = Coordinator(
-            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
-        )
-        ctx = coordinator._ctx_for_repo("repo-a")
-
-        assert ctx.config.poll_max_wait == 42
-
-    def test_enable_mechanical_rebase_defaults_true(self, tmp_path: Path) -> None:
-        """The default keeps the CI stage's mechanical rebase enabled."""
-        config = PipelineConfig(org="org", repos=["repo-a"], projects_dir=tmp_path)
-        coordinator = Coordinator(
-            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
-        )
-        ctx = coordinator._ctx_for_repo("repo-a")
-
-        assert ctx.config.enable_mechanical_rebase is True

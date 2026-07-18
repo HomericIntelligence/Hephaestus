@@ -2,7 +2,7 @@
 
 ## Semantics
 
-The coordinator runs on the process main thread and owns all eight stage
+The coordinator runs on the process main thread and owns all seven stage
 queues, the timer heap, the in-flight registry, all routing, and (through the
 :class:`~hephaestus.automation.pipeline_github.PipelineGitHub` accessor) every
 GitHub API mutation. A single worker pool executes agent, build/test, and
@@ -85,7 +85,6 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, TypeAlias
 
-from hephaestus.automation.agent_config import DEFAULT_CI_POLL_MAX_WAIT
 from hephaestus.automation.models import IssueInfo
 from hephaestus.automation.pipeline import admission as _admission, seeding as _seeding
 from hephaestus.automation.pipeline.events import StageEvent, encode_stage_event
@@ -101,7 +100,6 @@ from hephaestus.automation.pipeline.routing import (
     StageOutcome,
 )
 from hephaestus.automation.pipeline.stages import (
-    CiStage,
     Continue,
     FinishedStage,
     ImplementationStage,
@@ -114,7 +112,6 @@ from hephaestus.automation.pipeline.stages import (
     Stage,
     StageContext,
     StageGitHub,
-    StrictReviewStage,
 )
 from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARGV
 from hephaestus.automation.pipeline.stages.repo import product_to_work_item
@@ -163,8 +160,6 @@ _WAKE_HANDLE = object()
 _DRAIN_ORDER: tuple[StageName, ...] = (
     StageName.FINISHED,
     StageName.MERGE_WAIT,
-    StageName.CI,
-    StageName.STRICT_REVIEW,
     StageName.PR_REVIEW,
     StageName.IMPLEMENTATION,
     StageName.PLAN_REVIEW,
@@ -227,16 +222,8 @@ class PipelineConfig:
     drive_green_all: bool = False
     include_bot_prs: bool = True
     include_all_authors: bool = False
-    # When False, the CI stage's pre-fix mechanical rebase is skipped and every
-    # behind/conflicting PR falls through to the fix agent (``--no-mechanical-rebase``).
-    # Read by ``stages/ci.py`` via ``ctx.config.enable_mechanical_rebase``.
-    enable_mechanical_rebase: bool = True
-    # Wall-clock seconds the CI stage may wait for pending checks before timing
-    # out. Mirrors ``CIDriverOptions.poll_max_wait`` / ``--poll-max-wait``.
-    poll_max_wait: int = DEFAULT_CI_POLL_MAX_WAIT
     # Per-budget overrides applied on top of the ROUTES defaults by the
-    # coordinator's budget accessor. ``--max-fix-iterations N`` maps to
-    # ``{"ci_fix": N}`` so the CI-fix attempt budget is caller-tunable.
+    # coordinator's budget accessor.
     budget_overrides: dict[str, int] = field(default_factory=dict)
     # Configurable argv for the optional pre-PR unit-test gate. The
     # implementation stage reads this vector instead of hardcoding the test
@@ -295,8 +282,6 @@ class _StageRunConfig:
     drive_green_all: bool = False
     include_bot_prs: bool = True
     include_all_authors: bool = False
-    enable_mechanical_rebase: bool = True
-    poll_max_wait: int = DEFAULT_CI_POLL_MAX_WAIT
     pre_pr_test_argv: tuple[str, ...] = PRE_PR_TEST_ARGV
 
 
@@ -446,8 +431,6 @@ class Coordinator:
             drive_green_all=config.drive_green_all,
             include_bot_prs=config.include_bot_prs,
             include_all_authors=config.include_all_authors,
-            enable_mechanical_rebase=config.enable_mechanical_rebase,
-            poll_max_wait=config.poll_max_wait,
             pre_pr_test_argv=config.pre_pr_test_argv,
             run_pre_pr_tests=config.run_pre_pr_tests,
         )
@@ -463,8 +446,6 @@ class Coordinator:
             StageName.PLAN_REVIEW: PlanReviewStage(),
             StageName.IMPLEMENTATION: ImplementationStage(),
             StageName.PR_REVIEW: PrReviewStage(),
-            StageName.STRICT_REVIEW: StrictReviewStage(),
-            StageName.CI: CiStage(),
             StageName.MERGE_WAIT: MergeWaitStage(),
             StageName.FINISHED: FinishedStage(self.ledger, self.preserved),
         }
@@ -502,8 +483,8 @@ class Coordinator:
         """Config-aware budget accessor injected as ``StageContext.budget_fn``.
 
         A ``config.budget_overrides`` entry (e.g. ``--max-fix-iterations N`` ->
-        ``{"ci_fix": N}``) takes precedence over the ROUTES default, so a caller
-        can tune a stage's per-item budget without editing the routing table.
+        takes precedence over the ROUTES default, so a caller can tune a
+        stage's per-item budget without editing the routing table.
         """
         override = self.config.budget_overrides.get(name)
         if override is not None:
@@ -1268,7 +1249,7 @@ class Coordinator:
         RETRY timer contract (base.py): the stage records its backoff in
         ``payload["retry_delay_s"]`` immediately before returning; a missing
         key means "retry on the next drain tick". Under dry-run a DELAYED
-        retry waits on real-world progress (CI runs, PR merges) the preview
+        retry waits on real-world progress (for example, PR merges) the preview
         will never make, so the item finishes instead of stalling the heap.
         """
         delay = item.payload.pop("retry_delay_s", None)
@@ -1412,8 +1393,6 @@ class Coordinator:
         discovery_repos = [] if self.config.issues or self.config.prs else self.config.repos
         entries = _seeding.seed_from_cli(discovery_repos, [], [])
         default_repo = self.config.repos[0] if self.config.repos else ""
-        if not self.config.issues and not self.config.prs:
-            entries.extend(self._pending_arm_recovery_entries())
         if self.config.issues or self.config.prs:
             entries.extend(self._seed_direct_scope(default_repo))
         pushed = 0
@@ -1436,40 +1415,6 @@ class Coordinator:
             self._push_item(item, item.stage, enter=True)
             pushed += 1
         return pushed
-
-    def _pending_arm_recovery_entries(self) -> list[_seeding.SeedEntry]:
-        """Seed non-terminal durable arms through merge_wait after a restart."""
-        entries: list[_seeding.SeedEntry] = []
-        scope_stages = self.config.scope.stages if self.config.scope is not None else None
-        for repo in self.config.repos:
-            reader = getattr(self._ctx_for_repo(repo).github, "pending_drive_green_arms", None)
-            if not callable(reader):
-                continue
-            try:
-                records = reader()
-            except Exception as exc:
-                logger.warning("drive-green arm recovery read failed for %s: %s", repo, exc)
-                continue
-            for issue_number, pr_number in records:
-                stage, reason, passed = self._scope_seed_decision(
-                    issue_number,
-                    StageName.MERGE_WAIT,
-                    f"PR #{pr_number} has a pending durable drive-green arm record",
-                    scope_stages,
-                )
-                entries.append(
-                    _seeding.SeedEntry(
-                        kind="pr",
-                        identifier=pr_number,
-                        stage=stage,
-                        reason=reason,
-                        pr_number=pr_number,
-                        issue_number=issue_number,
-                        passed=passed,
-                        merge_wait_recovery=True,
-                    )
-                )
-        return entries
 
     def _clamp_seed_stage_to_scope(
         self,
@@ -1556,33 +1501,8 @@ class Coordinator:
         github = self._ctx_for_repo(repo).github if repo else self.github
         entries: list[_seeding.SeedEntry] = []
         scope_stages = self.config.scope.stages if self.config.scope is not None else None
-        reader = getattr(github, "pending_drive_green_arms", None)
-        pending_arms = set(reader()) if callable(reader) else set()
         requested_issues = list(self.config.issues)
-        recovered_issues: set[int] = set()
-        for issue, pr in pending_arms:
-            if issue not in requested_issues:
-                continue
-            stage, reason, passed = self._scope_seed_decision(
-                issue,
-                StageName.MERGE_WAIT,
-                f"PR #{pr} has a pending durable drive-green arm record",
-                scope_stages,
-            )
-            entries.append(
-                _seeding.SeedEntry(
-                    kind="pr",
-                    identifier=pr,
-                    stage=stage,
-                    reason=reason,
-                    pr_number=pr,
-                    issue_number=issue,
-                    passed=passed,
-                    merge_wait_recovery=True,
-                )
-            )
-            recovered_issues.add(issue)
-        issue_numbers = [issue for issue in requested_issues if issue not in recovered_issues]
+        issue_numbers = requested_issues
         if issue_numbers:
             issue_numbers = _admission._filter_open_issues(repo, issue_numbers)
         for issue in issue_numbers:
@@ -1593,27 +1513,22 @@ class Coordinator:
             entries.append(replace(entry, stage=stage, reason=reason, passed=passed))
         for pr in self.config.prs:
             issue_number = github.find_issue_for_pr(pr)
-            scope_identifier = issue_number if issue_number is not None else pr
-            if issue_number is not None and (issue_number, pr) in pending_arms:
-                stage, reason, passed = self._scope_seed_decision(
-                    scope_identifier,
-                    StageName.MERGE_WAIT,
-                    f"PR #{pr} has a pending durable drive-green arm record",
-                    scope_stages,
-                )
+            if issue_number is None:
                 entries.append(
                     _seeding.SeedEntry(
                         kind="pr",
                         identifier=pr,
-                        stage=stage,
-                        reason=reason,
+                        stage=StageName.FINISHED,
+                        reason=(
+                            f"PR #{pr} has no linked issue; refusing review without "
+                            "requirements context"
+                        ),
                         pr_number=pr,
-                        issue_number=issue_number,
-                        passed=passed,
-                        merge_wait_recovery=True,
+                        passed=False,
                     )
                 )
                 continue
+            scope_identifier = issue_number if issue_number is not None else pr
             pr_state = github.gh_pr_state(pr)
             pr_state_name = ((pr_state or {}).get("state") or "").upper()
             if pr_state_name == "MERGED":
@@ -1644,24 +1559,9 @@ class Coordinator:
                 continue
             has_go, _has_no_go = github.pr_has_implementation_state_label(pr)
             if has_go:
-                if issue_number is None:
-                    entries.append(
-                        _seeding.SeedEntry(
-                            kind="pr",
-                            identifier=pr,
-                            stage=StageName.FINISHED,
-                            reason=(
-                                f"PR #{pr} has no linked issue; strict review requires "
-                                "task requirements"
-                            ),
-                            pr_number=pr,
-                            passed=False,
-                        )
-                    )
-                    continue
                 stage, reason, passed = self._scope_seed_decision(
                     scope_identifier,
-                    StageName.STRICT_REVIEW,
+                    StageName.MERGE_WAIT,
                     f"PR #{pr} carries {STATE_IMPLEMENTATION_GO}",
                     scope_stages,
                 )
@@ -1677,6 +1577,28 @@ class Coordinator:
                     )
                 )
             else:
+                issue_facts: _seeding.IssueFacts | None
+                review_context: dict[str, str] | None
+                try:
+                    issue_facts = _seeding.seed_issue_from_github(issue_number, github)
+                    review_context = github.pr_review_context(pr)
+                except Exception as exc:
+                    logger.warning("PR #%d: review context read failed: %s", pr, exc)
+                    review_context = None
+                    issue_facts = None
+                if issue_facts is None or review_context is None:
+                    entries.append(
+                        _seeding.SeedEntry(
+                            kind="pr",
+                            identifier=pr,
+                            stage=StageName.FINISHED,
+                            reason=f"PR #{pr} review context could not be read",
+                            pr_number=pr,
+                            issue_number=issue_number,
+                            passed=False,
+                        )
+                    )
+                    continue
                 stage, reason, passed = self._scope_seed_decision(
                     scope_identifier,
                     StageName.PR_REVIEW,
@@ -1691,6 +1613,10 @@ class Coordinator:
                         reason=reason,
                         pr_number=pr,
                         issue_number=issue_number,
+                        issue_title=issue_facts.title,
+                        issue_body=issue_facts.body,
+                        pr_diff=review_context["pr_diff"],
+                        pr_description=review_context["pr_description"],
                         passed=passed,
                     )
                 )
@@ -1714,10 +1640,18 @@ class Coordinator:
             item = WorkItem(
                 repo=default_repo,
                 kind=ItemKind.PR,
+                # Only a resolved, linked issue supplies requirements context.
+                # A PR number is not a safe substitute: its author controls
+                # the PR body, so an unlinked direct PR must remain orphaned
+                # and fail closed before PR review.
                 issue=entry.issue_number,
                 pr=entry.pr_number or int(entry.identifier),
                 stage=entry.stage,
             )
+            item.payload["issue_title"] = entry.issue_title
+            item.payload["issue_body"] = entry.issue_body
+            item.payload["pr_diff"] = entry.pr_diff
+            item.payload["pr_description"] = entry.pr_description
         else:
             item = WorkItem(
                 repo=default_repo,
@@ -1728,10 +1662,14 @@ class Coordinator:
             )
             item.payload["issue_title"] = entry.issue_title
             item.payload["issue_body"] = entry.issue_body
+            # A scoped issue with an open PR enters PR_REVIEW as an issue
+            # work item. Preserve that provenance so the stage adopts a
+            # dedicated PR checkout rather than falling back to the shared
+            # repository root.
+            if entry.stage is StageName.PR_REVIEW and entry.pr_number is not None:
+                item.payload["existing_pr"] = True
         item.state = "ENTER"
         item.payload["entry_reason"] = entry.reason
-        if entry.merge_wait_recovery:
-            item.payload["merge_wait_recovery"] = True
         return item
 
     def _reseed_if_converged(self) -> bool:

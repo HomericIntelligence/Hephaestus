@@ -32,6 +32,10 @@ def _isolated_env(cache: Path) -> dict[str, str]:
         **os.environ,
         "PRE_COMMIT_HOME": str(cache),
         "PRE_COMMIT_COLOR": "never",
+        # The Gitleaks hook builds with Go. Keep its build cache inside this
+        # test's temporary home instead of inheriting an operator-owned cache
+        # that may not be writable in a sandboxed test process.
+        "GOCACHE": str(cache / "go-build"),
     }
     for key in _GIT_REPO_ENV_KEYS:
         env.pop(key, None)

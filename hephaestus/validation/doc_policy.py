@@ -11,7 +11,7 @@ Policies enforced:
 - ``gh pr create`` must NOT include ``--label``
 - ``git commit`` must NOT use ``--no-verify``
 - ``gh pr merge`` must use manual ``--squash`` without ``--auto`` (not ``--merge``
-  or ``--rebase``; automatic arming is reserved for the queue strict-review gate)
+  or ``--rebase``; automatic arming is reserved for the queue merge-wait stage)
 - ``git push`` must NOT push directly to ``main``/``master``
 
 Excluded paths (archived / test-fixture content that is not authoritative):
@@ -118,7 +118,7 @@ _RAW_RULES: list[tuple[str, Severity, str, str]] = [
         # Flag any ``gh pr merge`` invocation that carries ``--auto`` or a
         # rejected strategy flag, or that omits the required manual squash
         # strategy. Docs must not instruct an agent to arm a merge autonomously:
-        # queue-owned arming is reserved for the strict-review gate.
+        # Queue-owned arming is reserved for the merge-wait stage.
         r"gh\s+pr\s+merge\b"
         r"(?:"
         r"(?=.*--auto\b)|"

@@ -37,10 +37,10 @@ _REASONS = [*_DECLARED_REASONS, "unknown_reason"]
 # architecture doc's per-stage budget assignments; unknown reasons consume
 # none and resolve purely via the "*" default. Fail-back EXITS that leave
 # their stage rather than retry it consume no retry budget: plan_not_go
-# (implementation -> plan_review), already_implementation_go_pr (-> strict_review),
-# not_implementation_go / not_strict_review_go (ci -> strict_review),
+# (implementation -> plan_review), already_implementation_go_pr (-> merge_wait),
+# not_implementation_go (merge_wait -> pr_review),
 # missing_worktree (-> implementation),
-# no_pr (-> finished), and strict-gate re-review routes from merge_wait all
+# no_pr (-> finished), and merge-wait re-review routes all
 # map to None.
 _REASON_BUDGET: dict[str, str | None] = {
     "nogo": "plan_review_iter",
@@ -53,16 +53,10 @@ _REASON_BUDGET: dict[str, str | None] = {
     "exhaustion": None,
     "fix_exhausted": None,
     "not_implementation_go": None,
-    "not_strict_review_go": None,
     "missing_worktree": None,
     "no_pr": None,
     # #2054 terminalizes every open merge-wait item after containment.
     "closed": None,
-    # #2055 sends an unverifiable strict-review proof or post-arm head drift
-    # back to a fresh review.  Those routes are containment retries, not a
-    # stage-local budget consumption.
-    "strict_gate_unavailable": None,
-    "arm_confirm_failed": None,
     "unknown_reason": None,
 }
 

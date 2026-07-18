@@ -19,9 +19,6 @@ from hephaestus.automation.pipeline.routing import ROUTES, StageName
 from hephaestus.automation.pipeline.stages import (
     StageContext,
     StageGitHub,
-    StrictReviewArtifact,
-    StrictReviewEvidence,
-    StrictReviewLease,
 )
 from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARGV
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
@@ -51,18 +48,14 @@ class FakeStageGitHub(FakeGitHub):
         pr_issue: int | None = None,
         has_plan: bool = False,
         pr_head_branch: str | None = None,
+        pr_head_writable: bool = True,
         pr_impl_state: tuple[bool, bool] = (False, False),
         unresolved: list[tuple[int, int]] | None = None,
         by_severity: list[tuple[int, int, int]] | None = None,
         pr_state: dict[str, Any] | None = None,
-        failing_checks: list[str] | None = None,
-        pending_checks: list[str] | None = None,
-        checks: list[dict[str, Any]] | None = None,
-        pr_stuck: bool = False,
+        pr_review_context: dict[str, str] | None = None,
         learn_terminal: bool = False,
         resolve_count: int = 0,
-        strict_artifact: StrictReviewArtifact | None = None,
-        strict_evidence: StrictReviewEvidence | None = None,
     ) -> None:
         """Initialize the fake with canned read answers.
 
@@ -75,6 +68,8 @@ class FakeStageGitHub(FakeGitHub):
             pr_issue: Canned answer for find_issue_for_pr.
             has_plan: Canned answer for has_existing_plan.
             pr_head_branch: Canned answer for get_pr_head_branch.
+            pr_head_writable: Whether the PR head belongs to the base origin
+                and may receive coordinator-owned address commits.
             pr_impl_state: Canned (has_go, has_no_go) answer for
                 pr_has_implementation_state_label.
             unresolved: FIFO of (automation, human) answers for
@@ -86,16 +81,10 @@ class FakeStageGitHub(FakeGitHub):
                 deriving from unresolved (legacy: all automation = blocking).
             pr_state: Canned answer for gh_pr_state (merge_wait's single
                 PR-state read); ``None`` mirrors a transient read failure.
-            failing_checks: Canned answer for failing_required_check_names.
-            pending_checks: Canned answer for pending_required_check_names.
-            checks: Canned answer for pr_checks (all checks for CI polling).
-            pr_stuck: Canned answer for pr_is_genuinely_stuck.
             learn_terminal: Seed answer for drive_green_learn_terminal —
                 True mirrors an issue whose post-merge /learn already ran
                 terminally (the #848 dedupe record).
             resolve_count: Canned return count for resolve_automation_threads.
-            strict_artifact: Canned authenticated strict-review artifact.
-            strict_evidence: Canned bounded evidence for a strict-review job.
 
         """
         super().__init__()
@@ -107,6 +96,7 @@ class FakeStageGitHub(FakeGitHub):
         self._pr_issue = pr_issue
         self._has_plan = has_plan
         self._pr_head_branch = pr_head_branch
+        self._pr_head_writable = pr_head_writable
         self._pr_impl_state = pr_impl_state
         self._unresolved: list[tuple[int, int]] = list(unresolved or [(0, 0)])
         self._by_severity = (
@@ -115,22 +105,16 @@ class FakeStageGitHub(FakeGitHub):
             else [(a, 0, h) for (a, h) in self._unresolved]  # legacy: all automation = blocking
         )
         self._pr_state = pr_state
-        self._failing_checks = list(failing_checks or [])
-        self._pending_checks = list(pending_checks or [])
-        self._checks = list(checks or [])
-        self._pr_stuck = pr_stuck
+        self._pr_review_context = (
+            pr_review_context
+            if pr_review_context is not None
+            else {
+                "pr_diff": "diff --git a/a.py b/a.py\n+@@ -1 +1 @@\n-old\n+new\n",
+                "pr_description": "Closes #1",
+            }
+        )
         self._learn_terminal = learn_terminal
         self._resolve_count = resolve_count
-        self._strict_artifact = strict_artifact
-        self._strict_evidence = strict_evidence
-        self._strict_leases: dict[tuple[int, str], StrictReviewLease] = {}
-        self._strict_terminal: set[tuple[int, str]] = set()
-        self._next_strict_comment_id = 1
-        self.strict_artifact_calls: list[tuple[int, str]] = []
-        self.strict_terminal_artifact_calls: list[tuple[int, str]] = []
-        self.strict_evidence_calls: list[tuple[int, str, int]] = []
-        self.arming_records: dict[int, tuple[int, str]] = {}
-        self.confirmed_arming_records: set[int] = set()
         self.learn_results: dict[int, bool] = {}
         self.learn_claims: set[int] = set()
 
@@ -174,9 +158,18 @@ class FakeStageGitHub(FakeGitHub):
         """Mirror _review_utils.get_pr_head_branch (canned answer)."""
         return self._pr_head_branch
 
+    def pr_head_is_writable(self, pr_number: int) -> bool:
+        """Mirror PipelineGitHub.pr_head_is_writable (canned answer)."""
+        return self._pr_head_writable
+
     def pr_has_implementation_state_label(self, pr_number: int) -> tuple[bool, bool]:
         """Mirror pr_manager.pr_has_implementation_state_label (canned answer)."""
         return self._pr_impl_state
+
+    def pr_review_context(self, pr_number: int) -> dict[str, str] | None:
+        """Mirror PipelineGitHub's atomic PR-review input read."""
+        del pr_number
+        return dict(self._pr_review_context) if self._pr_review_context is not None else None
 
     def count_unresolved_threads(self, pr_number: int) -> tuple[int, int]:
         """Mirror _review_phase._count_unresolved_threads_blocking_go (FIFO).
@@ -274,132 +267,10 @@ class FakeStageGitHub(FakeGitHub):
         """Mirror pr_manager.enable_auto_merge_after_implementation_go."""
         self._log("arm_auto_merge", pr_number, expected_head_sha)
 
-    def strict_review_artifact(self, pr_number: int, head_sha: str) -> StrictReviewArtifact | None:
-        """Return the canned current-head strict-review proof, if any."""
-        self.strict_artifact_calls.append((pr_number, head_sha))
-        if (
-            self._strict_artifact is None
-            or not self._strict_artifact.is_go
-            or self._strict_artifact.head_sha.lower() != head_sha.lower()
-        ):
-            return None
-        return self._strict_artifact
-
-    def strict_review_terminal_artifact(
-        self, pr_number: int, head_sha: str
-    ) -> StrictReviewArtifact | None:
-        """Return any canned current-head terminal strict result for recovery."""
-        self.strict_terminal_artifact_calls.append((pr_number, head_sha))
-        if (
-            self._strict_artifact is None
-            or self._strict_artifact.head_sha.lower() != head_sha.lower()
-        ):
-            return None
-        return self._strict_artifact
-
-    def claim_strict_review_lease(self, pr_number: int, head_sha: str) -> StrictReviewLease | None:
-        """Claim one fake immutable lease, rejecting competing reviewers."""
-        key = (pr_number, head_sha.lower())
-        if (
-            key in self._strict_terminal
-            or key in self._strict_leases
-            or (
-                self._strict_artifact is not None
-                and self._strict_artifact.head_sha.lower() == head_sha.lower()
-            )
-        ):
-            return None
-        lease = StrictReviewLease(
-            head_sha=head_sha.lower(),
-            lease_id=f"fake-{pr_number}-{self._next_strict_comment_id}",
-            comment_id=self._next_strict_comment_id,
-        )
-        self._next_strict_comment_id += 1
-        self._strict_leases[key] = lease
-        self._log("claim_strict_review_lease", pr_number, head_sha, lease)
-        return lease
-
-    def publish_strict_review_artifact(
-        self,
-        pr_number: int,
-        head_sha: str,
-        verdict_body: str,
-        *,
-        is_go: bool,
-        lease: StrictReviewLease,
-    ) -> bool:
-        """Publish only while the fake's elected lease still matches exactly."""
-        key = (pr_number, head_sha.lower())
-        if (
-            self._strict_leases.get(key) != lease
-            or lease.head_sha.lower() != head_sha.lower()
-            or key in self._strict_terminal
-        ):
-            return False
-        self._strict_terminal.add(key)
-        self._strict_artifact = StrictReviewArtifact(
-            is_go=is_go,
-            head_sha=head_sha.lower(),
-            verdict="GO" if is_go else "NOGO",
-        )
-        self._log("publish_strict_review_artifact", pr_number, head_sha, verdict_body, lease, is_go)
-        return True
-
-    def strict_review_evidence(
-        self, pr_number: int, head_sha: str, issue_number: int
-    ) -> StrictReviewEvidence | None:
-        """Return canned evidence only when it remains for the requested head."""
-        self.strict_evidence_calls.append((pr_number, head_sha, issue_number))
-        if self._strict_evidence is None or self._strict_evidence.head_sha != head_sha:
-            return None
-        return self._strict_evidence
-
     def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
         """Mirror ci_driver.CIDriver._gh_pr_state (canned answer)."""
         del pr_number  # single canned answer; not per-PR keyed
         return self._pr_state
-
-    def failing_required_check_names(self, pr_number: int) -> list[str]:
-        """Mirror CICheckInspector.failing_required_check_names (canned answer)."""
-        del pr_number  # single canned answer; not per-PR keyed
-        return list(self._failing_checks)
-
-    def pending_required_check_names(self, pr_number: int) -> list[str]:
-        """Mirror CICheckInspector.pending_required_check_names (canned answer)."""
-        del pr_number  # single canned answer; not per-PR keyed
-        return list(self._pending_checks)
-
-    def pr_checks(self, pr_number: int) -> list[dict[str, Any]]:
-        """Mirror gh_pr_checks (returns all checks for CI classification)."""
-        del pr_number  # single canned answer; not per-PR keyed
-        return list(self._checks)
-
-    def arm_drive_green(self, issue_number: int, pr_number: int, head_sha: str) -> None:
-        """Mirror ci_driver.CIDriver._arm_drive_green (records the arming record)."""
-        self.arming_records[issue_number] = (pr_number, head_sha)
-        self.confirmed_arming_records.discard(issue_number)
-        self._log("arm_drive_green", issue_number, pr_number, head_sha)
-
-    def confirm_drive_green_arm(self, issue_number: int, pr_number: int, head_sha: str) -> None:
-        """Mirror the read-back-confirmed durable drive-green arm transition."""
-        if self.arming_records.get(issue_number) != (pr_number, head_sha):
-            raise RuntimeError("arm record is missing or mismatched")
-        self.confirmed_arming_records.add(issue_number)
-        self._log("confirm_drive_green_arm", issue_number, pr_number, head_sha)
-
-    def drive_green_arm_confirmed(self, issue_number: int, pr_number: int) -> bool:
-        """Return whether the canned arming record was confirmed remotely."""
-        record = self.arming_records.get(issue_number)
-        return (
-            record is not None
-            and record[0] == pr_number
-            and issue_number in self.confirmed_arming_records
-        )
-
-    def pr_is_genuinely_stuck(self, pr_number: int) -> bool:
-        """Mirror pr_manager.pr_is_genuinely_stuck (canned answer)."""
-        del pr_number  # single canned answer; not per-PR keyed
-        return self._pr_stuck
 
     def drive_green_learn_terminal(self, issue_number: int) -> bool:
         """Mirror ci_driver._learn_record_terminal over the arming record.

@@ -4,8 +4,8 @@ Contains the PR review analysis prompt (inline-comment generator) and the
 plain PR description template.
 """
 
+from ._review_rubric import get_pr_review_rubric
 from ._shared import fence_content, get_terse_output_directive
-from ._strict_rubric import get_pr_strict_rubric
 from .catalog import PromptCatalog
 
 #: Severities that BLOCK a GO when their automation thread is unresolved (#1856).
@@ -27,26 +27,24 @@ def get_pr_review_analysis_prompt(
     issue_number: int,
     pr_diff: str = "",
     issue_body: str = "",
-    ci_status: str = "",
     pr_description: str = "",
     advise_findings: str = "",
     include_nitpicks: bool = False,
+    review_context_kind: str = "issue",
 ) -> str:
-    """Get the PR review analysis prompt for generating inline review comments.
+    """Get the `$athena:pr-review` analysis prompt for inline review comments.
 
     All free-text fields are fenced as untrusted (see module docstring).
 
-    Repo PR policy (`Closes #N`, signed commits) is NOT checked here — the
-    required GitHub CI gate ``pr-policy`` enforces it authoritatively.
-    ``auto-merge-policy`` is advisory; the in-loop reviewer does code-quality
-    review only and the independent strict-review stage controls eligibility.
+    This is the loop's only automated review gate. When the Athena skill is
+    available, the prompt directs the reviewer to run its default profile;
+    otherwise the inline-review contract below is the fallback.
 
     Args:
         pr_number: GitHub PR number
         issue_number: Linked GitHub issue number
         pr_diff: PR diff output
         issue_body: Issue body/description
-        ci_status: CI check status summary
         pr_description: PR description body
         advise_findings: Prior team learnings from Mnemosyne to give the
             reviewer continuity with the advise-first implementation turn.
@@ -54,6 +52,10 @@ def get_pr_review_analysis_prompt(
             ``nitpick``-severity comments entirely. When True (``--nitpick``),
             nitpick comments are re-enabled. Either way every emitted comment
             carries a ``severity`` tag (#1083).
+        review_context_kind: Human-readable numeric context kind for the
+            prompt header. Pipeline reviews use the default ``"issue"``;
+            callers with an independently verified alternate context may
+            provide another label.
 
     Returns:
         Formatted PR review analysis prompt
@@ -68,16 +70,16 @@ def get_pr_review_analysis_prompt(
         "pr_review/analysis.j2",
         pr_number=pr_number,
         issue_number=issue_number,
+        review_context_kind=review_context_kind,
         pr_diff_block=fenced.fence("PR_DIFF", pr_diff),
         issue_body_block=fenced.fence("ISSUE_BODY", issue_body),
         advise_findings_block=fenced.fence(
             "ADVISE_FINDINGS",
             advise_findings or "_(no prior advise findings supplied)_",
         ),
-        ci_status_block=fenced.fence("CI_STATUS", ci_status),
         pr_description_block=fenced.fence("PR_DESCRIPTION", pr_description),
         untrusted_notice=fenced.untrusted_notice,
-        strict_rubric=get_pr_strict_rubric().strip(),
+        review_rubric=get_pr_review_rubric().strip(),
         nitpick_directive=nitpick_directive,
         terse_output_directive=get_terse_output_directive(),
     )
@@ -88,6 +90,7 @@ def get_review_validation_prompt(
     issue_number: int,
     prior_comments_json: str,
     diff_text: str = "",
+    review_context_kind: str = "issue",
 ) -> str:
     """Get the prompt that validates whether prior review comments were addressed.
 
@@ -105,6 +108,8 @@ def get_review_validation_prompt(
         prior_comments_json: JSON array string of prior comment dicts
             (``path``/``line``/``body``).
         diff_text: The current cumulative PR diff.
+        review_context_kind: Human-readable numeric context kind for the
+            prompt header (defaults to ``"issue"``).
 
     Returns:
         Formatted review-validation prompt.
@@ -115,6 +120,7 @@ def get_review_validation_prompt(
         "pr_review/validation.j2",
         pr_number=pr_number,
         issue_number=issue_number,
+        review_context_kind=review_context_kind,
         prior_comments_block=fenced.fence("PRIOR_COMMENTS", prior_comments_json),
         diff_block=fenced.fence("DIFF", diff_text),
         untrusted_notice=fenced.untrusted_notice,
@@ -125,6 +131,7 @@ def get_review_validation_prompt(
 def get_comment_difficulty_prompt(
     issue_number: int,
     comments_json: str,
+    review_context_kind: str = "issue",
 ) -> str:
     """Get the prompt that classifies review-comment fix difficulty (#1083).
 
@@ -137,6 +144,8 @@ def get_comment_difficulty_prompt(
         issue_number: Linked GitHub issue number (for log/context only).
         comments_json: JSON array string of comment dicts
             (``thread_id``/``path``/``line``/``body``).
+        review_context_kind: Human-readable numeric context kind for the
+            prompt header (defaults to ``"issue"``).
 
     Returns:
         Formatted comment-difficulty classification prompt.
@@ -146,6 +155,7 @@ def get_comment_difficulty_prompt(
     return PromptCatalog.current().render(
         "pr_review/comment_difficulty.j2",
         issue_number=issue_number,
+        review_context_kind=review_context_kind,
         comments_block=fenced.fence("REVIEW_COMMENTS", comments_json),
         untrusted_notice=fenced.untrusted_notice,
         terse_output_directive=get_terse_output_directive(),

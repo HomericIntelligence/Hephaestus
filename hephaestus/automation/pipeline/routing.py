@@ -33,14 +33,14 @@ class StageName(str, Enum):
     PLAN_REVIEW = "plan_review"
     IMPLEMENTATION = "implementation"
     PR_REVIEW = "pr_review"
-    STRICT_REVIEW = "strict_review"
-    CI = "ci"
     MERGE_WAIT = "merge_wait"
     FINISHED = "finished"
 
 
-#: Pipeline order used for scope-contiguity validation. Mirrors declaration
-#: order of ``StageName``.
+#: Active loop order used for scope-contiguity validation. CI/CD intentionally
+#: has no pipeline stage: normal review may collect its evidence for a binary
+#: verdict, but the loop does not change CI/CD and it never independently
+#: authorizes an approval.
 PIPELINE_ORDER: tuple[StageName, ...] = tuple(StageName)
 
 
@@ -83,8 +83,7 @@ class Route:
 #   pr_review_hard=6                       <- _review_phase.py:95 (=3*2, progress-aware)
 #   blocked_address=2                     <- review_thread_resolver.py _BLOCKED_ADDRESS_MAX_ATTEMPTS
 #   clone=2, plan=2, plan_cycles=2,
-#   implement=2, test_fix=1, ci_fix=1,
-#   rebase=2                               <- architecture doc stage sections
+#   implement=2, test_fix=1                <- architecture doc stage sections
 #   merge=DEFAULT_DRIVE_GREEN_LOOPS        <- loop_runner.py LoopConfig.drive_green_loops
 #                                             and --drive-green-loops defaults
 ROUTES: dict[StageName, Route] = {
@@ -113,13 +112,13 @@ ROUTES: dict[StageName, Route] = {
         next=StageName.PR_REVIEW,
         fail_routes={
             "plan_not_go": StageName.PLAN_REVIEW,
-            "already_implementation_go_pr": StageName.STRICT_REVIEW,
+            "already_implementation_go_pr": StageName.MERGE_WAIT,
             "*": StageName.FINISHED,
         },
         budgets={"implement": 2, "test_fix": 1},
     ),
     StageName.PR_REVIEW: Route(
-        next=StageName.STRICT_REVIEW,
+        next=StageName.MERGE_WAIT,
         fail_routes={
             "agent_error": StageName.IMPLEMENTATION,
             "human_blocked": StageName.FINISHED,
@@ -128,36 +127,14 @@ ROUTES: dict[StageName, Route] = {
         },
         budgets={"pr_review_iter": 3, "pr_review_hard": 6},
     ),
-    StageName.STRICT_REVIEW: Route(
-        next=StageName.CI,
-        fail_routes={
-            "nogo": StageName.IMPLEMENTATION,
-            "head_changed": StageName.STRICT_REVIEW,
-            "*": StageName.STRICT_REVIEW,
-        },
-        budgets={"strict_review_iter": 1},
-    ),
-    StageName.CI: Route(
-        next=StageName.MERGE_WAIT,
-        fail_routes={
-            "fix_exhausted": StageName.IMPLEMENTATION,
-            "not_implementation_go": StageName.STRICT_REVIEW,
-            "not_strict_review_go": StageName.STRICT_REVIEW,
-            "missing_worktree": StageName.IMPLEMENTATION,
-            "no_pr": StageName.FINISHED,
-            "*": StageName.CI,
-        },
-        budgets={"ci_fix": 1, "rebase": 2},
-    ),
     StageName.MERGE_WAIT: Route(
         next=StageName.FINISHED,
         fail_routes={
             "closed": StageName.FINISHED,
-            # A contained proof/head failure needs a fresh independent
-            # review, not terminal abandonment.  Containment failures such
-            # as inability to disarm or persist the arm remain terminal.
-            "strict_gate_unavailable": StageName.STRICT_REVIEW,
-            "arm_confirm_failed": StageName.STRICT_REVIEW,
+            # A missing loop-owned approval label needs a fresh review, not
+            # terminal abandonment. Other merge-wait failures are terminal;
+            # the stage never reconciles a state owned by another run.
+            "not_implementation_go": StageName.PR_REVIEW,
             "*": StageName.FINISHED,
         },
         budgets={},

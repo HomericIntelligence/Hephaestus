@@ -279,7 +279,7 @@ def _submit_until_bounded(
             descr=job_id,
         )
         submitted_at = time.monotonic()
-        measurements.submitted_at[pool.submit(job, StageName.CI)] = submitted_at
+        measurements.submitted_at[pool.submit(job, StageName.MERGE_WAIT)] = submitted_at
         next_job += 1
     return next_job
 

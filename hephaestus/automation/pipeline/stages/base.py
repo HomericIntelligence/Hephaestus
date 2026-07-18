@@ -65,7 +65,6 @@ from ..routing import ROUTES, Disposition, StageName, StageOutcome
 from ..work_item import ItemKind, WorkItem
 
 __all__ = [
-    "BACKOFF_CAP_S",
     "GIT_JOB_TIMEOUT_S",
     "AgentJob",
     "BuildTestJob",
@@ -83,9 +82,6 @@ __all__ = [
     "StageName",
     "StageOutcome",
     "StepResult",
-    "StrictReviewArtifact",
-    "StrictReviewEvidence",
-    "StrictReviewLease",
     "WorkItem",
     "agent_provider",
     "stage_model",
@@ -101,46 +97,6 @@ GIT_JOB_TIMEOUT_S = 600
 
 #: Poll backoff cap in seconds (legacy ``min(2**attempt, 60)`` — shared by
 #: every stage that uses the legacy exponential poll delay.
-BACKOFF_CAP_S = 60
-
-
-@dataclass(frozen=True)
-class StrictReviewArtifact:
-    """Authenticated strict-review terminal result for one exact PR head.
-
-    ``strict_review_artifact`` exposes only a v2 GO as merge authority.  The
-    separate terminal-result accessor also returns a durable NOGO so a
-    restarted coordinator can tell "reviewer already rejected this head" from
-    "another reviewer still owns the live lease".  ``verdict_body`` is the
-    authenticated review output retained for idempotent NOGO remediation.
-    """
-
-    is_go: bool
-    head_sha: str
-    verdict: str
-    verdict_body: str = ""
-    schema_version: int = 2
-
-
-@dataclass(frozen=True)
-class StrictReviewEvidence:
-    """Bounded current-head evidence supplied to the read-only strict reviewer."""
-
-    head_sha: str
-    issue_title: str
-    issue_body: str
-    diff: str
-    ci_status: str
-    prior_pr_review_verdict: str
-
-
-@dataclass(frozen=True)
-class StrictReviewLease:
-    """One elected, immutable strict-review generation fence for a PR head."""
-
-    head_sha: str
-    lease_id: str
-    comment_id: int
 
 
 @runtime_checkable
@@ -178,6 +134,10 @@ class StageGitHub(Protocol):
     def find_issue_for_pr(self, pr_number: int) -> int | None:
         """Return the linked issue for this PR, if its body has ``Closes #N``."""
         pass
+
+    def pr_review_context(self, pr_number: int) -> dict[str, str] | None:
+        """Return the PR body and complete diff required for source review."""
+        ...
 
     def has_existing_plan(self, issue_number: int) -> bool:
         """Return True when the issue already counts as planned.
@@ -230,6 +190,14 @@ class StageGitHub(Protocol):
     def get_pr_head_branch(self, pr_number: int) -> str | None:
         """Return the PR's head branch name (``_review_utils.get_pr_head_branch``)."""
         ...
+
+    def pr_head_is_writable(self, pr_number: int) -> bool:
+        """Return whether this loop can safely publish to the PR head branch.
+
+        A fork head may be fetched for read-only review, but it must never be
+        addressed by pushing a same-named branch to the base repository.
+        """
+        pass
 
     def pr_has_implementation_state_label(self, pr_number: int) -> tuple[bool, bool]:
         """Return ``(has_go, has_no_go)`` for the PR's implementation state labels.
@@ -301,9 +269,9 @@ class StageGitHub(Protocol):
     def defer_auto_merge(self, pr_number: int) -> None:
         """Durably disable auto-merge whenever a stage must revoke eligibility.
 
-        The adapter must read back disabled state for an open PR. Strict review
-        and merge wait use this containment boundary before fresh review and
-        whenever a current-head proof becomes invalid.
+        The adapter must read back disabled state for an open PR. Implementation
+        and PR review use this containment boundary before changing or reviewing
+        a PR; merge_wait never changes an arm it did not create.
         """
         ...
 
@@ -320,161 +288,46 @@ class StageGitHub(Protocol):
     def mark_pr_implementation_go(self, pr_number: int) -> None:
         """Durably apply ``state:implementation-go`` to the PR.
 
-        Reserved for the head-bound strict-review stage. Internal pr_review
-        does not call it, and the label alone never authorizes auto-merge.
+        The PR review stage applies this after its normal `$athena:pr-review`
+        invocation (or its inline-review fallback) reports GO. No external CI
+        status or secondary artifact can apply it.
         """
         ...
 
     def arm_auto_merge(self, pr_number: int, expected_head_sha: str) -> None:
         """Atomically arm squash auto-merge for one expected PR head.
 
-        Reserved exclusively for ``MergeWaitStage`` after it has revalidated
-        #2055's head-bound strict-review proof.  The adapter must pass the
-        exact expected head to GitHub's conditional arm API so a push between
-        validation and arming cannot authorize a different commit. No earlier
-        stage may call it.
+        Reserved exclusively for ``MergeWaitStage`` after it has re-read the
+        loop-owned ``state:implementation-go`` label. The adapter must pass
+        the live head to GitHub's conditional arm API to make this one request
+        operationally current. If a different process/run has already changed
+        that state, merge-wait warns and leaves it for the operator; it does
+        not reconcile, retry, or revoke it. No earlier stage may call it.
         """
         pass
-
-    # -- strict-review proof surface (#2055) ---------------------------------
-
-    def strict_review_artifact(self, pr_number: int, head_sha: str) -> StrictReviewArtifact | None:
-        """Return a current-head, authenticated strict GO proof or ``None``.
-
-        The adapter rejects absent, foreign, malformed, oversized, tampered,
-        stale, and NOGO artifacts.  Callers must treat ``None`` as no merge
-        authorization.
-        """
-        pass
-
-    def strict_review_terminal_artifact(
-        self, pr_number: int, head_sha: str
-    ) -> StrictReviewArtifact | None:
-        """Return an authenticated terminal strict result for ``head_sha``.
-
-        Unlike :meth:`strict_review_artifact`, this exposes a durable NOGO as
-        well as a v2 GO.  StrictReviewStage uses it only to resume containment
-        and fail back after a restart; MergeWaitStage must continue to use the
-        GO-only accessor for merge authority.  ``None`` means there is no
-        authenticated final result, which is deliberately distinct from a
-        competing live lease.
-        """
-        pass
-
-    def claim_strict_review_lease(self, pr_number: int, head_sha: str) -> StrictReviewLease | None:
-        """Claim the sole live strict-review lease for an exact PR head.
-
-        Callers must first check :meth:`strict_review_terminal_artifact`.
-        After that check, ``None`` means a competing valid holder or
-        unavailable durable evidence; callers must not dispatch another
-        reviewer or publish a verdict.
-        """
-        pass
-
-    def publish_strict_review_artifact(
-        self,
-        pr_number: int,
-        head_sha: str,
-        verdict_body: str,
-        *,
-        is_go: bool,
-        lease: StrictReviewLease,
-    ) -> bool:
-        """Append a verdict only when ``lease`` still owns this exact head.
-
-        Returns ``False`` when the fence is stale/lost; the stage must then
-        restart without touching global labels or remediation feedback.
-        """
-        pass
-
-    def strict_review_evidence(
-        self, pr_number: int, head_sha: str, issue_number: int
-    ) -> StrictReviewEvidence | None:
-        """Return bounded evidence still bound to ``head_sha``, else ``None``.
-
-        A strict reviewer has a read-only agent sandbox and cannot safely
-        rely on a mutable local checkout for the PR diff.  The coordinator
-        accessor fetches this repo-scoped evidence and validates the live
-        head both before and after the read; stages fail closed when it is
-        unavailable.  The linked issue title/body are part of this evidence:
-        without the task requirements, a reviewer cannot judge whether the
-        diff fulfils the work it is about to authorize for merge.
-        """
-        ...
 
     # -- merge_wait surface (#1816) ------------------------------------------
 
     def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
         """Read shared PR state for seed, stage, and merge decisions.
 
-        Returns ``{state, headRefOid, mergedAt, mergeStateStatus,
-        baseRefName}``, or ``None`` on a transient read failure. The repo seed
-        path and the CI and implementation stage boundaries use this read for
+        Returns a PR lifecycle record (including ``state``, ``headRefOid``,
+        ``mergedAt``, ``autoMergeRequest``, and ``baseRefName``), or ``None``
+        on a transient read failure. The repo seed
+        path and the implementation stage boundary use this read for
         merged/closed terminal-state checks before branch adoption or further
         routing. The merge_wait path uses the same contract to capture the
-        head OID and classify MERGED/CLOSED/FAILING/DIRTY/BLOCKED/PENDING.
-        """
-        ...
-
-    def arm_drive_green(self, issue_number: int, pr_number: int, head_sha: str) -> None:
-        """Durably persist the drive-green arming record (crash-safe).
-
-        Reserved for #2055's strict-gated arming protocol. It mirrors
-        ``ci_driver.CIDriver._arm_drive_green`` /
-        ``ArmingStateStore.save``: written and read back immediately before
-        :meth:`arm_auto_merge`, so a crash during the remote arm cannot lose
-        the fact that this PR (at this head SHA) was eligible to arm — the
-        post-merge ``/learn`` dedupe keys off this record.
-        """
-        ...
-
-    def failing_required_check_names(self, pr_number: int) -> list[str]:
-        """Return names of required checks currently failing.
-
-        Mirrors ``CICheckInspector.failing_required_check_names``; the
-        merge_wait POLL step classifies FAILING vs. PENDING from this list
-        (after excluding the auto-merge-policy check via
-        :func:`~hephaestus.automation.auto_merge_coordinator.without_auto_merge_policy`).
-        """
-        ...
-
-    def pending_required_check_names(self, pr_number: int) -> list[str]:
-        """Return names of required checks still in flight (not completed).
-
-        Mirrors ``CICheckInspector.pending_required_check_names``; the
-        merge_wait POLL step uses this to distinguish a BLOCKED
-        branch-protection state from a still-pending CI state.
-        """
-        ...
-
-    def pr_checks(self, pr_number: int) -> list[dict[str, Any]]:
-        """Return all checks for the PR (mirrors ``gh_pr_checks``).
-
-        Used by CI stage's ``_poll`` to classify via ``classify_ci_state``.
-        The coordinator handles the I/O and dry-run logic; the stage simply
-        calls this accessor.
-        """
-        ...
-
-    def pr_is_genuinely_stuck(self, pr_number: int) -> bool:
-        """Return True iff the PR cannot merge without manual/agent action.
-
-        Mirrors ``pr_manager.pr_is_genuinely_stuck`` (#1576): a merge
-        CONFLICT or a red required check is stuck; a BLOCKED-awaiting-review
-        PR is NOT. Gates any ``state:skip`` tagging on the merge_wait
-        BLOCKED-exhaustion path — exactly the legacy skip-ownership guard.
+        head OID and classify merged, closed, and open lifecycle states.
         """
         ...
 
     def drive_green_learn_terminal(self, issue_number: int) -> bool:
         """Return True when the post-merge ``/learn`` is already terminal.
 
-        Mirrors ``ci_driver.CIDriver._learn_record_terminal`` over the
-        issue's ``ArmingStateStore`` record: a record whose
-        ``learn_captured_at``/``learn_succeeded_at`` is set, or whose
-        ``learn_status`` is ``succeeded``/``failed``, must never fire
-        ``/learn`` again — the merge_wait MERGED path dedupes on this read
-        (doc section 7: "Post-merge learn (deduped via arming_state)").
+        An arming record whose ``learn_captured_at``/``learn_succeeded_at`` is
+        set, or whose ``learn_status`` is ``succeeded``/``failed``, must never
+        fire ``/learn`` again — the merge_wait MERGED path dedupes on this
+        read (doc section 7: "Post-merge learn (deduped via arming_state)").
         """
         ...
 
@@ -610,13 +463,19 @@ def agent_provider(ctx: StageContext) -> str:
     return str(getattr(ctx.config, "agent", "") or DEFAULT_AGENT)
 
 
-def stage_model(ctx: StageContext, phase: str, fallback: Callable[[], str]) -> str:
+def stage_model(
+    ctx: StageContext,
+    phase: str,
+    fallback: Callable[[], str],
+    *,
+    provider: str | None = None,
+) -> str:
     """Return a phase model override, the catch-all model, or the legacy fallback."""
     phase_value = getattr(ctx.config, f"{phase}_model", "")
     catch_all = getattr(ctx.config, "model", "")
     model = str(phase_value or catch_all or fallback())
     reasoning_effort = str(getattr(ctx.config, f"{phase}_reasoning_effort", "") or "")
-    if reasoning_effort and agent_provider(ctx) == "codex":
+    if reasoning_effort and (provider or agent_provider(ctx)) == "codex":
         base_model, separator, current_effort = model.rpartition(":")
         if separator and current_effort in {"default", "low", "medium", "high", "xhigh"}:
             model = base_model
@@ -675,11 +534,11 @@ def _require_item_worktree(item: WorkItem, stage_name: str, action: str) -> Stag
 def _build_rebase_job(item: WorkItem, ctx: StageContext, *, descr: str) -> GitJob:
     """Build the mechanical rebase-onto-base GitJob (shared base-ref capture).
 
-    Both ``ci`` (best-effort mechanical rebase) and ``merge_wait`` (DIRTY
-    resolution) rebase the item's worktree onto the same captured
+    ``merge_wait`` uses this shared worker operation when a dirty-worktree
+    resolution needs to rebase the item's worktree onto the captured
     ``item.payload["base_branch"]`` (defaulting to ``main``) via the same
     worker ``op="rebase"`` (``git_utils.rebase_worktree_onto``) — single home
-    so the two stages cannot diverge on this mechanic (#1861).
+    so all remaining consumers use one mechanic (#1861).
     """
     return GitJob(
         repo=item.repo,

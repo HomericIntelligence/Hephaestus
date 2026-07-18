@@ -11,7 +11,7 @@ contract):
 
 - States: ENTER -> REVIEW_WAIT -> VALIDATE_WAIT -> POST -> DIFFICULTY_WAIT
   -> ADDRESS_WAIT -> PUSH_WAIT -> EVAL -> (loop to REVIEW_WAIT) or terminal
-  advance to ``strict_review``. ``FOLLOWUP_WAIT`` remains only to drain legacy
+  advance to ``merge_wait``. ``FOLLOWUP_WAIT`` remains only to drain legacy
   persisted work; a clean GO never enters it.
 - Budgets: ``pr_review_iter`` = 3 (soft cap), ``pr_review_hard`` = 6 (hard
   cap; rounds 4-6 are admitted ONLY while the unresolved-thread count
@@ -41,10 +41,9 @@ contract):
   stands down, then finish failed with the PR left UNLABELED (a human must
   act; automation may not resolve their thread). GO + open automation
   thread -> downgraded to NOGO (address + re-review). Clean GO ->
-  ``_write_internal_go`` performs one final human-thread live-read, verifies
-  auto-merge is disabled, and posts an informational artifact. It does not
-  apply ``state:implementation-go`` or arm auto-merge; the head-bound
-  strict-review gate owns that authorization. Every
+  ``_write_go`` performs one final human-thread live-read, verifies
+  auto-merge is disabled, and applies ``state:implementation-go``.
+  ``merge_wait`` remains the sole auto-merge armer. Every
   real non-GO round durably writes ``state:implementation-no-go`` (doc
   section 5 owned label, "NOGO verdict, before retry/regress"; legacy
   ``_apply_impl_review_verdict`` -> ``mark_pr_implementation_no_go``
@@ -98,11 +97,11 @@ contract):
   ``prompts/implementation.py get_impl_resume_feedback_prompt`` (fresh-PR
   address path), ``prompts/address_review.py get_address_review_prompt``
   (existing-PR address path), ``prompts/follow_up.py get_follow_up_prompt``.
-- Verdict parsed IN-WORKER by ``claude_invoke.parse_review_verdict``
-  (carried as the review job's ``parse`` callable; symbol-scoped zero-I/O
-  exemption mirrors plan_review's). REVIEW_WAIT clears all stale
-  round-scoped payload at submission so a failed later round can never
-  replay an earlier round's verdict or threads.
+- Verdict and structured comments are parsed IN-WORKER (carried as the
+  review job's ``parse`` callable; symbol-scoped zero-I/O exemption mirrors
+  plan_review's). REVIEW_WAIT clears all stale round-scoped payload at
+  submission so a failed later round can never replay an earlier round's
+  verdict or threads.
 - Legacy FOLLOWUP_WAIT intentionally stores nothing in ``on_job_done``: the
   follow-up job's output is a side effect (follow-up issues filed by the
   agent), not a payload value any later state consumes.
@@ -114,6 +113,7 @@ import json
 import logging
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from html import escape
 from typing import Any, cast
 
@@ -143,6 +143,7 @@ from hephaestus.automation.session_naming import (
 from hephaestus.automation.state_labels import STATE_SKIP
 
 from ..events import PrReviewZeroThreadNogoEvent, ZeroThreadNogoAction
+from ..work_item import ItemKind
 from .base import (
     GIT_JOB_TIMEOUT_S,
     AgentJob,
@@ -164,8 +165,35 @@ from .base import (
 
 logger = logging.getLogger(__name__)
 
+_JSON_RESPONSE_BLOCK_RE = re.compile(
+    r"^[ \t]*```json[ \t]*\r?\n(.*?)\r?\n^[ \t]*```[ \t]*$",
+    re.DOTALL | re.MULTILINE,
+)
+
+
+@dataclass(frozen=True)
+class _ParsedReviewResponse:
+    """Reviewer verdict plus its structured inline comments."""
+
+    verdict: Any
+    comments: tuple[dict[str, Any], ...]
+
+
+def _parse_review_response(response: str) -> _ParsedReviewResponse:
+    """Preserve both the prose verdict and fenced JSON comments from a review."""
+    matches = _JSON_RESPONSE_BLOCK_RE.findall(response)
+    try:
+        parsed = json.loads(matches[-1]) if matches else {}
+    except json.JSONDecodeError:
+        parsed = {}
+    raw_comments = parsed.get("comments", []) if isinstance(parsed, dict) else []
+    comments = tuple(dict(comment) for comment in raw_comments if isinstance(comment, dict))
+    return _ParsedReviewResponse(parse_review_verdict(response), comments)
+
+
 # In-memory mini-states (stage-local strings, never GitHub labels).
 ENTER = "ENTER"
+ADOPT_WORKTREE_WAIT = "ADOPT_WORKTREE_WAIT"
 REVIEW_WAIT = "REVIEW_WAIT"
 VALIDATE_WAIT = "VALIDATE_WAIT"
 POST = "POST"
@@ -179,6 +207,7 @@ FINISH = PR_FINISH
 
 _STEP_HANDLER_NAMES: dict[str, str] = {
     ENTER: "_enter",
+    ADOPT_WORKTREE_WAIT: "_adopt_worktree_wait",
     REVIEW_WAIT: "_review_wait",
     VALIDATE_WAIT: "_validate_wait",
     POST: "_post",
@@ -196,6 +225,11 @@ def _issue_number(item: WorkItem) -> int:
     if item.issue is None:
         raise RuntimeError("pr_review stage reached without an issue number")
     return item.issue
+
+
+def _review_context_kind(item: WorkItem) -> str:
+    """Return the prompt-facing numeric context kind for this review item."""
+    return "PR" if item.payload.get("review_context_kind") == "PR" else "issue"
 
 
 #: Max CONSECUTIVE reviewer-infrastructure failures (ERROR verdicts or
@@ -354,12 +388,12 @@ class PrReviewStage(Stage):
     - EVAL [M]: re-housed ``_evaluate_go_verdict`` + budget gate (see
       module docstring).
     - FOLLOWUP_WAIT (legacy persisted work only): submit the follow-up job,
-      then PR_FINISH -> FINISHED. A clean GO advances to ``strict_review``
+      then PR_FINISH -> FINISHED. A clean GO advances to ``merge_wait``
       from EVAL instead.
     """
 
     def on_enter(self, item: WorkItem, ctx: StageContext) -> StageOutcome | None:
-        """Contain an existing arm, then reset the cycle-relative round counter.
+        """Hydrate review inputs, contain an existing arm, and reset the round counter.
 
         ``attempts["pr_review_iter"]`` is per-lifetime (routing.py: attempts
         are never reset), so the per-cycle review budget is tracked in
@@ -378,6 +412,15 @@ class PrReviewStage(Stage):
 
         """
         if item.pr is not None:
+            review_context = ctx.github.pr_review_context(item.pr)
+            if review_context is None:
+                logger.warning(
+                    "pr_review:%s: review context unavailable for PR #%d",
+                    item.issue,
+                    item.pr,
+                )
+                return StageOutcome(Disposition.FINISH_FAIL, "pr_review_context_unavailable")
+            item.payload.update(review_context)
             try:
                 ctx.github.defer_auto_merge(item.pr)
             except Exception as exc:
@@ -411,13 +454,26 @@ class PrReviewStage(Stage):
             Continue, JobRequest, or StageOutcome.
 
         """
-        if not item.issue:
+        if item.issue is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
         if item.pr is None:
             # Nothing to review: fail back to implementation, whose
             # PR_CREATE step is the designated (re)creation path.
             logger.warning("pr_review:%d: no PR on item; failing back", item.issue)
             return self._fail_back_agent_error(item)
+        if (
+            item.state == "ENTER"
+            and not item.worktree
+            and (item.kind is ItemKind.PR or bool(item.payload.get("existing_pr")))
+        ):
+            # A PR-review entry has no adopted checkout yet. It must never be
+            # reviewed from the shared repository root, including when an
+            # issue seed was routed to an already-open PR by drive-green.
+            # It also must not detour through fresh implementation merely to
+            # obtain that checkout: issue-level state:skip is intentionally
+            # absolute for fresh implementation but is not a reason to skip
+            # an existing PR review.
+            return self._adopt_direct_pr_worktree(item, ctx)
 
         handler_name = _STEP_HANDLER_NAMES.get(item.state)
         if handler_name is not None:
@@ -432,6 +488,55 @@ class PrReviewStage(Stage):
 
     def _enter(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """ENTER advances to REVIEW_WAIT."""
+        return Continue(next_state=REVIEW_WAIT)
+
+    def _adopt_direct_pr_worktree(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Create a synchronized isolated checkout for an existing PR."""
+        if item.pr is None:  # guarded by step(); keeps type narrowing local
+            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        branch = ctx.github.get_pr_head_branch(item.pr)
+        if not branch:
+            logger.error("pr_review:%s: no head branch for direct PR #%d", item.issue, item.pr)
+            return StageOutcome(Disposition.FINISH_FAIL, "direct_pr_no_head_branch")
+        item.branch = branch
+        item.payload["existing_pr"] = True
+        logger.info(
+            "pr_review:%d: adopting direct PR #%d (branch %r) for review",
+            _issue_number(item),
+            item.pr,
+            branch,
+        )
+        job = GitJob(
+            repo=item.repo,
+            op="create_worktree",
+            timeout_s=GIT_JOB_TIMEOUT_S,
+            kwargs={
+                "issue_number": _issue_number(item),
+                "branch_name": branch,
+                "refresh_base": False,
+                # This mutable review checkout cannot reuse the writer's
+                # branch checkout.
+                "isolated": True,
+                "sync_to_remote": True,
+                "pr_number": item.pr,
+                "repo_root": str(ctx.paths.repo_root),
+            },
+            descr="direct_pr_review_worktree",
+        )
+        # Coordinator completion callbacks run before on_done_state is
+        # assigned. The marker makes that ordering explicit and fail-closed.
+        item.payload["direct_pr_worktree_pending"] = True
+        return JobRequest(job, on_done_state=ADOPT_WORKTREE_WAIT)
+
+    def _adopt_worktree_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Advance only from a clean, synchronized direct-PR checkout."""
+        del ctx
+        if item.payload.pop("direct_pr_worktree_error", None):
+            return StageOutcome(Disposition.FINISH_FAIL, "direct_pr_worktree_failed")
+        if not item.worktree:
+            return StageOutcome(Disposition.FINISH_FAIL, "direct_pr_worktree_unfinished")
+        if item.payload.get("direct_pr_worktree_dirty"):
+            return StageOutcome(Disposition.FINISH_FAIL, "direct_pr_worktree_dirty")
         return Continue(next_state=REVIEW_WAIT)
 
     def _review_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
@@ -458,14 +563,19 @@ class PrReviewStage(Stage):
             cwd=_worktree_path(item, ctx),
             timeout_s=pr_reviewer_claude_timeout(),
             session_agent=AGENT_PR_REVIEWER,
-            # Diff / body / CI context are seeded into item.payload by
-            # the coordinator (#1817), which owns the gh reads.
+            sandbox="read-only",
+            # The normal $athena:pr-review skill is read-only, but its
+            # declared workflow uses local Bash helpers and review subagents.
+            # Keep that capability on the sole GO/NOGO review job only;
+            # validation and difficulty jobs retain WorkerPool's read scope.
+            allowed_tools="Read,Glob,Grep,Bash,Skill,Agent,WebFetch",
+            # on_enter refreshes diff and body context through the stage
+            # adapter before every review cycle.
             prompt_kwargs={
                 "pr_number": item.pr,
                 "issue_number": item.issue,
                 "pr_diff": item.payload.get("pr_diff", ""),
                 "issue_body": item.payload.get("issue_body", ""),
-                "ci_status": item.payload.get("ci_status", ""),
                 "pr_description": item.payload.get("pr_description", ""),
                 "advise_findings": item.payload.get("advise_findings", ""),
                 "include_nitpicks": bool(
@@ -475,8 +585,9 @@ class PrReviewStage(Stage):
                         getattr(ctx.config, "include_nitpicks", False),
                     )
                 ),
+                "review_context_kind": _review_context_kind(item),
             },
-            parse=parse_review_verdict,  # verdict parsed in-worker
+            parse=_parse_review_response,  # verdict and inline comments parsed in-worker
             descr="review",
         )
         return JobRequest(job, on_done_state=VALIDATE_WAIT)
@@ -499,11 +610,13 @@ class PrReviewStage(Stage):
             cwd=_worktree_path(item, ctx),
             timeout_s=pr_reviewer_claude_timeout(),
             session_agent=AGENT_PR_REVIEWER,
+            sandbox="read-only",
             prompt_kwargs={
                 "pr_number": item.pr,
                 "issue_number": item.issue,
                 "prior_comments_json": item.payload.get("prior_comments_json", "[]"),
                 "diff_text": item.payload.get("pr_diff", ""),
+                "review_context_kind": _review_context_kind(item),
             },
             descr="validate",
         )
@@ -522,9 +635,11 @@ class PrReviewStage(Stage):
             cwd=_worktree_path(item, ctx),
             timeout_s=pr_reviewer_claude_timeout(),
             session_agent=AGENT_COMMENT_CLASSIFIER,
+            sandbox="read-only",
             prompt_kwargs={
                 "issue_number": item.issue,
                 "comments_json": json.dumps(item.payload.get("review_threads", [])),
+                "review_context_kind": _review_context_kind(item),
             },
             descr="difficulty",
         )
@@ -534,16 +649,22 @@ class PrReviewStage(Stage):
         """PUSH_WAIT submits the commit+push job for the addressing changes."""
         issue = _issue_number(item)
         logger.info("pr_review:%d: requesting push job", issue)
+        kwargs: dict[str, object] = {
+            "issue_number": issue,
+            "worktree_path": item.worktree,
+            "branch": item.branch,
+            "agent": agent_provider(ctx),
+        }
+        if item.payload.get("direct_pr_worktree"):
+            # Direct review addresses findings from a detached checkout; the
+            # coordinator must publish that exact HEAD to the PR branch with
+            # a normal fast-forward push.
+            kwargs["publish_detached_head"] = True
         git_job = GitJob(
             repo=item.repo,
             op="commit_push",
             timeout_s=GIT_JOB_TIMEOUT_S,
-            kwargs={
-                "issue_number": issue,
-                "worktree_path": item.worktree,
-                "branch": item.branch,
-                "agent": agent_provider(ctx),
-            },
+            kwargs=kwargs,
             descr="push_fixes",
         )
         return JobRequest(git_job, on_done_state=EVAL)
@@ -581,14 +702,12 @@ class PrReviewStage(Stage):
             ctx: Stage context.
 
         """
+        if item.payload.pop("direct_pr_worktree_pending", None):
+            self._on_direct_pr_worktree_done(item, result)
+            return
+
         if not result.ok:
-            logger.warning("pr_review:%s: job failed: %s", item.issue, result.error)
-            if item.state == REVIEW_WAIT:
-                # EVAL treats the missing verdict as a reviewer-infrastructure
-                # ERROR; the flag lets VALIDATE_WAIT skip the dead round.
-                item.payload["review_failed"] = True
-            elif item.state in (ADDRESS_WAIT, PUSH_WAIT):
-                item.payload["address_error"] = True
+            self._on_job_failed(item, result)
             return
 
         if item.state == PUSH_WAIT:
@@ -600,8 +719,17 @@ class PrReviewStage(Stage):
             return
 
         if item.state == REVIEW_WAIT and result.value is not None:
-            item.payload["review_verdict"] = result.value
-            item.payload["review_text"] = getattr(result.value, "raw", str(result.value))
+            if isinstance(result.value, _ParsedReviewResponse):
+                item.payload["review_verdict"] = result.value.verdict
+                item.payload["review_text"] = result.value.verdict.raw
+                item.payload["review_threads"] = [
+                    dict(comment) for comment in result.value.comments
+                ]
+            else:
+                # Keep direct stage callers and persisted prior results
+                # compatible; only live AgentJob results use the paired parser.
+                item.payload["review_verdict"] = result.value
+                item.payload["review_text"] = getattr(result.value, "raw", str(result.value))
         elif item.state == VALIDATE_WAIT and result.value is not None:
             item.payload["validation_result"] = result.value
         elif item.state == DIFFICULTY_WAIT and result.value is not None:
@@ -611,6 +739,38 @@ class PrReviewStage(Stage):
         # FOLLOWUP_WAIT intentionally has no branch: the follow-up job's
         # output is a side effect (issues filed by the agent), not a payload
         # value any later state consumes.
+
+    @staticmethod
+    def _on_direct_pr_worktree_done(item: WorkItem, result: JobResult) -> None:
+        """Record the exact checkout created for a direct PR review."""
+        if not result.ok:
+            logger.warning("pr_review:%s: direct PR worktree failed: %s", item.issue, result.error)
+            item.worktree = ""
+            item.payload["direct_pr_worktree_error"] = result.error or "worktree job failed"
+            return
+        value = result.value
+        if isinstance(value, dict):
+            item.worktree = str(value.get("path", ""))
+            item.payload["direct_pr_worktree_dirty"] = bool(value.get("dirty"))
+            if item.worktree and not item.payload["direct_pr_worktree_dirty"]:
+                item.payload["direct_pr_worktree"] = item.worktree
+        elif isinstance(value, str):
+            item.worktree = value
+            if item.worktree:
+                item.payload["direct_pr_worktree"] = item.worktree
+        else:
+            item.payload["direct_pr_worktree_error"] = "worktree job returned no path"
+
+    @staticmethod
+    def _on_job_failed(item: WorkItem, result: JobResult) -> None:
+        """Record the state-specific failure outcome for a non-git agent job."""
+        logger.warning("pr_review:%s: job failed: %s", item.issue, result.error)
+        if item.state == REVIEW_WAIT:
+            # EVAL treats the missing verdict as a reviewer-infrastructure
+            # ERROR; the flag lets VALIDATE_WAIT skip the dead round.
+            item.payload["review_failed"] = True
+        elif item.state in (ADDRESS_WAIT, PUSH_WAIT):
+            item.payload["address_error"] = True
 
     def _post(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """POST [M]: durably post SURVIVING threads, refresh unresolved counts.
@@ -625,16 +785,20 @@ class PrReviewStage(Stage):
         """
         if item.pr is None:  # guarded by step(); kept for restart safety
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        verdict = self._ensure_graded_verdict(item.payload.get("review_verdict"))
+        item.payload["review_verdict"] = verdict
+        item.payload["review_text"] = verdict.raw
         raw_threads = [dict(t) for t in item.payload.get("review_threads") or []]
         threads = _surviving_threads(raw_threads, item.payload.get("validation_result"))
         item.payload["raw_review_threads"] = raw_threads
         # The surviving set is what gets posted, classified, and addressed.
         item.payload["review_threads"] = threads
-        if threads:
-            posted = ctx.github.post_review_threads(
-                item.pr, list(threads), item.payload.get("review_text", "")
-            )
-            item.payload["posted_thread_ids"] = posted
+        posted = ctx.github.post_review_threads(
+            item.pr,
+            list(threads),
+            self._final_review_comment(verdict, verdict.raw),
+        )
+        item.payload["posted_thread_ids"] = posted
         automation_unresolved, human_unresolved = ctx.github.count_unresolved_threads(item.pr)
         item.payload["unresolved_auto"] = automation_unresolved
         item.payload["unresolved_human"] = human_unresolved
@@ -662,6 +826,14 @@ class PrReviewStage(Stage):
         """
         if item.pr is None:  # guarded by step(); kept for restart safety
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        if item.payload.get("existing_pr") and not ctx.github.pr_head_is_writable(item.pr):
+            logger.warning(
+                "pr_review:%s: PR #%d head is not writable through this repository; "
+                "refusing to address a fork from the base origin",
+                item.issue,
+                item.pr,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "pr_head_not_writable")
         if not item.worktree:
             logger.warning(
                 "pr_review:%s: no worktree for the address step; failing back "
@@ -742,6 +914,9 @@ class PrReviewStage(Stage):
         verdict = payload.get("review_verdict")
         if verdict is None or verdict.is_error:
             return self._handle_error_verdict(item, verdict)
+        verdict = self._ensure_graded_verdict(verdict)
+        payload["review_verdict"] = verdict
+        payload["review_text"] = verdict.raw
 
         # Fresh counts AFTER the address/push leg, split by severity so a GO is
         # downgraded only by BLOCKING automation threads (#1856 / re-introduced #1554).
@@ -1008,27 +1183,27 @@ class PrReviewStage(Stage):
         return self._fail_back_agent_error(item)
 
     def _handle_clean_go(self, item: WorkItem, ctx: StageContext, minor_auto: int) -> StepResult:
-        """Resolve advisory threads, record internal GO, and route onward."""
+        """Resolve advisory threads, apply review GO, and route onward."""
         if item.pr is None or item.issue is None:  # guarded by caller; narrowing
             return self._fail_back_agent_error(item)
         if minor_auto:
             # Automation owns these waved minor/nitpick threads; resolve them so
             # required_review_thread_resolution does not re-block at merge_wait.
             logger.info(
-                "pr_review:%d: GO with %d advisory minor thread(s); resolving before strict gate",
+                "pr_review:%d: GO with %d advisory minor thread(s); resolving before merge wait",
                 item.issue,
                 minor_auto,
             )
             ctx.github.resolve_automation_threads(item.pr)
         logger.info(
-            "pr_review:%d: clean GO; advancing PR #%d to strict review",
+            "pr_review:%d: clean GO; advancing PR #%d to merge wait",
             item.issue,
             item.pr,
         )
-        blocked_reason = self._write_internal_go(item.pr, ctx)
+        blocked_reason = self._write_go(item.pr, ctx)
         if blocked_reason is not None:
             return StageOutcome(Disposition.FINISH_FAIL, blocked_reason)
-        return StageOutcome(Disposition.ADVANCE, "internal GO; strict review pending")
+        return StageOutcome(Disposition.ADVANCE, "review GO; merge wait pending")
 
     @staticmethod
     def _gate_no_commit(item: WorkItem) -> Continue | None:
@@ -1220,12 +1395,12 @@ class PrReviewStage(Stage):
         return StageOutcome(Disposition.FINISH_FAIL, "human_blocked")
 
     @staticmethod
-    def _write_internal_go(pr_number: int, ctx: StageContext) -> str | None:
-        """Record clean internal review while preserving the strict-review gate.
+    def _write_go(pr_number: int, ctx: StageContext) -> str | None:
+        """Apply clean review GO while preserving merge-wait-only arming.
 
-        Internal pr_review neither applies ``state:implementation-go`` nor
-        arms auto-merge. It proves the PR is unarmed before publishing its
-        internal result; strict_review owns the later head-bound eligibility.
+        ``pr_review`` owns the automated GO decision. It verifies the PR is
+        unarmed before applying ``state:implementation-go``; only
+        ``merge_wait`` can subsequently arm auto-merge.
 
         Args:
             pr_number: GitHub PR number that earned the clean GO.
@@ -1250,24 +1425,43 @@ class PrReviewStage(Stage):
 
         if not PrReviewStage._ensure_auto_merge_deferred(pr_number, ctx):
             return "auto_merge_disable_failed"
-        PrReviewStage._upsert_clean_go_comment(pr_number, ctx)
+        try:
+            ctx.github.mark_pr_implementation_go(pr_number)
+        except Exception as error:
+            logger.error("pr_review: failed to mark PR #%d implementation-go: %s", pr_number, error)
+            return "implementation_go_label_failed"
         return None
 
     @staticmethod
-    def _upsert_clean_go_comment(pr_number: int, ctx: StageContext) -> None:
-        """Leave a durable internal-GO artifact without granting merge eligibility."""
-        body = (
-            "<!-- hephaestus-pr-review-go -->\n"
-            "Automated PR review result: GO.\n\n"
-            "No unresolved blocking review threads were found by the automation reviewer. "
-            "This is an internal review result only; independent strict review remains "
-            "required and auto-merge remains disabled."
+    def _final_review_comment(verdict: Any, review_text: object) -> str:
+        """Build the final review comment with total grade and GO/NOGO."""
+        prose = str(review_text).strip() if review_text is not None else ""
+        # Tests and recovery paths can supply a verdict object without its
+        # parsed grade while retaining the original reviewer prose.  Preserve
+        # the grade the reviewer actually reported whenever it is available.
+        grade = getattr(verdict, "grade", None) or parse_review_verdict(prose).grade or "ungraded"
+        decision = getattr(verdict, "verdict", None) or "ERROR"
+        return (
+            "## Automated PR review\n\n"
+            f"Total grade: {grade}\n\n"
+            f"Verdict: {decision}\n\n"
+            f"{prose or _NO_STRUCTURED_SUMMARY}"
         )
-        try:
-            ctx.github.upsert_pr_comment(pr_number, "<!-- hephaestus-pr-review-go -->", body)
-        except Exception as e:
-            logger.warning(
-                "pr_review: failed to upsert clean-GO review comment on PR #%d (non-fatal): %s",
-                pr_number,
-                e,
-            )
+
+    @staticmethod
+    def _ensure_graded_verdict(verdict: Any) -> Any:
+        """Return a grade-bearing verdict, failing closed on malformed output.
+
+        The final GitHub review is an auditable grade plus GO/NOGO decision.
+        A reviewer response that omits the grade therefore cannot authorize a
+        GO: it is recorded as a synthetic F/NOGO with the reason preserved in
+        the final review prose.
+        """
+        if getattr(verdict, "grade", None):
+            return verdict
+        raw = str(getattr(verdict, "raw", "")).strip()
+        return parse_review_verdict(
+            (f"{raw}\n\n" if raw else "")
+            + "Grade: F\nVerdict: NOGO\n\n"
+            + "The reviewer response omitted its required grade, so this review is treated as NOGO."
+        )

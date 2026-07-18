@@ -291,7 +291,7 @@ with `--help` to see full usage.
 
 | Command | Description |
 |---|---|
-| `hephaestus-automation-loop` | Multi-repo queue-based automation pipeline using Claude Code or Codex (repo → planning → plan_review → implementation → pr_review → strict_review → ci → merge_wait → finished; legacy implementation-GO inputs route through `strict_review`) |
+| `hephaestus-automation-loop` | Multi-repo queue-based automation pipeline using Claude Code or Codex (repo → planning → plan_review → implementation → pr_review → merge_wait → finished; restarted implementation-GO inputs re-enter `merge_wait` with their loop-owned approval label) |
 | `hephaestus-plan-issues` | Bulk issue planning using Claude Code or Codex |
 | `hephaestus-implement-issues` | Bulk issue implementation using Claude Code or Codex in parallel worktrees |
 | `hephaestus-review-prs` | Read-only PR review automation using Claude Code or Codex in parallel worktrees |
@@ -455,10 +455,11 @@ hephaestus-check-complexity --help
 ## Contributing
 
 The `main` branch is protected; all changes go through a pull request. CI blocks
-PRs that fail its issue-reference, signature, and DCO checks. The pipeline
-arms auto-merge only in `merge_wait`, after `strict_review` has published and
-the pipeline has revalidated a current-head authenticated GO proof. The
-`auto-merge-policy` check is advisory; the queue gate is authoritative.
+PRs that fail its issue-reference, signature, and DCO checks. The loop runs
+`$athena:pr-review` and then writes `state:implementation-go`; it arms only in
+`merge_wait`. Normal review may collect CI/CD evidence and incorporate it into
+its binary verdict, but the loop does not change CI/CD and no CI workflow
+independently authorizes it. The `auto-merge-policy` check is advisory.
 
 1. Create a feature branch named `<issue-number>-description`
    (`git checkout -b 123-amazing-feature`).
@@ -467,9 +468,8 @@ the pipeline has revalidated a current-head authenticated GO proof. The
 3. Push the branch (`git push -u origin 123-amazing-feature`).
 4. Open a pull request whose body contains the literal line `Closes #123`
    (capital `C`, no colon, on its own line — `Fixes`/`Resolves` are **not** accepted).
-5. Do not enable auto-merge manually. The queue's independent strict-review
-   stage and `merge_wait` are its sole automatic authority, and only arm after
-   a current-head authenticated GO proof.
+5. Do not enable auto-merge manually. The automation loop's review, label, and
+   `merge_wait` stages are its sole automatic authority.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full process.
 

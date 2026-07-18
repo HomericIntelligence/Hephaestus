@@ -152,21 +152,19 @@ def test_build_pipeline_config_maps_implement_phase_to_review_scope(
     (config,) = dispatch["run_pipeline"].call_args.args
     assert config.scope is not None
     assert config.scope.stages == frozenset(
-        {StageName.IMPLEMENTATION, StageName.PR_REVIEW, StageName.STRICT_REVIEW}
+        {StageName.IMPLEMENTATION, StageName.PR_REVIEW, StageName.MERGE_WAIT}
     )
 
 
-def test_build_pipeline_config_maps_drive_green_phase_to_ci_scope(
+def test_build_pipeline_config_maps_drive_green_phase_to_review_scope(
     dispatch: dict[str, MagicMock],
 ) -> None:
-    """The drive-green phase owns CI classification plus merge wait."""
+    """The drive-green phase owns loop review plus merge wait."""
     loop_runner.main(["--issues", "11", "--phases", "drive-green"])
 
     (config,) = dispatch["run_pipeline"].call_args.args
     assert config.scope is not None
-    assert config.scope.stages == frozenset(
-        {StageName.STRICT_REVIEW, StageName.CI, StageName.MERGE_WAIT}
-    )
+    assert config.scope.stages == frozenset({StageName.PR_REVIEW, StageName.MERGE_WAIT})
 
 
 def test_build_pipeline_config_maps_drive_green_loops_to_budget(

@@ -12,7 +12,6 @@ from hephaestus.automation.agent_config import (
     AGENT_PLANNER as AGENT_PLANNER,
     AGENT_PR_MESSAGE as AGENT_PR_MESSAGE,
     AGENT_PR_REVIEWER as AGENT_PR_REVIEWER,
-    AGENT_STRICT_REVIEW as AGENT_STRICT_REVIEW,
     current_trunk_githash as current_trunk_githash,
     issue_auto_impl_branch_name as issue_auto_impl_branch_name,
     reviewer_agent as reviewer_agent,
@@ -20,5 +19,4 @@ from hephaestus.automation.agent_config import (
     session_name as session_name,
     session_uuid as session_uuid,
     short_githash as short_githash,
-    strict_review_agent as strict_review_agent,
 )

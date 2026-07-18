@@ -344,7 +344,7 @@ def test_is_automation_owned_thread_human_not_owned() -> None:
 
 
 def test_review_phase_apply_verdict_go_defers_auto_merge_without_labeling(tmp_path: Path) -> None:
-    """Legacy GO handling is informational while the strict gate is unavailable."""
+    """Legacy GO handling is informational while queue review is unavailable."""
     phase = ReviewPhase(_make_ctx(tmp_path))
     with (
         mock.patch("hephaestus.automation._review_phase.ensure_pr_auto_merge_deferred") as defer,

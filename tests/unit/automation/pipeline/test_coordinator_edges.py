@@ -24,6 +24,7 @@ import hephaestus.automation.pipeline.jobs as jobs_mod
 import hephaestus.automation.pipeline.routing as routing_mod
 import hephaestus.automation.pipeline.seeding as seeding_mod
 import hephaestus.automation.pipeline.stages.base as stage_base_mod
+import hephaestus.automation.pipeline.stages.pr_review as pr_review_mod
 import hephaestus.automation.pipeline.work_item as work_item_mod
 from hephaestus.automation.state_labels import STATE_PLAN_GO
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
@@ -47,6 +48,7 @@ EpicSkipTagObligation = seeding_mod.EpicSkipTagObligation
 
 Continue = stage_base_mod.Continue
 JobRequest = stage_base_mod.JobRequest
+PrReviewStage = pr_review_mod.PrReviewStage
 
 ItemKind = work_item_mod.ItemKind
 WorkItem = work_item_mod.WorkItem
@@ -463,10 +465,10 @@ class TestRunItemEdges:
             def on_job_done(self, i: WorkItem, result: Any, ctx: Any) -> None:
                 pass
 
-        coordinator.stages[StageName.CI] = GitRequestingStage()
+        coordinator.stages[StageName.PR_REVIEW] = GitRequestingStage()
 
         with caplog.at_level("INFO"):
-            coordinator._run_item(_item(stage=StageName.CI))
+            coordinator._run_item(_item(stage=StageName.PR_REVIEW))
 
         assert any("[dry-run] would submit GitJob: GitJob" in r.message for r in caplog.records)
 
@@ -553,7 +555,7 @@ class TestSeedingEdges:
             SeedEntry(
                 kind="pr",
                 identifier=88,
-                stage=StageName.STRICT_REVIEW,
+                stage=StageName.MERGE_WAIT,
                 reason="impl-go",
             )
         ]
@@ -561,7 +563,7 @@ class TestSeedingEdges:
 
         coordinator._seed_pass()
 
-        item = coordinator.queues[StageName.STRICT_REVIEW].snapshot()[0]
+        item = coordinator.queues[StageName.MERGE_WAIT].snapshot()[0]
         assert item.kind is ItemKind.PR and item.pr == 88 and item.repo == "repo-a"
 
     def test_issue_entry_with_pr_preserves_pr_number(
@@ -628,7 +630,7 @@ class TestSeedingEdges:
         coordinator._seed_pass()
 
         assert created == [("target-repo", tmp_path / "target-repo")]
-        item = coordinator.queues[StageName.STRICT_REVIEW].snapshot()[0]
+        item = coordinator.queues[StageName.MERGE_WAIT].snapshot()[0]
         assert item.repo == "target-repo"
         assert item.kind is ItemKind.ISSUE
         assert item.issue == 1818
@@ -643,7 +645,11 @@ class TestSeedingEdges:
             "gh_pr_label_names",
             MagicMock(side_effect=AssertionError("ambient PR label seeding called")),
         )
-        target_github = FakeStageGitHub(pr_impl_state=(True, False), pr_issue=1818)
+        target_github = FakeStageGitHub(
+            pr_impl_state=(True, False),
+            pr_issue=1818,
+            pr_state={"state": "OPEN", "headRefOid": "a" * 40},
+        )
         created: list[tuple[str, Path]] = []
 
         def github_factory(repo: str, repo_root: Path) -> FakeStageGitHub:
@@ -668,7 +674,7 @@ class TestSeedingEdges:
         coordinator._seed_pass()
 
         assert created == [("target-repo", tmp_path / "target-repo")]
-        item = coordinator.queues[StageName.STRICT_REVIEW].snapshot()[0]
+        item = coordinator.queues[StageName.MERGE_WAIT].snapshot()[0]
         assert item.repo == "target-repo"
         assert item.kind is ItemKind.PR
         assert item.issue == 1818
@@ -750,7 +756,7 @@ class TestSeedingEdges:
 
         assert coordinator.run() == 0
 
-        assert not coordinator.queues[StageName.CI].snapshot()
+        assert not coordinator.queues[StageName.PR_REVIEW].snapshot()
         assert not coordinator.queues[StageName.PR_REVIEW].snapshot()
         assert len(coordinator.ledger) == 1
         assert coordinator.ledger[0].passed
@@ -796,7 +802,7 @@ class TestSeedingEdges:
 
         assert coordinator.run() == 1
 
-        assert not coordinator.queues[StageName.CI].snapshot()
+        assert not coordinator.queues[StageName.PR_REVIEW].snapshot()
         assert not coordinator.queues[StageName.PR_REVIEW].snapshot()
         assert len(coordinator.ledger) == 1
         assert not coordinator.ledger[0].passed
@@ -806,7 +812,7 @@ class TestSeedingEdges:
     def test_direct_pr_scope_respects_drive_green_phase_scope(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A non-implementation-go direct PR must not enter pr_review in CI scope."""
+        """A non-implementation-go direct PR must not enter review/merge scope."""
         monkeypatch.setattr(
             seeding_mod,
             "gh_pr_label_names",
@@ -822,7 +828,7 @@ class TestSeedingEdges:
             repos=["target-repo"],
             prs=[1854],
             projects_dir=tmp_path,
-            scope=routing_mod.PipelineScope(frozenset({StageName.CI, StageName.MERGE_WAIT})),
+            scope=routing_mod.PipelineScope(frozenset({StageName.MERGE_WAIT})),
         )
         coordinator = Coordinator(
             config,
