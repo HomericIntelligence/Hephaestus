@@ -1747,7 +1747,11 @@ class Coordinator:
             item = WorkItem(
                 repo=default_repo,
                 kind=ItemKind.PR,
-                issue=entry.issue_number,
+                # A PR is itself a GitHub issue. Direct ``--prs`` input does
+                # not require an exact ``Closes #N`` trailer merely to obtain
+                # review/label context; use the PR number when no linked
+                # issue is available.
+                issue=entry.issue_number or entry.pr_number or int(entry.identifier),
                 pr=entry.pr_number or int(entry.identifier),
                 stage=entry.stage,
             )
@@ -1761,6 +1765,12 @@ class Coordinator:
             )
             item.payload["issue_title"] = entry.issue_title
             item.payload["issue_body"] = entry.issue_body
+            # A scoped issue with an open PR enters PR_REVIEW as an issue
+            # work item. Preserve that provenance so the stage adopts a
+            # dedicated PR checkout rather than falling back to the shared
+            # repository root.
+            if entry.stage is StageName.PR_REVIEW and entry.pr_number is not None:
+                item.payload["existing_pr"] = True
         item.state = "ENTER"
         item.payload["entry_reason"] = entry.reason
         if entry.merge_wait_recovery:

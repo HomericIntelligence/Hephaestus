@@ -400,6 +400,7 @@ class StrictReviewStage(Stage):
                     "branch_name": branch,
                     "refresh_base": False,
                     "isolated": True,
+                    "isolated_name": f"strict-review-pr-{item.pr}",
                     "sync_to_remote": True,
                     "pr_number": item.pr,
                     "repo_root": str(ctx.paths.repo_root),

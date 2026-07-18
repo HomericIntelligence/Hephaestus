@@ -15,6 +15,7 @@ from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages.pr_review import (
+    ADOPT_WORKTREE_WAIT,
     PR_FINISH,
     REVIEW_ERROR_RETRY_CAP,
     PrReviewStage,
@@ -185,18 +186,106 @@ class TestPrReviewStageStep:
         assert result.disposition == Disposition.FAIL_BACK
         assert result.note == "agent_error"
 
-    def test_direct_pr_without_worktree_fails_back_before_review(
+    def test_direct_pr_without_worktree_adopts_before_review(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A direct PR must adopt its branch before a reviewer sees it."""
+        """A direct PR adopts its exact branch without entering implementation."""
         stage = PrReviewStage()
+        github = FakeStageGitHub(pr_head_branch="review-pr")
+        ctx = make_ctx(github=github)
         item = make_work_item(issue=1, pr=1001, kind=ItemKind.PR, state="ENTER")
+        item.payload["direct_pr_worktree_name"] = "pr-review-pr-1001-test"
         assert item.worktree == ""
 
-        result = stage.step(item, make_ctx())
+        result = stage.step(item, ctx)
 
-        assert result == StageOutcome(Disposition.FAIL_BACK, "agent_error")
-        assert item.payload["agent_error_failback"] is True
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.op == "create_worktree"
+        assert result.on_done_state == ADOPT_WORKTREE_WAIT
+        assert result.job.kwargs == {
+            "issue_number": 1,
+            "branch_name": "review-pr",
+            "refresh_base": False,
+            "isolated": True,
+            "isolated_name": "pr-review-pr-1001-test",
+            "sync_to_remote": True,
+            "pr_number": 1001,
+            "repo_root": str(ctx.paths.repo_root),
+        }
+        assert item.payload["existing_pr"] is True
+        assert item.payload["direct_pr_worktree_pending"] is True
+        assert "agent_error_failback" not in item.payload
+
+    def test_issue_seeded_existing_pr_without_worktree_adopts_before_review(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Drive-green issue seeds adopt their existing PR checkout too."""
+        stage = PrReviewStage()
+        ctx = make_ctx(github=FakeStageGitHub(pr_head_branch="review-pr"))
+        item = make_work_item(issue=1, pr=1001, kind=ItemKind.ISSUE, state="ENTER")
+        item.payload["existing_pr"] = True
+        item.payload["direct_pr_worktree_name"] = "pr-review-pr-1001-test"
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.op == "create_worktree"
+        assert result.job.kwargs["isolated"] is True
+        assert result.job.kwargs["isolated_name"] == "pr-review-pr-1001-test"
+
+    def test_direct_pr_adoption_completion_enters_review_wait(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Completion is recorded before the coordinator changes WAIT state."""
+        stage = PrReviewStage()
+        ctx = make_ctx(github=FakeStageGitHub(pr_head_branch="review-pr"))
+        item = make_work_item(
+            issue=1,
+            pr=1001,
+            kind=ItemKind.PR,
+            state="ENTER",
+        )
+        item.payload["direct_pr_worktree_name"] = "pr-review-pr-1001-test"
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"path": "/tmp/review-pr", "dirty": False}),
+            ctx,
+        )
+        # ``Coordinator._handle_completion`` assigns on_done_state only after
+        # this callback, so mirror its durable ordering exactly.
+        item.state = ADOPT_WORKTREE_WAIT
+        result = stage.step(item, ctx)
+
+        assert result == Continue(next_state="REVIEW_WAIT")
+        assert item.worktree == "/tmp/review-pr"
+        assert item.payload["direct_pr_worktree"] == "/tmp/review-pr"
+        assert "direct_pr_worktree_pending" not in item.payload
+
+    def test_direct_pr_review_checkout_name_is_unique_per_item(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Concurrent direct reviews cannot collide on one detached path."""
+        stage = PrReviewStage()
+        ctx = make_ctx(github=FakeStageGitHub(pr_head_branch="review-pr"))
+        first = make_work_item(issue=1, pr=1001, kind=ItemKind.PR, state="ENTER")
+        second = make_work_item(issue=1, pr=1001, kind=ItemKind.PR, state="ENTER")
+
+        first_result = stage.step(first, ctx)
+        second_result = stage.step(second, ctx)
+
+        assert isinstance(first_result, JobRequest)
+        assert isinstance(second_result, JobRequest)
+        assert first.payload["direct_pr_worktree_name"] != second.payload["direct_pr_worktree_name"]
+        assert first_result.job.kwargs["isolated_name"] == first.payload["direct_pr_worktree_name"]
+        assert (
+            second_result.job.kwargs["isolated_name"]
+            == second.payload["direct_pr_worktree_name"]
+        )
 
     def test_enter_advances_to_review(self, make_ctx: Any, make_work_item: Any) -> None:
         """ENTER advances to REVIEW_WAIT."""
@@ -484,6 +573,20 @@ class TestPrReviewStageStep:
             "agent": "claude",
         }
         assert result.on_done_state == "EVAL"
+
+    def test_address_refuses_fork_head_without_base_origin_write(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A fetched fork head may be reviewed but never addressed via origin."""
+        stage = PrReviewStage()
+        ctx = make_ctx(github=FakeStageGitHub(pr_head_writable=False))
+        item = make_work_item(issue=1, pr=1001, state="ADDRESS_WAIT")
+        item.payload["existing_pr"] = True
+        item.worktree = "/tmp/detached-pr-review"
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "pr_head_not_writable")
 
     def test_followup_wait_requests_follow_up(self, make_ctx: Any, make_work_item: Any) -> None:
         """Legacy FOLLOWUP_WAIT submits the follow-up job, then finishes."""

@@ -313,6 +313,24 @@ class TestGate:
             Disposition.FINISH_FAIL, "auto_merge_disable_failed"
         )
 
+    def test_gate_existing_fork_pr_fails_closed_before_worktree_or_agent(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Fork heads cannot be addressed by pushing a base-origin branch."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub(
+            open_pr=1001,
+            pr_head_branch="fork-feature",
+            pr_head_writable=False,
+        )
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="GATE")
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "pr_head_not_writable")
+        assert github.mutation_log == []
+
     def test_adopted_worktree_job_syncs_without_trunk_reset(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

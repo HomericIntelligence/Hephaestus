@@ -213,6 +213,7 @@ class WorktreeManager:
         *,
         refresh_base: bool = False,
         isolated: bool = False,
+        isolated_name: str | None = None,
         timeout: int | None = None,
     ) -> Path:
         """Create a new worktree for an issue.
@@ -228,8 +229,12 @@ class WorktreeManager:
                 all other callers (review, address-review, ci-driver).
             isolated: When True, create an in-root detached checkout instead of
                 reusing another worktree that holds ``branch_name``. Strict
-                review uses this so a preserved writer checkout is never reset
-                or exposed to the read-only reviewer.
+                and PR review use this so a preserved writer checkout is never
+                reset or exposed to an agent.
+            isolated_name: Stable name for an isolated checkout.  Callers that
+                need independent detached checkouts for the same PR (for
+                example mutable PR review and read-only strict review) must
+                supply distinct names. Ignored unless ``isolated`` is true.
             timeout: Optional timeout in seconds for each git command.
 
         Returns:
@@ -240,9 +245,8 @@ class WorktreeManager:
 
         """
         with self.lock:
-            worktree_key: int | str = (
-                f"strict-review-pr-{issue_number}" if isolated else issue_number
-            )
+            isolated_key = isolated_name or f"strict-review-pr-{issue_number}"
+            worktree_key: int | str = isolated_key if isolated else issue_number
             if worktree_key in self.worktrees:
                 logger.warning("Worktree for issue #%s already exists", issue_number)
                 return self.worktrees[worktree_key]
@@ -253,9 +257,7 @@ class WorktreeManager:
             if branch_name is None:
                 branch_name = f"{issue_number}-auto"
 
-            worktree_path = self.base_dir / (
-                f"strict-review-pr-{issue_number}" if isolated else f"issue-{issue_number}"
-            )
+            worktree_path = self.base_dir / (isolated_key if isolated else f"issue-{issue_number}")
 
             # Reuse, don't collide: git forbids the same branch in two worktrees.
             # When ``branch_name`` is already checked out elsewhere (e.g. a PR

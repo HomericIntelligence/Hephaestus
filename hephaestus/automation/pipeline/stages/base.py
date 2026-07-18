@@ -199,6 +199,14 @@ class StageGitHub(Protocol):
         """Return the PR's head branch name (``_review_utils.get_pr_head_branch``)."""
         ...
 
+    def pr_head_is_writable(self, pr_number: int) -> bool:
+        """Return whether this loop can safely publish to the PR head branch.
+
+        A fork head may be fetched for read-only review, but it must never be
+        addressed by pushing a same-named branch to the base repository.
+        """
+        ...
+
     def pr_has_implementation_state_label(self, pr_number: int) -> tuple[bool, bool]:
         """Return ``(has_go, has_no_go)`` for the PR's implementation state labels.
 

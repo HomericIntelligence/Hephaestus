@@ -762,6 +762,79 @@ class ImplementationStage(Stage):
         )
         return StageOutcome(Disposition.FAIL_BACK, "already_implementation_go_pr")
 
+    @staticmethod
+    def _writable_head_guard(
+        item: WorkItem, ctx: StageContext, existing_pr: int
+    ) -> StageOutcome | None:
+        """Fail closed when an existing PR head belongs to a fork.
+
+        Fork heads can be fetched for review, but implementation must never
+        address them by creating a same-named branch on the base repository's
+        origin.
+        """
+        if ctx.github.pr_head_is_writable(existing_pr):
+            return None
+        logger.warning(
+            "implementation:%d: PR #%d head is not writable through this repository; "
+            "refusing to address a fork from the base origin",
+            item.issue,
+            existing_pr,
+        )
+        return StageOutcome(Disposition.FINISH_FAIL, "pr_head_not_writable")
+
+    def _adopt_existing_pr(
+        self,
+        item: WorkItem,
+        ctx: StageContext,
+        existing_pr: int,
+        *,
+        agent_error_reentry: bool,
+    ) -> StepResult:
+        """Validate and adopt an existing writable PR for normal review."""
+        item.pr = existing_pr
+        terminal = _terminal_pr_outcome(ctx.github.gh_pr_state(existing_pr), existing_pr)
+        if terminal is not None:
+            return terminal
+        writable_head = self._writable_head_guard(item, ctx, existing_pr)
+        if writable_head is not None:
+            return writable_head
+        defer_failed = self._defer_gate(_issue_number(item), existing_pr, ctx)
+        if defer_failed is not None:
+            return defer_failed
+        head_branch = ctx.github.get_pr_head_branch(existing_pr)
+        if head_branch:
+            item.branch = head_branch
+        impl_go_route = self._impl_go_route(item, ctx, existing_pr)
+        if impl_go_route is not None:
+            return impl_go_route
+        if agent_error_reentry:
+            # M1: consume the implement budget at GATE-adoption so the
+            # pr_review agent_error -> re-adopt cycle is bounded.
+            attempts = item.attempts.get("implement", 0) + 1
+            item.attempts["implement"] = attempts
+            budget = ctx.budget("implement")
+            if attempts >= budget:
+                logger.error(
+                    "implementation:%d: agent_error fail-backs exhausted the "
+                    "implement budget (%d/%d) re-adopting PR #%d — stopping; "
+                    "the review/address infrastructure failed repeatedly and "
+                    "re-adopting the same PR cannot fix it (manual look needed)",
+                    item.issue,
+                    attempts,
+                    budget,
+                    existing_pr,
+                )
+                return StageOutcome(Disposition.FINISH_FAIL, "agent_error_exhausted")
+        # Adopt the PR's REAL head branch — never assume {issue}-auto-impl.
+        item.payload["existing_pr"] = True
+        logger.info(
+            "implementation:%d: existing PR #%d (branch %r); preparing adopted worktree",
+            item.issue,
+            existing_pr,
+            item.branch,
+        )
+        return Continue(next_state=WORKTREE_WAIT)
+
     def _gate(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """GATE [M]: existing-PR fast path, then the plan-review verdict gate.
 
@@ -798,48 +871,12 @@ class ImplementationStage(Stage):
 
         existing_pr = item.pr or ctx.github.find_pr_for_issue(item.issue)
         if existing_pr:
-            item.pr = existing_pr
-            terminal = _terminal_pr_outcome(ctx.github.gh_pr_state(existing_pr), existing_pr)
-            if terminal is not None:
-                return terminal
-            defer_failed = self._defer_gate(item.issue, existing_pr, ctx)
-            if defer_failed is not None:
-                return defer_failed
-            head_branch = ctx.github.get_pr_head_branch(existing_pr)
-            if head_branch:
-                item.branch = head_branch
-            impl_go_route = self._impl_go_route(item, ctx, existing_pr)
-            if impl_go_route is not None:
-                return impl_go_route
-            if agent_error_reentry:
-                # M1: consume the implement budget at GATE-adoption so the
-                # pr_review agent_error -> re-adopt cycle is bounded.
-                attempts = item.attempts.get("implement", 0) + 1
-                item.attempts["implement"] = attempts
-                budget = ctx.budget("implement")
-                if attempts >= budget:
-                    logger.error(
-                        "implementation:%d: agent_error fail-backs exhausted the "
-                        "implement budget (%d/%d) re-adopting PR #%d — stopping; "
-                        "the review/address infrastructure failed repeatedly and "
-                        "re-adopting the same PR cannot fix it (manual look needed)",
-                        item.issue,
-                        attempts,
-                        budget,
-                        existing_pr,
-                    )
-                    return StageOutcome(Disposition.FINISH_FAIL, "agent_error_exhausted")
-            # Adopt the PR's REAL head branch — never assume {issue}-auto-impl
-            # (the _review_existing_pr branch-assumption bug). Auto-merge was
-            # already verified disabled above before the branch was inspected.
-            item.payload["existing_pr"] = True
-            logger.info(
-                "implementation:%d: existing PR #%d (branch %r); preparing adopted worktree",
-                item.issue,
+            return self._adopt_existing_pr(
+                item,
+                ctx,
                 existing_pr,
-                item.branch,
+                agent_error_reentry=agent_error_reentry,
             )
-            return Continue(next_state=WORKTREE_WAIT)
 
         # At-or-past (never equality): plan-go OR already implementation-go
         # both satisfy the gate; anything earlier fails back to plan_review.

@@ -719,10 +719,12 @@ class WorkerPool:
                 ok=False,
                 error="commit_push requires non-empty 'worktree_path' and 'issue_number' kwargs",
             )
-        # NOTE: commit_if_changes returns False BOTH for "worktree clean,
-        # nothing to commit" AND for "commit attempted but failed" (it logs
-        # and swallows the RuntimeError). Do not push in either case; stages
-        # consume value=False as the no-real-commit path.
+        # ``commit_if_changes`` returns False for a clean worktree.  An agent
+        # is instructed to leave its edits uncommitted, but a defensive
+        # recovery still recognizes a clean branch that is ahead of its
+        # remote tracking ref: the coordinator, not the agent, publishes that
+        # already-created commit so every subsequent review binds to the new
+        # remote head.
         changed = git_utils.commit_if_changes(
             int(issue_number),
             Path(worktree_path),
@@ -731,10 +733,18 @@ class WorkerPool:
             timeout=job.timeout_s,
         )
         if not changed:
-            return JobResult(ok=True, value=False)
-        git_utils.push_branch(
-            str(job.kwargs.get("branch", "HEAD")),
-            Path(worktree_path),
-            timeout=job.timeout_s,
-        )
-        return JobResult(ok=True, value=changed)
+            branch = str(job.kwargs.get("branch") or "")
+            if not branch or not git_utils.has_unpushed_commits(
+                branch, Path(worktree_path), timeout=job.timeout_s
+            ):
+                return JobResult(ok=True, value=False)
+        branch = str(job.kwargs.get("branch", "HEAD"))
+        if bool(job.kwargs.get("publish_detached_head", False)):
+            git_utils.push_head_to_branch(
+                branch,
+                Path(worktree_path),
+                timeout=job.timeout_s,
+            )
+        else:
+            git_utils.push_branch(branch, Path(worktree_path), timeout=job.timeout_s)
+        return JobResult(ok=True, value=True)

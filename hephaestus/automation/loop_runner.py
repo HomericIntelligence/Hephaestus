@@ -464,7 +464,7 @@ def _pipeline_scope_for_phases(phases: tuple[str, ...]) -> PipelineScope | None:
     ``None`` preserves the default full pipeline, including repo discovery.
     Partial selections use the same stage ownership as the focused wrapper
     CLIs: plan = planning+plan_review, implement = implementation+pr_review+
-    strict_review, drive-green = strict_review+merge_wait. The overlap
+    strict_review, drive-green = pr_review+strict_review+merge_wait. The overlap
     makes either operational entry point safe for a legacy implementation-GO
     PR that still needs a current-head independent review.
     """
@@ -482,6 +482,7 @@ def _pipeline_scope_for_phases(phases: tuple[str, ...]) -> PipelineScope | None:
             StageName.STRICT_REVIEW,
         ),
         "drive-green": (
+            StageName.PR_REVIEW,
             StageName.STRICT_REVIEW,
             StageName.MERGE_WAIT,
         ),

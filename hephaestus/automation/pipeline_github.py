@@ -834,6 +834,37 @@ class PipelineGitHub:
                 return None
         return get_pr_head_branch(pr_number)
 
+    def pr_head_is_writable(self, pr_number: int) -> bool:
+        """Return whether the PR head belongs to this repository's origin.
+
+        The automation loop may review a fork PR from ``refs/pull/N/head``,
+        but it cannot safely push an address commit there through the base
+        repository's ``origin``. Any missing or malformed repository identity
+        fails closed.
+        """
+        if self._repo_slug is None or self.repo is None:
+            return False
+        try:
+            result = self._gh(
+                ["pr", "view", str(pr_number), "--json", "headRepository,headRepositoryOwner"],
+                check=False,
+            )
+            data = json.loads(result.stdout or "{}")
+        except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError):
+            return False
+        if not isinstance(data, dict):
+            return False
+        repository = data.get("headRepository")
+        owner = data.get("headRepositoryOwner")
+        repo_name = repository.get("name") if isinstance(repository, dict) else repository
+        owner_login = owner.get("login") if isinstance(owner, dict) else owner
+        return (
+            isinstance(repo_name, str)
+            and isinstance(owner_login, str)
+            and repo_name.casefold() == self.repo.casefold()
+            and owner_login.casefold() == self.org.casefold()
+        )
+
     def pr_has_implementation_state_label(self, pr_number: int) -> tuple[bool, bool]:
         """Return ``(has_go, has_no_go)`` (``pr_manager``)."""
         if self._repo_slug is not None:

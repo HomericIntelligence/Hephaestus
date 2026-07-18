@@ -117,6 +117,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from html import escape
 from typing import Any, cast
+from uuid import uuid4
 
 from hephaestus.automation.agent_config import (
     address_review_claude_timeout,
@@ -144,13 +145,13 @@ from hephaestus.automation.session_naming import (
 from hephaestus.automation.state_labels import STATE_SKIP
 
 from ..events import PrReviewZeroThreadNogoEvent, ZeroThreadNogoAction
+from ..work_item import ItemKind
 from .base import (
     GIT_JOB_TIMEOUT_S,
     AgentJob,
     Continue,
     Disposition,
     GitJob,
-    ItemKind,
     JobRequest,
     JobResult,
     Stage,
@@ -194,6 +195,7 @@ def _parse_review_response(response: str) -> _ParsedReviewResponse:
 
 # In-memory mini-states (stage-local strings, never GitHub labels).
 ENTER = "ENTER"
+ADOPT_WORKTREE_WAIT = "ADOPT_WORKTREE_WAIT"
 REVIEW_WAIT = "REVIEW_WAIT"
 VALIDATE_WAIT = "VALIDATE_WAIT"
 POST = "POST"
@@ -207,6 +209,7 @@ FINISH = PR_FINISH
 
 _STEP_HANDLER_NAMES: dict[str, str] = {
     ENTER: "_enter",
+    ADOPT_WORKTREE_WAIT: "_adopt_worktree_wait",
     REVIEW_WAIT: "_review_wait",
     VALIDATE_WAIT: "_validate_wait",
     POST: "_post",
@@ -446,16 +449,19 @@ class PrReviewStage(Stage):
             # PR_CREATE step is the designated (re)creation path.
             logger.warning("pr_review:%d: no PR on item; failing back", item.issue)
             return self._fail_back_agent_error(item)
-        if item.kind is ItemKind.PR and item.state == "ENTER" and not item.worktree:
-            # A direct PR seed has no adopted checkout yet.  Never review from
-            # the shared repository root with an empty diff/body context: the
-            # implementation stage owns exact-branch adoption.
-            logger.warning(
-                "pr_review:%d: no adopted worktree for PR #%d; failing back",
-                item.issue,
-                item.pr,
-            )
-            return self._fail_back_agent_error(item)
+        if (
+            item.state == "ENTER"
+            and not item.worktree
+            and (item.kind is ItemKind.PR or bool(item.payload.get("existing_pr")))
+        ):
+            # A PR-review entry has no adopted checkout yet. It must never be
+            # reviewed from the shared repository root, including when an
+            # issue seed was routed to an already-open PR by drive-green.
+            # It also must not detour through fresh implementation merely to
+            # obtain that checkout: issue-level state:skip is intentionally
+            # absolute for fresh implementation but is not a reason to skip
+            # an existing PR review.
+            return self._adopt_direct_pr_worktree(item, ctx)
 
         handler_name = _STEP_HANDLER_NAMES.get(item.state)
         if handler_name is not None:
@@ -470,6 +476,66 @@ class PrReviewStage(Stage):
 
     def _enter(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """ENTER advances to REVIEW_WAIT."""
+        return Continue(next_state=REVIEW_WAIT)
+
+    def _adopt_direct_pr_worktree(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Create a synchronized isolated checkout for an existing PR."""
+        if item.pr is None:  # guarded by step(); keeps type narrowing local
+            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        branch = ctx.github.get_pr_head_branch(item.pr)
+        if not branch:
+            logger.error("pr_review:%s: no head branch for direct PR #%d", item.issue, item.pr)
+            return StageOutcome(Disposition.FINISH_FAIL, "direct_pr_no_head_branch")
+        item.branch = branch
+        item.payload["existing_pr"] = True
+        worktree_name = str(
+            item.payload.setdefault(
+                "direct_pr_worktree_name",
+                f"pr-review-pr-{item.pr}-{uuid4().hex}",
+            )
+        )
+        logger.info(
+            "pr_review:%d: adopting direct PR #%d (branch %r) for review",
+            _issue_number(item),
+            item.pr,
+            branch,
+        )
+        job = GitJob(
+            repo=item.repo,
+            op="create_worktree",
+            timeout_s=GIT_JOB_TIMEOUT_S,
+            kwargs={
+                "issue_number": _issue_number(item),
+                "branch_name": branch,
+                "refresh_base": False,
+                # This mutable review checkout cannot reuse the writer's
+                # branch checkout. It has its own name because strict review
+                # also needs a separate, read-only detached checkout later.
+                "isolated": True,
+                # The name is item-owned and per-attempt. Concurrent direct
+                # reviews of one PR must not remove, reset, or clean up each
+                # other's detached checkout.
+                "isolated_name": worktree_name,
+                "sync_to_remote": True,
+                "pr_number": item.pr,
+                "repo_root": str(ctx.paths.repo_root),
+            },
+            descr="direct_pr_review_worktree",
+        )
+        # Coordinator completion callbacks run before on_done_state is
+        # assigned. The marker makes that ordering explicit and fail-closed.
+        item.payload["direct_pr_worktree_pending"] = True
+        return JobRequest(job, on_done_state=ADOPT_WORKTREE_WAIT)
+
+    def _adopt_worktree_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Advance only from a clean, synchronized direct-PR checkout."""
+        del ctx
+        if item.payload.pop("direct_pr_worktree_error", None):
+            return StageOutcome(Disposition.FINISH_FAIL, "direct_pr_worktree_failed")
+        if not item.worktree:
+            return StageOutcome(Disposition.FINISH_FAIL, "direct_pr_worktree_unfinished")
+        if item.payload.get("direct_pr_worktree_dirty"):
+            return StageOutcome(Disposition.FINISH_FAIL, "direct_pr_worktree_dirty")
         return Continue(next_state=REVIEW_WAIT)
 
     def _review_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
@@ -571,16 +637,22 @@ class PrReviewStage(Stage):
         """PUSH_WAIT submits the commit+push job for the addressing changes."""
         issue = _issue_number(item)
         logger.info("pr_review:%d: requesting push job", issue)
+        kwargs: dict[str, object] = {
+            "issue_number": issue,
+            "worktree_path": item.worktree,
+            "branch": item.branch,
+            "agent": agent_provider(ctx),
+        }
+        if item.payload.get("direct_pr_worktree"):
+            # Direct review addresses findings from a detached checkout; the
+            # coordinator must publish that exact HEAD to the PR branch with
+            # a normal fast-forward push.
+            kwargs["publish_detached_head"] = True
         git_job = GitJob(
             repo=item.repo,
             op="commit_push",
             timeout_s=GIT_JOB_TIMEOUT_S,
-            kwargs={
-                "issue_number": issue,
-                "worktree_path": item.worktree,
-                "branch": item.branch,
-                "agent": agent_provider(ctx),
-            },
+            kwargs=kwargs,
             descr="push_fixes",
         )
         return JobRequest(git_job, on_done_state=EVAL)
@@ -618,14 +690,12 @@ class PrReviewStage(Stage):
             ctx: Stage context.
 
         """
+        if item.payload.pop("direct_pr_worktree_pending", None):
+            self._on_direct_pr_worktree_done(item, result)
+            return
+
         if not result.ok:
-            logger.warning("pr_review:%s: job failed: %s", item.issue, result.error)
-            if item.state == REVIEW_WAIT:
-                # EVAL treats the missing verdict as a reviewer-infrastructure
-                # ERROR; the flag lets VALIDATE_WAIT skip the dead round.
-                item.payload["review_failed"] = True
-            elif item.state in (ADDRESS_WAIT, PUSH_WAIT):
-                item.payload["address_error"] = True
+            self._on_job_failed(item, result)
             return
 
         if item.state == PUSH_WAIT:
@@ -657,6 +727,38 @@ class PrReviewStage(Stage):
         # FOLLOWUP_WAIT intentionally has no branch: the follow-up job's
         # output is a side effect (issues filed by the agent), not a payload
         # value any later state consumes.
+
+    @staticmethod
+    def _on_direct_pr_worktree_done(item: WorkItem, result: JobResult) -> None:
+        """Record the exact checkout created for a direct PR review."""
+        if not result.ok:
+            logger.warning("pr_review:%s: direct PR worktree failed: %s", item.issue, result.error)
+            item.worktree = ""
+            item.payload["direct_pr_worktree_error"] = result.error or "worktree job failed"
+            return
+        value = result.value
+        if isinstance(value, dict):
+            item.worktree = str(value.get("path", ""))
+            item.payload["direct_pr_worktree_dirty"] = bool(value.get("dirty"))
+            if item.worktree and not item.payload["direct_pr_worktree_dirty"]:
+                item.payload["direct_pr_worktree"] = item.worktree
+        elif isinstance(value, str):
+            item.worktree = value
+            if item.worktree:
+                item.payload["direct_pr_worktree"] = item.worktree
+        else:
+            item.payload["direct_pr_worktree_error"] = "worktree job returned no path"
+
+    @staticmethod
+    def _on_job_failed(item: WorkItem, result: JobResult) -> None:
+        """Record the state-specific failure outcome for a non-git agent job."""
+        logger.warning("pr_review:%s: job failed: %s", item.issue, result.error)
+        if item.state == REVIEW_WAIT:
+            # EVAL treats the missing verdict as a reviewer-infrastructure
+            # ERROR; the flag lets VALIDATE_WAIT skip the dead round.
+            item.payload["review_failed"] = True
+        elif item.state in (ADDRESS_WAIT, PUSH_WAIT):
+            item.payload["address_error"] = True
 
     def _post(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """POST [M]: durably post SURVIVING threads, refresh unresolved counts.
@@ -708,6 +810,14 @@ class PrReviewStage(Stage):
         """
         if item.pr is None:  # guarded by step(); kept for restart safety
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        if item.payload.get("existing_pr") and not ctx.github.pr_head_is_writable(item.pr):
+            logger.warning(
+                "pr_review:%s: PR #%d head is not writable through this repository; "
+                "refusing to address a fork from the base origin",
+                item.issue,
+                item.pr,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "pr_head_not_writable")
         if not item.worktree:
             logger.warning(
                 "pr_review:%s: no worktree for the address step; failing back "

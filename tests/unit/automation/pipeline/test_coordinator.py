@@ -30,7 +30,7 @@ from hephaestus.automation.pipeline.events import (
     PrReviewZeroThreadNogoEvent,
     ZeroThreadNogoAction,
 )
-from hephaestus.automation.pipeline.jobs import AgentJob, JobHandle, JobResult
+from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobHandle, JobResult
 from hephaestus.automation.pipeline.routing import (
     Disposition,
     PipelineScope,
@@ -363,6 +363,80 @@ class TestQuiescence:
         review_jobs = [handle.job for handle in pool.submitted if isinstance(handle.job, AgentJob)]
         assert review_jobs
         assert review_jobs[-1].cwd == tmp_path / "pr-601"
+
+    def test_pr_review_adoption_records_completion_before_wait_state(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Direct PR review honors the coordinator's callback-before-state order."""
+        github = FakeStageGitHub(pr_head_branch="review-pr")
+        coordinator, pool, _ = make_coordinator(tmp_path, monkeypatch, github=github)
+        worktree = tmp_path / "build" / ".worktrees" / "pr-review-pr-601"
+        pool.queue_result(JobResult(ok=True, value={"path": str(worktree), "dirty": False}))
+        # Stop after the review job is submitted. This keeps the assertion at
+        # the adoption boundary while exercising the real completion drain.
+        pool.queue_result(JobResult(ok=False, interrupted=True, error="stop"))
+        item = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.PR,
+            issue=1,
+            pr=601,
+            stage=StageName.PR_REVIEW,
+            state="ENTER",
+            payload={
+                "_enter_pending": True,
+                "direct_pr_worktree_name": "pr-review-pr-601-test",
+            },
+        )
+
+        coordinator._run_item(item)
+        coordinator._drain_completions()
+
+        assert item.worktree == str(worktree)
+        assert item.payload["direct_pr_worktree"] == str(worktree)
+        assert item.state == "REVIEW_WAIT"
+        jobs = [handle.job for handle in pool.submitted]
+        assert isinstance(jobs[0], GitJob)
+        assert jobs[0].kwargs["isolated"] is True
+        assert jobs[0].kwargs["isolated_name"] == "pr-review-pr-601-test"
+
+    def test_issue_seed_with_existing_pr_marks_pr_review_adoption(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue-scoped drive-green input retains its existing-PR provenance."""
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+        entry = SeedEntry(
+            kind="issue",
+            identifier=601,
+            stage=StageName.PR_REVIEW,
+            reason="open PR awaiting review",
+            pr_number=701,
+        )
+
+        item = coordinator._entry_to_item(entry, "repo-a")
+
+        assert item.kind is ItemKind.ISSUE
+        assert item.pr == 701
+        assert item.payload["existing_pr"] is True
+
+    def test_direct_pr_without_closing_issue_uses_pr_as_issue_context(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Explicit --prs input is reviewable without an exact Closes trailer."""
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+        entry = SeedEntry(
+            kind="pr",
+            identifier=701,
+            stage=StageName.PR_REVIEW,
+            reason="direct PR awaiting review",
+            pr_number=701,
+            issue_number=None,
+        )
+
+        item = coordinator._entry_to_item(entry, "repo-a")
+
+        assert item.kind is ItemKind.PR
+        assert item.pr == 701
+        assert item.issue == 701
 
 
 def _fake_in_flight_item(coordinator: Coordinator, item: WorkItem) -> JobHandle:

@@ -584,7 +584,9 @@ listed above. Standalone scripts are thin queue-pipeline scoped entry points:
 - `hephaestus-review-prs` preserves the historical reviewer CLI and dispatches
   the pr_review stage slice.
 - `hephaestus-drive-prs-green` preserves the historical drive-green CLI and
-  dispatches the strict_review/merge_wait stage slice.
+  dispatches the pr_review/strict_review/merge_wait stage slice. This lets an
+  explicitly selected existing PR receive normal review before the independent
+  loop-owned approval review.
 - `hephaestus-merge-prs` remains a manual merge-driving command outside the
   queue coordinator.
 

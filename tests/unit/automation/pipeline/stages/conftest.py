@@ -49,6 +49,7 @@ class FakeStageGitHub(FakeGitHub):
         pr_issue: int | None = None,
         has_plan: bool = False,
         pr_head_branch: str | None = None,
+        pr_head_writable: bool = True,
         pr_impl_state: tuple[bool, bool] = (False, False),
         unresolved: list[tuple[int, int]] | None = None,
         by_severity: list[tuple[int, int, int]] | None = None,
@@ -68,6 +69,8 @@ class FakeStageGitHub(FakeGitHub):
             pr_issue: Canned answer for find_issue_for_pr.
             has_plan: Canned answer for has_existing_plan.
             pr_head_branch: Canned answer for get_pr_head_branch.
+            pr_head_writable: Whether the PR head belongs to the base origin
+                and may receive coordinator-owned address commits.
             pr_impl_state: Canned (has_go, has_no_go) answer for
                 pr_has_implementation_state_label.
             unresolved: FIFO of (automation, human) answers for
@@ -95,6 +98,7 @@ class FakeStageGitHub(FakeGitHub):
         self._pr_issue = pr_issue
         self._has_plan = has_plan
         self._pr_head_branch = pr_head_branch
+        self._pr_head_writable = pr_head_writable
         self._pr_impl_state = pr_impl_state
         self._unresolved: list[tuple[int, int]] = list(unresolved or [(0, 0)])
         self._by_severity = (
@@ -151,6 +155,10 @@ class FakeStageGitHub(FakeGitHub):
     def get_pr_head_branch(self, pr_number: int) -> str | None:
         """Mirror _review_utils.get_pr_head_branch (canned answer)."""
         return self._pr_head_branch
+
+    def pr_head_is_writable(self, pr_number: int) -> bool:
+        """Mirror PipelineGitHub.pr_head_is_writable (canned answer)."""
+        return self._pr_head_writable
 
     def pr_has_implementation_state_label(self, pr_number: int) -> tuple[bool, bool]:
         """Mirror pr_manager.pr_has_implementation_state_label (canned answer)."""

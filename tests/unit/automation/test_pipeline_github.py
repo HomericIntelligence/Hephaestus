@@ -195,6 +195,55 @@ class TestRepoScoping:
             ]
         ]
 
+    @pytest.mark.parametrize(
+        ("payload", "expected"),
+        [
+            (
+                {
+                    "headRepository": {"name": "repo-a"},
+                    "headRepositoryOwner": {"login": "org"},
+                },
+                True,
+            ),
+            (
+                {
+                    "headRepository": {"name": "repo-a"},
+                    "headRepositoryOwner": {"login": "contributor"},
+                },
+                False,
+            ),
+        ],
+    )
+    def test_pr_head_writable_requires_base_repository_identity(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        payload: dict[str, object],
+        expected: bool,
+    ) -> None:
+        """Fork heads are readable but cannot receive a base-origin address push."""
+        calls: list[list[str]] = []
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            return SimpleNamespace(stdout=json.dumps(payload))
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+
+        assert adapter.pr_head_is_writable(17) is expected
+        assert calls == [
+            [
+                "pr",
+                "view",
+                "17",
+                "--json",
+                "headRepository,headRepositoryOwner",
+                "--repo",
+                "org/repo-a",
+            ]
+        ]
+
     def test_label_mutators_include_repo_arg(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

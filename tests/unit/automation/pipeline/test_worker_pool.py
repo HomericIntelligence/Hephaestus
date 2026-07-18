@@ -1138,6 +1138,67 @@ class TestGitOps:
         assert result.ok is True
         assert result.value is False
 
+    def test_commit_push_publishes_agent_precommitted_change(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A clean tree ahead of its remote branch still needs coordinator-owned push."""
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={"issue_number": 5, "worktree_path": tmp_path, "branch": "5-auto"},
+        )
+        with (
+            patch("hephaestus.automation.git_utils.commit_if_changes", return_value=False),
+            patch(
+                "hephaestus.automation.git_utils.has_unpushed_commits", return_value=True
+            ) as mock_ahead,
+            patch("hephaestus.automation.git_utils.push_branch") as mock_push,
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        mock_ahead.assert_called_once_with("5-auto", tmp_path, timeout=60)
+        mock_push.assert_called_once_with("5-auto", tmp_path, timeout=60)
+        assert result.ok is True
+        assert result.value is True
+
+    def test_commit_push_publishes_detached_pr_review_head(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """Direct PR review publishes its detached HEAD, never a writer ref."""
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 5,
+                "worktree_path": tmp_path,
+                "branch": "5-auto",
+                "publish_detached_head": True,
+            },
+        )
+        with (
+            patch("hephaestus.automation.git_utils.commit_if_changes", return_value=True),
+            patch(
+                "hephaestus.automation.git_utils.push_head_to_branch"
+            ) as mock_push,
+            patch("hephaestus.automation.git_utils.push_branch") as normal_push,
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        mock_push.assert_called_once_with("5-auto", tmp_path, timeout=60)
+        normal_push.assert_not_called()
+        assert result.ok is True
+        assert result.value is True
+
     def test_commit_push_missing_worktree_path_is_error(
         self,
         pool: WorkerPool,
