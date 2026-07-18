@@ -28,6 +28,10 @@ Analyze PR #{{ pr_number }} using {{ review_context_kind }} #{{ issue_number }} 
 > If `$athena:pr-review` appears in your available skills, invoke it now with
 > its normal default behavior. Do not ask the skill to modify its CI/CD review
 > behavior.
+> Do not return the skill's raw report. After it completes, translate its
+> actionable findings into the mandatory JSON comments below and map its
+> result to this binary gate: only an unconditional `GO` is `GO`; a
+> `CONDITIONAL GO` or any no-go result is `NOGO`.
 > If it is unavailable, perform the equivalent review
 > directly using this prompt. In either case, this review is the loop's sole
 > GO/NOGO decision; `merge_wait` is the separate mechanical auto-merge armer.

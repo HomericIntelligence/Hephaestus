@@ -805,8 +805,8 @@ class PipelineGitHub:
         Seed and implementation paths use the result for terminal-state
         checks before branch adoption or label routing, while merge_wait uses it
         for head capture and lifecycle polling. It deliberately excludes
-        GitHub merge-readiness and check-status fields: the automation loop
-        neither reads nor relies on CI/CD.
+        GitHub merge-readiness and check-status fields: this accessor does not
+        use CI/CD as automation-loop authorization.
         """
         try:
             result = self._gh(

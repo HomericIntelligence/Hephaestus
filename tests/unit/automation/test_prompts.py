@@ -100,6 +100,8 @@ class TestPRReviewAnalysisPrompt:
         assert "$athena:pr-review" in out
         assert "--ci-free" not in out
         assert "normal default behavior" in out
+        assert "Do not return the skill's raw report" in out
+        assert "CONDITIONAL GO" in out
         assert "pr-policy" not in out
         assert "CI Status" not in out
         assert "merge_wait" in out

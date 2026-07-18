@@ -149,6 +149,13 @@ class TestParseReviewVerdict:
         v = parse_review_verdict("Grade: F\nVerdict: NO GO")
         assert v.verdict == "NOGO"
 
+    def test_conditional_go_is_a_nogo_for_the_binary_review_gate(self) -> None:
+        """A conditional skill approval must not pass the loop's GO gate."""
+        v = parse_review_verdict("Grade: B\nVerdict: CONDITIONAL GO")
+        assert v.grade == "B"
+        assert v.verdict == "NOGO"
+        assert v.is_go is False
+
     def test_missing_verdict_is_ambiguous(self) -> None:
         """Missing verdict => AMBIGUOUS, treated as not-GO by the loop."""
         v = parse_review_verdict("Grade: B")

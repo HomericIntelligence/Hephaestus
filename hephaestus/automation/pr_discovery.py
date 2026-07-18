@@ -62,8 +62,9 @@ def _is_viewer_authored(pr: dict[str, Any], viewer_login: str) -> bool:
 def pr_needs_loop_review(pr: dict[str, Any]) -> bool:
     """Return whether an open non-draft PR is eligible for loop review.
 
-    This intentionally does not read a check, workflow, status, or merge
-    state. The loop's own review and approval label are its entire input.
+    This discovery helper intentionally does not read a check, workflow,
+    status, or merge state. The loop's approval input remains its own review
+    and approval label.
     """
     state = str(pr.get("state", "OPEN")).upper()
     is_draft = bool(pr.get("isDraft", pr.get("draft", False)))

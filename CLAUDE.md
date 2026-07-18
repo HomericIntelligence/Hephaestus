@@ -340,9 +340,10 @@ The required CI gate `pr-policy` and the PR reviewer enforce:
 `$athena:pr-review` in its normal default profile when available, then applies
 `state:implementation-go` on GO; `merge_wait` is the sole automatic armer and
 consumes that loop-owned label.
-The loop never reads, changes, or relies on CI/CD. CI workflows and external
-artifacts never grant that authority. Branch protection and required reviews still govern
-whether GitHub merges the PR.
+Normal review may collect CI/CD evidence, but the loop does not change CI/CD or
+use it as authorization. CI workflows and external artifacts never grant that
+authority. Branch protection and required reviews still govern whether GitHub
+merges the PR.
 
 ```bash
 # 1. Create feature branch

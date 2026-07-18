@@ -643,11 +643,12 @@ class ReviewVerdict:
 
 
 _VERDICT_RE = re.compile(
-    r"^\s*\**\s*Verdict\s*:\s*\**\s*(GO|NO[\s-]?GO|ERROR)\b", re.MULTILINE | re.IGNORECASE
+    r"^\s*\**\s*Verdict\s*:\s*\**\s*(CONDITIONAL[\s-]?GO|GO|NO[\s-]?GO|ERROR)\b",
+    re.MULTILINE | re.IGNORECASE,
 )
 _SUMMARY_PAIR_RE = re.compile(
     r"^\s*\**\s*Grade\s*:\s*\**\s*(?P<grade>[A-F][+-]?)(?![A-Za-z])[ \t]*\r?\n"
-    r"^\s*\**\s*Verdict\s*:\s*\**\s*(?P<verdict>GO|NO[\s-]?GO|ERROR)\b",
+    r"^\s*\**\s*Verdict\s*:\s*\**\s*(?P<verdict>CONDITIONAL[\s-]?GO|GO|NO[\s-]?GO|ERROR)\b",
     re.MULTILINE | re.IGNORECASE,
 )
 
@@ -663,7 +664,7 @@ def parse_review_verdict(text: str) -> ReviewVerdict:
 
     Looks for lines like:
         Grade: B+
-        Verdict: GO     (or NOGO, NO-GO, NO GO, ERROR)
+        Verdict: GO     (or CONDITIONAL GO, NOGO, NO-GO, NO GO, ERROR)
 
     A response missing a verdict is treated as AMBIGUOUS — which the loop
     treats as NoGo (continue iterating). A grade is associated only with an
@@ -671,7 +672,8 @@ def parse_review_verdict(text: str) -> ReviewVerdict:
     borrow a grade from an earlier summary. An explicit ``Verdict: ERROR`` marks
     a reviewer-infrastructure failure (see
     :data:`INFRA_ERROR_REVIEW_TEXT`) and is surfaced as ``verdict="ERROR"`` so
-    callers can distinguish it from a genuine NOGO.
+    callers can distinguish it from a genuine NOGO. ``CONDITIONAL GO`` is
+    normalized to NOGO because the pipeline's gate is binary.
 
     Args:
         text: The full review text from Claude.
