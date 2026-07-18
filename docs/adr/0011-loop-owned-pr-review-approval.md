@@ -3,14 +3,16 @@
 - Status: Accepted
 - Date: 2026-07-17
 - Tracks: #2053, #2268, #2269, #2278
-- Supersedes: the retired strict-proof approval policy
+- Supersedes: ADR-0009 and ADR-0010
 
 ## Context
 
-The retired strict-proof policy made a separate GitHub Actions workflow, status
-context, and authenticated review artifact part of the automation loop's
-approval protocol. That protocol crosses an ownership boundary: the loop cannot
-control or depend on CI/CD scheduling, configuration, or status publication.
+ADR-0009 and ADR-0010 made a separate GitHub Actions workflow, status context,
+and authenticated review artifact part of the automation loop's approval
+protocol. That protocol crosses an ownership boundary: the loop cannot control
+or depend on CI/CD scheduling, configuration, or status publication. This ADR
+records the current topology alongside the immutable pipeline history in
+ADR-0006; it does not amend that record.
 
 The loop already has an independent read-only review stage and a durable,
 loop-owned `state:implementation-go` label. The required review is

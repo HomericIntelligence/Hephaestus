@@ -15,7 +15,7 @@ numbered, and listed here.
 |-----|-------|--------|
 | [0001](0001-automation-library-boundary.md) | hephaestus.automation is an opt-in product layer | Accepted |
 | [0002](0002-pep562-lazy-imports.md) | PEP 562 lazy imports back the library/product boundary | Accepted |
-| [0003](0003-retired-dependency-manager-policy.md) | Retired dependency-manager policy | Retired |
+| [0003](0003-dependabot-renovate-split.md) | Dependabot owns pip+actions; Renovate owns pixi/conda | Accepted (historical; superseded by 0008) |
 | [0004](0004-single-aggregator-required-checks.md) | Single aggregated required-checks gate | Accepted |
 | [0005](0005-multi-agent-runtime-abstraction.md) | Multi-agent (Claude/Codex/Pi) runtime abstraction | Accepted |
 | [0006](0006-queue-based-in-process-automation-pipeline.md) | Queue-based in-process automation pipeline | Accepted |
