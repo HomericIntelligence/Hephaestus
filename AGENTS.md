@@ -17,10 +17,10 @@ omitted (see `hephaestus.agents.runtime.add_agent_argument`).
 **Loop-owned approval policy:** `pr_review` invokes `$athena:pr-review` with
 its normal default behavior when available, otherwise uses its inline-review
 fallback. It posts inline findings and a final grade/GO-NOGO review; a GO
-applies `state:implementation-go`. Normal review may collect CI/CD evidence,
-but the loop does not change CI/CD or use it as authorization. `merge_wait` is
-the sole automatic armer and consumes that loop-owned label. No workflow,
-status, artifact, or lease authorizes it.
+applies `state:implementation-go`. Normal review may collect CI/CD evidence
+and incorporate it into its binary verdict, but the loop does not change CI/CD
+and no workflow, status, artifact, or lease independently authorizes it.
+`merge_wait` is the sole automatic armer and consumes that loop-owned label.
 
 | Queue stage | Module | Purpose |
 |-------------|--------|---------|

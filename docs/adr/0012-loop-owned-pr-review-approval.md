@@ -29,7 +29,8 @@ it belongs in that stage rather than in GitHub Actions.
    fallback. It posts inline findings and a final total grade with GO/NOGO;
    a GO applies the loop-owned `state:implementation-go` label. It neither
    publishes a GitHub artifact nor changes CI/CD state; normal review may
-   collect CI/CD evidence but does not use it as authorization.
+   collect CI/CD evidence and incorporate it into its binary verdict, but CI
+   never independently authorizes the loop.
 3. `merge_wait` is the sole automatic armer and consumes the loop-owned label.
    A restart re-reads that label and the live PR head; the head is operational
    arm/recovery metadata only, never a post-label invalidation or additional
@@ -50,6 +51,7 @@ it belongs in that stage rather than in GitHub Actions.
 - A restart before the label is applied reruns review; a restart after the
   label is applied resumes through merge-wait without an external proof.
 - CI/CD continues to validate code and protect branches. Normal review may
-  collect its evidence, but the automation loop does not change it or use it
-  as authorization.
+  collect its evidence and incorporate it into its binary verdict, but the
+  automation loop does not change CI/CD and it never independently authorizes
+  the loop.
 - The retired policy no longer appears as an active contract.

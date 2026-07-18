@@ -26,9 +26,9 @@ links to the full section below.
    body, and keep auto-merge disabled. After an unconditional independent
    current-head `$athena:pr-review` GO, the loop applies
    `state:implementation-go`, then may conditionally arm the PR in
-   `merge_wait`. Normal review may collect CI/CD evidence, but the loop does
-   not change CI/CD or use it as authorization. Do not enable auto-merge
-   manually.
+   `merge_wait`. Normal review may collect CI/CD evidence and incorporate it
+   into its binary verdict, but the loop does not change CI/CD and CI itself
+   never independently authorizes it. Do not enable auto-merge manually.
 
 If anything in steps 1–2 fails, see [Platform Support](#platform-support) for
 the supported Python versions and platform-specific test behavior.
@@ -285,8 +285,9 @@ Do not enable auto-merge manually. The queue arms it only after it has run
 `$athena:pr-review` for the PR's current head and applied
 `state:implementation-go`. `merge_wait` consumes that loop-owned label; a
 restart re-reads it with the live PR head. Normal review may collect CI/CD
-evidence, but the loop does not change CI/CD or use it as authorization; the
-advisory `auto-merge-policy` is not the authorization mechanism.
+evidence and incorporate it into its binary verdict, but the loop does not
+change CI/CD and no CI check independently authorizes it; the advisory
+`auto-merge-policy` is not the authorization mechanism.
 
 Also: ensure tests pass locally (`uv run pytest`), keep commits to logical units with
 [conventional commit](https://www.conventionalcommits.org/) messages, and never bypass

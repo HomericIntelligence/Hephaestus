@@ -38,8 +38,9 @@ class StageName(str, Enum):
 
 
 #: Active loop order used for scope-contiguity validation. CI/CD intentionally
-#: has no pipeline stage: normal review may collect its evidence, but the loop
-#: does not change CI/CD or use it as authorization.
+#: has no pipeline stage: normal review may collect its evidence for a binary
+#: verdict, but the loop does not change CI/CD and it never independently
+#: authorizes an approval.
 PIPELINE_ORDER: tuple[StageName, ...] = tuple(StageName)
 
 

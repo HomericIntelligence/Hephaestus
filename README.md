@@ -457,9 +457,9 @@ hephaestus-check-complexity --help
 The `main` branch is protected; all changes go through a pull request. CI blocks
 PRs that fail its issue-reference, signature, and DCO checks. The loop runs
 `$athena:pr-review` and then writes `state:implementation-go`; it arms only in
-`merge_wait`. Normal review may collect CI/CD evidence, but the loop does not
-change CI/CD or use it as authorization. The `auto-merge-policy` check is
-advisory; no CI workflow authorizes the loop.
+`merge_wait`. Normal review may collect CI/CD evidence and incorporate it into
+its binary verdict, but the loop does not change CI/CD and no CI workflow
+independently authorizes it. The `auto-merge-policy` check is advisory.
 
 1. Create a feature branch named `<issue-number>-description`
    (`git checkout -b 123-amazing-feature`).

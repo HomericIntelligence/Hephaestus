@@ -21,11 +21,12 @@ its inline-review fallback. It posts inline findings and a final total grade
 with GO/NOGO. A GO applies `state:implementation-go`; `merge_wait` then
 performs the sole automatic arm. No GitHub artifact or status is involved.
 
-CI/CD is outside the loop's authorization boundary. Normal PR review may
-collect check evidence, but the loop does not change CI/CD or use it for an
-approval or label transition. `merge_wait` is the sole automatic armer and
-consumes the loop-owned label. A restart re-reads that label and the live PR
-head. No workflow, status, artifact, or lease authorizes the loop.
+CI/CD is outside the loop's direct authorization boundary. Normal PR review
+may collect check evidence and incorporate it into its binary verdict, but the
+loop does not change CI/CD and no workflow, status, artifact, or lease can
+independently cause an approval or label transition. `merge_wait` is the sole
+automatic armer and consumes the loop-owned label. A restart re-reads that
+label and the live PR head.
 The live head is used only to issue or recover an auto-merge request; it never
 invalidates an already-issued loop-owned label or causes post-label re-review.
 
