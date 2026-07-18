@@ -24,6 +24,12 @@ Other folded material:
 > itemized in [§15](#15-in-flight-refactor-pr-2280) so future readers can
 > audit the delta at a glance. A follow-up doc rewrite is queued behind
 > PR #2280's merge.
+>
+> 16 OTHER architectural PRs are also OPEN against `main` (cataloged in
+> [§16](#16-other-in-flight-architectural-changes-16-prs)) and are
+> sequenced to merge before this doc's rewrite PR. Several of them touch
+> `strict_review` / `ci` files that PR #2280 removes — those are flagged
+> in §16 with merge-order notes.> PR #2280's merge.
 
 The [`docs/adr/`](adr/) records remain the bind-points for individual
 architectural decisions (`0006-queue-based-in-process-automation-pipeline`,
@@ -65,6 +71,7 @@ Optimization"), file paths are repo-relative.
 13. [Glossary](#13-glossary)
 14. [Provenance audit checklist](#14-provenance-audit-checklist)
 15. [In-flight refactor: PR #2280](#15-in-flight-refactor-pr-2280)
+16. [Other in-flight architectural changes (16 PRs)](#16-other-in-flight-architectural-changes-16-prs)
 
 ---
 
@@ -2317,3 +2324,209 @@ should:
    §1 / §2 / §3 / §4 / §5 / §6 / §8 / §10 / §11 / §13 / §14) with new
    line-cites to the post-merge source.
 4. Delete this §15 and its banner once the rewrite lands.
+
+## 16. Other in-flight architectural changes (16 PRs)
+
+Beyond PR #2280 (which dominates the architecture-shape change and is
+detailed in §15), sixteen other OPEN PRs touch this doc's scope. They
+are cataloged here so the follow-up doc-rewrite PR can read every
+in-flight change off the same page. Cards follow a fixed format:
+
+- **Scope** — files / behavior the PR touches (one line).
+- **Doc impact** — which sections (§1–§14) require rewriting after merge.
+- **Merge-order note** — interactions with PR #2280 or other in-flight PRs.
+
+Cards are sorted by merge-order risk: the ones that interact with
+PR #2280 first (because they touch files `#2280` removes), then pure
+additive refactors, then test-only and doc-only PRs at the bottom.
+
+### 16.1 PRs that interact with PR #2280
+
+#### [PR #2279](https://github.com/HomericIntelligence/Hephaestus/pull/2279) — `fix(automation): defer strict review while CI is pending`
+
+- **Scope.** `hephaestus/automation/pipeline/stages/__init__.py`,
+  `stages/base.py`, `stages/strict_review.py`, `pipeline_github.py`.
+  Adds a CI-pending gate so `strict_review` does not arm while CI is
+  unresolved.
+- **Doc impact.** §5.6 (`strict_review`, will be deleted), §6 (ROUTES
+  gain a `ci_pending` reason), §10 (observability of the gate).
+- **Merge-order note.** **`strict_review` is removed by PR #2280.**
+  This PR is meaningless post-#2280 and must merge BEFORE #2280 OR
+  be rebased and dropped from the queue before the doc-rewrite PR
+  runs.
+
+#### [PR #2277](https://github.com/HomericIntelligence/Hephaestus/pull/2277) — `fix(automation): isolate strict review worktrees`
+
+- **Scope.** `stages/base.py` + 6 stage files (incl.
+  `stages/strict_review.py`, `stages/ci.py`) + `worker_pool.py` +
+  `worktree_manager.py`. Generalizes the strict-review sandbox so
+  every stage gets a parallel isolated worktree.
+- **Doc impact.** §5.6 / §5.7 (will be deleted), §8 (worker-pool
+  worktree isolation contract), §11 (worktree_manager module
+  description).
+- **Merge-order note.** Same as #2279 — the dedicated worktree
+  story becomes unnecessary once `#2280` deletes `strict_review`.
+  The implementation generalizes to all stages, however, so the
+  non-strict-review subset can survive `#2280` and become a useful
+  generalization.
+
+### 16.2 Stage-orchestration refactors
+
+#### [PR #2209](https://github.com/HomericIntelligence/Hephaestus/pull/2209) — `[majo] Split review-phase orchestration into cohesive units`
+
+- **Scope.** Splits `hephaestus/automation/_review_phase.py` into
+  `_review_loop.py` + `_review_conflict_resolver.py`; updates
+  `stages/pr_review.py` to consume the new units.
+- **Doc impact.** §11 (replace the single
+  `_review_phase.py` bullet with bullets for `_review_loop.py` and
+  `_review_conflict_resolver.py`).
+- **Merge-order note.** Additive refactor — no conflicts.
+
+#### [PR #2210](https://github.com/HomericIntelligence/Hephaestus/pull/2210) — `[mino] Decompose address-review session orchestration`
+
+- **Scope.** Splits
+  `hephaestus/automation/address_review_core.py` into smaller units;
+  updates `AGENTS.md` call-site table.
+- **Doc impact.** §11 (address-review module description); the
+  `AGENTS.md` row in the call-site table rewrites once the module
+  list changes.
+- **Merge-order note.** Additive refactor — no conflicts.
+
+#### [PR #2262](https://github.com/HomericIntelligence/Hephaestus/pull/2262) — `[mino] Expand scoped-agent-call tests to pipeline paths`
+
+- **Scope.** Adds scoped-agent-call tests for `stages/*.py` +
+  `worker_pool.py` + `jobs.py` (no production-code changes).
+- **Doc impact.** None — tests only.
+- **Merge-order note.** Safe to merge anytime.
+
+### 16.3 Prompts and review-template hygiene
+
+#### [PR #2222](https://github.com/HomericIntelligence/Hephaestus/pull/2222) — `[majo] Fence untrusted inputs in advise prompts`
+
+- **Scope.** `hephaestus/automation/prompts/advise.py` — wires
+  `_fence_untrusted` into the advise prompt builder so issue bodies
+  and review comments can never inject verdict lines.
+- **Doc impact.** §11 (prompts module description; the project-wide
+  `_fence_untrusted` invariant in §3 already references this).
+- **Merge-order note.** Additive — the prompt layer's fence
+  invariant pre-dates this PR.
+
+#### [PR #2310](https://github.com/HomericIntelligence/Hephaestus/pull/2310) — `[Fix] Load default prompt templates by __file__ path, not PackageLoader`
+
+- **Scope.** `hephaestus/prompts/catalog.py` — switches the default
+  template resolver from `PackageLoader` (which fails on PyInstaller
+  / sdist installs) to a `__file__`-relative path.
+- **Doc impact.** §11 (catalog module description).
+- **Merge-order note.** Bug-fix — safe to merge anytime; aligns with
+  PR #2302 (below) so the rubric templates load by file path too.
+
+#### [PR #2302](https://github.com/HomericIntelligence/Hephaestus/pull/2302) — `[Feat] Adversarial review posture in the Jinja rubric templates`
+
+- **Scope.** Rewrites
+  `hephaestus/prompts/templates/default/pr_review/analysis.j2` +
+  `strict_rubrics/reviewer.j2` to inject an adversarial-review
+  framing into the rubric.
+- **Doc impact.** §11 (templates catalog — note that the rubric
+  templates are Jinja, not Python, post-#2280 because the
+  `strict_review_gate.py` Python prompt is removed).
+- **Merge-order note.** Survives `#2280` (review rubric is consumed
+  by `pr_review` regardless of `strict_review`'s presence).
+
+### 16.4 GitHub API + release-wiring
+
+#### [PR #2312](https://github.com/HomericIntelligence/Hephaestus/pull/2312) — `fix: handle merge-queue-protected repos in hephaestus-merge-prs`
+
+- **Scope.** `hephaestus/github/pr_merge.py` — detects
+  merge-queue-protected branches and switches the merge mode from
+  squash to merge-queue enqueue.
+- **Doc impact.** §9 (`hephaestus-merge-prs` CLI behaviour) +
+  possibly §10 if a new rate-limit / queue-budget gate is added.
+- **Merge-order note.** Bug-fix — safe to merge anytime.
+
+#### [PR #2261](https://github.com/HomericIntelligence/Hephaestus/pull/2261) — `Restore current-head validation for #2129 release dispatch`
+
+- **Scope.** `.github/workflows/release.yml` — adds a
+  current-head check before the release dispatch so a stale-PR
+  dispatch cannot fire.
+- **Doc impact.** §10 (release dispatch note).
+- **Merge-order note.** Bug-fix — safe to merge anytime.
+
+### 16.5 NATS messaging
+
+#### [PR #2219](https://github.com/HomericIntelligence/Hephaestus/pull/2219) — `[mino] Define NATS failed-message retention or DLQ behavior`
+
+- **Scope.** `hephaestus/nats/subscriber.py` + `docs/nats.md` —
+  defines retention / DLQ semantics for failed NATS messages that
+  exceed the per-stage retry budget.
+- **Doc impact.** §11 (NATS subscriber module description) +
+  potential §10 if retention setting affects alerting.
+- **Merge-order note.** Additive — no conflicts.
+
+#### [PR #2218](https://github.com/HomericIntelligence/Hephaestus/pull/2218) — `[mino] Escalate NATS shutdown-timeout failures`
+
+- **Scope.** `hephaestus/nats/subscriber.py` — escalates
+  shutdown-timeout failures to fatal so a stuck subscriber does not
+  silently drain.
+- **Doc impact.** §11 (NATS subscriber module description).
+- **Merge-order note.** Additive — no conflicts; pairs with #2219
+  (DLQ behavior) so prefer merging #2218 first.
+
+### 16.6 Observability and operational policy
+
+#### [PR #2300](https://github.com/HomericIntelligence/Hephaestus/pull/2300) — `[majo] Define monitoring alerts and SLOs for automation operations`
+
+- **Scope.** `hephaestus/automation/pipeline/coordinator.py` +
+  `hephaestus/observability/alerts.py` + `docs/observability.md` —
+  defines SLOs (e.g. P95 stage step latency, queue-depth, retry-rate)
+  and the alert thresholds that page on SLO breach.
+- **Doc impact.** §10 (the doc currently names the observability
+  tick but does not enumerate SLOs; post-merge this section gains a
+  compact SLO table cross-linking `hephaestus.observability.alerts`).
+- **Merge-order note.** Additive — no conflicts; aligns with the
+  rate-budget gate in §3.
+
+#### [PR #2299](https://github.com/HomericIntelligence/Hephaestus/pull/2299) — `[majo] Define and test backup and disaster-recovery procedures`
+
+- **Scope.** Adds `docs/adr/0012-backup-and-disaster-recovery-policy.md`,
+  `docs/runbooks/backup-restore.md`, and `scripts/backup_state.py`.
+- **Doc impact.** §11 (operational modules — new ADR + new script);
+  possibly a brief mention in the runbook index already at §9.
+- **Merge-order note.** Additive — no conflicts.
+
+#### [PR #2297](https://github.com/HomericIntelligence/Hephaestus/pull/2297) — `[mino] Add authenticated external GitHub and agent end-to-end coverage`
+
+- **Scope.** Adds `.github/workflows/contract.yml`,
+  `tests/integration/contract/**`, and `docs/contract-testing.md`.
+- **Doc impact.** §11 (contract-testing subsystem — entirely new
+  module family, cross-linked from §9).
+- **Merge-order note.** Additive — no conflicts.
+
+### 16.7 Doc-hygiene (test policy)
+
+#### [PR #2298](https://github.com/HomericIntelligence/Hephaestus/pull/2298) — `test: ban source-line-number assertions in doc/regression tests (root cause of #2056 stranding)`
+
+- **Scope.** Adds
+  `tests/unit/validation/test_no_source_line_assertions.py` +
+  `tests/unit/docs/test_no_line_number_refs.py`; touches
+  `docs/AUTOMATION_LOOP_ARCHITECTURE.md` and the state-skip-revival
+  runbook to strip pre-existing line-number assertions.
+- **Doc impact.** §14 (the "Provenance audit checklist" itself uses
+  line-cite references — those are exempt from the ban by design,
+  but the policy is restated here so future doc-rewrite PRs know to
+  keep doc citations while stripping test citations).
+- **Merge-order note.** Bug-fix — safe to merge anytime.
+
+---
+
+**Followup sequencing.** All 17 PRs (the 16 cataloged above PLUS PR #2280)
+are expected to land before the doc-rewrite PR runs. The rewrite PR's job
+is:
+
+1. Wait for these 17 PRs to merge.
+2. Re-run the audit pass against post-merge `main` to enumerate every
+   claim in this doc that is now stale (cite-drift + budget-key drift
+   + stage-name membership).
+3. Rewrite §1–§14 in coordinated commits per scope (one commit per
+   §1 / §2 / §3 / §5 / §6 / §8 / §10 / §11 / §13 / §14, mirroring the
+   §15 inventory).
+4. Delete the front-matter banner, §15, and §16 once the rewrite lands.
