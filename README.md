@@ -114,6 +114,7 @@ Hephaestus/
 │   ├── markdown/      # Markdown linting and link fixing
 │   ├── nats/          # NATS JetStream subscriber (event-driven workflows)
 │   ├── observability/ # Prometheus metrics, local health endpoint, and alert transitions
+│   ├── prompts/       # Packaged Jinja templates and CLI-only override catalog
 │   ├── resilience/    # Circuit breaker + retry + subprocess resilience primitives
 │   ├── scripts_lib/   # Standalone consistency-check scripts (CLI table, version)
 │   ├── system/        # System information collection

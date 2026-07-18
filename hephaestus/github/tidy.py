@@ -46,6 +46,7 @@ from hephaestus.github.git_ops import (
 )
 from hephaestus.github.pr_merge import detect_repo_from_remote
 from hephaestus.logging.utils import setup_logging
+from hephaestus.prompts import PromptCatalog, add_prompt_dir_argument
 
 logger = logging.getLogger(__name__)
 
@@ -62,20 +63,6 @@ _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 # Pattern that gh-tidy emits when rebase fails (from gh-tidy lines 297-301)
 _PROBLEM_HEADER = re.compile(r"WARNING:\s*Unable to auto-rebase the following branches")
 _PROBLEM_BULLET = re.compile(r"^\s*\*\s+(\S+)")
-
-# Swarm constraints injected verbatim into every agent prompt
-_FORBIDDEN_BLOCK = """\
-## FORBIDDEN ACTIONS — do not perform any of these, ever:
-- `git branch -d <branch>`
-- `git branch -D <branch>`
-- `git push origin --delete <branch>`
-- `git worktree remove --force <path>`
-- Removing or deleting any worktree that existed before this agent started
-- Deleting any local or remote branch
-Only the worktree that THIS agent creates (`tidy-<branch>`) may be cleaned up,
-and only with `git worktree remove` (without --force).  If that fails, leave
-the worktree in place and report it.
-"""
 
 
 def _detect_default_branch(override: str | None) -> str:
@@ -187,97 +174,14 @@ def _run_gh_tidy(trunk: str, dry_run: bool) -> tuple[int, str]:
 def _make_agent_prompt(branch: str, trunk: str, repo_path: Path, repo_slug: str) -> str:
     """Build the per-branch Myrmidon agent prompt."""
     worktree_path = repo_path / ".git" / "worktrees" / f"tidy-{branch}"
-    return f"""\
-You are a Myrmidon rebase-fix agent operating on a single git branch.
-
-## Context
-- Repository: {repo_slug}
-- Repository path: {repo_path}
-- Branch to rebase: `{branch}`
-- Trunk: `{trunk}`
-- Worktree to create: {worktree_path}
-
-{_FORBIDDEN_BLOCK}
-
-## Your task — complete in order, stop and report on any failure:
-
-### 1. Pre-flight
-```bash
-cd {repo_path}
-git worktree prune          # safe: removes only already-gone worktree directories
-git worktree add {worktree_path} {branch}
-```
-
-### 2. Fetch latest trunk
-```bash
-git -C {worktree_path} fetch origin {trunk}
-```
-
-### 3. Rebase
-```bash
-git -C {worktree_path} rebase origin/{trunk}
-```
-
-If the rebase succeeds cleanly, skip to step 5.
-
-If the rebase stops with conflicts:
-
-### 4. Semantic conflict resolution (for each conflicted file)
-```bash
-git -C {worktree_path} diff --name-only --diff-filter=U
-```
-
-For EACH conflicted file:
-- Read the file — it contains `<<<<<<<` / `=======` / `>>>>>>>` markers.
-- Read what BOTH sides were trying to accomplish.
-- Write the correctly merged content that preserves the intent of both sides.
-- `git -C {worktree_path} add <file>`
-
-Resolution heuristics (from batch-pr-rebase-workflow v2.8.0, verified-ci):
-- `.github/workflows/**` → prefer trunk's version unless this branch is ADDING the workflow
-- `uv.lock` → `git -C {worktree_path} show origin/{trunk}:uv.lock > uv.lock`;
-  then run `uv sync` inside the worktree to regenerate
-- Feature code, tests → keep both sides' genuine additions; do NOT blindly take either side
-- Generated/binary files → take trunk's version
-
-After staging all resolved files:
-```bash
-GIT_EDITOR=true git -C {worktree_path} rebase --continue
-```
-If git says "nothing to commit", use `git -C {worktree_path} rebase --skip` instead.
-Repeat until the rebase completes.
-
-### 5. Verify the rebase didn't silently drop everything
-```bash
-git -C {worktree_path} log origin/{trunk}..HEAD --oneline
-```
-If the output is EMPTY: all commits were already on {trunk}. Report "subsumed" and STOP —
-do NOT push, do NOT delete anything.
-
-### 6. Push
-```bash
-git -C {worktree_path} push --force-with-lease --force-if-includes origin {branch}
-```
-
-### 7. Clean up worktree (no --force)
-```bash
-git -C {repo_path} worktree remove {worktree_path}
-```
-If this fails (worktree has uncommitted files), leave it in place and report. Do NOT use --force.
-
-## Report format (end your response with this):
-```
-STATUS: <rebased | subsumed | conflict-too-complex | failed>
-BRANCH: {branch}
-NOTE: <one sentence summary>
-```
-
-## Safety Net workarounds (use these when Safety Net hook blocks a command):
-- Instead of `git checkout <ref> -- <file>`: use `git show <ref>:<file> > <file>`
-- Instead of `git checkout <branch>`: use `git switch <branch>`
-- Instead of `git reset --hard`: use `git reset --keep` (only if no uncommitted changes)
-- `GIT_EDITOR=true` before `git rebase --continue` to suppress editor prompts
-"""
+    return PromptCatalog.current().render(
+        "tidy/rebase_fix.j2",
+        branch=branch,
+        trunk=trunk,
+        repo_path=repo_path,
+        repo_slug=repo_slug,
+        worktree_path=worktree_path,
+    )
 
 
 def _status_from_agent_text(text: str) -> str | None:
@@ -430,6 +334,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Max parallel swarm agents (default: 5)",
     )
     add_agent_argument(parser)
+    add_prompt_dir_argument(parser)
     parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging")
     add_github_throttle_args(parser)
     add_json_arg(parser)

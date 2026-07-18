@@ -64,13 +64,14 @@ precommit:
 # Run lint + format-check + typecheck
 check: lint format-check typecheck
 
-# Run pip-audit to check for known dependency vulnerabilities
+# Audit dependencies for known vulnerabilities via the configured policy
+# (hephaestus-filter-audit + .pip-audit-ignore.txt)
 audit:
-    uv run pip-audit --ignore-vuln PYSEC-2025-183
+    uv run pip-audit --format json | uv run hephaestus-filter-audit
 
 # Generate API reference documentation with pdoc (output: docs/api/)
 docs:
-    uv run pdoc ./hephaestus ./hephaestus/agents ./hephaestus/benchmarks ./hephaestus/ci ./hephaestus/cli ./hephaestus/config ./hephaestus/datasets ./hephaestus/discovery ./hephaestus/forensics ./hephaestus/github ./hephaestus/io ./hephaestus/logging ./hephaestus/markdown ./hephaestus/nats ./hephaestus/observability ./hephaestus/resilience ./hephaestus/scripts_lib ./hephaestus/system ./hephaestus/utils ./hephaestus/validation ./hephaestus/version --output-dir docs/api
+    uv run pdoc ./hephaestus ./hephaestus/agents ./hephaestus/benchmarks ./hephaestus/ci ./hephaestus/cli ./hephaestus/config ./hephaestus/datasets ./hephaestus/discovery ./hephaestus/forensics ./hephaestus/github ./hephaestus/io ./hephaestus/logging ./hephaestus/markdown ./hephaestus/nats ./hephaestus/observability ./hephaestus/prompts ./hephaestus/resilience ./hephaestus/scripts_lib ./hephaestus/system ./hephaestus/utils ./hephaestus/validation ./hephaestus/version --output-dir docs/api
 
 # Full CI-equivalent run: bootstrap, check, and test
 all: bootstrap check test

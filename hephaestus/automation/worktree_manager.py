@@ -26,6 +26,7 @@ import contextlib
 import logging
 import os
 import shutil
+import subprocess
 import threading
 from pathlib import Path
 from typing import Any
@@ -581,6 +582,12 @@ class WorktreeManager:
         Returns:
             True if the branch resolves locally, False otherwise.
 
+        Raises:
+            Exception: If the command runner raises an error outside the
+                subprocess exception hierarchy, so unexpected failures retain
+                their traceback and reach the caller instead of being
+                misclassified as a missing branch.
+
         """
         try:
             result = run(
@@ -591,7 +598,13 @@ class WorktreeManager:
                 **_timeout_kw(timeout),
             )
             return result.returncode == 0
-        except Exception:
+        except subprocess.SubprocessError:
+            logger.warning(
+                "Local branch check failed for %s in %s; treating it as absent",
+                branch_name,
+                self.repo_root,
+                exc_info=True,
+            )
             return False
 
     def _remote_branch_exists(self, branch_name: str, *, timeout: int | None = None) -> bool:

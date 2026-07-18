@@ -21,7 +21,7 @@ from hephaestus.automation.prompts import (
     get_pr_review_analysis_prompt,
     get_review_validation_prompt,
 )
-from hephaestus.automation.prompts._shared import _TERSE_OUTPUT_DIRECTIVE
+from hephaestus.automation.prompts._shared import get_terse_output_directive
 
 # Distinctive phrase from the directive; verified at plan time to be absent
 # from every existing prompt file (grep -rnE "Output discipline|token budget"
@@ -31,7 +31,7 @@ SENTINEL = "Output discipline (token budget)"
 
 def test_terse_directive_leads_with_github_carveout() -> None:
     """Carve-out MUST be the first non-blank line so brevity never truncates pr-policy artifacts."""
-    first_line = _TERSE_OUTPUT_DIRECTIVE.lstrip().splitlines()[0]
+    first_line = get_terse_output_directive().lstrip().splitlines()[0]
     assert "GitHub-posted" in first_line
     assert "retain full detail" in first_line
 
@@ -93,13 +93,11 @@ def test_each_prompt_includes_terse_directive(build) -> None:
     assert SENTINEL in text, "shared terse directive missing from composed prompt"
 
 
-def test_terse_directive_defined_in_single_module() -> None:
-    """Verify directive is defined in _shared.py only, not redefined elsewhere."""
+def test_terse_directive_is_external_to_python_prompt_modules() -> None:
+    """The directive lives in a shared template, not a Python literal."""
     pkg = pathlib.Path(__file__).parents[3] / "hephaestus" / "automation" / "prompts"
     for py in pkg.glob("*.py"):
-        if py.name == "_shared.py":
-            continue
         body = py.read_text()
         assert "_TERSE_OUTPUT_DIRECTIVE =" not in body, (
-            f"{py.name} re-defines the directive — import it from _shared instead"
+            f"{py.name} re-defines the directive instead of rendering the shared template"
         )

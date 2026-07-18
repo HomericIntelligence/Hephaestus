@@ -614,7 +614,14 @@ def stage_model(ctx: StageContext, phase: str, fallback: Callable[[], str]) -> s
     """Return a phase model override, the catch-all model, or the legacy fallback."""
     phase_value = getattr(ctx.config, f"{phase}_model", "")
     catch_all = getattr(ctx.config, "model", "")
-    return str(phase_value or catch_all or fallback())
+    model = str(phase_value or catch_all or fallback())
+    reasoning_effort = str(getattr(ctx.config, f"{phase}_reasoning_effort", "") or "")
+    if reasoning_effort and agent_provider(ctx) == "codex":
+        base_model, separator, current_effort = model.rpartition(":")
+        if separator and current_effort in {"default", "low", "medium", "high", "xhigh"}:
+            model = base_model
+        return f"{model}:{reasoning_effort}"
+    return model
 
 
 def _issue_labels(item: WorkItem, ctx: StageContext) -> list[str]:

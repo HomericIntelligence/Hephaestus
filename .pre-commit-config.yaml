@@ -74,6 +74,15 @@ repos:
         pass_filenames: false
         stages: [manual]
 
+  # Security: mandatory generic staged-secret scanning. Keep this release
+  # aligned with the security/secrets-scan container in _required.yml.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.0
+    hooks:
+      - id: gitleaks
+        name: Gitleaks (generic staged-secret scan)
+        stages: [pre-commit]
+
   # Security: SAST (Static Application Security Testing)
   - repo: local
     hooks:
@@ -87,13 +96,13 @@ repos:
         pass_filenames: false
 
   # Lock file freshness
-  - repo: local
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.11.28
     hooks:
-      - id: check-uv-lock
+      - id: uv-lock
         name: Check uv lock file
-        description: Verify uv.lock is up to date
-        entry: uv lock --check
-        language: system
+        description: Verify uv.lock is up to date without modifying it
+        args: [--check]
         pass_filenames: false
         files: ^(pyproject\.toml|uv\.lock)$
 
@@ -240,11 +249,11 @@ repos:
         pass_filenames: false
         always_run: true
       - id: check-private-denylist
-        name: Check local private denylist
+        name: Check private denylist
         description: >
-          If .heph-private-denylist exists locally, reject staged or tracked
-          text containing any fixed string listed there. The denylist itself is
-          gitignored and must never be committed. Diagnostics print only
+          Reject staged or tracked text matching any fixed string in the
+          committed .heph-project-denylist (centrally enforced) or the local,
+          untracked .heph-private-denylist. Diagnostics print only
           source/path/line, never matched values.
         entry: python3 scripts/check_private_denylist.py --staged --tracked
         language: system

@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from hephaestus.automation._review_utils import build_automation_parser
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.jobs import (
     AgentJob,
@@ -28,6 +29,7 @@ from hephaestus.automation.pipeline.jobs import (
 from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.worker_pool import WorkerPool, _repo_lock_path
+from hephaestus.prompts import PromptCatalog
 from hephaestus.resilience import CircuitBreakerOpenError, get_circuit_breaker
 from hephaestus.utils.file_lock import LockUnavailableError
 from hephaestus.utils.helpers import get_repo_root
@@ -80,6 +82,47 @@ def _agent_job(model: str = "opus-4-8", **overrides: object) -> AgentJob:
 
 class TestWorkerPoolSubmitComplete:
     """Tests for basic submit/complete workflow."""
+
+    def test_submit_agent_job_propagates_prompt_dir_override_to_worker_thread(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """Worker-thread prompt builders must see the CLI-selected prompt overlay."""
+        template = tmp_path / "planning" / "plan.j2"
+        template.parent.mkdir()
+        template.write_text("WORKER {{ issue_number }}\n", encoding="utf-8")
+
+        parser = build_automation_parser("test parser")
+        try:
+            parser.parse_args(["--prompt-dir", str(tmp_path)])
+            seen: dict[str, str] = {}
+
+            def prompt_builder() -> str:
+                return PromptCatalog.current().render("planning/plan.j2", issue_number=7)
+
+            job = _agent_job(prompt_builder=prompt_builder)
+
+            def fake_invoke_claude_with_session(*args: object, **kwargs: object) -> tuple[str, str]:
+                del args
+                seen["prompt"] = str(kwargs["prompt"])
+                return ("ok", "sid")
+
+            with (
+                patch(f"{_WP}.resolve_agent", return_value="claude"),
+                patch(
+                    f"{_WP}.claude_invoke.invoke_claude_with_session",
+                    side_effect=fake_invoke_claude_with_session,
+                ),
+            ):
+                pool.submit(job, StageName.IMPLEMENTATION)
+                _, result = completion_q.get(timeout=10)
+
+            assert result.ok is True
+            assert seen["prompt"] == "WORKER 7\n"
+        finally:
+            PromptCatalog.clear_current()
 
     def test_submit_and_complete_agent_job(
         self,

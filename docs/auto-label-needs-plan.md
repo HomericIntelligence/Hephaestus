@@ -47,6 +47,10 @@ The issue forms
   pattern (`epic` label, see [ROADMAP.md](ROADMAP.md)). **Reference only:**
   triage links it; it is not auto-consumed (free-text parsing into pipeline
   state is deliberately avoided).
+- **Acceptance Criteria** — a required Markdown checklist of specific, testable
+  outcomes that define when the issue is complete.
+- **Verification Plan** — a required criterion-by-criterion mapping to runnable
+  commands, automated tests, or manual checks and their expected evidence.
 - **Audit-section** is intentionally **not** a form field. Hephaestus has
   no per-audit-section label vocabulary (only `audit-finding`), so maintainers
   tag audit section during triage rather than via the form — avoiding an inert

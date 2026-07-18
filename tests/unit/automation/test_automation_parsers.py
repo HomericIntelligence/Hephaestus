@@ -120,6 +120,17 @@ def _dry_run_spec(help_text: str) -> ActionSpec:
     )
 
 
+def _prompt_dir_spec() -> ActionSpec:
+    """Return the optional CLI-only prompt-overlay selector spec."""
+    return _action_spec(
+        ("--prompt-dir",),
+        "prompt_dir",
+        "_PromptDirAction",
+        None,
+        help_text="Optional directory layered over packaged Jinja prompt templates",
+    )
+
+
 def _verbose_spec(help_text: str) -> ActionSpec:
     """Return a -v/--verbose action spec."""
     return _action_spec(
@@ -696,6 +707,17 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             help_text="HEPH_PLANNER_MODEL for child processes",
         ),
         _action_spec(
+            ("--planner-reasoning-effort",),
+            "planner_reasoning_effort",
+            "_StoreAction",
+            "",
+            choices=("default", "low", "medium", "high", "xhigh"),
+            help_text=(
+                "Explicit Codex reasoning effort for this role. Use default to omit "
+                "model_reasoning_effort; when omitted, the selected model alias keeps its default."
+            ),
+        ),
+        _action_spec(
             ("--reviewer-model",),
             "reviewer_model",
             "_StoreAction",
@@ -712,6 +734,28 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "",
             help_text=(
                 "HEPH_IMPLEMENTER_MODEL for child processes (implement, address-review, ci-driver)"
+            ),
+        ),
+        _action_spec(
+            ("--reviewer-reasoning-effort",),
+            "reviewer_reasoning_effort",
+            "_StoreAction",
+            "",
+            choices=("default", "low", "medium", "high", "xhigh"),
+            help_text=(
+                "Explicit Codex reasoning effort for this role. Use default to omit "
+                "model_reasoning_effort; when omitted, the selected model alias keeps its default."
+            ),
+        ),
+        _action_spec(
+            ("--implementer-reasoning-effort",),
+            "implementer_reasoning_effort",
+            "_StoreAction",
+            "",
+            choices=("default", "low", "medium", "high", "xhigh"),
+            help_text=(
+                "Explicit Codex reasoning effort for this role. Use default to omit "
+                "model_reasoning_effort; when omitted, the selected model alias keeps its default."
             ),
         ),
         _action_spec(
@@ -833,8 +877,9 @@ def test_parser_action_specs_are_preserved(
     name: str,
     factory: Callable[[], argparse.ArgumentParser],
 ) -> None:
-    """Affected parsers keep their current action specs after common-helper extraction."""
-    assert _sorted_specs(_specs(factory())) == _sorted_specs(EXPECTED_SPECS[name])
+    """Affected parsers expose their established flags plus prompt overlays."""
+    expected = (*EXPECTED_SPECS[name], _prompt_dir_spec())
+    assert _sorted_specs(_specs(factory())) == _sorted_specs(expected)
 
 
 def test_ci_driver_help_describes_the_strict_review_gate() -> None:

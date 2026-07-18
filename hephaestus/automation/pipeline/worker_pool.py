@@ -14,6 +14,7 @@ import time
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
+from contextvars import copy_context
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -217,7 +218,10 @@ class WorkerPool:
 
         """
         handle = JobHandle(job=job, on_done_state=on_done_state)
-        future = self._executor.submit(self._run, job, claim_key, claim_stage)
+        # Capture the caller's ContextVar snapshot so worker-thread prompt
+        # builders see the same CLI-selected prompt catalog as the coordinator.
+        context = copy_context()
+        future = self._executor.submit(context.run, self._run, job, claim_key, claim_stage)
         future.add_done_callback(lambda f: self._on_future_done(handle, f))
         return handle
 

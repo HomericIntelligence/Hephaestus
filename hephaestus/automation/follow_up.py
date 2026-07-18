@@ -2,7 +2,7 @@
 
 Policy (2026-05-10): one consolidated GitHub issue per implementation, sectioned
 by category (core / security / safety / critical_bug). Follow-ups are tightly
-scoped — see ``prompts.FOLLOW_UP_PROMPT`` for the rules. Out-of-scope items
+scoped — see :func:`prompts.get_follow_up_prompt` for the rules. Out-of-scope items
 that the model considered but rejected are returned to the caller so they can
 be recorded in the PR body rather than filed as separate issues.
 
