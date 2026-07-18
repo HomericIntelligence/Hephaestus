@@ -218,7 +218,6 @@ def test_go_labels_current_head_for_merge_wait(make_ctx: Any, make_work_item: An
     result = StrictReviewStage().step(item, make_ctx(github=github))
 
     assert isinstance(result, Continue)
-    assert item.payload["pr_review_skill_head"] == _HEAD
     assert ("mark_pr_implementation_go", (12,)) in github.mutation_log
 
 
@@ -537,7 +536,7 @@ def test_nogo_push_during_label_write_revokes_stale_label(
     assert any(action == "gh_issue_remove_labels" for action, _ in github.mutation_log)
 
 
-def test_head_drift_restarts_review_without_handing_off_old_verdict(
+def test_head_drift_restarts_review_without_reusing_old_verdict(
     make_ctx: Any, make_work_item: Any
 ) -> None:
     """The loop never reuses a PR-review verdict for a different head."""
@@ -556,12 +555,11 @@ def test_head_drift_restarts_review_without_handing_off_old_verdict(
     result = StrictReviewStage().step(item, make_ctx(github=github))
 
     assert result == Continue(next_state=HEAD_CHECK)
-    assert "pr_review_skill_head" not in item.payload
     assert ("defer_auto_merge", (12,)) in github.mutation_log
 
 
 def test_missing_context_is_a_nogo(make_ctx: Any, make_work_item: Any) -> None:
-    """Incomplete review context cannot create an approval handoff."""
+    """Incomplete review context cannot apply loop-owned approval."""
     item = make_work_item(
         stage=StageName.STRICT_REVIEW,
         pr=12,
@@ -573,4 +571,3 @@ def test_missing_context_is_a_nogo(make_ctx: Any, make_work_item: Any) -> None:
     result = StrictReviewStage().step(item, make_ctx(github=github))
 
     assert result == StageOutcome(Disposition.FAIL_BACK, "nogo")
-    assert "pr_review_skill_head" not in item.payload

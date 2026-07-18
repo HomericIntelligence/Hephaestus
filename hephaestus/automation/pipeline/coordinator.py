@@ -1409,7 +1409,7 @@ class Coordinator:
             except Exception as exc:
                 # Do not queue a review when an old arm could merge the PR
                 # before that review completes.  ``_finish`` records the
-                # containment failure without re-entering strict_review.
+                # containment failure without requeueing review.
                 logger.error(
                     "review-gate ingress: failed to defer auto-merge for PR #%d: %s",
                     item.pr,
@@ -1694,7 +1694,7 @@ class Coordinator:
             if has_go:
                 stage, reason, passed = self._scope_seed_decision(
                     scope_identifier,
-                    StageName.STRICT_REVIEW,
+                    StageName.MERGE_WAIT,
                     f"PR #{pr} carries {STATE_IMPLEMENTATION_GO}",
                     scope_stages,
                 )

@@ -1,11 +1,15 @@
-# ADR-0010: Trusted strict-review proof context
+# ADR-0010: Trusted strict-review proof context (retired)
 
-- Status: Accepted
+- Status: Superseded by ADR-0012
 - Date: 2026-07-16
 - Tracks: #2055
 - Extends: ADR-0007
 
 ## Context
+
+> Historical record only. ADR-0012 retired this CI/CD workflow and status
+> context; the automation loop now owns `$athena:pr-review` and applies its
+> own `state:implementation-go` label without an external proof.
 
 The strict-review verdict is merge authorization. A verifier executed from the
 candidate pull-request checkout can be changed by that candidate, so a

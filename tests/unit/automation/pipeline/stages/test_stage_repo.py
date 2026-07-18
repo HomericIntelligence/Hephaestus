@@ -251,7 +251,7 @@ class TestDiscover:
 
         assert isinstance(result, Continue)
         assert github.issue_reads == [8]
-        assert repo_item.payload["products"][0]["stage"] is StageName.STRICT_REVIEW
+        assert repo_item.payload["products"][0]["stage"] is StageName.MERGE_WAIT
         assert repo_item.payload["products"][0]["pr"] == 44
 
     def test_discover_failure_finishes_fail(

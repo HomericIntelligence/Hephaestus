@@ -10,8 +10,8 @@ GitHub Actions validates repository code independently. The automation loop
 never reads, changes, or relies on checks, workflows, statuses, artifacts,
 leases, or `pull_request_target` events. After `$athena:pr-review` returns a
 current-head GO, the loop applies `state:implementation-go`; `merge_wait`
-consumes it only with that direct current-head handoff, while restarted labels
-re-enter strict review. CI/CD neither produces nor validates it.
+consumes that loop-owned label, while restarted labels re-enter merge-wait.
+CI/CD neither produces nor validates it.
 
 ## Current required contexts
 

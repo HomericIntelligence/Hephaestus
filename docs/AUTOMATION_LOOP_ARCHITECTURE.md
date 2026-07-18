@@ -23,9 +23,8 @@ status.
 
 CI/CD is outside the loop: it supplies no review input, approval, repair task,
 or label transition. `merge_wait` is the sole automatic armer and consumes the
-loop-owned label only with `strict_review`'s direct current-head handoff. A
-restart repeats review because the label has no head SHA. No workflow, status,
-artifact, or lease authorizes the loop.
+loop-owned label. A restart re-reads that label and the live PR head. No
+workflow, status, artifact, or lease authorizes the loop.
 
 ## Queue topology
 
@@ -46,7 +45,7 @@ flowchart LR
 repo ─> planning ─> plan_review ─> implementation ─> pr_review ─> strict_review ─> merge_wait ─> finished
              ^             │              ^   ^                         │
              └─── NOGO ────┘              │   └ agent err ─────────────┘ strict NOGO or head drift
-                (iter 3, cycles 2)        └── implementation-GO ───────> strict_review
+                (iter 3, cycles 2)        └── implementation-GO ───────> merge_wait
 ```
 
 The complete edge set — including implementation → plan_review (`plan_not_go`)
@@ -367,10 +366,10 @@ Related: #1554 (original minor-thread deadlock this replaces), #1575
    review, and checks the head both before and after that fetch. Missing,
    malformed, oversized, or stale evidence is a fail-closed NOGO. All evidence
    is untrusted and nonce-fenced.
-3. [M] Re-read the head before handoff. A GO applies
-   `state:implementation-go`, then re-reads the head again before recording
-   that exact reviewed head in the work item and advancing to `merge_wait`.
-   It does not write a GitHub artifact or status.
+3. [M] Re-read the head before applying the label. A GO applies
+   `state:implementation-go`, then re-reads the head again before advancing
+   to `merge_wait`. The label is the loop's durable authorization; no GitHub
+   artifact or status is written.
 4. [M] An explicit NOGO, infrastructure failure, or malformed verdict verifies
    auto-merge is disabled, records remediation, and fails back to a real implementation pass. It never
    loops through an adopted PR without implementation work. An orphan PR has
@@ -414,8 +413,8 @@ LEARN_WAIT solely to preserve the existing post-merge learn dedupe.
 missing label; FINISH_FAIL on a containment failure; FINISH_PASS after a
 merged PR's deduped learn step.
 
-**Fail routes**: missing-label or stale in-memory handoff failures →
-strict_review; containment failures finish failed.
+**Fail routes**: missing-label or arm-confirmation failures → strict_review;
+containment failures finish failed.
 
 **Budgets**: merge/poll budgets remain bounded by the coordinator routes.
 
@@ -455,10 +454,10 @@ globally bounded.
 | repo | finished(pass) — repo item is terminal; discovered issues/PRs go to their classified entry queues | finished(fail) on clone exhaustion | clone=2 |
 | planning | plan_review | finished(fail) | plan=2 |
 | plan_review | implementation | planning (nogo, default), finished(fail) on plan_cycles_exhausted | plan_review_iter=3, plan_cycles=2 |
-| implementation | pr_review | plan_review (plan_not_go), strict_review (already_implementation_go_pr), finished(fail) on exhaustion | implement=2, test_fix=1 |
+| implementation | pr_review | plan_review (plan_not_go), merge_wait (already_implementation_go_pr), finished(fail) on exhaustion | implement=2, test_fix=1 |
 | pr_review | strict_review | implementation (agent_error), finished(fail) on human_blocked or failed disable verification, finished(skip) on exhaustion | pr_review_iter=3, pr_review_hard=6 |
 | strict_review | merge_wait | implementation (nogo), strict_review (head_changed), finished(fail) on containment or label failure | strict_review_iter=1 |
-| merge_wait | finished(pass) | strict_review on missing loop-owned label, stale handoff, or arm confirmation; finished(fail) on containment failure; existing merged PRs learn then pass | merge/poll bounded by routes |
+| merge_wait | finished(pass) | strict_review on missing loop-owned label or arm confirmation; finished(fail) on containment failure; existing merged PRs learn then pass | merge/poll bounded by routes |
 | finished | — | — | — |
 
 ## Seeding and reconstruction
@@ -469,11 +468,11 @@ inputs are terminalized at the seed boundary when their PR is already merged or
 closed: merged PRs become `finished(pass)` and closed PRs become
 `finished(fail)`, before branch adoption or label-based routing is attempted.
 Open direct PRs enter the target repo's `pr_review` queue unless the PR already
-carries `state:implementation-go`, in which case they enter `strict_review`.
-The label is the loop's sole durable merge authorization, but it does not
-record the reviewed SHA; a restarted or adopted item therefore repeats the
-loop-owned current-head review before `merge_wait` can arm it. CI workflows
-and external review artifacts do not participate in that decision.
+carries `state:implementation-go`, in which case they enter `merge_wait`.
+The label is the loop's sole durable merge authorization; a restarted or
+adopted item re-reads the label and current PR head before `merge_wait` can
+arm it. CI workflows and external review artifacts do not participate in that
+decision.
 
 The same terminal-state check is repeated at the strict-review and implementation stage
 boundaries before branch adoption or implementation-label routing. This makes a
@@ -496,7 +495,7 @@ semantics.
 | state:skip or epic | excluded | Epic tagging is the one seeding write; done BEFORE excluding. |
 | Direct PR already merged | finished | pass, idempotent; terminalized before branch adoption. |
 | Direct PR already closed | finished | fail; terminalized before branch adoption. |
-| Open PR + PR carries state:implementation-go | strict_review | Rebind the label to the live head with loop-owned review before merge_wait. |
+| Open PR + PR carries state:implementation-go | merge_wait | Re-read the loop-owned label and live head before conditional arming. |
 | Open PR, no impl-go | pr_review | existing-PR path; will be reviewed. |
 | No PR, at-or-past state:plan-go | implementation | plan approved; ready to implement. |
 | No PR, state:plan-no-go | planning | plan rejected; amend with feedback. |

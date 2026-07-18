@@ -567,12 +567,10 @@ class StrictReviewStage(Stage):
         # Label mutation races with a push. Re-read the head after the write
         # so a review for H1 cannot authorize a new H2.
         current_outcome = self._current_head_or_restart(
-            item, ctx, head_sha, action="implementation-go handoff"
+            item, ctx, head_sha, action="implementation-go verification"
         )
         if current_outcome is not None:
             return current_outcome
-        item.payload["pr_review_skill_head"] = head_sha
-        item.payload["pr_review_skill_verdict"] = verdict_text
         return Continue(next_state=SR_FINISH)
 
     def _handle_nogo(

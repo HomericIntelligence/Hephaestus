@@ -282,9 +282,9 @@ valid issue reference, signed commits, or DCO sign-offs:
 
 Do not enable auto-merge manually. The queue arms it only after it has run
 `$athena:pr-review` for the PR's current head and applied
-`state:implementation-go`. `merge_wait` consumes that label only with the
-direct current-head strict-review handoff; restarted labels re-enter strict
-review. The loop never reads, changes, or relies on CI/CD, and the advisory
+`state:implementation-go`. `merge_wait` consumes that loop-owned label; a
+restart re-reads it with the live PR head. The loop never reads, changes, or
+relies on CI/CD, and the advisory
 `auto-merge-policy` is not the authorization mechanism.
 
 Also: ensure tests pass locally (`uv run pytest`), keep commits to logical units with

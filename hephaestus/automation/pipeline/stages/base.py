@@ -279,7 +279,7 @@ class StageGitHub(Protocol):
 
         The adapter must read back disabled state for an open PR. Strict review
         and merge wait use this containment boundary before fresh review and
-        whenever a current-head review handoff becomes invalid.
+        whenever an existing arm can no longer be retained.
         """
         ...
 

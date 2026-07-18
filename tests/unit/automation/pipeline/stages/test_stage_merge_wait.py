@@ -4,16 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from hephaestus.automation.pipeline.jobs import AgentJob
 from hephaestus.automation.pipeline.routing import Disposition, StageName
-from hephaestus.automation.pipeline.stages import (
-    Continue,
-    JobRequest,
-    StageOutcome,
-    StrictReviewEvidence,
-)
+from hephaestus.automation.pipeline.stages import Continue, StageOutcome
 from hephaestus.automation.pipeline.stages.merge_wait import ARM, POLL, MergeWaitStage
-from hephaestus.automation.pipeline.stages.strict_review import REVIEW_WAIT, StrictReviewStage
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 
@@ -33,16 +26,15 @@ class _ArmingGitHub(FakeStageGitHub):
         }
 
 
-def test_direct_strict_review_handoff_arms_without_an_external_gate(
+def test_loop_owned_implementation_go_label_arms_without_an_external_gate(
     make_ctx: Any, make_work_item: Any
 ) -> None:
-    """Merge-wait consumes the loop-owned label and exact in-memory handoff."""
+    """Merge-wait consumes the loop-owned label without an external gate."""
     github = _ArmingGitHub(labels=(True, False))
     item = make_work_item(
         stage=StageName.MERGE_WAIT,
         pr=12,
         state=ARM,
-        payload={"pr_review_skill_head": "a" * 40},
     )
 
     result = MergeWaitStage().step(item, make_ctx(github=github))
@@ -61,7 +53,6 @@ def test_missing_implementation_go_is_contained(make_ctx: Any, make_work_item: A
         stage=StageName.MERGE_WAIT,
         pr=12,
         state=ARM,
-        payload={"pr_review_skill_head": "a" * 40},
     )
 
     result = MergeWaitStage().step(item, make_ctx(github=github))
@@ -70,10 +61,8 @@ def test_missing_implementation_go_is_contained(make_ctx: Any, make_work_item: A
     assert not any(action == "arm_auto_merge" for action, _ in github.mutation_log)
 
 
-def test_label_without_direct_review_handoff_restarts_strict_review(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A restarted label cannot arm an unreviewed pushed head."""
+def test_label_without_ephemeral_review_handoff_arms(make_ctx: Any, make_work_item: Any) -> None:
+    """A persisted loop-owned label remains the merge authorization after restart."""
     github = _ArmingGitHub(labels=(True, False))
     item = make_work_item(
         stage=StageName.MERGE_WAIT,
@@ -83,15 +72,14 @@ def test_label_without_direct_review_handoff_restarts_strict_review(
 
     result = MergeWaitStage().step(item, make_ctx(github=github))
 
-    assert result == StageOutcome(Disposition.FAIL_BACK, "review_stale")
-    assert not any(action == "arm_auto_merge" for action, _ in github.mutation_log)
-    assert any(action == "gh_issue_remove_labels" for action, _ in github.mutation_log)
+    assert isinstance(result, Continue)
+    assert any(action == "arm_auto_merge" for action, _ in github.mutation_log)
 
 
-def test_same_head_restart_requests_a_fresh_strict_review(
+def test_label_arms_even_when_previous_review_state_is_not_rehydrated(
     make_ctx: Any, make_work_item: Any
 ) -> None:
-    """A restarted prior GO must not exhaust the same-head review budget."""
+    """A restart does not turn ephemeral review state into another gate."""
     head = "a" * 40
     github = _ArmingGitHub(labels=(True, False))
     item = make_work_item(
@@ -108,65 +96,30 @@ def test_same_head_restart_requests_a_fresh_strict_review(
 
     result = MergeWaitStage().step(item, make_ctx(github=github))
 
-    assert result == StageOutcome(Disposition.FAIL_BACK, "review_stale")
-    assert not any(key.startswith("strict_review_") for key in item.payload)
-
-    # Model the strict-review ingress recapturing and syncing the unchanged
-    # head.  The cleared attempt must permit Athena to run again.
-    item.stage = StageName.STRICT_REVIEW
-    item.state = REVIEW_WAIT
-    item.payload["strict_review_head"] = head
-    item.payload["strict_review_worktree"] = "/review/fresh-strict-12"
-    evidence = StrictReviewEvidence(
-        head_sha=head,
-        issue_title="Task",
-        issue_body="Do the task.",
-        diff="diff --git a/a.py b/a.py\n+",
-        prior_pr_review_verdict="Grade: A\nVerdict: GO",
-    )
-    review_result = StrictReviewStage().step(
-        item,
-        make_ctx(github=FakeStageGitHub(strict_evidence=evidence)),
-    )
-
-    assert isinstance(review_result, JobRequest)
-    assert isinstance(review_result.job, AgentJob)
-    assert item.payload["strict_review_attempt"] == 1
+    assert isinstance(result, Continue)
+    assert any(action == "arm_auto_merge" for action, _ in github.mutation_log)
 
 
-def test_stale_in_memory_review_handoff_is_contained_before_arm(
+def test_live_label_authorization_uses_the_current_pr_head(
     make_ctx: Any, make_work_item: Any
 ) -> None:
-    """A push between strict-review's label write and ARM cannot be armed."""
-
-    class StaleHandoffGitHub(_ArmingGitHub):
-        def __init__(self) -> None:
-            super().__init__(labels=(True, False))
-            self._pr_state = {"state": "OPEN", "headRefOid": "b" * 40}
-
-        def defer_auto_merge(self, pr_number: int) -> None:
-            super().defer_auto_merge(pr_number)
-            self._pr_state = {"state": "OPEN", "headRefOid": "b" * 40, "autoMergeRequest": None}
-
-    github = StaleHandoffGitHub()
+    """ARM uses the live head after the loop has applied its approval label."""
+    github = _ArmingGitHub(labels=(True, False))
+    github._pr_state = {"state": "OPEN", "headRefOid": "b" * 40}
     item = make_work_item(
         stage=StageName.MERGE_WAIT,
         pr=12,
         state=ARM,
-        payload={"pr_review_skill_head": "a" * 40},
     )
 
     result = MergeWaitStage().step(item, make_ctx(github=github))
 
-    assert result == StageOutcome(Disposition.FAIL_BACK, "review_stale")
-    assert not any(action == "arm_auto_merge" for action, _ in github.mutation_log)
-    assert ("defer_auto_merge", (12,)) in github.mutation_log
-    assert any(action == "gh_issue_remove_labels" for action, _ in github.mutation_log)
-    actions = [action for action, _args in github.mutation_log]
-    assert actions.index("defer_auto_merge") < actions.index("gh_issue_remove_labels")
+    assert isinstance(result, Continue)
+    assert github.arming_records[item.issue] == (12, "b" * 40)
+    assert not any(action == "gh_issue_remove_labels" for action, _ in github.mutation_log)
 
 
-def test_recovered_arm_is_disarmed_before_rechecking_the_handoff(
+def test_recovered_arm_is_disarmed_before_rechecking_label_authorization(
     make_ctx: Any, make_work_item: Any
 ) -> None:
     """A restart cannot leave a former arm live until ARM gets a queue turn."""
@@ -184,87 +137,6 @@ def test_recovered_arm_is_disarmed_before_rechecking_the_handoff(
     assert github.mutation_log[0] == ("defer_auto_merge", (12,))
 
 
-def test_stale_handoff_rechecks_after_revoking_the_go_label(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A same-head re-arm during stale-label removal cannot survive failback."""
-
-    class RearmDuringLabelRemovalGitHub(_ArmingGitHub):
-        def __init__(self) -> None:
-            super().__init__(labels=(True, False))
-            self._pr_state = {"state": "OPEN", "headRefOid": "b" * 40}
-
-        def defer_auto_merge(self, pr_number: int) -> None:
-            super().defer_auto_merge(pr_number)
-            self._pr_state = {"state": "OPEN", "headRefOid": "b" * 40, "autoMergeRequest": None}
-
-        def remove_labels(self, pr_number: int, labels: list[str]) -> None:
-            super().remove_labels(pr_number, labels)
-            self._pr_state = {
-                "state": "OPEN",
-                "headRefOid": "b" * 40,
-                "autoMergeRequest": {"enabledAt": "raced"},
-            }
-
-    github = RearmDuringLabelRemovalGitHub()
-    item = make_work_item(
-        stage=StageName.MERGE_WAIT,
-        pr=12,
-        state=ARM,
-        payload={"pr_review_skill_head": "a" * 40},
-    )
-
-    assert MergeWaitStage().step(item, make_ctx(github=github)) == StageOutcome(
-        Disposition.FAIL_BACK, "review_stale"
-    )
-
-    assert [action for action, _args in github.mutation_log].count("defer_auto_merge") == 2
-    state = github.gh_pr_state(12)
-    assert state is not None
-    assert state["autoMergeRequest"] is None
-
-
-def test_stale_handoff_rechecks_after_go_label_removal_error(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """An ambiguous stale-label error cannot leave a former arm live."""
-
-    class RearmAndFailLabelRemovalGitHub(_ArmingGitHub):
-        def __init__(self) -> None:
-            super().__init__(labels=(True, False))
-            self._pr_state = {"state": "OPEN", "headRefOid": "b" * 40}
-
-        def defer_auto_merge(self, pr_number: int) -> None:
-            super().defer_auto_merge(pr_number)
-            self._pr_state = {"state": "OPEN", "headRefOid": "b" * 40, "autoMergeRequest": None}
-
-        def remove_labels(self, pr_number: int, labels: list[str]) -> None:
-            super().remove_labels(pr_number, labels)
-            self._pr_state = {
-                "state": "OPEN",
-                "headRefOid": "b" * 40,
-                "autoMergeRequest": {"enabledAt": "raced"},
-            }
-            raise RuntimeError("label response lost")
-
-    github = RearmAndFailLabelRemovalGitHub()
-    item = make_work_item(
-        stage=StageName.MERGE_WAIT,
-        pr=12,
-        state=ARM,
-        payload={"pr_review_skill_head": "a" * 40},
-    )
-
-    assert MergeWaitStage().step(item, make_ctx(github=github)) == StageOutcome(
-        Disposition.FINISH_FAIL, "implementation_go_revoke_failed"
-    )
-
-    assert [action for action, _args in github.mutation_log].count("defer_auto_merge") == 2
-    state = github.gh_pr_state(12)
-    assert state is not None
-    assert state["autoMergeRequest"] is None
-
-
 def test_armed_labeled_pr_polls_without_rechecking_external_state(
     make_ctx: Any, make_work_item: Any
 ) -> None:
@@ -274,7 +146,6 @@ def test_armed_labeled_pr_polls_without_rechecking_external_state(
         stage=StageName.MERGE_WAIT,
         pr=12,
         state=ARM,
-        payload={"pr_review_skill_head": "a" * 40},
     )
     stage = MergeWaitStage()
 
@@ -302,7 +173,6 @@ def test_post_arm_head_drift_revokes_auto_merge(make_ctx: Any, make_work_item: A
         stage=StageName.MERGE_WAIT,
         pr=12,
         state=ARM,
-        payload={"pr_review_skill_head": "a" * 40},
     )
     stage = MergeWaitStage()
 
@@ -334,7 +204,6 @@ def test_arm_failure_is_contained_before_finishing(make_ctx: Any, make_work_item
         stage=StageName.MERGE_WAIT,
         pr=12,
         state=ARM,
-        payload={"pr_review_skill_head": "a" * 40},
     )
 
     result = MergeWaitStage().step(item, make_ctx(github=github))

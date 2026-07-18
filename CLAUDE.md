@@ -339,10 +339,9 @@ The required CI gate `pr-policy` and the PR reviewer enforce:
 `pr-policy` blocks PRs that fail those checks. The queue runs
 `$athena:pr-review --ci-free` in-loop for the current PR head, then applies
 `state:implementation-go`; `merge_wait` is the sole automatic armer and
-accepts it only with the direct current-head strict-review handoff. A restart
-re-enters strict review. The loop never reads, changes, or relies on CI/CD. CI
-workflows and external artifacts
-never grant that authority. Branch protection and required reviews still govern
+consumes that loop-owned label. A restart re-reads the label and live PR head.
+The loop never reads, changes, or relies on CI/CD. CI workflows and external
+artifacts never grant that authority. Branch protection and required reviews still govern
 whether GitHub merges the PR.
 
 ```bash
@@ -363,7 +362,7 @@ gh pr create \
   --body "$(printf 'Summary of change.\n\nCloses #<issue-number>\n')"
 
 # 5. Do not use --admin or bypass branch protection. Queue-owned auto-merge,
-#    when eligible, is armed only by merge_wait after strict review.
+#    when eligible, is armed only by merge_wait after loop review applies its label.
 ```
 
 ### Commit Message Format

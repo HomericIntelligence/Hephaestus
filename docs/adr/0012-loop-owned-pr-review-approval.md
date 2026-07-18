@@ -28,9 +28,9 @@ loop-owned `state:implementation-go` label. The required review is
    After its current-head GO read-back, the stage applies the loop-owned
    `state:implementation-go` label itself. It neither publishes a GitHub
    artifact nor reads CI/CD state.
-3. `merge_wait` is the sole automatic armer and consumes the loop-owned label
-   only with strict review's direct current-head handoff. A restart repeats
-   strict review because the label does not record a reviewed SHA. Normal
+3. `merge_wait` is the sole automatic armer and consumes the loop-owned label.
+   A restart re-reads that label and the live PR head; it does not turn an
+   ephemeral review handoff into another authorization requirement. Normal
    GitHub branch protection and explicit operator authority remain independent
    of this loop decision.
 
@@ -45,8 +45,8 @@ loop-owned `state:implementation-go` label. The required review is
 
 ## Consequences
 
-- A restart before the label is applied reruns review instead of recovering an
-  external proof; this is the expected fail-safe behavior.
+- A restart before the label is applied reruns review; a restart after the
+  label is applied resumes through merge-wait without an external proof.
 - Exactly one active loop leader owns strict review for a repository globally.
   Cooperating processes on that leader host use a local PR ownership lock;
   multi-host concurrent leaders are unsupported without a separately

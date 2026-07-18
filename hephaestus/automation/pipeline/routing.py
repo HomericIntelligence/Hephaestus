@@ -111,7 +111,7 @@ ROUTES: dict[StageName, Route] = {
         next=StageName.PR_REVIEW,
         fail_routes={
             "plan_not_go": StageName.PLAN_REVIEW,
-            "already_implementation_go_pr": StageName.STRICT_REVIEW,
+            "already_implementation_go_pr": StageName.MERGE_WAIT,
             "*": StageName.FINISHED,
         },
         budgets={"implement": 2, "test_fix": 1},
@@ -139,12 +139,11 @@ ROUTES: dict[StageName, Route] = {
         next=StageName.FINISHED,
         fail_routes={
             "closed": StageName.FINISHED,
-            # A contained review-handoff/head failure needs a fresh independent
-            # review, not terminal abandonment.  Containment failures such
-            # as inability to disarm or persist the arm remain terminal.
+            # A missing loop-owned approval label needs a fresh independent
+            # review, not terminal abandonment. Containment failures such as
+            # inability to disarm or persist the arm remain terminal.
             "not_implementation_go": StageName.STRICT_REVIEW,
             "arm_confirm_failed": StageName.STRICT_REVIEW,
-            "review_stale": StageName.STRICT_REVIEW,
             "*": StageName.FINISHED,
         },
         budgets={},

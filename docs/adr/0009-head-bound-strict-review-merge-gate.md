@@ -1,10 +1,15 @@
 # ADR-0009: Head-bound strict review controls queue-owned merge eligibility
 
-- Status: Accepted
+- Status: Superseded by ADR-0012
 - Date: 2026-07-16
 - Tracks: #2055
 
 ## Context
+
+> Historical record only. ADR-0012 retired the CI/CD artifact and proof
+> protocol described below. The automation loop now invokes `$athena:pr-review`
+> itself and uses its loop-owned `state:implementation-go` label as the sole
+> merge authorization.
 
 An implementation-review label alone cannot prove that the exact commit about
 to merge received an independent review. The temporary #2054 policy therefore

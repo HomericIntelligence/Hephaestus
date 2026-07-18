@@ -31,7 +31,6 @@ import logging
 from hephaestus.automation.agent_config import implementer_model, learn_claude_timeout
 from hephaestus.automation.learn import build_learn_prompt
 from hephaestus.automation.session_naming import AGENT_LEARNINGS
-from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_GO
 from hephaestus.prompts import PromptCatalog
 
 from .base import (
@@ -94,13 +93,10 @@ class MergeWaitStage(Stage):
     def on_enter(self, item: WorkItem, ctx: StageContext) -> StageOutcome | None:
         """Initialize the mini-state and restore a confirmed arm to POLL.
 
-        A recovery seed carries only a merge-wait record, not the ephemeral
-        current-head handoff from strict_review.  It first disarms any remote
-        arm, then starts from ARM.  ARM routes an open PR back to
-        strict_review unless that direct current-head handoff is present; a
-        merged PR still reaches the
-        normal deduplicated learning path.  This prevents an old label from
-        authorizing a pushed head after a restart.
+        A recovery seed carries only a merge-wait record. It first disarms any
+        remote arm, then starts from ARM, which reads the live PR head and the
+        loop-owned approval label again. A merged PR still reaches the normal
+        deduplicated learning path.
 
         Args:
             item: The work item being processed.
@@ -116,7 +112,7 @@ class MergeWaitStage(Stage):
             try:
                 # This is an ingress boundary, not an authorization check:
                 # a persisted old arm can otherwise merge before ARM gets to
-                # revalidate the missing in-memory review handoff.
+                # revalidate the loop-owned approval label.
                 ctx.github.defer_auto_merge(item.pr)
             except Exception as exc:
                 logger.error(
@@ -180,19 +176,11 @@ class MergeWaitStage(Stage):
                 return self._route_merged(item, ctx)
             return terminal
         head_sha = str((pr_state or {}).get("headRefOid") or "")
-        reviewed_head = str(item.payload.get("pr_review_skill_head") or "")
-        if not reviewed_head or not head_sha or reviewed_head != head_sha:
-            # Only the direct strict_review handoff carries the reviewed
-            # current head.  A restart/reseed cannot reconstruct it from the
-            # label, so it must repeat strict_review rather than arm a
-            # possibly pushed head.  Deferral must precede label removal: a
-            # label does not cancel a stale GitHub auto-merge arm.
-            return self._disable_and_fail(
-                item, ctx, "review_stale", recoverable=True, revoke_go_label=True
-            )
         has_go, _has_no_go = ctx.github.pr_has_implementation_state_label(item.pr)
         if not has_go:
             return self._disable_and_fail(item, ctx, "not_implementation_go", recoverable=True)
+        if not head_sha:
+            return self._disable_and_fail(item, ctx, "missing_pr_head")
         if item.payload.pop("merge_wait_prepared_recovery", False) and bool(
             (pr_state or {}).get("autoMergeRequest")
         ):
@@ -289,23 +277,19 @@ class MergeWaitStage(Stage):
             return False
         return True
 
-    def _disable_and_fail(  # noqa: C901 - containment preserves each remote failure distinction.
+    def _disable_and_fail(
         self,
         item: WorkItem,
         ctx: StageContext,
         note: str,
         *,
         recoverable: bool = False,
-        revoke_go_label: bool = False,
     ) -> StepResult:
         """Contain a failed gate condition before routing its outcome.
 
-        Label loss and head drift are recoverable only after containment and a
-        fresh `$athena:pr-review` pass. Failures to disable auto-merge or to persist
-        an arm record stay terminal because their remote state is ambiguous.
-        When a stale approval label must be revoked, the read-back-confirmed
-        deferral is deliberately performed first because label removal alone
-        does not stop an existing GitHub arm.
+        Approval-label loss and post-arm head drift are recoverable only after
+        containment. Failures to disable auto-merge or to persist an arm
+        record stay terminal because their remote state is ambiguous.
         """
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
@@ -330,48 +314,6 @@ class MergeWaitStage(Stage):
                 item.pr,
             )
             return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_disable_failed")
-        if revoke_go_label:
-            label_revoked = True
-            try:
-                ctx.github.remove_labels(item.pr, [STATE_IMPLEMENTATION_GO])
-            except Exception as exc:
-                logger.error(
-                    "merge_wait: failed to revoke stale implementation-go on PR #%d: %s",
-                    item.pr,
-                    exc,
-                )
-                # The outcome is ambiguous: GitHub may have applied the
-                # label change despite the failed response.  Re-contain the
-                # remote arm before reporting the label failure.
-                label_revoked = False
-            # The label mutation is not a disarm.  Repeat containment after
-            # it so a same-head re-arm racing that RPC cannot survive the
-            # failback to strict review.
-            try:
-                ctx.github.defer_auto_merge(item.pr)
-            except Exception as exc:
-                logger.error(
-                    "merge_wait: failed to re-disable auto-merge after label revocation "
-                    "for PR #%d: %s",
-                    item.pr,
-                    exc,
-                )
-                return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_disable_failed")
-            disabled = ctx.github.gh_pr_state(item.pr)
-            terminal = _terminal_pr_outcome(disabled, item.pr)
-            if terminal is not None:
-                if terminal.disposition is Disposition.FINISH_PASS:
-                    return self._route_merged(item, ctx)
-                return terminal
-            if disabled is None or bool(disabled.get("autoMergeRequest")):
-                logger.error(
-                    "merge_wait: could not verify auto-merge disabled after label revocation "
-                    "for PR #%d",
-                    item.pr,
-                )
-                return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_disable_failed")
-            if not label_revoked:
-                return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_revoke_failed")
         item.armed = False
         if recoverable:
             # A failback starts a new strict-review cycle even when the PR

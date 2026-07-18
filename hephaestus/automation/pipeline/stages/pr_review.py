@@ -714,7 +714,7 @@ class PrReviewStage(Stage):
                     dict(comment) for comment in result.value.comments
                 ]
             else:
-                # Keep direct stage callers and persisted pre-handoff results
+                # Keep direct stage callers and persisted prior results
                 # compatible; only live AgentJob results use the paired parser.
                 item.payload["review_verdict"] = result.value
                 item.payload["review_text"] = getattr(result.value, "raw", str(result.value))

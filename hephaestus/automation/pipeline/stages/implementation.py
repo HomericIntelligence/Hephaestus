@@ -19,8 +19,8 @@ binding contract):
   skips the item regardless of plan-go/implementation-go, before either the
   existing-PR fast path or the fresh-implement plan-go gate below. Then the
   existing-PR fast path (``_review_existing_pr`` semantics): a PR already
-  carrying ``state:implementation-go`` re-enters ``strict_review`` so the
-  label is rebound to the live head; a PR without it adopts the PR's
+  carrying ``state:implementation-go`` routes to ``merge_wait``; a PR without
+  it adopts the PR's
   REAL head branch, re-ensures the auto-merge deferral [durable], cuts a
   worktree on the ADOPTED branch (``refresh_base=False`` +
   ``sync_to_remote`` — the anti-clobber reset of
@@ -736,9 +736,8 @@ class ImplementationStage(Stage):
         """Route an adopted PR that already carries ``state:implementation-go``.
 
         Split out of :meth:`_gate` for the same readability reason as
-        :meth:`_skip_gate`. A label does not preserve the exact head that
-        strict review inspected, so both fresh and adopted entries re-enter
-        strict review directly. That stage owns its read-only worktree.
+        :meth:`_skip_gate`. The loop-owned label is the durable authorization,
+        so both fresh and adopted entries route directly to ``merge_wait``.
 
         Args:
             item: The work item under evaluation (``item.pr``/``item.branch``
@@ -756,7 +755,7 @@ class ImplementationStage(Stage):
         if not has_go:
             return None
         logger.info(
-            "implementation:%d: PR #%d already implementation-go; routing to strict review",
+            "implementation:%d: PR #%d already implementation-go; routing to merge-wait",
             item.issue,
             existing_pr,
         )

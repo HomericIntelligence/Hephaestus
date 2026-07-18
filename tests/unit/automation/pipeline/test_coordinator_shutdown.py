@@ -327,7 +327,7 @@ class TestCrashMatrixJournal:
                 78,
                 None,
                 False,
-                StageName.STRICT_REVIEW,
+                StageName.MERGE_WAIT,
             ),
             ("merged PR", [], None, 79, False, StageName.FINISHED),
             ("state:skip", [STATE_SKIP], None, None, False, None),

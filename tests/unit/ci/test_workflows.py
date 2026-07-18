@@ -27,7 +27,7 @@ from hephaestus.ci.workflows import (
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 AUTO_TAG_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "auto-tag.yml"
-AUTO_MERGE_ON_GO_WORKFLOW = (
+LABEL_TRIGGERED_AUTO_MERGE_WORKFLOW = (
     REPO_ROOT / ".github" / "workflows" / "enable-auto-merge-on-implementation-go.yml"
 )
 REQUIRED_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "_required.yml"
@@ -323,12 +323,12 @@ jobs:
         assert validate_workflow(wf) == []
 
 
-class TestStrictGateWorkflow:
-    """Regression tests for queue-owned strict-review auto-merge policy."""
+class TestLoopOwnedApprovalWorkflow:
+    """Regression tests for the loop-owned approval policy."""
 
     def test_label_triggered_auto_merge_workflow_is_removed(self) -> None:
-        """No privileged label-event workflow can bypass the strict gate."""
-        assert not AUTO_MERGE_ON_GO_WORKFLOW.exists()
+        """No privileged label-event workflow can arm auto-merge."""
+        assert not LABEL_TRIGGERED_AUTO_MERGE_WORKFLOW.exists()
 
     def test_advisory_policy_reports_without_authorizing_an_arm(self) -> None:
         """The workflow reports state; the queue remains the sole armer."""

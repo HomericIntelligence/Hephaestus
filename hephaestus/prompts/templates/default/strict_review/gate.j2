@@ -44,6 +44,6 @@ Automation-loop handoff: <GO|NOGO>
 ```
 
 Use `GO` only when the skill's own CI-free conclusion is GO. Map `CONDITIONAL
-GO` and `NO-GO` to `NOGO`. This handoff only records that this exact head was
-reviewed; the strict-review stage applies `state:implementation-go` only after
-it verifies this head is still current.
+GO` and `NO-GO` to `NOGO`. The strict-review stage applies the loop-owned
+`state:implementation-go` label only after it verifies this head is still
+current. That label is the loop's sole merge authorization.

@@ -108,10 +108,9 @@ def test_named_reasons_route_where_the_doc_says() -> None:
     assert ROUTES[StageName.IMPLEMENTATION].fail_routes["plan_not_go"] == StageName.PLAN_REVIEW
     assert (
         ROUTES[StageName.IMPLEMENTATION].fail_routes["already_implementation_go_pr"]
-        == StageName.STRICT_REVIEW
+        == StageName.MERGE_WAIT
     )
     assert (
         ROUTES[StageName.MERGE_WAIT].fail_routes["not_implementation_go"] == StageName.STRICT_REVIEW
     )
-    assert ROUTES[StageName.MERGE_WAIT].fail_routes["review_stale"] == StageName.STRICT_REVIEW
     assert ROUTES[StageName.MERGE_WAIT].fail_routes["closed"] == StageName.FINISHED

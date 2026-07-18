@@ -2,8 +2,8 @@
 
 Use this runbook when a PR carries loop-owned `state:implementation-go` and
 remains blocked. `merge_wait` is the sole automatic armer and conditionally
-arms only the direct current-head strict-review handoff; CI/CD is outside the
-loop.
+arms the current head when the loop-owned label is present; CI/CD is outside
+the loop.
 
 ## Containment
 
@@ -26,7 +26,7 @@ drive-green scope. It will either conditionally arm the current head or return
 it to the loop's PR-review pass:
 
 ```bash
-uv run hephaestus-automation-loop --prs <N> --phases drive-green --loops 1 --max-workers 1
+uv run hephaestus-automation-loop --prs <N> --loops 1 --max-workers 1
 ```
 
 ## Follow-Up

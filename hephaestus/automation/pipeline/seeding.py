@@ -12,7 +12,7 @@ Entry routing (the binding contract is the classification table in
 
 - ``state:skip`` or epic → excluded (stage ``None``, logged)
 - PR merged → finished (pass, idempotent)
-- Open PR + at-or-past ``state:implementation-go`` → strict_review
+- Open PR + at-or-past ``state:implementation-go`` → merge_wait
 - Open PR, no impl-GO → pr_review (existing-PR path)
 - No PR, at-or-past ``state:plan-go`` → implementation
 - No PR, ``state:plan-no-go`` → planning (amend path)
@@ -261,20 +261,20 @@ def classify_issue(facts: IssueFacts) -> Classification:
 
     # Routing logic: open PR path
     if facts.pr_is_open:
-        # A label alone does not preserve which head Athena reviewed across a
-        # process restart.  Re-enter strict_review so the live head receives
-        # a fresh in-loop review before merge_wait can arm it.  No CI status
-        # or external review artifact is consulted.
+        # The loop-owned approval label is the durable merge authorization.
+        # A restart sends it to merge_wait, which re-reads the live PR head
+        # before conditionally arming GitHub. No CI status or external review
+        # artifact is consulted.
         if facts.pr_has_implementation_go:
             return (
-                StageName.STRICT_REVIEW,
+                StageName.MERGE_WAIT,
                 f"#{facts.number} open PR with {STATE_IMPLEMENTATION_GO}",
             )
         if facts.pr_has_implementation_no_go:
             return StageName.PR_REVIEW, f"#{facts.number} open PR awaiting review"
         if _label_at_or_past(state_label, STATE_IMPLEMENTATION_GO):
             return (
-                StageName.STRICT_REVIEW,
+                StageName.MERGE_WAIT,
                 f"#{facts.number} open PR with {STATE_IMPLEMENTATION_GO}",
             )
         # Open PR, no implementation-go → awaiting PR review
@@ -469,7 +469,7 @@ def seed_from_cli(
     - ``issues`` → :func:`seed_issue` + :func:`classify_issue` per issue.
     - ``prs`` → tri-state classification mirroring ``classify_issue``'s
       open-PR routing: merged PR -> FINISHED (idempotent), closed PR ->
-      excluded, open PR with ``state:implementation-go`` -> STRICT_REVIEW, open PR
+      excluded, open PR with ``state:implementation-go`` -> MERGE_WAIT, open PR
       without it -> PR_REVIEW. A failed state/label fetch reads as
       "open, not yet reviewed" (-> pr_review), matching the legacy
       ``_review_existing_pr`` fail-open-to-review semantics.
@@ -542,7 +542,7 @@ def seed_from_cli(
                 SeedEntry(
                     kind="pr",
                     identifier=pr,
-                    stage=StageName.STRICT_REVIEW,
+                    stage=StageName.MERGE_WAIT,
                     reason=f"PR #{pr} carries {STATE_IMPLEMENTATION_GO}",
                     pr_number=pr,
                 )
