@@ -34,6 +34,6 @@ copy — the module is the source of truth.
 | `state:needs-plan` | Issue is queued for the planner (also the implicit state when no `state:*` label is present). |
 | `state:plan-go` | Plan reviewed and approved; ready for implementation. |
 | `state:plan-no-go` | Plan reviewed and rejected; needs re-planning. |
-| `state:implementation-go` | Applied by `strict_review` after a current-head `$athena:pr-review` GO; it authorizes the loop's merge-wait step. |
+| `state:implementation-go` | Applied by `pr_review` after a `$athena:pr-review` GO (or inline fallback); it authorizes the loop's merge-wait step. |
 | `state:implementation-no-go` | Implementation reviewed and rejected; needs re-work. |
 | `state:skip` | Work item taken out of the loop entirely — operator-applied, auto-applied when the review loop exhausts its budget without a GO, or applied to epics before exclusion. Independent of all other state labels. See [Reviving a state:skip-labeled issue](state-skip-revival.md) to safely clear it. |

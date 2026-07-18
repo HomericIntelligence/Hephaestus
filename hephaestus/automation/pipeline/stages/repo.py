@@ -17,7 +17,7 @@ Steps:
    ``ctx.github.skip_epics`` [durable, BEFORE excluding], classify each kept
    issue via the REUSED :func:`~..seeding.seed_issue` /
    :func:`~..seeding.classify_issue`, and (``--drive-green-all``) route
-   orphan PRs (open PRs with no tracked issue) to strict review.
+   open PRs with a linked tracked issue to PR review.
 4. [M] SEEDED: expose the classified products in
    ``item.payload["products"]`` — the coordinator (queue owner) performs the
    actual queue pushes when routing the repo item — and finish
@@ -257,7 +257,8 @@ class RepoStage(Stage):
                 }
             )
 
-        # --drive-green-all: orphan PRs (no tracked issue) -> strict review.
+        # --drive-green-all: only linked PRs can be reviewed. Orphans have no
+        # requirements context and must remain outside the automation loop.
         if getattr(ctx.config, "drive_green_all", False):
             include_bot_prs = bool(getattr(ctx.config, "include_bot_prs", True))
             include_all_authors = bool(getattr(ctx.config, "include_all_authors", False))
@@ -275,13 +276,10 @@ class RepoStage(Stage):
                     pr, include_bot_prs=include_bot_prs, viewer_login=viewer_login
                 ):
                     continue
-                products.append(
-                    {
-                        "kind": "pr",
-                        "number": pr_number,
-                        "stage": StageName.STRICT_REVIEW,
-                        "reason": f"orphan PR #{pr_number} (drive-green-all)",
-                    }
+                logger.info(
+                    "repo:%s: skipping orphan PR #%d; no linked issue supplies requirements",
+                    item.repo,
+                    pr_number,
                 )
 
         item.payload["products"] = products
@@ -331,9 +329,8 @@ def product_to_work_item(repo: str, product: dict[str, Any]) -> WorkItem | None:
     item = WorkItem(
         repo=repo,
         kind=kind,
-        # A PR number never supplies issue requirements.  Repo-discovered
-        # orphan PRs therefore retain issue=None and are rejected before the
-        # strict-review gate can run.
+        # A PR number never supplies issue requirements. Linked issue context
+        # is required before a PR can enter the review stage.
         issue=(
             number
             if kind is ItemKind.ISSUE

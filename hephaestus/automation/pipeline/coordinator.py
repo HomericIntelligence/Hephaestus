@@ -112,7 +112,6 @@ from hephaestus.automation.pipeline.stages import (
     Stage,
     StageContext,
     StageGitHub,
-    StrictReviewStage,
 )
 from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARGV
 from hephaestus.automation.pipeline.stages.repo import product_to_work_item
@@ -161,7 +160,6 @@ _WAKE_HANDLE = object()
 _DRAIN_ORDER: tuple[StageName, ...] = (
     StageName.FINISHED,
     StageName.MERGE_WAIT,
-    StageName.STRICT_REVIEW,
     StageName.PR_REVIEW,
     StageName.IMPLEMENTATION,
     StageName.PLAN_REVIEW,
@@ -260,10 +258,6 @@ class PipelineConfig:
     # when True, issues already at-or-past ``state:plan-go`` are re-routed to
     # PLANNING instead of being classified past the scope (and thus skipped).
     force: bool = False
-    # Product-layer, host-local ownership guard for strict review.  The pure
-    # coordinator only receives this injected capability; it never imports
-    # filesystem-locking helpers itself.
-    strict_review_guard: Any | None = None
 
 
 @dataclass
@@ -275,7 +269,6 @@ class _StageRunConfig:
     enable_follow_up: bool = True
     run_pre_pr_tests: bool = False
     force: bool = False
-    strict_review_guard: Any | None = None
     agent: str = "claude"
     model: str = ""
     planner_model: str = ""
@@ -440,7 +433,6 @@ class Coordinator:
             include_all_authors=config.include_all_authors,
             pre_pr_test_argv=config.pre_pr_test_argv,
             run_pre_pr_tests=config.run_pre_pr_tests,
-            strict_review_guard=config.strict_review_guard,
         )
         self._ctx_cache: dict[str, StageContext] = {}
 
@@ -454,7 +446,6 @@ class Coordinator:
             StageName.PLAN_REVIEW: PlanReviewStage(),
             StageName.IMPLEMENTATION: ImplementationStage(),
             StageName.PR_REVIEW: PrReviewStage(),
-            StageName.STRICT_REVIEW: StrictReviewStage(),
             StageName.MERGE_WAIT: MergeWaitStage(),
             StageName.FINISHED: FinishedStage(self.ledger, self.preserved),
         }
@@ -899,7 +890,6 @@ class Coordinator:
         seeding reconstruction resumes exactly here with no shutdown
         bookkeeping.
         """
-        self._release_strict_review_guard(item)
         item.result = ItemResult(
             passed=False,
             reason=f"resumable at {item.stage.value}",
@@ -1105,12 +1095,6 @@ class Coordinator:
                 if isinstance(result, Continue):
                     item.state = result.next_state
                     item.add_history_event(item.stage, item.state)
-                    if item.stage is StageName.MERGE_WAIT and item.state == "POLL":
-                        # The strict-review guard is an ephemeral local mutex,
-                        # not an approval proof.  Release it only after the
-                        # merge-wait stage has read the label, armed GitHub,
-                        # and confirmed that arm for this live attempt.
-                        self._release_strict_review_guard(item)
                     continue
                 if isinstance(result, JobRequest):
                     if self.config.dry_run:
@@ -1224,24 +1208,6 @@ class Coordinator:
             return
         disposition = outcome.disposition
 
-        # A strict-review claim spans its worktree synchronization, read-only
-        # agent job, final loop-owned verdict mutation, and the immediately
-        # following merge-wait ARM confirmation.  Keeping it for that one
-        # in-process handoff closes the label-read-to-arm window without
-        # creating a durable approval condition; the loop-owned label remains
-        # the sole restart-safe authorization.
-        handoff_to_merge_wait = (
-            item.stage is StageName.STRICT_REVIEW
-            and disposition is Disposition.ADVANCE
-            and route.next is StageName.MERGE_WAIT
-        )
-        if (
-            item.stage is StageName.STRICT_REVIEW
-            and disposition is not Disposition.RETRY
-            and not handoff_to_merge_wait
-        ):
-            self._release_strict_review_guard(item)
-
         if item.stage is StageName.FINISHED:
             # Sink outcomes are terminal: the result is already recorded.
             self._record_event("done", self._item_key(item), outcome.note)
@@ -1325,7 +1291,6 @@ class Coordinator:
 
     def _finish(self, item: WorkItem, *, passed: bool, reason: str) -> None:
         """Set the item's result and hand it to the finished sink."""
-        self._release_strict_review_guard(item)
         item.result = ItemResult(passed=passed, reason=reason, final_stage=item.stage)
         if item.stage is StageName.FINISHED:
             # Poisoned inside the sink: record directly, never re-queue.
@@ -1334,24 +1299,6 @@ class Coordinator:
                 item.payload["_recorded"] = True
             return
         self._push_item(item, StageName.FINISHED, enter=True)
-
-    def _release_strict_review_guard(self, item: WorkItem) -> None:
-        """Release this item's strict-review ownership exactly once."""
-        owner = item.payload.pop("_strict_review_guard_owner", None)
-        if item.pr is None or not isinstance(owner, int):
-            return
-        guard = self.config.strict_review_guard
-        if guard is None:
-            return
-        try:
-            guard.release(self.config.org, item.repo, item.pr, owner)
-        except Exception as exc:  # defensive; cleanup must not poison routing
-            logger.warning(
-                "strict-review guard release failed for %s PR #%d: %s",
-                item.repo,
-                item.pr,
-                exc,
-            )
 
     def _seed_products(self, item: WorkItem) -> None:
         """Push a terminal repo item's discovered products into entry queues."""
@@ -1396,13 +1343,6 @@ class Coordinator:
 
         Every durable GitHub mutation for this transition already happened
         inside the stage, immediately before the outcome that got us here.
-        The one narrow exception is review-gate ingress: a direct/reseeded
-        strict-review item, an orphaned direct merge-wait item, or a
-        merge-wait arm-recovery item can carry a stale remote auto-merge arm
-        before its queued stage gets CPU time, so the coordinator disarms it
-        *before* queueing.  Those stages repeat the check on entry to defend
-        every other invocation path and an external re-arm between enqueue
-        and drain.
 
         Upstream idempotency guard (#2107): a genuinely NEW ISSUE work item whose
         ``(repo, issue)`` is already queued (any stage) or in-flight is refused —
@@ -1419,33 +1359,6 @@ class Coordinator:
         ):
             logger.info("seed skipped: #%s already queued/in-flight in %s", item.issue, item.repo)
             return
-        requires_ingress_containment = stage is StageName.STRICT_REVIEW or (
-            stage is StageName.MERGE_WAIT
-            and (item.issue is None or bool(item.payload.get("merge_wait_recovery")))
-        )
-        if requires_ingress_containment and enter and item.pr is not None:
-            try:
-                self._ctx_for(item).github.defer_auto_merge(item.pr)
-            except Exception as exc:
-                # Do not queue a review when an old arm could merge the PR
-                # before that review completes.  ``_finish`` records the
-                # containment failure without requeueing review.
-                logger.error(
-                    "review-gate ingress: failed to defer auto-merge for PR #%d: %s",
-                    item.pr,
-                    exc,
-                )
-                failure_reason = (
-                    "strict_review_ingress_auto_merge_disable_failed"
-                    if stage is StageName.STRICT_REVIEW
-                    else "merge_wait_recovery_auto_merge_disable_failed"
-                )
-                self._finish(
-                    item,
-                    passed=False,
-                    reason=failure_reason,
-                )
-                return
         item.stage = stage
         if enter:
             item.state = "ENTER"
@@ -1661,6 +1574,21 @@ class Coordinator:
             entries.append(replace(entry, stage=stage, reason=reason, passed=passed))
         for pr in self.config.prs:
             issue_number = github.find_issue_for_pr(pr)
+            if issue_number is None:
+                entries.append(
+                    _seeding.SeedEntry(
+                        kind="pr",
+                        identifier=pr,
+                        stage=StageName.FINISHED,
+                        reason=(
+                            f"PR #{pr} has no linked issue; refusing review without "
+                            "requirements context"
+                        ),
+                        pr_number=pr,
+                        passed=False,
+                    )
+                )
+                continue
             scope_identifier = issue_number if issue_number is not None else pr
             if issue_number is not None and (issue_number, pr) in pending_arms:
                 stage, reason, passed = self._scope_seed_decision(
@@ -1764,28 +1692,17 @@ class Coordinator:
         if entry.kind == "repo":
             item = WorkItem(repo=str(entry.identifier), kind=ItemKind.REPO, stage=entry.stage)
         elif entry.kind == "pr":
-            direct_pr_number = entry.pr_number or int(entry.identifier)
-            # Direct ``--prs`` entries without a linked ``Closes #N`` issue
-            # still need a stable numeric review context; otherwise
-            # PrReviewStage rejects the advertised PR-review route before it
-            # can inspect the PR.  Use the PR's GitHub issue number only for
-            # PR_REVIEW ingress.  Merge-wait orphan entries stay issue=None so
-            # a stale implementation-go label cannot arm an unreviewed PR.
-            issue_number = entry.issue_number
-            direct_pr_review_context = False
-            if issue_number is None and entry.stage is StageName.PR_REVIEW:
-                issue_number = direct_pr_number
-                direct_pr_review_context = True
             item = WorkItem(
                 repo=default_repo,
                 kind=ItemKind.PR,
-                issue=issue_number,
-                pr=direct_pr_number,
+                # Only a resolved, linked issue supplies requirements context.
+                # A PR number is not a safe substitute: its author controls
+                # the PR body, so an unlinked direct PR must remain orphaned
+                # and fail closed before PR review.
+                issue=entry.issue_number,
+                pr=entry.pr_number or int(entry.identifier),
                 stage=entry.stage,
             )
-            if direct_pr_review_context:
-                item.payload["review_context_kind"] = "PR"
-                item.payload["direct_pr_unlinked_review_context"] = True
         else:
             item = WorkItem(
                 repo=default_repo,

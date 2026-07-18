@@ -27,9 +27,22 @@ from typing import Any
 
 from hephaestus.prompts import PromptCatalog
 
+from ._review_rubric import (
+    _FULL_SWEEP_SUFFIX as _FULL_SWEEP_SUFFIX,
+    _IMPL_LOOP_REVIEW_RUBRIC as _IMPL_LOOP_REVIEW_RUBRIC,
+    _PLAN_LOOP_REVIEW_RUBRIC as _PLAN_LOOP_REVIEW_RUBRIC,
+    _PLAN_REVIEW_RUBRIC as _PLAN_REVIEW_RUBRIC,
+    _PR_REVIEW_RUBRIC as _PR_REVIEW_RUBRIC,
+    _PR_REVIEW_RUBRIC_DIMENSIONS as _PR_REVIEW_RUBRIC_DIMENSIONS,
+    _REVIEW_GRADING_AND_ANTI_INFLATION as _REVIEW_GRADING_AND_ANTI_INFLATION,
+    _REVIEW_OUTPUT_FORMAT as _REVIEW_OUTPUT_FORMAT,
+    _REVIEW_RUBRIC as _REVIEW_RUBRIC,
+    _SEVEN_PRINCIPLES_DIMENSIONS as _SEVEN_PRINCIPLES_DIMENSIONS,
+)
+
 # Re-export private helpers/constants for tests and internal callers that
 # previously did ``from hephaestus.automation.prompts import _fence_untrusted``
-# or ``prompts._STRICT_GRADING_AND_ANTI_INFLATION``. The ``as`` aliases tell
+# or ``prompts._REVIEW_GRADING_AND_ANTI_INFLATION``. The ``as`` aliases tell
 # ruff these are intentional re-exports, not unused imports.
 from ._shared import (
     FencedContent as FencedContent,
@@ -42,18 +55,6 @@ from ._shared import (
     fence_content as fence_content,
     get_terse_output_directive as get_terse_output_directive,
     get_untrusted_notice as get_untrusted_notice,
-)
-from ._strict_rubric import (
-    _FULL_SWEEP_SUFFIX as _FULL_SWEEP_SUFFIX,
-    _IMPL_LOOP_STRICT_RUBRIC as _IMPL_LOOP_STRICT_RUBRIC,
-    _PLAN_LOOP_STRICT_RUBRIC as _PLAN_LOOP_STRICT_RUBRIC,
-    _PLAN_STRICT_RUBRIC as _PLAN_STRICT_RUBRIC,
-    _PR_STRICT_RUBRIC as _PR_STRICT_RUBRIC,
-    _PR_STRICT_RUBRIC_DIMENSIONS as _PR_STRICT_RUBRIC_DIMENSIONS,
-    _SEVEN_PRINCIPLES_DIMENSIONS as _SEVEN_PRINCIPLES_DIMENSIONS,
-    _STRICT_GRADING_AND_ANTI_INFLATION as _STRICT_GRADING_AND_ANTI_INFLATION,
-    _STRICT_REVIEW_OUTPUT_FORMAT as _STRICT_REVIEW_OUTPUT_FORMAT,
-    _STRICT_REVIEW_RUBRIC as _STRICT_REVIEW_RUBRIC,
 )
 from .address_review import build_unaddressed_directive, get_address_review_prompt
 from .advise import (

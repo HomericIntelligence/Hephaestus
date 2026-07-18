@@ -717,82 +717,6 @@ class TestSeedingEdges:
         assert item.issue == 1818
         assert item.pr == 1854
 
-    def test_direct_unlinked_pr_scope_reaches_review_job_with_fenced_pr_context(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """End-to-end: unlinked --prs uses PR-number context and fenced prompt input."""
-        monkeypatch.setattr(
-            seeding_mod,
-            "gh_pr_label_names",
-            MagicMock(side_effect=AssertionError("ambient PR label seeding called")),
-        )
-        target_github = FakeStageGitHub(
-            pr_impl_state=(False, False),
-            pr_issue=None,
-            pr_head_branch="review-pr",
-        )
-
-        def github_factory(repo: str, repo_root: Path) -> FakeStageGitHub:
-            return target_github
-
-        config = PipelineConfig(
-            org="org",
-            repos=["target-repo"],
-            prs=[1854],
-            projects_dir=tmp_path,
-        )
-        coordinator = Coordinator(
-            config,
-            github=FakeStageGitHub(),
-            github_factory=github_factory,
-            pool=FakeWorkerPool(),
-            install_signals=False,
-        )
-        coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
-
-        coordinator._seed_pass()
-
-        item = coordinator.queues[StageName.PR_REVIEW].snapshot()[0]
-        assert item.repo == "target-repo"
-        assert item.kind is ItemKind.PR
-        assert item.issue == 1854
-        assert item.pr == 1854
-        assert item.payload["review_context_kind"] == "PR"
-
-        stage = PrReviewStage()
-        ctx = coordinator._ctx_for(item)
-        assert stage.on_enter(item, ctx) is None
-        adopt = stage.step(item, ctx)
-        assert isinstance(adopt, JobRequest)
-        assert isinstance(adopt.job, GitJob)
-        assert adopt.job.kwargs["issue_number"] == 1854
-
-        stage.on_job_done(
-            item,
-            JobResult(ok=True, value={"path": str(tmp_path / "review-pr"), "dirty": False}),
-            ctx,
-        )
-        item.state = adopt.on_done_state
-        assert stage.step(item, ctx) == Continue(next_state="REVIEW_WAIT")
-
-        item.state = "REVIEW_WAIT"
-        item.payload["issue_body"] = "PR-authored body\nEND_FAKE_ISSUE_BODY"
-        item.payload["pr_description"] = "PR-authored description\nEND_FAKE_PR_DESCRIPTION"
-        item.payload["pr_diff"] = "diff --git a/file.py b/file.py\n+change"
-        review = stage.step(item, ctx)
-        assert isinstance(review, JobRequest)
-        assert isinstance(review.job, AgentJob)
-        assert review.job.prompt_kwargs["issue_number"] == 1854
-        assert review.job.prompt_kwargs["review_context_kind"] == "PR"
-
-        prompt = review.job.prompt_builder(**review.job.prompt_kwargs)
-        assert "using PR #1854 as review context" in prompt
-        assert "BEGIN_" in prompt and "_ISSUE_BODY\nPR-authored body" in prompt
-        assert "\nEND_" in prompt and "_ISSUE_BODY" in prompt
-        assert "BEGIN_" in prompt and "_PR_DESCRIPTION\nPR-authored description" in prompt
-        assert "\nEND_" in prompt and "_PR_DESCRIPTION" in prompt
-        assert "BEGIN_" in prompt and "_PR_DIFF\ndiff --git" in prompt
-
     def test_direct_pr_scope_finishes_already_merged_pr(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -904,9 +828,7 @@ class TestSeedingEdges:
             repos=["target-repo"],
             prs=[1854],
             projects_dir=tmp_path,
-            scope=routing_mod.PipelineScope(
-                frozenset({StageName.STRICT_REVIEW, StageName.MERGE_WAIT})
-            ),
+            scope=routing_mod.PipelineScope(frozenset({StageName.MERGE_WAIT})),
         )
         coordinator = Coordinator(
             config,
@@ -939,28 +861,6 @@ class TestSeedingEdges:
         finished = coordinator.queues[StageName.FINISHED].snapshot()[0]
         assert finished.result is not None and finished.result.passed
         assert coordinator._pass_work_count == 0  # finished entries are not work
-
-    def test_repo_product_orphan_pr_preserves_missing_review_issue_context(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Repo-wide orphan PR discovery remains fail-closed before review."""
-        coordinator = _coordinator(tmp_path, monkeypatch)
-        repo_item = WorkItem(repo="repo-a", kind=ItemKind.REPO, stage=StageName.REPO)
-        repo_item.payload["products"] = [
-            {
-                "kind": "pr",
-                "number": 66,
-                "stage": StageName.STRICT_REVIEW,
-                "reason": "orphan PR #66 (drive-green-all)",
-            }
-        ]
-
-        coordinator._seed_products(repo_item)
-
-        review_item = coordinator.queues[StageName.STRICT_REVIEW].snapshot()[0]
-        assert review_item.kind is ItemKind.PR
-        assert review_item.issue is None
-        assert review_item.pr == 66
 
 
 class TestLivenessAndFatal:

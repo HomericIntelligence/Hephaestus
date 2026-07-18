@@ -191,7 +191,7 @@ def test_guard_scope_excludes_coordinator_neutral_stage_github_calls(
 
 
 def test_legacy_auto_merge_coordinator_is_fail_closed() -> None:
-    """Compatibility drive-green code cannot bypass the queue strict gate (#2054)."""
+    """Compatibility drive-green code cannot bypass the queue review path (#2054)."""
     path = _AUTOMATION / "auto_merge_coordinator.py"
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     method = next(

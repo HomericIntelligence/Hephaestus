@@ -2,11 +2,11 @@
 
 Epic #1809 made the queue-based pipeline
 (:mod:`hephaestus.automation.pipeline.coordinator`) the single implementation
-of the drive-green (``pr_review`` → ``strict_review`` → ``merge_wait``) flow. This module is
+of the drive-green (``pr_review`` → ``merge_wait``) flow. This module is
 the console-script entry point: :func:`main` parses its scope and worker
 arguments, builds a
 :class:`~hephaestus.automation.pipeline.coordinator.PipelineConfig` trimmed to
-the ``(pr_review, strict_review, merge_wait)`` stage scope via
+the ``(pr_review, merge_wait)`` stage scope via
 :class:`~hephaestus.automation.pipeline.routing.PipelineScope`, seeds the
 requested issues / PRs (and, in no-scope discovery mode, the repo-wide open-PR
 sweep via ``drive_green_all``), and dispatches to
@@ -14,7 +14,7 @@ sweep via ``drive_green_all``), and dispatches to
 
 The former CI repair/rebase/poll stage was deliberately removed: CI/CD remains
 independent branch protection and never supplies automation-loop input. The
-remaining stages live in ``pipeline/stages/strict_review.py`` and
+remaining stages live in ``pipeline/stages/pr_review.py`` and
 ``pipeline/stages/merge_wait.py``. :class:`CIDriver` is retained as an
 importable placeholder for the package's public API surface
 (:mod:`hephaestus.automation`); it no longer carries orchestration.
@@ -43,15 +43,13 @@ from hephaestus.config.paths import resolve_projects_dir
 from ._review_utils import build_automation_parser
 from .git_utils import get_repo_slug
 from .pipeline.routing import PipelineScope, StageName
-from .strict_review_guard import StrictReviewGuard
 
 logger = logging.getLogger(__name__)
 
 #: Contiguous stage subset the historical drive-green CLI runs.  Direct PRs
-#: first receive the normal PR review, then the independent Athena review,
-#: then the sole conditional merge-wait arm.
+#: first receive the normal PR review, then the sole conditional merge-wait arm.
 _CI_DRIVER_SCOPE_STAGES: frozenset[StageName] = frozenset(
-    {StageName.PR_REVIEW, StageName.STRICT_REVIEW, StageName.MERGE_WAIT}
+    {StageName.PR_REVIEW, StageName.MERGE_WAIT}
 )
 
 
@@ -60,8 +58,7 @@ class CIDriver:
 
     Since the epic #1809 pipeline conversion the per-issue drive-green
     orchestration lives entirely in the pipeline stages
-    (``pipeline/stages/pr_review.py``, ``pipeline/stages/strict_review.py``, and
-    ``pipeline/stages/merge_wait.py``), driven by
+    (``pipeline/stages/pr_review.py`` and ``pipeline/stages/merge_wait.py``), driven by
     :func:`~hephaestus.automation.pipeline.coordinator.run_pipeline` and
     reached from :func:`main`. Nothing instantiates this class at runtime; it
     is kept only so the package's documented public export
@@ -197,10 +194,10 @@ def _resolve_repo() -> tuple[str, str]:
 
 
 def main() -> int:
-    """Execute the drive-green workflow via PR review → strict review → merge wait.
+    """Execute the drive-green workflow via PR review → merge wait.
 
     Parses the historical drive-green argument surface, builds a
-    :class:`PipelineConfig` scoped to ``(pr_review, strict_review, merge_wait)``, and
+    :class:`PipelineConfig` scoped to ``(pr_review, merge_wait)``, and
     dispatches to the coordinator. Seeding is coordinator-owned and uses only
     open-PR state and loop-owned labels; it does not inspect CI/CD.
 
@@ -225,8 +222,7 @@ def main() -> int:
 
     log = logging.getLogger(__name__)
     log.info(
-        "Starting loop review driver (pr_review→strict_review→merge_wait) "
-        "for issues: %s, direct PRs: %s",
+        "Starting loop review driver (pr_review→merge_wait) for issues: %s, direct PRs: %s",
         args.issues or "<discovery mode>",
         args.prs,
     )
@@ -264,7 +260,6 @@ def main() -> int:
             include_all_authors=args.include_all_authors,
             projects_dir=resolve_projects_dir(None, prefer_cwd_parent=True),
             json_out=args.json,
-            strict_review_guard=StrictReviewGuard(),
             scope=PipelineScope(_CI_DRIVER_SCOPE_STAGES),
         )
 

@@ -2,8 +2,8 @@
 
 Doc section "1. repo" is the binding contract: ENTER -> CLONE_WAIT ->
 DISCOVER -> SEEDED; budget clone=2; epics tagged ``state:skip`` [durable]
-BEFORE exclusion; ``--drive-green-all`` routes orphan PRs to strict_review; the repo
-item is terminal (FINISH_PASS ``seeded:N``).
+BEFORE exclusion; orphan PRs without a linked issue are skipped; the repo item
+is terminal (FINISH_PASS ``seeded:N``).
 """
 
 from __future__ import annotations
@@ -382,93 +382,13 @@ class TestDiscover:
         assert "state:skip" in gh.labels[5]
         assert [p["number"] for p in reseed_item.payload["products"]] == [5, 6]
 
-    def test_drive_green_all_routes_orphan_prs_to_strict_review(
-        self,
-        repo_item: WorkItem,
-        tmp_path: Path,
-        make_ctx: Callable[..., Any],
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Open PRs with no tracked issue enter the strict-review gate."""
-        config = type(
-            "Cfg",
-            (),
-            {
-                "drive_green_all": True,
-                "include_bot_prs": True,
-                "include_all_authors": True,
-                "dry_run": False,
-            },
-        )()
-        ctx = make_ctx(config=config, paths=_RepoPaths(tmp_path))
-        self._patch_discovery(
-            monkeypatch,
-            meta=[{"number": 1, "labels": [], "title": "covered"}],
-            facts={1: _facts(1, pr=55, pr_open=True)},
-            classifications={1: (StageName.PR_REVIEW, "open PR")},
-            open_prs=[
-                {"number": 55, "user": {"login": "alice", "type": "User"}},
-                {"number": 66, "user": {"login": "alice", "type": "User"}},
-            ],
-        )
-        repo_item.state = "DISCOVER"
-
-        RepoStage().step(repo_item, ctx)
-
-        orphan = [p for p in repo_item.payload["products"] if p.get("kind") == "pr"]
-        assert [(p["number"], p["stage"]) for p in orphan] == [(66, StageName.STRICT_REVIEW)]
-        review_item = product_to_work_item("repo-a", orphan[0])
-        assert review_item is not None
-        assert review_item.kind is ItemKind.PR
-        # An orphan PR has no real issue requirements, so strict review must
-        # fail closed rather than accepting PR-authored context.
-        assert review_item.issue is None
-        assert review_item.pr == 66
-
-    def test_drive_green_all_skips_prs_not_eligible_for_loop_review(
-        self,
-        repo_item: WorkItem,
-        tmp_path: Path,
-        make_ctx: Callable[..., Any],
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Drive-green-all reuses the shared open/non-draft review predicate."""
-        config = type(
-            "Cfg",
-            (),
-            {
-                "drive_green_all": True,
-                "include_bot_prs": True,
-                "include_all_authors": True,
-                "dry_run": False,
-            },
-        )()
-        ctx = make_ctx(config=config, paths=_RepoPaths(tmp_path))
-        self._patch_discovery(
-            monkeypatch,
-            meta=[],
-            facts={},
-            classifications={},
-            open_prs=[
-                {"number": 66, "state": "OPEN", "isDraft": False, "user": {"login": "a"}},
-                {"number": 67, "state": "OPEN", "isDraft": True, "user": {"login": "a"}},
-                {"number": 68, "state": "CLOSED", "isDraft": False, "user": {"login": "a"}},
-            ],
-        )
-        repo_item.state = "DISCOVER"
-
-        RepoStage().step(repo_item, ctx)
-
-        orphan = [p for p in repo_item.payload["products"] if p.get("kind") == "pr"]
-        assert [p["number"] for p in orphan] == [66]
-
     @pytest.mark.parametrize(
         ("include_bot_prs", "include_all_authors", "expected"),
         [
-            pytest.param(True, False, [66, 68], id="viewer-only-including-bots"),
-            pytest.param(False, False, [66], id="viewer-only-without-bots"),
-            pytest.param(True, True, [66, 67, 68, 69], id="all-authors-including-bots"),
-            pytest.param(False, True, [66, 67], id="all-authors-without-bots"),
+            pytest.param(True, False, [], id="viewer-only-including-bots"),
+            pytest.param(False, False, [], id="viewer-only-without-bots"),
+            pytest.param(True, True, [], id="all-authors-including-bots"),
+            pytest.param(False, True, [], id="all-authors-without-bots"),
         ],
     )
     def test_drive_green_all_honors_author_and_bot_filters(

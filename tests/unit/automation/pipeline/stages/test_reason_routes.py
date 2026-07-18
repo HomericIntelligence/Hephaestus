@@ -24,7 +24,6 @@ from hephaestus.automation.pipeline.stages import (
     plan_review,
     planning,
     pr_review,
-    strict_review,
 )
 
 _STAGE_MODULES: dict[StageName, ModuleType] = {
@@ -32,7 +31,6 @@ _STAGE_MODULES: dict[StageName, ModuleType] = {
     StageName.PLAN_REVIEW: plan_review,
     StageName.IMPLEMENTATION: implementation,
     StageName.PR_REVIEW: pr_review,
-    StageName.STRICT_REVIEW: strict_review,
     StageName.MERGE_WAIT: merge_wait,
 }
 
@@ -44,8 +42,6 @@ _EXPECTED_REASONS: dict[StageName, set[str]] = {
     # human_blocked is emitted as FINISH_FAIL (terminal), not FAIL_BACK —
     # its ROUTES row entry (-> FINISHED) documents the same destination.
     StageName.PR_REVIEW: {"agent_error"},
-    # no_pr/timeout are emitted as FINISH_FAIL (terminal), not FAIL_BACK.
-    StageName.STRICT_REVIEW: {"nogo"},
     StageName.MERGE_WAIT: set(),
 }
 
@@ -110,7 +106,5 @@ def test_named_reasons_route_where_the_doc_says() -> None:
         ROUTES[StageName.IMPLEMENTATION].fail_routes["already_implementation_go_pr"]
         == StageName.MERGE_WAIT
     )
-    assert (
-        ROUTES[StageName.MERGE_WAIT].fail_routes["not_implementation_go"] == StageName.STRICT_REVIEW
-    )
+    assert ROUTES[StageName.MERGE_WAIT].fail_routes["not_implementation_go"] == StageName.PR_REVIEW
     assert ROUTES[StageName.MERGE_WAIT].fail_routes["closed"] == StageName.FINISHED

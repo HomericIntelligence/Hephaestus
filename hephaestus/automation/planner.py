@@ -46,7 +46,7 @@ from .pipeline.routing import PipelineScope, StageName
 logger = logging.getLogger(__name__)
 
 #: Contiguous stage subset the planner CLI runs: initial plan generation
-#: (PLANNING) followed by the strict review/amend/learn loop (PLAN_REVIEW).
+#: (PLANNING) followed by the plan review/amend/learn loop (PLAN_REVIEW).
 #: PlanReviewStage's ADVANCE target (IMPLEMENTATION) is out of scope, so
 #: ``PipelineScope`` rewrites it to FINISHED — a GO'd plan simply finishes.
 _PLANNER_SCOPE_STAGES: frozenset[StageName] = frozenset({StageName.PLANNING, StageName.PLAN_REVIEW})

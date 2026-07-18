@@ -17,7 +17,7 @@ Analyze PR #{{ pr_number }} using {{ review_context_kind }} #{{ issue_number }} 
 
 ---
 
-{{ strict_rubric }}
+{{ review_rubric }}
 
 {{ terse_output_directive }}
 
@@ -25,26 +25,11 @@ Analyze PR #{{ pr_number }} using {{ review_context_kind }} #{{ issue_number }} 
 
 **Code-quality review:**
 
-> Note: repository submission policy is enforced outside this loop. The queue's
-> independent strict-review and merge-wait stages control any automatic arm.
-> Do NOT re-check submission policy here — focus
-> solely on code correctness, completeness, and quality.
-
-**Operator-defined authorization boundary (binding for this review):**
-
-`state:implementation-go`, applied by the automation loop after its own
-validation, is intentionally the sole durable authorization for this PR's
-merge path. A current-head read while applying that label and a later live-head
-read while operating the PR are operational safeguards, not durable approval
-requirements. Do NOT report a finding merely because the label does not retain
-a reviewed SHA, review-proof artifact, lease, status context, comment, cached
-handoff, or any other second authorization condition. In particular, do not
-propose binding the label to a commit, preserving review-local state after the
-label, revoking the label to require a renewed review, or making an H1-to-H2
-head change a merge-authorization defect. CI/CD is outside the loop and is not
-review evidence, a prerequisite, or a remediation target. Treat a change that
-restores any of those restrictions as a defect against this task, even if a
-generic security pattern or prior review recommends it.
+> If `$athena:pr-review` appears in your available skills, invoke it now using
+> its normal default behavior. Do not ask the skill to change CI behavior.
+> If it is unavailable, perform the equivalent review
+> directly using this prompt. In either case, this review is the loop's sole
+> GO/NOGO decision; `merge_wait` is the separate mechanical auto-merge armer.
 
 Review the PR for correctness, completeness, and code quality. Identify any issues that should
 be addressed as inline review comments.
@@ -60,12 +45,13 @@ Classify each inline comment with a `severity`:
 {{ nitpick_directive }}
 
 **Output format (verdict contract — MANDATORY):**
-The review prose + inline comments explain *why*; the verdict line is a binary
-gate. Write your analysis in prose, then end your response with exactly one of
-the two verdict lines below (the parser takes the LAST matching line):
+The review prose + inline comments explain *why*; the grade and verdict are
+the final review summary. Write your analysis in prose, then end your response
+with exactly one grade line and one verdict line below (the parser reads the
+final Grade/Verdict summary):
 
-Verdict: GO — Code is correct, complete,
-and eligible for independent strict review; it is not merge authorization.
+Grade: A-F
+Verdict: GO — Code is correct, complete, and ready for merge_wait.
 Verdict: NOGO — A fundamental code problem must be fixed first (explain in the review).
 
 After the verdict line, emit a single fenced JSON block:

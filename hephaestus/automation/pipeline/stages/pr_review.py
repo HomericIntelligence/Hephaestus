@@ -11,7 +11,7 @@ contract):
 
 - States: ENTER -> REVIEW_WAIT -> VALIDATE_WAIT -> POST -> DIFFICULTY_WAIT
   -> ADDRESS_WAIT -> PUSH_WAIT -> EVAL -> (loop to REVIEW_WAIT) or terminal
-  advance to ``strict_review``. ``FOLLOWUP_WAIT`` remains only to drain legacy
+  advance to ``merge_wait``. ``FOLLOWUP_WAIT`` remains only to drain legacy
   persisted work; a clean GO never enters it.
 - Budgets: ``pr_review_iter`` = 3 (soft cap), ``pr_review_hard`` = 6 (hard
   cap; rounds 4-6 are admitted ONLY while the unresolved-thread count
@@ -41,10 +41,9 @@ contract):
   stands down, then finish failed with the PR left UNLABELED (a human must
   act; automation may not resolve their thread). GO + open automation
   thread -> downgraded to NOGO (address + re-review). Clean GO ->
-  ``_write_internal_go`` performs one final human-thread live-read, verifies
-  auto-merge is disabled, and posts an informational artifact. It does not
-  apply ``state:implementation-go`` or arm auto-merge; the head-bound
-  strict-review gate owns that authorization. Every
+  ``_write_go`` performs one final human-thread live-read, verifies
+  auto-merge is disabled, and applies ``state:implementation-go``.
+  ``merge_wait`` remains the sole auto-merge armer. Every
   real non-GO round durably writes ``state:implementation-no-go`` (doc
   section 5 owned label, "NOGO verdict, before retry/regress"; legacy
   ``_apply_impl_review_verdict`` -> ``mark_pr_implementation_no_go``
@@ -390,7 +389,7 @@ class PrReviewStage(Stage):
     - EVAL [M]: re-housed ``_evaluate_go_verdict`` + budget gate (see
       module docstring).
     - FOLLOWUP_WAIT (legacy persisted work only): submit the follow-up job,
-      then PR_FINISH -> FINISHED. A clean GO advances to ``strict_review``
+      then PR_FINISH -> FINISHED. A clean GO advances to ``merge_wait``
       from EVAL instead.
     """
 
@@ -514,8 +513,8 @@ class PrReviewStage(Stage):
                 "branch_name": branch,
                 "refresh_base": False,
                 # This mutable review checkout cannot reuse the writer's
-                # branch checkout. It has its own name because strict review
-                # also needs a separate, read-only detached checkout later.
+                # branch checkout. It has its own item-specific name so a
+                # direct PR review cannot collide with an implementation run.
                 "isolated": True,
                 # The name is item-owned and per-attempt. Concurrent direct
                 # reviews of one PR must not remove, reset, or clean up each
@@ -781,16 +780,20 @@ class PrReviewStage(Stage):
         """
         if item.pr is None:  # guarded by step(); kept for restart safety
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        verdict = self._ensure_graded_verdict(item.payload.get("review_verdict"))
+        item.payload["review_verdict"] = verdict
+        item.payload["review_text"] = verdict.raw
         raw_threads = [dict(t) for t in item.payload.get("review_threads") or []]
         threads = _surviving_threads(raw_threads, item.payload.get("validation_result"))
         item.payload["raw_review_threads"] = raw_threads
         # The surviving set is what gets posted, classified, and addressed.
         item.payload["review_threads"] = threads
-        if threads:
-            posted = ctx.github.post_review_threads(
-                item.pr, list(threads), item.payload.get("review_text", "")
-            )
-            item.payload["posted_thread_ids"] = posted
+        posted = ctx.github.post_review_threads(
+            item.pr,
+            list(threads),
+            self._final_review_comment(verdict, verdict.raw),
+        )
+        item.payload["posted_thread_ids"] = posted
         automation_unresolved, human_unresolved = ctx.github.count_unresolved_threads(item.pr)
         item.payload["unresolved_auto"] = automation_unresolved
         item.payload["unresolved_human"] = human_unresolved
@@ -906,6 +909,9 @@ class PrReviewStage(Stage):
         verdict = payload.get("review_verdict")
         if verdict is None or verdict.is_error:
             return self._handle_error_verdict(item, verdict)
+        verdict = self._ensure_graded_verdict(verdict)
+        payload["review_verdict"] = verdict
+        payload["review_text"] = verdict.raw
 
         # Fresh counts AFTER the address/push leg, split by severity so a GO is
         # downgraded only by BLOCKING automation threads (#1856 / re-introduced #1554).
@@ -1172,27 +1178,27 @@ class PrReviewStage(Stage):
         return self._fail_back_agent_error(item)
 
     def _handle_clean_go(self, item: WorkItem, ctx: StageContext, minor_auto: int) -> StepResult:
-        """Resolve advisory threads, record internal GO, and route onward."""
+        """Resolve advisory threads, apply review GO, and route onward."""
         if item.pr is None or item.issue is None:  # guarded by caller; narrowing
             return self._fail_back_agent_error(item)
         if minor_auto:
             # Automation owns these waved minor/nitpick threads; resolve them so
             # required_review_thread_resolution does not re-block at merge_wait.
             logger.info(
-                "pr_review:%d: GO with %d advisory minor thread(s); resolving before strict gate",
+                "pr_review:%d: GO with %d advisory minor thread(s); resolving before merge wait",
                 item.issue,
                 minor_auto,
             )
             ctx.github.resolve_automation_threads(item.pr)
         logger.info(
-            "pr_review:%d: clean GO; advancing PR #%d to strict review",
+            "pr_review:%d: clean GO; advancing PR #%d to merge wait",
             item.issue,
             item.pr,
         )
-        blocked_reason = self._write_internal_go(item.pr, ctx)
+        blocked_reason = self._write_go(item.pr, ctx)
         if blocked_reason is not None:
             return StageOutcome(Disposition.FINISH_FAIL, blocked_reason)
-        return StageOutcome(Disposition.ADVANCE, "internal GO; strict review pending")
+        return StageOutcome(Disposition.ADVANCE, "review GO; merge wait pending")
 
     @staticmethod
     def _gate_no_commit(item: WorkItem) -> Continue | None:
@@ -1384,12 +1390,12 @@ class PrReviewStage(Stage):
         return StageOutcome(Disposition.FINISH_FAIL, "human_blocked")
 
     @staticmethod
-    def _write_internal_go(pr_number: int, ctx: StageContext) -> str | None:
-        """Record clean internal review while preserving the strict-review gate.
+    def _write_go(pr_number: int, ctx: StageContext) -> str | None:
+        """Apply clean review GO while preserving merge-wait-only arming.
 
-        Internal pr_review neither applies ``state:implementation-go`` nor
-        arms auto-merge. It proves the PR is unarmed before publishing its
-        internal result; strict_review owns the later head-bound eligibility.
+        ``pr_review`` owns the automated GO decision. It verifies the PR is
+        unarmed before applying ``state:implementation-go``; only
+        ``merge_wait`` can subsequently arm auto-merge.
 
         Args:
             pr_number: GitHub PR number that earned the clean GO.
@@ -1414,24 +1420,43 @@ class PrReviewStage(Stage):
 
         if not PrReviewStage._ensure_auto_merge_deferred(pr_number, ctx):
             return "auto_merge_disable_failed"
-        PrReviewStage._upsert_clean_go_comment(pr_number, ctx)
+        try:
+            ctx.github.mark_pr_implementation_go(pr_number)
+        except Exception as error:
+            logger.error("pr_review: failed to mark PR #%d implementation-go: %s", pr_number, error)
+            return "implementation_go_label_failed"
         return None
 
     @staticmethod
-    def _upsert_clean_go_comment(pr_number: int, ctx: StageContext) -> None:
-        """Leave a durable internal-GO artifact without granting merge eligibility."""
-        body = (
-            "<!-- hephaestus-pr-review-go -->\n"
-            "Automated PR review result: GO.\n\n"
-            "No unresolved blocking review threads were found by the automation reviewer. "
-            "This is an internal review result only; independent strict review remains "
-            "required and auto-merge remains disabled."
+    def _final_review_comment(verdict: Any, review_text: object) -> str:
+        """Build the final review comment with total grade and GO/NOGO."""
+        prose = str(review_text).strip() if review_text is not None else ""
+        # Tests and recovery paths can supply a verdict object without its
+        # parsed grade while retaining the original reviewer prose.  Preserve
+        # the grade the reviewer actually reported whenever it is available.
+        grade = getattr(verdict, "grade", None) or parse_review_verdict(prose).grade or "ungraded"
+        decision = getattr(verdict, "verdict", None) or "ERROR"
+        return (
+            "## Automated PR review\n\n"
+            f"Total grade: {grade}\n\n"
+            f"Verdict: {decision}\n\n"
+            f"{prose or _NO_STRUCTURED_SUMMARY}"
         )
-        try:
-            ctx.github.upsert_pr_comment(pr_number, "<!-- hephaestus-pr-review-go -->", body)
-        except Exception as e:
-            logger.warning(
-                "pr_review: failed to upsert clean-GO review comment on PR #%d (non-fatal): %s",
-                pr_number,
-                e,
-            )
+
+    @staticmethod
+    def _ensure_graded_verdict(verdict: Any) -> Any:
+        """Return a grade-bearing verdict, failing closed on malformed output.
+
+        The final GitHub review is an auditable grade plus GO/NOGO decision.
+        A reviewer response that omits the grade therefore cannot authorize a
+        GO: it is recorded as a synthetic F/NOGO with the reason preserved in
+        the final review prose.
+        """
+        if getattr(verdict, "grade", None):
+            return verdict
+        raw = str(getattr(verdict, "raw", "")).strip()
+        return parse_review_verdict(
+            (f"{raw}\n\n" if raw else "")
+            + "Grade: F\nVerdict: NOGO\n\n"
+            + "The reviewer response omitted its required grade, so this review is treated as NOGO."
+        )

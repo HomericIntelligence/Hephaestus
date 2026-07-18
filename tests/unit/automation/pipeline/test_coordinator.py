@@ -38,14 +38,13 @@ from hephaestus.automation.pipeline.routing import (
     StageOutcome,
 )
 from hephaestus.automation.pipeline.seeding import SeedEntry
-from hephaestus.automation.pipeline.stages import Continue, StrictReviewEvidence
+from hephaestus.automation.pipeline.stages import Continue
 from hephaestus.automation.pipeline.stages.base import JobRequest
 from hephaestus.automation.pipeline.stages.pr_review import (
     REVIEW_ERROR_RETRY_CAP,
     PrReviewStage,
 )
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
-from hephaestus.automation.strict_review_guard import StrictReviewGuard
 from hephaestus.resilience import (
     all_circuit_breaker_snapshots,
     get_circuit_breaker,
@@ -112,7 +111,6 @@ def make_coordinator(
         dry_run=dry_run,
         serialize_file_overlap=serialize_file_overlap,
         projects_dir=tmp_path,
-        strict_review_guard=StrictReviewGuard(),
     )
     gh = github or FakeStageGitHub()
     pool = FakeWorkerPool()
@@ -322,48 +320,6 @@ class TestQuiescence:
         assert any(reason.startswith("poisoned: boom") for reason in reasons)
         assert any(reason == "fine" for reason in reasons)
 
-    def test_direct_pr_worktree_completion_advances_without_resubmitting(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Coordinator completion keeps a direct PR's review checkout separate."""
-        head = "a" * 40
-        github = FakeStageGitHub(
-            pr_state={"state": "OPEN", "headRefOid": head, "autoMergeRequest": None},
-            pr_head_branch="strict-review-pr-601",
-            strict_evidence=StrictReviewEvidence(
-                head_sha=head,
-                issue_title="Strict-review task",
-                issue_body="Review the current head.",
-                diff="diff --git a/file.py b/file.py\n+change",
-                prior_pr_review_verdict="Grade: A\nVerdict: GO",
-            ),
-        )
-        coordinator, pool, _ = make_coordinator(tmp_path, monkeypatch, github=github)
-        pool.queue_result(JobResult(ok=True, value={"path": str(tmp_path / "pr-601")}))
-        item = WorkItem(
-            repo="repo-a",
-            kind=ItemKind.PR,
-            issue=1,
-            pr=601,
-            stage=StageName.STRICT_REVIEW,
-            state="HEAD_CHECK",
-        )
-
-        coordinator._run_item(item)
-        coordinator._drain_completions()
-
-        worktree_jobs = [
-            handle.job
-            for handle in pool.submitted
-            if getattr(handle.job, "op", "") == "create_worktree"
-        ]
-        assert len(worktree_jobs) == 1
-        assert item.worktree == ""
-        assert item.payload["strict_review_worktree"] == str(tmp_path / "pr-601")
-        review_jobs = [handle.job for handle in pool.submitted if isinstance(handle.job, AgentJob)]
-        assert review_jobs
-        assert review_jobs[-1].cwd == tmp_path / "pr-601"
-
     def test_pr_review_adoption_records_completion_before_wait_state(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -418,27 +374,21 @@ class TestQuiescence:
         assert item.pr == 701
         assert item.payload["existing_pr"] is True
 
-    def test_direct_pr_without_closing_issue_uses_pr_review_context(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Explicit --prs PR-review input can use the PR number as review context."""
-        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
-        entry = SeedEntry(
-            kind="pr",
-            identifier=701,
-            stage=StageName.PR_REVIEW,
-            reason="direct PR awaiting review",
-            pr_number=701,
-            issue_number=None,
+    def test_direct_unlinked_pr_finishes_failed_before_review(self, tmp_path: Path) -> None:
+        """A PR number cannot substitute for linked issue requirements."""
+        coordinator = Coordinator(
+            PipelineConfig(org="org", repos=["repo-a"], prs=[701], projects_dir=tmp_path),
+            github=FakeStageGitHub(pr_issue=None),
+            pool=FakeWorkerPool(),
+            install_signals=False,
         )
 
-        item = coordinator._entry_to_item(entry, "repo-a")
+        entries = coordinator._seed_direct_scope("repo-a")
 
-        assert item.kind is ItemKind.PR
-        assert item.pr == 701
-        assert item.issue == 701
-        assert item.payload["review_context_kind"] == "PR"
-        assert item.payload["direct_pr_unlinked_review_context"] is True
+        assert len(entries) == 1
+        assert entries[0].stage is StageName.FINISHED
+        assert entries[0].passed is False
+        assert "no linked issue" in entries[0].reason
 
     def test_direct_pr_with_linked_issue_preserves_requirements_context(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -583,171 +533,6 @@ class TestJournalOrder:
         )
         push_idx = next(i for i, entry in enumerate(trace) if entry[:2] == ("push", "plan_review"))
         assert mutation_idx < push_idx, f"push preceded durable mutation: {trace}"
-
-    def test_strict_review_ingress_defers_auto_merge_before_queue_push(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A reseeded strict-review item cannot wait queued with an old arm live."""
-        coordinator, _, gh = make_coordinator(tmp_path, monkeypatch)
-        original_log = gh._log
-
-        def shared_log(name: str, *args: Any) -> None:
-            original_log(name, *args)
-            coordinator.event_log.append(("mutation", name, args))
-
-        gh._log = shared_log  # type: ignore[method-assign]
-        item = WorkItem(
-            repo="repo-a",
-            kind=ItemKind.PR,
-            issue=2053,
-            pr=2280,
-            stage=StageName.STRICT_REVIEW,
-            state="ENTER",
-        )
-
-        coordinator._push_item(item, StageName.STRICT_REVIEW, enter=True)
-
-        assert coordinator.queues[StageName.STRICT_REVIEW].snapshot() == [item]
-        trace = coordinator.event_log
-        defer_idx = next(
-            i for i, entry in enumerate(trace) if entry[:2] == ("mutation", "defer_auto_merge")
-        )
-        push_idx = next(
-            i for i, entry in enumerate(trace) if entry[:2] == ("push", "strict_review")
-        )
-        assert defer_idx < push_idx, f"strict review queued before auto-merge containment: {trace}"
-
-    def test_strict_review_ingress_finishes_when_containment_fails(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A failed ingress deferral cannot leave the PR queued for review."""
-        coordinator, _, gh = make_coordinator(tmp_path, monkeypatch)
-        monkeypatch.setattr(
-            gh,
-            "defer_auto_merge",
-            lambda _pr_number: (_ for _ in ()).throw(RuntimeError("GitHub unavailable")),
-        )
-        item = WorkItem(
-            repo="repo-a",
-            kind=ItemKind.PR,
-            issue=2053,
-            pr=2280,
-            stage=StageName.STRICT_REVIEW,
-            state="ENTER",
-        )
-
-        coordinator._push_item(item, StageName.STRICT_REVIEW, enter=True)
-
-        assert coordinator.queues[StageName.STRICT_REVIEW].snapshot() == []
-        assert item.result is not None
-        assert item.result.reason == "strict_review_ingress_auto_merge_disable_failed"
-        assert coordinator.queues[StageName.FINISHED].snapshot() == [item]
-
-    def test_strict_review_guard_spans_merge_wait_arm_confirmation(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A second reviewer cannot revoke GO between the first read and arm."""
-        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
-        guard = coordinator.config.strict_review_guard
-        assert guard is not None
-        typed_guard: StrictReviewGuard = cast(StrictReviewGuard, guard)
-        item = WorkItem(
-            repo="repo-a",
-            kind=ItemKind.PR,
-            issue=2053,
-            pr=2280,
-            stage=StageName.STRICT_REVIEW,
-            state="EVAL",
-        )
-        owner = id(item)
-        contender = owner + 1
-        assert typed_guard.try_claim("org", "repo-a", 2280, owner)
-        item.payload["_strict_review_guard_owner"] = owner
-
-        class ArmConfirmationStage:
-            def on_enter(self, queued: WorkItem, ctx: Any) -> None:
-                queued.state = "ARM"
-
-            def step(self, queued: WorkItem, ctx: Any) -> Any:
-                if queued.state == "ARM":
-                    assert not typed_guard.try_claim("org", "repo-a", 2280, contender)
-                    return Continue("POLL")
-                assert typed_guard.try_claim("org", "repo-a", 2280, contender)
-                typed_guard.release("org", "repo-a", 2280, contender)
-                return StageOutcome(Disposition.FINISH_PASS, "armed")
-
-            def on_job_done(self, queued: WorkItem, result: JobResult, ctx: Any) -> None:
-                raise AssertionError("this stage submits no jobs")
-
-        coordinator.stages[StageName.MERGE_WAIT] = ArmConfirmationStage()
-        coordinator._route(item, StageOutcome(Disposition.ADVANCE, "strict-go"))
-
-        assert coordinator.queues[StageName.MERGE_WAIT].pop() is item
-        coordinator._run_item(item)
-
-        assert item.result is not None
-        assert item.result.passed is True
-
-    def test_recovered_merge_wait_arm_is_deferred_before_queue_push(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A restart cannot leave a persisted arm live while ARM is queued."""
-        coordinator, _, gh = make_coordinator(tmp_path, monkeypatch)
-        original_log = gh._log
-
-        def shared_log(name: str, *args: Any) -> None:
-            original_log(name, *args)
-            coordinator.event_log.append(("mutation", name, args))
-
-        gh._log = shared_log  # type: ignore[method-assign]
-        item = WorkItem(
-            repo="repo-a",
-            kind=ItemKind.PR,
-            issue=2053,
-            pr=2280,
-            stage=StageName.MERGE_WAIT,
-            state="ENTER",
-            payload={"merge_wait_recovery": True},
-        )
-
-        coordinator._push_item(item, StageName.MERGE_WAIT, enter=True)
-
-        trace = coordinator.event_log
-        defer_idx = next(
-            i for i, entry in enumerate(trace) if entry[:2] == ("mutation", "defer_auto_merge")
-        )
-        push_idx = next(i for i, entry in enumerate(trace) if entry[:2] == ("push", "merge_wait"))
-        assert defer_idx < push_idx, f"recovery queued before auto-merge containment: {trace}"
-
-    def test_orphan_merge_wait_is_deferred_before_queue_push(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """An unlinked direct PR cannot retain an old arm while queued."""
-        coordinator, _, gh = make_coordinator(tmp_path, monkeypatch)
-        original_log = gh._log
-
-        def shared_log(name: str, *args: Any) -> None:
-            original_log(name, *args)
-            coordinator.event_log.append(("mutation", name, args))
-
-        gh._log = shared_log  # type: ignore[method-assign]
-        item = WorkItem(
-            repo="repo-a",
-            kind=ItemKind.PR,
-            issue=None,
-            pr=2280,
-            stage=StageName.MERGE_WAIT,
-            state="ENTER",
-        )
-
-        coordinator._push_item(item, StageName.MERGE_WAIT, enter=True)
-
-        trace = coordinator.event_log
-        defer_idx = next(
-            i for i, entry in enumerate(trace) if entry[:2] == ("mutation", "defer_auto_merge")
-        )
-        push_idx = next(i for i, entry in enumerate(trace) if entry[:2] == ("push", "merge_wait"))
-        assert defer_idx < push_idx, f"orphan queued before auto-merge containment: {trace}"
 
 
 class TestDrainOrder:
@@ -1816,7 +1601,7 @@ class TestPipelineScopeWiring:
         assert entries[0].issue_number == 2055
         assert entries[0].merge_wait_recovery is True
 
-    def test_direct_open_pr_with_pending_arm_record_bypasses_strict_review(
+    def test_direct_open_pr_with_pending_arm_record_preserves_merge_wait_recovery(
         self, tmp_path: Path
     ) -> None:
         """An explicit PR restart preserves its durable arm handoff too."""

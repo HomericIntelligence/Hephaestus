@@ -358,24 +358,6 @@ class MergeWaitStage(Stage):
             )
             return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_disable_failed")
         item.armed = False
-        if recoverable:
-            # A failback starts a new strict-review cycle even when the PR
-            # head is unchanged.  In particular, restart recovery arrives
-            # here with the prior GO pass's one-shot attempt already spent;
-            # retaining it would make REVIEW_WAIT emit an immediate NOGO
-            # instead of invoking Athena again.
-            for key in (
-                "strict_review_attempt",
-                "strict_review_head",
-                "strict_review_verdict",
-                "strict_review_text",
-                "strict_review_failed",
-                "strict_review_worktree",
-                "strict_review_worktree_head",
-                "strict_review_worktree_failed",
-                "strict_review_worktree_pending",
-            ):
-                item.payload.pop(key, None)
         disposition = Disposition.FAIL_BACK if recoverable else Disposition.FINISH_FAIL
         return StageOutcome(disposition, note)
 

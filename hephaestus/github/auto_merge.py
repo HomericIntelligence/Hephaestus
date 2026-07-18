@@ -52,9 +52,7 @@ def defer_auto_merge(pr_number: int, run: Callable[[list[str]], Any]) -> bool:
         if verified_state in _TERMINAL_STATES:
             return True
         if verified_state == "OPEN" and not verified_armed:
-            logger.warning(
-                "Disabled auto-merge for PR #%s pending the strict-review gate", pr_number
-            )
+            logger.warning("Disabled auto-merge for PR #%s pending the PR-review gate", pr_number)
             return True
         raise RuntimeError("auto-merge remains enabled")
     except Exception as exc:

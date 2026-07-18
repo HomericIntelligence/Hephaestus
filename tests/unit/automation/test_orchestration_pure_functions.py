@@ -62,25 +62,6 @@ class TestLoopRunnerPureFunctions:
 
 
 # ---------------------------------------------------------------------------
-# pr_discovery — confirmed from pr_discovery.py
-# ---------------------------------------------------------------------------
-class TestPRDiscoveryPureFunctions:
-    """Test pure helpers in pr_discovery."""
-
-    def test_open_non_draft_pr_needs_loop_review(self) -> None:
-        from hephaestus.automation.pr_discovery import pr_needs_loop_review
-
-        assert pr_needs_loop_review({"isDraft": False, "state": "OPEN"}) is True
-        assert pr_needs_loop_review({"draft": False, "state": "open"}) is True
-
-    def test_draft_or_closed_pr_does_not_need_loop_review(self) -> None:
-        from hephaestus.automation.pr_discovery import pr_needs_loop_review
-
-        assert pr_needs_loop_review({"isDraft": True, "state": "OPEN"}) is False
-        assert pr_needs_loop_review({"isDraft": False, "state": "CLOSED"}) is False
-
-
-# ---------------------------------------------------------------------------
 # github_api — confirmed from github_api.py:417-422 and :533-544
 # ---------------------------------------------------------------------------
 class TestGithubApiPureFunctions:

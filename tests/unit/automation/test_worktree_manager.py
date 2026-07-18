@@ -809,10 +809,10 @@ class TestCreateWorktreeBranchCollision:
         ):
             result = manager.create_worktree(725, "708-auto-impl", isolated=True)
 
-        assert result == manager.base_dir / "strict-review-pr-725"
+        assert result == manager.base_dir / "review-pr-725"
         assert result != external_writer
         assert result != implementation_writer
-        assert manager.worktrees["strict-review-pr-725"] == result
+        assert manager.worktrees["review-pr-725"] == result
         assert (implementation_writer / "pending-change").read_text() == "preserve me"
         argvs = [call.args[0] for call in worktree_mocks.run.call_args_list]
         assert ["git", "worktree", "add", "--detach", str(result), "708-auto-impl"] in argvs
@@ -820,7 +820,7 @@ class TestCreateWorktreeBranchCollision:
     def test_isolated_checkout_uses_distinct_role_name(
         self, worktree_mocks: Any, tmp_path: Any
     ) -> None:
-        """Mutable PR review never collides with strict review's checkout."""
+        """Named PR-review checkouts remain isolated from other checkouts."""
         worktree_mocks.repo_root.return_value = tmp_path
         worktree_mocks.run.return_value.stdout = "origin/main"
         manager = WorktreeManager()

@@ -78,7 +78,6 @@ from .models import (
 )
 from .state_labels import is_skipped
 from .status_tracker import StatusTracker
-from .strict_review_guard import StrictReviewGuard
 from .worktree_manager import WorktreeManager
 
 # Public API of this module. ``_CLAUDE_IMPL_TIMEOUT`` keeps its leading
@@ -194,7 +193,7 @@ Examples:
     parser.add_argument(
         "--no-auto-merge",
         action="store_true",
-        help="(Deprecated, ignored) merge authorization is owned by strict_review and merge_wait",
+        help="(Deprecated, ignored) merge arming is owned by merge_wait",
     )
     parser.add_argument(
         "--no-learn",
@@ -540,9 +539,8 @@ def main() -> int:
         nitpick=args.nitpick,
         projects_dir=resolve_projects_dir(None, prefer_cwd_parent=True),
         json_out=args.json,
-        strict_review_guard=StrictReviewGuard(),
         scope=PipelineScope(
-            frozenset({StageName.IMPLEMENTATION, StageName.PR_REVIEW, StageName.STRICT_REVIEW})
+            frozenset({StageName.IMPLEMENTATION, StageName.PR_REVIEW, StageName.MERGE_WAIT})
         ),
     )
 

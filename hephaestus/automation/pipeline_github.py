@@ -43,9 +43,6 @@ from hephaestus.automation.arming_state import (
     ArmingStateStore,
 )
 from hephaestus.automation.git_utils import issue_auto_impl_branch_name
-from hephaestus.automation.pipeline.stages.base import (
-    StrictReviewEvidence,
-)
 from hephaestus.automation.prompts.pr_review import (
     BLOCKING_SEVERITIES,
     SEVERITY_MARKER_PREFIX,
@@ -78,17 +75,6 @@ from hephaestus.utils.file_lock import file_lock
 logger = logging.getLogger(__name__)
 
 _CLOSES_ISSUE_LINE_RE = re.compile(r"^Closes #(\d+)\s*$", re.MULTILINE)
-
-# The in-loop PR reviewer needs a complete, bounded prompt. A PR outside this
-# envelope fails closed rather than silently omitting changed-file or review
-# context.
-_STRICT_REVIEW_MAX_DIFF_BYTES = 350_000
-_STRICT_REVIEW_MAX_PRIOR_REVIEW_BYTES = 20_000
-_STRICT_REVIEW_MAX_REVIEWS = 100
-_STRICT_REVIEW_MAX_ISSUE_TITLE_BYTES = 1_000
-_STRICT_REVIEW_MAX_ISSUE_BODY_BYTES = 80_000
-_NO_PRIOR_AUTOMATED_REVIEW = "No authenticated prior PR-review verdict is available."
-_PR_REVIEW_VERDICT_RE = re.compile(r"(?m)^Verdict:\s*(?:GO|NOGO)\s*$")
 
 
 def _split_threads(threads: list[dict[str, Any]]) -> tuple[int, int]:
@@ -607,140 +593,6 @@ class PipelineGitHub:
             logger.info("[dry-run] would %s", what)
             return True
         return False
-
-    @staticmethod
-    def _strict_review_prior_verdict(reviews: object, automation_login: str) -> str | None:
-        """Return the latest bounded, authenticated PR-review verdict text.
-
-        The prior review is context only, but it must still be selected from
-        the automation identity rather than an arbitrary human review.  No
-        matching prior review is a normal direct-PR/orphan case; malformed
-        response data is not.
-        """
-        if not isinstance(reviews, list) or len(reviews) > _STRICT_REVIEW_MAX_REVIEWS:
-            return None
-        for review in reversed(reviews):
-            if not isinstance(review, dict):
-                return None
-            author = review.get("author")
-            if not isinstance(author, dict) or author.get("login") != automation_login:
-                continue
-            body = review.get("body")
-            if not isinstance(body, str) or not _PR_REVIEW_VERDICT_RE.search(body):
-                continue
-            body_bytes = body.encode("utf-8")
-            if len(body_bytes) <= _STRICT_REVIEW_MAX_PRIOR_REVIEW_BYTES:
-                return body
-            # Retain the final output contract at the end of a long review;
-            # accepting an unbounded predecessor would defeat the prompt cap.
-            suffix = body_bytes[-_STRICT_REVIEW_MAX_PRIOR_REVIEW_BYTES:].decode(
-                "utf-8", errors="replace"
-            )
-            return "[... prior PR review truncated to its final bytes ...]\n" + suffix
-        return _NO_PRIOR_AUTOMATED_REVIEW
-
-    def strict_review_evidence(  # noqa: C901 - every evidence channel must fail closed independently.
-        self, pr_number: int, head_sha: str, issue_number: int
-    ) -> StrictReviewEvidence | None:
-        """Fetch complete, bounded PR-review context for one exact head.
-
-        The initial and final PR-state reads bind the fetched diff to
-        ``head_sha``. A concurrent push, read/schema error,
-        oversized/empty diff, or malformed context returns ``None`` so the
-        caller must fail closed instead of issuing an under-informed GO.
-        ``issue_number`` is the linked issue for normal issue-flow work; for
-        unlinked direct ``--prs`` review it is the PR's own GitHub issue
-        number, whose title/body are fenced by the strict-review prompt.
-        """
-        if (
-            self._repo_slug is None
-            or pr_number <= 0
-            or issue_number <= 0
-            or re.fullmatch(r"[0-9a-fA-F]{40}", head_sha) is None
-        ):
-            return None
-        normalized_head = head_sha.lower()
-        try:
-            snapshot_result = self._gh(
-                ["pr", "view", str(pr_number), "--json", "state,headRefOid,reviews"]
-            )
-            snapshot = json.loads(snapshot_result.stdout or "{}")
-            if not isinstance(snapshot, dict):
-                return None
-            if str(snapshot.get("state") or "").upper() != "OPEN":
-                return None
-            if str(snapshot.get("headRefOid") or "").lower() != normalized_head:
-                return None
-            automation_login = self._reviewer_login()
-            if automation_login is None:
-                return None
-            prior_verdict = self._strict_review_prior_verdict(
-                snapshot.get("reviews"), automation_login
-            )
-            if prior_verdict is None:
-                return None
-
-            issue_result = self._gh(["issue", "view", str(issue_number), "--json", "title,body"])
-            issue = json.loads(issue_result.stdout or "{}")
-            if not isinstance(issue, dict):
-                return None
-            issue_title = issue.get("title")
-            issue_body = issue.get("body")
-            if (
-                not isinstance(issue_title, str)
-                or not issue_title.strip()
-                or not isinstance(issue_body, str)
-                or len(issue_title.encode("utf-8")) > _STRICT_REVIEW_MAX_ISSUE_TITLE_BYTES
-                or len(issue_body.encode("utf-8")) > _STRICT_REVIEW_MAX_ISSUE_BODY_BYTES
-            ):
-                return None
-
-            diff_result = self._gh(["pr", "diff", str(pr_number)])
-            diff = diff_result.stdout
-            if not isinstance(diff, str) or not diff.strip():
-                return None
-            if len(diff.encode("utf-8")) > _STRICT_REVIEW_MAX_DIFF_BYTES:
-                return None
-
-            confirmed = self.gh_pr_state(pr_number)
-            if (
-                confirmed is None
-                or str(confirmed.get("state") or "").upper() != "OPEN"
-                or str(confirmed.get("headRefOid") or "").lower() != normalized_head
-            ):
-                return None
-        except (
-            OSError,
-            RuntimeError,
-            TypeError,
-            ValueError,
-            subprocess.SubprocessError,
-            json.JSONDecodeError,
-        ) as exc:
-            logger.warning(
-                "strict_review_evidence: failed to hydrate evidence for PR #%d: %s",
-                pr_number,
-                exc,
-            )
-            return None
-        return StrictReviewEvidence(
-            head_sha=normalized_head,
-            issue_title=issue_title,
-            issue_body=issue_body,
-            diff=diff,
-            prior_pr_review_verdict=prior_verdict,
-        )
-
-    @staticmethod
-    def _reviewer_login() -> str | None:
-        """Return the automation identity used to select prior-review context."""
-        try:
-            result = gh_call(["api", "user", "--jq", ".login"])
-        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
-            logger.warning("pr_review_evidence: could not resolve automation login: %s", exc)
-            return None
-        login = str(result.stdout or "").strip()
-        return login or None
 
     # -- read surface --------------------------------------------------------
 

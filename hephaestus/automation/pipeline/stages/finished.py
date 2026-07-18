@@ -9,8 +9,7 @@ Steps:
 1. [M] RECORD: append the item's :class:`~..work_item.ItemResult` to the run
    ledger (the coordinator injects its ledger list at construction — queue
    and ledger ownership stay with the coordinator).
-2. [W:G] CLEANUP: remove any disposable strict-review checkout first. Then
-   remove the implementation worktree on pass; on fail, preserve that writer
+2. [W:G] CLEANUP: remove the implementation worktree on pass; on fail, preserve that writer
    worktree for debugging and record it in the preserved list the end-of-run
    summary prints.
 
@@ -113,36 +112,7 @@ class FinishedStage(Stage):
         return StageOutcome(Disposition.FINISH_FAIL, note=f"unknown state: {item.state}")
 
     def _cleanup(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """Remove a disposable review checkout, then clean or preserve the writer."""
-        strict_review_worktree = str(item.payload.get("strict_review_worktree") or "")
-        if (
-            strict_review_worktree
-            and strict_review_worktree != item.worktree
-            and not item.payload.get("_strict_review_worktree_cleaned")
-        ):
-            if ctx.dry_run:
-                logger.info(
-                    "[dry-run] would remove strict-review worktree %s",
-                    strict_review_worktree,
-                )
-                item.payload["_strict_review_worktree_cleaned"] = True
-                return Continue(next_state="CLEANUP")
-            item.payload["_strict_review_worktree_cleanup_pending"] = True
-            return JobRequest(
-                job=GitJob(
-                    repo=item.repo,
-                    op="remove_worktree",
-                    timeout_s=GIT_JOB_TIMEOUT_S,
-                    kwargs={
-                        "worktree_path": strict_review_worktree,
-                        "repo_root": str(ctx.paths.repo_root),
-                        "force": True,
-                    },
-                    descr=f"remove strict-review worktree {strict_review_worktree}",
-                ),
-                on_done_state="CLEANUP",
-            )
-
+        """Clean or preserve the writer worktree."""
         if not item.worktree:
             return Continue(next_state="DONE")
 
@@ -186,15 +156,6 @@ class FinishedStage(Stage):
             ctx: Stage context.
 
         """
-        if item.payload.pop("_strict_review_worktree_cleanup_pending", None):
-            item.payload["_strict_review_worktree_cleaned"] = True
-            if not result.ok:
-                logger.warning(
-                    "finished:%s: strict-review worktree cleanup failed (non-fatal): %s",
-                    item.issue or item.repo,
-                    result.error,
-                )
-            return
         if not result.ok:
             logger.warning(
                 "finished:%s: worktree cleanup failed (non-fatal): %s",

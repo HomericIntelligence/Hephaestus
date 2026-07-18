@@ -33,7 +33,6 @@ class StageName(str, Enum):
     PLAN_REVIEW = "plan_review"
     IMPLEMENTATION = "implementation"
     PR_REVIEW = "pr_review"
-    STRICT_REVIEW = "strict_review"
     MERGE_WAIT = "merge_wait"
     FINISHED = "finished"
 
@@ -117,7 +116,7 @@ ROUTES: dict[StageName, Route] = {
         budgets={"implement": 2, "test_fix": 1},
     ),
     StageName.PR_REVIEW: Route(
-        next=StageName.STRICT_REVIEW,
+        next=StageName.MERGE_WAIT,
         fail_routes={
             "agent_error": StageName.IMPLEMENTATION,
             "human_blocked": StageName.FINISHED,
@@ -126,15 +125,6 @@ ROUTES: dict[StageName, Route] = {
         },
         budgets={"pr_review_iter": 3, "pr_review_hard": 6},
     ),
-    StageName.STRICT_REVIEW: Route(
-        next=StageName.MERGE_WAIT,
-        fail_routes={
-            "nogo": StageName.IMPLEMENTATION,
-            "head_changed": StageName.STRICT_REVIEW,
-            "*": StageName.STRICT_REVIEW,
-        },
-        budgets={"strict_review_iter": 1},
-    ),
     StageName.MERGE_WAIT: Route(
         next=StageName.FINISHED,
         fail_routes={
@@ -142,7 +132,8 @@ ROUTES: dict[StageName, Route] = {
             # A missing loop-owned approval label needs a fresh independent
             # review, not terminal abandonment. Containment failures such as
             # inability to disarm or persist the arm remain terminal.
-            "not_implementation_go": StageName.STRICT_REVIEW,
+            "not_implementation_go": StageName.PR_REVIEW,
+            "arm_confirm_failed": StageName.PR_REVIEW,
             "*": StageName.FINISHED,
         },
         budgets={},

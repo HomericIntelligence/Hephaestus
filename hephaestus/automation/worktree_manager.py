@@ -8,8 +8,7 @@ Provides:
 Layout note
 -----------
 Implementation worktrees live under ``<repo_root>/build/.worktrees/issue-{N}``.
-Read-only strict-review checkouts use the separate
-``<repo_root>/build/.worktrees/strict-review-pr-{N}`` path. Putting them inside
+Detached review checkouts use separate item-specific paths. Putting them inside
 the repo (rather than ``~/.tmp``) keeps them visible to the implementer process
 even after a force-kill: an interrupted run leaves the worktree on disk so a
 subsequent invocation can either resume work or surface a ``WorktreeDirtyError``
@@ -228,12 +227,12 @@ class WorktreeManager:
                 is explicitly pinned. Default False preserves prior behavior for
                 all other callers (review, address-review, ci-driver).
             isolated: When True, create an in-root detached checkout instead of
-                reusing another worktree that holds ``branch_name``. Strict
-                and PR review use this so a preserved writer checkout is never
+                reusing another worktree that holds ``branch_name``. PR review
+                uses this so a preserved writer checkout is never
                 reset or exposed to an agent.
             isolated_name: Stable name for an isolated checkout.  Callers that
                 need independent detached checkouts for the same PR (for
-                example mutable PR review and read-only strict review) must
+                example two PR review attempts) must
                 supply distinct names. Ignored unless ``isolated`` is true.
             timeout: Optional timeout in seconds for each git command.
 
@@ -245,7 +244,7 @@ class WorktreeManager:
 
         """
         with self.lock:
-            isolated_key = isolated_name or f"strict-review-pr-{issue_number}"
+            isolated_key = isolated_name or f"review-pr-{issue_number}"
             worktree_key: int | str = isolated_key if isolated else issue_number
             if worktree_key in self.worktrees:
                 logger.warning("Worktree for issue #%s already exists", issue_number)
@@ -346,7 +345,7 @@ class WorktreeManager:
         except subprocess.CalledProcessError:
             # The head can be a fork branch which is not a local ref. Do not
             # attach or create that branch; the worker will fetch/reset it (or
-            # its PR ref fallback) before the strict reviewer receives it.
+            # its PR ref fallback) before the review agent receives it.
             run(
                 [
                     "git",

@@ -95,22 +95,14 @@ def test_label_without_ephemeral_review_handoff_arms(make_ctx: Any, make_work_it
     assert any(action == "arm_auto_merge" for action, _ in github.mutation_log)
 
 
-def test_label_arms_even_when_previous_review_state_is_not_rehydrated(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A restart does not turn ephemeral review state into another gate."""
-    head = "a" * 40
+def test_label_arms_without_ephemeral_review_state(make_ctx: Any, make_work_item: Any) -> None:
+    """A restart does not turn stale payload values into another gate."""
     github = _ArmingGitHub(labels=(True, False))
     item = make_work_item(
         stage=StageName.MERGE_WAIT,
         pr=12,
         state=ARM,
-        payload={
-            "strict_review_attempt": 1,
-            "strict_review_head": head,
-            "strict_review_worktree": "/review/stale-strict-12",
-            "strict_review_worktree_head": head,
-        },
+        payload={"obsolete_review_state": True},
     )
 
     result = MergeWaitStage().step(item, make_ctx(github=github))

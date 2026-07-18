@@ -548,10 +548,10 @@ class TestReviewPrInline:
 
 
 class TestVerdictFromProseNotSummary:
-    """The verdict (Verdict: GO/NOGO) lives in the review PROSE, not the JSON summary.
+    """The Grade/Verdict pair lives in review prose, not the JSON summary.
 
     Regression for the AMBIGUOUS misread: review_pr_inline must return the
-    verdict-bearing prose so parse_review_verdict sees `Verdict: NOGO`, even
+    verdict-bearing prose so parse_review_verdict sees `Grade`/`Verdict`, even
     though the JSON `summary` field (posted to GitHub) carries no verdict line.
     """
 
@@ -559,7 +559,7 @@ class TestVerdictFromProseNotSummary:
         """run_pr_review_analysis returns the prose body (carrying Verdict:) as review_text."""
         prose = (
             "## Review\nFindings here.\n\n"
-            "Verdict: NOGO — two real defects.\n\n"
+            "Grade: F\nVerdict: NOGO — two real defects.\n\n"
             '```json\n{"comments": [], "summary": "two defects (no verdict here)"}\n```'
         )
         # Claude wraps the prose in a JSON result envelope.
@@ -587,7 +587,7 @@ class TestVerdictFromProseNotSummary:
             )
         # summary is the JSON field (no verdict); review_text is the prose (has verdict).
         assert out["summary"] == "two defects (no verdict here)"
-        assert "Verdict: NOGO" in out["review_text"]
+        assert "Grade: F\nVerdict: NOGO" in out["review_text"]
 
     def test_review_pr_inline_returns_verdict_text_not_summary(self, tmp_path: Path) -> None:
         """review_pr_inline returns the verdict-bearing prose, so the loop parses NOGO."""
@@ -598,7 +598,7 @@ class TestVerdictFromProseNotSummary:
                 {"path": "a.py", "line": 1, "side": "RIGHT", "severity": "major", "body": "x"}
             ],
             "summary": "a defect (no verdict token here)",
-            "review_text": "## Review\nProse.\n\nVerdict: NOGO — a real defect.\n",
+            "review_text": "## Review\nProse.\n\nGrade: F\nVerdict: NOGO — a real defect.\n",
         }
         with (
             patch(

@@ -19,7 +19,6 @@ from hephaestus.automation.pipeline.routing import ROUTES, StageName
 from hephaestus.automation.pipeline.stages import (
     StageContext,
     StageGitHub,
-    StrictReviewEvidence,
 )
 from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARGV
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
@@ -56,7 +55,6 @@ class FakeStageGitHub(FakeGitHub):
         pr_state: dict[str, Any] | None = None,
         learn_terminal: bool = False,
         resolve_count: int = 0,
-        strict_evidence: StrictReviewEvidence | None = None,
     ) -> None:
         """Initialize the fake with canned read answers.
 
@@ -86,7 +84,6 @@ class FakeStageGitHub(FakeGitHub):
                 True mirrors an issue whose post-merge /learn already ran
                 terminally (the #848 dedupe record).
             resolve_count: Canned return count for resolve_automation_threads.
-            strict_evidence: Canned bounded evidence for a strict-review job.
 
         """
         super().__init__()
@@ -109,8 +106,6 @@ class FakeStageGitHub(FakeGitHub):
         self._pr_state = pr_state
         self._learn_terminal = learn_terminal
         self._resolve_count = resolve_count
-        self._strict_evidence = strict_evidence
-        self.strict_evidence_calls: list[tuple[int, str, int]] = []
         self.arming_records: dict[int, tuple[int, str]] = {}
         self.confirmed_arming_records: set[int] = set()
         self.learn_results: dict[int, bool] = {}
@@ -260,15 +255,6 @@ class FakeStageGitHub(FakeGitHub):
         """Mirror pr_manager.enable_auto_merge_after_implementation_go."""
         self._log("arm_auto_merge", pr_number, expected_head_sha)
 
-    def strict_review_evidence(
-        self, pr_number: int, head_sha: str, issue_number: int
-    ) -> StrictReviewEvidence | None:
-        """Return canned evidence only when it remains for the requested head."""
-        self.strict_evidence_calls.append((pr_number, head_sha, issue_number))
-        if self._strict_evidence is None or self._strict_evidence.head_sha != head_sha:
-            return None
-        return self._strict_evidence
-
     def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
         """Mirror ci_driver.CIDriver._gh_pr_state (canned answer)."""
         del pr_number  # single canned answer; not per-PR keyed
@@ -359,16 +345,6 @@ class _Config:
         self.agent = "claude"
         self.dry_run = dry_run
         self.pre_pr_test_argv = PRE_PR_TEST_ARGV
-        self.strict_review_guard = _PermissiveStrictReviewGuard()
-
-
-class _PermissiveStrictReviewGuard:
-    """Minimal loop-ownership capability for ordinary isolated stage tests."""
-
-    def try_claim(self, org: str, repo: str, pr_number: int, owner: int) -> bool:
-        """Accept the sole test item; concurrency cases use a dedicated fake."""
-        del org, repo, pr_number, owner
-        return True
 
 
 class _Paths:

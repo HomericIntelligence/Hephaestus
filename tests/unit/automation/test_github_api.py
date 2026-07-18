@@ -1945,7 +1945,7 @@ class TestGhPrCreate:
     def test_pr_creation_with_auto_merge_flag_remains_unarmed(
         self, mock_gh_call: Any, _mock_signed: Any
     ) -> None:
-        """The deprecated compatibility flag cannot bypass the strict gate."""
+        """The deprecated compatibility flag cannot bypass queue review."""
         list_result = Mock()
         list_result.stdout = "[]"  # no existing PR on the head
         mock_create_result = Mock()

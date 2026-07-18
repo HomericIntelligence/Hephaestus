@@ -464,7 +464,7 @@ def _pipeline_scope_for_phases(phases: tuple[str, ...]) -> PipelineScope | None:
     ``None`` preserves the default full pipeline, including repo discovery.
     Partial selections use the same stage ownership as the focused wrapper
     CLIs: plan = planning+plan_review, implement = implementation+pr_review+
-    strict_review, drive-green = pr_review+strict_review+merge_wait. The overlap
+    merge_wait, drive-green = pr_review+merge_wait. The overlap
     lets either operational entry point resume an already-approved PR through
     merge-wait, where the loop re-reads its approval label and live PR head
     before arming; it does not require an ephemeral review handoff.
@@ -480,11 +480,10 @@ def _pipeline_scope_for_phases(phases: tuple[str, ...]) -> PipelineScope | None:
         "implement": (
             StageName.IMPLEMENTATION,
             StageName.PR_REVIEW,
-            StageName.STRICT_REVIEW,
+            StageName.MERGE_WAIT,
         ),
         "drive-green": (
             StageName.PR_REVIEW,
-            StageName.STRICT_REVIEW,
             StageName.MERGE_WAIT,
         ),
     }
@@ -639,7 +638,6 @@ def _build_pipeline_config(
 
     """
     from hephaestus.automation.pipeline.coordinator import PipelineConfig
-    from hephaestus.automation.strict_review_guard import StrictReviewGuard
 
     circuit_breaker_snapshot_provider = None
     if cfg.metrics_port:
@@ -683,7 +681,6 @@ def _build_pipeline_config(
         repo_roots=cfg.repo_roots,
         json_out=args.json,
         scope=_pipeline_scope_for_phases(cfg.phases),
-        strict_review_guard=StrictReviewGuard(),
     )
 
 

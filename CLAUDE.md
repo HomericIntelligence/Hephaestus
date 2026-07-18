@@ -337,9 +337,9 @@ The required CI gate `pr-policy` and the PR reviewer enforce:
    DCO `Signed-off-by` trailer.
 
 `pr-policy` blocks PRs that fail those checks. The queue runs
-`$athena:pr-review --ci-free` in-loop for the current PR head, then applies
-`state:implementation-go`; `merge_wait` is the sole automatic armer and
-consumes that loop-owned label. A restart re-reads the label and live PR head.
+`$athena:pr-review` in its normal default profile when available, then applies
+`state:implementation-go` on GO; `merge_wait` is the sole automatic armer and
+consumes that loop-owned label.
 The loop never reads, changes, or relies on CI/CD. CI workflows and external
 artifacts never grant that authority. Branch protection and required reviews still govern
 whether GitHub merges the PR.

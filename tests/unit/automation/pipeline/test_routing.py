@@ -26,7 +26,6 @@ class TestStageName:
             "plan_review",
             "implementation",
             "pr_review",
-            "strict_review",
             "merge_wait",
             "finished",
         }
@@ -154,7 +153,7 @@ class TestROUTES:
         route = ROUTES[StageName.FINISHED]
         assert route.next == StageName.FINISHED
 
-    def test_routes_match_strict_review_stage_contract(self) -> None:
+    def test_routes_match_single_pr_review_stage_contract(self) -> None:
         """Pin the full stage table while the companion documentation lands separately."""
         expected: dict[StageName, Route] = {
             StageName.REPO: Route(
@@ -186,7 +185,7 @@ class TestROUTES:
                 budgets={"implement": 2, "test_fix": 1},
             ),
             StageName.PR_REVIEW: Route(
-                next=StageName.STRICT_REVIEW,
+                next=StageName.MERGE_WAIT,
                 fail_routes={
                     "agent_error": StageName.IMPLEMENTATION,
                     "human_blocked": StageName.FINISHED,
@@ -195,23 +194,12 @@ class TestROUTES:
                 },
                 budgets={"pr_review_iter": 3, "pr_review_hard": 6},
             ),
-            StageName.STRICT_REVIEW: Route(
-                next=StageName.MERGE_WAIT,
-                fail_routes={
-                    "nogo": StageName.IMPLEMENTATION,
-                    "head_changed": StageName.STRICT_REVIEW,
-                    "*": StageName.STRICT_REVIEW,
-                },
-                budgets={"strict_review_iter": 1},
-            ),
             StageName.MERGE_WAIT: Route(
                 next=StageName.FINISHED,
                 fail_routes={
                     "closed": StageName.FINISHED,
-                    # Only loss of the loop-owned authorization label returns
-                    # to review. ARM timing, head movement, and GitHub arm
-                    # mechanics stay inside merge_wait.
-                    "not_implementation_go": StageName.STRICT_REVIEW,
+                    "not_implementation_go": StageName.PR_REVIEW,
+                    "arm_confirm_failed": StageName.PR_REVIEW,
                     "*": StageName.FINISHED,
                 },
                 budgets={},
@@ -220,9 +208,9 @@ class TestROUTES:
         }
         assert expected == ROUTES
 
-    def test_strict_review_advances_directly_to_merge_wait(self) -> None:
+    def test_pr_review_advances_directly_to_merge_wait(self) -> None:
         """The active loop has no CI/CD stage between review and merge wait."""
-        assert ROUTES[StageName.STRICT_REVIEW].next is StageName.MERGE_WAIT
+        assert ROUTES[StageName.PR_REVIEW].next is StageName.MERGE_WAIT
         assert "ci_fix" not in routing.budget_keys()
 
     def test_merge_budget_provenance_uses_stable_source_references(self) -> None:
@@ -328,7 +316,7 @@ class TestPipelineScope:
     def test_pipeline_scope_rejects_non_contiguous(self) -> None:
         """A gapped scope silently drops stages — reject it."""
         with pytest.raises(ValueError, match="contiguous"):
-            PipelineScope(frozenset({StageName.PLANNING, StageName.STRICT_REVIEW}))
+            PipelineScope(frozenset({StageName.PLANNING, StageName.MERGE_WAIT}))
 
     def test_pipeline_scope_finished_never_breaks_contiguity(self) -> None:
         """FINISHED (universal sink) is allowed in any scope."""

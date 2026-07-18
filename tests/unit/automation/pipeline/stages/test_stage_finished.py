@@ -159,30 +159,6 @@ class TestCleanup:
         assert isinstance(result, Continue) and result.next_state == "DONE"
         assert preserved == [("repo-a", 42, "/wt/issue-42")]
 
-    def test_strict_review_checkout_is_removed_before_writer_is_preserved(
-        self,
-        stage: FinishedStage,
-        preserved: list[tuple[str, int, str]],
-        make_ctx: Any,
-    ) -> None:
-        """The disposable strict-review checkout never replaces a failed writer (#2276)."""
-        ctx = make_ctx()
-        item = _item(passed=False, worktree="/wt/issue-42", state="CLEANUP")
-        item.payload["strict_review_worktree"] = "/wt/strict-review-42"
-
-        result = stage.step(item, ctx)
-
-        assert isinstance(result, JobRequest)
-        assert isinstance(result.job, GitJob)
-        assert result.job.kwargs["worktree_path"] == "/wt/strict-review-42"
-        assert result.on_done_state == "CLEANUP"
-
-        stage.on_job_done(item, JobResult(ok=True), ctx)
-        follow_up = stage.step(item, ctx)
-
-        assert isinstance(follow_up, Continue) and follow_up.next_state == "DONE"
-        assert preserved == [("repo-a", 42, "/wt/issue-42")]
-
     def test_fail_preserve_is_idempotent(
         self,
         stage: FinishedStage,

@@ -82,7 +82,6 @@ __all__ = [
     "StageName",
     "StageOutcome",
     "StepResult",
-    "StrictReviewEvidence",
     "WorkItem",
     "agent_provider",
     "stage_model",
@@ -98,17 +97,6 @@ GIT_JOB_TIMEOUT_S = 600
 
 #: Poll backoff cap in seconds (legacy ``min(2**attempt, 60)`` — shared by
 #: every stage that uses the legacy exponential poll delay.
-
-
-@dataclass(frozen=True)
-class StrictReviewEvidence:
-    """Bounded current-head context supplied to the read-only PR reviewer."""
-
-    head_sha: str
-    issue_title: str
-    issue_body: str
-    diff: str
-    prior_pr_review_verdict: str
 
 
 @runtime_checkable
@@ -296,9 +284,9 @@ class StageGitHub(Protocol):
     def mark_pr_implementation_go(self, pr_number: int) -> None:
         """Durably apply ``state:implementation-go`` to the PR.
 
-        ``strict_review`` applies this only after the loop's current head has
-        passed `$athena:pr-review`. Internal ``pr_review`` does not call it,
-        and no external CI status or GitHub artifact can apply it.
+        The PR review stage applies this after its normal `$athena:pr-review`
+        invocation (or its inline-review fallback) reports GO. No external CI
+        status or secondary artifact can apply it.
         """
         ...
 
@@ -313,22 +301,6 @@ class StageGitHub(Protocol):
         without revoking that label. No earlier stage may call it.
         """
         pass
-
-    def strict_review_evidence(
-        self, pr_number: int, head_sha: str, issue_number: int
-    ) -> StrictReviewEvidence | None:
-        """Return bounded evidence still bound to ``head_sha``, else ``None``.
-
-        A strict reviewer has a read-only agent sandbox and cannot safely
-        rely on a mutable local checkout for the PR diff.  The coordinator
-        accessor fetches this repo-scoped evidence and validates the live
-        head both before and after the read; stages fail closed when it is
-        unavailable.  The numeric review context's title/body are part of
-        this evidence.  For linked issue work this is the issue requirements;
-        for unlinked direct ``--prs`` review this is the PR's GitHub issue
-        object, and the strict-review prompt fences it as untrusted context.
-        """
-        ...
 
     # -- merge_wait surface (#1816) ------------------------------------------
 
@@ -348,11 +320,12 @@ class StageGitHub(Protocol):
     def arm_drive_green(self, issue_number: int, pr_number: int, head_sha: str) -> None:
         """Durably persist the drive-green arming record (crash-safe).
 
-        This record is restart metadata for the auto-merge request and
-        post-merge ``/learn`` dedupe. It is written immediately before
-        :meth:`arm_auto_merge` and may be updated to the subsequently observed
-        live head. It is never review evidence or an authorization condition;
-        only ``state:implementation-go`` authorizes merge-wait.
+        Reserved for #2055's label-gated arming protocol. It mirrors
+        ``ci_driver.CIDriver._arm_drive_green`` /
+        ``ArmingStateStore.save``: written and read back immediately before
+        :meth:`arm_auto_merge`, so a crash during the remote arm cannot lose
+        the fact that this PR (at this head SHA) was eligible to arm — the
+        post-merge ``/learn`` dedupe keys off this record.
         """
         ...
 

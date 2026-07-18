@@ -4,18 +4,18 @@ Contains the plan-generation prompt, the standalone plan-review prompt, and
 the iteration-aware plan-loop review prompt.
 """
 
+from ._review_rubric import (
+    get_full_sweep_suffix,
+    get_plan_loop_review_rubric,
+    get_plan_review_rubric,
+    get_review_output_format,
+)
 from ._shared import (
     _iteration_guidance,
     _iteration_label,
     _prior_review_block,
     fence_content,
     get_terse_output_directive,
-)
-from ._strict_rubric import (
-    get_full_sweep_suffix,
-    get_plan_loop_strict_rubric,
-    get_plan_strict_rubric,
-    get_strict_review_output_format,
 )
 from .catalog import PromptCatalog
 
@@ -55,7 +55,7 @@ def get_plan_review_prompt(
         issue_body_block=fenced.fence("ISSUE_BODY", issue_body),
         plan_text_block=fenced.fence("PLAN_TEXT", plan_text),
         untrusted_notice=fenced.untrusted_notice,
-        strict_rubric=get_plan_strict_rubric().strip(),
+        review_rubric=get_plan_review_rubric().strip(),
         terse_output_directive=get_terse_output_directive(),
     )
 
@@ -92,7 +92,7 @@ def get_plan_loop_review_prompt(
     full_sweep_suffix = get_full_sweep_suffix().strip() if iteration == 2 else ""
     return PromptCatalog.current().render(
         "planning/plan_loop_review.j2",
-        rubric=get_plan_loop_strict_rubric().strip(),
+        rubric=get_plan_loop_review_rubric().strip(),
         iteration=iteration,
         iteration_label=_iteration_label(iteration),
         iteration_guidance=_iteration_guidance(iteration),
@@ -107,7 +107,7 @@ def get_plan_loop_review_prompt(
         learnings=learnings or "_(no learnings captured this iteration)_",
         prior_review_block=_prior_review_block(prior_review, fenced),
         full_sweep_suffix=full_sweep_suffix,
-        output_format=get_strict_review_output_format().strip(),
+        output_format=get_review_output_format().strip(),
         untrusted_notice=fenced.untrusted_notice,
         terse_output_directive=get_terse_output_directive(),
     )

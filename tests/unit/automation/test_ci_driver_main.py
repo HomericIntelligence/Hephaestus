@@ -2,7 +2,7 @@
 
 ``ci_driver.main()`` no longer runs a legacy ``CIDriver`` orchestration loop; it
 parses the historical driver argument surface, builds a ``PipelineConfig``
-trimmed to the ``(pr_review, strict_review, merge_wait)`` stage scope, and dispatches to
+trimmed to the ``(pr_review, merge_wait)`` stage scope, and dispatches to
 ``pipeline.coordinator.run_pipeline``. Seeding (issues / PRs / the repo-wide
 failing-PR sweep) is coordinator-owned. These tests exercise the wrapper end to
 end with ``run_pipeline`` (and repo resolution) mocked so no live agent or
@@ -80,10 +80,7 @@ def test_main_builds_review_merge_wait_scope_and_dispatches() -> None:
     assert config.dry_run is True
     # Direct PRs without an approval label must receive PR review first.
     assert config.scope is not None
-    assert config.scope.stages == frozenset(
-        {StageName.PR_REVIEW, StageName.STRICT_REVIEW, StageName.MERGE_WAIT}
-    )
-    assert config.strict_review_guard is not None
+    assert config.scope.stages == frozenset({StageName.PR_REVIEW, StageName.MERGE_WAIT})
 
 
 def test_main_scoped_run_disables_drive_green_all() -> None:

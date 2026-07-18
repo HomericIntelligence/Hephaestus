@@ -15,19 +15,20 @@ or depend on CI/CD scheduling, configuration, or status publication. This ADR
 records the current topology alongside the immutable pipeline history in
 ADR-0006; it does not amend that record.
 
-The loop already has an independent read-only review stage and a durable,
-loop-owned `state:implementation-go` label. The required review is
-`$athena:pr-review`; it belongs in that stage rather than in GitHub Actions.
+The loop already has a PR-review stage and a durable, loop-owned
+`state:implementation-go` label. The required review is `$athena:pr-review`;
+it belongs in that stage rather than in GitHub Actions.
 
 ## Decision
 
-1. Remove the strict-review-proof workflow, status context, artifact, lease,
+1. Remove the former proof workflow, status context, artifact, lease,
    and all label/review-triggered workflow automation.
-2. Keep `strict_review` as the internal stage name, but make it invoke
-   `$athena:pr-review` in a clean, read-only worktree for the current PR head.
-   After its current-head GO read-back, the stage applies the loop-owned
-   `state:implementation-go` label itself. It neither publishes a GitHub
-   artifact nor reads CI/CD state.
+2. Remove the separate reviewer stage, its worktree/evidence/guard
+   machinery, and its tests. `pr_review` invokes `$athena:pr-review` with its
+   normal default behavior when available, otherwise performs the inline
+   fallback. It posts inline findings and a final total grade with GO/NOGO;
+   a GO applies the loop-owned `state:implementation-go` label. It neither
+   publishes a GitHub artifact nor reads or changes CI/CD state.
 3. `merge_wait` is the sole automatic armer and consumes the loop-owned label.
    A restart re-reads that label and the live PR head; the head is operational
    arm/recovery metadata only, never a post-label invalidation or additional
@@ -40,17 +41,13 @@ loop-owned `state:implementation-go` label. The required review is
   and authority dependency the loop does not own.
 - **Publish a GitHub artifact from the loop.** Rejected: it duplicates loop
   state and turns a review handoff into a cross-system authorization protocol.
-- **Remove the independent PR review.** Rejected: `$athena:pr-review` remains
-  the required quality review before the loop can apply its label.
+- **Remove PR review.** Rejected: `$athena:pr-review` remains the required
+  quality review before the loop can apply its label.
 
 ## Consequences
 
 - A restart before the label is applied reruns review; a restart after the
   label is applied resumes through merge-wait without an external proof.
-- Exactly one active loop leader owns strict review for a repository globally.
-  Cooperating processes on that leader host use a local PR ownership lock;
-  multi-host concurrent leaders are unsupported without a separately
-  authorized loop-owned coordinator.
 - CI/CD continues to validate code and protect branches, but the automation
   loop never reads, changes, or relies on it.
 - The retired policy no longer appears as an active contract.

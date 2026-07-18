@@ -15,11 +15,11 @@ from labels at startup. An interrupt leaves items resumable, never failed.
 
 ### Loop-owned PR review and approval
 
-`strict_review` is the read-only `$athena:pr-review` pass between `pr_review`
-and `merge_wait`. It captures a live PR head and runs in a synchronized, clean,
-isolated Codex worktree. After a GO and current-head read-back, the stage itself
-applies `state:implementation-go`; it does not publish a GitHub artifact or
-status.
+`pr_review` is the loop's only automated PR review. When `$athena:pr-review`
+is available it runs in its normal default profile; otherwise the stage uses
+its inline-review fallback. It posts inline findings and a final total grade
+with GO/NOGO. A GO applies `state:implementation-go`; `merge_wait` then
+performs the sole automatic arm. No GitHub artifact or status is involved.
 
 CI/CD is outside the loop: it supplies no review input, approval, repair task,
 or label transition. `merge_wait` is the sole automatic armer and consumes the
@@ -34,25 +34,25 @@ invalidates an already-issued loop-owned label or causes post-label re-review.
 
 ```mermaid
 flowchart LR
-  repo --> planning --> plan_review --> implementation --> pr_review --> strict_review --> merge_wait --> finished
+  repo --> planning --> plan_review --> implementation --> pr_review --> merge_wait --> finished
   plan_review -- "NOGO (plan_review_iter 3 / plan_cycles 2)" --> planning
   implementation -- "agent err" --> implementation
   pr_review -- "agent_error" --> implementation
-  strict_review -- "NOGO or head drift" --> implementation
+  merge_wait -- "missing approval" --> pr_review
 ```
 
 ### ASCII
 
 ```
-repo ─> planning ─> plan_review ─> implementation ─> pr_review ─> strict_review ─> merge_wait ─> finished
-             ^             │              ^   ^                         │
-             └─── NOGO ────┘              │   └ agent err ─────────────┘ strict NOGO or head drift
+repo ─> planning ─> plan_review ─> implementation ─> pr_review ─> merge_wait ─> finished
+             ^             │              ^   ^             │
+             └─── NOGO ────┘              │   └ agent err ─┘ missing approval
                 (iter 3, cycles 2)        └── implementation-GO ───────> merge_wait
 ```
 
 The complete edge set — including implementation → plan_review (`plan_not_go`)
-and strict-review remediation back to implementation — is normative in the
-ROUTES table below.
+and merge-wait recovery back to PR review — is normative in the ROUTES table
+below.
 
 ## Coordinator / worker contract
 
@@ -112,8 +112,8 @@ causes a queue push.
 3. [M] List issues, dedup, partition epics → tag epics `state:skip` [durable],
    exclude them, run label-based classifier to assign entry queues, build
    dependency graph.
-4. [M] Discover and fast-forward: `--drive-green-all` → orphan PRs (PRs with no
-   tracked issue) → strict_review stage.
+4. [M] `--drive-green-all` skips orphan PRs (PRs with no tracked issue): they
+   have no requirements context for automated review.
 5. [M] Push repo's discovered issues to their classified entry queues; advance
    repo item → finished (pass, seeded: N issues).
 
@@ -238,19 +238,21 @@ per-repo in-flight cap.
 ### 5. pr_review
 
 **States**: ENTER → REVIEW_WAIT → VALIDATE_WAIT → POST → DIFFICULTY_WAIT →
-ADDRESS_WAIT → PUSH_WAIT → EVAL → (loop). A clean internal GO advances to
-the independent strict-review gate; it does not itself authorize a merge.
+ADDRESS_WAIT → PUSH_WAIT → EVAL → (loop). A clean GO applies the loop-owned
+approval label and advances to merge_wait; it does not itself arm a merge.
 
 **Steps**:
 
 1. [M] **ENTER**: verify auto-merge is disabled before any review work. A
    failed read-back finishes `auto_merge_disable_failed`.
-2. [W:A] **Inline review step** — `prompts/pr_review.py:104
-   get_pr_review_analysis_prompt` via `pr_reviewer.review_pr_inline`; output
-   is review body.
+2. [W:A] **Review step** — `prompts/pr_review.py
+   get_pr_review_analysis_prompt` invokes `$athena:pr-review` in its normal
+   default profile when available, otherwise performs the inline fallback;
+   output is review body plus grade and verdict.
 3. [W:A] **Validation step** — `prompts/pr_review.py:232
    get_review_validation_prompt`.
-4. [M] **POST**: post surviving review threads and comments to PR [durable].
+4. [M] **POST**: post surviving inline threads and a final review comment with
+   total grade and GO/NOGO to PR [durable].
 5. [W:A] **Difficulty step** — `prompts/pr_review.py:310
    get_comment_difficulty_prompt`.
 6. [W:A] **Address step**: if fresh PR → resume implementer with
@@ -267,15 +269,15 @@ the independent strict-review gate; it does not itself authorize a merge.
    artifact, emit the typed `pr_review_zero_thread_nogo` event, and re-enter
    `REVIEW_WAIT` for a fresh reviewer invocation without consuming a round;
    if GO + `human == 0` + `blocking_automation == 0` → resolve any advisory
-   (`minor_automation`) threads, then verify auto-merge is disabled and
-   advance to strict review. It does not apply `state:implementation-go` or
-   arm auto-merge. If GO but
+   (`minor_automation`) threads, then verify auto-merge is disabled, apply
+   `state:implementation-go`, and advance to merge_wait. It does not arm
+   auto-merge. If GO but
    `human > 0` → FINISH_FAIL (`human_blocked`); if NOGO/AMBIGUOUS/ERROR and
    iteration < 3 → RETRY; if HUMAN_BLOCKED or iteration cap exhausted →
    routes depend on iteration (hard cap 6) and unresolved-thread progress;
    on exhaustion → apply `state:skip` label [durable] → SKIP.
 
-**Verdicts**: ADVANCE (to strict_review), RETRY, SKIP, BLOCKED (human
+**Verdicts**: ADVANCE (to merge_wait), RETRY, SKIP, BLOCKED (human
 intervention needed), FAIL_BACK(reason).
 
 **Fail routes**: `agent_error` → implementation (retry from implement);
@@ -298,8 +300,8 @@ to a dead end (#2079). Stage-originated JSONL events use the closed schema in
 `pipeline/events.py`; raw reviewer text, GitHub bodies, and arbitrary event
 objects are rejected.
 
-**Owned labels**: `state:implementation-no-go` (NOGO verdict, before
-retry/regress) [durable],
+**Owned labels**: `state:implementation-go` (GO) [durable],
+`state:implementation-no-go` (NOGO verdict, before retry/regress) [durable],
 `state:skip` (exhaustion) [durable].
 
 **Prompt functions**:
@@ -347,51 +349,7 @@ positives, and the fail-safe default explicitly.
 Related: #1554 (original minor-thread deadlock this replaces), #1575
 (no-commit detection, related thread-management work).
 
-### 6. strict_review
-
-**States**: ENTER → HEAD_CHECK → WORKTREE_WAIT → REVIEW_WAIT → EVAL → FINISH.
-
-**Steps**:
-
-1. [M] On **every** ingress, revoke any earlier eligibility: clear
-   `state:implementation-go`, disable/readback auto-merge, then capture the
-   live PR head. A previously captured head that changed is restarted from a
-   fresh head check. A containment failure is terminal and fail-closed.
-2. [W:G] For a direct PR or a missing worktree, synchronize an isolated
-   worktree to the captured PR branch without refreshing it from the base
-   branch. [W:A] Explicitly invoke `$athena:pr-review` there in
-   `sandbox="read-only"`, with a fresh per-head/per-attempt session and the
-   expected remote SHA. The worker grants only the skill's read-only tool
-   contract and rejects a local-HEAD mismatch or any tracked/untracked local
-   change before invocation. Before dispatch, the coordinator fetches a
-   bounded, repo-scoped nonempty diff and authenticated prior
-   review, and checks the head both before and after that fetch. Missing,
-   malformed, oversized, or stale evidence is a fail-closed NOGO. All evidence
-   is untrusted and nonce-fenced.
-3. [M] Re-read the head before applying the label. A GO applies
-   `state:implementation-go`, then re-reads the head again before advancing
-   to `merge_wait`. The label is the loop's durable authorization; no GitHub
-   artifact or status is written.
-4. [M] An explicit NOGO, infrastructure failure, or malformed verdict verifies
-   auto-merge is disabled, records remediation, and fails back to a real implementation pass. It never
-   loops through an adopted PR without implementation work. An orphan PR has
-   no issue-bound implementation scope, so it remains fail-closed for manual
-   remediation after containment.
-
-**Verdicts**: ADVANCE (current-head GO) → merge_wait; FAIL_BACK (`nogo`) →
-implementation; RETRY (`head_changed`) → strict_review; containment failures
-finish failed.
-
-**Budgets**: `strict_review_iter` = 1 per current-head attempt.
-
-**Owned labels**: `state:implementation-no-go` records NOGO feedback.
-`strict_review` applies `state:implementation-go` after its current-head GO.
-
-**Prompt functions**:
-
-- `prompts/strict_review_gate.py build_strict_review_prompt`
-
-### 7. merge_wait
+### 6. merge_wait
 
 **States**: ENTER → ARM. Already-merged PRs may continue through POLL and
 LEARN_WAIT solely to preserve the existing post-merge learn dedupe.
@@ -408,15 +366,15 @@ LEARN_WAIT solely to preserve the existing post-merge learn dedupe.
    in the race window follows the existing deduped learn path.
 3. [M] **POLL**: every armed poll revalidates the loop-owned label and GitHub's
    `autoMergeRequest`; a later disarm revokes eligibility
-   and returns to strict review. An already-merged PR continues to
+   and returns to PR review. An already-merged PR continues to
    **LEARN_WAIT** for exactly-once post-merge learning.
 
-**Verdicts**: RETRY while waiting for GitHub; FAIL_BACK to strict review on a
-missing label; FINISH_FAIL on arm-confirmation/readback or containment failure;
-FINISH_PASS after a merged PR's deduped learn step.
+**Verdicts**: RETRY while waiting for GitHub; FAIL_BACK to PR review on a
+missing label; FINISH_FAIL on a containment failure; FINISH_PASS after a
+merged PR's deduped learn step.
 
-**Fail routes**: missing-label failures → strict_review; arm-confirmation/readback
-or containment failures finish failed.
+**Fail routes**: missing-label or arm-confirmation failures → pr_review;
+containment failures finish failed.
 
 **Budgets**: merge/poll budgets remain bounded by the coordinator routes.
 
@@ -448,7 +406,7 @@ or containment failures finish failed.
 Failure routing (single declarative location; per-stage fail-target and
 budgets). All budgets are per-item-lifetime counters stored in
 `WorkItem.attempts`; they are NEVER reset when an item re-enters a stage, so
-cross-stage regression cycles (e.g. strict_review → implementation → pr_review) remain
+cross-stage regression cycles (e.g. pr_review → implementation → pr_review) remain
 globally bounded.
 
 | Stage | Next (success) | Fail targets | Budgets |
@@ -457,9 +415,8 @@ globally bounded.
 | planning | plan_review | finished(fail) | plan=2 |
 | plan_review | implementation | planning (nogo, default), finished(fail) on plan_cycles_exhausted | plan_review_iter=3, plan_cycles=2 |
 | implementation | pr_review | plan_review (plan_not_go), merge_wait (already_implementation_go_pr), finished(fail) on exhaustion | implement=2, test_fix=1 |
-| pr_review | strict_review | implementation (agent_error), finished(fail) on human_blocked or failed disable verification, finished(skip) on exhaustion | pr_review_iter=3, pr_review_hard=6 |
-| strict_review | merge_wait | implementation (nogo), strict_review (head_changed), finished(fail) on containment or label failure | strict_review_iter=1 |
-| merge_wait | finished(pass) | strict_review on missing loop-owned label; finished(fail) on arm confirmation/readback or containment failure; existing merged PRs learn then pass | merge/poll bounded by routes |
+| pr_review | merge_wait | implementation (agent_error), finished(fail) on human_blocked or failed disable verification, finished(skip) on exhaustion | pr_review_iter=3, pr_review_hard=6 |
+| merge_wait | finished(pass) | pr_review on missing loop-owned label or arm confirmation; finished(fail) on containment failure; existing merged PRs learn then pass | merge/poll bounded by routes |
 | finished | — | — | — |
 
 ## Seeding and reconstruction
@@ -469,7 +426,7 @@ restart reconstruction (at startup, scan GitHub for labels/PR state). Direct PR
 inputs are terminalized at the seed boundary when their PR is already merged or
 closed: merged PRs become `finished(pass)` and closed PRs become
 `finished(fail)`, before branch adoption or label-based routing is attempted.
-Open direct PRs enter the target repo's `pr_review` queue unless the PR already
+Open direct PRs with a linked issue enter the target repo's `pr_review` queue unless the PR already
 carries `state:implementation-go`, in which case they enter `merge_wait`.
 When an open direct PR has no linked `Closes #N` issue, the review work item
 uses the PR number as its numeric review context (GitHub PRs are issue objects)
@@ -481,7 +438,7 @@ adopted item re-reads the label and current PR head before `merge_wait` can
 arm it. CI workflows and external review artifacts do not participate in that
 decision.
 
-The same terminal-state check is repeated at the strict-review and implementation stage
+The same terminal-state check is repeated at the pr-review and implementation stage
 boundaries before branch adoption or implementation-label routing. This makes a
 PR that closes or merges between seeding and stage execution terminal without
 attempting to adopt its branch or run further work.
@@ -502,6 +459,7 @@ semantics.
 | state:skip or epic | excluded | Epic tagging is the one seeding write; done BEFORE excluding. |
 | Direct PR already merged | finished | pass, idempotent; terminalized before branch adoption. |
 | Direct PR already closed | finished | fail; terminalized before branch adoption. |
+| Direct PR with no linked issue | finished | fail closed; requirements context is missing. |
 | Open PR + PR carries state:implementation-go | merge_wait | Re-read the loop-owned label and live head before conditional arming. |
 | Open PR, no impl-go | pr_review | existing-PR path; will be reviewed. |
 | No PR, at-or-past state:plan-go | implementation | plan approved; ready to implement. |
@@ -512,7 +470,7 @@ semantics.
 
 - `--repos` seeds one repo item per named repository.
 - `--issues` seeds issue-scoped items through the classifier and routes them to
-  planning, implementation, pr_review, strict_review, merge_wait, or finished according to durable
+  planning, implementation, pr_review, merge_wait, or finished according to durable
   labels/PR state. When explicit issue or PR scope is present, the resolved
   repository list is used only as context for those items; repo discovery is not
   enqueued, so a scoped run cannot reconstruct every open issue in the repo.
@@ -585,14 +543,12 @@ listed above. Standalone scripts are thin queue-pipeline scoped entry points:
 - `hephaestus-plan-issues` preserves the historical planner CLI and dispatches
   the planning/plan_review stage slice.
 - `hephaestus-implement-issues` preserves the historical implementer CLI and
-  dispatches the implementation/pr_review/strict_review stage slice after the
+  dispatches the implementation/pr_review/merge_wait stage slice after the
   plan-go gate.
 - `hephaestus-review-prs` preserves the historical reviewer CLI and dispatches
   the pr_review stage slice.
 - `hephaestus-drive-prs-green` preserves the historical drive-green CLI and
-  dispatches the pr_review/strict_review/merge_wait stage slice. This lets an
-  explicitly selected existing PR receive normal review before the independent
-  loop-owned approval review.
+  dispatches the pr_review/merge_wait stage slice.
 - `hephaestus-merge-prs` remains a manual merge-driving command outside the
   queue coordinator.
 

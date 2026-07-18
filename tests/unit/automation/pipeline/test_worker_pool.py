@@ -180,15 +180,15 @@ class TestWorkerPoolSubmitComplete:
         pool: WorkerPool,
         completion_q: CompletionQueue,
     ) -> None:
-        """Strict-review jobs must not be silently widened to workspace-write."""
+        """Read-only jobs must not be silently widened to workspace-write."""
         job = _agent_job(agent="codex", sandbox="read-only")
-        session_result = MagicMock(stdout="strict review")
+        session_result = MagicMock(stdout="review")
 
         with (
             patch(f"{_WP}.resolve_agent", return_value="codex"),
             patch(f"{_WP}.run_agent_session", return_value=session_result) as mock_session,
         ):
-            pool.submit(job, StageName.STRICT_REVIEW)
+            pool.submit(job, StageName.PR_REVIEW)
             _handle, result = completion_q.get(timeout=10)
 
         assert result.ok is True
@@ -208,62 +208,12 @@ class TestWorkerPoolSubmitComplete:
                 return_value=("GO", "s"),
             ) as invoke,
         ):
-            pool.submit(job, StageName.STRICT_REVIEW)
+            pool.submit(job, StageName.PR_REVIEW)
             _handle, result = completion_q.get(timeout=10)
 
         assert result.ok is True
         assert invoke.call_args.kwargs["allowed_tools"] == "Read,Glob,Grep"
         assert invoke.call_args.kwargs["permission_mode"] == "dontAsk"
-
-    def test_expected_head_mismatch_blocks_agent_before_invocation(
-        self,
-        pool: WorkerPool,
-        completion_q: CompletionQueue,
-    ) -> None:
-        """A strict reviewer never sees a worktree at a different commit."""
-        expected = "a" * 40
-        job = _agent_job(expected_head_sha=expected)
-        head_result = subprocess.CompletedProcess(
-            ["git", "rev-parse", "HEAD"], 0, stdout=("b" * 40) + "\n", stderr=""
-        )
-        with (
-            patch(f"{_WP}.subprocess.run", return_value=head_result),
-            patch(f"{_WP}.claude_invoke.invoke_claude_with_session") as invoke,
-        ):
-            pool.submit(job, StageName.STRICT_REVIEW)
-            _handle, result = completion_q.get(timeout=10)
-
-        assert result.ok is False
-        assert result.error is not None and "local_head_mismatch" in result.error
-        invoke.assert_not_called()
-
-    def test_dirty_expected_head_worktree_blocks_agent_before_invocation(
-        self,
-        pool: WorkerPool,
-        completion_q: CompletionQueue,
-    ) -> None:
-        """Matching SHA alone is insufficient when local files differ from it."""
-        expected = "a" * 40
-        job = _agent_job(expected_head_sha=expected)
-        head_result = subprocess.CompletedProcess(
-            ["git", "rev-parse", "HEAD"], 0, stdout=expected + "\n", stderr=""
-        )
-        dirty_result = subprocess.CompletedProcess(
-            ["git", "status", "--porcelain=v1", "--untracked-files=all"],
-            0,
-            stdout=" M implementation.py\n?? untracked.txt\n",
-            stderr="",
-        )
-        with (
-            patch(f"{_WP}.subprocess.run", side_effect=[head_result, dirty_result]),
-            patch(f"{_WP}.claude_invoke.invoke_claude_with_session") as invoke,
-        ):
-            pool.submit(job, StageName.STRICT_REVIEW)
-            _handle, result = completion_q.get(timeout=10)
-
-        assert result.ok is False
-        assert result.error is not None and "local_worktree_dirty" in result.error
-        invoke.assert_not_called()
 
     def test_submit_and_complete_build_test_job(
         self,
@@ -859,8 +809,8 @@ class TestGitOps:
         completion_q: CompletionQueue,
         tmp_path: Path,
     ) -> None:
-        """Strict review syncs its returned detached path, never a writer checkout (#2276)."""
-        review_path = tmp_path / "build" / ".worktrees" / "strict-review-pr-70"
+        """PR review syncs its returned detached path, never a writer checkout."""
+        review_path = tmp_path / "build" / ".worktrees" / "pr-review-pr-70"
         job = GitJob(
             repo="test/repo",
             op="create_worktree",
@@ -1156,6 +1106,7 @@ class TestGitOps:
             patch(
                 "hephaestus.automation.git_utils.has_unpushed_commits", return_value=True
             ) as mock_ahead,
+            patch("hephaestus.automation.git_utils.run", return_value=MagicMock(stdout="")),
             patch("hephaestus.automation.git_utils.push_branch") as mock_push,
         ):
             pool.submit(job, StageName.PR_REVIEW)
@@ -1165,6 +1116,35 @@ class TestGitOps:
         mock_push.assert_called_once_with("5-auto", tmp_path, timeout=60)
         assert result.ok is True
         assert result.value is True
+
+    def test_commit_push_does_not_publish_dirty_worktree_after_failed_commit(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A failed commit cannot publish an older unpushed branch tip."""
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={"issue_number": 5, "worktree_path": tmp_path, "branch": "5-auto"},
+        )
+        with (
+            patch("hephaestus.automation.git_utils.commit_if_changes", return_value=False),
+            patch("hephaestus.automation.git_utils.has_unpushed_commits", return_value=True),
+            patch(
+                "hephaestus.automation.git_utils.run",
+                return_value=MagicMock(stdout=" M uncommitted-change.py\\n"),
+            ),
+            patch("hephaestus.automation.git_utils.push_branch") as mock_push,
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        mock_push.assert_not_called()
+        assert result.ok is False
+        assert result.error == "commit_push left uncommitted changes"
 
     def test_commit_push_publishes_detached_pr_review_head(
         self,

@@ -376,9 +376,6 @@ class WorkerPool:
         the executing worker identity.
         """
         try:
-            verification_failure = self._verify_expected_worktree(job)
-            if verification_failure is not None:
-                return verification_failure
             agent = resolve_agent(job.agent)
             is_claude = agent == "claude"
             session_agent = job.session_agent or job.agent
@@ -455,55 +452,6 @@ class WorkerPool:
                 ok=False,
                 error=f"{type(exc).__name__}: {exc!s}"[:_ERR_MAX],
             )
-
-    @staticmethod
-    def _verify_expected_worktree(job: AgentJob) -> JobResult | None:
-        """Fail closed unless a strict-review worktree is clean at its reviewed SHA."""
-        if not job.expected_head_sha:
-            return None
-        local_head = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=str(job.cwd),
-            capture_output=True,
-            text=True,
-            timeout=job.timeout_s,
-            check=False,
-        )
-        actual_head = (local_head.stdout or "").strip()
-        if local_head.returncode != 0 or actual_head.lower() != job.expected_head_sha.lower():
-            return JobResult(
-                ok=False,
-                error=(
-                    "local_head_mismatch: "
-                    f"expected={job.expected_head_sha} actual={actual_head or '<unreadable>'}"
-                )[:_ERR_MAX],
-                stdout_tail=(local_head.stdout or "")[-_TAIL:],
-                stderr_tail=(local_head.stderr or "")[-_TAIL:],
-            )
-        logger.info(
-            "agent job %s verified local HEAD %s against remote-reviewed head",
-            job.descr or job.agent,
-            actual_head[:12],
-        )
-        worktree_status = subprocess.run(
-            ["git", "status", "--porcelain=v1", "--untracked-files=all"],
-            cwd=str(job.cwd),
-            capture_output=True,
-            text=True,
-            timeout=job.timeout_s,
-            check=False,
-        )
-        if worktree_status.returncode != 0 or (worktree_status.stdout or "").strip():
-            return JobResult(
-                ok=False,
-                error=(
-                    "local_worktree_dirty: strict review requires a clean worktree "
-                    f"at {job.expected_head_sha}"
-                )[:_ERR_MAX],
-                stdout_tail=(worktree_status.stdout or "")[-_TAIL:],
-                stderr_tail=(worktree_status.stderr or "")[-_TAIL:],
-            )
-        return None
 
     def _run_build_test(self, job: BuildTestJob) -> JobResult:
         """Run a build/test job (subprocess with argv)."""
@@ -738,6 +686,14 @@ class WorkerPool:
                 branch, Path(worktree_path), timeout=job.timeout_s
             ):
                 return JobResult(ok=True, value=False)
+            status = git_utils.run(
+                ["git", "status", "--porcelain"],
+                cwd=Path(worktree_path),
+                capture_output=True,
+                timeout=job.timeout_s,
+            )
+            if status.stdout.strip():
+                return JobResult(ok=False, error="commit_push left uncommitted changes")
         branch = str(job.kwargs.get("branch", "HEAD"))
         if bool(job.kwargs.get("publish_detached_head", False)):
             git_utils.push_head_to_branch(

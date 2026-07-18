@@ -8,7 +8,7 @@ PR threads, validates that prior comments were truly addressed, gates GO on
 zero unresolved threads, and resumes the implementer session to fix what
 remains. It also owns the diff/changed-file collectors and review-log
 persistence helpers. An internal GO is informational only and does not label
-or arm the PR; the independent pipeline strict-review stage owns eligibility.
+or arm the PR; the pipeline PR-review stage owns eligibility.
 
 The module-level helper ``_is_automation_owned_thread`` lives here because the
 GO-gate thread accounting is its only caller.
@@ -210,7 +210,7 @@ class ReviewPhase(StageMixin):
 
         Shared by both the fresh-implementation path and the existing-PR review
         path. The queue makes an internal GO informational only; its separate
-        head-bound strict-review stage owns the implementation-GO result.
+        pipeline PR-review stage owns the implementation-GO result.
 
         An ``ERROR`` verdict (reviewer-infrastructure failure) or a
         ``HUMAN_BLOCKED`` verdict (review reached GO but an unresolved human
@@ -218,7 +218,7 @@ class ReviewPhase(StageMixin):
         so it must be left unlabeled for the "no go/no-go label → re-review" path
         to pick it up next loop (#911 / PR #1069). Labeling it no-go would falsely
         record a converged failure; internal GO labels remain reserved for the
-        independent strict-review stage.
+        pipeline PR-review stage.
         """
         impl = self.impl
         try:
@@ -250,7 +250,7 @@ class ReviewPhase(StageMixin):
             impl._log(
                 "info",
                 f"{issue_ref(issue_number)}: implementation review reached internal GO; "
-                f"auto-merge remains disabled for {pr_ref(pr_number)} pending strict review",
+                f"auto-merge remains disabled for {pr_ref(pr_number)} pending PR review",
                 thread_id,
             )
             return

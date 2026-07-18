@@ -4,8 +4,8 @@ Contains the PR review analysis prompt (inline-comment generator) and the
 plain PR description template.
 """
 
+from ._review_rubric import get_pr_review_rubric
 from ._shared import fence_content, get_terse_output_directive
-from ._strict_rubric import get_pr_strict_rubric
 from .catalog import PromptCatalog
 
 #: Severities that BLOCK a GO when their automation thread is unresolved (#1856).
@@ -32,13 +32,13 @@ def get_pr_review_analysis_prompt(
     include_nitpicks: bool = False,
     review_context_kind: str = "issue",
 ) -> str:
-    """Get the PR review analysis prompt for generating inline review comments.
+    """Get the `$athena:pr-review` analysis prompt for inline review comments.
 
     All free-text fields are fenced as untrusted (see module docstring).
 
-    Repository submission policy is NOT checked here. The in-loop reviewer
-    performs code-quality review only, and the independent strict-review stage
-    controls eligibility.
+    This is the loop's only automated review gate. When the Athena skill is
+    available, the prompt directs the reviewer to run its default profile;
+    otherwise the inline-review contract below is the fallback.
 
     Args:
         pr_number: GitHub PR number
@@ -78,7 +78,7 @@ def get_pr_review_analysis_prompt(
         ),
         pr_description_block=fenced.fence("PR_DESCRIPTION", pr_description),
         untrusted_notice=fenced.untrusted_notice,
-        strict_rubric=get_pr_strict_rubric().strip(),
+        review_rubric=get_pr_review_rubric().strip(),
         nitpick_directive=nitpick_directive,
         terse_output_directive=get_terse_output_directive(),
     )

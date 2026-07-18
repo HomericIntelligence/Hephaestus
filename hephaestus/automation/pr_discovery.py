@@ -466,7 +466,7 @@ class PRDiscovery:
 
         A repo is only truly "driven" when there are zero open PRs left. The
         per-issue ``_drive_issue`` loop's notion of success does NOT imply the
-        repo is clean: PRs awaiting manual strict review, PRs from issues
+        repo is clean: PRs awaiting manual review, PRs from issues
         outside the input set, and PRs opened by humans/other-automation all
         leave open work behind.
 

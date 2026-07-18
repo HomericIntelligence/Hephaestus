@@ -14,14 +14,12 @@ pool. Each agent job runs either **Claude Code** or **Codex**, chosen via the
 optional `--agent` CLI flag or auto-detected with a Claude preference when
 omitted (see `hephaestus.agents.runtime.add_agent_argument`).
 
-**Loop-owned approval policy:** `strict_review` runs the read-only
-`$athena:pr-review --ci-free` profile between `pr_review` and `merge_wait`. After a
-current-head GO, `strict_review` applies `state:implementation-go` itself.
-The loop never reads, changes, or relies on CI/CD. `merge_wait` is the sole
-automatic armer and consumes that loop-owned label. A restart re-reads the
-label and live PR head without repeating or invalidating a completed review;
-the head is operational arm/recovery metadata, not a post-label gate. No
-workflow, status, artifact, or lease authorizes it.
+**Loop-owned approval policy:** `pr_review` invokes `$athena:pr-review` with
+its normal default behavior when available, otherwise uses its inline-review
+fallback. It posts inline findings and a final grade/GO-NOGO review; a GO
+applies `state:implementation-go`. The loop never reads, changes, or relies on
+CI/CD. `merge_wait` is the sole automatic armer and consumes that loop-owned
+label. No workflow, status, artifact, or lease authorizes it.
 
 | Queue stage | Module | Purpose |
 |-------------|--------|---------|
@@ -30,7 +28,6 @@ workflow, status, artifact, or lease authorizes it.
 | plan_review | `hephaestus.automation.pipeline.stages.plan_review` | Strict plan review, amendment, and plan labels |
 | implementation | `hephaestus.automation.pipeline.stages.implementation` | Worktree creation, implementation, tests, commit/push, and PR creation |
 | pr_review | `hephaestus.automation.pipeline.stages.pr_review` | Inline PR review, validation, comment addressing, and implementation labels |
-| strict_review | `hephaestus.automation.pipeline.stages.strict_review` | Read-only Codex `$athena:pr-review --ci-free` pass for the current PR head; applies loop-owned approval |
 | merge_wait | `hephaestus.automation.pipeline.stages.merge_wait` | Sole automatic armer for loop-approved PRs; preserves post-merge learn |
 | finished | `hephaestus.automation.pipeline.stages.finished` | Terminal ledger and worktree cleanup/preservation |
 
@@ -41,9 +38,9 @@ that do not map to a pipeline stage remain out-of-band tools:
 | Console script | Current module | Purpose |
 |----------------|----------------|---------|
 | `hephaestus-plan-issues` | `hephaestus.automation.planner` | Thin queue-pipeline planning/plan_review wrapper |
-| `hephaestus-implement-issues` | `hephaestus.automation.implementer` | Thin queue-pipeline implementation/pr_review/strict_review wrapper |
+| `hephaestus-implement-issues` | `hephaestus.automation.implementer` | Thin queue-pipeline implementation/pr_review/merge_wait wrapper |
 | `hephaestus-merge-prs` | `hephaestus.github.pr_merge` | Manual merge-driving command outside the queue coordinator |
-| `hephaestus-review-prs` | `hephaestus.automation.pr_reviewer` | Thin queue-pipeline internal pr_review wrapper; strict review runs in the implementation/drive-green slices |
+| `hephaestus-review-prs` | `hephaestus.automation.pr_reviewer` | Thin queue-pipeline pr_review wrapper |
 | `hephaestus-agent-stage` | `hephaestus.automation.agent_stage` | One-off stage invocation |
 
 ## Agent runtime
@@ -75,7 +72,7 @@ selected model alias's established reasoning default.
 
 The agent topology above is not accidental — it follows a small set of design
 principles inherited from **ProjectOdyssey**, where the queue-based agent loop
-and strict plan/review gates were first incubated before being generalized into
+and plan/review quality gates were first incubated before being generalized into
 Hephaestus's shared tooling. Those principles, applied to agent design, are:
 
 - **Simplicity first (KISS / YAGNI).** Each queue stage owns one responsibility
@@ -116,7 +113,6 @@ review before merge.
 | `review_validator.py:_run_validation_session` | `Read,Glob,Grep` | Worktree validation of prior review comments; no write tools; GitHub updates stay in orchestrator code. |
 | `comment_difficulty.py:_run_classifier_session` | `Read,Glob,Grep` | Worktree comment classification; no write tools; result is parsed JSON only. |
 | `pr_review_core.py:_invoke_and_parse_review_session` | `Read,Glob,Grep` | Worktree PR analysis (invoked once, or twice on a `PromptTooLongError` retry with a smaller diff budget, #1847); no write tools; review posting is handled outside the agent call. |
-| `pipeline/stages/strict_review.py:StrictReviewStage` | `Read,Glob,Grep,Bash,Agent,Skill` | `$athena:pr-review --ci-free` is dispatched through Codex in a synchronized `AgentJob(sandbox="read-only")`, because Claude's non-interactive tool surface cannot technically constrain the skill's required Bash evidence collection. The profile reviews only the current immutable Git source and local validation; it does not inspect CI/CD. The worker verifies its local HEAD matches the captured remote SHA and has no tracked or untracked changes. |
 | `_implement_phase.py:ImplementPhase._run_claude_impl_session` | `Read,Write,Edit,Glob,Grep,Bash` | Initial implementation runs in the isolated issue worktree and remains subject to review and branch protection. |
 | `_review_phase.py:ReviewPhase._resume_impl_with_feedback` | `Read,Write,Edit,Glob,Grep,Bash` | Review-feedback fixes resume the implementer in the isolated issue worktree and cannot bypass PR review or merge gates. |
 | `address_review_core.py:run_address_fix_session` | `Read,Write,Edit,Glob,Grep,Bash,Task,Skill` | Review-thread fixes run in the isolated issue worktree; `Task`/`Skill` support per-comment sub-agents and skill-advisor routing. |
@@ -134,7 +130,7 @@ contract — enforced by the test suite — is that **all untrusted GitHub conte
 (issue bodies, PR diffs, reviewer comments, plan text) is wrapped with
 `_fence_untrusted()` using random nonces and accompanied by `_UNTRUSTED_NOTICE`.
 This prevents a hostile issue body from forging a verdict line or injecting
-instructions that bypass the strict review loop. See the tests in
+instructions that bypass the PR review loop. See the tests in
 `tests/unit/automation/test_prompts.py` for the regression coverage.
 
 ## Human-in-the-loop checkpoints
