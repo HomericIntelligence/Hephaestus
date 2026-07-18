@@ -7,8 +7,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import tomllib
 import yaml
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 has no stdlib tomllib
+    import tomli as tomllib
 
 from hephaestus.ci.workflows import (
     Violation,
