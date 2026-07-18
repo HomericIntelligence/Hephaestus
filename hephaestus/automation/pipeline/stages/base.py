@@ -205,7 +205,7 @@ class StageGitHub(Protocol):
         A fork head may be fetched for read-only review, but it must never be
         addressed by pushing a same-named branch to the base repository.
         """
-        ...
+        pass
 
     def pr_has_implementation_state_label(self, pr_number: int) -> tuple[bool, bool]:
         """Return ``(has_go, has_no_go)`` for the PR's implementation state labels.
