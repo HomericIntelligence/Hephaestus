@@ -25,6 +25,12 @@ completion, no duplicates, use of every configured worker during sustained
 load, a bounded drain, end-to-end p95 latency no higher than 500 ms, and
 four-worker capacity at least twice the one-worker control.
 
+Percentiles are computed by linear interpolation between closest ranks
+(`rank = percentile * (n - 1)`, numpy's default `linear` method), which is
+tail-inclusive: a small fraction of very slow completions cannot hide below
+the p95 gate the way a nearest-rank formula rounding down into the fast body
+would (issue #2229).
+
 ## Running locally
 
 Run the same bounded profile used by CI explicitly; the directory is excluded
