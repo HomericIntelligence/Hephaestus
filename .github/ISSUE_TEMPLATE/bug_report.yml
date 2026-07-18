@@ -73,6 +73,6 @@ body:
     attributes:
       value: >
         ℹ️ On submit this issue is automatically labeled `state:needs-plan` (see
-        [auto-label-needs-plan](https://github.com/mvillmow/Hephaestus/blob/main/docs/auto-label-needs-plan.md));
+        [auto-label-needs-plan](https://github.com/HomericIntelligence/Hephaestus/blob/main/docs/auto-label-needs-plan.md));
         the planning pipeline picks it up next loop. You need not set any
         `state:*` label yourself.
