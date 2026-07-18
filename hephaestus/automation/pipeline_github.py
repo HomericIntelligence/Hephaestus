@@ -26,7 +26,6 @@ import re
 import subprocess
 import time
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 from hephaestus.automation import github_api, pr_manager
@@ -43,7 +42,6 @@ from hephaestus.automation.arming_state import (
     ARM_STATUS_PREPARED,
     ArmingStateStore,
 )
-from hephaestus.automation.ci_check_inspector import CICheckInspector
 from hephaestus.automation.git_utils import issue_auto_impl_branch_name
 from hephaestus.automation.pipeline.stages.base import (
     StrictReviewEvidence,
@@ -208,12 +206,6 @@ class PipelineGitHub:
         self.dry_run = dry_run
         self._repo_root = repo_root or Path.cwd()
         self._arming = ArmingStateStore(lambda: ensure_state_dir(self._repo_root))
-        self._inspector = CICheckInspector(
-            get_pr_branch=lambda pr: get_pr_head_branch(pr) or "",
-            # Reads stay live even under pipeline dry-run so CI classification
-            # is truthful; only mutators log-and-skip.
-            options_provider=lambda: SimpleNamespace(dry_run=False),
-        )
 
     @property
     def _repo_slug(self) -> str | None:
@@ -943,78 +935,6 @@ class PipelineGitHub:
         except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError) as exc:
             logger.warning("PR #%s: gh_pr_state read failed: %s", pr_number, exc)
             return None
-
-    def failing_required_check_names(self, pr_number: int) -> list[str]:
-        """Names of required checks currently failing (``CICheckInspector``)."""
-        if self._repo_slug is not None:
-            checks = self.pr_checks(pr_number)
-            required = [c for c in checks if c.get("required")] or checks
-            return [
-                c.get("name", "")
-                for c in required
-                if c.get("status") == "completed" and c.get("conclusion") == "failure"
-            ]
-        return self._inspector.failing_required_check_names(pr_number)
-
-    def pending_required_check_names(self, pr_number: int) -> list[str]:
-        """Names of required checks still in flight (``CICheckInspector``)."""
-        if self._repo_slug is not None:
-            checks = self.pr_checks(pr_number)
-            required = [c for c in checks if c.get("required")] or checks
-            return [c.get("name", "") for c in required if c.get("status") != "completed"]
-        return self._inspector.pending_required_check_names(pr_number)
-
-    def pr_checks(self, pr_number: int) -> list[dict[str, Any]]:
-        """Read required checks for the PR (``gh_pr_checks --required``)."""
-        if self._repo_slug is not None:
-            try:
-                result = self._gh(
-                    [
-                        "pr",
-                        "checks",
-                        str(pr_number),
-                        "--required",
-                        "--json",
-                        "name,state,bucket,workflow",
-                    ],
-                    log_on_error=False,
-                )
-            except subprocess.CalledProcessError as exc:
-                if github_api._is_gh_pr_checks_no_checks_error(exc):
-                    return []
-                raise
-            raw = json.loads(result.stdout or "[]")
-            return [github_api._map_pr_check(item) for item in raw]
-        return github_api.gh_pr_checks(pr_number, dry_run=False)
-
-    def pr_is_genuinely_stuck(self, pr_number: int) -> bool:
-        """Return True iff the PR cannot merge without manual action (``pr_manager``)."""
-        if self._repo_slug is not None:
-            try:
-                result = self._gh(
-                    [
-                        "pr",
-                        "view",
-                        str(pr_number),
-                        "--json",
-                        "mergeStateStatus,mergeable,statusCheckRollup",
-                    ],
-                    check=False,
-                )
-                pr = json.loads(result.stdout or "{}")
-            except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError):
-                return False
-            merge_state = str(pr.get("mergeStateStatus") or "").upper()
-            mergeable = str(pr.get("mergeable") or "").upper()
-            if merge_state in {"DIRTY", "CONFLICTING"} or mergeable == "CONFLICTING":
-                return True
-            rollup = pr.get("statusCheckRollup")
-            return isinstance(rollup, list) and any(
-                isinstance(check, dict)
-                and check.get("conclusion") in {"FAILURE", "CANCELLED", "TIMED_OUT"}
-                for check in rollup
-            )
-        return pr_manager.pr_is_genuinely_stuck(pr_number)
 
     def drive_green_learn_terminal(self, issue_number: int) -> bool:
         """Return True when the post-merge ``/learn`` is already terminal.

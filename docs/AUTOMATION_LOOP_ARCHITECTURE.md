@@ -220,7 +220,7 @@ per-repo in-flight cap.
 **Verdicts**: ADVANCE, RETRY, FAIL_BACK(reason).
 
 **Fail routes**: `plan_not_go` → plan_review; `already_implementation_go_pr`
-(existing PR detected) → merge_wait; `agent_error`
+(existing PR detected) → strict_review; `agent_error`
 → RETRY (consumes the `implement` budget); exhaustion → finished(fail).
 
 **Budgets**: `implement` = 2 (bounds implement-step attempts, including

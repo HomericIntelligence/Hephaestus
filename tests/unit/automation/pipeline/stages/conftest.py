@@ -53,10 +53,6 @@ class FakeStageGitHub(FakeGitHub):
         unresolved: list[tuple[int, int]] | None = None,
         by_severity: list[tuple[int, int, int]] | None = None,
         pr_state: dict[str, Any] | None = None,
-        failing_checks: list[str] | None = None,
-        pending_checks: list[str] | None = None,
-        checks: list[dict[str, Any]] | None = None,
-        pr_stuck: bool = False,
         learn_terminal: bool = False,
         resolve_count: int = 0,
         strict_evidence: StrictReviewEvidence | None = None,
@@ -83,10 +79,6 @@ class FakeStageGitHub(FakeGitHub):
                 deriving from unresolved (legacy: all automation = blocking).
             pr_state: Canned answer for gh_pr_state (merge_wait's single
                 PR-state read); ``None`` mirrors a transient read failure.
-            failing_checks: Canned answer for failing_required_check_names.
-            pending_checks: Canned answer for pending_required_check_names.
-            checks: Canned answer for pr_checks (all checks for CI polling).
-            pr_stuck: Canned answer for pr_is_genuinely_stuck.
             learn_terminal: Seed answer for drive_green_learn_terminal —
                 True mirrors an issue whose post-merge /learn already ran
                 terminally (the #848 dedupe record).
@@ -111,10 +103,6 @@ class FakeStageGitHub(FakeGitHub):
             else [(a, 0, h) for (a, h) in self._unresolved]  # legacy: all automation = blocking
         )
         self._pr_state = pr_state
-        self._failing_checks = list(failing_checks or [])
-        self._pending_checks = list(pending_checks or [])
-        self._checks = list(checks or [])
-        self._pr_stuck = pr_stuck
         self._learn_terminal = learn_terminal
         self._resolve_count = resolve_count
         self._strict_evidence = strict_evidence
@@ -278,21 +266,6 @@ class FakeStageGitHub(FakeGitHub):
         del pr_number  # single canned answer; not per-PR keyed
         return self._pr_state
 
-    def failing_required_check_names(self, pr_number: int) -> list[str]:
-        """Mirror CICheckInspector.failing_required_check_names (canned answer)."""
-        del pr_number  # single canned answer; not per-PR keyed
-        return list(self._failing_checks)
-
-    def pending_required_check_names(self, pr_number: int) -> list[str]:
-        """Mirror CICheckInspector.pending_required_check_names (canned answer)."""
-        del pr_number  # single canned answer; not per-PR keyed
-        return list(self._pending_checks)
-
-    def pr_checks(self, pr_number: int) -> list[dict[str, Any]]:
-        """Mirror gh_pr_checks (returns all checks for CI classification)."""
-        del pr_number  # single canned answer; not per-PR keyed
-        return list(self._checks)
-
     def arm_drive_green(self, issue_number: int, pr_number: int, head_sha: str) -> None:
         """Mirror ci_driver.CIDriver._arm_drive_green (records the arming record)."""
         self.arming_records[issue_number] = (pr_number, head_sha)
@@ -314,11 +287,6 @@ class FakeStageGitHub(FakeGitHub):
             and record[0] == pr_number
             and issue_number in self.confirmed_arming_records
         )
-
-    def pr_is_genuinely_stuck(self, pr_number: int) -> bool:
-        """Mirror pr_manager.pr_is_genuinely_stuck (canned answer)."""
-        del pr_number  # single canned answer; not per-PR keyed
-        return self._pr_stuck
 
     def drive_green_learn_terminal(self, issue_number: int) -> bool:
         """Mirror ci_driver._learn_record_terminal over the arming record.

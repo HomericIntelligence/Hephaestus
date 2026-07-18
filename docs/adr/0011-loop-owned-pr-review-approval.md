@@ -25,9 +25,11 @@ loop-owned `state:implementation-go` label. The required review is
    After its current-head GO read-back, the stage applies the loop-owned
    `state:implementation-go` label itself. It neither publishes a GitHub
    artifact nor reads CI/CD state.
-3. `merge_wait` is the sole automatic armer and consumes only the loop-owned
-   label. Normal GitHub branch protection and explicit operator authority
-   remain independent of this loop decision.
+3. `merge_wait` is the sole automatic armer and consumes the loop-owned label
+   only with strict review's direct current-head handoff. A restart repeats
+   strict review because the label does not record a reviewed SHA. Normal
+   GitHub branch protection and explicit operator authority remain independent
+   of this loop decision.
 
 ## Alternatives considered
 

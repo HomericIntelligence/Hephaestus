@@ -1229,66 +1229,13 @@ class TestReadSurface:
 
         assert issue is None
 
-    def test_pr_manager_reads(
+    def test_pr_manager_implementation_label_read(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
             pr_manager_mod, "pr_has_implementation_state_label", lambda n: (True, False)
         )
-        monkeypatch.setattr(pr_manager_mod, "pr_is_genuinely_stuck", lambda n: True)
-
         assert adapter.pr_has_implementation_state_label(7) == (True, False)
-        assert adapter.pr_is_genuinely_stuck(7) is True
-
-    def test_pr_checks_reads_live_even_in_dry_run(
-        self, dry_adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        checks = [{"name": "ci"}]
-        mock = MagicMock(return_value=checks)
-        monkeypatch.setattr(github_api_mod, "gh_pr_checks", mock)
-
-        assert dry_adapter.pr_checks(7) == checks
-        mock.assert_called_once_with(7, dry_run=False)
-
-    def test_repo_pr_checks_reads_only_required_contexts(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Optional workflow failures cannot enter the loop's CI classifier."""
-        calls: list[list[str]] = []
-
-        def fake_gh(argv: list[str], **kwargs: object) -> SimpleNamespace:
-            del kwargs
-            calls.append(argv)
-            return SimpleNamespace(
-                stdout=json.dumps([{"name": "unit", "state": "SUCCESS", "bucket": "pass"}])
-            )
-
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
-        monkeypatch.setattr(pg, "gh_call", fake_gh)
-
-        assert adapter.pr_checks(7) == [
-            {"name": "unit", "status": "completed", "conclusion": "success", "required": False}
-        ]
-        assert calls == [
-            [
-                "pr",
-                "checks",
-                "7",
-                "--required",
-                "--json",
-                "name,state,bucket,workflow",
-                "--repo",
-                "org/repo-a",
-            ]
-        ]
-
-    def test_check_inspector_delegation(self, adapter: pg.PipelineGitHub) -> None:
-        adapter._inspector = MagicMock()
-        adapter._inspector.failing_required_check_names.return_value = ["lint"]
-        adapter._inspector.pending_required_check_names.return_value = ["test"]
-
-        assert adapter.failing_required_check_names(7) == ["lint"]
-        assert adapter.pending_required_check_names(7) == ["test"]
 
 
 class TestUnresolvedThreads:
