@@ -1,10 +1,19 @@
 #!/usr/bin/env python3
-"""Reject local private tokens in tracked or staged text files.
+"""Reject private/PII tokens in tracked or staged text files.
 
-Operators can create an untracked ``.heph-private-denylist`` at the repository
-root with one fixed string per line. When present, this guard scans supplied
-paths (working-tree mode), git-tracked files, or staged index content and fails
-if any denylisted string appears. Diagnostics intentionally print only
+This guard merges two denylist sources at the repository root, both one fixed
+string per line:
+
+* ``.heph-project-denylist`` — committed and centrally enforced, so the policy
+  is effective for every contributor and in CI even when no local file exists.
+  Only patterns safe to name in a public repo belong here.
+* ``.heph-private-denylist`` — optional, operator-local, and gitignored, for
+  genuine secret values known only on a given machine.
+
+When any token is present, this guard scans supplied paths (working-tree mode),
+git-tracked files, or staged index content and fails if a denylisted string
+appears. The denylist files themselves are never flagged as their own
+violation on any scan path. Diagnostics intentionally print only
 source/path/line, never the matched value or source line.
 
 Usage:
@@ -20,6 +29,7 @@ from pathlib import Path
 from typing import Literal, NamedTuple
 
 DENYLIST_FILENAME = ".heph-private-denylist"
+PROJECT_DENYLIST_FILENAME = ".heph-project-denylist"
 PRIVATE_DENYLIST_REDACTION = "<redacted-private-denylist-value>"
 ScanSource = Literal["working-tree", "tracked", "staged"]
 
@@ -42,9 +52,18 @@ def get_repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def load_denylist(repo_root: Path) -> list[str]:
-    """Return local denylist tokens, ignoring blank lines and comments."""
-    path = repo_root / DENYLIST_FILENAME
+def _is_denylist_file(repo_root: Path, path: Path) -> bool:
+    """True if *path* is either denylist file (never scanned as a violation)."""
+    candidate = path if path.is_absolute() else repo_root / path
+    denylist_paths = {
+        (repo_root / DENYLIST_FILENAME).resolve(),
+        (repo_root / PROJECT_DENYLIST_FILENAME).resolve(),
+    }
+    return candidate.resolve() in denylist_paths
+
+
+def _read_tokens(path: Path) -> list[str]:
+    """Return denylist tokens from *path*, ignoring blank lines and comments."""
     if not path.exists():
         return []
     tokens: list[str] = []
@@ -53,6 +72,23 @@ def load_denylist(repo_root: Path) -> list[str]:
         if token and not token.startswith("#"):
             tokens.append(token)
     return tokens
+
+
+def load_denylist(repo_root: Path) -> list[str]:
+    """Return merged project + local denylist tokens, project-first, de-duplicated.
+
+    Merges the committed, centrally-enforced ``.heph-project-denylist`` with the
+    optional operator-local ``.heph-private-denylist`` so the policy is effective
+    even when no local file exists. Order is stable and duplicates are removed.
+    """
+    merged: list[str] = []
+    seen: set[str] = set()
+    for filename in (PROJECT_DENYLIST_FILENAME, DENYLIST_FILENAME):
+        for token in _read_tokens(repo_root / filename):
+            if token not in seen:
+                seen.add(token)
+                merged.append(token)
+    return merged
 
 
 def _git_paths(repo_root: Path, cmd: list[str]) -> list[Path]:
@@ -131,10 +167,9 @@ def scan_paths(
     findings: list[Finding] = []
     if not tokens:
         return findings
-    denylist_path = (repo_root / DENYLIST_FILENAME).resolve()
     for path in paths:
         candidate = path if path.is_absolute() else repo_root / path
-        if candidate.resolve() == denylist_path or not candidate.is_file():
+        if _is_denylist_file(repo_root, candidate) or not candidate.is_file():
             continue
         try:
             lines = candidate.read_text(encoding="utf-8").splitlines()
@@ -182,6 +217,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.staged:
             for rel_path in staged_files(repo_root, pathspecs):
+                if _is_denylist_file(repo_root, rel_path):
+                    continue
                 text = staged_text(repo_root, rel_path)
                 if text is not None:
                     findings.extend(_scan_text("staged", rel_path, text, tokens))
@@ -189,12 +226,15 @@ def main(argv: list[str] | None = None) -> int:
     if not findings:
         return 0
 
-    print("ERROR: local private denylist match(es) found. Remove the value before committing:")
+    print("ERROR: private denylist match(es) found. Remove the value before committing:")
     for finding in findings:
         redacted_path = _redact_private_tokens(str(finding.path), tokens)
         print(f"  {finding.source} {redacted_path}:{finding.line_number}")
     print("\nMatched values and line contents are intentionally not printed.")
-    print(f"\nDenylist source: {DENYLIST_FILENAME} (local, untracked)")
+    print(
+        f"\nDenylist sources: {PROJECT_DENYLIST_FILENAME} (project, tracked), "
+        f"{DENYLIST_FILENAME} (local, untracked)"
+    )
     return 1
 
 

@@ -38,3 +38,12 @@ python3 scripts/check_private_denylist.py --staged --tracked
 
 The guard prints only file paths and line numbers. It intentionally never prints
 matched values or source lines.
+
+## Project-level denylist (committed)
+
+`.heph-project-denylist` is committed to the repo and scanned in CI for every
+contributor, so the privacy policy is effective even without a local file. Add
+only patterns safe to name in a public repo (deprecated hostnames, banned
+placeholder leaks). Genuine operator secrets still go in the untracked
+`.heph-private-denylist`. Both files use one fixed string per line; blank lines
+and `#`-comments are ignored. The two lists are merged and de-duplicated.

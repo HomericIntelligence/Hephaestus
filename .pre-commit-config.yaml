@@ -249,11 +249,11 @@ repos:
         pass_filenames: false
         always_run: true
       - id: check-private-denylist
-        name: Check local private denylist
+        name: Check private denylist
         description: >
-          If .heph-private-denylist exists locally, reject staged or tracked
-          text containing any fixed string listed there. The denylist itself is
-          gitignored and must never be committed. Diagnostics print only
+          Reject staged or tracked text matching any fixed string in the
+          committed .heph-project-denylist (centrally enforced) or the local,
+          untracked .heph-private-denylist. Diagnostics print only
           source/path/line, never matched values.
         entry: python3 scripts/check_private_denylist.py --staged --tracked
         language: system

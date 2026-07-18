@@ -51,6 +51,8 @@ Thumbs.db
 .env
 .env.local
 .heph-private-denylist
+# .heph-project-denylist is intentionally tracked (centrally enforced); never ignore it.
+!.heph-project-denylist
 *.pem
 credentials.json
 
