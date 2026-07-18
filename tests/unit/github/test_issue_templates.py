@@ -51,6 +51,35 @@ def test_parent_epic_is_optional_input() -> None:
         assert p.get("validations", {}).get("required", False) is False
 
 
+def test_acceptance_criteria_is_required_checklist_textarea() -> None:
+    """Both forms require testable completion criteria in checklist form."""
+    for form in FORMS:
+        criteria = _field(_load(form), "acceptance_criteria")
+        assert criteria["type"] == "textarea"
+        assert criteria["attributes"]["label"] == "Acceptance Criteria"
+        assert "- [ ]" in criteria["attributes"]["placeholder"]
+        assert criteria["validations"]["required"] is True
+
+
+def test_verification_plan_is_required_criterion_map() -> None:
+    """Both forms require criterion-linked verification and expected evidence."""
+    for form in FORMS:
+        plan = _field(_load(form), "verification_plan")
+        assert plan["type"] == "textarea"
+        assert plan["attributes"]["label"] == "Verification Plan"
+        assert plan["validations"]["required"] is True
+
+        guidance = " ".join(
+            (
+                plan["attributes"]["description"],
+                plan["attributes"]["placeholder"],
+            )
+        ).lower()
+        assert "acceptance criterion" in guidance
+        assert "command" in guidance
+        assert "expected evidence" in guidance
+
+
 def test_forms_seed_only_existing_labels() -> None:
     """Forms seed only provisioned default labels (no phantom labels)."""
     for form in FORMS:
