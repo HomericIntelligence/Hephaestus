@@ -137,8 +137,8 @@ class SeedEntry:
         passed: Terminal result for entries clamped directly to ``finished``.
         merge_wait_recovery: Whether this entry was reconstructed from a
             durable drive-green arm record.  Merge-wait consults that record
-            on entry to decide whether a confirmed remote arm can safely
-            resume POLL rather than invoke ARM again.
+            on entry to disarm any persisted remote arm and return to ARM for
+            a fresh live-head and loop-owned-label read.
         skip_tag_obligation: Durable write that must complete before this
             entry's exclusion can be honored, when it is an untagged epic.
 
