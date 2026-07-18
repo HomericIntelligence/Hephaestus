@@ -87,6 +87,24 @@ class TestParsePorcelainStatus:
         with pytest.raises(RuntimeError, match="Malformed"):
             pr_manager._parse_porcelain_status(porcelain)
 
+    def test_accepts_worktree_type_change_status(self) -> None:
+        """Regression (#2228): a worktree-only type change ``" T"`` is valid.
+
+        Git reports a file whose type changed in the worktree (e.g. a regular
+        file replaced by a symlink) with an unstaged ``" T"`` status. PR #2208
+        added it to ``_PORCELAIN_STATUS_PAIRS``; this pins the behavior so a
+        future edit to that allowlist cannot silently reject the entry again.
+        """
+        porcelain = " T src/type-changed.py\0"
+
+        assert pr_manager._parse_porcelain_status(porcelain) == ((" T", "src/type-changed.py"),)
+
+    @pytest.mark.parametrize("status", ("TA", "TR", "TC"))
+    def test_rejects_invalid_type_change_status(self, status: str) -> None:
+        """An index type-change paired with add/rename/copy is not a valid pair."""
+        with pytest.raises(RuntimeError, match="Malformed"):
+            pr_manager._parse_porcelain_status(f"{status} src/type-changed.py\0")
+
 
 class TestSelectCommitPaths:
     """Tests for applying staging policy to parsed paths."""
