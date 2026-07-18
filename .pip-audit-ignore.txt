@@ -1,0 +1,9 @@
+# pip-audit suppression policy, consumed by `hephaestus-filter-audit`
+# (see hephaestus/validation/audit.py). One advisory ID per line;
+# `#` starts a comment.
+#
+# Carried over from the inline `--ignore-vuln` flag (introduced in #425,
+# preserved through the uv migration in #2236). No longer fires in the
+# uv-managed environment; retained for parity with the CI workflows'
+# inline suppression until those are migrated.
+PYSEC-2025-183

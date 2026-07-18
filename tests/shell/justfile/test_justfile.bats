@@ -80,6 +80,19 @@ JUSTFILE="${REPO_ROOT}/justfile"
     [[ "$output" == *"all "* ]] || [[ "$output" == *"all"$'\n'* ]]
 }
 
+@test "justfile contains 'audit' recipe" {
+    run just --justfile "$JUSTFILE" --list
+    [[ "$output" == *"audit"* ]]
+}
+
+@test "'audit' recipe pipes pip-audit through hephaestus-filter-audit" {
+    run grep -A1 '^audit:' "$JUSTFILE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"pip-audit --format json"* ]]
+    [[ "$output" == *"hephaestus-filter-audit"* ]]
+    [[ "$output" != *"--ignore-vuln"* ]]
+}
+
 # ---------------------------------------------------------------------------
 # No heredocs (regression guard — known pitfall with just)
 # ---------------------------------------------------------------------------

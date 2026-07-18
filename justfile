@@ -64,9 +64,10 @@ precommit:
 # Run lint + format-check + typecheck
 check: lint format-check typecheck
 
-# Run pip-audit to check for known dependency vulnerabilities
+# Audit dependencies for known vulnerabilities via the configured policy
+# (hephaestus-filter-audit + .pip-audit-ignore.txt)
 audit:
-    uv run pip-audit --ignore-vuln PYSEC-2025-183
+    uv run pip-audit --format json | uv run hephaestus-filter-audit
 
 # Generate API reference documentation with pdoc (output: docs/api/)
 docs:
