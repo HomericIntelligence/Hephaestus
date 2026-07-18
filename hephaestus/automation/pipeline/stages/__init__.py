@@ -15,7 +15,6 @@ from .base import (
     StepResult,
     StrictReviewEvidence,
 )
-from .ci import CiStage
 from .finished import FinishedStage
 from .implementation import ImplementationStage
 from .merge_wait import MergeWaitStage
@@ -26,7 +25,6 @@ from .repo import RepoStage
 from .strict_review import StrictReviewStage
 
 __all__ = [
-    "CiStage",
     "Continue",
     "FinishedStage",
     "ImplementationStage",

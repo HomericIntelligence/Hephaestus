@@ -6,7 +6,7 @@ subprocess-per-phase loop was removed after the #1818/#1819 cutover.
 
 ## Overview and goals
 
-The automation loop is a single-coordinator, nine-queue state-machine
+The automation loop is a single-coordinator, eight-queue state-machine
 pipeline. The coordinator (main thread) owns queues and performs validation,
 logging, and GitHub manipulation. A single worker pool executes all agent
 invocations, build/test subprocesses, and git/network operations. GitHub labels
@@ -16,14 +16,15 @@ from labels at startup. An interrupt leaves items resumable, never failed.
 ### Loop-owned PR review and approval
 
 `strict_review` is the read-only `$athena:pr-review` pass between `pr_review`
-and `ci`. It captures a live PR head and runs in a synchronized, clean,
-isolated worktree. A GO records the reviewed head in the in-memory work item;
-it does not publish a GitHub artifact or status.
+and `merge_wait`. It captures a live PR head and runs in a synchronized, clean,
+isolated Codex worktree. After a GO and current-head read-back, the stage itself
+applies `state:implementation-go`; it does not publish a GitHub artifact or
+status.
 
-The loop observes CI after this pass. Green CI or `NO_CHECKS` applies
-`state:implementation-go`; a known failure is repaired and then re-reviewed.
-`merge_wait` is the sole automatic armer and consumes only that loop-owned
-label. No workflow, status, artifact, or lease authorizes the loop.
+CI/CD is outside the loop: it supplies no review input, approval, repair task,
+or label transition. `merge_wait` is the sole automatic armer and consumes only
+the loop-owned label. No workflow, status, artifact, or lease authorizes the
+loop.
 
 ## Queue topology
 
@@ -31,19 +32,17 @@ label. No workflow, status, artifact, or lease authorizes the loop.
 
 ```mermaid
 flowchart LR
-  repo --> planning --> plan_review --> implementation --> pr_review --> strict_review --> ci --> merge_wait --> finished
+  repo --> planning --> plan_review --> implementation --> pr_review --> strict_review --> merge_wait --> finished
   plan_review -- "NOGO (plan_review_iter 3 / plan_cycles 2)" --> planning
   implementation -- "agent err" --> implementation
   pr_review -- "agent_error" --> implementation
   strict_review -- "NOGO or head drift" --> implementation
-  ci -- "fix (in-stage)" --> ci
-  ci -- "fix_exhausted" --> implementation
 ```
 
 ### ASCII
 
 ```
-repo ─> planning ─> plan_review ─> implementation ─> pr_review ─> strict_review ─> ci ─> merge_wait ─> finished
+repo ─> planning ─> plan_review ─> implementation ─> pr_review ─> strict_review ─> merge_wait ─> finished
              ^             │              ^   ^                         │
              └─── NOGO ────┘              │   └ agent err ─────────────┘ strict NOGO or head drift
                 (iter 3, cycles 2)        └── implementation-GO ───────> strict_review
@@ -55,7 +54,7 @@ ROUTES table below.
 
 ## Coordinator / worker contract
 
-The main thread (coordinator) owns all nine in-memory stage queues and
+The main thread (coordinator) owns all eight in-memory stage queues and
 performs ONLY: arg parsing, queue seeding, queue draining, validation/logging,
 and GitHub API mutations (labels, comments, PR create/auto-merge disablement — sub-second
 calls). It never launches agent workflows, build/test subprocesses, or
@@ -367,82 +366,30 @@ Related: #1554 (original minor-thread deadlock this replaces), #1575
    review, and checks the head both before and after that fetch. Missing,
    malformed, oversized, or stale evidence is a fail-closed NOGO. All evidence
    is untrusted and nonce-fenced.
-3. [M] Re-read the head before handoff. A GO records that exact reviewed head
-   in the work item and advances to CI; it does not write a GitHub artifact,
-   status, or label.
+3. [M] Re-read the head before handoff. A GO applies
+   `state:implementation-go`, then re-reads the head again before recording
+   that exact reviewed head in the work item and advancing to `merge_wait`.
+   It does not write a GitHub artifact or status.
 4. [M] An explicit NOGO, infrastructure failure, or malformed verdict verifies
    auto-merge is disabled, records remediation, and fails back to a real implementation pass. It never
    loops through an adopted PR without implementation work. An orphan PR has
    no issue-bound implementation scope, so it remains fail-closed for manual
    remediation after containment.
 
-**Verdicts**: ADVANCE (current-head GO) → ci; FAIL_BACK (`nogo`) →
+**Verdicts**: ADVANCE (current-head GO) → merge_wait; FAIL_BACK (`nogo`) →
 implementation; RETRY (`head_changed`) → strict_review; containment failures
 finish failed.
 
 **Budgets**: `strict_review_iter` = 1 per current-head attempt.
 
-**Owned labels**: `state:implementation-no-go` records NOGO feedback. The CI
-stage applies `state:implementation-go` only after green or absent CI.
+**Owned labels**: `state:implementation-no-go` records NOGO feedback.
+`strict_review` applies `state:implementation-go` after its current-head GO.
 
 **Prompt functions**:
 
 - `prompts/strict_review_gate.py build_strict_review_prompt`
 
-### 7. ci
-
-**States**: ENTER → DISCOVER → REBASE_WAIT → POLL → FIX_WAIT → PUSH_WAIT →
-(POLL).
-
-**Steps**:
-
-1. [M] **DISCOVER**: resolve the PR, terminalize closed/merged PRs, then for
-   an open PR disable auto-merge and read back the disabled state before any
-   worktree or CI action. A failed read-back finishes
-   `auto_merge_disable_failed`. Adopt the real head branch, verify
-   the in-memory reviewed head; a missing or stale review fails back to
-   `strict_review`.
-2. [W:G] **Mechanical rebase** (optional, if base changed): attempt rebase via
-   git; on success, push.
-3. [M] **POLL** (non-blocking): observe
-   `ci_run_coordinator.classify_ci_state(ctx.github.pr_checks(pr))`, the
-   shipped pure classifier imported by `hephaestus.automation.pipeline.stages.ci`
-   and covered by
-   `tests/unit/automation/pipeline/stages/test_classify_ci_state.py`. It returns
-   PENDING, GREEN, FAILING, or `NO_CHECKS`. Before GREEN or `NO_CHECKS` can
-   advance, re-read the head and require it still equals the reviewed head;
-   then apply `state:implementation-go`. This is an observation, not CI/CD
-   authorization: the loop remains operational when no workflows exist. A
-   rebase, CI-fix push, or external push therefore re-enters `strict_review`.
-   If PENDING → RETRY with timer backoff; if GREEN/NO_CHECKS → ADVANCE; if
-   FAILING → step 4.
-4. [W:A] **CI fix step** (budget ci_fix = 1) — `ci_fix_orchestrator.py:498
-   build_ci_fix_prompt`; escalation via `ci_fix_orchestrator.py:148
-   force_engagement_prompt`.
-5. [W:G] Push fix commit(s).
-6. Loop back to step 3 (POLL).
-
-**Verdicts**: ADVANCE (GREEN), RETRY (PENDING, fix needed),
-FAIL_BACK(`not_implementation_go` or fix reason), FINISH_FAIL (`no_pr` or
-`auto_merge_disable_failed`).
-
-**Fail routes**: `fix_exhausted` → implementation (retry from implement);
-`not_implementation_go` or `review_stale` → strict_review (regress);
-`no_pr` and
-`auto_merge_disable_failed` → finished(fail); default = ci (RETRY).
-
-**Budgets**: `ci_fix` = 1 (max fix attempts; one escalation via
-force_engagement), `rebase` = 2 (max mechanical rebase attempts).
-
-**Owned labels**: `state:implementation-go` after a green or absent CI
-observation.
-
-**Prompt functions**:
-
-- `ci_fix_orchestrator.py build_ci_fix_prompt`
-- `ci_fix_orchestrator.py force_engagement_prompt`
-
-### 8. merge_wait
+### 7. merge_wait
 
 **States**: ENTER → ARM. Already-merged PRs may continue through POLL and
 LEARN_WAIT solely to preserve the existing post-merge learn dedupe.
@@ -466,8 +413,8 @@ LEARN_WAIT solely to preserve the existing post-merge learn dedupe.
 missing label; FINISH_FAIL on a containment failure; FINISH_PASS after a
 merged PR's deduped learn step.
 
-**Fail routes**: missing-label failures → strict_review; CI/dirty/blocked
-recovery routes remain bounded by their existing stage budgets.
+**Fail routes**: missing-label or stale in-memory handoff failures →
+strict_review; containment failures finish failed.
 
 **Budgets**: merge/poll budgets remain bounded by the coordinator routes.
 
@@ -478,7 +425,7 @@ recovery routes remain bounded by their existing stage budgets.
 - `prompts/address_review.py get_address_review_prompt`
 - `learn.py build_learn_prompt` (post-merge deduped)
 
-### 9. finished
+### 8. finished
 
 **States**: ENTER → RECORD → CLEANUP → DONE.
 
@@ -499,7 +446,7 @@ recovery routes remain bounded by their existing stage budgets.
 Failure routing (single declarative location; per-stage fail-target and
 budgets). All budgets are per-item-lifetime counters stored in
 `WorkItem.attempts`; they are NEVER reset when an item re-enters a stage, so
-cross-stage regression cycles (e.g. ci → implementation → pr_review) remain
+cross-stage regression cycles (e.g. strict_review → implementation → pr_review) remain
 globally bounded.
 
 | Stage | Next (success) | Fail targets | Budgets |
@@ -509,9 +456,8 @@ globally bounded.
 | plan_review | implementation | planning (nogo, default), finished(fail) on plan_cycles_exhausted | plan_review_iter=3, plan_cycles=2 |
 | implementation | pr_review | plan_review (plan_not_go), merge_wait (already_implementation_go_pr), finished(fail) on exhaustion | implement=2, test_fix=1 |
 | pr_review | strict_review | implementation (agent_error), finished(fail) on human_blocked or failed disable verification, finished(skip) on exhaustion | pr_review_iter=3, pr_review_hard=6 |
-| strict_review | ci | implementation (nogo), strict_review (head_changed), finished(fail) on containment failure | strict_review_iter=1 |
-| ci | merge_wait | implementation (fix_exhausted, missing_worktree), strict_review (not_implementation_go, review_stale), finished(fail) on no_pr or auto_merge_disable_failed | ci_fix=1, rebase=2 |
-| merge_wait | finished(pass) | strict_review on missing loop-owned label; finished(fail) on containment failure; existing merged PRs learn then pass | merge/poll bounded by routes |
+| strict_review | merge_wait | implementation (nogo), strict_review (head_changed), finished(fail) on containment or label failure | strict_review_iter=1 |
+| merge_wait | finished(pass) | strict_review on missing loop-owned label, stale handoff, or arm confirmation; finished(fail) on containment failure; existing merged PRs learn then pass | merge/poll bounded by routes |
 | finished | — | — | — |
 
 ## Seeding and reconstruction
@@ -526,7 +472,7 @@ carries `state:implementation-go`, in which case they enter `merge_wait`.
 The label is the loop-owned merge authorization; CI workflows and external
 review artifacts do not participate in that decision.
 
-The same terminal-state check is repeated at the CI and implementation stage
+The same terminal-state check is repeated at the strict-review and implementation stage
 boundaries before branch adoption or implementation-label routing. This makes a
 PR that closes or merges between seeding and stage execution terminal without
 attempting to adopt its branch or run further work.
@@ -557,7 +503,7 @@ semantics.
 
 - `--repos` seeds one repo item per named repository.
 - `--issues` seeds issue-scoped items through the classifier and routes them to
-  planning, implementation, pr_review, ci, or finished according to durable
+  planning, implementation, pr_review, strict_review, merge_wait, or finished according to durable
   labels/PR state. When explicit issue or PR scope is present, the resolved
   repository list is used only as context for those items; repo discovery is not
   enqueued, so a scoped run cannot reconstruct every open issue in the repo.
@@ -635,7 +581,7 @@ listed above. Standalone scripts are thin queue-pipeline scoped entry points:
 - `hephaestus-review-prs` preserves the historical reviewer CLI and dispatches
   the pr_review stage slice.
 - `hephaestus-drive-prs-green` preserves the historical drive-green CLI and
-  dispatches the strict_review/ci/merge_wait stage slice.
+  dispatches the strict_review/merge_wait stage slice.
 - `hephaestus-merge-prs` remains a manual merge-driving command outside the
   queue coordinator.
 

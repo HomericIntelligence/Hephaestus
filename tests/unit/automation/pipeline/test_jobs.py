@@ -76,7 +76,7 @@ class TestJobDataclassesFrozen:
         job = GitJob(repo="test/repo", op="rebase", timeout_s=60)
         handle = JobHandle(job=job, on_done_state=StageName.IMPLEMENTATION)
         with pytest.raises(FrozenInstanceError):
-            handle.on_done_state = StageName.CI  # type: ignore[misc]
+            handle.on_done_state = StageName.PR_REVIEW  # type: ignore[misc]
 
 
 class TestBuildTestJobArgv:
@@ -104,15 +104,15 @@ class TestJobHandleIdentity:
     def test_identical_specs_produce_distinct_handles(self) -> None:
         """Two handles over the same job spec are neither equal nor colliding."""
         job = GitJob(repo="test/repo", op="rebase", timeout_s=60)
-        h1 = JobHandle(job=job, on_done_state=StageName.CI)
-        h2 = JobHandle(job=job, on_done_state=StageName.CI)
+        h1 = JobHandle(job=job, on_done_state=StageName.PR_REVIEW)
+        h2 = JobHandle(job=job, on_done_state=StageName.PR_REVIEW)
         assert h1 != h2
         assert len({h1: "a", h2: "b"}) == 2
 
     def test_handle_hashable_with_unhashable_job_fields(self) -> None:
         """Handles hash by identity even when the job carries dict kwargs."""
         job = GitJob(repo="test/repo", op="rebase", timeout_s=60, kwargs={"cwd": Path("/tmp")})
-        handle = JobHandle(job=job, on_done_state=StageName.CI)
+        handle = JobHandle(job=job, on_done_state=StageName.PR_REVIEW)
         tracked = {handle: "pending"}
         assert tracked[handle] == "pending"
 

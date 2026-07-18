@@ -7,7 +7,6 @@ plain PR description template.
 from ._shared import fence_content, get_terse_output_directive
 from ._strict_rubric import get_pr_strict_rubric
 from .catalog import PromptCatalog
-
 #: Severities that BLOCK a GO when their automation thread is unresolved (#1856).
 #: ``minor``/``nitpick`` are advisory — a GO the reviewer returned must not
 #: deadlock to state:skip over a nit it declined to block on. An unmarked or
@@ -27,7 +26,6 @@ def get_pr_review_analysis_prompt(
     issue_number: int,
     pr_diff: str = "",
     issue_body: str = "",
-    ci_status: str = "",
     pr_description: str = "",
     advise_findings: str = "",
     include_nitpicks: bool = False,
@@ -36,17 +34,15 @@ def get_pr_review_analysis_prompt(
 
     All free-text fields are fenced as untrusted (see module docstring).
 
-    Repo PR policy (`Closes #N`, signed commits) is NOT checked here — the
-    required GitHub CI gate ``pr-policy`` enforces it authoritatively.
-    ``auto-merge-policy`` is advisory; the in-loop reviewer does code-quality
-    review only and the independent strict-review stage controls eligibility.
+    Repository submission policy is NOT checked here. The in-loop reviewer
+    performs code-quality review only, and the independent strict-review stage
+    controls eligibility.
 
     Args:
         pr_number: GitHub PR number
         issue_number: Linked GitHub issue number
         pr_diff: PR diff output
         issue_body: Issue body/description
-        ci_status: CI check status summary
         pr_description: PR description body
         advise_findings: Prior team learnings from Mnemosyne to give the
             reviewer continuity with the advise-first implementation turn.
@@ -74,7 +70,6 @@ def get_pr_review_analysis_prompt(
             "ADVISE_FINDINGS",
             advise_findings or "_(no prior advise findings supplied)_",
         ),
-        ci_status_block=fenced.fence("CI_STATUS", ci_status),
         pr_description_block=fenced.fence("PR_DESCRIPTION", pr_description),
         untrusted_notice=fenced.untrusted_notice,
         strict_rubric=get_pr_strict_rubric().strip(),

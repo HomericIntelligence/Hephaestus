@@ -34,13 +34,12 @@ class StageName(str, Enum):
     IMPLEMENTATION = "implementation"
     PR_REVIEW = "pr_review"
     STRICT_REVIEW = "strict_review"
-    CI = "ci"
     MERGE_WAIT = "merge_wait"
     FINISHED = "finished"
 
 
-#: Pipeline order used for scope-contiguity validation. Mirrors declaration
-#: order of ``StageName``.
+#: Active loop order used for scope-contiguity validation. CI/CD intentionally
+#: has no pipeline stage: the loop neither reads nor changes CI/CD state.
 PIPELINE_ORDER: tuple[StageName, ...] = tuple(StageName)
 
 
@@ -83,8 +82,7 @@ class Route:
 #   pr_review_hard=6                       <- _review_phase.py:95 (=3*2, progress-aware)
 #   blocked_address=2                     <- review_thread_resolver.py _BLOCKED_ADDRESS_MAX_ATTEMPTS
 #   clone=2, plan=2, plan_cycles=2,
-#   implement=2, test_fix=1, ci_fix=1,
-#   rebase=2                               <- architecture doc stage sections
+#   implement=2, test_fix=1                <- architecture doc stage sections
 #   merge=DEFAULT_DRIVE_GREEN_LOOPS        <- loop_runner.py LoopConfig.drive_green_loops
 #                                             and --drive-green-loops defaults
 ROUTES: dict[StageName, Route] = {
@@ -129,25 +127,13 @@ ROUTES: dict[StageName, Route] = {
         budgets={"pr_review_iter": 3, "pr_review_hard": 6},
     ),
     StageName.STRICT_REVIEW: Route(
-        next=StageName.CI,
+        next=StageName.MERGE_WAIT,
         fail_routes={
             "nogo": StageName.IMPLEMENTATION,
             "head_changed": StageName.STRICT_REVIEW,
             "*": StageName.STRICT_REVIEW,
         },
         budgets={"strict_review_iter": 1},
-    ),
-    StageName.CI: Route(
-        next=StageName.MERGE_WAIT,
-        fail_routes={
-            "fix_exhausted": StageName.IMPLEMENTATION,
-            "not_implementation_go": StageName.STRICT_REVIEW,
-            "review_stale": StageName.STRICT_REVIEW,
-            "missing_worktree": StageName.IMPLEMENTATION,
-            "no_pr": StageName.FINISHED,
-            "*": StageName.CI,
-        },
-        budgets={"ci_fix": 1, "rebase": 2},
     ),
     StageName.MERGE_WAIT: Route(
         next=StageName.FINISHED,
@@ -158,6 +144,7 @@ ROUTES: dict[StageName, Route] = {
             # as inability to disarm or persist the arm remain terminal.
             "not_implementation_go": StageName.STRICT_REVIEW,
             "arm_confirm_failed": StageName.STRICT_REVIEW,
+            "review_stale": StageName.STRICT_REVIEW,
             "*": StageName.FINISHED,
         },
         budgets={},

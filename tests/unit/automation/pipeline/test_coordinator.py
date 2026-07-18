@@ -489,12 +489,12 @@ class TestDrainOrder:
     """Downstream-first queue draining."""
 
     def test_downstream_first(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """merge_wait drains before ci ... before planning before repo."""
+        """merge_wait drains before review, planning, and repo."""
         coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
         for stage in (
             StageName.PLANNING,
             StageName.MERGE_WAIT,
-            StageName.CI,
+            StageName.PR_REVIEW,
             StageName.REPO,
         ):
             coordinator.stages[stage] = StubStage(StageOutcome(Disposition.FINISH_PASS, "x"))
@@ -502,7 +502,7 @@ class TestDrainOrder:
         coordinator._push_item(
             _issue_item(2, StageName.MERGE_WAIT), StageName.MERGE_WAIT, enter=True
         )
-        coordinator._push_item(_issue_item(3, StageName.CI), StageName.CI, enter=True)
+        coordinator._push_item(_issue_item(3, StageName.PR_REVIEW), StageName.PR_REVIEW, enter=True)
         repo_item = WorkItem(repo="repo-a", kind=ItemKind.REPO, stage=StageName.REPO)
         coordinator._push_item(repo_item, StageName.REPO, enter=True)
         coordinator.event_log.clear()
@@ -510,8 +510,8 @@ class TestDrainOrder:
         coordinator._drain_queues()
 
         drained = [entry[1] for entry in coordinator.event_log if entry[0] == "drain"]
-        assert drained.index("merge_wait") < drained.index("ci")
-        assert drained.index("ci") < drained.index("planning")
+        assert drained.index("merge_wait") < drained.index("pr_review")
+        assert drained.index("pr_review") < drained.index("planning")
         assert drained.index("planning") < drained.index("repo")
 
 
@@ -1768,21 +1768,19 @@ class TestConfigWiring:
     """PipelineConfig fields reach the per-repo StageContext the stages read."""
 
     def test_budget_override_takes_precedence_over_routes_default(self, tmp_path: Path) -> None:
-        """budget_overrides={"ci_fix": N} overrides the ROUTES ci_fix default (1)."""
+        """Budget overrides take precedence over the routing-table default."""
         config = PipelineConfig(
             org="org",
             repos=["repo-a"],
             projects_dir=tmp_path,
-            budget_overrides={"ci_fix": 3},
+            budget_overrides={"merge": 3},
         )
         coordinator = Coordinator(
             config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
         )
         ctx = coordinator._ctx_for_repo("repo-a")
 
-        assert ctx.budget("ci_fix") == 3
-        # A non-overridden key still resolves from ROUTES (rebase default 2).
-        assert ctx.budget("rebase") == 2
+        assert ctx.budget("merge") == 3
 
     def test_drive_green_filters_flow_to_stage_config(self, tmp_path: Path) -> None:
         """Discovery flags survive the coordinator's stage-config copy."""
@@ -1801,53 +1799,3 @@ class TestConfigWiring:
 
         assert ctx.config.include_bot_prs is False
         assert ctx.config.include_all_authors is True
-
-    def test_no_budget_override_uses_routes_default(self, tmp_path: Path) -> None:
-        """Without an override the ci_fix budget is the ROUTES default (1)."""
-        config = PipelineConfig(org="org", repos=["repo-a"], projects_dir=tmp_path)
-        coordinator = Coordinator(
-            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
-        )
-        ctx = coordinator._ctx_for_repo("repo-a")
-
-        assert ctx.budget("ci_fix") == 1
-
-    def test_enable_mechanical_rebase_flows_to_stage_config(self, tmp_path: Path) -> None:
-        """enable_mechanical_rebase=False reaches ctx.config (read by stages/ci.py)."""
-        config = PipelineConfig(
-            org="org",
-            repos=["repo-a"],
-            projects_dir=tmp_path,
-            enable_mechanical_rebase=False,
-        )
-        coordinator = Coordinator(
-            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
-        )
-        ctx = coordinator._ctx_for_repo("repo-a")
-
-        assert ctx.config.enable_mechanical_rebase is False
-
-    def test_poll_max_wait_flows_to_stage_config(self, tmp_path: Path) -> None:
-        """poll_max_wait reaches ctx.config for wall-clock CI polling."""
-        config = PipelineConfig(
-            org="org",
-            repos=["repo-a"],
-            projects_dir=tmp_path,
-            poll_max_wait=42,
-        )
-        coordinator = Coordinator(
-            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
-        )
-        ctx = coordinator._ctx_for_repo("repo-a")
-
-        assert ctx.config.poll_max_wait == 42
-
-    def test_enable_mechanical_rebase_defaults_true(self, tmp_path: Path) -> None:
-        """The default keeps the CI stage's mechanical rebase enabled."""
-        config = PipelineConfig(org="org", repos=["repo-a"], projects_dir=tmp_path)
-        coordinator = Coordinator(
-            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
-        )
-        ctx = coordinator._ctx_for_repo("repo-a")
-
-        assert ctx.config.enable_mechanical_rebase is True

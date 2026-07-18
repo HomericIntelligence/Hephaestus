@@ -19,17 +19,6 @@ def _arch_text() -> str:
     return DOC_PATH.read_text(encoding="utf-8")
 
 
-def test_ci_stage_documents_shipped_classifier() -> None:
-    """The CI-stage doc must describe classify_ci_state as shipped code."""
-    text = DOC_PATH.read_text(encoding="utf-8")
-
-    assert "classify_ci_state" in text
-    assert "NEW pure function" not in text
-    assert "does not exist yet" not in text
-    assert "shipped pure classifier" in text
-    assert "tests/unit/automation/pipeline/stages/test_classify_ci_state.py" in text
-
-
 def test_automation_loop_architecture_status_is_implemented() -> None:
     """The architecture contract must describe the implemented pipeline."""
     text = _arch_text()
@@ -111,18 +100,19 @@ def test_automation_loop_architecture_documents_effective_item_semantics() -> No
     assert "exit-code calculation" in normalized
 
 
-def test_stage_github_pr_state_docstring_describes_shared_read_contract() -> None:
-    """The shared PR-state accessor must describe every pipeline consumer."""
+def test_stage_github_pr_state_docstring_describes_ci_free_read_contract() -> None:
+    """The shared PR-state accessor documents lifecycle data, not CI state."""
     from hephaestus.automation.pipeline.stages.base import StageGitHub
 
     docstring = StageGitHub.gh_pr_state.__doc__ or ""
     normalized = " ".join(docstring.split())
 
     assert "repo" in normalized
-    assert "CI" in normalized
     assert "implementation" in normalized
     assert "merge_wait" in normalized
     assert "terminal-state checks" in normalized
+    assert "headRefOid" in normalized
+    assert "CI" not in normalized
 
 
 def test_automation_loop_architecture_has_concurrency_cli_dry_run_and_glossary() -> None:

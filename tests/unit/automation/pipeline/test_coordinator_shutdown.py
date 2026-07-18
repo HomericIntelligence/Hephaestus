@@ -191,16 +191,16 @@ class TestInterruptSemantics:
         """Queued (never-started) items report RESUMABLE at their stage."""
         coordinator = _coordinator(tmp_path, monkeypatch)
         item = WorkItem(
-            repo="repo-a", kind=ItemKind.ISSUE, issue=2, stage=StageName.CI, state="ENTER"
+            repo="repo-a", kind=ItemKind.ISSUE, issue=2, stage=StageName.PR_REVIEW, state="ENTER"
         )
-        coordinator._push_item(item, StageName.CI, enter=True)
+        coordinator._push_item(item, StageName.PR_REVIEW, enter=True)
         coordinator.shutdown.set()
 
         exit_code = coordinator.run()
 
         assert exit_code == 130
         assert item.result is not None
-        assert item.result.reason == "resumable at ci"
+        assert item.result.reason == "resumable at pr_review"
         assert coordinator.ledger == []
 
     def test_second_signal_immediate_teardown_synthesizes_interrupted(
@@ -327,7 +327,7 @@ class TestCrashMatrixJournal:
                 78,
                 None,
                 False,
-                StageName.STRICT_REVIEW,
+                StageName.MERGE_WAIT,
             ),
             ("merged PR", [], None, 79, False, StageName.FINISHED),
             ("state:skip", [STATE_SKIP], None, None, False, None),

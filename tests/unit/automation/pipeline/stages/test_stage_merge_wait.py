@@ -53,6 +53,36 @@ def test_missing_implementation_go_is_contained(make_ctx: Any, make_work_item: A
     assert not any(action == "arm_auto_merge" for action, _ in github.mutation_log)
 
 
+def test_stale_in_memory_review_handoff_is_contained_before_arm(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A push between strict-review's label write and ARM cannot be armed."""
+
+    class StaleHandoffGitHub(_ArmingGitHub):
+        def __init__(self) -> None:
+            super().__init__(labels=(True, False))
+            self._pr_state = {"state": "OPEN", "headRefOid": "b" * 40}
+
+        def defer_auto_merge(self, pr_number: int) -> None:
+            super().defer_auto_merge(pr_number)
+            self._pr_state = {"state": "OPEN", "headRefOid": "b" * 40, "autoMergeRequest": None}
+
+    github = StaleHandoffGitHub()
+    item = make_work_item(
+        stage=StageName.MERGE_WAIT,
+        pr=12,
+        state=ARM,
+        payload={"pr_review_skill_head": "a" * 40},
+    )
+
+    result = MergeWaitStage().step(item, make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.FAIL_BACK, "review_stale")
+    assert not any(action == "arm_auto_merge" for action, _ in github.mutation_log)
+    assert ("defer_auto_merge", (12,)) in github.mutation_log
+    assert any(action == "gh_issue_remove_labels" for action, _ in github.mutation_log)
+
+
 def test_armed_labeled_pr_polls_without_rechecking_external_state(
     make_ctx: Any, make_work_item: Any
 ) -> None:

@@ -65,7 +65,6 @@ from ..routing import ROUTES, Disposition, StageName, StageOutcome
 from ..work_item import ItemKind, WorkItem
 
 __all__ = [
-    "BACKOFF_CAP_S",
     "GIT_JOB_TIMEOUT_S",
     "AgentJob",
     "BuildTestJob",
@@ -99,7 +98,6 @@ GIT_JOB_TIMEOUT_S = 600
 
 #: Poll backoff cap in seconds (legacy ``min(2**attempt, 60)`` — shared by
 #: every stage that uses the legacy exponential poll delay.
-BACKOFF_CAP_S = 60
 
 
 @dataclass(frozen=True)
@@ -290,9 +288,9 @@ class StageGitHub(Protocol):
     def mark_pr_implementation_go(self, pr_number: int) -> None:
         """Durably apply ``state:implementation-go`` to the PR.
 
-        The CI observation stage applies this only after the loop's current
-        head has passed `$athena:pr-review`. Internal ``pr_review`` does not
-        call it, and no external CI status or GitHub artifact can apply it.
+        ``strict_review`` applies this only after the loop's current head has
+        passed `$athena:pr-review`. Internal ``pr_review`` does not call it,
+        and no external CI status or GitHub artifact can apply it.
         """
         ...
 
@@ -327,12 +325,13 @@ class StageGitHub(Protocol):
     def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
         """Read shared PR state for seed, stage, and merge decisions.
 
-        Returns ``{state, headRefOid, mergedAt, mergeStateStatus,
-        baseRefName}``, or ``None`` on a transient read failure. The repo seed
-        path and the CI and implementation stage boundaries use this read for
+        Returns a PR lifecycle record (including ``state``, ``headRefOid``,
+        ``mergedAt``, ``autoMergeRequest``, and ``baseRefName``), or ``None``
+        on a transient read failure. The repo seed
+        path and the implementation stage boundary use this read for
         merged/closed terminal-state checks before branch adoption or further
         routing. The merge_wait path uses the same contract to capture the
-        head OID and classify MERGED/CLOSED/FAILING/DIRTY/BLOCKED/PENDING.
+        head OID and classify merged, closed, and open lifecycle states.
         """
         ...
 
@@ -345,44 +344,6 @@ class StageGitHub(Protocol):
         :meth:`arm_auto_merge`, so a crash during the remote arm cannot lose
         the fact that this PR (at this head SHA) was eligible to arm — the
         post-merge ``/learn`` dedupe keys off this record.
-        """
-        ...
-
-    def failing_required_check_names(self, pr_number: int) -> list[str]:
-        """Return names of required checks currently failing.
-
-        Mirrors ``CICheckInspector.failing_required_check_names``; the
-        merge_wait POLL step classifies FAILING vs. PENDING from this list
-        (after excluding the auto-merge-policy check via
-        :func:`~hephaestus.automation.auto_merge_coordinator.without_auto_merge_policy`).
-        """
-        ...
-
-    def pending_required_check_names(self, pr_number: int) -> list[str]:
-        """Return names of required checks still in flight (not completed).
-
-        Mirrors ``CICheckInspector.pending_required_check_names``; the
-        merge_wait POLL step uses this to distinguish a BLOCKED
-        branch-protection state from a still-pending CI state.
-        """
-        ...
-
-    def pr_checks(self, pr_number: int) -> list[dict[str, Any]]:
-        """Return all checks for the PR (mirrors ``gh_pr_checks``).
-
-        Used by CI stage's ``_poll`` to classify via ``classify_ci_state``.
-        The coordinator handles the I/O and dry-run logic; the stage simply
-        calls this accessor.
-        """
-        ...
-
-    def pr_is_genuinely_stuck(self, pr_number: int) -> bool:
-        """Return True iff the PR cannot merge without manual/agent action.
-
-        Mirrors ``pr_manager.pr_is_genuinely_stuck`` (#1576): a merge
-        CONFLICT or a red required check is stuck; a BLOCKED-awaiting-review
-        PR is NOT. Gates any ``state:skip`` tagging on the merge_wait
-        BLOCKED-exhaustion path — exactly the legacy skip-ownership guard.
         """
         ...
 
@@ -595,11 +556,11 @@ def _require_item_worktree(item: WorkItem, stage_name: str, action: str) -> Stag
 def _build_rebase_job(item: WorkItem, ctx: StageContext, *, descr: str) -> GitJob:
     """Build the mechanical rebase-onto-base GitJob (shared base-ref capture).
 
-    Both ``ci`` (best-effort mechanical rebase) and ``merge_wait`` (DIRTY
-    resolution) rebase the item's worktree onto the same captured
+    ``merge_wait`` uses this shared worker operation when a dirty-worktree
+    resolution needs to rebase the item's worktree onto the captured
     ``item.payload["base_branch"]`` (defaulting to ``main``) via the same
     worker ``op="rebase"`` (``git_utils.rebase_worktree_onto``) — single home
-    so the two stages cannot diverge on this mechanic (#1861).
+    so all remaining consumers use one mechanic (#1861).
     """
     return GitJob(
         repo=item.repo,

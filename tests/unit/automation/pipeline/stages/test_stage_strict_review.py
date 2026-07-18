@@ -46,9 +46,10 @@ def test_review_job_uses_athena_pr_review_prompt(make_ctx: Any, make_work_item: 
     assert "MUST invoke and follow the `$athena:pr-review` skill" in prompt
     assert "Automation-loop handoff: <GO|NOGO>" in prompt
     assert "PR-review-specific graded dimensions" not in prompt
-    assert "CI Status" not in prompt
+    assert "CI-free" in prompt
+    assert "collect_evidence.py" in prompt
     assert result.job.sandbox == "read-only"
-    assert result.job.allowed_tools == "Read,Glob,Grep,Bash,Agent,Skill,WebFetch"
+    assert result.job.agent == "codex"
 
 
 def test_skill_handoff_must_be_the_final_line() -> None:
@@ -60,8 +61,8 @@ def test_skill_handoff_must_be_the_final_line() -> None:
     assert quoted.verdict == "AMBIGUOUS"
 
 
-def test_go_records_only_internal_review_handoff(make_ctx: Any, make_work_item: Any) -> None:
-    """A review GO does not publish a proof or label the PR before CI."""
+def test_go_labels_current_head_for_merge_wait(make_ctx: Any, make_work_item: Any) -> None:
+    """A current-head review GO is the loop's sole label producer."""
     item = make_work_item(
         stage=StageName.STRICT_REVIEW,
         pr=12,
@@ -78,7 +79,56 @@ def test_go_records_only_internal_review_handoff(make_ctx: Any, make_work_item: 
 
     assert isinstance(result, Continue)
     assert item.payload["pr_review_skill_head"] == _HEAD
-    assert not any(action == "mark_pr_implementation_go" for action, _ in github.mutation_log)
+    assert ("mark_pr_implementation_go", (12,)) in github.mutation_log
+
+
+def test_strict_review_uses_codex_even_when_the_loop_agent_is_claude(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """Athena review is never run with an unenforceable Claude shell boundary."""
+    item = make_work_item(
+        stage=StageName.STRICT_REVIEW,
+        pr=12,
+        state=REVIEW_WAIT,
+        payload={"strict_review_head": _HEAD},
+    )
+    github = FakeStageGitHub(strict_evidence=_EVIDENCE)
+
+    result = StrictReviewStage().step(item, make_ctx(github=github))
+
+    assert isinstance(result, JobRequest)
+    assert isinstance(result.job, AgentJob)
+    assert result.job.agent == "codex"
+
+
+def test_go_revokes_label_when_a_push_races_the_label_write(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A GO for H1 cannot leave an approval label on a pushed H2."""
+
+    class PushDuringLabelGitHub(FakeStageGitHub):
+        def mark_pr_implementation_go(self, pr_number: int) -> None:
+            super().mark_pr_implementation_go(pr_number)
+            self._pr_state = {"state": "OPEN", "headRefOid": "b" * 40}
+
+    item = make_work_item(
+        stage=StageName.STRICT_REVIEW,
+        pr=12,
+        state=EVAL,
+        payload={
+            "strict_review_head": _HEAD,
+            "strict_review_verdict": "GO",
+            "strict_review_text": "Grade: A\nVerdict: GO",
+        },
+    )
+    github = PushDuringLabelGitHub(pr_state={"state": "OPEN", "headRefOid": _HEAD})
+
+    result = StrictReviewStage().step(item, make_ctx(github=github))
+
+    assert result == Continue(next_state=HEAD_CHECK)
+    assert ("mark_pr_implementation_go", (12,)) in github.mutation_log
+    assert ("defer_auto_merge", (12,)) in github.mutation_log
+    assert any(action == "gh_issue_remove_labels" for action, _ in github.mutation_log)
 
 
 def test_job_result_keeps_final_verdict(make_ctx: Any, make_work_item: Any) -> None:

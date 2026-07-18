@@ -1,9 +1,9 @@
 """In-loop ``$athena:pr-review`` stage.
 
-The stage sits between ``pr_review`` and ``ci``. It invokes the Athena skill
-in a clean, read-only worktree and records its result only on the in-memory
-work item. The later CI-observation stage owns applying
-``state:implementation-go``; ``merge_wait`` owns the sole auto-merge arm.
+The stage sits between ``pr_review`` and ``merge_wait``. It invokes the Athena
+skill in a clean, read-only Codex worktree and, after a second current-head
+read, applies ``state:implementation-go`` itself. ``merge_wait`` owns the sole
+auto-merge arm.
 
 - States: ENTER -> HEAD_CHECK -> WORKTREE_WAIT -> REVIEW_WAIT -> EVAL ->
   SR_FINISH.
@@ -25,8 +25,8 @@ work item. The later CI-observation stage owns applying
   transcript. Prompt composed in-worker by
   :func:`~hephaestus.automation.prompts.strict_review_gate.build_strict_review_prompt`.
 - EVAL [M]:
-  - GO: records the reviewed head on this work item and advances to ``ci``.
-    The CI stage is the sole label producer after it observes green or no CI.
+  - GO: applies the loop-owned label only after the reviewed head is read back
+    as current, records that head, and advances to ``merge_wait``.
   - NOGO: idempotently ``defer_auto_merge``, readback-verify it actually
     disabled, post fenced remediation feedback, ``mark_pr_implementation_no_go``,
     FAIL_BACK(``nogo``) to ``implementation`` (a real implementation job, not
@@ -66,7 +66,6 @@ from .base import (
     WorkItem,
     _terminal_pr_outcome,
     _worktree_path,
-    agent_provider,
     stage_model,
 )
 
@@ -353,10 +352,14 @@ class StrictReviewStage(Stage):
             attempt,
             item.pr,
         )
+        # Athena's review skill needs a shell to invoke its local helpers.
+        # Claude's non-interactive path has no OS-level read-only sandbox, so
+        # this dedicated review stage always selects Codex's read-only
+        # sandbox instead of inheriting the implementation-agent setting.
         job = AgentJob(
             repo=item.repo,
             issue=issue,
-            agent=agent_provider(ctx),
+            agent="codex",
             model=stage_model(ctx, "reviewer", reviewer_model),
             prompt_builder=build_strict_review_prompt,
             cwd=_worktree_path(item, ctx),
@@ -364,7 +367,6 @@ class StrictReviewStage(Stage):
             session_agent=strict_review_agent(head_sha, attempt),
             expected_head_sha=head_sha,
             sandbox="read-only",
-            allowed_tools="Read,Glob,Grep,Bash,Agent,Skill,WebFetch",
             # The bounded issue/diff/prior-review context is fetched by the
             # coordinator adapter; no CI state is an input to this review.
             prompt_kwargs={
@@ -441,11 +443,25 @@ class StrictReviewStage(Stage):
     def _handle_go(
         self, item: WorkItem, ctx: StageContext, head_sha: str, verdict_text: str
     ) -> StepResult:
-        """Record a successful in-loop PR-review skill verdict for CI."""
+        """Label a successful current-head in-loop PR-review skill verdict."""
         pr_number = item.pr
         if pr_number is None:  # guarded by step(); narrowing
             return StageOutcome(Disposition.FAIL_BACK, "nogo")
         current_outcome = self._current_head_or_restart(item, ctx, head_sha, action="GO handoff")
+        if current_outcome is not None:
+            return current_outcome
+        try:
+            ctx.github.mark_pr_implementation_go(pr_number)
+        except Exception as exc:
+            logger.error(
+                "strict_review: failed to mark PR #%d implementation-go: %s", pr_number, exc
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_label_failed")
+        # Label mutation races with a push. Re-read the head after the write
+        # so a review for H1 cannot authorize a new H2.
+        current_outcome = self._current_head_or_restart(
+            item, ctx, head_sha, action="implementation-go handoff"
+        )
         if current_outcome is not None:
             return current_outcome
         item.payload["pr_review_skill_head"] = head_sha

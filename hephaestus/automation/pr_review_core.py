@@ -292,7 +292,6 @@ def run_pr_review_analysis(
             issue_number=issue_number,
             pr_diff=diff_text,
             issue_body=context.get("issue_body", ""),
-            ci_status=context.get("ci_status", ""),
             pr_description=context.get("pr_description", ""),
             advise_findings=context.get("advise_findings", ""),
             # #1083: nitpicks are suppressed unless --nitpick threaded the flag
@@ -425,7 +424,6 @@ def gather_impl_review_context(
             composed_body_chars=len(composed_body) + len(advise_findings),
         ),
         "issue_body": composed_body,
-        "ci_status": "",
         "review_comments": "",
         "pr_description": "",
         "advise_findings": advise_findings,

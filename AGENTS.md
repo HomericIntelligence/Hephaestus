@@ -9,16 +9,17 @@ for the catalog of skills the agents invoke, see the [`skills/`](skills/) direct
 
 The default `hephaestus-automation-loop` path is the queue-based in-process
 pipeline in `hephaestus.automation.pipeline.coordinator`. The coordinator owns
-nine in-memory stage queues and dispatches agent/build/git jobs to a worker
+eight in-memory stage queues and dispatches agent/build/git jobs to a worker
 pool. Each agent job runs either **Claude Code** or **Codex**, chosen via the
 optional `--agent` CLI flag or auto-detected with a Claude preference when
 omitted (see `hephaestus.agents.runtime.add_agent_argument`).
 
 **Loop-owned approval policy:** `strict_review` runs the read-only
-`$athena:pr-review` skill between `pr_review` and CI. CI is observed but never
-required: green results or no configured checks let the loop apply
-`state:implementation-go`. `merge_wait` is the sole automatic armer and uses
-that loop-owned label; no workflow, status, artifact, or lease authorizes it.
+`$athena:pr-review` skill between `pr_review` and `merge_wait`. After a
+current-head GO, `strict_review` applies `state:implementation-go` itself.
+The loop never reads, changes, or relies on CI/CD. `merge_wait` is the sole
+automatic armer and uses that loop-owned label; no workflow, status, artifact,
+or lease authorizes it.
 
 | Queue stage | Module | Purpose |
 |-------------|--------|---------|
@@ -27,8 +28,7 @@ that loop-owned label; no workflow, status, artifact, or lease authorizes it.
 | plan_review | `hephaestus.automation.pipeline.stages.plan_review` | Strict plan review, amendment, and plan labels |
 | implementation | `hephaestus.automation.pipeline.stages.implementation` | Worktree creation, implementation, tests, commit/push, and PR creation |
 | pr_review | `hephaestus.automation.pipeline.stages.pr_review` | Inline PR review, validation, comment addressing, and implementation labels |
-| strict_review | `hephaestus.automation.pipeline.stages.strict_review` | Read-only `$athena:pr-review` pass for the current PR head |
-| ci | `hephaestus.automation.pipeline.stages.ci` | Non-blocking CI classification and CI-fix routing |
+| strict_review | `hephaestus.automation.pipeline.stages.strict_review` | Read-only Codex `$athena:pr-review` pass for the current PR head; applies loop-owned approval |
 | merge_wait | `hephaestus.automation.pipeline.stages.merge_wait` | Sole automatic armer after the loop-owned label; preserves post-merge learn |
 | finished | `hephaestus.automation.pipeline.stages.finished` | Terminal ledger and worktree cleanup/preservation |
 
@@ -114,8 +114,8 @@ review before merge.
 | `review_validator.py:_run_validation_session` | `Read,Glob,Grep` | Worktree validation of prior review comments; no write tools; GitHub updates stay in orchestrator code. |
 | `comment_difficulty.py:_run_classifier_session` | `Read,Glob,Grep` | Worktree comment classification; no write tools; result is parsed JSON only. |
 | `pr_review_core.py:_invoke_and_parse_review_session` | `Read,Glob,Grep` | Worktree PR analysis (invoked once, or twice on a `PromptTooLongError` retry with a smaller diff budget, #1847); no write tools; review posting is handled outside the agent call. |
-| `pipeline/stages/strict_review.py:StrictReviewStage` | `Read,Glob,Grep,Bash,Agent,Skill,WebFetch` | `$athena:pr-review` is explicitly invoked in a synchronized isolated worktree through `AgentJob(sandbox="read-only")`; the worker verifies its local HEAD matches the captured remote SHA and has no tracked or untracked changes. |
-| `_implement_phase.py:ImplementPhase._run_claude_impl_session` | `Read,Write,Edit,Glob,Grep,Bash` | Initial implementation runs in the isolated issue worktree and remains subject to review, CI, and branch protection. |
+| `pipeline/stages/strict_review.py:StrictReviewStage` | `Read,Glob,Grep,Bash,Agent,Skill,WebFetch` | `$athena:pr-review` is dispatched through Codex in a synchronized `AgentJob(sandbox="read-only")`, because Claude's non-interactive tool surface cannot technically constrain the skill's required Bash evidence collection. The worker verifies its local HEAD matches the captured remote SHA and has no tracked or untracked changes. |
+| `_implement_phase.py:ImplementPhase._run_claude_impl_session` | `Read,Write,Edit,Glob,Grep,Bash` | Initial implementation runs in the isolated issue worktree and remains subject to review and branch protection. |
 | `_review_phase.py:ReviewPhase._resume_impl_with_feedback` | `Read,Write,Edit,Glob,Grep,Bash` | Review-feedback fixes resume the implementer in the isolated issue worktree and cannot bypass PR review or merge gates. |
 | `address_review_core.py:run_address_fix_session` | `Read,Write,Edit,Glob,Grep,Bash,Task,Skill` | Review-thread fixes run in the isolated issue worktree; `Task`/`Skill` support per-comment sub-agents and skill-advisor routing. |
 | `github/fleet_sync/conflict_resolver.py:_run_conflict_agent` | `none` | Claude-only conflict planner receives only nonce-fenced conflict text and returns JSON edits; direct runtimes are rejected because their tool surfaces cannot provide the zero-tool contract, no agent invocation occurs in `--dry-run`, and the host validates/writes only known paths, owns all Git continuation/signing/push, snapshots remote URLs, and pins the final lease to the discovered branch SHA. |

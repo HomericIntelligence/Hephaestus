@@ -14,7 +14,7 @@ A piece of work is **done** when every item below is true.
 | 1 | Branch named `<issue-number>-<description>` | Convention (PR reviewer) |
 | 2 | PR body contains the literal line `Closes #<issue-number>` (capital C, no colon, on its own line) | CI gate `pr-policy` (`.github/workflows/_required.yml`) |
 | 3 | Every commit on the branch is cryptographically signed and DCO-signed (`git commit -S -s`) | CI gate `pr-policy` |
-| 4 | Auto-merge is armed only by `merge_wait`, after the loop has run `$athena:pr-review` for the current head, observed green or absent checks, and applied `state:implementation-go`. | Queue gate; advisory `auto-merge-policy` and human review |
+| 4 | Auto-merge is armed only by `merge_wait`, after `strict_review` has run `$athena:pr-review` for the current head and applied `state:implementation-go`. | Queue gate; advisory `auto-merge-policy` and human review |
 | 5 | Commit messages follow Conventional Commits (`type(scope): description`) | CI gate `pr-policy` (Check 3) + local `commit-msg` hook `conventional-commit-msg` |
 | 6 | `uv run ruff check hephaestus/ tests/` passes | CI job `lint` |
 | 7 | `uv run ruff format --check hephaestus/ tests/` passes (no files would be reformatted) | CI job `lint` |

@@ -6,15 +6,11 @@ state before relying on this record for a merge decision.
 
 ## CI is not automation-loop authorization
 
-GitHub Actions validates repository code. The automation loop may observe
-those checks, but it never needs a workflow, status context, artifact, lease,
-or `pull_request_target` event to run. In a repository with no configured
-checks, the loop treats that observation as `NO_CHECKS` and continues.
-
-The loop itself runs `$athena:pr-review`, then observes CI. Only after a green
-observation or `NO_CHECKS` does it apply `state:implementation-go`. The label
-is the loop-owned signal consumed by its merge-wait step; it is not produced or
-validated by CI/CD.
+GitHub Actions validates repository code independently. The automation loop
+never reads, changes, or relies on checks, workflows, statuses, artifacts,
+leases, or `pull_request_target` events. After `$athena:pr-review` returns a
+current-head GO, the loop applies `state:implementation-go`; `merge_wait`
+consumes that label. CI/CD neither produces nor validates it.
 
 ## Current required contexts
 

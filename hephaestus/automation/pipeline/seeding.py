@@ -261,20 +261,19 @@ def classify_issue(facts: IssueFacts) -> Classification:
 
     # Routing logic: open PR path
     if facts.pr_is_open:
-        # A label never bypasses strict review: it may be legacy, stale, or
-        # forged and is not the authenticated proof required by merge_wait.
-        # issue-label fallback preserves compatibility with pre-PR-label
-        # snapshots while PR-level no-go remains authoritative.
+        # The loop itself applies implementation-go only after a current-head
+        # Athena PR-review pass. It is therefore its durable handoff to the
+        # sole armer; no CI status or external review artifact is consulted.
         if facts.pr_has_implementation_go:
             return (
-                StageName.STRICT_REVIEW,
+                StageName.MERGE_WAIT,
                 f"#{facts.number} open PR with {STATE_IMPLEMENTATION_GO}",
             )
         if facts.pr_has_implementation_no_go:
             return StageName.PR_REVIEW, f"#{facts.number} open PR awaiting review"
         if _label_at_or_past(state_label, STATE_IMPLEMENTATION_GO):
             return (
-                StageName.STRICT_REVIEW,
+                StageName.MERGE_WAIT,
                 f"#{facts.number} open PR with {STATE_IMPLEMENTATION_GO}",
             )
         # Open PR, no implementation-go → awaiting PR review
@@ -542,7 +541,7 @@ def seed_from_cli(
                 SeedEntry(
                     kind="pr",
                     identifier=pr,
-                    stage=StageName.STRICT_REVIEW,
+                    stage=StageName.MERGE_WAIT,
                     reason=f"PR #{pr} carries {STATE_IMPLEMENTATION_GO}",
                     pr_number=pr,
                 )

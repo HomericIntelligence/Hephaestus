@@ -280,9 +280,10 @@ valid issue reference, signed commits, or DCO sign-offs:
    with `git commit -s -S`.
 
 Do not enable auto-merge manually. The queue arms it only after it has run
-`$athena:pr-review` for the PR's current head, observed green or absent checks,
-and applied `state:implementation-go`. `merge_wait` consumes that loop-owned
-label; the advisory `auto-merge-policy` is not the authorization mechanism.
+`$athena:pr-review` for the PR's current head and applied
+`state:implementation-go`. `merge_wait` consumes that loop-owned label; the
+loop never reads, changes, or relies on CI/CD, and the advisory
+`auto-merge-policy` is not the authorization mechanism.
 
 Also: ensure tests pass locally (`uv run pytest`), keep commits to logical units with
 [conventional commit](https://www.conventionalcommits.org/) messages, and never bypass

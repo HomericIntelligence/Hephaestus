@@ -85,7 +85,6 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, TypeAlias
 
-from hephaestus.automation.agent_config import DEFAULT_CI_POLL_MAX_WAIT
 from hephaestus.automation.models import IssueInfo
 from hephaestus.automation.pipeline import admission as _admission, seeding as _seeding
 from hephaestus.automation.pipeline.events import StageEvent, encode_stage_event
@@ -101,7 +100,6 @@ from hephaestus.automation.pipeline.routing import (
     StageOutcome,
 )
 from hephaestus.automation.pipeline.stages import (
-    CiStage,
     Continue,
     FinishedStage,
     ImplementationStage,
@@ -163,7 +161,6 @@ _WAKE_HANDLE = object()
 _DRAIN_ORDER: tuple[StageName, ...] = (
     StageName.FINISHED,
     StageName.MERGE_WAIT,
-    StageName.CI,
     StageName.STRICT_REVIEW,
     StageName.PR_REVIEW,
     StageName.IMPLEMENTATION,
@@ -227,16 +224,8 @@ class PipelineConfig:
     drive_green_all: bool = False
     include_bot_prs: bool = True
     include_all_authors: bool = False
-    # When False, the CI stage's pre-fix mechanical rebase is skipped and every
-    # behind/conflicting PR falls through to the fix agent (``--no-mechanical-rebase``).
-    # Read by ``stages/ci.py`` via ``ctx.config.enable_mechanical_rebase``.
-    enable_mechanical_rebase: bool = True
-    # Wall-clock seconds the CI stage may wait for pending checks before timing
-    # out. Mirrors ``CIDriverOptions.poll_max_wait`` / ``--poll-max-wait``.
-    poll_max_wait: int = DEFAULT_CI_POLL_MAX_WAIT
     # Per-budget overrides applied on top of the ROUTES defaults by the
-    # coordinator's budget accessor. ``--max-fix-iterations N`` maps to
-    # ``{"ci_fix": N}`` so the CI-fix attempt budget is caller-tunable.
+    # coordinator's budget accessor.
     budget_overrides: dict[str, int] = field(default_factory=dict)
     # Configurable argv for the optional pre-PR unit-test gate. The
     # implementation stage reads this vector instead of hardcoding the test
@@ -295,8 +284,6 @@ class _StageRunConfig:
     drive_green_all: bool = False
     include_bot_prs: bool = True
     include_all_authors: bool = False
-    enable_mechanical_rebase: bool = True
-    poll_max_wait: int = DEFAULT_CI_POLL_MAX_WAIT
     pre_pr_test_argv: tuple[str, ...] = PRE_PR_TEST_ARGV
 
 
@@ -446,8 +433,6 @@ class Coordinator:
             drive_green_all=config.drive_green_all,
             include_bot_prs=config.include_bot_prs,
             include_all_authors=config.include_all_authors,
-            enable_mechanical_rebase=config.enable_mechanical_rebase,
-            poll_max_wait=config.poll_max_wait,
             pre_pr_test_argv=config.pre_pr_test_argv,
             run_pre_pr_tests=config.run_pre_pr_tests,
         )
@@ -464,7 +449,6 @@ class Coordinator:
             StageName.IMPLEMENTATION: ImplementationStage(),
             StageName.PR_REVIEW: PrReviewStage(),
             StageName.STRICT_REVIEW: StrictReviewStage(),
-            StageName.CI: CiStage(),
             StageName.MERGE_WAIT: MergeWaitStage(),
             StageName.FINISHED: FinishedStage(self.ledger, self.preserved),
         }
@@ -502,8 +486,8 @@ class Coordinator:
         """Config-aware budget accessor injected as ``StageContext.budget_fn``.
 
         A ``config.budget_overrides`` entry (e.g. ``--max-fix-iterations N`` ->
-        ``{"ci_fix": N}``) takes precedence over the ROUTES default, so a caller
-        can tune a stage's per-item budget without editing the routing table.
+        takes precedence over the ROUTES default, so a caller can tune a
+        stage's per-item budget without editing the routing table.
         """
         override = self.config.budget_overrides.get(name)
         if override is not None:
@@ -1268,7 +1252,7 @@ class Coordinator:
         RETRY timer contract (base.py): the stage records its backoff in
         ``payload["retry_delay_s"]`` immediately before returning; a missing
         key means "retry on the next drain tick". Under dry-run a DELAYED
-        retry waits on real-world progress (CI runs, PR merges) the preview
+        retry waits on real-world progress (for example, PR merges) the preview
         will never make, so the item finishes instead of stalling the heap.
         """
         delay = item.payload.pop("retry_delay_s", None)

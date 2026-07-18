@@ -88,13 +88,12 @@ class TestPRReviewAnalysisPrompt:
         assert "PR #10" in out
         assert "issue #5" in out
 
-    def test_omits_policy_checks_defers_to_ci_gates(self) -> None:
-        """The reviewer no longer enforces repo policy — CI gates own it.
+    def test_omits_submission_policy_checks(self) -> None:
+        """The reviewer does not consume submission policy or CI state.
 
-        Closes #N and signed commits are enforced by CI. Auto-merge containment
-        is enforced by the queue pipeline's strict-review gate, not the
-        in-loop LLM reviewer (which fabricated false POLICY VIOLATIONs from
-        empty/stale data).
+        Auto-merge containment is enforced by the queue pipeline's
+        strict-review gate, not the in-loop LLM reviewer (which fabricated
+        false POLICY VIOLATIONs from empty/stale data).
         """
         out = prompts.get_pr_review_analysis_prompt(pr_number=1, issue_number=1)
         # The removed policy machinery must be gone.
@@ -103,8 +102,10 @@ class TestPRReviewAnalysisPrompt:
         assert "signature_valid" not in out
         assert "COMMITS_SIGNING_STATE" not in out
         assert "Policy checks (MANDATORY" not in out
-        # But the prompt should tell the reviewer the CI gates own policy.
-        assert "pr-policy" in out
+        # The prompt must keep policy outside this CI-free loop.
+        assert "submission policy" in out
+        assert "pr-policy" not in out
+        assert "CI Status" not in out
         assert "independent strict-review" in out
         assert "merge-wait" in out
         assert "acceptable to merge" not in out

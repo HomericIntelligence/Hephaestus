@@ -25,7 +25,7 @@ Remap the loop into a single-coordinator, queue-based state machine:
 
 1. **One coordinator event loop** (the process main thread) owns eight
    in-memory stage queues (`repo → planning → plan_review → implementation →
-   pr_review → ci → merge_wait → finished`) and performs ONLY arg parsing +
+   pr_review → strict_review → merge_wait → finished`) and performs ONLY arg parsing +
    queue seeding, draining, validation/logging, GitHub API mutation, and
    routing. It never launches agent workflows or build/test commands.
 2. **One worker pool** runs ALL agent invocations, build/test subprocesses,

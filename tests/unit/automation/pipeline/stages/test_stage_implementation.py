@@ -506,7 +506,7 @@ class TestGitErrorRetryCap:
     def test_adopted_impl_go_worktree_failure_retries_worktree_not_ci(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A failed adopted worktree sync must not flow through ADOPTED_CI."""
+        """A failed adopted worktree sync must not bypass the adopted path."""
         stage = ImplementationStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state="WORKTREE_WAIT")

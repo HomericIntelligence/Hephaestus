@@ -1,8 +1,8 @@
-# Runbook: CI-Driver Stall
+# Runbook: Drive-Green Stall
 
 Use this runbook when a PR carries loop-owned `state:implementation-go` and
-remains blocked after the automation loop has observed CI. `merge_wait` is the
-sole automatic armer and conditionally arms the current head.
+remains blocked. `merge_wait` is the sole automatic armer and conditionally
+arms the current head; CI/CD is outside the loop.
 
 ## Containment
 
@@ -31,7 +31,7 @@ uv run hephaestus-automation-loop --prs <N> --phases drive-green --loops 1 --max
 ## Follow-Up
 
 If the label is absent, do not attempt to arm: the loop must complete its
-review and CI-observation path first.
+current-head `$athena:pr-review` path first.
 
 ## See Also
 

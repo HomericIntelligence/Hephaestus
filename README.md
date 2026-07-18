@@ -291,7 +291,7 @@ with `--help` to see full usage.
 
 | Command | Description |
 |---|---|
-| `hephaestus-automation-loop` | Multi-repo queue-based automation pipeline using Claude Code or Codex (repo → planning → plan_review → implementation → pr_review → strict_review → ci → merge_wait → finished; legacy implementation-GO inputs route through `strict_review`) |
+| `hephaestus-automation-loop` | Multi-repo queue-based automation pipeline using Claude Code or Codex (repo → planning → plan_review → implementation → pr_review → strict_review → merge_wait → finished; implementation-GO inputs resume at `merge_wait`) |
 | `hephaestus-plan-issues` | Bulk issue planning using Claude Code or Codex |
 | `hephaestus-implement-issues` | Bulk issue implementation using Claude Code or Codex in parallel worktrees |
 | `hephaestus-review-prs` | Read-only PR review automation using Claude Code or Codex in parallel worktrees |
@@ -456,8 +456,8 @@ hephaestus-check-complexity --help
 
 The `main` branch is protected; all changes go through a pull request. CI blocks
 PRs that fail its issue-reference, signature, and DCO checks. The loop runs
-`$athena:pr-review`, observes CI (with `NO_CHECKS` supported), writes
-`state:implementation-go`, then arms only in `merge_wait`. The
+`$athena:pr-review` and then writes `state:implementation-go`; it arms only in
+`merge_wait`. The loop never reads, changes, or relies on CI/CD. The
 `auto-merge-policy` check is advisory; no CI workflow authorizes the loop.
 
 1. Create a feature branch named `<issue-number>-description`

@@ -194,15 +194,13 @@ class TestWorkerPoolSubmitComplete:
         assert result.ok is True
         assert mock_session.call_args.kwargs["sandbox"] == "read-only"
 
-    def test_read_only_agent_job_scopes_claude_to_declared_tools(
+    def test_read_only_agent_job_scopes_claude_to_read_tools(
         self,
         pool: WorkerPool,
         completion_q: CompletionQueue,
     ) -> None:
-        """A read-only job propagates its explicit tool contract to Claude."""
-        job = _agent_job(
-            sandbox="read-only", allowed_tools="Read,Glob,Grep,Bash,Agent,Skill,WebFetch"
-        )
+        """A read-only job keeps Claude's historic restricted tool scope."""
+        job = _agent_job(sandbox="read-only")
         with (
             patch(f"{_WP}.resolve_agent", return_value="claude"),
             patch(
@@ -214,9 +212,7 @@ class TestWorkerPoolSubmitComplete:
             _handle, result = completion_q.get(timeout=10)
 
         assert result.ok is True
-        assert (
-            invoke.call_args.kwargs["allowed_tools"] == "Read,Glob,Grep,Bash,Agent,Skill,WebFetch"
-        )
+        assert invoke.call_args.kwargs["allowed_tools"] == "Read,Glob,Grep"
         assert invoke.call_args.kwargs["permission_mode"] == "dontAsk"
 
     def test_expected_head_mismatch_blocks_agent_before_invocation(
@@ -282,7 +278,7 @@ class TestWorkerPoolSubmitComplete:
             timeout_s=60,
         )
 
-        pool.submit(job, StageName.CI)
+        pool.submit(job, StageName.PR_REVIEW)
         handle, result = completion_q.get(timeout=10)
 
         assert handle.job is job
@@ -310,7 +306,7 @@ class TestWorkerPoolSubmitComplete:
         with patch(f"{_WP}.subprocess.run", return_value=completed):
             pool.submit(
                 job,
-                StageName.CI,
+                StageName.PR_REVIEW,
                 claim_key="test/repo#123",
                 claim_stage="ci",
             )
@@ -365,7 +361,7 @@ class TestWorkerPoolSubmitComplete:
             with patch(f"{_WP}.subprocess.run", side_effect=complete_after_both_workers_enter):
                 pool.submit(
                     jobs[0],
-                    StageName.CI,
+                    StageName.PR_REVIEW,
                     claim_key="test/repo#123",
                     claim_stage="ci",
                 )
@@ -410,7 +406,7 @@ class TestWorkerPoolSubmitComplete:
             timeout_s=60,
         )
 
-        pool.submit(job, StageName.CI)
+        pool.submit(job, StageName.PR_REVIEW)
         _, result = completion_q.get(timeout=10)
 
         assert result.ok is False
@@ -433,7 +429,7 @@ class TestWorkerPoolSubmitComplete:
             f"{_WP}.subprocess.run",
             side_effect=subprocess.TimeoutExpired(cmd=["sleep", "60"], timeout=1),
         ):
-            pool.submit(job, StageName.CI)
+            pool.submit(job, StageName.PR_REVIEW)
             _, result = completion_q.get(timeout=10)
 
         assert result.ok is False
@@ -737,7 +733,7 @@ class TestInterruptedPostCheck:
             patch(f"{_WP}.claude_invoke.invoke_claude_with_session") as mock_invoke,
         ):
             mock_invoke.return_value = ("done", "sid")
-            pool.submit(job, StageName.CI)
+            pool.submit(job, StageName.PR_REVIEW)
             assert started.wait(timeout=10), "job never started"
             shutdown_event.set()
             _handle, result = completion_q.get(timeout=10)
@@ -1064,7 +1060,7 @@ class TestGitOps:
             ) as mock_commit,
             patch("hephaestus.automation.git_utils.push_branch") as mock_push,
         ):
-            pool.submit(job, StageName.CI)
+            pool.submit(job, StageName.PR_REVIEW)
             _, result = completion_q.get(timeout=10)
 
         mock_commit.assert_called_once_with(
@@ -1095,7 +1091,7 @@ class TestGitOps:
             patch("hephaestus.automation.git_utils.commit_if_changes", return_value=False),
             patch("hephaestus.automation.git_utils.push_branch") as mock_push,
         ):
-            pool.submit(job, StageName.CI)
+            pool.submit(job, StageName.PR_REVIEW)
             _, result = completion_q.get(timeout=10)
 
         mock_push.assert_not_called()
@@ -1118,7 +1114,7 @@ class TestGitOps:
             patch("hephaestus.automation.git_utils.commit_if_changes") as mock_commit,
             patch("hephaestus.automation.git_utils.push_branch") as mock_push,
         ):
-            pool.submit(job, StageName.CI)
+            pool.submit(job, StageName.PR_REVIEW)
             _, result = completion_q.get(timeout=10)
 
         mock_commit.assert_not_called()
@@ -1540,7 +1536,7 @@ class TestShutdownAndCancel:
             mock_invoke.return_value = ("done", "sid")
             pool.submit(slow_job, StageName.PLANNING)
             assert started.wait(timeout=10), "slow job never started"
-            pool.submit(queued_job, StageName.CI)  # queued behind the busy worker
+            pool.submit(queued_job, StageName.PR_REVIEW)  # queued behind the busy worker
             pool.shutdown()  # sets shutdown event + cancel_futures=True
             release.set()
 
@@ -1565,7 +1561,7 @@ class TestOnFutureDone:
         """A cancelled future synthesizes no completion tuple."""
         handle = JobHandle(
             job=BuildTestJob(repo="r", cwd=Path("/tmp"), argv=("true",), timeout_s=1),
-            on_done_state=StageName.CI,
+            on_done_state=StageName.PR_REVIEW,
         )
         future: Future[JobResult] = Future()
         future.cancel()
@@ -1596,7 +1592,7 @@ class TestOnFutureDone:
         """RuntimeError from future.result() becomes worker_crash with traceback."""
         handle = JobHandle(
             job=BuildTestJob(repo="r", cwd=Path("/tmp"), argv=("true",), timeout_s=1),
-            on_done_state=StageName.CI,
+            on_done_state=StageName.PR_REVIEW,
         )
         future: Future[JobResult] = Future()
         future.set_exception(RuntimeError("boom"))
@@ -1632,7 +1628,7 @@ class TestOnFutureDone:
         """Process-control escapes stay at lower severity and do not log tracebacks."""
         handle = JobHandle(
             job=BuildTestJob(repo="r", cwd=Path("/tmp"), argv=("true",), timeout_s=1),
-            on_done_state=StageName.CI,
+            on_done_state=StageName.PR_REVIEW,
         )
         future: Future[JobResult] = Future()
         future.set_exception(exc)
@@ -1658,7 +1654,7 @@ class TestOnFutureDone:
         monkeypatch.setattr(f"{_WP}._ERR_MAX", small_err_max)
         handle = JobHandle(
             job=BuildTestJob(repo="r", cwd=Path("/tmp"), argv=("true",), timeout_s=1),
-            on_done_state=StageName.CI,
+            on_done_state=StageName.PR_REVIEW,
         )
         future: Future[JobResult] = Future()
         future.set_exception(RuntimeError("w" * 200))

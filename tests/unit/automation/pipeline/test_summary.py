@@ -108,7 +108,7 @@ class TestPrintSummaryRows:
             _item(2, StageName.FINISHED, passed=False, reason="tests failed"),
             _item(3, StageName.FINISHED, passed=False, reason="skip: state:skip"),
             _item(4, StageName.FINISHED, passed=False, reason="blocked: human threads"),
-            _item(5, StageName.CI, passed=False, reason="resumable at ci"),
+            _item(5, StageName.PR_REVIEW, passed=False, reason="resumable at pr_review"),
         ]
 
         with caplog.at_level(logging.INFO):
@@ -119,7 +119,7 @@ class TestPrintSummaryRows:
         assert "FAIL:tests failed" in text
         assert "SKIP" in text
         assert "BLOCKED" in text
-        assert "RESUMABLE at ci" in text
+        assert "RESUMABLE at pr_review" in text
         assert "#1" in text and "!11" in text
 
     def test_aggregates_and_stats(self, caplog: pytest.LogCaptureFixture) -> None:
@@ -221,7 +221,7 @@ class TestJsonEnvelope:
         """The envelope carries dispositions, loops, resumable, preserved."""
         items = [
             _item(1, StageName.FINISHED, passed=True, reason="ok"),
-            _item(2, StageName.CI, passed=False, reason="resumable at ci"),
+            _item(2, StageName.PR_REVIEW, passed=False, reason="resumable at pr_review"),
         ]
 
         print_summary(
@@ -237,7 +237,7 @@ class TestJsonEnvelope:
         assert envelope["message"] == "pipeline interrupted"
         assert envelope["dispositions"] == {"pass": 1, "resumable": 1}
         assert envelope["loops_run"] == 3
-        assert envelope["resumable"] == ["repo-a#2@ci"]
+        assert envelope["resumable"] == ["repo-a#2@pr_review"]
         assert envelope["preserved_worktrees"] == [[2, "/wt/2"]]
 
     @pytest.mark.parametrize(

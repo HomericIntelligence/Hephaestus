@@ -62,40 +62,21 @@ class TestLoopRunnerPureFunctions:
 
 
 # ---------------------------------------------------------------------------
-# ci_driver — confirmed from ci_driver.py:82-97
+# ci_driver — confirmed from ci_driver.py
 # ---------------------------------------------------------------------------
 class TestCIDriverPureFunctions:
     """Test pure helpers in ci_driver (omitted from coverage measurement)."""
 
-    def test_pr_is_failing_blocked_merge_state(self) -> None:
-        # mergeStateStatus == "BLOCKED" → True regardless of rollup
-        from hephaestus.automation.ci_driver import _pr_is_failing
+    def test_open_non_draft_pr_needs_loop_review(self) -> None:
+        from hephaestus.automation.ci_driver import _pr_needs_loop_review
 
-        pr = {"isDraft": False, "mergeStateStatus": "BLOCKED", "statusCheckRollup": []}
-        assert _pr_is_failing(pr) is True
+        assert _pr_needs_loop_review({"isDraft": False, "state": "OPEN"}) is True
 
-    def test_pr_is_failing_draft_is_not_failing(self) -> None:
-        # Draft PRs are excluded — ci_driver.py:85
-        from hephaestus.automation.ci_driver import _pr_is_failing
+    def test_draft_or_closed_pr_does_not_need_loop_review(self) -> None:
+        from hephaestus.automation.ci_driver import _pr_needs_loop_review
 
-        pr = {"isDraft": True, "mergeStateStatus": "BLOCKED", "statusCheckRollup": []}
-        assert _pr_is_failing(pr) is False
-
-    def test_pr_is_failing_all_success(self) -> None:
-        from hephaestus.automation.ci_driver import _pr_is_failing
-
-        pr = {
-            "isDraft": False,
-            "mergeStateStatus": "MERGEABLE",
-            "statusCheckRollup": [{"conclusion": "SUCCESS"}],
-        }
-        assert _pr_is_failing(pr) is False
-
-    def test_pr_is_failing_empty_rollup_not_blocked(self) -> None:
-        from hephaestus.automation.ci_driver import _pr_is_failing
-
-        pr = {"isDraft": False, "mergeStateStatus": "MERGEABLE", "statusCheckRollup": []}
-        assert _pr_is_failing(pr) is False
+        assert _pr_needs_loop_review({"isDraft": True, "state": "OPEN"}) is False
+        assert _pr_needs_loop_review({"isDraft": False, "state": "CLOSED"}) is False
 
 
 # ---------------------------------------------------------------------------

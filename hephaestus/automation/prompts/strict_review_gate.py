@@ -9,7 +9,6 @@ from __future__ import annotations
 from ._shared import fence_content
 from .catalog import PromptCatalog
 
-
 def build_strict_review_prompt(
     pr_number: int,
     issue_number: int,

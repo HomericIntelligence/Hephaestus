@@ -10,8 +10,7 @@ binding contract):
 - States: ENTER -> GATE -> WORKTREE_WAIT -> DIRTY_DECISION_WAIT ->
   ADVISE_WAIT -> IMPLEMENT_WAIT -> TEST_WAIT -> TESTFIX_WAIT ->
   COMMIT_PUSH_WAIT -> PR_CREATE. The existing-PR fast path short-circuits
-  WORKTREE_WAIT -> DIRTY_DECISION_WAIT -> ADOPTED (ADVANCE to pr_review)
-  or ADOPTED_CI (fail-back to ci for implementation-go PRs).
+  WORKTREE_WAIT -> DIRTY_DECISION_WAIT -> ADOPTED (ADVANCE to pr_review).
 - Budgets: ``implement`` = 2 (bounds implement attempts INCLUDING
   agent_error retries — the doc's "agent_error -> RETRY (consumes the
   implement budget)"), ``test_fix`` = 1 (one fix attempt on red pre-PR
@@ -20,9 +19,8 @@ binding contract):
   skips the item regardless of plan-go/implementation-go, before either the
   existing-PR fast path or the fresh-implement plan-go gate below. Then the
   existing-PR fast path (``_review_existing_pr`` semantics): a PR already
-  carrying ``state:implementation-go`` fails back
-  ``already_implementation_go_pr`` (routes to ci) with ``item.pr`` /
-  ``item.branch`` set for the ci stage; a PR without it adopts the PR's
+  carrying ``state:implementation-go`` routes directly to ``merge_wait``;
+  a PR without it adopts the PR's
   REAL head branch, re-ensures the auto-merge deferral [durable], cuts a
   worktree on the ADOPTED branch (``refresh_base=False`` +
   ``sync_to_remote`` — the anti-clobber reset of
@@ -128,7 +126,6 @@ GATE = "GATE"
 WORKTREE_WAIT = "WORKTREE_WAIT"
 DIRTY_DECISION_WAIT = "DIRTY_DECISION_WAIT"
 ADOPTED = "ADOPTED"
-ADOPTED_CI = "ADOPTED_CI"
 ADVISE_WAIT = "ADVISE_WAIT"
 IMPLEMENT_WAIT = "IMPLEMENT_WAIT"
 TEST_WAIT = "TEST_WAIT"
@@ -142,7 +139,6 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
     WORKTREE_WAIT: "_worktree_wait",
     DIRTY_DECISION_WAIT: "_dirty_decision_wait",
     ADOPTED: "_adopted",
-    ADOPTED_CI: "_adopted_ci",
     ADVISE_WAIT: "_advise_wait",
     IMPLEMENT_WAIT: "_implement_wait",
     TEST_WAIT: "_test_wait",
@@ -350,7 +346,7 @@ class ImplementationStage(Stage):
             # Worktree creation failed: transient infrastructure, not an
             # implement outcome. If the retry budget remains, retry the
             # worktree job itself; do not let adopted-PR state fall through
-            # to ADOPTED/ADOPTED_CI without a valid synced worktree.
+            # to ADOPTED without a valid synced worktree.
             outcome = self._git_retry(item, "worktree creation failed")
             if outcome.disposition is Disposition.RETRY:
                 item.state = WORKTREE_WAIT
@@ -364,7 +360,7 @@ class ImplementationStage(Stage):
             # but run implement/test/push with the fenced feedback.
             adopted_next = IMPLEMENT_WAIT
         elif item.payload.get("existing_pr_impl_go"):
-            adopted_next = ADOPTED_CI
+            adopted_next = ADOPTED
         else:
             adopted_next = ADOPTED if item.payload.get("existing_pr") else ADVISE_WAIT
         if not item.payload.get("worktree_dirty"):
@@ -401,17 +397,6 @@ class ImplementationStage(Stage):
             item.branch,
         )
         return StageOutcome(Disposition.ADVANCE, f"existing PR #{item.pr}")
-
-    def _adopted_ci(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """ADOPTED_CI routes an implementation-go PR to CI after worktree setup."""
-        issue = _issue_number(item)
-        logger.info(
-            "implementation:%d: adopted implementation-go PR #%s (branch %r); routing to ci",
-            issue,
-            item.pr,
-            item.branch,
-        )
-        return StageOutcome(Disposition.FAIL_BACK, "already_implementation_go_pr")
 
     def _advise_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """ADVISE_WAIT either skips advice or submits the advise job."""

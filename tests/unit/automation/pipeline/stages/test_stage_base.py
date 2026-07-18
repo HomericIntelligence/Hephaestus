@@ -14,10 +14,8 @@ from hephaestus.automation.pipeline.stages import (
     PlanReviewStage,
     Stage,
     base as stage_base,
-    ci,
 )
 from hephaestus.automation.pipeline.stages.base import (
-    BACKOFF_CAP_S,
     Continue,
     JobRequest,
     StageContext,
@@ -109,15 +107,6 @@ class TestStepResultTypes:
         """JobRequest names the state entered after on_job_done."""
         request = JobRequest(job=None, on_done_state="EVAL")  # type: ignore[arg-type]
         assert request.on_done_state == "EVAL"
-
-
-class TestSharedBackoffCap:
-    """The active CI poll backoff cap is owned once by the stage base module."""
-
-    def test_backoff_cap_is_shared_by_ci(self) -> None:
-        """The active CI stage reads the exported cap from base.py."""
-        assert BACKOFF_CAP_S == 60
-        assert ci.BACKOFF_CAP_S == BACKOFF_CAP_S
 
 
 class TestAgentProvider:

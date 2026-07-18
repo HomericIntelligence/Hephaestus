@@ -30,7 +30,8 @@ import logging
 
 from hephaestus.automation.agent_config import implementer_model, learn_claude_timeout
 from hephaestus.automation.learn import build_learn_prompt
-from hephaestus.automation.session_naming import AGENT_CI_DRIVER
+from hephaestus.automation.session_naming import AGENT_LEARNINGS
+from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_GO
 from hephaestus.prompts import PromptCatalog
 
 from .base import (
@@ -66,15 +67,15 @@ def build_drive_green_learn_prompt(issue_number: int, pr_number: int) -> str:
 
     Module-level composed builder (NOT a closure): :class:`AgentJob` is frozen
     and prompt builders run in-worker, so the builder must be a top-level
-    function receiving everything via ``prompt_kwargs`` (mirrors
-    :func:`..ci.build_ci_fix_prompt`). Reuses ``learn.build_learn_prompt``
+    function receiving everything via ``prompt_kwargs``. Reuses
+    ``learn.build_learn_prompt``
     verbatim with the drive-green context string re-housed from
     ``post_merge_processor.run_drive_green_learnings`` so the learnings are
-    scoped to what made CI fail and how it was fixed.
+    scoped to the automation-loop review and merge path.
 
     Args:
         issue_number: GitHub issue number the merged PR closed.
-        pr_number: GitHub PR number that reached green and merged.
+        pr_number: GitHub PR number that merged.
 
     Returns:
         The full /learn prompt string.
@@ -189,6 +190,20 @@ class MergeWaitStage(Stage):
                 return self._route_merged(item, ctx)
             return terminal
         head_sha = str((pr_state or {}).get("headRefOid") or "")
+        reviewed_head = str(item.payload.get("pr_review_skill_head") or "")
+        if reviewed_head and reviewed_head != head_sha:
+            # A handoff from strict_review is head-bound. Contain a push that
+            # arrived after its post-label read and before this arm attempt.
+            try:
+                ctx.github.remove_labels(item.pr, [STATE_IMPLEMENTATION_GO])
+            except Exception as exc:
+                logger.error(
+                    "merge_wait: failed to revoke stale implementation-go on PR #%d: %s",
+                    item.pr,
+                    exc,
+                )
+                return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_revoke_failed")
+            return self._disable_and_fail(item, ctx, "review_stale", recoverable=True)
         has_go, _has_no_go = ctx.github.pr_has_implementation_state_label(item.pr)
         if not has_go:
             return self._disable_and_fail(item, ctx, "not_implementation_go", recoverable=True)
@@ -423,7 +438,7 @@ class MergeWaitStage(Stage):
             prompt_builder=build_drive_green_learn_prompt,
             cwd=_worktree_path(item, ctx),
             timeout_s=learn_claude_timeout(),
-            session_agent=AGENT_CI_DRIVER,
+            session_agent=AGENT_LEARNINGS,
             prompt_kwargs={
                 "issue_number": item.issue,
                 "pr_number": item.pr,

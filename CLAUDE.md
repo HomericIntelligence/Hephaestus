@@ -337,11 +337,11 @@ The required CI gate `pr-policy` and the PR reviewer enforce:
    DCO `Signed-off-by` trailer.
 
 `pr-policy` blocks PRs that fail those checks. The queue runs
-`$athena:pr-review` in-loop, then observes CI. A green observation or no
-configured checks lets the loop apply `state:implementation-go`; `merge_wait`
-is the sole automatic armer. CI workflows and external artifacts never grant
-that authority. Branch protection and required reviews still govern whether
-GitHub merges the PR.
+`$athena:pr-review` in-loop for the current PR head, then applies
+`state:implementation-go`; `merge_wait` is the sole automatic armer. The loop
+never reads, changes, or relies on CI/CD. CI workflows and external artifacts
+never grant that authority. Branch protection and required reviews still govern
+whether GitHub merges the PR.
 
 ```bash
 # 1. Create feature branch

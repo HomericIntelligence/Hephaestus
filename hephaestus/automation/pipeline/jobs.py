@@ -42,9 +42,6 @@ class AgentJob:
     # Existing agent jobs retain the established write-capable default; the
     # independent strict-review stage explicitly requests ``read-only``.
     sandbox: str = "workspace-write"
-    # A read-only job may need a narrower or broader tool subset than the
-    # default review surface. ``None`` preserves the historic default.
-    allowed_tools: str | None = None
     descr: str = ""
 
 

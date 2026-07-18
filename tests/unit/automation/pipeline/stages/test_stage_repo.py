@@ -251,7 +251,7 @@ class TestDiscover:
 
         assert isinstance(result, Continue)
         assert github.issue_reads == [8]
-        assert repo_item.payload["products"][0]["stage"] is StageName.STRICT_REVIEW
+        assert repo_item.payload["products"][0]["stage"] is StageName.MERGE_WAIT
         assert repo_item.payload["products"][0]["pr"] == 44
 
     def test_discover_failure_finishes_fail(
@@ -541,7 +541,7 @@ class TestDiscover:
         repo_item.payload["products"] = [
             {"number": 1, "stage": StageName.PLANNING, "reason": "r"},
             {"number": 2, "stage": None, "reason": "excluded"},
-            {"number": 3, "stage": StageName.CI, "reason": "r"},
+            {"number": 3, "stage": StageName.PR_REVIEW, "reason": "r"},
         ]
         repo_item.payload["seeded_count"] = 1
 
@@ -602,7 +602,7 @@ class TestProductToWorkItem:
     def test_issue_product_with_open_pr(self) -> None:
         item = product_to_work_item(
             "repo-a",
-            {"kind": "issue", "number": 9, "pr": 77, "stage": StageName.CI, "reason": "r"},
+            {"kind": "issue", "number": 9, "pr": 77, "stage": StageName.PR_REVIEW, "reason": "r"},
         )
 
         assert item is not None
@@ -610,7 +610,7 @@ class TestProductToWorkItem:
 
     def test_pr_product(self) -> None:
         item = product_to_work_item(
-            "repo-a", {"kind": "pr", "number": 66, "stage": StageName.CI, "reason": "orphan"}
+            "repo-a", {"kind": "pr", "number": 66, "stage": StageName.PR_REVIEW, "reason": "orphan"}
         )
 
         assert item is not None

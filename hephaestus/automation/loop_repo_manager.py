@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from hephaestus.automation.ci_driver import _pr_is_failing
 from hephaestus.automation.git_utils import COMMIT_POLICY_REWRITE_EXEC
 from hephaestus.automation.github_api import skip_epics
 from hephaestus.automation.state_labels import partition_epics
@@ -163,7 +162,7 @@ def _list_open_pr_meta(org: str, repo: str) -> list[dict[str, Any]]:
     """Return open PR numbers and author metadata, sorted ascending.
 
     Read-only helper for the pipeline repo stage's ``--drive-green-all``
-    orphan-PR discovery (#1817): PRs with no tracked issue route to the ci
+    orphan-PR discovery (#1817): PRs with no tracked issue route to strict
     stage. Raises RuntimeError on failures so discovery does not masquerade
     as a clean empty run.
     """
@@ -258,13 +257,12 @@ def _count_open_issues(org: str, repo: str) -> int:
 
 
 def _count_failing_prs(org: str, repo: str) -> int:
-    """Return count of open PRs that need drive-green attention.
+    """Return the number of open non-draft PRs needing loop attention.
 
-    Uses the same gh pr list shape and the same _pr_is_failing predicate
-    that ci_driver._discover_failing_prs uses, so the loop runner's SKIP
-    gate cannot drift from the driver's work list. Bounded by gh's
-    --limit 1000; cap-hit is logged but still treated as "has work" since
-    the actual driver discovery handles the same cap consistently.
+    The historical name remains for callers, but the loop deliberately reads
+    no check, workflow, status, or merge state. Its review/approval path is
+    driven only by PR openness and loop-owned labels. Bounded by gh's
+    --limit 1000; cap-hit is logged but still treated as "has work".
 
     Returns 0 on any gh / parse / timeout failure so the SKIP gate is
     fail-closed (we don't run the driver when we can't confirm work).
@@ -281,7 +279,7 @@ def _count_failing_prs(org: str, repo: str) -> int:
                 "--limit",
                 "1000",
                 "--json",
-                "number,isDraft,statusCheckRollup,mergeStateStatus",
+                "number,isDraft,state",
             ],
             timeout=NETWORK_TIMEOUT,
         )
@@ -296,7 +294,7 @@ def _count_failing_prs(org: str, repo: str) -> int:
             "[%s] _count_failing_prs hit gh's 1000-PR cap; gate may undercount",
             repo,
         )
-    return sum(1 for pr in pulls if _pr_is_failing(pr))
+    return sum(1 for pr in pulls if not pr.get("isDraft") and pr.get("state", "OPEN") == "OPEN")
 
 
 def _sort_repos_by_open_count(org: str, repos: list[str]) -> list[str]:

@@ -388,7 +388,7 @@ class WorkerPool:
                 if is_claude:
                     claude_kwargs: dict[str, Any] = {}
                     if job.sandbox == "read-only":
-                        claude_kwargs["allowed_tools"] = job.allowed_tools or "Read,Glob,Grep"
+                        claude_kwargs["allowed_tools"] = "Read,Glob,Grep"
                         claude_kwargs["permission_mode"] = "dontAsk"
                     stdout, _ = claude_invoke.invoke_claude_with_session(
                         repo=job.repo,

@@ -458,14 +458,13 @@ class PrReviewStage(Stage):
             cwd=_worktree_path(item, ctx),
             timeout_s=pr_reviewer_claude_timeout(),
             session_agent=AGENT_PR_REVIEWER,
-            # Diff / body / CI context are seeded into item.payload by
+            # Diff and body context are seeded into item.payload by
             # the coordinator (#1817), which owns the gh reads.
             prompt_kwargs={
                 "pr_number": item.pr,
                 "issue_number": item.issue,
                 "pr_diff": item.payload.get("pr_diff", ""),
                 "issue_body": item.payload.get("issue_body", ""),
-                "ci_status": item.payload.get("ci_status", ""),
                 "pr_description": item.payload.get("pr_description", ""),
                 "advise_findings": item.payload.get("advise_findings", ""),
                 "include_nitpicks": bool(

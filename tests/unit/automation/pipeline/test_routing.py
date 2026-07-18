@@ -27,7 +27,6 @@ class TestStageName:
             "implementation",
             "pr_review",
             "strict_review",
-            "ci",
             "merge_wait",
             "finished",
         }
@@ -197,7 +196,7 @@ class TestROUTES:
                 budgets={"pr_review_iter": 3, "pr_review_hard": 6},
             ),
             StageName.STRICT_REVIEW: Route(
-                next=StageName.CI,
+                next=StageName.MERGE_WAIT,
                 fail_routes={
                     "nogo": StageName.IMPLEMENTATION,
                     "head_changed": StageName.STRICT_REVIEW,
@@ -205,24 +204,13 @@ class TestROUTES:
                 },
                 budgets={"strict_review_iter": 1},
             ),
-            StageName.CI: Route(
-                next=StageName.MERGE_WAIT,
-                fail_routes={
-                    "fix_exhausted": StageName.IMPLEMENTATION,
-                    "not_implementation_go": StageName.STRICT_REVIEW,
-                    "review_stale": StageName.STRICT_REVIEW,
-                    "missing_worktree": StageName.IMPLEMENTATION,
-                    "no_pr": StageName.FINISHED,
-                    "*": StageName.CI,
-                },
-                budgets={"ci_fix": 1, "rebase": 2},
-            ),
             StageName.MERGE_WAIT: Route(
                 next=StageName.FINISHED,
                 fail_routes={
                     "closed": StageName.FINISHED,
                     "not_implementation_go": StageName.STRICT_REVIEW,
                     "arm_confirm_failed": StageName.STRICT_REVIEW,
+                    "review_stale": StageName.STRICT_REVIEW,
                     "*": StageName.FINISHED,
                 },
                 budgets={},
@@ -231,11 +219,10 @@ class TestROUTES:
         }
         assert expected == ROUTES
 
-    def test_ci_requires_strict_review_before_maintenance(self) -> None:
-        """Both absent implementation state and stale review return to strict review."""
-        ci_route = ROUTES[StageName.CI]
-        assert ci_route.fail_routes["not_implementation_go"] is StageName.STRICT_REVIEW
-        assert ci_route.fail_routes["review_stale"] is StageName.STRICT_REVIEW
+    def test_strict_review_advances_directly_to_merge_wait(self) -> None:
+        """The active loop has no CI/CD stage between review and merge wait."""
+        assert ROUTES[StageName.STRICT_REVIEW].next is StageName.MERGE_WAIT
+        assert "ci_fix" not in routing.budget_keys()
 
     def test_merge_budget_provenance_uses_stable_source_references(self) -> None:
         """#1902: merge-budget provenance should not pin volatile line numbers."""
@@ -256,7 +243,7 @@ class TestPipelineScope:
         trimmed = scope.trimmed_routes()
 
         assert StageName.FINISHED in trimmed
-        for stage in StageName:
+        for stage in ROUTES:
             assert stage in trimmed
             assert trimmed[stage].next == ROUTES[stage].next
 
@@ -275,7 +262,7 @@ class TestPipelineScope:
 
         assert len(trimmed) == 4
         assert StageName.REPO not in trimmed
-        assert StageName.CI not in trimmed
+        assert StageName.MERGE_WAIT not in trimmed
 
     def test_pipeline_scope_rewrites_out_of_scope_next_target(self) -> None:
         """Out-of-scope next targets are rewritten to FINISHED."""
@@ -338,9 +325,9 @@ class TestPipelineScope:
             PipelineScope(frozenset())
 
     def test_pipeline_scope_rejects_non_contiguous(self) -> None:
-        """A gapped scope (e.g. planning + ci) silently drops stages — reject it."""
+        """A gapped scope silently drops stages — reject it."""
         with pytest.raises(ValueError, match="contiguous"):
-            PipelineScope(frozenset({StageName.PLANNING, StageName.CI}))
+            PipelineScope(frozenset({StageName.PLANNING, StageName.STRICT_REVIEW}))
 
     def test_pipeline_scope_finished_never_breaks_contiguity(self) -> None:
         """FINISHED (universal sink) is allowed in any scope."""
