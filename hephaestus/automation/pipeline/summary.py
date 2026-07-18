@@ -57,11 +57,15 @@ def format_preserved_worktrees(preserved: Sequence[PreservedWorktree], script: s
     if not preserved:
         return []
     issue_nums = [number for _, number, _ in preserved]
-    issues_arg = " ".join(str(n) for n in issue_nums)
+    # ``--issues`` takes ONE comma-separated string (loop_runner._parse_issue_list);
+    # a space-joined list makes argparse read only the first number and reject the
+    # rest, and ``--resume`` is not an option on this CLI at all (#2281). The loop
+    # resumes a preserved worktree by re-seeding the same ``--issues``.
+    issues_arg = ",".join(str(n) for n in issue_nums)
     lines: list[str] = ["\nPreserved worktrees (contain uncommitted changes):"]
     lines.extend(f"  #{number}: {path}" for _, number, path in preserved)
     lines.append("\nRerun these issues after inspecting/cleaning the worktrees:")
-    lines.append(f"  {script} --issues {issues_arg} --resume")
+    lines.append(f"  {script} --issues {issues_arg}")
     lines.append("To discard them instead:")
     lines.extend(f"  git worktree remove --force {path}" for _, _, path in preserved)
     return lines
