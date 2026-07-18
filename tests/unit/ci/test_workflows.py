@@ -9,6 +9,11 @@ from typing import Any
 import pytest
 import yaml
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 has no stdlib tomllib
+    import tomli as tomllib
+
 from hephaestus.ci.workflows import (
     Violation,
     _is_checkout_step,
@@ -29,6 +34,8 @@ REQUIRED_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "_required.yml"
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
 SECURITY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "security.yml"
 TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "test.yml"
+PERFORMANCE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "performance.yml"
+PERFORMANCE_DOC = REPO_ROOT / "docs" / "performance-testing.md"
 SETUP_PI_ACTION = REPO_ROOT / ".github" / "actions" / "setup-pi-cli" / "action.yml"
 
 
@@ -162,6 +169,75 @@ class TestWorkflowInventoryLiveTree:
             hook["files"]
             == r"^(\.pre-commit-config\.yaml|\.github/workflows/(README\.md|.*\.yml))$"
         )
+
+
+class TestPerformanceWorkflow:
+    """Contracts for the bounded worker-pool performance lane."""
+
+    def _load(self) -> dict[str, Any]:
+        workflow: dict[str, Any] = yaml.load(
+            PERFORMANCE_WORKFLOW.read_text(encoding="utf-8"),
+            Loader=yaml.BaseLoader,
+        )
+        return workflow
+
+    def test_lane_is_scheduled_manual_and_bounded(self) -> None:
+        """The lane has only the approved triggers and fixed safety limits."""
+        workflow = self._load()
+        assert set(workflow["on"]) == {"schedule", "workflow_dispatch"}
+
+        job = workflow["jobs"]["worker-pool-load"]
+        assert int(job["timeout-minutes"]) <= 10
+        run = next(
+            step["run"]
+            for step in job["steps"]
+            if step.get("name") == "Run bounded worker-pool load tests"
+        )
+        for argument in (
+            "--load-duration-s=30",
+            "--load-max-jobs=50000",
+            "--load-workers=8",
+            "--load-max-in-flight=64",
+            "--load-p95-budget-ms=500",
+        ):
+            assert argument in run
+
+    def test_lane_collects_before_running_the_bounded_profile(self) -> None:
+        """The workflow proves collection before it evaluates runtime limits."""
+        steps = self._load()["jobs"]["worker-pool-load"]["steps"]
+        collect = next(
+            step["run"]
+            for step in steps
+            if step.get("name") == "Verify performance suite collection"
+        )
+
+        assert "python -m pytest tests/performance" in collect
+        assert "--collect-only" in collect
+        assert '--override-ini="addopts="' in collect
+
+    def test_lane_uploads_runtime_report(self) -> None:
+        """The report is retained as an artifact even when a gate fails."""
+        steps = self._load()["jobs"]["worker-pool-load"]["steps"]
+        upload = next(
+            step
+            for step in steps
+            if str(step.get("uses", "")).startswith("actions/upload-artifact@")
+        )
+        assert upload["if"] == "${{ always() }}"
+        assert upload["with"]["path"] == "build/performance/worker-pool.json"
+
+    def test_performance_strategy_is_documented(self) -> None:
+        """The public docs index links to the performance strategy."""
+        index = (REPO_ROOT / "docs" / "index.md").read_text(encoding="utf-8")
+        assert PERFORMANCE_DOC.is_file()
+        assert "(performance-testing.md)" in index
+
+    def test_default_pytest_options_deselect_performance_tests(self) -> None:
+        """Normal test runs do not accidentally execute the stress lane."""
+        config = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        addopts = config["tool"]["pytest"]["ini_options"]["addopts"]
+        assert "-m" in addopts
+        assert "not performance" in addopts
 
 
 class TestIsCheckoutStep:
