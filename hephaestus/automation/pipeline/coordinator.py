@@ -219,6 +219,9 @@ class PipelineConfig:
     planner_model: str = ""
     reviewer_model: str = ""
     implementer_model: str = ""
+    planner_reasoning_effort: str = ""
+    reviewer_reasoning_effort: str = ""
+    implementer_reasoning_effort: str = ""
     no_advise: bool = False
     nitpick: bool = False
     drive_green_all: bool = False
@@ -284,6 +287,9 @@ class _StageRunConfig:
     planner_model: str = ""
     reviewer_model: str = ""
     implementer_model: str = ""
+    planner_reasoning_effort: str = ""
+    reviewer_reasoning_effort: str = ""
+    implementer_reasoning_effort: str = ""
     dry_run: bool = False
     nitpick: bool = False
     drive_green_all: bool = False
@@ -429,6 +435,9 @@ class Coordinator:
             planner_model=config.planner_model,
             reviewer_model=config.reviewer_model,
             implementer_model=config.implementer_model,
+            planner_reasoning_effort=config.planner_reasoning_effort,
+            reviewer_reasoning_effort=config.reviewer_reasoning_effort,
+            implementer_reasoning_effort=config.implementer_reasoning_effort,
             dry_run=config.dry_run,
             nitpick=config.nitpick,
             drive_green_all=config.drive_green_all,

@@ -376,6 +376,34 @@ def test_codex_base_cmd_allows_terra_default_reasoning(model: str, tmp_path: Pat
 
 
 @pytest.mark.parametrize(
+    ("model", "expected_model", "reasoning_effort", "expected_reasoning"),
+    [
+        ("sol", "gpt-5.6-sol", "medium", "medium"),
+        ("gpt-5.6-terra", "gpt-5.6-terra", "xhigh", "xhigh"),
+        ("gpt-5.6-luna", "gpt-5.6-luna", "default", ""),
+        ("gpt-5.6", "gpt-5.6", "default", ""),
+        ("gpt-5.6", "gpt-5.6", "high", "high"),
+    ],
+)
+def test_codex_base_cmd_honors_explicit_reasoning_override(
+    model: str,
+    expected_model: str,
+    reasoning_effort: str,
+    expected_reasoning: str,
+    tmp_path: Path,
+) -> None:
+    """Per-role transport settings override a tier alias's default reasoning."""
+    with patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]):
+        cmd = agent_runtime._codex_base_cmd(cwd=tmp_path, model=f"{model}:{reasoning_effort}")
+
+    assert cmd[cmd.index("--model") + 1] == expected_model
+    reasoning_args = [arg for arg in cmd if arg.startswith("model_reasoning_effort=")]
+    assert bool(reasoning_args) is bool(expected_reasoning)
+    if expected_reasoning:
+        assert reasoning_args == [f"model_reasoning_effort={json.dumps(expected_reasoning)}"]
+
+
+@pytest.mark.parametrize(
     "native_model",
     ["gpt-5.4-mini", "gpt-5.5", "gpt-5.6"],
 )

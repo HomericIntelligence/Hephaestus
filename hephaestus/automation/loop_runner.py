@@ -207,6 +207,9 @@ class LoopConfig:
     planner_model: str = ""
     reviewer_model: str = ""
     implementer_model: str = ""
+    planner_reasoning_effort: str = ""
+    reviewer_reasoning_effort: str = ""
+    implementer_reasoning_effort: str = ""
     gh_global_rate: float = 10.0
     gh_global_burst: float = 30.0
     # Org is resolved at runtime from --org / --repos / cwd detection; no
@@ -341,6 +344,16 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument("--planner-model", default="", help="HEPH_PLANNER_MODEL for child processes")
+    reasoning_help = (
+        "Explicit Codex reasoning effort for this role. Use default to omit "
+        "model_reasoning_effort; when omitted, the selected model alias keeps its default."
+    )
+    p.add_argument(
+        "--planner-reasoning-effort",
+        choices=("default", "low", "medium", "high", "xhigh"),
+        default="",
+        help=reasoning_help,
+    )
     p.add_argument(
         "--reviewer-model",
         default="",
@@ -353,6 +366,18 @@ def _build_parser() -> argparse.ArgumentParser:
         "--implementer-model",
         default="",
         help="HEPH_IMPLEMENTER_MODEL for child processes (implement, address-review, ci-driver)",
+    )
+    p.add_argument(
+        "--reviewer-reasoning-effort",
+        choices=("default", "low", "medium", "high", "xhigh"),
+        default="",
+        help=reasoning_help,
+    )
+    p.add_argument(
+        "--implementer-reasoning-effort",
+        choices=("default", "low", "medium", "high", "xhigh"),
+        default="",
+        help=reasoning_help,
     )
     p.add_argument(
         "--org",
@@ -638,6 +663,9 @@ def _build_pipeline_config(
         planner_model=cfg.planner_model,
         reviewer_model=cfg.reviewer_model,
         implementer_model=cfg.implementer_model,
+        planner_reasoning_effort=cfg.planner_reasoning_effort,
+        reviewer_reasoning_effort=cfg.reviewer_reasoning_effort,
+        implementer_reasoning_effort=cfg.implementer_reasoning_effort,
         no_advise=cfg.no_advise,
         nitpick=cfg.nitpick,
         drive_green_all=cfg.drive_green_all,
@@ -782,6 +810,9 @@ def main(argv: list[str] | None = None) -> int:
         planner_model=args.planner_model,
         reviewer_model=args.reviewer_model,
         implementer_model=args.implementer_model,
+        planner_reasoning_effort=args.planner_reasoning_effort,
+        reviewer_reasoning_effort=args.reviewer_reasoning_effort,
+        implementer_reasoning_effort=args.implementer_reasoning_effort,
         gh_global_rate=args.gh_global_rate,
         gh_global_burst=args.gh_global_burst,
         org=org,

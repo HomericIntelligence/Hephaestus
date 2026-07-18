@@ -10,6 +10,8 @@ The queue-based pipeline is the only automation-loop path (epic #1809, cutover
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -18,6 +20,7 @@ import hephaestus.automation.loop_runner as loop_runner
 import hephaestus.automation.pipeline.coordinator as coordinator_mod
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.routing import StageName
+from hephaestus.automation.pipeline.stages.base import StageContext, stage_model
 from hephaestus.config.paths import DEFAULT_PROJECTS_DIR
 
 
@@ -203,6 +206,88 @@ def test_build_pipeline_config_maps_agent_and_models(
     assert config.planner_model == "gpt-plan"
     assert config.reviewer_model == "gpt-review"
     assert config.implementer_model == "gpt-impl"
+
+
+def test_build_pipeline_config_maps_per_role_reasoning_effort(
+    dispatch: dict[str, MagicMock], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The loop forwards each role's explicit reasoning setting to stages."""
+    monkeypatch.setattr(loop_runner, "resolve_agent", lambda agent: "codex")
+
+    loop_runner.main(
+        [
+            "--agent",
+            "codex",
+            "--planner-reasoning-effort",
+            "xhigh",
+            "--reviewer-reasoning-effort",
+            "default",
+            "--implementer-reasoning-effort",
+            "high",
+        ]
+    )
+
+    (config,) = dispatch["run_pipeline"].call_args.args
+    assert config.planner_reasoning_effort == "xhigh"
+    assert config.reviewer_reasoning_effort == "default"
+    assert config.implementer_reasoning_effort == "high"
+
+
+@pytest.mark.parametrize(
+    ("role", "model", "effort", "expected"),
+    [
+        ("planner", "sol", "xhigh", "sol:xhigh"),
+        ("implementer", "terra", "high", "terra:high"),
+        ("reviewer", "terra", "default", "terra:default"),
+    ],
+)
+def test_stage_model_propagates_per_role_reasoning_effort(
+    role: str, model: str, effort: str, expected: str
+) -> None:
+    """Every pipeline role transports its own reasoning setting to the runtime."""
+    config = SimpleNamespace(
+        agent="codex",
+        model="",
+        planner_model="sol" if role == "planner" else "",
+        implementer_model="terra" if role == "implementer" else "",
+        reviewer_model="terra" if role == "reviewer" else "",
+        planner_reasoning_effort="xhigh" if role == "planner" else "",
+        implementer_reasoning_effort="high" if role == "implementer" else "",
+        reviewer_reasoning_effort="default" if role == "reviewer" else "",
+    )
+
+    context = cast(StageContext, SimpleNamespace(config=config))
+    assert stage_model(context, role, lambda: model) == expected
+
+
+@pytest.mark.parametrize("agent", ["claude", "pi"])
+def test_stage_model_does_not_append_codex_reasoning_to_other_provider_model(agent: str) -> None:
+    """A Codex-only reasoning flag cannot corrupt another provider's model selection."""
+    config = SimpleNamespace(
+        agent=agent,
+        model="",
+        reviewer_model="claude-sonnet-4-6",
+        reviewer_reasoning_effort="default",
+    )
+
+    context = cast(StageContext, SimpleNamespace(config=config))
+    assert stage_model(context, "reviewer", lambda: "fallback") == ("claude-sonnet-4-6")
+
+
+@pytest.mark.parametrize("model", ["terra:default", "gpt-5.6-terra:default"])
+def test_stage_model_replaces_existing_codex_reasoning_selector(model: str) -> None:
+    """An explicit role override replaces, rather than stacks on, a model selector."""
+    config = SimpleNamespace(
+        agent="codex",
+        model="",
+        reviewer_model=model,
+        reviewer_reasoning_effort="xhigh",
+    )
+
+    context = cast(StageContext, SimpleNamespace(config=config))
+    assert stage_model(context, "reviewer", lambda: "fallback") == (
+        model.removesuffix(":default") + ":xhigh"
+    )
 
 
 def test_phase_timeout_help_documents_agent_job_scope() -> None:
