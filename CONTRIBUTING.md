@@ -97,6 +97,24 @@ are cut on demand by pushing a signed `vX.Y.Z` git tag (see
 5. Before pushing, run the fast quality gate: `just check`
    (lint + format-check + typecheck). Run `just --list` to see every recipe.
 
+### Secret-scanning failures
+
+The mandatory `gitleaks` pre-commit hook scans every staged change with generic
+secret rules, even when the optional operator-local `.heph-private-denylist`
+does not exist. Handle a finding as follows:
+
+1. Treat it as a real credential first: remove it from the change and rotate or
+   revoke it if it was ever usable.
+2. For synthetic fixtures or examples, replace the value with a placeholder
+   that cannot be mistaken for a credential.
+3. If an exact non-secret value must remain, add `gitleaks:allow` only to that
+   specific line and explain the exception in the pull request. Do not use
+   `SKIP=gitleaks` or `--no-verify`.
+4. If the pinned scanner release has a tool-wide regression, roll both the
+   pre-commit revision and the CI image back to the previous known-good
+   Gitleaks release in a reviewed PR while keeping the hook enabled. Remove
+   temporary line-scoped exceptions after the regression is resolved.
+
 ### Platform Support
 
 The uv developer environment and the published wheel intentionally cover

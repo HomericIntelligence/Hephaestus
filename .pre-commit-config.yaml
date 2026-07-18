@@ -74,6 +74,15 @@ repos:
         pass_filenames: false
         stages: [manual]
 
+  # Security: mandatory generic staged-secret scanning. Keep this release
+  # aligned with the security/secrets-scan container in _required.yml.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.0
+    hooks:
+      - id: gitleaks
+        name: Gitleaks (generic staged-secret scan)
+        stages: [pre-commit]
+
   # Security: SAST (Static Application Security Testing)
   - repo: local
     hooks:
