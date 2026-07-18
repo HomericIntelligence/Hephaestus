@@ -30,6 +30,7 @@ def get_pr_review_analysis_prompt(
     pr_description: str = "",
     advise_findings: str = "",
     include_nitpicks: bool = False,
+    review_context_kind: str = "issue",
 ) -> str:
     """Get the PR review analysis prompt for generating inline review comments.
 
@@ -51,6 +52,9 @@ def get_pr_review_analysis_prompt(
             ``nitpick``-severity comments entirely. When True (``--nitpick``),
             nitpick comments are re-enabled. Either way every emitted comment
             carries a ``severity`` tag (#1083).
+        review_context_kind: Human-readable numeric context kind. Linked PRs
+            use ``"issue"``; unlinked direct ``--prs`` review uses ``"PR"``
+            because GitHub PRs are issue objects but not linked requirements.
 
     Returns:
         Formatted PR review analysis prompt
@@ -65,6 +69,7 @@ def get_pr_review_analysis_prompt(
         "pr_review/analysis.j2",
         pr_number=pr_number,
         issue_number=issue_number,
+        review_context_kind=review_context_kind,
         pr_diff_block=fenced.fence("PR_DIFF", pr_diff),
         issue_body_block=fenced.fence("ISSUE_BODY", issue_body),
         advise_findings_block=fenced.fence(
@@ -84,6 +89,7 @@ def get_review_validation_prompt(
     issue_number: int,
     prior_comments_json: str,
     diff_text: str = "",
+    review_context_kind: str = "issue",
 ) -> str:
     """Get the prompt that validates whether prior review comments were addressed.
 
@@ -101,6 +107,8 @@ def get_review_validation_prompt(
         prior_comments_json: JSON array string of prior comment dicts
             (``path``/``line``/``body``).
         diff_text: The current cumulative PR diff.
+        review_context_kind: Human-readable numeric context kind for the
+            prompt header (``"issue"`` or direct-review ``"PR"``).
 
     Returns:
         Formatted review-validation prompt.
@@ -111,6 +119,7 @@ def get_review_validation_prompt(
         "pr_review/validation.j2",
         pr_number=pr_number,
         issue_number=issue_number,
+        review_context_kind=review_context_kind,
         prior_comments_block=fenced.fence("PRIOR_COMMENTS", prior_comments_json),
         diff_block=fenced.fence("DIFF", diff_text),
         untrusted_notice=fenced.untrusted_notice,
@@ -121,6 +130,7 @@ def get_review_validation_prompt(
 def get_comment_difficulty_prompt(
     issue_number: int,
     comments_json: str,
+    review_context_kind: str = "issue",
 ) -> str:
     """Get the prompt that classifies review-comment fix difficulty (#1083).
 
@@ -133,6 +143,8 @@ def get_comment_difficulty_prompt(
         issue_number: Linked GitHub issue number (for log/context only).
         comments_json: JSON array string of comment dicts
             (``thread_id``/``path``/``line``/``body``).
+        review_context_kind: Human-readable numeric context kind for the
+            prompt header (``"issue"`` or direct-review ``"PR"``).
 
     Returns:
         Formatted comment-difficulty classification prompt.
@@ -142,6 +154,7 @@ def get_comment_difficulty_prompt(
     return PromptCatalog.current().render(
         "pr_review/comment_difficulty.j2",
         issue_number=issue_number,
+        review_context_kind=review_context_kind,
         comments_block=fenced.fence("REVIEW_COMMENTS", comments_json),
         untrusted_notice=fenced.untrusted_notice,
         terse_output_directive=get_terse_output_directive(),

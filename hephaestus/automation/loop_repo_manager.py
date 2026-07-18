@@ -195,9 +195,13 @@ def _list_open_pr_meta(org: str, repo: str) -> list[dict[str, Any]]:
                 continue
             raw_user = entry.get("user")
             user = raw_user if isinstance(raw_user, dict) else {}
+            raw_state = entry.get("state")
+            state = raw_state if isinstance(raw_state, str) else "open"
             pulls.append(
                 {
                     "number": number,
+                    "state": state.upper(),
+                    "isDraft": bool(entry.get("draft", False)),
                     "user": {
                         "login": user.get("login"),
                         "type": user.get("type"),

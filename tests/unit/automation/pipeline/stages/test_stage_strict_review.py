@@ -354,6 +354,33 @@ def test_strict_review_uses_codex_even_when_the_loop_agent_is_claude(
     assert result.job.agent == "codex"
 
 
+def test_strict_review_applies_reviewer_reasoning_effort_with_forced_codex_provider(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """The forced Codex review job still receives reviewer reasoning overrides."""
+    item = make_work_item(
+        stage=StageName.STRICT_REVIEW,
+        pr=12,
+        state=REVIEW_WAIT,
+        payload={"strict_review_head": _HEAD, "strict_review_worktree": "/review/strict-12"},
+    )
+    config = SimpleNamespace(
+        strict_review_guard=_StrictReviewGuard(),
+        agent="claude",
+        model="",
+        reviewer_model="terra:default",
+        reviewer_reasoning_effort="xhigh",
+    )
+    github = FakeStageGitHub(strict_evidence=_EVIDENCE)
+
+    result = StrictReviewStage().step(item, make_ctx(config=config, github=github))
+
+    assert isinstance(result, JobRequest)
+    assert isinstance(result.job, AgentJob)
+    assert result.job.agent == "codex"
+    assert result.job.model == "terra:xhigh"
+
+
 def test_strict_review_ingress_disarms_before_revoking_the_go_label(
     make_ctx: Any, make_work_item: Any
 ) -> None:

@@ -60,7 +60,9 @@ logger = logging.getLogger(__name__)
 def _drive_green_pr_is_in_scope(
     pr: dict[str, Any], *, include_bot_prs: bool, viewer_login: str
 ) -> bool:
-    """Return whether an orphan PR belongs to the configured author scope."""
+    """Return whether an orphan PR is eligible and belongs to author scope."""
+    if not _pr_discovery.pr_needs_loop_review(pr):
+        return False
     if not include_bot_prs and _pr_discovery._is_bot_pr_author(pr):
         return False
     if not _pr_discovery._is_viewer_authored(pr, viewer_login):

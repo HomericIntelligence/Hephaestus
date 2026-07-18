@@ -43,8 +43,18 @@ class TestListOpenPrMeta:
             result = loop_repo_manager._list_open_pr_meta("acme", "widget")
 
         assert result == [
-            {"number": 3, "user": {"login": "alice", "type": "User"}},
-            {"number": 9, "user": {"login": "depbot", "type": "Bot"}},
+            {
+                "number": 3,
+                "state": "OPEN",
+                "isDraft": False,
+                "user": {"login": "alice", "type": "User"},
+            },
+            {
+                "number": 9,
+                "state": "OPEN",
+                "isDraft": False,
+                "user": {"login": "depbot", "type": "Bot"},
+            },
         ]
         assert mock_gh.call_args.args[0] == [
             "api",
@@ -63,8 +73,8 @@ class TestListOpenPrMeta:
             result = loop_repo_manager._list_open_pr_meta("acme", "widget")
 
         assert result == [
-            {"number": 7, "user": {"login": None, "type": None}},
-            {"number": 8, "user": {"login": None, "type": None}},
+            {"number": 7, "state": "OPEN", "isDraft": False, "user": {"login": None, "type": None}},
+            {"number": 8, "state": "OPEN", "isDraft": False, "user": {"login": None, "type": None}},
         ]
 
     @pytest.mark.parametrize("stdout", ["not-json", "{}"])

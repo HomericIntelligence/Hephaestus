@@ -59,6 +59,17 @@ def _is_viewer_authored(pr: dict[str, Any], viewer_login: str) -> bool:
     return not viewer_login or (isinstance(user, dict) and user.get("login") == viewer_login)
 
 
+def pr_needs_loop_review(pr: dict[str, Any]) -> bool:
+    """Return whether an open non-draft PR is eligible for loop review.
+
+    This intentionally does not read a check, workflow, status, or merge
+    state. The loop's own review and approval label are its entire input.
+    """
+    state = str(pr.get("state", "OPEN")).upper()
+    is_draft = bool(pr.get("isDraft", pr.get("draft", False)))
+    return not is_draft and state == "OPEN"
+
+
 @dataclass(frozen=True)
 class PRWorkset:
     """Resolved PR workset for a drive-green run."""
@@ -166,7 +177,7 @@ def _normalise_open_pr(
 
 def _pr_is_failing_row(pr: dict[str, Any]) -> bool:
     """Return True iff a PR row should be picked up by failing-PR discovery."""
-    if pr.get("isDraft"):
+    if not pr_needs_loop_review(pr):
         return False
     if pr.get("mergeStateStatus") == "BLOCKED":
         return True

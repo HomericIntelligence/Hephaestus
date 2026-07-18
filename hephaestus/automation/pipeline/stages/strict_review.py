@@ -139,8 +139,13 @@ def parse_strict_review_verdict(text: str) -> ReviewVerdict:
 
 
 def _issue_number(item: WorkItem) -> int:
-    """Return a stable issue id; orphan PRs use zero for review-session scope."""
+    """Return a stable review-session id; orphan PRs use zero until rejected."""
     return item.issue if item.issue is not None else 0
+
+
+def _review_context_kind(item: WorkItem) -> str:
+    """Return the prompt-facing numeric context kind for this review item."""
+    return "PR" if item.payload.get("review_context_kind") == "PR" else "issue"
 
 
 class StrictReviewStage(Stage):
@@ -161,9 +166,11 @@ class StrictReviewStage(Stage):
         if not item.state:
             item.state = ENTER
         if item.issue is None:
-            # Requirements must originate from a real linked issue, never
-            # from PR-authored content.  Reject an orphan before claiming the
-            # gate, mutating labels, or dispatching review work.
+            # Direct ``--prs`` PR_REVIEW ingress hydrates unlinked PRs with
+            # their PR issue number plus review_context_kind="PR".  Any item
+            # still lacking a numeric context is an orphan from another path;
+            # reject it before claiming the gate, mutating labels, or
+            # dispatching review work.
             return StageOutcome(Disposition.FINISH_FAIL, "strict_review_orphan")
         if "_strict_review_guard_owner" not in item.payload:
             item.payload.pop("_strict_review_entry_contained", None)
@@ -311,9 +318,9 @@ class StrictReviewStage(Stage):
             logger.warning("strict_review:%d: no PR on item; failing back", item.issue)
             return StageOutcome(Disposition.FAIL_BACK, "nogo")
         if item.issue is None:
-            # The strict gate must judge the diff against an issue's concrete
-            # requirements.  A PR-only item cannot meet that contract, and a
-            # NOGO cannot safely enter the issue-bound implementation stage.
+            # A direct ``--prs`` item that completed PR_REVIEW has a PR-number
+            # context.  A remaining context-less orphan cannot safely enter
+            # review or issue-bound remediation.
             return StageOutcome(Disposition.FINISH_FAIL, "strict_review_orphan")
 
         ownership = self._claim_review_ownership(item, ctx)
@@ -496,7 +503,7 @@ class StrictReviewStage(Stage):
             repo=item.repo,
             issue=issue,
             agent="codex",
-            model=stage_model(ctx, "reviewer", reviewer_model),
+            model=stage_model(ctx, "reviewer", reviewer_model, provider="codex"),
             prompt_builder=build_strict_review_prompt,
             cwd=Path(review_worktree),
             timeout_s=pr_reviewer_claude_timeout(),
@@ -513,6 +520,7 @@ class StrictReviewStage(Stage):
                 "issue_body": evidence.issue_body,
                 "diff": evidence.diff,
                 "prior_pr_review_verdict": evidence.prior_pr_review_verdict,
+                "review_context_kind": _review_context_kind(item),
             },
             parse=parse_strict_review_verdict,
             descr="strict_review",

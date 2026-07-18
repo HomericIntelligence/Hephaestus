@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-from typing import Any
 
 from hephaestus.agents.runtime import resolve_agent
 from hephaestus.cli.utils import (
@@ -54,15 +53,6 @@ logger = logging.getLogger(__name__)
 _CI_DRIVER_SCOPE_STAGES: frozenset[StageName] = frozenset(
     {StageName.PR_REVIEW, StageName.STRICT_REVIEW, StageName.MERGE_WAIT}
 )
-
-
-def _pr_needs_loop_review(pr: dict[str, Any]) -> bool:
-    """Return whether an open non-draft PR is eligible for loop review.
-
-    This intentionally does not read a check, workflow, status, or merge
-    state. The loop's own review and approval label are its entire input.
-    """
-    return not bool(pr.get("isDraft")) and pr.get("state", "OPEN") == "OPEN"
 
 
 class CIDriver:

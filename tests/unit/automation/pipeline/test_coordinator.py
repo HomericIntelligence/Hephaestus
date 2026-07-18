@@ -418,10 +418,10 @@ class TestQuiescence:
         assert item.pr == 701
         assert item.payload["existing_pr"] is True
 
-    def test_direct_pr_without_closing_issue_remains_orphaned(
+    def test_direct_pr_without_closing_issue_uses_pr_review_context(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Explicit --prs input never treats its PR number as requirements context."""
+        """Explicit --prs PR-review input can use the PR number as review context."""
         coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
         entry = SeedEntry(
             kind="pr",
@@ -436,7 +436,9 @@ class TestQuiescence:
 
         assert item.kind is ItemKind.PR
         assert item.pr == 701
-        assert item.issue is None
+        assert item.issue == 701
+        assert item.payload["review_context_kind"] == "PR"
+        assert item.payload["direct_pr_unlinked_review_context"] is True
 
     def test_direct_pr_with_linked_issue_preserves_requirements_context(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

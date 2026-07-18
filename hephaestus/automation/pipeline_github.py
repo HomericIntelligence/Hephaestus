@@ -648,6 +648,9 @@ class PipelineGitHub:
         ``head_sha``. A concurrent push, read/schema error,
         oversized/empty diff, or malformed context returns ``None`` so the
         caller must fail closed instead of issuing an under-informed GO.
+        ``issue_number`` is the linked issue for normal issue-flow work; for
+        unlinked direct ``--prs`` review it is the PR's own GitHub issue
+        number, whose title/body are fenced by the strict-review prompt.
         """
         if (
             self._repo_slug is None

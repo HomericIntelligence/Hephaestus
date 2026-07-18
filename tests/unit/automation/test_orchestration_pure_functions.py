@@ -62,21 +62,22 @@ class TestLoopRunnerPureFunctions:
 
 
 # ---------------------------------------------------------------------------
-# ci_driver — confirmed from ci_driver.py
+# pr_discovery — confirmed from pr_discovery.py
 # ---------------------------------------------------------------------------
-class TestCIDriverPureFunctions:
-    """Test pure helpers in ci_driver (omitted from coverage measurement)."""
+class TestPRDiscoveryPureFunctions:
+    """Test pure helpers in pr_discovery."""
 
     def test_open_non_draft_pr_needs_loop_review(self) -> None:
-        from hephaestus.automation.ci_driver import _pr_needs_loop_review
+        from hephaestus.automation.pr_discovery import pr_needs_loop_review
 
-        assert _pr_needs_loop_review({"isDraft": False, "state": "OPEN"}) is True
+        assert pr_needs_loop_review({"isDraft": False, "state": "OPEN"}) is True
+        assert pr_needs_loop_review({"draft": False, "state": "open"}) is True
 
     def test_draft_or_closed_pr_does_not_need_loop_review(self) -> None:
-        from hephaestus.automation.ci_driver import _pr_needs_loop_review
+        from hephaestus.automation.pr_discovery import pr_needs_loop_review
 
-        assert _pr_needs_loop_review({"isDraft": True, "state": "OPEN"}) is False
-        assert _pr_needs_loop_review({"isDraft": False, "state": "CLOSED"}) is False
+        assert pr_needs_loop_review({"isDraft": True, "state": "OPEN"}) is False
+        assert pr_needs_loop_review({"isDraft": False, "state": "CLOSED"}) is False
 
 
 # ---------------------------------------------------------------------------

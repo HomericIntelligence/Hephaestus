@@ -229,6 +229,11 @@ def _issue_number(item: WorkItem) -> int:
     return item.issue
 
 
+def _review_context_kind(item: WorkItem) -> str:
+    """Return the prompt-facing numeric context kind for this review item."""
+    return "PR" if item.payload.get("review_context_kind") == "PR" else "issue"
+
+
 #: Max CONSECUTIVE reviewer-infrastructure failures (ERROR verdicts or
 #: failed/valueless review jobs) tolerated before failing back
 #: ``agent_error``. Bounds the in-stage ERROR retry loop without burning
@@ -442,7 +447,7 @@ class PrReviewStage(Stage):
             Continue, JobRequest, or StageOutcome.
 
         """
-        if not item.issue:
+        if item.issue is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
         if item.pr is None:
             # Nothing to review: fail back to implementation, whose
@@ -578,6 +583,7 @@ class PrReviewStage(Stage):
                         getattr(ctx.config, "include_nitpicks", False),
                     )
                 ),
+                "review_context_kind": _review_context_kind(item),
             },
             parse=_parse_review_response,  # verdict and inline comments parsed in-worker
             descr="review",
@@ -607,6 +613,7 @@ class PrReviewStage(Stage):
                 "issue_number": item.issue,
                 "prior_comments_json": item.payload.get("prior_comments_json", "[]"),
                 "diff_text": item.payload.get("pr_diff", ""),
+                "review_context_kind": _review_context_kind(item),
             },
             descr="validate",
         )
@@ -628,6 +635,7 @@ class PrReviewStage(Stage):
             prompt_kwargs={
                 "issue_number": item.issue,
                 "comments_json": json.dumps(item.payload.get("review_threads", [])),
+                "review_context_kind": _review_context_kind(item),
             },
             descr="difficulty",
         )

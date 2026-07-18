@@ -323,9 +323,10 @@ class StageGitHub(Protocol):
         rely on a mutable local checkout for the PR diff.  The coordinator
         accessor fetches this repo-scoped evidence and validates the live
         head both before and after the read; stages fail closed when it is
-        unavailable.  The linked issue title/body are part of this evidence:
-        without the task requirements, a reviewer cannot judge whether the
-        diff fulfils the work it is about to authorize for merge.
+        unavailable.  The numeric review context's title/body are part of
+        this evidence.  For linked issue work this is the issue requirements;
+        for unlinked direct ``--prs`` review this is the PR's GitHub issue
+        object, and the strict-review prompt fences it as untrusted context.
         """
         ...
 
@@ -497,13 +498,19 @@ def agent_provider(ctx: StageContext) -> str:
     return str(getattr(ctx.config, "agent", "") or DEFAULT_AGENT)
 
 
-def stage_model(ctx: StageContext, phase: str, fallback: Callable[[], str]) -> str:
+def stage_model(
+    ctx: StageContext,
+    phase: str,
+    fallback: Callable[[], str],
+    *,
+    provider: str | None = None,
+) -> str:
     """Return a phase model override, the catch-all model, or the legacy fallback."""
     phase_value = getattr(ctx.config, f"{phase}_model", "")
     catch_all = getattr(ctx.config, "model", "")
     model = str(phase_value or catch_all or fallback())
     reasoning_effort = str(getattr(ctx.config, f"{phase}_reasoning_effort", "") or "")
-    if reasoning_effort and agent_provider(ctx) == "codex":
+    if reasoning_effort and (provider or agent_provider(ctx)) == "codex":
         base_model, separator, current_effort = model.rpartition(":")
         if separator and current_effort in {"default", "low", "medium", "high", "xhigh"}:
             model = base_model

@@ -412,11 +412,11 @@ LEARN_WAIT solely to preserve the existing post-merge learn dedupe.
    **LEARN_WAIT** for exactly-once post-merge learning.
 
 **Verdicts**: RETRY while waiting for GitHub; FAIL_BACK to strict review on a
-missing label; FINISH_FAIL on a containment failure; FINISH_PASS after a
-merged PR's deduped learn step.
+missing label; FINISH_FAIL on arm-confirmation/readback or containment failure;
+FINISH_PASS after a merged PR's deduped learn step.
 
-**Fail routes**: missing-label or arm-confirmation failures → strict_review;
-containment failures finish failed.
+**Fail routes**: missing-label failures → strict_review; arm-confirmation/readback
+or containment failures finish failed.
 
 **Budgets**: merge/poll budgets remain bounded by the coordinator routes.
 
@@ -459,7 +459,7 @@ globally bounded.
 | implementation | pr_review | plan_review (plan_not_go), merge_wait (already_implementation_go_pr), finished(fail) on exhaustion | implement=2, test_fix=1 |
 | pr_review | strict_review | implementation (agent_error), finished(fail) on human_blocked or failed disable verification, finished(skip) on exhaustion | pr_review_iter=3, pr_review_hard=6 |
 | strict_review | merge_wait | implementation (nogo), strict_review (head_changed), finished(fail) on containment or label failure | strict_review_iter=1 |
-| merge_wait | finished(pass) | strict_review on missing loop-owned label or arm confirmation; finished(fail) on containment failure; existing merged PRs learn then pass | merge/poll bounded by routes |
+| merge_wait | finished(pass) | strict_review on missing loop-owned label; finished(fail) on arm confirmation/readback or containment failure; existing merged PRs learn then pass | merge/poll bounded by routes |
 | finished | — | — | — |
 
 ## Seeding and reconstruction
@@ -471,6 +471,11 @@ closed: merged PRs become `finished(pass)` and closed PRs become
 `finished(fail)`, before branch adoption or label-based routing is attempted.
 Open direct PRs enter the target repo's `pr_review` queue unless the PR already
 carries `state:implementation-go`, in which case they enter `merge_wait`.
+When an open direct PR has no linked `Closes #N` issue, the review work item
+uses the PR number as its numeric review context (GitHub PRs are issue objects)
+and labels that context as `PR #N` in reviewer prompts; all PR-authored body,
+description, prior-review, and diff text remains nonce-fenced as untrusted
+content.
 The label is the loop's sole durable merge authorization; a restarted or
 adopted item re-reads the label and current PR head before `merge_wait` can
 arm it. CI workflows and external review artifacts do not participate in that

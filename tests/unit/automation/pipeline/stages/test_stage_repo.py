@@ -425,6 +425,43 @@ class TestDiscover:
         assert review_item.issue is None
         assert review_item.pr == 66
 
+    def test_drive_green_all_skips_prs_not_eligible_for_loop_review(
+        self,
+        repo_item: WorkItem,
+        tmp_path: Path,
+        make_ctx: Callable[..., Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Drive-green-all reuses the shared open/non-draft review predicate."""
+        config = type(
+            "Cfg",
+            (),
+            {
+                "drive_green_all": True,
+                "include_bot_prs": True,
+                "include_all_authors": True,
+                "dry_run": False,
+            },
+        )()
+        ctx = make_ctx(config=config, paths=_RepoPaths(tmp_path))
+        self._patch_discovery(
+            monkeypatch,
+            meta=[],
+            facts={},
+            classifications={},
+            open_prs=[
+                {"number": 66, "state": "OPEN", "isDraft": False, "user": {"login": "a"}},
+                {"number": 67, "state": "OPEN", "isDraft": True, "user": {"login": "a"}},
+                {"number": 68, "state": "CLOSED", "isDraft": False, "user": {"login": "a"}},
+            ],
+        )
+        repo_item.state = "DISCOVER"
+
+        RepoStage().step(repo_item, ctx)
+
+        orphan = [p for p in repo_item.payload["products"] if p.get("kind") == "pr"]
+        assert [p["number"] for p in orphan] == [66]
+
     @pytest.mark.parametrize(
         ("include_bot_prs", "include_all_authors", "expected"),
         [

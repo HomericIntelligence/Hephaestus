@@ -18,6 +18,7 @@ def build_strict_review_prompt(
     issue_body: str,
     diff: str = "",
     prior_pr_review_verdict: str = "",
+    review_context_kind: str = "issue",
 ) -> str:
     """Build the CI-free strict-review prompt for one captured PR head."""
     fenced = fence_content()
@@ -26,6 +27,7 @@ def build_strict_review_prompt(
         pr_number=pr_number,
         issue_number=issue_number,
         head_sha=head_sha,
+        review_context_kind=review_context_kind,
         untrusted_notice=fenced.untrusted_notice,
         prior_verdict_block=fenced.fence("PRIOR_PR_REVIEW_VERDICT", prior_pr_review_verdict),
         issue_requirements_block=fenced.fence(

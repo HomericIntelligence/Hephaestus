@@ -1764,17 +1764,28 @@ class Coordinator:
         if entry.kind == "repo":
             item = WorkItem(repo=str(entry.identifier), kind=ItemKind.REPO, stage=entry.stage)
         elif entry.kind == "pr":
+            direct_pr_number = entry.pr_number or int(entry.identifier)
+            # Direct ``--prs`` entries without a linked ``Closes #N`` issue
+            # still need a stable numeric review context; otherwise
+            # PrReviewStage rejects the advertised PR-review route before it
+            # can inspect the PR.  Use the PR's GitHub issue number only for
+            # PR_REVIEW ingress.  Merge-wait orphan entries stay issue=None so
+            # a stale implementation-go label cannot arm an unreviewed PR.
+            issue_number = entry.issue_number
+            direct_pr_review_context = False
+            if issue_number is None and entry.stage is StageName.PR_REVIEW:
+                issue_number = direct_pr_number
+                direct_pr_review_context = True
             item = WorkItem(
                 repo=default_repo,
                 kind=ItemKind.PR,
-                # Only a resolved, linked issue supplies requirements context.
-                # A PR number is not a safe substitute: its author controls
-                # the PR body, so an unlinked direct PR must remain orphaned
-                # and fail closed before strict review.
-                issue=entry.issue_number,
-                pr=entry.pr_number or int(entry.identifier),
+                issue=issue_number,
+                pr=direct_pr_number,
                 stage=entry.stage,
             )
+            if direct_pr_review_context:
+                item.payload["review_context_kind"] = "PR"
+                item.payload["direct_pr_unlinked_review_context"] = True
         else:
             item = WorkItem(
                 repo=default_repo,
