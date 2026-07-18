@@ -623,6 +623,8 @@ def test_independent_strict_items_receive_distinct_auxiliary_worktree_names(
 
     assert isinstance(first_request, JobRequest)
     assert isinstance(second_request, JobRequest)
+    assert isinstance(first_request.job, GitJob)
+    assert isinstance(second_request.job, GitJob)
     assert first_request.job.kwargs["worktree_name"] != second_request.job.kwargs["worktree_name"]
 
 

@@ -159,16 +159,19 @@ class TestCleanup:
 
         first = stage.step(item, ctx)
         assert isinstance(first, JobRequest)
+        assert isinstance(first.job, GitJob)
         assert first.job.kwargs["worktree_path"] == "/wt/issue-42"
         stage.on_job_done(item, JobResult(ok=True), ctx)
 
         second = stage.step(item, ctx)
         assert isinstance(second, JobRequest)
+        assert isinstance(second.job, GitJob)
         assert second.job.kwargs["worktree_path"] == "/wt/strict-42-a"
         stage.on_job_done(item, JobResult(ok=True), ctx)
 
         third = stage.step(item, ctx)
         assert isinstance(third, JobRequest)
+        assert isinstance(third.job, GitJob)
         assert third.job.kwargs["worktree_path"] == "/wt/strict-42-b"
         stage.on_job_done(item, JobResult(ok=True), ctx)
 
