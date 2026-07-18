@@ -208,8 +208,10 @@ class TestROUTES:
                 next=StageName.FINISHED,
                 fail_routes={
                     "closed": StageName.FINISHED,
+                    # Only loss of the loop-owned authorization label returns
+                    # to review. ARM timing, head movement, and GitHub arm
+                    # mechanics stay inside merge_wait.
                     "not_implementation_go": StageName.STRICT_REVIEW,
-                    "arm_confirm_failed": StageName.STRICT_REVIEW,
                     "*": StageName.FINISHED,
                 },
                 budgets={},

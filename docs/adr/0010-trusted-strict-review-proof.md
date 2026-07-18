@@ -1,9 +1,13 @@
 # ADR-0010: Trusted strict-review proof context
 
-- Status: Accepted
+- Status: Superseded by ADR-0012
 - Date: 2026-07-16
 - Tracks: #2055
 - Extends: ADR-0007
+
+> Historical record only. The `strict-review-proof` workflow, status context,
+> artifact, and lease model described below were removed. They are not an
+> active CI/CD, automation-loop, or merge-authorization requirement.
 
 ## Context
 

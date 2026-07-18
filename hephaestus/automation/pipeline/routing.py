@@ -143,7 +143,6 @@ ROUTES: dict[StageName, Route] = {
             # review, not terminal abandonment. Containment failures such as
             # inability to disarm or persist the arm remain terminal.
             "not_implementation_go": StageName.STRICT_REVIEW,
-            "arm_confirm_failed": StageName.STRICT_REVIEW,
             "*": StageName.FINISHED,
         },
         budgets={},

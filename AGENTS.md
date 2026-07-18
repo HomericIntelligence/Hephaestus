@@ -19,8 +19,9 @@ omitted (see `hephaestus.agents.runtime.add_agent_argument`).
 current-head GO, `strict_review` applies `state:implementation-go` itself.
 The loop never reads, changes, or relies on CI/CD. `merge_wait` is the sole
 automatic armer and consumes that loop-owned label. A restart re-reads the
-label and live PR head without repeating a completed review. No workflow,
-status, artifact, or lease authorizes it.
+label and live PR head without repeating or invalidating a completed review;
+the head is operational arm/recovery metadata, not a post-label gate. No
+workflow, status, artifact, or lease authorizes it.
 
 | Queue stage | Module | Purpose |
 |-------------|--------|---------|

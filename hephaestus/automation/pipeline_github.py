@@ -1017,10 +1017,10 @@ class PipelineGitHub:
         """Return whether a durable record confirms GitHub armed this PR.
 
         ``armed_at`` is written before the remote arm request, so it cannot
-        prove that the request succeeded.  Recovery may resume POLL only when
-        the post-request, exact-PR confirmation was also durably written.
-        Legacy records with no arm status deliberately return ``False`` and
-        take the conservative prepared-arm recovery path.
+        prove that the request succeeded. This is recovery metadata only:
+        merge-wait always re-reads the loop-owned label and live GitHub state
+        before it resumes arming. Legacy records with no arm status return
+        ``False`` and take that same reconciliation path.
         """
         record = self._arming.load(issue_number) or {}
         return (
@@ -1352,11 +1352,10 @@ class PipelineGitHub:
     def arm_drive_green(self, issue_number: int, pr_number: int, head_sha: str) -> None:
         """Persist the drive-green arming record (``ArmingStateStore.save``).
 
-        Record shape mirrors ``ci_driver.CIDriver._arm_drive_green``; an
-        already-terminal record is never overwritten (its learn evidence is
-        the /learn dedupe key).  This is the durable ``prepared`` transition:
-        it precedes the remote request and is insufficient to resume POLL
-        until :meth:`confirm_drive_green_arm` records the remote read-back.
+        An already-terminal record is never overwritten because it is the
+        post-merge ``/learn`` dedupe key. This prepared transition precedes
+        the remote request and records only recovery metadata; it is not a
+        review proof or a merge authorization.
         """
         if self._skip(f"arm drive-green record for #{issue_number} (PR #{pr_number})"):
             return
@@ -1399,13 +1398,12 @@ class PipelineGitHub:
             )
 
     def confirm_drive_green_arm(self, issue_number: int, pr_number: int, head_sha: str) -> None:
-        """Persist and read back an exact-PR/head remote arm confirmation.
+        """Persist a read-back-confirmed remote arm for restart recovery.
 
-        This transition occurs only after merge_wait has read a matching live
-        head, approval label, and ``autoMergeRequest`` from GitHub. The
-        pre-arm record is intentionally not enough to take this transition:
-        accepting a mismatched record would let a restart skip ARM for a
-        different PR or commit.
+        This transition occurs only after merge-wait has observed a live
+        approval label and ``autoMergeRequest``. The prepared record is
+        refreshed to the observed head first, so this check is a local
+        recovery invariant and never a review-proof or label-validity check.
         """
         if self._skip(f"confirm drive-green arm for #{issue_number} (PR #{pr_number})"):
             return

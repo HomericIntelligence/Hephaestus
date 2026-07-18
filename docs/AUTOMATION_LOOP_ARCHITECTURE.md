@@ -25,6 +25,8 @@ CI/CD is outside the loop: it supplies no review input, approval, repair task,
 or label transition. `merge_wait` is the sole automatic armer and consumes the
 loop-owned label. A restart re-reads that label and the live PR head. No
 workflow, status, artifact, or lease authorizes the loop.
+The live head is used only to issue or recover an auto-merge request; it never
+invalidates an already-issued loop-owned label or causes post-label re-review.
 
 ## Queue topology
 

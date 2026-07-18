@@ -22,6 +22,6 @@ numbered, and listed here.
 | [0007](0007-dual-surface-required-checks.md) | Dual-surface required checks | Accepted |
 | [0008](0008-uv-only-development-environment.md) | uv is the sole development environment manager | Accepted |
 | [0009](0009-head-bound-strict-review-merge-gate.md) | Head-bound strict review controls queue-owned merge eligibility | Accepted (historical; superseded by 0012) |
-| [0010](0010-trusted-strict-review-proof.md) | Trusted strict-review proof context | Accepted (historical; superseded by 0012) |
+| [0010](0010-trusted-strict-review-proof.md) | Trusted strict-review proof context | Superseded by 0012 (historical) |
 | [0011](0011-mcp-integration-posture.md) | MCP is optional project-scoped agent tooling | Accepted |
 | [0012](0012-loop-owned-pr-review-approval.md) | Loop-owned Athena PR-review approval | Accepted |

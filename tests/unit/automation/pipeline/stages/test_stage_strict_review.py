@@ -15,6 +15,7 @@ from hephaestus.automation.pipeline.stages.strict_review import (
     EVAL,
     HEAD_CHECK,
     REVIEW_WAIT,
+    SR_FINISH,
     StrictReviewStage,
     parse_strict_review_verdict,
 )
@@ -437,10 +438,10 @@ def test_strict_review_ingress_rechecks_after_go_label_removal_error(
     assert state["autoMergeRequest"] is None
 
 
-def test_go_revokes_label_when_a_push_races_the_label_write(
+def test_go_label_remains_the_authorization_when_a_push_races_the_label_write(
     make_ctx: Any, make_work_item: Any
 ) -> None:
-    """A GO for H1 cannot leave an approval label on a pushed H2."""
+    """A later push cannot make discarded review state override the GO label."""
 
     class PushDuringLabelGitHub(FakeStageGitHub):
         def mark_pr_implementation_go(self, pr_number: int) -> None:
@@ -463,10 +464,10 @@ def test_go_revokes_label_when_a_push_races_the_label_write(
 
     result = StrictReviewStage().step(item, make_ctx(github=github))
 
-    assert result == Continue(next_state=HEAD_CHECK)
+    assert result == Continue(next_state=SR_FINISH)
     assert ("mark_pr_implementation_go", (12,)) in github.mutation_log
-    assert ("defer_auto_merge", (12,)) in github.mutation_log
-    assert any(action == "gh_issue_remove_labels" for action, _ in github.mutation_log)
+    assert ("defer_auto_merge", (12,)) not in github.mutation_log
+    assert not any(action == "gh_issue_remove_labels" for action, _ in github.mutation_log)
     assert "strict_review_attempt" not in item.payload
     assert "strict_review_worktree_head" not in item.payload
 

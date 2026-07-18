@@ -717,6 +717,36 @@ class TestJournalOrder:
         push_idx = next(i for i, entry in enumerate(trace) if entry[:2] == ("push", "merge_wait"))
         assert defer_idx < push_idx, f"recovery queued before auto-merge containment: {trace}"
 
+    def test_orphan_merge_wait_is_deferred_before_queue_push(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unlinked direct PR cannot retain an old arm while queued."""
+        coordinator, _, gh = make_coordinator(tmp_path, monkeypatch)
+        original_log = gh._log
+
+        def shared_log(name: str, *args: Any) -> None:
+            original_log(name, *args)
+            coordinator.event_log.append(("mutation", name, args))
+
+        gh._log = shared_log  # type: ignore[method-assign]
+        item = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.PR,
+            issue=None,
+            pr=2280,
+            stage=StageName.MERGE_WAIT,
+            state="ENTER",
+        )
+
+        coordinator._push_item(item, StageName.MERGE_WAIT, enter=True)
+
+        trace = coordinator.event_log
+        defer_idx = next(
+            i for i, entry in enumerate(trace) if entry[:2] == ("mutation", "defer_auto_merge")
+        )
+        push_idx = next(i for i, entry in enumerate(trace) if entry[:2] == ("push", "merge_wait"))
+        assert defer_idx < push_idx, f"orphan queued before auto-merge containment: {trace}"
+
 
 class TestDrainOrder:
     """Downstream-first queue draining."""

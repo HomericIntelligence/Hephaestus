@@ -138,6 +138,105 @@ def test_live_label_authorization_uses_the_current_pr_head(
     assert not any(action == "gh_issue_remove_labels" for action, _ in github.mutation_log)
 
 
+def test_arm_confirmation_accepts_head_drift_under_loop_owned_label(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A push during arming cannot turn discarded review state into a new gate."""
+
+    class PushDuringArmGitHub(_ArmingGitHub):
+        def arm_auto_merge(self, pr_number: int, expected_head_sha: str) -> None:
+            super().arm_auto_merge(pr_number, expected_head_sha)
+            self._pr_state = {
+                "state": "OPEN",
+                "headRefOid": "b" * 40,
+                "autoMergeRequest": {"enabledAt": "now"},
+            }
+
+    github = PushDuringArmGitHub(labels=(True, False))
+    item = make_work_item(stage=StageName.MERGE_WAIT, pr=12, state=ARM)
+
+    result = MergeWaitStage().step(item, make_ctx(github=github))
+
+    assert result == Continue(next_state=POLL)
+    assert github.arming_records[item.issue] == (12, "b" * 40)
+    assert ("defer_auto_merge", (12,)) not in github.mutation_log
+    assert item.armed is True
+
+
+def test_missing_auto_merge_retries_without_revoking_loop_owned_label(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """An operational arm loss retries in merge-wait rather than strict review."""
+
+    class MissingArmGitHub(_ArmingGitHub):
+        def arm_auto_merge(self, pr_number: int, expected_head_sha: str) -> None:
+            super().arm_auto_merge(pr_number, expected_head_sha)
+            self._pr_state = {"state": "OPEN", "headRefOid": expected_head_sha}
+
+    github = MissingArmGitHub(labels=(True, False))
+    item = make_work_item(stage=StageName.MERGE_WAIT, pr=12, state=ARM)
+
+    result = MergeWaitStage().step(item, make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.RETRY, "auto_merge_not_armed")
+    assert item.state == ARM
+    assert item.armed is False
+    assert ("defer_auto_merge", (12,)) not in github.mutation_log
+
+
+def test_ambiguous_arm_error_accepts_a_confirmed_labelled_arm(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A transport error reconciles a recorded arm before retrying anything."""
+
+    class AmbiguousArmGitHub(_ArmingGitHub):
+        def arm_auto_merge(self, pr_number: int, expected_head_sha: str) -> None:
+            super().arm_auto_merge(pr_number, expected_head_sha)
+            self._pr_state = {
+                "state": "OPEN",
+                "headRefOid": "b" * 40,
+                "autoMergeRequest": {"enabledAt": "now"},
+            }
+            raise RuntimeError("response lost")
+
+    github = AmbiguousArmGitHub(labels=(True, False))
+    item = make_work_item(stage=StageName.MERGE_WAIT, pr=12, state=ARM)
+
+    result = MergeWaitStage().step(item, make_ctx(github=github))
+
+    assert result == Continue(next_state=POLL)
+    assert github.arming_records[item.issue] == (12, "b" * 40)
+    assert ("defer_auto_merge", (12,)) not in github.mutation_log
+
+
+def test_label_loss_during_arm_confirmation_defers_and_returns_to_review(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """Only loss of the loop-owned label returns merge-wait to review."""
+
+    class LabelLostDuringArmGitHub(_ArmingGitHub):
+        def __init__(self) -> None:
+            super().__init__(labels=(True, False))
+            self._label_reads = iter(((True, False), (False, False)))
+
+        def pr_has_implementation_state_label(self, pr_number: int) -> tuple[bool, bool]:
+            del pr_number
+            return next(self._label_reads)
+
+        def defer_auto_merge(self, pr_number: int) -> None:
+            super().defer_auto_merge(pr_number)
+            self._pr_state = {"state": "OPEN", "headRefOid": "a" * 40}
+
+    github = LabelLostDuringArmGitHub()
+    item = make_work_item(stage=StageName.MERGE_WAIT, pr=12, state=ARM)
+
+    result = MergeWaitStage().step(item, make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
+    assert ("defer_auto_merge", (12,)) in github.mutation_log
+    assert item.armed is False
+
+
 def test_recovered_arm_is_disarmed_before_rechecking_label_authorization(
     make_ctx: Any, make_work_item: Any
 ) -> None:
@@ -175,8 +274,10 @@ def test_armed_labeled_pr_polls_without_rechecking_external_state(
     assert result == StageOutcome(Disposition.RETRY, "merge_pending")
 
 
-def test_post_arm_head_drift_revokes_auto_merge(make_ctx: Any, make_work_item: Any) -> None:
-    """A push after arming cannot merge code the skill did not review."""
+def test_post_arm_head_drift_keeps_loop_owned_label_authorization(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A later push does not turn transient review state into a second gate."""
 
     class DriftingGitHub(_ArmingGitHub):
         def defer_auto_merge(self, pr_number: int) -> None:
@@ -205,13 +306,33 @@ def test_post_arm_head_drift_revokes_auto_merge(make_ctx: Any, make_work_item: A
 
     result = stage.step(item, make_ctx(github=github))
 
-    assert result == StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
-    assert ("defer_auto_merge", (12,)) in github.mutation_log
+    assert result == StageOutcome(Disposition.RETRY, "merge_pending")
+    assert ("defer_auto_merge", (12,)) not in github.mutation_log
+    assert item.armed is True
+
+
+def test_poll_retries_a_lost_arm_without_revoking_loop_owned_label(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A disappearing arm returns to ARM while the label remains sufficient."""
+    github = _ArmingGitHub(labels=(True, False))
+    item = make_work_item(stage=StageName.MERGE_WAIT, pr=12, state=POLL)
+    item.armed = True
+    item.payload["merge_wait_started_at"] = 1.0
+    github._pr_state = {"state": "OPEN", "headRefOid": "b" * 40}
+
+    result = MergeWaitStage().step(item, make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.RETRY, "auto_merge_not_armed")
+    assert item.state == ARM
     assert item.armed is False
+    assert ("defer_auto_merge", (12,)) not in github.mutation_log
 
 
-def test_arm_failure_is_contained_before_finishing(make_ctx: Any, make_work_item: Any) -> None:
-    """An ambiguous GitHub arm error cannot leave auto-merge enabled."""
+def test_arm_failure_retries_after_readback_without_revoking_label(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """An ambiguous arm error retries only after it observes no live arm."""
 
     class FailingArmGitHub(_ArmingGitHub):
         def arm_auto_merge(self, pr_number: int, expected_head_sha: str) -> None:
@@ -227,8 +348,9 @@ def test_arm_failure_is_contained_before_finishing(make_ctx: Any, make_work_item
 
     result = MergeWaitStage().step(item, make_ctx(github=github))
 
-    assert result == StageOutcome(Disposition.FINISH_FAIL, "arm_failed")
-    assert ("defer_auto_merge", (12,)) in github.mutation_log
+    assert result == StageOutcome(Disposition.RETRY, "auto_merge_not_armed")
+    assert item.state == ARM
+    assert ("defer_auto_merge", (12,)) not in github.mutation_log
 
 
 def test_closed_pr_finishes_failed_after_arm(make_ctx: Any, make_work_item: Any) -> None:

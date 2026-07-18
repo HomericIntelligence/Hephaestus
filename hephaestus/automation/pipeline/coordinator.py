@@ -1397,11 +1397,12 @@ class Coordinator:
         Every durable GitHub mutation for this transition already happened
         inside the stage, immediately before the outcome that got us here.
         The one narrow exception is review-gate ingress: a direct/reseeded
-        strict-review item, or a merge-wait arm-recovery item, can carry a
-        stale remote auto-merge arm before its queued stage gets CPU time, so
-        the coordinator disarms it *before* queueing.  Those stages repeat
-        the check on entry to defend every other invocation path and an
-        external re-arm between enqueue and drain.
+        strict-review item, an orphaned direct merge-wait item, or a
+        merge-wait arm-recovery item can carry a stale remote auto-merge arm
+        before its queued stage gets CPU time, so the coordinator disarms it
+        *before* queueing.  Those stages repeat the check on entry to defend
+        every other invocation path and an external re-arm between enqueue
+        and drain.
 
         Upstream idempotency guard (#2107): a genuinely NEW ISSUE work item whose
         ``(repo, issue)`` is already queued (any stage) or in-flight is refused —
@@ -1419,7 +1420,8 @@ class Coordinator:
             logger.info("seed skipped: #%s already queued/in-flight in %s", item.issue, item.repo)
             return
         requires_ingress_containment = stage is StageName.STRICT_REVIEW or (
-            stage is StageName.MERGE_WAIT and bool(item.payload.get("merge_wait_recovery"))
+            stage is StageName.MERGE_WAIT
+            and (item.issue is None or bool(item.payload.get("merge_wait_recovery")))
         )
         if requires_ingress_containment and enter and item.pr is not None:
             try:

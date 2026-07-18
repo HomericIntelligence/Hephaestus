@@ -1,10 +1,8 @@
-"""Merge-wait stage: strictly-gated auto-merge arming and post-merge learning.
+"""Merge-wait stage: loop-owned auto-merge arming and post-merge learning.
 
-Re-houses ``ci_driver._arm_and_wait_for_merge`` (:584) /
-``_wait_for_pr_terminal`` (:1492) / ``_resolve_dirty_pr`` (:923) /
-``_resolve_blocked_pr`` (:986) as a pipeline stage
-(docs/AUTOMATION_LOOP_ARCHITECTURE.md section "7. merge_wait" is the
-binding contract).
+Owns the queue pipeline's arming, terminal-state polling, and post-merge
+learning handoff (docs/AUTOMATION_LOOP_ARCHITECTURE.md section "7. merge_wait"
+is the binding contract).
 
 ARM reads the live PR head, requires the loop-owned ``state:implementation-go``
 label, requests squash auto-merge, and confirms that GitHub recorded the arm.
@@ -61,6 +59,12 @@ LEARN_WAIT = "LEARN_WAIT"
 MW_FINISH = "MW_FINISH"
 FINISH = MW_FINISH
 
+# An absent arm is an operational state, not a reason to revoke the
+# loop-owned authorization label.  Timer parking prevents a transient GitHub
+# response from turning into an in-process busy loop.
+_ARM_RETRY_DELAY_S = 30
+_ARM_RETRY_LIMIT = 3
+
 
 def build_drive_green_learn_prompt(issue_number: int, pr_number: int) -> str:
     """Compose the post-merge drive-green /learn prompt (built in-worker).
@@ -89,7 +93,7 @@ def build_drive_green_learn_prompt(issue_number: int, pr_number: int) -> str:
 
 
 class MergeWaitStage(Stage):
-    """Stage: arm only a current loop-owned approval label and contain drift."""
+    """Stage: arm from the loop-owned approval label and contain label loss."""
 
     def on_enter(self, item: WorkItem, ctx: StageContext) -> StageOutcome | None:
         """Initialize the mini-state and restore a confirmed arm to POLL.
@@ -214,41 +218,68 @@ class MergeWaitStage(Stage):
         try:
             ctx.github.arm_auto_merge(item.pr, head_sha)
         except Exception as exc:
-            raced = ctx.github.gh_pr_state(item.pr)
-            raced_terminal = _terminal_pr_outcome(raced, item.pr)
-            if raced_terminal is not None and raced_terminal.disposition is Disposition.FINISH_PASS:
-                logger.info("merge_wait: PR #%d merged while arming: %s", item.pr, exc)
-                return self._route_merged(item, ctx)
-            logger.warning("merge_wait: failed to arm auto-merge for PR #%d: %s", item.pr, exc)
-            # A transport error is ambiguous: GitHub may have accepted the
-            # arm before the client observed the failure.  Contain that
-            # possible remote arm before terminalizing so a later push cannot
-            # merge without its loop-owned approval label.
-            return self._disable_and_fail(item, ctx, "arm_failed")
+            logger.warning("merge_wait: arm response failed for PR #%d: %s", item.pr, exc)
+            # A transport failure is ambiguous: read back first.  A confirmed
+            # live arm remains valid under the loop-owned label; an absent arm
+            # retries with a timer rather than blindly issuing a second arm.
+            confirmed = ctx.github.gh_pr_state(item.pr)
+            confirmed_terminal = _terminal_pr_outcome(confirmed, item.pr)
+            if confirmed_terminal is not None:
+                if confirmed_terminal.disposition is Disposition.FINISH_PASS:
+                    return self._route_merged(item, ctx)
+                return confirmed_terminal
+            return self._handle_arm_readback(item, ctx, head_sha, confirmed)
         confirmed = ctx.github.gh_pr_state(item.pr)
         confirmed_terminal = _terminal_pr_outcome(confirmed, item.pr)
         if confirmed_terminal is not None:
             if confirmed_terminal.disposition is Disposition.FINISH_PASS:
                 return self._route_merged(item, ctx)
             return confirmed_terminal
+        return self._handle_arm_readback(item, ctx, head_sha, confirmed)
+
+    def _handle_arm_readback(
+        self,
+        item: WorkItem,
+        ctx: StageContext,
+        requested_head: str,
+        confirmed: dict[str, object] | None,
+    ) -> StepResult:
+        """Accept a live labelled arm or schedule a bounded operational retry."""
         confirmed_head = str((confirmed or {}).get("headRefOid") or "")
         confirmed_has_go, _confirmed_has_no_go = ctx.github.pr_has_implementation_state_label(
-            item.pr
+            item.pr or 0
         )
-        if (
-            confirmed_head != head_sha
-            or not (confirmed or {}).get("autoMergeRequest")
-            or not confirmed_has_go
-        ):
-            return self._disable_and_fail(item, ctx, "arm_confirm_failed", recoverable=True)
-        if not self._confirm_arm(item, ctx, head_sha):
+        if not confirmed_has_go:
+            return self._disable_and_fail(item, ctx, "not_implementation_go", recoverable=True)
+        if not confirmed_head or not (confirmed or {}).get("autoMergeRequest"):
+            return self._retry_arm(item, "auto_merge_not_armed")
+        # The label, not this transient head, is the authorization.  Store
+        # the confirmed head only as arm-recovery metadata so a restart can
+        # resume the post-merge learning handoff consistently.
+        if confirmed_head != requested_head and not self._record_arm(item, ctx, confirmed_head):
+            return self._disable_and_fail(item, ctx, "arm_confirmation_record_failed")
+        if not self._confirm_arm(item, ctx, confirmed_head):
             # GitHub is armed but recovery cannot prove that fact durably.
             # Contain the remote arm before terminalizing rather than letting
             # a future restart re-enable an already-valid request.
             return self._disable_and_fail(item, ctx, "arm_confirmation_record_failed")
         item.armed = True
-        item.payload["merge_wait_head"] = head_sha
+        item.payload["merge_wait_head"] = confirmed_head
+        item.payload.pop("merge_wait_arm_retries", None)
         return Continue(next_state=POLL)
+
+    @staticmethod
+    def _retry_arm(item: WorkItem, note: str) -> StageOutcome:
+        """Timer-park a label-preserving ARM retry without busy-spinning."""
+        retries = int(item.payload.get("merge_wait_arm_retries", 0)) + 1
+        item.payload["merge_wait_arm_retries"] = retries
+        item.armed = False
+        item.state = ARM
+        if retries > _ARM_RETRY_LIMIT:
+            logger.error("merge_wait:%s: auto-merge arm retry budget exhausted", item.issue)
+            return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_arm_retry_exhausted")
+        item.payload["retry_delay_s"] = _ARM_RETRY_DELAY_S
+        return StageOutcome(Disposition.RETRY, note)
 
     @staticmethod
     def _record_arm(item: WorkItem, ctx: StageContext, head_sha: str) -> bool:
@@ -299,9 +330,9 @@ class MergeWaitStage(Stage):
     ) -> StepResult:
         """Contain a failed gate condition before routing its outcome.
 
-        Approval-label loss and post-arm head drift are recoverable only after
-        containment. Failures to disable auto-merge or to persist an arm
-        record stay terminal because their remote state is ambiguous.
+        Approval-label loss is recoverable only after containment. Failures to
+        disable auto-merge or to persist an arm record stay terminal because
+        their remote state is ambiguous.
         """
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
@@ -356,6 +387,8 @@ class MergeWaitStage(Stage):
         pr_state_str = ((gh_state or {}).get("state") or "").upper()
         if pr_state_str not in {"MERGED", "CLOSED"}:
             has_go, _has_no_go = ctx.github.pr_has_implementation_state_label(item.pr)
+            if not has_go:
+                return self._disable_and_fail(item, ctx, "not_implementation_go", recoverable=True)
             if item.armed and bool((gh_state or {}).get("autoMergeRequest")) and has_go:
                 started = item.payload.get("merge_wait_started_at")
                 if started is None:
@@ -365,7 +398,7 @@ class MergeWaitStage(Stage):
                 # performs another merge mutation from this state.
                 item.payload["retry_delay_s"] = 30
                 return StageOutcome(Disposition.RETRY, "merge_pending")
-            return self._disable_and_fail(item, ctx, "not_implementation_go", recoverable=True)
+            return self._retry_arm(item, "auto_merge_not_armed")
 
         started = item.payload.get("merge_wait_started_at")
         if started is None:
