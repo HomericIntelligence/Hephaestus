@@ -901,7 +901,10 @@ class ImplementationStage(Stage):
             # Push failed: transient git/network trouble — RETRY the stage
             # without burning the implement budget, bounded by
             # GIT_ERROR_RETRY_CAP (M5).
-            return self._git_retry(item, "commit_push failed")
+            outcome = self._git_retry(item, "commit_push failed")
+            if outcome.disposition is Disposition.RETRY:
+                item.state = COMMIT_PUSH_WAIT
+            return outcome
 
         if item.pr is None:
             title = item.payload.get("issue_title") or f"[Auto] Implement issue #{item.issue}"
