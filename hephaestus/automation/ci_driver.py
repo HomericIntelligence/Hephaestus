@@ -3,8 +3,8 @@
 Epic #1809 made the queue-based pipeline
 (:mod:`hephaestus.automation.pipeline.coordinator`) the single implementation
 of the drive-green (``strict_review`` → ``merge_wait``) flow. This module is
-now the historical console-script entry point only: :func:`main` parses its
-scope and worker arguments, builds a
+the console-script entry point: :func:`main` parses its scope and worker
+arguments, builds a
 :class:`~hephaestus.automation.pipeline.coordinator.PipelineConfig` trimmed to
 the ``(strict_review, merge_wait)`` stage scope via
 :class:`~hephaestus.automation.pipeline.routing.PipelineScope`, seeds the
@@ -20,8 +20,8 @@ importable placeholder for the package's public API surface
 (:mod:`hephaestus.automation`); it no longer carries orchestration.
 
 Usage:
-    hephaestus-drive-prs-green [--issues N ...] [--prs N ...] [--dry-run] \
-        [--max-workers N] [--all]
+    hephaestus-drive-prs-green [--issues N ...] [--prs N ...] [--dry-run]
+        [--max-workers N] [--all] [-v] [--json]
 """
 
 from __future__ import annotations
