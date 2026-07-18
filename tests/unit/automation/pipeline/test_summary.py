@@ -73,11 +73,29 @@ class TestFormatPreservedWorktrees:
             "  #101: /wt/issue-101",
             "  #202: /wt/issue-202",
             "\nRerun these issues after inspecting/cleaning the worktrees:",
-            "  impl.py --issues 101 202 --resume",
+            "  impl.py --issues 101,202",
             "To discard them instead:",
             "  git worktree remove --force /wt/issue-101",
             "  git worktree remove --force /wt/issue-202",
         ]
+
+    def test_rerun_hint_actually_parses_with_the_loop_cli(self) -> None:
+        """The emitted rerun command must be valid input to the loop parser (#2281).
+
+        A byte-identical pin previously froze a command the CLI rejects
+        (space-joined ``--issues`` + a nonexistent ``--resume``). Assert the
+        real argparser accepts the emitted flags and recovers the numbers.
+        """
+        from hephaestus.automation import loop_runner
+
+        preserved = [("repo-a", 101, "/wt/issue-101"), ("repo-b", 202, "/wt/issue-202")]
+        rerun_line = next(
+            line for line in format_preserved_worktrees(preserved, "loop") if "--issues" in line
+        )
+        # Everything after the script token is the argv the operator would run.
+        argv = rerun_line.split()[1:]
+        parsed = loop_runner._parse_args(argv)
+        assert parsed.issues == [101, 202]
 
 
 class TestPrintSummaryRows:
