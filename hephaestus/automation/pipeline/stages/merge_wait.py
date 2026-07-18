@@ -107,6 +107,12 @@ class MergeWaitStage(Stage):
             None (always proceed to step()).
 
         """
+        # A PR number is not requirements context.  In particular, an
+        # unlinked direct ``--prs`` seed carrying a stale GO label must be
+        # contained here rather than using that label to arm auto-merge.
+        # Linked PRs still use the label as the sole durable authorization.
+        if item.issue is None:
+            return self._disable_and_fail(item, ctx, "merge_wait_orphan")
         if item.payload.pop("merge_wait_recovery", False):
             if item.issue is None or item.pr is None:
                 return StageOutcome(Disposition.FINISH_FAIL, "invalid_arm_recovery")

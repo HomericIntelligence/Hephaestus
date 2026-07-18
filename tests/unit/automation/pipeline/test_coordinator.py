@@ -641,6 +641,50 @@ class TestJournalOrder:
         assert item.result.reason == "strict_review_ingress_auto_merge_disable_failed"
         assert coordinator.queues[StageName.FINISHED].snapshot() == [item]
 
+    def test_strict_review_guard_spans_merge_wait_arm_confirmation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A second reviewer cannot revoke GO between the first read and arm."""
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+        guard = coordinator.config.strict_review_guard
+        assert guard is not None
+        item = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.PR,
+            issue=2053,
+            pr=2280,
+            stage=StageName.STRICT_REVIEW,
+            state="EVAL",
+        )
+        owner = id(item)
+        contender = owner + 1
+        assert guard.try_claim("org", "repo-a", 2280, owner)
+        item.payload["_strict_review_guard_owner"] = owner
+
+        class ArmConfirmationStage:
+            def on_enter(self, queued: WorkItem, ctx: Any) -> None:
+                queued.state = "ARM"
+
+            def step(self, queued: WorkItem, ctx: Any) -> Any:
+                if queued.state == "ARM":
+                    assert not guard.try_claim("org", "repo-a", 2280, contender)
+                    return Continue("POLL")
+                assert guard.try_claim("org", "repo-a", 2280, contender)
+                guard.release("org", "repo-a", 2280, contender)
+                return StageOutcome(Disposition.FINISH_PASS, "armed")
+
+            def on_job_done(self, queued: WorkItem, result: JobResult, ctx: Any) -> None:
+                raise AssertionError("this stage submits no jobs")
+
+        coordinator.stages[StageName.MERGE_WAIT] = ArmConfirmationStage()
+        coordinator._route(item, StageOutcome(Disposition.ADVANCE, "strict-go"))
+
+        assert coordinator.queues[StageName.MERGE_WAIT].pop() is item
+        coordinator._run_item(item)
+
+        assert item.result is not None
+        assert item.result.passed is True
+
     def test_recovered_merge_wait_arm_is_deferred_before_queue_push(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

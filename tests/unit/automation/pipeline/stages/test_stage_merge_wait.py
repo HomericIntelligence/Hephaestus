@@ -61,6 +61,25 @@ def test_missing_implementation_go_is_contained(make_ctx: Any, make_work_item: A
     assert not any(action == "arm_auto_merge" for action, _ in github.mutation_log)
 
 
+def test_orphan_pr_is_contained_before_merge_wait_can_consume_go_label(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """An unlinked direct PR may never turn a stale GO label into an arm."""
+    github = _ArmingGitHub(labels=(True, False))
+    item = make_work_item(
+        issue=None,
+        stage=StageName.MERGE_WAIT,
+        pr=12,
+        state=ARM,
+    )
+
+    result = MergeWaitStage().on_enter(item, make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_wait_orphan")
+    assert ("defer_auto_merge", (12,)) in github.mutation_log
+    assert not any(action == "arm_auto_merge" for action, _ in github.mutation_log)
+
+
 def test_label_without_ephemeral_review_handoff_arms(make_ctx: Any, make_work_item: Any) -> None:
     """A persisted loop-owned label remains the merge authorization after restart."""
     github = _ArmingGitHub(labels=(True, False))

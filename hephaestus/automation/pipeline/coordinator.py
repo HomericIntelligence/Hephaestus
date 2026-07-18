@@ -1105,6 +1105,12 @@ class Coordinator:
                 if isinstance(result, Continue):
                     item.state = result.next_state
                     item.add_history_event(item.stage, item.state)
+                    if item.stage is StageName.MERGE_WAIT and item.state == "POLL":
+                        # The strict-review guard is an ephemeral local mutex,
+                        # not an approval proof.  Release it only after the
+                        # merge-wait stage has read the label, armed GitHub,
+                        # and confirmed that arm for this live attempt.
+                        self._release_strict_review_guard(item)
                     continue
                 if isinstance(result, JobRequest):
                     if self.config.dry_run:
@@ -1219,9 +1225,21 @@ class Coordinator:
         disposition = outcome.disposition
 
         # A strict-review claim spans its worktree synchronization, read-only
-        # agent job, and final loop-owned verdict mutation.  Retry keeps that
-        # claim; every other disposition leaves this stage and must release it.
-        if item.stage is StageName.STRICT_REVIEW and disposition is not Disposition.RETRY:
+        # agent job, final loop-owned verdict mutation, and the immediately
+        # following merge-wait ARM confirmation.  Keeping it for that one
+        # in-process handoff closes the label-read-to-arm window without
+        # creating a durable approval condition; the loop-owned label remains
+        # the sole restart-safe authorization.
+        handoff_to_merge_wait = (
+            item.stage is StageName.STRICT_REVIEW
+            and disposition is Disposition.ADVANCE
+            and route.next is StageName.MERGE_WAIT
+        )
+        if (
+            item.stage is StageName.STRICT_REVIEW
+            and disposition is not Disposition.RETRY
+            and not handoff_to_merge_wait
+        ):
             self._release_strict_review_guard(item)
 
         if item.stage is StageName.FINISHED:
