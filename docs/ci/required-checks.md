@@ -48,6 +48,13 @@ automation authority and is not a required context.
 handles code events only; it must not gain label, review, or auto-merge event
 triggers. The automation loop handles review labels and merge-state actions.
 
+The gate fans in the `_required.yml` code-validation jobs: `lint`, `pr-policy`,
+`unit-tests`, `build`, the `security/*` scans (including `security/workflow-scan`,
+the zizmor GitHub Actions SAST gate added for issue #2151), `license-scan`, and
+more. Enumerating each one individually in branch protection is brittle: renaming
+a job, adding a job, or splitting one silently changes what's required, and nobody
+notices until something slips through.
+
 ## Live audit
 
 ```bash

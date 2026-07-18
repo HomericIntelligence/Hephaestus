@@ -560,9 +560,16 @@ class TestReleaseAttestations:
         assert self._publish_step()["with"]["generate_attestations"] is True
 
     def test_id_token_write_permission_present(self) -> None:
-        """Attestation generation requires the ``id-token: write`` permission."""
+        """Attestation generation requires the ``id-token: write`` permission.
+
+        The permission is scoped to the ``build-and-publish`` job (least
+        privilege, zizmor excessive-permissions / issue #2151) — the workflow
+        default is read-only — because that is where the PyPI publish step
+        generates PEP 740 attestations.
+        """
         workflow = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
-        assert workflow["permissions"]["id-token"] == "write"
+        assert workflow["permissions"].get("id-token") != "write"
+        assert workflow["jobs"]["build-and-publish"]["permissions"]["id-token"] == "write"
 
 
 class TestAutomationRuntimeInstall:

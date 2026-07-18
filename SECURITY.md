@@ -54,6 +54,29 @@ network-facing service. Its security posture reflects that scope:
   non-production exception. Certificate and key material must be provided as
   runtime file paths, never committed to the repository.
 
+### Static Analysis Coverage
+
+Each source surface has a dedicated, CI-gating static security scanner, so
+security analysis is not limited to the Python surface:
+
+| Surface | Tool | Gate |
+|---------|------|------|
+| Python (`hephaestus/`, `scripts/`) | Bandit (medium+) | pre-commit hook + required `security/sast-scan` |
+| GitHub Actions workflows | zizmor (medium+, offline; online audits weekly) | pre-commit hook + required `security/workflow-scan` |
+| Shell scripts (`**/*.sh`) | ShellCheck | pre-commit hook (all `.sh`) + required `shellcheck` job (`--severity=error`) |
+| Secrets | gitleaks + detect-private-key | required `security/secrets-scan` + pre-commit |
+| Dependencies | pip-audit | required `security/dependency-scan` + weekly schedule |
+
+For the workflow surface (issue #2151), zizmor is used instead of
+CodeQL/Semgrep: it is purpose-built for GitHub Actions security (template
+injection, credential persistence, cache poisoning, unpinned/vulnerable
+actions, excessive permissions), ships as a PyPI wheel locked in `uv.lock`
+under the uv-only toolchain, and runs offline for a deterministic,
+network-free PR gate. The
+weekly `Security` workflow drops the offline flag to add the API-backed online
+audits. Suppressions use inline `# zizmor: ignore[rule]` comments and must
+carry a rationale.
+
 ### Abuse & Rate Limiting
 
 Because this repository exposes no network service, there is no in-process
