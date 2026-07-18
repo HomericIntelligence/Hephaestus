@@ -26,7 +26,8 @@ auto-merge arm.
   :func:`~hephaestus.automation.prompts.strict_review_gate.build_strict_review_prompt`.
 - EVAL [M]:
   - GO: applies the loop-owned label only after the reviewed head is read back
-    as current, records that head, and advances to ``merge_wait``.
+    as current, then discards the review-local head before advancing to
+    ``merge_wait``.
   - NOGO: idempotently ``defer_auto_merge``, readback-verify it actually
     disabled, post fenced remediation feedback, ``mark_pr_implementation_no_go``,
     FAIL_BACK(``nogo``) to ``implementation`` (a real implementation job, not
@@ -87,6 +88,29 @@ FINISH = SR_FINISH
 _OWNERSHIP_CLAIMED = "claimed"
 _OWNERSHIP_BUSY = "busy"
 _OWNERSHIP_UNAVAILABLE = "unavailable"
+
+# A successful strict review passes only ordinary issue context, its worktree
+# cleanup path, and the in-process mutex to the next stage.  This is a closed
+# allowlist rather than a review-key denylist: an unknown or renamed review
+# field must never become a second durable merge authorization.  Additions
+# require an explicit review of their authorization consequences.
+_GO_CONTEXT_PAYLOAD_KEYS = frozenset(
+    {
+        "_fail_backs",
+        "advise_findings",
+        "direct_pr_worktree",
+        "entry_reason",
+        "entry_stage",
+        "existing_pr",
+        "issue_body",
+        "issue_title",
+        "marketplace_path",
+    }
+)
+_GO_HANDOFF_PAYLOAD_KEYS = _GO_CONTEXT_PAYLOAD_KEYS | {
+    "_strict_review_guard_owner",
+    "strict_review_worktree",
+}
 
 #: HTML-comment marker for the NOGO remediation feedback comment.
 STRICT_REVIEW_NOGO_MARKER = "<!-- hephaestus-strict-review-nogo -->"
@@ -555,7 +579,7 @@ class StrictReviewStage(Stage):
     def _handle_go(
         self, item: WorkItem, ctx: StageContext, head_sha: str, verdict_text: str
     ) -> StepResult:
-        """Label a successful current-head in-loop PR-review skill verdict."""
+        """Label a successful current-head PR-review verdict and discard its proof state."""
         pr_number = item.pr
         if pr_number is None:  # guarded by step(); narrowing
             return StageOutcome(Disposition.FAIL_BACK, "nogo")
@@ -576,6 +600,14 @@ class StrictReviewStage(Stage):
         )
         if current_outcome is not None:
             return current_outcome
+        # Review state is needed only while this stage verifies the current
+        # head and applies GO.  It must not cross into merge_wait: the
+        # loop-owned label is that stage's only authorization.  Retain only a
+        # fixed, non-authorization context; an unknown field is discarded
+        # even if it originated before this strict-review pass.
+        for key in tuple(item.payload):
+            if key not in _GO_HANDOFF_PAYLOAD_KEYS:
+                item.payload.pop(key, None)
         return Continue(next_state=SR_FINISH)
 
     def _handle_nogo(

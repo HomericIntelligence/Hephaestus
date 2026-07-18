@@ -224,9 +224,39 @@ def test_go_labels_current_head_for_merge_wait(make_ctx: Any, make_work_item: An
         pr=12,
         state=EVAL,
         payload={
+            "issue_title": "Issue title",
+            "issue_body": "Issue body",
+            "advise_findings": "Findings",
+            "marketplace_path": "/marketplace",
+            "existing_pr": 12,
+            "entry_stage": "repo",
+            "entry_reason": "seeded",
+            "_fail_backs": 0,
+            "direct_pr_worktree": "/review/direct-12",
             "strict_review_head": _HEAD,
+            "strict_review_attempt": 1,
             "strict_review_verdict": "GO",
             "strict_review_text": "Grade: A\nVerdict: GO",
+            "strict_review_worktree": "/review/strict-12",
+            "strict_review_worktree_head": _HEAD,
+            # Alternate names are equally prohibited as a MergeWait handoff.
+            "reviewed_head": _HEAD,
+            "approval_head": _HEAD,
+            "reviewed_sha": _HEAD,
+            "approval_sha": _HEAD,
+            "strict_review_commit": _HEAD,
+            "review_evidence_sha": _HEAD,
+            "proof_sha": _HEAD,
+            "approval_ref": "reviewed-branch",
+            "validated_sha": _HEAD,
+            "gate_revision": _HEAD,
+            "attestation": _HEAD,
+            # Unknown spellings and forged ingress bookkeeping cannot escape
+            # the closed GO handoff allowlist either.
+            "approved_head": _HEAD,
+            "authorization_sha": _HEAD,
+            "audit_stamp": _HEAD,
+            "_strict_review_entry_payload_keys": ("strict_review_head",),
         },
     )
     github = FakeStageGitHub(pr_state={"state": "OPEN", "headRefOid": _HEAD})
@@ -235,6 +265,70 @@ def test_go_labels_current_head_for_merge_wait(make_ctx: Any, make_work_item: An
 
     assert isinstance(result, Continue)
     assert ("mark_pr_implementation_go", (12,)) in github.mutation_log
+    # The current-head value is only a transient check while this stage
+    # applies GO.  It must not cross into merge_wait where it could become a
+    # second authorization condition beside the loop-owned label.
+    assert not {
+        "strict_review_head",
+        "strict_review_attempt",
+        "strict_review_verdict",
+        "strict_review_text",
+        "strict_review_worktree_head",
+        "reviewed_head",
+        "approval_head",
+        "reviewed_sha",
+        "approval_sha",
+        "strict_review_commit",
+        "review_evidence_sha",
+        "proof_sha",
+        "approval_ref",
+        "validated_sha",
+        "gate_revision",
+        "attestation",
+        "approved_head",
+        "authorization_sha",
+        "audit_stamp",
+        "_strict_review_entry_payload_keys",
+    } & item.payload.keys()
+    assert item.payload["strict_review_worktree"] == "/review/strict-12"
+    assert "_strict_review_guard_owner" in item.payload
+    assert {
+        key: item.payload[key]
+        for key in (
+            "issue_title",
+            "issue_body",
+            "advise_findings",
+            "marketplace_path",
+            "existing_pr",
+            "entry_stage",
+            "entry_reason",
+            "_fail_backs",
+            "direct_pr_worktree",
+        )
+    } == {
+        "issue_title": "Issue title",
+        "issue_body": "Issue body",
+        "advise_findings": "Findings",
+        "marketplace_path": "/marketplace",
+        "existing_pr": 12,
+        "entry_stage": "repo",
+        "entry_reason": "seeded",
+        "_fail_backs": 0,
+        "direct_pr_worktree": "/review/direct-12",
+    }
+    assert set(item.payload) == {
+        "issue_title",
+        "issue_body",
+        "advise_findings",
+        "marketplace_path",
+        "existing_pr",
+        "entry_stage",
+        "entry_reason",
+        "_fail_backs",
+        "direct_pr_worktree",
+        "strict_review_worktree",
+        "_strict_review_guard_owner",
+    }
 
 
 def test_strict_review_uses_codex_even_when_the_loop_agent_is_claude(
@@ -356,8 +450,10 @@ def test_go_revokes_label_when_a_push_races_the_label_write(
         state=EVAL,
         payload={
             "strict_review_head": _HEAD,
+            "strict_review_attempt": 1,
             "strict_review_verdict": "GO",
             "strict_review_text": "Grade: A\nVerdict: GO",
+            "strict_review_worktree_head": _HEAD,
         },
     )
     github = PushDuringLabelGitHub(pr_state={"state": "OPEN", "headRefOid": _HEAD})
@@ -368,6 +464,8 @@ def test_go_revokes_label_when_a_push_races_the_label_write(
     assert ("mark_pr_implementation_go", (12,)) in github.mutation_log
     assert ("defer_auto_merge", (12,)) in github.mutation_log
     assert any(action == "gh_issue_remove_labels" for action, _ in github.mutation_log)
+    assert "strict_review_attempt" not in item.payload
+    assert "strict_review_worktree_head" not in item.payload
 
 
 def test_job_result_keeps_final_verdict(make_ctx: Any, make_work_item: Any) -> None:
