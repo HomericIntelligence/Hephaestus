@@ -54,6 +54,7 @@ See the [README](../README.md) for installation and development setup instructio
 - [NATS JetStream Configuration](nats.md) - TLS defaults, certificate file paths, and local plaintext exceptions for `hephaestus.nats`
 - [Operations Runbooks](runbooks/index.md) — Operator recovery procedures for the automation pipeline (loop crash, corrupted worktree, CI-driver stall, quota exhaustion)
 - [Performance Testing](performance-testing.md) — Bounded worker-pool load, capacity, latency, and sustained-concurrency testing
+- [Privacy, Retention, and Deletion Policy](../PRIVACY.md) — data inventory, retention periods, deletion procedures, and GDPR contact (issue #2175)
 
 ## Contributing
 
