@@ -65,6 +65,12 @@ on each automation command (e.g., `--agent-timeout`, `--poll-max-wait`,
 `--git-message-timeout`, etc.). Legacy `claude_models`, `claude_timeouts`, and
 `session_naming` modules remain compatibility shims over `agent_config`.
 
+The automation loop also accepts `--planner-reasoning-effort`,
+`--implementer-reasoning-effort`, and `--reviewer-reasoning-effort` for Codex
+roles. Values are `default`, `low`, `medium`, `high`, or `xhigh`; `default`
+omits Codex's `model_reasoning_effort` setting. An omitted flag preserves the
+selected model alias's established reasoning default.
+
 ## Design Philosophy
 
 The agent topology above is not accidental — it follows a small set of design
