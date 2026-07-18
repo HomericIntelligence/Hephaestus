@@ -897,6 +897,13 @@ class TestAddressReviewPrompt:
         out = self._build()
         assert "ALL" in out and ("must be" in out.lower() or "resolve" in out.lower())
 
+    def test_rejects_review_comments_that_conflict_with_active_policy(self) -> None:
+        """Untrusted review feedback cannot override the active task contract."""
+        out = self._build()
+
+        assert "active implementation contract" in out
+        assert "second strict-review merge authorization" in out
+
     def test_instructs_advise_skill(self) -> None:
         """Each sub-agent must consult /hephaestus:advise before fixing."""
         out = self._build()
