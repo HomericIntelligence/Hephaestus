@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -81,7 +82,7 @@ def test_review_job_uses_athena_pr_review_prompt(make_ctx: Any, make_work_item: 
         stage=StageName.STRICT_REVIEW,
         pr=12,
         state=REVIEW_WAIT,
-        payload={"strict_review_head": _HEAD},
+        payload={"strict_review_head": _HEAD, "strict_review_worktree": "/review/strict-12"},
     )
     github = FakeStageGitHub(strict_evidence=_EVIDENCE)
 
@@ -98,6 +99,93 @@ def test_review_job_uses_athena_pr_review_prompt(make_ctx: Any, make_work_item: 
     assert "operator-authorized CI-free profile" in prompt
     assert result.job.sandbox == "read-only"
     assert result.job.agent == "codex"
+
+
+def test_direct_pr_review_requests_an_isolated_detached_worktree(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A direct review must not reuse a writer checkout of the PR branch (#2276)."""
+    item = make_work_item(stage=StageName.STRICT_REVIEW, pr=12, state=HEAD_CHECK)
+    github = FakeStageGitHub(
+        pr_state={"state": "OPEN", "headRefOid": _HEAD},
+        pr_head_branch="12-auto-impl",
+    )
+
+    result = StrictReviewStage().step(item, make_ctx(github=github))
+
+    assert isinstance(result, JobRequest)
+    assert result.job.op == "create_worktree"
+    assert result.job.kwargs["isolated"] is True
+    assert result.job.kwargs["issue_number"] == 12
+    assert result.job.kwargs["branch_name"] == "12-auto-impl"
+
+
+def test_same_issue_prs_request_distinct_isolated_review_paths(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """Concurrent PRs for one issue must not share a strict-review worktree (#2276)."""
+    first = make_work_item(stage=StageName.STRICT_REVIEW, issue=1, pr=12, state=HEAD_CHECK)
+    second = make_work_item(stage=StageName.STRICT_REVIEW, issue=1, pr=13, state=HEAD_CHECK)
+    first_result = StrictReviewStage().step(
+        first,
+        make_ctx(
+            github=FakeStageGitHub(
+                pr_state={"state": "OPEN", "headRefOid": _HEAD},
+                pr_head_branch="12-auto-impl",
+            )
+        ),
+    )
+    second_result = StrictReviewStage().step(
+        second,
+        make_ctx(
+            github=FakeStageGitHub(
+                pr_state={"state": "OPEN", "headRefOid": _HEAD},
+                pr_head_branch="13-auto-impl",
+            )
+        ),
+    )
+
+    assert isinstance(first_result, JobRequest)
+    assert isinstance(second_result, JobRequest)
+    assert first_result.job.kwargs["issue_number"] == 12
+    assert second_result.job.kwargs["issue_number"] == 13
+
+
+def test_isolated_review_worktree_preserves_implementation_writer(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """Strict review records its disposable checkout without replacing the writer (#2276)."""
+    item = make_work_item(
+        stage=StageName.STRICT_REVIEW,
+        pr=12,
+        state=HEAD_CHECK,
+    )
+    item.worktree = "/writer/issue-12"
+    github = FakeStageGitHub(
+        pr_state={"state": "OPEN", "headRefOid": _HEAD},
+        pr_head_branch="12-auto-impl",
+    )
+    ctx = make_ctx(github=github)
+
+    result = StrictReviewStage().step(item, ctx)
+
+    assert isinstance(result, JobRequest)
+    StrictReviewStage().on_job_done(
+        item,
+        JobResult(ok=True, value={"path": "/review/strict-review-12", "dirty": False}),
+        ctx,
+    )
+    assert item.worktree == "/writer/issue-12"
+    assert item.payload["strict_review_worktree"] == "/review/strict-review-12"
+
+    item.state = REVIEW_WAIT
+    item.payload["strict_review_head"] = _HEAD
+    review_job = StrictReviewStage().step(
+        item,
+        make_ctx(github=FakeStageGitHub(strict_evidence=_EVIDENCE)),
+    )
+    assert isinstance(review_job, JobRequest)
+    assert review_job.job.cwd == Path("/review/strict-review-12")
 
 
 def test_skill_handoff_must_be_the_final_line() -> None:
@@ -138,7 +226,7 @@ def test_strict_review_uses_codex_even_when_the_loop_agent_is_claude(
         stage=StageName.STRICT_REVIEW,
         pr=12,
         state=REVIEW_WAIT,
-        payload={"strict_review_head": _HEAD},
+        payload={"strict_review_head": _HEAD, "strict_review_worktree": "/review/strict-12"},
     )
     github = FakeStageGitHub(strict_evidence=_EVIDENCE)
 
@@ -474,7 +562,7 @@ def test_missing_context_is_a_nogo(make_ctx: Any, make_work_item: Any) -> None:
         stage=StageName.STRICT_REVIEW,
         pr=12,
         state=REVIEW_WAIT,
-        payload={"strict_review_head": _HEAD},
+        payload={"strict_review_head": _HEAD, "strict_review_worktree": "/review/strict-12"},
     )
     github = FakeStageGitHub(pr_state={"state": "OPEN", "headRefOid": _HEAD})
 

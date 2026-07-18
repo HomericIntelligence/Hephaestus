@@ -853,6 +853,46 @@ class TestGitOps:
             "diff": "",
         }
 
+    def test_create_isolated_worktree_syncs_only_detached_checkout(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """Strict review syncs its returned detached path, never a writer checkout (#2276)."""
+        review_path = tmp_path / "build" / ".worktrees" / "strict-review-pr-70"
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 70,
+                "branch_name": "70-existing",
+                "isolated": True,
+                "repo_root": str(tmp_path),
+                "sync_to_remote": True,
+                "pr_number": 70,
+            },
+        )
+        instance = MagicMock()
+        instance.create_worktree.return_value = review_path
+        with (
+            patch(f"{_WP}.WorktreeManager", return_value=instance),
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+            patch(f"{_WP}.git_utils.sync_worktree_to_remote_branch") as mock_sync,
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        instance.create_worktree.assert_called_once_with(
+            issue_number=70,
+            branch_name="70-existing",
+            isolated=True,
+            timeout=60,
+        )
+        mock_sync.assert_called_once_with(review_path, "70-existing", pr_number=70, timeout=60)
+        assert result.ok is True
+
     def test_create_worktree_defaults_repo_root_to_ambient_cwd(
         self,
         pool: WorkerPool,

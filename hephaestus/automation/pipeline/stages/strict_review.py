@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import logging
 import re
+from pathlib import Path
 from typing import Any
 
 from hephaestus.automation.agent_config import pr_reviewer_claude_timeout, reviewer_model
@@ -66,7 +67,6 @@ from .base import (
     StepResult,
     WorkItem,
     _terminal_pr_outcome,
-    _worktree_path,
     stage_model,
 )
 
@@ -306,7 +306,7 @@ class StrictReviewStage(Stage):
         if item.state == WORKTREE_WAIT:
             if item.payload.pop("strict_review_worktree_failed", None):
                 return StageOutcome(Disposition.FINISH_FAIL, "strict_review_worktree_failed")
-            if not item.worktree:
+            if not item.payload.get("strict_review_worktree"):
                 # A restored item cannot safely assume an unrecorded worker
                 # completion created a usable checkout.  Fail closed instead
                 # of sending the reviewer to the shared repository root.
@@ -371,8 +371,9 @@ class StrictReviewStage(Stage):
         # A reviewer must never inspect a local checkout whose commit has not
         # been synchronized to this exact remote head. This is required for a
         # restored/direct ingress as well as a normal push during review.
+        review_worktree = str(item.payload.get("strict_review_worktree") or "")
         synced_worktree_head = str(item.payload.get("strict_review_worktree_head") or "")
-        if not item.worktree or synced_worktree_head.lower() != head_sha.lower():
+        if not review_worktree or synced_worktree_head.lower() != head_sha.lower():
             branch = item.branch or ctx.github.get_pr_head_branch(item.pr)  # type: ignore[arg-type]
             if not branch:
                 logger.warning(
@@ -392,9 +393,13 @@ class StrictReviewStage(Stage):
                 op="create_worktree",
                 timeout_s=GIT_JOB_TIMEOUT_S,
                 kwargs={
-                    "issue_number": item.issue if item.issue is not None else item.pr,
+                    # The detached path is keyed by PR, not issue: more than
+                    # one PR can refer to an issue and their reviewers may run
+                    # concurrently under different ownership claims.
+                    "issue_number": item.pr,
                     "branch_name": branch,
                     "refresh_base": False,
+                    "isolated": True,
                     "sync_to_remote": True,
                     "pr_number": item.pr,
                     "repo_root": str(ctx.paths.repo_root),
@@ -415,6 +420,11 @@ class StrictReviewStage(Stage):
         head_sha = str(item.payload.get("strict_review_head") or "")
         if not head_sha:
             # Guarded by HEAD_CHECK; restart-safety fallback.
+            return Continue(next_state=HEAD_CHECK)
+        review_worktree = str(item.payload.get("strict_review_worktree") or "")
+        if not review_worktree:
+            # The review agent may never fall back to the writer or shared
+            # checkout. Recreate its detached checkout instead.
             return Continue(next_state=HEAD_CHECK)
         evidence = ctx.github.strict_review_evidence(item.pr, head_sha, item.issue)  # type: ignore[arg-type]
         if evidence is None or evidence.head_sha.lower() != head_sha.lower():
@@ -458,7 +468,7 @@ class StrictReviewStage(Stage):
             agent="codex",
             model=stage_model(ctx, "reviewer", reviewer_model),
             prompt_builder=build_strict_review_prompt,
-            cwd=_worktree_path(item, ctx),
+            cwd=Path(review_worktree),
             timeout_s=pr_reviewer_claude_timeout(),
             session_agent=strict_review_agent(head_sha, attempt),
             expected_head_sha=head_sha,
@@ -671,14 +681,14 @@ class StrictReviewStage(Stage):
                 return
             value = result.value
             if isinstance(value, dict):
-                item.worktree = str(value.get("path") or "")
+                item.payload["strict_review_worktree"] = str(value.get("path") or "")
                 if value.get("dirty"):
                     # The worker intentionally preserves dirty worktrees.
                     # They cannot safely represent an exact remote PR head.
                     item.payload["strict_review_worktree_failed"] = True
             elif isinstance(value, str):
-                item.worktree = value
-            if not item.worktree:
+                item.payload["strict_review_worktree"] = value
+            if not item.payload.get("strict_review_worktree"):
                 item.payload["strict_review_worktree_failed"] = True
             else:
                 synced_head = str(item.payload.get("strict_review_head") or "")

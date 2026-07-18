@@ -784,6 +784,39 @@ class TestCreateWorktreeBranchCollision:
         ]
         assert add_calls == [], "must NOT run `git worktree add` when reusing"
 
+    def test_isolated_checkout_does_not_reuse_branch_holder(
+        self, worktree_mocks: Any, tmp_path: Any
+    ) -> None:
+        """An isolated reviewer gets an in-root detached checkout (#2276)."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        worktree_mocks.run.return_value.stdout = "origin/main"
+        manager = WorktreeManager()
+        external_writer = tmp_path.parent / "writer-worktree"
+        implementation_writer = manager.base_dir / "issue-725"
+        implementation_writer.mkdir()
+        (implementation_writer / "pending-change").write_text("preserve me")
+
+        with patch.object(
+            manager,
+            "list_worktrees",
+            return_value=[
+                {
+                    "path": str(external_writer),
+                    "branch": "refs/heads/708-auto-impl",
+                    "commit": "abc",
+                }
+            ],
+        ):
+            result = manager.create_worktree(725, "708-auto-impl", isolated=True)
+
+        assert result == manager.base_dir / "strict-review-pr-725"
+        assert result != external_writer
+        assert result != implementation_writer
+        assert manager.worktrees["strict-review-pr-725"] == result
+        assert (implementation_writer / "pending-change").read_text() == "preserve me"
+        argvs = [call.args[0] for call in worktree_mocks.run.call_args_list]
+        assert ["git", "worktree", "add", "--detach", str(result), "708-auto-impl"] in argvs
+
     def test_no_reuse_when_branch_not_checked_out_elsewhere(
         self, worktree_mocks: Any, tmp_path: Any
     ) -> None:
