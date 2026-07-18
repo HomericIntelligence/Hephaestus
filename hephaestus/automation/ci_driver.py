@@ -21,7 +21,7 @@ importable placeholder for the package's public API surface
 
 Usage:
     hephaestus-drive-prs-green [--issues N ...] [--prs N ...] [--dry-run] \
-        [--max-fix-iterations N] [--max-workers N] [--all]
+        [--max-workers N] [--all]
 """
 
 from __future__ import annotations
@@ -91,10 +91,8 @@ def _build_parser() -> argparse.ArgumentParser:
     """Build the argparse parser for the historical drive-green CLI.
 
     Extracted so tests can inspect the flag surface without invoking
-    ``parse_args``. Preserves the historical ``hephaestus-drive-prs-green``
-    flag surface (``--issues`` / ``--prs``, ``--max-fix-iterations``, the
-    ``--all`` / bot-PR toggles, the poll/timeout + GitHub-throttle flags) so
-    pinned callers and the loop runner's child-phase argv keep working.
+    ``parse_args``. The supported flags cover issue/PR scope, author and bot
+    toggles, worker and agent timeouts, and GitHub throttling.
     """
     parser = build_automation_parser(
         description="Run loop-owned PR review and conditional auto-merge arming",
