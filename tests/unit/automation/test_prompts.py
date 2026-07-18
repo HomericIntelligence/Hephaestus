@@ -903,6 +903,8 @@ class TestAddressReviewPrompt:
 
         assert "active implementation contract" in out
         assert "second strict-review merge authorization" in out
+        assert "review-head SHA" in out
+        assert "pre-arm prerequisite" in out
 
     def test_instructs_advise_skill(self) -> None:
         """Each sub-agent must consult /hephaestus:advise before fixing."""

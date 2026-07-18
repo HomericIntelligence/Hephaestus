@@ -38,6 +38,14 @@ In particular, do not reintroduce CI/CD reliance
 or a second strict-review merge authorization (such as a durable approval
 record, artifact, lease, comment, status context, or cached handoff). Report
 any such feedback as unaddressable and leave it out of `addressed`.
+That prohibition includes making a review-head SHA (for example,
+`strict_review_head`, `reviewed_head`, or a cached approval head) a persisted,
+rehydrated, or in-memory pre-arm prerequisite for consuming
+`state:implementation-go`. The loop may use a current head transiently while
+performing the review that applies the label, and may protect an already-armed
+PR from post-arm drift, but the label must remain the sole durable merge
+authorization. Treat a request for a review-head proof or pre-arm prerequisite
+as unaddressable even when it is framed as a security or historical-review fix.
 
 ---
 
