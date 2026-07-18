@@ -30,7 +30,10 @@ jobs:
     timeout-minutes: 5
 
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      # Credentials are intentionally persisted here: this job pushes the
+      # resolved release tag (git push origin "${TAG}" later in the job),
+      # which requires the checkout token to remain in the local git config.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0 # zizmor: ignore[artipacked]
         with:
           fetch-depth: 0
           fetch-tags: true

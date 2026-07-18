@@ -11,10 +11,11 @@ on:
         required: false
         default: ""
 
+# Least-privilege permissions are declared per job below (zizmor
+# excessive-permissions, issue #2151): the workflow-level default is
+# read-only and each job widens only what it needs.
 permissions:
-  contents: write
-  id-token: write
-  pages: write
+  contents: read
 
 # Serialize per-tag: this workflow builds, publishes to PyPI, and creates a
 # GitHub release — none idempotent. Two runs for the SAME tag must not race
@@ -40,11 +41,12 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - name: Setup uv
         uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
-          enable-cache: true
+          enable-cache: false  # release artifacts must not read/write a shared cache (zizmor cache-poisoning)
 
       - name: Editable install (scripts/ smoke tests spawn subprocesses that import hephaestus)
         run: uv sync --all-groups --all-extras --locked
@@ -69,11 +71,12 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - name: Setup uv
         uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
-          enable-cache: true
+          enable-cache: false  # release artifacts must not read/write a shared cache (zizmor cache-poisoning)
 
       - name: Run mypy type checking
         run: uv run mypy
@@ -83,20 +86,27 @@ jobs:
     timeout-minutes: 15
     needs: [test, type-check]
     environment: testpypi
+    permissions:
+      contents: read
+      id-token: write  # TestPyPI trusted-publisher OIDC
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - name: Resolve tag
         id: tag
         shell: bash
+        env:
+          # env indirection keeps workflow inputs out of the interpolated
+          # shell (zizmor template-injection, issue #2151).
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          REF_TAG: ${{ github.ref }}
         run: |
           # Priority: explicit input > tag-push ref > latest tag
-          INPUT_TAG="${{ github.event.inputs.tag }}"
-          REF_TAG="${{ github.ref }}"
           if [ -n "$INPUT_TAG" ]; then
             TAG="$INPUT_TAG"
           elif [[ "$REF_TAG" == refs/tags/* ]]; then
@@ -111,7 +121,7 @@ jobs:
       - name: Setup uv
         uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
-          enable-cache: true
+          enable-cache: false  # release artifacts must not read/write a shared cache (zizmor cache-poisoning)
 
       - name: Build package
         shell: bash
@@ -132,7 +142,7 @@ jobs:
           ls -1 dist/
 
       - name: Upload dist for reuse by build-and-publish
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa0  # v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: release-dist
           path: dist/
@@ -198,20 +208,27 @@ jobs:
     timeout-minutes: 15
     needs: [test, type-check, publish-testpypi]
     environment: pypi
+    permissions:
+      contents: write  # Create GitHub Release / upload assets
+      id-token: write  # PyPI trusted-publisher OIDC + PEP 740 attestations
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - name: Resolve tag
         id: tag
         shell: bash
+        env:
+          # env indirection keeps workflow inputs out of the interpolated
+          # shell (zizmor template-injection, issue #2151).
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          REF_TAG: ${{ github.ref }}
         run: |
           # Priority: explicit input > tag-push ref > latest tag
-          INPUT_TAG="${{ github.event.inputs.tag }}"
-          REF_TAG="${{ github.ref }}"
           if [ -n "$INPUT_TAG" ]; then
             TAG="$INPUT_TAG"
           elif [[ "$REF_TAG" == refs/tags/* ]]; then
@@ -226,7 +243,7 @@ jobs:
       - name: Setup uv
         uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
-          enable-cache: true
+          enable-cache: false  # release artifacts must not read/write a shared cache (zizmor cache-poisoning)
 
       - name: Verify tag matches package version
         shell: bash
@@ -311,6 +328,10 @@ jobs:
     needs: [build-and-publish]
     # Publish the pdoc API reference to GitHub Pages only after the package
     # release succeeds, so the online docs always match a version on PyPI.
+    permissions:
+      contents: read
+      pages: write  # Deploy to GitHub Pages
+      id-token: write  # GitHub Pages OIDC deployment
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -320,6 +341,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - name: Resolve tag
         id: tag
@@ -342,7 +364,7 @@ jobs:
       - name: Setup uv
         uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
-          enable-cache: true
+          enable-cache: false  # release artifacts must not read/write a shared cache (zizmor cache-poisoning)
 
       - name: Editable install (pdoc imports hephaestus to introspect signatures)
         run: uv sync --all-groups --all-extras --locked
