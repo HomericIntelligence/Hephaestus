@@ -6,9 +6,11 @@ from http.client import HTTPMessage
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
+from urllib.request import Request
 
 import pytest
 
+from hephaestus.datasets import downloader
 from hephaestus.datasets.downloader import (
     EMNIST_SPLITS,
     CIFAR10Downloader,
@@ -25,28 +27,29 @@ class TestDatasetDownloader:
 
     def test_init_strips_trailing_slash(self) -> None:
         """Base URL trailing slash is stripped."""
-        d = DatasetDownloader("http://example.com/data/")
-        assert d.base_url == "http://example.com/data"
+        d = DatasetDownloader("https://example.com/data/")
+        assert d.base_url == "https://example.com/data"
 
     def test_init_defaults(self) -> None:
         """Default values are set correctly."""
-        d = DatasetDownloader("http://example.com")
+        d = DatasetDownloader("https://example.com")
         assert d.max_retries == 3
         assert len(d.retry_delays) == 3
 
     def test_init_custom_retries(self) -> None:
         """Custom retry count is respected."""
-        d = DatasetDownloader("http://example.com", max_retries=5)
+        d = DatasetDownloader("https://example.com", max_retries=5)
         assert d.max_retries == 5
 
     def test_init_custom_user_agent(self) -> None:
         """Custom user agent is stored."""
-        d = DatasetDownloader("http://example.com", user_agent="TestAgent/1.0")
+        d = DatasetDownloader("https://example.com", user_agent="TestAgent/1.0")
         assert d.user_agent == "TestAgent/1.0"
 
     @pytest.mark.parametrize(
         "bad_url",
         [
+            "http://example.com/data",
             "file:///etc/passwd",
             "ftp://example.com/data",
             "gopher://example.com",
@@ -54,21 +57,36 @@ class TestDatasetDownloader:
             "/etc/passwd",  # no scheme at all
         ],
     )
-    def test_init_rejects_non_http_scheme(self, bad_url: str) -> None:
-        """Constructing with a non-http(s) base URL raises ValueError."""
-        with pytest.raises(ValueError, match="non-HTTP"):
+    def test_init_rejects_non_https_scheme(self, bad_url: str) -> None:
+        """Constructing with an insecure or non-web base URL raises ValueError."""
+        with pytest.raises(ValueError):
             DatasetDownloader(bad_url)
 
-    def test_download_rejects_non_http_scheme_after_reassignment(self, tmp_path: Path) -> None:
-        """A base_url reassigned to file:// is rejected before urlopen.
+    @pytest.mark.parametrize("base_url", ["http://example.com", "file:///etc"])
+    def test_download_rejects_non_https_scheme_after_reassignment(
+        self, base_url: str, tmp_path: Path
+    ) -> None:
+        """A base URL reassigned to an insecure scheme is rejected before urlopen.
 
         Guards the EMNIST mirror-fallback path, which mutates ``base_url``
         after construction and would otherwise bypass the constructor check.
         """
         downloader = DatasetDownloader("https://example.com")
-        downloader.base_url = "file:///etc"
-        with pytest.raises(ValueError, match="non-HTTP"):
+        downloader.base_url = base_url
+        with pytest.raises(ValueError, match="non-HTTPS"):
             downloader.download_with_retry("passwd", tmp_path / "out")
+
+    def test_redirect_handler_rejects_plaintext_http(self) -> None:
+        """An HTTPS download cannot follow a redirect to plaintext HTTP."""
+        with pytest.raises(ValueError, match="non-HTTPS"):
+            downloader._HTTPSRedirectHandler().redirect_request(
+                Request("https://example.com/dataset"),
+                MagicMock(),
+                302,
+                "Found",
+                HTTPMessage(),
+                "http://example.com/dataset",
+            )
 
     def test_decompress_gz(self, tmp_path: Path) -> None:
         """decompress_gz unpacks a valid gzip file."""
@@ -79,7 +97,7 @@ class TestDatasetDownloader:
         with gzip.open(gz_path, "wb") as f:
             f.write(content)
 
-        downloader = DatasetDownloader("http://example.com")
+        downloader = DatasetDownloader("https://example.com")
         success = downloader.decompress_gz(gz_path, out_path)
 
         assert success is True
@@ -91,19 +109,19 @@ class TestDatasetDownloader:
         bad_gz.write_bytes(b"not gzip data")
         out_path = tmp_path / "out.txt"
 
-        downloader = DatasetDownloader("http://example.com")
+        downloader = DatasetDownloader("https://example.com")
         success = downloader.decompress_gz(bad_gz, out_path)
         assert success is False
 
     def test_download_with_retry_failure(self, tmp_path: Path) -> None:
         """download_with_retry returns False when all attempts fail."""
-        downloader = DatasetDownloader("http://localhost:1", max_retries=1)
+        downloader = DatasetDownloader("https://localhost:1", max_retries=1)
         downloader.retry_delays = [0]
         output = tmp_path / "file.bin"
         success = downloader.download_with_retry("nonexistent.bin", output, max_retries=1)
         assert success is False
 
-    @patch("hephaestus.datasets.downloader.urlopen")
+    @patch("hephaestus.datasets.downloader._HTTPS_OPENER.open")
     def test_download_with_retry_success(self, mock_urlopen, tmp_path: Path) -> None:
         """download_with_retry returns True on successful download."""
         content = b"file content"
@@ -114,13 +132,13 @@ class TestDatasetDownloader:
         mock_response.read.side_effect = [content, b""]
         mock_urlopen.return_value = mock_response
 
-        downloader = DatasetDownloader("http://example.com")
+        downloader = DatasetDownloader("https://example.com")
         output = tmp_path / "file.bin"
         success = downloader.download_with_retry("test.bin", output, max_retries=1)
         assert success is True
         assert output.exists()
 
-    @patch("hephaestus.datasets.downloader.urlopen")
+    @patch("hephaestus.datasets.downloader._HTTPS_OPENER.open")
     def test_download_retries_on_http_error(self, mock_urlopen, tmp_path: Path) -> None:
         """download_with_retry retries on HTTPError."""
         mock_urlopen.side_effect = HTTPError(
@@ -130,24 +148,24 @@ class TestDatasetDownloader:
             hdrs=HTTPMessage(),
             fp=None,
         )
-        downloader = DatasetDownloader("http://example.com", max_retries=2)
+        downloader = DatasetDownloader("https://example.com", max_retries=2)
         downloader.retry_delays = [0, 0]
         output = tmp_path / "file.bin"
         success = downloader.download_with_retry("test.bin", output, max_retries=2)
         assert success is False
         assert mock_urlopen.call_count == 2
 
-    @patch("hephaestus.datasets.downloader.urlopen")
+    @patch("hephaestus.datasets.downloader._HTTPS_OPENER.open")
     def test_download_retries_on_url_error(self, mock_urlopen, tmp_path: Path) -> None:
         """download_with_retry retries on URLError."""
         mock_urlopen.side_effect = URLError(reason="connection refused")
-        downloader = DatasetDownloader("http://example.com", max_retries=2)
+        downloader = DatasetDownloader("https://example.com", max_retries=2)
         downloader.retry_delays = [0, 0]
         output = tmp_path / "file.bin"
         success = downloader.download_with_retry("test.bin", output, max_retries=2)
         assert success is False
 
-    @patch("hephaestus.datasets.downloader.urlopen")
+    @patch("hephaestus.datasets.downloader._HTTPS_OPENER.open")
     def test_download_shows_progress_no_content_length(self, mock_urlopen, tmp_path: Path) -> None:
         """Handles missing Content-Length header gracefully."""
         content = b"data"
@@ -158,27 +176,27 @@ class TestDatasetDownloader:
         mock_response.read.side_effect = [content, b""]
         mock_urlopen.return_value = mock_response
 
-        downloader = DatasetDownloader("http://example.com")
+        downloader = DatasetDownloader("https://example.com")
         output = tmp_path / "file.bin"
         success = downloader.download_with_retry("test.bin", output, max_retries=1)
         assert success is True
 
-    @patch("hephaestus.datasets.downloader.urlopen")
+    @patch("hephaestus.datasets.downloader._HTTPS_OPENER.open")
     def test_download_retries_on_oserror(self, mock_urlopen, tmp_path: Path) -> None:
         """download_with_retry retries on OSError."""
         mock_urlopen.side_effect = OSError("disk write failed")
-        downloader = DatasetDownloader("http://example.com", max_retries=2)
+        downloader = DatasetDownloader("https://example.com", max_retries=2)
         downloader.retry_delays = [0, 0]
         output = tmp_path / "file.bin"
         success = downloader.download_with_retry("test.bin", output, max_retries=2)
         assert success is False
         assert mock_urlopen.call_count == 2
 
-    @patch("hephaestus.datasets.downloader.urlopen")
+    @patch("hephaestus.datasets.downloader._HTTPS_OPENER.open")
     def test_download_retry_delay_clamped_to_last(self, mock_urlopen, tmp_path: Path) -> None:
         """When attempt index exceeds retry_delays length, last delay is used."""
         mock_urlopen.side_effect = URLError(reason="refused")
-        downloader = DatasetDownloader("http://example.com", max_retries=4)
+        downloader = DatasetDownloader("https://example.com", max_retries=4)
         downloader.retry_delays = [0, 0]  # fewer delays than retries
         output = tmp_path / "file.bin"
         success = downloader.download_with_retry("test.bin", output, max_retries=4)

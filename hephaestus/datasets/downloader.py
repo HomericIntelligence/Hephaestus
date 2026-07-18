@@ -37,23 +37,23 @@ from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 from hephaestus.logging.utils import get_logger
 
 logger = get_logger(__name__)
 
-# Network schemes permitted for dataset downloads. Restricting to http(s)
-# blocks ``file://``, ``ftp://``, and other ``urlopen``-supported schemes that
-# would otherwise turn an attacker-controlled ``base_url`` into a local-file or
-# SSRF read (CWE-918 / CWE-22). This guard is what makes the ``nosec B310``
-# annotation on the ``urlopen`` call below accurate.
-_ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
+# HTTPS is the sole permitted scheme for dataset downloads. This blocks
+# plaintext HTTP as well as ``file://``, ``ftp://``, and other
+# ``urlopen``-supported schemes that would otherwise turn an attacker-controlled
+# ``base_url`` into a local-file or SSRF read (CWE-918 / CWE-22). This guard is
+# what makes the ``nosec B310`` annotation on the ``urlopen`` call below accurate.
+_ALLOWED_URL_SCHEMES = frozenset({"https"})
 
 
 def _validate_url_scheme(url: str) -> str:
-    """Return *url* unchanged if its scheme is an allowed http(s) scheme.
+    """Return *url* unchanged when it uses the HTTPS scheme.
 
     Args:
         url: The fully-qualified URL whose scheme should be validated.
@@ -62,18 +62,38 @@ def _validate_url_scheme(url: str) -> str:
         The original *url* when its scheme is permitted.
 
     Raises:
-        ValueError: If *url* uses any scheme other than ``http``/``https``
-            (e.g. ``file://``, ``ftp://``), which could be abused for local
-            file disclosure or SSRF.
+        ValueError: If *url* does not use ``https`` (e.g. ``http://``,
+            ``file://``, ``ftp://``), which would permit plaintext transport,
+            local file disclosure, or SSRF.
 
     """
     scheme = urlparse(url).scheme.lower()
     if scheme not in _ALLOWED_URL_SCHEMES:
         raise ValueError(
-            f"Refusing non-HTTP(S) dataset URL: {url!r} "
+            f"Refusing non-HTTPS dataset URL: {url!r} "
             f"(scheme {scheme!r}; allowed: {sorted(_ALLOWED_URL_SCHEMES)})"
         )
     return url
+
+
+class _HTTPSRedirectHandler(HTTPRedirectHandler):
+    """Reject redirects that would downgrade a dataset download from HTTPS."""
+
+    def redirect_request(
+        self,
+        req: Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> Request | None:
+        """Return an HTTPS redirect request or reject an insecure destination."""
+        _validate_url_scheme(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_HTTPS_OPENER = build_opener(_HTTPSRedirectHandler())
 
 
 # Per-file MD5 checksums for integrity verification. Values are the
@@ -136,12 +156,12 @@ class DatasetDownloader:
         user_agent: str = "Mozilla/5.0 (compatible; Hephaestus/1.0)",
         max_retries: int = 3,
         retry_delays: list[float] | None = None,
-    ):
+    ) -> None:
         """Initialize the dataset downloader.
 
         Args:
-            base_url: Base URL for dataset files
-            user_agent: User-Agent header for HTTP requests
+            base_url: HTTPS base URL for dataset files
+            user_agent: User-Agent header for HTTPS requests
             max_retries: Maximum number of retry attempts
             retry_delays: Delay times between retries (exponential backoff)
 
@@ -180,7 +200,7 @@ class DatasetDownloader:
 
             try:
                 request = Request(url, headers={"User-Agent": self.user_agent})
-                with urlopen(request) as response:  # nosec B310 - url scheme validated to http(s) via _validate_url_scheme above; file://, ftp:// and other schemes raise ValueError before this call
+                with _HTTPS_OPENER.open(request) as response:  # nosec B310 - the initial URL and every redirect are validated as HTTPS; HTTP, file://, ftp://, and other schemes raise ValueError before a request is sent
                     total_size = int(response.headers.get("Content-Length", 0))
                     downloaded = 0
                     block_size = 8192
