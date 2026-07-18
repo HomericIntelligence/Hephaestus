@@ -280,11 +280,12 @@ class TestPrReviewStageStep:
 
         assert isinstance(first_result, JobRequest)
         assert isinstance(second_result, JobRequest)
+        assert isinstance(first_result.job, GitJob)
+        assert isinstance(second_result.job, GitJob)
         assert first.payload["direct_pr_worktree_name"] != second.payload["direct_pr_worktree_name"]
         assert first_result.job.kwargs["isolated_name"] == first.payload["direct_pr_worktree_name"]
         assert (
-            second_result.job.kwargs["isolated_name"]
-            == second.payload["direct_pr_worktree_name"]
+            second_result.job.kwargs["isolated_name"] == second.payload["direct_pr_worktree_name"]
         )
 
     def test_enter_advances_to_review(self, make_ctx: Any, make_work_item: Any) -> None:

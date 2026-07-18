@@ -1186,9 +1186,7 @@ class TestGitOps:
         )
         with (
             patch("hephaestus.automation.git_utils.commit_if_changes", return_value=True),
-            patch(
-                "hephaestus.automation.git_utils.push_head_to_branch"
-            ) as mock_push,
+            patch("hephaestus.automation.git_utils.push_head_to_branch") as mock_push,
             patch("hephaestus.automation.git_utils.push_branch") as normal_push,
         ):
             pool.submit(job, StageName.PR_REVIEW)

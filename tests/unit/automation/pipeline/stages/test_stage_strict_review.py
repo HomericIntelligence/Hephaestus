@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from hephaestus.automation.claude_invoke import ReviewVerdict
-from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
+from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageName
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages.base import StrictReviewEvidence
@@ -114,6 +114,7 @@ def test_direct_pr_review_requests_an_isolated_detached_worktree(
     result = StrictReviewStage().step(item, make_ctx(github=github))
 
     assert isinstance(result, JobRequest)
+    assert isinstance(result.job, GitJob)
     assert result.job.op == "create_worktree"
     assert result.job.kwargs["isolated"] is True
     assert result.job.kwargs["issue_number"] == 12
@@ -147,6 +148,8 @@ def test_same_issue_prs_request_distinct_isolated_review_paths(
 
     assert isinstance(first_result, JobRequest)
     assert isinstance(second_result, JobRequest)
+    assert isinstance(first_result.job, GitJob)
+    assert isinstance(second_result.job, GitJob)
     assert first_result.job.kwargs["issue_number"] == 12
     assert second_result.job.kwargs["issue_number"] == 13
 
@@ -185,6 +188,7 @@ def test_isolated_review_worktree_preserves_implementation_writer(
         make_ctx(github=FakeStageGitHub(strict_evidence=_EVIDENCE)),
     )
     assert isinstance(review_job, JobRequest)
+    assert isinstance(review_job.job, AgentJob)
     assert review_job.job.cwd == Path("/review/strict-review-12")
 
 

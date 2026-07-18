@@ -4,9 +4,16 @@ from __future__ import annotations
 
 from typing import Any
 
+from hephaestus.automation.pipeline.jobs import AgentJob
 from hephaestus.automation.pipeline.routing import Disposition, StageName
-from hephaestus.automation.pipeline.stages import Continue, StageOutcome
+from hephaestus.automation.pipeline.stages import (
+    Continue,
+    JobRequest,
+    StageOutcome,
+    StrictReviewEvidence,
+)
 from hephaestus.automation.pipeline.stages.merge_wait import ARM, POLL, MergeWaitStage
+from hephaestus.automation.pipeline.stages.strict_review import REVIEW_WAIT, StrictReviewStage
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 
@@ -79,6 +86,52 @@ def test_label_without_direct_review_handoff_restarts_strict_review(
     assert result == StageOutcome(Disposition.FAIL_BACK, "review_stale")
     assert not any(action == "arm_auto_merge" for action, _ in github.mutation_log)
     assert any(action == "gh_issue_remove_labels" for action, _ in github.mutation_log)
+
+
+def test_same_head_restart_requests_a_fresh_strict_review(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A restarted prior GO must not exhaust the same-head review budget."""
+    head = "a" * 40
+    github = _ArmingGitHub(labels=(True, False))
+    item = make_work_item(
+        stage=StageName.MERGE_WAIT,
+        pr=12,
+        state=ARM,
+        payload={
+            "strict_review_attempt": 1,
+            "strict_review_head": head,
+            "strict_review_worktree": "/review/stale-strict-12",
+            "strict_review_worktree_head": head,
+        },
+    )
+
+    result = MergeWaitStage().step(item, make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.FAIL_BACK, "review_stale")
+    assert not any(key.startswith("strict_review_") for key in item.payload)
+
+    # Model the strict-review ingress recapturing and syncing the unchanged
+    # head.  The cleared attempt must permit Athena to run again.
+    item.stage = StageName.STRICT_REVIEW
+    item.state = REVIEW_WAIT
+    item.payload["strict_review_head"] = head
+    item.payload["strict_review_worktree"] = "/review/fresh-strict-12"
+    evidence = StrictReviewEvidence(
+        head_sha=head,
+        issue_title="Task",
+        issue_body="Do the task.",
+        diff="diff --git a/a.py b/a.py\n+",
+        prior_pr_review_verdict="Grade: A\nVerdict: GO",
+    )
+    review_result = StrictReviewStage().step(
+        item,
+        make_ctx(github=FakeStageGitHub(strict_evidence=evidence)),
+    )
+
+    assert isinstance(review_result, JobRequest)
+    assert isinstance(review_result.job, AgentJob)
+    assert item.payload["strict_review_attempt"] == 1
 
 
 def test_stale_in_memory_review_handoff_is_contained_before_arm(

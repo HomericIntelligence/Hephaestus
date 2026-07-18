@@ -173,6 +173,7 @@ class TestCleanup:
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
         assert result.job.kwargs["worktree_path"] == "/wt/strict-review-42"
         assert result.on_done_state == "CLEANUP"
 

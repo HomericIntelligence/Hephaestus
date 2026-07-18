@@ -267,9 +267,7 @@ class WorktreeManager:
             # existing worktree and register it under this issue; the caller then
             # syncs it to the PR head (fetch + reset --hard origin/<branch>).
             existing = (
-                None
-                if isolated
-                else self._worktree_holding_branch(branch_name, timeout=timeout)
+                None if isolated else self._worktree_holding_branch(branch_name, timeout=timeout)
             )
             if existing is not None and existing != worktree_path:
                 logger.info(
