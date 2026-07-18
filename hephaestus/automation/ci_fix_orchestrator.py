@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -86,6 +87,36 @@ _IGNORED_UNTRACKED_PREFIXES: tuple[str, ...] = (
     "htmlcov/",
 )
 _UNMERGED_STATUS_CODES: frozenset[str] = frozenset({"DD", "AU", "UD", "UA", "DU", "AA", "UU"})
+
+# Pre-push CI-fix test gate (#2122): re-run the failing tests parsed from the CI
+# logs before force-pushing so the mesh can never push a branch that still fails
+# the exact test it claims to fix (root cause of PR #2056's stranding).
+_FAILED_TEST_LINE_RE = re.compile(r"(?:^|\s)(?:FAILED|ERROR)\s+(tests/[\w./-]+\.py(?:::[\w./-]+)*)")
+_AFFECTED_TESTS_TIMEOUT_SECONDS = 900
+# pytest exit code 5 = "no tests ran": the failing test may have been deleted by
+# the fix/rebase itself (exactly the #2056 remedy) — not a gate failure.
+_PYTEST_NO_TESTS_RAN = 5
+
+
+def extract_failing_pytest_node_ids(ci_logs: str) -> list[str]:
+    """Parse failing pytest node IDs from CI failure logs (pure; unit-tested).
+
+    Scans ``FAILED``/``ERROR`` lines for ``tests/...py[::...]`` node IDs,
+    de-duplicating while preserving first-seen order. Parametrized IDs are
+    truncated at ``[`` so the whole test function runs — a safe superset that
+    survives param renames across a rebase and avoids "unknown node id" errors.
+
+    Args:
+        ci_logs: Combined CI failure log text.
+
+    Returns:
+        Ordered, de-duplicated list of pytest node IDs (params stripped).
+
+    """
+    seen: dict[str, None] = {}
+    for match in _FAILED_TEST_LINE_RE.finditer(ci_logs):
+        seen.setdefault(match.group(1).split("[", 1)[0])
+    return list(seen)
 
 
 def _porcelain_path(line: str) -> str:
@@ -263,11 +294,16 @@ class CIFixOrchestrator:
         pr_head_branch: str,
         session_id: str | None,
         pr_base_branch: str = "main",
+        ci_logs: str = "",
     ) -> bool:
         """Check head advancement, retry if needed, then push CI fixes.
 
         Shared post-agent contract for both codex and claude providers (#846).
         Returns True if fixes were pushed, False on any failure or no-commit.
+
+        ``ci_logs`` feeds the pre-push test gate (#2122): the failing pytest
+        node IDs parsed from it are re-run in the worktree and the push is
+        refused if they still fail.
         """
         if not self._head_advanced(worktree_path, pre_agent_sha, issue_number):  # noqa: SIM102
             if not self.retry_no_commit_once(
@@ -305,6 +341,8 @@ class CIFixOrchestrator:
             return False
         if not self._ci_fix_head_is_pushable(worktree_path, issue_number, base_ref=base_ref):
             return False
+        if not self._affected_tests_pass(worktree_path, issue_number, ci_logs):
+            return False
         try:
             push_current_branch_with_lease_on_divergence(
                 worktree_path,
@@ -316,6 +354,58 @@ class CIFixOrchestrator:
         except Exception as push_err:
             logger.error("Issue #%s: git push failed after CI fix: %s", issue_number, push_err)
             return False
+
+    def _affected_tests_pass(self, worktree_path: Path, issue_number: int, ci_logs: str) -> bool:
+        """Re-run the CI-failing tests locally; refuse the push if they still fail (#2122).
+
+        Parses the failing pytest node IDs from ``ci_logs`` and re-runs them in
+        the worktree. Node IDs whose file no longer exists are dropped (a rebase
+        can legitimately delete the failing test — exactly the #2056 remedy).
+        Returns True (gate skipped) when no runnable node IDs are found, so a
+        BEHIND/green PR or an unparseable log never deadlocks the push.
+
+        Args:
+            worktree_path: Worktree the fix branch is checked out in.
+            issue_number: GitHub issue number (for logging).
+            ci_logs: Combined CI failure log text.
+
+        Returns:
+            True if the affected tests pass (or the gate does not apply),
+            False if they still fail or the run times out.
+
+        """
+        node_ids = [
+            n
+            for n in extract_failing_pytest_node_ids(ci_logs)
+            if (worktree_path / n.split("::", 1)[0]).exists()
+        ]
+        if not node_ids:
+            logger.info(
+                "Issue #%s: no runnable failing pytest node IDs in CI logs; "
+                "skipping pre-push test gate",
+                issue_number,
+            )
+            return True
+        try:
+            result = subprocess.run(
+                ["uv", "run", "python", "-m", "pytest", "-q", "--no-header", *node_ids],
+                cwd=worktree_path,
+                capture_output=True,
+                text=True,
+                timeout=_AFFECTED_TESTS_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            logger.error("Issue #%s: pre-push test gate timed out; refusing to push", issue_number)
+            return False
+        if result.returncode not in (0, _PYTEST_NO_TESTS_RAN):
+            logger.error(
+                "Issue #%s: affected tests still failing locally; refusing to push: %s",
+                issue_number,
+                (result.stdout or result.stderr or "")[-500:],
+            )
+            return False
+        return True
 
     def _ci_fix_residual_commit_is_safe(
         self,
@@ -550,7 +640,6 @@ class CIFixOrchestrator:
             pr_head_branch,
             advise_findings,
         )
-
         try:
             agent_result = self.invoke_agent_session(
                 prompt=prompt,
@@ -586,6 +675,7 @@ class CIFixOrchestrator:
             pr_head_branch=pr_head_branch,
             pr_base_branch=pr_base_branch,
             session_id=session_id,
+            ci_logs=ci_logs,
         )
 
     def attempt_mechanical_rebase(

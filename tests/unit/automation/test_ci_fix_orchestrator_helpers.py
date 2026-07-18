@@ -15,7 +15,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hephaestus.automation.ci_fix_orchestrator import CIFixOrchestrator
+from hephaestus.automation.ci_fix_orchestrator import (
+    CIFixOrchestrator,
+    extract_failing_pytest_node_ids,
+)
 
 
 @pytest.fixture()
@@ -632,3 +635,106 @@ class TestAttemptMechanicalRebase:
             return_value=MagicMock(stdout="not json"),
         ):
             assert orchestrator.attempt_mechanical_rebase(5, 50, 0) is False
+
+
+class TestExtractFailingPytestNodeIds:
+    """Pure parser for failing pytest node IDs in CI logs (#2122)."""
+
+    def test_dedups_and_strips_params(self) -> None:
+        logs = (
+            "2026-07-16T00:00:00Z FAILED tests/unit/docs/test_x.py::test_a[param-1] - boom\n"
+            "FAILED tests/unit/docs/test_x.py::test_a[param-2]\n"
+            "ERROR tests/unit/io/test_y.py::TestC::test_b\n"
+            "PASSED tests/unit/io/test_z.py::test_ok\n"
+        )
+        assert extract_failing_pytest_node_ids(logs) == [
+            "tests/unit/docs/test_x.py::test_a",
+            "tests/unit/io/test_y.py::TestC::test_b",
+        ]
+
+    def test_empty_and_unparseable_logs_yield_no_ids(self) -> None:
+        assert extract_failing_pytest_node_ids("") == []
+        assert extract_failing_pytest_node_ids("all green, nothing failed here") == []
+
+    def test_module_level_error_without_node_is_captured(self) -> None:
+        assert extract_failing_pytest_node_ids(
+            "ERROR tests/unit/io/test_y.py - collection error"
+        ) == ["tests/unit/io/test_y.py"]
+
+
+class TestAffectedTestsPass:
+    """The pre-push CI-fix test gate re-runs failing tests before allowing push (#2122)."""
+
+    def test_empty_logs_skip_gate_without_subprocess(
+        self, orchestrator: CIFixOrchestrator, tmp_path: Path
+    ) -> None:
+        with patch("hephaestus.automation.ci_fix_orchestrator.subprocess.run") as mock_run:
+            assert orchestrator._affected_tests_pass(tmp_path, 7, "") is True
+        mock_run.assert_not_called()
+
+    def test_absent_files_drop_all_node_ids_and_skip_gate(
+        self, orchestrator: CIFixOrchestrator, tmp_path: Path
+    ) -> None:
+        logs = "FAILED tests/unit/docs/test_missing.py::test_a\n"
+        with patch("hephaestus.automation.ci_fix_orchestrator.subprocess.run") as mock_run:
+            assert orchestrator._affected_tests_pass(tmp_path, 7, logs) is True
+        mock_run.assert_not_called()
+
+    def test_passing_rerun_allows_push(
+        self, orchestrator: CIFixOrchestrator, tmp_path: Path
+    ) -> None:
+        node = "tests/unit/docs/test_x.py"
+        (tmp_path / node).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / node).write_text("def test_a():\n    pass\n")
+        logs = f"FAILED {node}::test_a\n"
+        with patch(
+            "hephaestus.automation.ci_fix_orchestrator.subprocess.run",
+            return_value=MagicMock(returncode=0, stdout="", stderr=""),
+        ) as mock_run:
+            assert orchestrator._affected_tests_pass(tmp_path, 7, logs) is True
+        assert mock_run.call_args.args[0][:5] == [
+            "uv",
+            "run",
+            "python",
+            "-m",
+            "pytest",
+        ]
+        assert f"{node}::test_a" in mock_run.call_args.args[0]
+
+    def test_failing_rerun_refuses_push(
+        self, orchestrator: CIFixOrchestrator, tmp_path: Path
+    ) -> None:
+        node = "tests/unit/docs/test_x.py"
+        (tmp_path / node).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / node).write_text("def test_a():\n    assert False\n")
+        logs = f"FAILED {node}::test_a\n"
+        with patch(
+            "hephaestus.automation.ci_fix_orchestrator.subprocess.run",
+            return_value=MagicMock(returncode=1, stdout="1 failed", stderr=""),
+        ):
+            assert orchestrator._affected_tests_pass(tmp_path, 7, logs) is False
+
+    def test_no_tests_ran_exit_code_is_treated_as_pass(
+        self, orchestrator: CIFixOrchestrator, tmp_path: Path
+    ) -> None:
+        """Exit code 5 = the failing test was deleted by the fix/rebase (#2056 remedy)."""
+        node = "tests/unit/docs/test_x.py"
+        (tmp_path / node).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / node).write_text("# test removed by the fix\n")
+        logs = f"FAILED {node}::test_a\n"
+        with patch(
+            "hephaestus.automation.ci_fix_orchestrator.subprocess.run",
+            return_value=MagicMock(returncode=5, stdout="no tests ran", stderr=""),
+        ):
+            assert orchestrator._affected_tests_pass(tmp_path, 7, logs) is True
+
+    def test_timeout_refuses_push(self, orchestrator: CIFixOrchestrator, tmp_path: Path) -> None:
+        node = "tests/unit/docs/test_x.py"
+        (tmp_path / node).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / node).write_text("def test_a():\n    pass\n")
+        logs = f"FAILED {node}::test_a\n"
+        with patch(
+            "hephaestus.automation.ci_fix_orchestrator.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="pytest", timeout=900),
+        ):
+            assert orchestrator._affected_tests_pass(tmp_path, 7, logs) is False
