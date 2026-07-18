@@ -260,6 +260,10 @@ class PipelineConfig:
     # when True, issues already at-or-past ``state:plan-go`` are re-routed to
     # PLANNING instead of being classified past the scope (and thus skipped).
     force: bool = False
+    # Product-layer, host-local ownership guard for strict review.  The pure
+    # coordinator only receives this injected capability; it never imports
+    # filesystem-locking helpers itself.
+    strict_review_guard: Any | None = None
 
 
 @dataclass
@@ -271,6 +275,7 @@ class _StageRunConfig:
     enable_follow_up: bool = True
     run_pre_pr_tests: bool = False
     force: bool = False
+    strict_review_guard: Any | None = None
     agent: str = "claude"
     model: str = ""
     planner_model: str = ""
@@ -435,6 +440,7 @@ class Coordinator:
             include_all_authors=config.include_all_authors,
             pre_pr_test_argv=config.pre_pr_test_argv,
             run_pre_pr_tests=config.run_pre_pr_tests,
+            strict_review_guard=config.strict_review_guard,
         )
         self._ctx_cache: dict[str, StageContext] = {}
 
@@ -893,6 +899,7 @@ class Coordinator:
         seeding reconstruction resumes exactly here with no shutdown
         bookkeeping.
         """
+        self._release_strict_review_guard(item)
         item.result = ItemResult(
             passed=False,
             reason=f"resumable at {item.stage.value}",
@@ -1211,6 +1218,12 @@ class Coordinator:
             return
         disposition = outcome.disposition
 
+        # A strict-review claim spans its worktree synchronization, read-only
+        # agent job, and final loop-owned verdict mutation.  Retry keeps that
+        # claim; every other disposition leaves this stage and must release it.
+        if item.stage is StageName.STRICT_REVIEW and disposition is not Disposition.RETRY:
+            self._release_strict_review_guard(item)
+
         if item.stage is StageName.FINISHED:
             # Sink outcomes are terminal: the result is already recorded.
             self._record_event("done", self._item_key(item), outcome.note)
@@ -1294,6 +1307,7 @@ class Coordinator:
 
     def _finish(self, item: WorkItem, *, passed: bool, reason: str) -> None:
         """Set the item's result and hand it to the finished sink."""
+        self._release_strict_review_guard(item)
         item.result = ItemResult(passed=passed, reason=reason, final_stage=item.stage)
         if item.stage is StageName.FINISHED:
             # Poisoned inside the sink: record directly, never re-queue.
@@ -1302,6 +1316,24 @@ class Coordinator:
                 item.payload["_recorded"] = True
             return
         self._push_item(item, StageName.FINISHED, enter=True)
+
+    def _release_strict_review_guard(self, item: WorkItem) -> None:
+        """Release this item's strict-review ownership exactly once."""
+        owner = item.payload.pop("_strict_review_guard_owner", None)
+        if item.pr is None or not isinstance(owner, int):
+            return
+        guard = self.config.strict_review_guard
+        if guard is None:
+            return
+        try:
+            guard.release(self.config.org, item.repo, item.pr, owner)
+        except Exception as exc:  # defensive; cleanup must not poison routing
+            logger.warning(
+                "strict-review guard release failed for %s PR #%d: %s",
+                item.repo,
+                item.pr,
+                exc,
+            )
 
     def _seed_products(self, item: WorkItem) -> None:
         """Push a terminal repo item's discovered products into entry queues."""

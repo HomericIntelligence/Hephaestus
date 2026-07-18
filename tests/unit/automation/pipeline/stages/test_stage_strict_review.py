@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 from hephaestus.automation.claude_invoke import ReviewVerdict
@@ -26,6 +27,40 @@ _EVIDENCE = StrictReviewEvidence(
     diff="diff --git a/a.py b/a.py\n+",
     prior_pr_review_verdict="Grade: A\nVerdict: GO",
 )
+
+
+class _StrictReviewGuard:
+    """In-memory strict-review ownership fake for concurrency contracts."""
+
+    def __init__(self) -> None:
+        self.owners: dict[tuple[str, str, int], int] = {}
+
+    def try_claim(self, org: str, repo: str, pr_number: int, owner: int) -> bool:
+        key = (org, repo, pr_number)
+        current = self.owners.get(key)
+        if current is not None and current != owner:
+            return False
+        self.owners[key] = owner
+        return True
+
+
+def test_same_head_strict_review_loser_retries_without_a_second_review(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """Only one same-PR strict-review item may proceed through the gate."""
+    guard = _StrictReviewGuard()
+    config = SimpleNamespace(strict_review_guard=guard)
+    github = FakeStageGitHub(pr_state={"state": "OPEN", "headRefOid": _HEAD})
+    first = make_work_item(stage=StageName.STRICT_REVIEW, pr=12, state="ENTER")
+    second = make_work_item(stage=StageName.STRICT_REVIEW, pr=12, state="ENTER")
+    stage = StrictReviewStage()
+
+    assert stage.step(first, make_ctx(config=config, github=github)) == Continue(
+        next_state=HEAD_CHECK
+    )
+    assert stage.step(second, make_ctx(config=config, github=github)) == StageOutcome(
+        Disposition.RETRY, "strict_review_busy"
+    )
 
 
 def test_review_job_uses_athena_pr_review_prompt(make_ctx: Any, make_work_item: Any) -> None:

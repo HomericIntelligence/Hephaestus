@@ -637,6 +637,7 @@ def _build_pipeline_config(
 
     """
     from hephaestus.automation.pipeline.coordinator import PipelineConfig
+    from hephaestus.automation.strict_review_guard import StrictReviewGuard
 
     circuit_breaker_snapshot_provider = None
     if cfg.metrics_port:
@@ -680,6 +681,7 @@ def _build_pipeline_config(
         repo_roots=cfg.repo_roots,
         json_out=args.json,
         scope=_pipeline_scope_for_phases(cfg.phases),
+        strict_review_guard=StrictReviewGuard(),
     )
 
 

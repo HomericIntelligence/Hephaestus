@@ -129,9 +129,21 @@ class StrictReviewStage(Stage):
         """
         if not item.state:
             item.state = ENTER
+        if "_strict_review_guard_owner" not in item.payload:
+            item.payload.pop("_strict_review_entry_contained", None)
         if item.pr is not None:
-            return self._contain_and_revoke_on_entry(item, ctx)
+            return self._claim_and_contain_entry(item, ctx)
         return None
+
+    def _claim_and_contain_entry(self, item: WorkItem, ctx: StageContext) -> StageOutcome | None:
+        """Claim the PR before its ingress containment writes."""
+        if not self._claim_review_ownership(item, ctx):
+            item.payload["retry_delay_s"] = 1
+            return StageOutcome(Disposition.RETRY, "strict_review_busy")
+        outcome = self._contain_and_revoke_on_entry(item, ctx)
+        if outcome is None:
+            item.payload["_strict_review_entry_contained"] = True
+        return outcome
 
     def _contain_and_revoke_on_entry(
         self, item: WorkItem, ctx: StageContext
@@ -245,7 +257,7 @@ class StrictReviewStage(Stage):
             return None
         return confirmed
 
-    def step(self, item: WorkItem, ctx: StageContext) -> StepResult:
+    def step(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901
         """Execute the next strict-review action for the item's current state.
 
         Args:
@@ -264,6 +276,15 @@ class StrictReviewStage(Stage):
             # requirements.  A PR-only item cannot meet that contract, and a
             # NOGO cannot safely enter the issue-bound implementation stage.
             return StageOutcome(Disposition.FINISH_FAIL, "strict_review_orphan")
+
+        if not self._claim_review_ownership(item, ctx):
+            item.payload["retry_delay_s"] = 1
+            return StageOutcome(Disposition.RETRY, "strict_review_busy")
+        if item.state == ENTER and not item.payload.get("_strict_review_entry_contained"):
+            outcome = self._contain_and_revoke_on_entry(item, ctx)
+            if outcome is not None:
+                return outcome
+            item.payload["_strict_review_entry_contained"] = True
 
         if item.state == ENTER:
             return Continue(next_state=HEAD_CHECK)
@@ -286,6 +307,30 @@ class StrictReviewStage(Stage):
             return StageOutcome(Disposition.ADVANCE, "strict review GO")
         logger.warning("strict_review:%s: unknown state %r", item.issue, item.state)
         return StageOutcome(Disposition.FINISH_FAIL, f"unknown state: {item.state}")
+
+    @staticmethod
+    def _claim_review_ownership(item: WorkItem, ctx: StageContext) -> bool:
+        """Claim this PR's loop-owned review slot before any gate action."""
+        guard = getattr(ctx.config, "strict_review_guard", None)
+        if guard is None:
+            return True
+        pr_number = item.pr
+        if pr_number is None:  # guarded by step(); narrowing
+            return False
+        owner = id(item)
+        try:
+            claimed = bool(guard.try_claim(ctx.org, item.repo, pr_number, owner))
+        except Exception as exc:
+            logger.warning(
+                "strict_review:%s: unable to acquire PR #%d review ownership: %s",
+                item.issue,
+                pr_number,
+                exc,
+            )
+            return False
+        if claimed:
+            item.payload["_strict_review_guard_owner"] = owner
+        return claimed
 
     def _head_check(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """HEAD_CHECK [M]: capture the PR's live head SHA before dispatching review."""

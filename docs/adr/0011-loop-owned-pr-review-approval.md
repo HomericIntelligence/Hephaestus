@@ -46,6 +46,10 @@ loop-owned `state:implementation-go` label. The required review is
 
 - A restart before the label is applied reruns review instead of recovering an
   external proof; this is the expected fail-safe behavior.
+- One active loop leader owns strict review for a repository. Cooperating loop
+  processes on one host use a local PR ownership lock; multi-host concurrent
+  loop leaders are not supported without a separately authorized loop-owned
+  coordinator.
 - CI/CD continues to validate code and protect branches, but the automation
   loop never reads, changes, or relies on it.
 - The retired policy no longer appears as an active contract.
