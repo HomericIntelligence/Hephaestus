@@ -593,13 +593,6 @@ class StrictReviewStage(Stage):
                 "strict_review: failed to mark PR #%d implementation-go: %s", pr_number, exc
             )
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_label_failed")
-        # Label mutation races with a push. Re-read the head after the write
-        # so a review for H1 cannot authorize a new H2.
-        current_outcome = self._current_head_or_restart(
-            item, ctx, head_sha, action="implementation-go verification"
-        )
-        if current_outcome is not None:
-            return current_outcome
         # Review state is needed only while this stage verifies the current
         # head and applies GO.  It must not cross into merge_wait: the
         # loop-owned label is that stage's only authorization.  Retain only a

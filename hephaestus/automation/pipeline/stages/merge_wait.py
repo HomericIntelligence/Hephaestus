@@ -355,16 +355,8 @@ class MergeWaitStage(Stage):
         gh_state = ctx.github.gh_pr_state(item.pr)
         pr_state_str = ((gh_state or {}).get("state") or "").upper()
         if pr_state_str not in {"MERGED", "CLOSED"}:
-            armed_head = str(item.payload.get("merge_wait_head") or "")
-            current_head = str((gh_state or {}).get("headRefOid") or "")
             has_go, _has_no_go = ctx.github.pr_has_implementation_state_label(item.pr)
-            if (
-                item.armed
-                and armed_head
-                and current_head == armed_head
-                and bool((gh_state or {}).get("autoMergeRequest"))
-                and has_go
-            ):
+            if item.armed and bool((gh_state or {}).get("autoMergeRequest")) and has_go:
                 started = item.payload.get("merge_wait_started_at")
                 if started is None:
                     return StageOutcome(Disposition.FINISH_FAIL, "missing_merge_wait_started_at")
