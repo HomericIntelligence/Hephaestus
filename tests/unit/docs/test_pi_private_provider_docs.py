@@ -27,6 +27,7 @@ def test_pi_private_provider_docs_are_sanitized() -> None:
     assert "~/.pi/agent/models.json" in text
     assert "HEPH_PI_MODEL" in text
     assert ".heph-private-denylist" in text
+    assert ".heph-project-denylist" in text
     assert "--staged --tracked" in text
     assert "<operator-local-alias>" in text
     assert "https://" not in text
