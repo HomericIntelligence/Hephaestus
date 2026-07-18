@@ -1133,6 +1133,83 @@ class TestDurableEventLog:
             coordinator._metrics_registry.render_prometheus()
         )
 
+    def test_snapshot_and_tick_expose_stalled_ticks(self, tmp_path: Path) -> None:
+        """Stall state is exported in the snapshot and as a gauge."""
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                projects_dir=tmp_path,
+                metrics_port=9123,
+            ),
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        coordinator._stalled_ticks = 2
+
+        assert coordinator._observability_snapshot()["stalled_ticks"] == 2
+        coordinator._emit_observability_tick()
+
+        assert coordinator._metrics_registry is not None
+        rendered = coordinator._metrics_registry.render_prometheus()
+        assert "hephaestus_pipeline_stalled_ticks 2" in rendered
+        assert "hephaestus_pipeline_loops_total 0" in rendered
+
+    def test_completion_increments_jobs_total_by_stage_and_outcome(self, tmp_path: Path) -> None:
+        """Each completed job increments the jobs_total counter by outcome."""
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                projects_dir=tmp_path,
+                metrics_port=9123,
+            ),
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        coordinator.stages[StageName.IMPLEMENTATION] = StubStage()
+
+        ok_item = _issue_item(1, StageName.IMPLEMENTATION)
+        ok_handle = _fake_in_flight_item(coordinator, ok_item)
+        coordinator._handle_completion(ok_handle, JobResult(ok=True, duration_s=1.5))
+
+        fail_item = _issue_item(2, StageName.IMPLEMENTATION)
+        fail_handle = _fake_in_flight_item(coordinator, fail_item)
+        coordinator._handle_completion(fail_handle, JobResult(ok=False, duration_s=0.5))
+
+        assert coordinator._metrics_registry is not None
+        rendered = coordinator._metrics_registry.render_prometheus()
+        assert 'hephaestus_pipeline_jobs_total{outcome="ok",stage="implementation"} 1' in rendered
+        assert (
+            'hephaestus_pipeline_jobs_total{outcome="failed",stage="implementation"} 1' in rendered
+        )
+        assert "hephaestus_pipeline_agent_job_seconds_total 2" in rendered
+
+    def test_agent_job_seconds_counter_clamps_negative_duration(self, tmp_path: Path) -> None:
+        """A negative duration is clamped so Counter.inc never raises."""
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                projects_dir=tmp_path,
+                metrics_port=9123,
+            ),
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        coordinator.stages[StageName.IMPLEMENTATION] = StubStage()
+        item = _issue_item(3, StageName.IMPLEMENTATION)
+        handle = _fake_in_flight_item(coordinator, item)
+
+        coordinator._handle_completion(handle, JobResult(ok=True, duration_s=-1.0))
+
+        assert coordinator._metrics_registry is not None
+        rendered = coordinator._metrics_registry.render_prometheus()
+        assert "hephaestus_pipeline_agent_job_seconds_total 0" in rendered
+
     def test_event_log_path_persists_queue_events(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

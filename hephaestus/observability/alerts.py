@@ -19,17 +19,22 @@ class AlertEvent:
 
 
 def evaluate_alerts(
-    snapshot: Mapping[str, Any], *, queue_depth_threshold: int = 100
+    snapshot: Mapping[str, Any],
+    *,
+    queue_depth_threshold: int = 100,
+    stalled_ticks_threshold: int = 3,
 ) -> list[AlertEvent]:
     """Evaluate conditions that the coordinator's runtime snapshot really contains.
 
     The function deliberately contains no speculative rules: every rule reads
-    either ``queue_depths`` or ``circuit_breakers`` emitted by the coordinator.
-    Returned events describe active conditions; :class:`AlertTracker` turns
-    those into fire/resolve transitions.
+    ``queue_depths``, ``circuit_breakers``, or ``stalled_ticks`` emitted by the
+    coordinator. Returned events describe active conditions;
+    :class:`AlertTracker` turns those into fire/resolve transitions.
     """
     if queue_depth_threshold < 0:
         raise ValueError("queue depth threshold must be non-negative")
+    if stalled_ticks_threshold < 0:
+        raise ValueError("stalled ticks threshold must be non-negative")
     events: list[AlertEvent] = []
     raw_breakers = snapshot.get("circuit_breakers", {})
     if isinstance(raw_breakers, Mapping):
@@ -68,17 +73,37 @@ def evaluate_alerts(
                     f"{', '.join(sorted(exceeded))}",
                 )
             )
+
+    raw_stalled = snapshot.get("stalled_ticks")
+    if (
+        isinstance(raw_stalled, (int, float))
+        and not isinstance(raw_stalled, bool)
+        and raw_stalled >= stalled_ticks_threshold
+    ):
+        events.append(
+            AlertEvent(
+                name="pipeline_stalled",
+                severity="warning",
+                status="fired",
+                message=f"pipeline made no progress for {int(raw_stalled)} ticks",
+            )
+        )
     return events
 
 
 class AlertTracker:
     """Emit a durable event only when an alert condition changes state."""
 
-    def __init__(self, *, queue_depth_threshold: int = 100) -> None:
-        """Create a tracker with the coordinator's queue-depth threshold."""
+    def __init__(
+        self, *, queue_depth_threshold: int = 100, stalled_ticks_threshold: int = 3
+    ) -> None:
+        """Create a tracker with the coordinator's alert thresholds."""
         if queue_depth_threshold < 0:
             raise ValueError("queue depth threshold must be non-negative")
+        if stalled_ticks_threshold < 0:
+            raise ValueError("stalled ticks threshold must be non-negative")
         self._queue_depth_threshold = queue_depth_threshold
+        self._stalled_ticks_threshold = stalled_ticks_threshold
         self._active: dict[str, AlertEvent] = {}
         self._lock = threading.Lock()
 
@@ -87,7 +112,9 @@ class AlertTracker:
         current = {
             event.name: event
             for event in evaluate_alerts(
-                snapshot, queue_depth_threshold=self._queue_depth_threshold
+                snapshot,
+                queue_depth_threshold=self._queue_depth_threshold,
+                stalled_ticks_threshold=self._stalled_ticks_threshold,
             )
         }
         with self._lock:
