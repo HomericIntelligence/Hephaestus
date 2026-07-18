@@ -414,7 +414,7 @@ class StageGitHub(Protocol):
         must make that distinction before it creates a lease or dispatches a
         reviewer.
         """
-        ...
+        pass
 
     def strict_review_evidence(
         self, pr_number: int, head_sha: str, issue_number: int, *, ci_status: str | None = None
