@@ -618,6 +618,18 @@ class TestSharedRubricConstants:
         """The anti-inflation block must restate the DEFAULT IS F rule."""
         assert "DEFAULT IS F" in prompts._REVIEW_GRADING_AND_ANTI_INFLATION
 
+    def test_reviewer_rubric_states_adversarial_posture(self) -> None:
+        """The reviewer rubric must open from a falsification posture (#2257).
+
+        Re-homed from the deleted ``test_strict_rubric`` suite: #2280 renamed
+        ``strict_rubrics/reviewer.j2`` to ``review_rubrics/reviewer.j2`` and
+        replaced ``build_strict_review_rubric`` with ``build_review_rubric``.
+        """
+        rubric = prompts._REVIEW_RUBRIC
+        assert "REVIEW POSTURE" in rubric
+        assert "Assume the submission is WRONG" in rubric
+        assert "falsify" in rubric
+
     def test_seven_principles_yagni_carves_out_toolchain_churn(self) -> None:
         """P2/YAGNI exempts toolchain churn but still flags scope creep (#1017)."""
         block = prompts._SEVEN_PRINCIPLES_DIMENSIONS
