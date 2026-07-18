@@ -553,7 +553,59 @@ jobs:
         run: uv sync --all-groups --all-extras --locked
 
       - name: Run integration tests
+        # uv sync installed every [project.scripts] binary into .venv/bin, so
+        # the CLI entry-point checks must never skip here (#2173).
+        env:
+          HEPHAESTUS_REQUIRE_CLI: "1"
         run: uv run pytest tests/integration --override-ini="addopts=" -v --strict-markers
+
+  installed-cli-tests:
+    # Installed-artifact lane (#2173): build the wheel, install it into a
+    # fresh non-editable venv, and exercise every console binary from PATH
+    # with skipping forbidden. Proves end-users' `pip install` artifacts
+    # actually expose working CLIs — the editable uv env above cannot.
+    name: installed-cli-tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: changes-gate
+    if: needs.changes-gate.outputs.code_event == 'true'
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          # hatch-vcs derives the wheel version from git tags.
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        with:
+          python-version: "3.12"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        with:
+          enable-cache: true
+
+      - name: Build wheel
+        run: uv build --wheel
+
+      - name: Install wheel into fresh venv
+        # [automation] extra: most console scripts live under
+        # hephaestus.automation.*. pytest runs the suite; pyyaml is
+        # imported by tests/conftest.py.
+        run: |
+          uv venv build/cli-venv
+          WHEEL=(dist/*.whl)
+          uv pip install --python build/cli-venv/bin/python "${WHEEL[0]}[automation]" pytest pyyaml
+
+      - name: Run CLI entry-point tests against installed binaries
+        env:
+          HEPHAESTUS_REQUIRE_CLI: "1"
+        run: |
+          export PATH="$PWD/build/cli-venv/bin:$PATH"
+          build/cli-venv/bin/pytest tests/integration/test_cli_entry_points.py \
+            --override-ini="addopts=" -v --strict-markers
 
   shell-tests:
     name: shell-tests
@@ -873,6 +925,7 @@ jobs:
       - pr-policy
       - unit-tests
       - integration-tests
+      - installed-cli-tests
       - shell-tests
       - build
       - security-dependency-scan

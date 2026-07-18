@@ -104,5 +104,9 @@ jobs:
 
       - name: Run integration tests
         if: matrix.test-type == 'integration'
+        # uv sync installed every [project.scripts] binary, so the CLI
+        # entry-point checks must never skip here (#2173).
+        env:
+          HEPHAESTUS_REQUIRE_CLI: "1"
         run: |
           uv run pytest tests/integration --override-ini="addopts=" -v --strict-markers
