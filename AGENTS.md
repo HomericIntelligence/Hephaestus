@@ -184,4 +184,3 @@ table. Highlights:
 ## Canonical architecture reference
 
 The **canonical unified reference** for the queue-pipeline, stage semantics, ROUTES table, scope trimming, durable journal, worker pool, and observability lives at [\`docs/architecture.md\`](../docs/architecture.md). Update the doc (not this file) when the topology changes; this file remains the agent-topology map and skill catalog.
-

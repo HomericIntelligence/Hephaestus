@@ -6,7 +6,7 @@ Re-houses the fused implementation-review loop from ``_review_phase.py``
 (``pr_reviewer.review_pr_inline``, ``review_validator
 .validate_prior_comments_addressed``, ``address_review
 .run_address_fix_session``) as a pipeline stage
-(docs/AUTOMATION_LOOP_ARCHITECTURE.md section "5. pr_review" is the binding
+(docs/architecture.md §5.5 "pr_review" is the binding
 contract):
 
 - States: ENTER -> REVIEW_WAIT -> VALIDATE_WAIT -> POST -> DIFFICULTY_WAIT

@@ -508,4 +508,3 @@ Make sure all temporary files are in the build/ directory
 ## Canonical architecture reference
 
 For the unified, source-grounded pipeline reference (every operational claim traced back to its backing module), see [\`docs/architecture.md\`](../docs/architecture.md). The AI-agent topology and skill catalog lives at the top-level [\`AGENTS.md\`](../AGENTS.md).
-

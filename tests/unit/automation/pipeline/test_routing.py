@@ -60,15 +60,37 @@ class TestDisposition:
         assert {d.value for d in Disposition} == expected
 
     def test_finish_fail_has_terminal_comment(self) -> None:
-        """FINISH_FAIL keeps the terse terminal-fail rationale comment."""
-        source_lines = Path(routing.__file__).read_text(encoding="utf-8").splitlines()
-        for index, line in enumerate(source_lines):
-            if line.strip() == 'FINISH_FAIL = "finish_fail"':
-                assert index > 0
-                assert source_lines[index - 1].strip() == "# terminal fail; no S105 needed"
-                break
-        else:
-            pytest.fail("FINISH_FAIL enum member not found")
+        """FINISH_FAIL carries the terse terminal-fail rationale comment.
+
+        Stable against reorders (#2298): parses ``routing.py`` as a Python AST,
+        locates ``Disposition.FINISH_FAIL``, and verifies the immediately-preceding
+        source line carries the rationale comment. Asserts on the comment text
+        and the proximity rule, not on a specific line number.
+        """
+        import ast
+
+        source = Path(routing.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        disposition_cls = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef) and node.name == "Disposition"
+        )
+        finish_fail_stmt = next(
+            stmt
+            for stmt in disposition_cls.body
+            if isinstance(stmt, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "FINISH_FAIL"
+                for target in stmt.targets
+            )
+        )
+        finish_fail_line = finish_fail_stmt.lineno  # 1-indexed
+        previous_line = source.splitlines()[finish_fail_line - 2]
+        assert previous_line.strip() == "# terminal fail; no S105 needed", (
+            f"expected rationale comment immediately above FINISH_FAIL; "
+            f"got line {finish_fail_line - 1}: {previous_line!r}"
+        )
 
 
 class TestStageOutcome:
@@ -248,7 +270,9 @@ class TestROUTES:
         assert "review_thread_resolver.py _BLOCKED_ADDRESS_MAX_ATTEMPTS (=2)" in block
         # No ``_review_phase.py:<NN>`` cite may replace the value-tag form.
         cite_lines = [
-            tail for line in block.splitlines() if "<-" in line
+            tail
+            for line in block.splitlines()
+            if "<-" in line
             for tail in [line.split("<-", 1)[-1]]
         ]
         assert not any("_review_phase.py:" in tail for tail in cite_lines)

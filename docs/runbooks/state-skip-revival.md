@@ -49,7 +49,7 @@ Check when `state:skip` was applied relative to PR creation:
    required).
 4. Confirm re-admission: the next automation loop pass should pick the issue
    back up at planning or implementation depending on its current `state:*`
-   rank (`docs/AUTOMATION_LOOP_ARCHITECTURE.md` classification table).
+   rank (`docs/architecture.md` §7 classification table).
 
 ## Fix — confirming a skip was correct
 

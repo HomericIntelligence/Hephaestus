@@ -1,8 +1,9 @@
 """Declarative stage-routing table. Pure data, zero I/O (epic #1809).
 
 The ROUTES table below is the code form of the normative table in
-``docs/AUTOMATION_LOOP_ARCHITECTURE.md`` ("ROUTES table" section). Any change
-here MUST be reflected there and vice versa;
+[`docs/architecture.md` §6](../docs/architecture.md#6-the-routes-table--single-source-of-truth)
+("The ROUTES table — single source of truth"). Any change here MUST be reflected
+there and vice versa;
 ``tests/unit/automation/pipeline/test_routing.py`` pins every row.
 
 All budgets are per-item-lifetime counters (tracked in ``WorkItem.attempts``);
@@ -76,12 +77,12 @@ class Route:
     budgets: dict[str, int] = field(default_factory=dict)
 
 
-# The rows below transcribe docs/AUTOMATION_LOOP_ARCHITECTURE.md "ROUTES
+# The rows below transcribe docs/architecture.md §6 "ROUTES
 # table" exactly: named fail-route keys are the doc's reason vocabulary, "*"
 # is the doc's default target. Budget provenance:
 #   plan_review_iter=3, pr_review_iter=3  <- _review_phase.py MAX_REVIEW_ITERATIONS (=3)
 #   pr_review_hard=6                       <- _review_phase.py MAX_REVIEW_ITERATIONS_HARD_CAP (=3*2)
-#   blocked_address=2                     <- review_thread_resolver.py _BLOCKED_ADDRESS_MAX_ATTEMPTS (=2)
+#   blocked_address=2  <- review_thread_resolver.py _BLOCKED_ADDRESS_MAX_ATTEMPTS (=2)
 #   clone=2, plan=2, plan_cycles=2,
 #   implement=2, test_fix=1                <- architecture doc stage sections
 #   merge=DEFAULT_DRIVE_GREEN_LOOPS        <- loop_runner.py LoopConfig.drive_green_loops
