@@ -136,6 +136,11 @@ class StrictReviewStage(Stage):
         """
         if not item.state:
             item.state = ENTER
+        if item.issue is None:
+            # Requirements must originate from a real linked issue, never
+            # from PR-authored content.  Reject an orphan before claiming the
+            # gate, mutating labels, or dispatching review work.
+            return StageOutcome(Disposition.FINISH_FAIL, "strict_review_orphan")
         if "_strict_review_guard_owner" not in item.payload:
             item.payload.pop("_strict_review_entry_contained", None)
         if item.pr is not None:

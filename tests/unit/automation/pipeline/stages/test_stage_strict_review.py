@@ -76,6 +76,19 @@ def test_strict_review_without_an_ownership_guard_fails_closed(
     )
 
 
+def test_orphan_strict_review_fails_before_gate_side_effects(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """An orphan cannot claim, contain, or dispatch the strict-review gate."""
+    item = make_work_item(issue=None, stage=StageName.STRICT_REVIEW, pr=12, state="ENTER")
+    github = FakeStageGitHub(pr_state={"state": "OPEN", "headRefOid": _HEAD})
+
+    assert StrictReviewStage().on_enter(item, make_ctx(github=github)) == StageOutcome(
+        Disposition.FINISH_FAIL, "strict_review_orphan"
+    )
+    assert github.mutation_log == []
+
+
 def test_review_job_uses_athena_pr_review_prompt(make_ctx: Any, make_work_item: Any) -> None:
     """The approval reviewer is explicitly the Athena PR-review skill."""
     item = make_work_item(

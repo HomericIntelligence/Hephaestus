@@ -329,11 +329,14 @@ def product_to_work_item(repo: str, product: dict[str, Any]) -> WorkItem | None:
     item = WorkItem(
         repo=repo,
         kind=kind,
-        # GitHub PRs are issues too.  Repo-wide drive-green discovery may not
-        # have an exact closing-issue link, but it must still provide the
-        # review stage a stable requirements/comment context just like an
-        # explicit ``--prs`` seed does.
-        issue=number,
+        # A PR number never supplies issue requirements.  Repo-discovered
+        # orphan PRs therefore retain issue=None and are rejected before the
+        # strict-review gate can run.
+        issue=(
+            number
+            if kind is ItemKind.ISSUE
+            else (int(product["issue"]) if product.get("issue") is not None else None)
+        ),
         pr=int(product["pr"]) if product.get("pr") else (number if kind is ItemKind.PR else None),
         stage=stage,
         state="ENTER",

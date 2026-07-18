@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 DOC_PATH = Path(__file__).resolve().parents[3] / "docs" / "AUTOMATION_LOOP_ARCHITECTURE.md"
 AGENTS_PATH = Path(__file__).resolve().parents[3] / "AGENTS.md"
@@ -100,19 +103,52 @@ def test_automation_loop_architecture_documents_effective_item_semantics() -> No
     assert "exit-code calculation" in normalized
 
 
-def test_stage_github_pr_state_docstring_describes_ci_free_read_contract() -> None:
-    """The shared PR-state accessor documents lifecycle data, not CI state."""
-    from hephaestus.automation.pipeline.stages.base import StageGitHub
+def test_gh_pr_state_reads_only_lifecycle_fields() -> None:
+    """The shared accessor requests and returns the lifecycle record."""
+    from hephaestus.automation.pipeline_github import PipelineGitHub
 
-    docstring = StageGitHub.gh_pr_state.__doc__ or ""
-    normalized = " ".join(docstring.split())
+    payload = {
+        "state": "OPEN",
+        "headRefOid": "a" * 40,
+        "mergedAt": None,
+        "baseRefName": "main",
+        "autoMergeRequest": None,
+    }
+    github = PipelineGitHub("org", repo="repo", repo_root=Path.cwd())
 
-    assert "repo" in normalized
-    assert "implementation" in normalized
-    assert "merge_wait" in normalized
-    assert "terminal-state checks" in normalized
-    assert "headRefOid" in normalized
-    assert "CI" not in normalized
+    with patch(
+        "hephaestus.automation.pipeline_github.gh_call",
+        return_value=SimpleNamespace(stdout=json.dumps(payload)),
+    ) as gh_call:
+        assert github.gh_pr_state(42) == payload
+
+    gh_call.assert_called_once_with(
+        [
+            "pr",
+            "view",
+            "42",
+            "--json",
+            "state,headRefOid,mergedAt,baseRefName,autoMergeRequest",
+            "--repo",
+            "org/repo",
+        ]
+    )
+
+
+def test_gh_pr_state_terminal_fields_route_seeded_prs() -> None:
+    """CLI PR seeding consumes lifecycle state before label routing."""
+    from hephaestus.automation.pipeline.routing import StageName
+    from hephaestus.automation.pipeline.seeding import seed_from_cli
+
+    merged = MagicMock()
+    merged.gh_pr_state.return_value = {"state": "MERGED", "mergedAt": "2026-01-01T00:00:00Z"}
+    closed = MagicMock()
+    closed.gh_pr_state.return_value = {"state": "CLOSED", "mergedAt": None}
+
+    assert seed_from_cli([], [], [42], github=merged)[0].stage is StageName.FINISHED
+    assert seed_from_cli([], [], [43], github=closed)[0].stage is None
+    merged.pr_has_implementation_state_label.assert_not_called()
+    closed.pr_has_implementation_state_label.assert_not_called()
 
 
 def test_automation_loop_architecture_has_concurrency_cli_dry_run_and_glossary() -> None:

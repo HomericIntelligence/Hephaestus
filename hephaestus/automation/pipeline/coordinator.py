@@ -1747,11 +1747,11 @@ class Coordinator:
             item = WorkItem(
                 repo=default_repo,
                 kind=ItemKind.PR,
-                # A PR is itself a GitHub issue. Direct ``--prs`` input does
-                # not require an exact ``Closes #N`` trailer merely to obtain
-                # review/label context; use the PR number when no linked
-                # issue is available.
-                issue=entry.issue_number or entry.pr_number or int(entry.identifier),
+                # Only a resolved, linked issue supplies requirements context.
+                # A PR number is not a safe substitute: its author controls
+                # the PR body, so an unlinked direct PR must remain orphaned
+                # and fail closed before strict review.
+                issue=entry.issue_number,
                 pr=entry.pr_number or int(entry.identifier),
                 stage=entry.stage,
             )

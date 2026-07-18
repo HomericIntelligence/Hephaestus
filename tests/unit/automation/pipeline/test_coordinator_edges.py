@@ -862,10 +862,10 @@ class TestSeedingEdges:
         assert finished.result is not None and finished.result.passed
         assert coordinator._pass_work_count == 0  # finished entries are not work
 
-    def test_repo_product_orphan_pr_uses_pr_as_review_issue_context(
+    def test_repo_product_orphan_pr_preserves_missing_review_issue_context(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Repo-wide direct PR discovery can reach the CI-free review stage."""
+        """Repo-wide orphan PR discovery remains fail-closed before review."""
         coordinator = _coordinator(tmp_path, monkeypatch)
         repo_item = WorkItem(repo="repo-a", kind=ItemKind.REPO, stage=StageName.REPO)
         repo_item.payload["products"] = [
@@ -881,7 +881,8 @@ class TestSeedingEdges:
 
         review_item = coordinator.queues[StageName.STRICT_REVIEW].snapshot()[0]
         assert review_item.kind is ItemKind.PR
-        assert review_item.issue == review_item.pr == 66
+        assert review_item.issue is None
+        assert review_item.pr == 66
 
 
 class TestLivenessAndFatal:
