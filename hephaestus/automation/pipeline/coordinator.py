@@ -413,7 +413,10 @@ class Coordinator:
             self._routes = config.scope.trimmed_routes()
             self._routes.setdefault(StageName.FINISHED, ROUTES[StageName.FINISHED])
         else:
-            self._routes = ROUTES
+            # Copy, not alias: ``ROUTES`` is a module-level shared table, so an
+            # accidental in-place edit of ``self._routes`` would corrupt every
+            # other run/test. The table is small and built once per run.
+            self._routes = dict(ROUTES)
 
         self._install_signals = install_signals
         self._seq = 0
@@ -1205,7 +1208,23 @@ class Coordinator:
 
     def _route(self, item: WorkItem, outcome: StageOutcome) -> None:
         """Apply the Disposition -> action table (plan #1817)."""
-        route = self._routes[item.stage]
+        route = self._routes.get(item.stage)
+        if route is None:
+            # A stage absent from this run's (possibly scope-trimmed) route
+            # table has no next/fail mapping — routing it would KeyError. This
+            # happens when a seeder-created REPO item is poisoned under a
+            # partial ``--phases`` scope whose ``trimmed_routes`` omits REPO
+            # (#2294). Fail closed to the sink instead of crashing the whole
+            # run, which the poison handler that called us already intends.
+            logger.error(
+                "coordinator: %s has no route in this run's stage scope; "
+                "finishing failed instead of crashing (%s)",
+                item.stage.value,
+                outcome.note or "unroutable",
+            )
+            reason = outcome.note or f"unroutable:{item.stage.value}"
+            self._finish(item, passed=False, reason=reason)
+            return
         disposition = outcome.disposition
 
         if item.stage is StageName.FINISHED:

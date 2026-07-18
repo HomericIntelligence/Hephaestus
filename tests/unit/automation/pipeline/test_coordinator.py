@@ -647,6 +647,33 @@ class TestFailBackRouting:
         assert item.stage is StageName.FINISHED
         assert item.result is not None and not item.result.passed
 
+    def test_stage_absent_from_route_table_finishes_failed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A poisoned item whose stage is not in the run's routes finishes failed (#2294).
+
+        Under a partial ``--phases`` scope, ``trimmed_routes`` can omit
+        ``StageName.REPO`` even though the seeder always pushes a REPO item.
+        Routing a poisoned REPO item must fail closed to the sink, not raise
+        ``KeyError`` and crash the whole run.
+        """
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+        # Simulate a scope-trimmed route table with no REPO entry. Assign a
+        # fresh copy so the module-level ROUTES dict (aliased by the default
+        # unscoped path) is never mutated across tests.
+        coordinator._routes = {
+            s: r for s, r in coordinator._routes.items() if s is not StageName.REPO
+        }
+        item = WorkItem(
+            repo="repo-a", kind=ItemKind.REPO, issue=None, stage=StageName.REPO, state="ENTER"
+        )
+
+        coordinator._route(item, StageOutcome(Disposition.FINISH_FAIL, "poisoned: boom"))
+
+        assert item.stage is StageName.FINISHED
+        assert item.result is not None and not item.result.passed
+        assert "poisoned: boom" in item.result.reason
+
     def test_dry_run_fail_back_finishes_instead_of_regressing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1460,7 +1487,12 @@ class TestPipelineScopeWiring:
         assert coordinator._routes[StageName.PLAN_REVIEW].next == StageName.FINISHED
 
     def test_full_run_uses_global_routes(self, tmp_path: Path) -> None:
-        """Without a scope the coordinator routes through the full ROUTES table."""
+        """Without a scope the coordinator routes through the full ROUTES table.
+
+        It uses a COPY of ROUTES, not the shared object itself, so an
+        in-place edit of ``self._routes`` can never corrupt the module-level
+        table for other runs (#2294).
+        """
         from hephaestus.automation.pipeline.routing import ROUTES
 
         config = PipelineConfig(org="org", repos=["repo-a"], loops=1, projects_dir=tmp_path)
@@ -1468,7 +1500,8 @@ class TestPipelineScopeWiring:
             config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
         )
 
-        assert coordinator._routes is ROUTES
+        assert coordinator._routes == ROUTES
+        assert coordinator._routes is not ROUTES
 
     def test_direct_issue_scope_hydrates_issue_context_payload(self, tmp_path: Path) -> None:
         """Explicit --issues seeding preserves the real issue title/body for prompts."""
