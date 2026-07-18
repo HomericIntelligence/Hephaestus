@@ -1121,3 +1121,48 @@ class TestCreateWorktreeBranchCollision:
         argvs = [call.args[0] for call in worktree_mocks.run.call_args_list]
         assert ["git", "worktree", "remove", "--force", str(worktree_path)] in argvs
         assert ["git", "worktree", "prune"] in argvs
+
+
+class TestLocalBranchExists:
+    """Tests for diagnostic-preserving local branch lookups."""
+
+    def test_subprocess_failure_is_logged_and_treated_as_absent(
+        self,
+        worktree_mocks: Any,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Expected subprocess failures stay fail-safe but log diagnostics."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+        worktree_mocks.run.side_effect = subprocess.TimeoutExpired(
+            ["git", "rev-parse"],
+            timeout=5,
+        )
+
+        with caplog.at_level(
+            "WARNING",
+            logger="hephaestus.automation.worktree_manager",
+        ):
+            result = manager._local_branch_exists("2143-auto", timeout=5)
+
+        assert result is False
+        assert "Local branch check failed for 2143-auto" in caplog.text
+        assert str(tmp_path) in caplog.text
+        assert caplog.records[-1].exc_info is not None
+
+    def test_unexpected_runner_error_propagates_unchanged(
+        self,
+        worktree_mocks: Any,
+        tmp_path: Path,
+    ) -> None:
+        """Unexpected runner errors are re-raised unchanged, not swallowed."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+        error = RuntimeError("runner contract broken")
+        worktree_mocks.run.side_effect = error
+
+        with pytest.raises(RuntimeError, match="runner contract broken") as exc_info:
+            manager._local_branch_exists("2143-auto")
+
+        assert exc_info.value is error
