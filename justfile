@@ -33,6 +33,10 @@ test-unit:
 test-integration:
     uv run pytest {{ integration_test_dir }}
 
+# Run the opt-in external contract lane (real gh; agent lane needs HEPHAESTUS_CONTRACT_AGENT=1)
+test-contract:
+    HEPHAESTUS_CONTRACT_TESTS=1 uv run pytest {{ integration_test_dir }}/contract --override-ini="addopts=" -v --strict-markers
+
 # Run BATS shell tests (recursive under tests/shell)
 test-shell:
     bats --recursive tests/shell

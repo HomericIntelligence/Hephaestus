@@ -13,3 +13,4 @@
 | release.yml | Builds, tests, publishes, and creates releases for tags. | push tags `v*`, workflow_dispatch |
 | security.yml | Runs scheduled/manual security scans and PR-time security checks for dependency-sensitive changes. | pull_request paths, schedule, workflow_dispatch |
 | test.yml | Runs the cross-Python unit/integration test matrix not duplicated by `_required.yml`. | pull_request, push to main |
+| contract.yml | Runs the opt-in, sandboxed external-integration contract lane (read-only `gh`; agent lane self-skips). Advisory-only, never required. | workflow_dispatch |

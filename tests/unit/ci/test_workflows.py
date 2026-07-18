@@ -36,6 +36,8 @@ SECURITY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "security.yml"
 TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "test.yml"
 PERFORMANCE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "performance.yml"
 PERFORMANCE_DOC = REPO_ROOT / "docs" / "performance-testing.md"
+CONTRACT_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "contract.yml"
+CONTRACT_DOC = REPO_ROOT / "docs" / "contract-testing.md"
 SETUP_PI_ACTION = REPO_ROOT / ".github" / "actions" / "setup-pi-cli" / "action.yml"
 
 
@@ -238,6 +240,55 @@ class TestPerformanceWorkflow:
         addopts = config["tool"]["pytest"]["ini_options"]["addopts"]
         assert "-m" in addopts
         assert "not performance" in addopts
+
+
+class TestContractWorkflow:
+    """Contracts for the opt-in external-integration contract lane (issue #2146)."""
+
+    def _load(self) -> dict[str, Any]:
+        workflow: dict[str, Any] = yaml.load(
+            CONTRACT_WORKFLOW.read_text(encoding="utf-8"),
+            Loader=yaml.BaseLoader,
+        )
+        return workflow
+
+    def _contract_step(self) -> dict[str, Any]:
+        steps = self._load()["jobs"]["github-contract"]["steps"]
+        return next(
+            step for step in steps if str(step.get("run", "")).strip().startswith("uv run pytest")
+        )
+
+    def test_trigger_is_dispatch_only(self) -> None:
+        """The lane must never run on pull_request/push — dispatch only."""
+        workflow = self._load()
+        assert set(workflow["on"]) == {"workflow_dispatch"}
+
+    def test_permissions_are_read_only(self) -> None:
+        """The lane requests only read scopes."""
+        permissions = self._load()["permissions"]
+        assert permissions["contents"] == "read"
+        assert permissions["issues"] == "read"
+
+    def test_pytest_step_opts_in_and_is_tokened(self) -> None:
+        """The pytest step sets the opt-in gate and a GH token, and targets the lane."""
+        step = self._contract_step()
+        env = step["env"]
+        assert env["HEPHAESTUS_CONTRACT_TESTS"] == "1"
+        assert env["GH_TOKEN"] == "${{ github.token }}"  # noqa: S105
+        assert env["HEPHAESTUS_CONTRACT_REPO"] == "${{ github.repository }}"
+        assert "tests/integration/contract" in step["run"]
+        assert '--override-ini="addopts="' in step["run"]
+
+    def test_agent_lane_is_not_opted_in(self) -> None:
+        """CI must not spend model tokens: the agent gate stays unset."""
+        env = self._contract_step().get("env", {})
+        assert "HEPHAESTUS_CONTRACT_AGENT" not in env
+
+    def test_contract_lane_is_documented(self) -> None:
+        """The public docs index links to the contract-testing guide."""
+        index = (REPO_ROOT / "docs" / "index.md").read_text(encoding="utf-8")
+        assert CONTRACT_DOC.is_file()
+        assert "(contract-testing.md)" in index
 
 
 class TestIsCheckoutStep:

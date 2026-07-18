@@ -2,9 +2,28 @@
 """Shared test fixtures for Hephaestus tests."""
 
 import json
+import os
 
 import pytest
 import yaml
+
+CONTRACT_OPT_IN_ENV = "HEPHAESTUS_CONTRACT_TESTS"
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Skip contract-marked tests unless the opt-in env var is set (issue #2146).
+
+    The contract lane (``tests/integration/contract/``) exercises the real
+    ``gh``/``claude`` CLIs, so it must never run in a default suite invocation.
+    It collects normally — proving the tests import and parametrize — but every
+    contract-marked item is marked skipped unless ``HEPHAESTUS_CONTRACT_TESTS=1``.
+    """
+    if os.environ.get(CONTRACT_OPT_IN_ENV) == "1":
+        return
+    skip = pytest.mark.skip(reason=f"contract lane is opt-in; set {CONTRACT_OPT_IN_ENV}=1 to run")
+    for item in items:
+        if item.get_closest_marker("contract"):
+            item.add_marker(skip)
 
 
 @pytest.fixture(autouse=True)
@@ -31,6 +50,8 @@ def _agents_authenticated_by_default(
     """
     if request.module.__name__.endswith("agents.test_runtime"):
         return
+    if request.node.get_closest_marker("contract"):
+        return  # contract lane (#2146) exercises the real auth preflight
     monkeypatch.setattr(
         "hephaestus.agents.runtime.is_agent_authenticated",
         lambda _agent: True,

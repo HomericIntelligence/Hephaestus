@@ -1,0 +1,42 @@
+name: Contract Tests (opt-in)
+
+# Opt-in, sandboxed external-integration contract lane (issue #2146). Runs only
+# on manual dispatch — never on pull_request/push — and is never a required
+# check. The GitHub lane makes read-only authenticated `gh` calls; the agent
+# lane self-skips in CI (no `claude` auth, HEPHAESTUS_CONTRACT_AGENT unset).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: read
+
+jobs:
+  github-contract:
+    name: GitHub contract lane
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        with:
+          python-version: "3.12"
+      - name: Setup uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        with:
+          enable-cache: true
+      - name: Install locked project environment
+        run: uv sync --all-groups --all-extras --locked
+      - name: Run contract lane (agent tests self-skip — no claude auth in CI)
+        env:
+          HEPHAESTUS_CONTRACT_TESTS: "1"
+          GH_TOKEN: ${{ github.token }}
+          HEPHAESTUS_CONTRACT_REPO: ${{ github.repository }}
+        run: >
+          uv run pytest tests/integration/contract
+          --override-ini="addopts="
+          -v --strict-markers

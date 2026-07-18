@@ -226,6 +226,7 @@ markers = [
     "unit: marks tests as unit tests",
     "performance: bounded capacity, latency, and sustained-concurrency tests",
     "requires_posix: requires POSIX coreutils (echo, false, ls) and/or git on PATH; skipped on win32",
+    "contract: opt-in sandboxed contract tests against real gh/claude CLIs; skipped unless HEPHAESTUS_CONTRACT_TESTS=1",
 ]
 
 [tool.mypy]

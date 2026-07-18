@@ -50,6 +50,7 @@ just docs        # outputs to docs/api/
 See the [README](../README.md) for installation and development setup instructions.
 
 - [Audit Reviewer](audit-reviewer.md) — `hephaestus-audit-prs`: coordinator-pattern auditor for ALL open PRs (issue #994)
+- [Contract Testing](contract-testing.md) — Opt-in, sandboxed authenticated `gh`/`claude` contract lane for verifying real external integrations
 - [MCP Integration Posture](mcp.md) — Capability boundary, alternative integration contracts, and project-scoped `.mcp.json` change control
 - [NATS JetStream Configuration](nats.md) - TLS defaults, certificate file paths, and local plaintext exceptions for `hephaestus.nats`
 - [Operations Runbooks](runbooks/index.md) — Operator recovery procedures for the automation pipeline (loop crash, corrupted worktree, CI-driver stall, quota exhaustion)
