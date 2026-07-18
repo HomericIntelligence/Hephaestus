@@ -23,3 +23,4 @@ numbered, and listed here.
 | [0008](0008-uv-only-development-environment.md) | uv is the sole development environment manager | Accepted |
 | [0009](0009-head-bound-strict-review-merge-gate.md) | Head-bound strict review controls queue-owned merge eligibility | Accepted |
 | [0010](0010-trusted-strict-review-proof.md) | Trusted strict-review proof context | Accepted |
+| [0011](0011-mcp-integration-posture.md) | MCP is optional project-scoped agent tooling | Accepted |

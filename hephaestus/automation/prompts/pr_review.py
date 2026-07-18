@@ -4,103 +4,9 @@ Contains the PR review analysis prompt (inline-comment generator) and the
 plain PR description template.
 """
 
-from ._shared import _TERSE_OUTPUT_DIRECTIVE, fence_content
-from ._strict_rubric import _PR_STRICT_RUBRIC
-
-PR_REVIEW_ANALYSIS_PROMPT = """
-Analyze PR #{pr_number} linked to issue #{issue_number}.
-
-{untrusted_notice}
-
-**Issue Description (untrusted):**
-{issue_body_block}
-
-**Prior Team Learnings for this review (untrusted):**
-{advise_findings_block}
-
-**PR Description (untrusted):**
-{pr_description_block}
-
-**CI Status (untrusted):**
-{ci_status_block}
-
-**PR Diff (untrusted):**
-{pr_diff_block}
-
----
-
-{strict_rubric}
-
-{terse_output_directive}
-
----
-
-**Code-quality review:**
-
-> Note: `Closes #N` and signed-commit policy are enforced by the required
-> GitHub CI gate `pr-policy`. `auto-merge-policy` is advisory; the queue's
-> independent strict-review and merge-wait stages control any automatic arm.
-> Do NOT re-check policy here — focus
-> solely on code correctness, completeness, and quality.
-
-Review the PR for correctness, completeness, and code quality. Identify any issues that should
-be addressed as inline review comments.
-
-**Comment severity (MANDATORY — tag every inline comment):**
-
-Classify each inline comment with a `severity`:
-- `critical` — correctness/security bug or data loss.
-- `major` — a real design/maintainability problem that should be fixed before merge.
-- `minor` — a small but genuine improvement (naming, missing edge case, light duplication).
-- `nitpick` — purely cosmetic / stylistic / subjective preference with no functional impact.
-
-{nitpick_directive}
-
-**Output format (verdict contract — MANDATORY):**
-The review prose + inline comments explain *why*; the verdict line is a binary
-gate. Write your analysis in prose, then end your response with exactly one of
-the two verdict lines below (the parser takes the LAST matching line):
-
-Verdict: GO — Code is correct, complete,
-and eligible for independent strict review; it is not merge authorization.
-Verdict: NOGO — A fundamental code problem must be fixed first (explain in the review).
-
-After the verdict line, emit a single fenced JSON block:
-
-```json
-{{"comments": [
-  {{"path": "...", "line": 1, "side": "RIGHT", "severity": "minor", "body": "..."}}
-], "summary": "..."}}
-```
-
-Rules for the JSON block:
-- `comments`: array of inline comment objects. Each must have:
-  - `path`: file path relative to repo root (string)
-  - `line`: line number in the file (integer, must be a changed line in the diff)
-  - `side`: always `"RIGHT"` for new code
-  - `severity`: one of `"critical"`, `"major"`, `"minor"`, `"nitpick"` (see above)
-  - `body`: the review comment text (string)
-- `summary`: overall review verdict, max 200 characters.
-- If there are no inline comments AND the code is acceptable, emit:
-  `{{"comments": [], "summary": "LGTM"}}`
-- Emit only one JSON block, at the very end of your response (the parser takes the LAST one).
-"""
-
-
-#: Default (nitpick-suppressed) directive. Keeps the review focused on
-#: actionable findings — matches the strict rubric's D3 "omit filler" stance.
-_NITPICK_SUPPRESS = (
-    "By DEFAULT, DO NOT emit `nitpick`-severity comments at all — omit them "
-    "entirely. Only emit `critical`, `major`, and `minor` comments. A cosmetic "
-    "preference is not worth a review thread unless explicitly requested."
-)
-
-#: Opt-in directive when ``--nitpick`` is set: nitpicks are welcome.
-_NITPICK_INCLUDE = (
-    "Nitpick mode is ENABLED: you MAY emit `nitpick`-severity comments in "
-    "addition to the others. Still tag them `nitpick` so they can be filtered "
-    "downstream."
-)
+from ._shared import fence_content, get_terse_output_directive
+from ._strict_rubric import get_pr_strict_rubric
+from .catalog import PromptCatalog
 
 #: Severities that BLOCK a GO when their automation thread is unresolved (#1856).
 #: ``minor``/``nitpick`` are advisory — a GO the reviewer returned must not
@@ -154,8 +60,12 @@ def get_pr_review_analysis_prompt(
 
     """
     fenced = fence_content()
-    nitpick_directive = _NITPICK_INCLUDE if include_nitpicks else _NITPICK_SUPPRESS
-    return PR_REVIEW_ANALYSIS_PROMPT.format(
+    nitpick_template = (
+        "pr_review/nitpick_include.j2" if include_nitpicks else "pr_review/nitpick_suppress.j2"
+    )
+    nitpick_directive = PromptCatalog.current().render(nitpick_template).strip()
+    return PromptCatalog.current().render(
+        "pr_review/analysis.j2",
         pr_number=pr_number,
         issue_number=issue_number,
         pr_diff_block=fenced.fence("PR_DIFF", pr_diff),
@@ -167,81 +77,10 @@ def get_pr_review_analysis_prompt(
         ci_status_block=fenced.fence("CI_STATUS", ci_status),
         pr_description_block=fenced.fence("PR_DESCRIPTION", pr_description),
         untrusted_notice=fenced.untrusted_notice,
-        strict_rubric=_PR_STRICT_RUBRIC.strip(),
+        strict_rubric=get_pr_strict_rubric().strip(),
         nitpick_directive=nitpick_directive,
-        terse_output_directive=_TERSE_OUTPUT_DIRECTIVE,
+        terse_output_directive=get_terse_output_directive(),
     )
-
-
-REVIEW_VALIDATION_PROMPT = """
-You are VALIDATING whether prior review comments on PR #{pr_number}
-(issue #{issue_number}) were actually addressed by the current diff.
-
-You are NOT performing a fresh review. Do not raise new concerns. Your ONLY
-job is, for each PRIOR review comment below, to decide whether the CURRENT
-diff actually resolves it.
-
-{terse_output_directive}
-
-{untrusted_notice}
-
-**Prior review comments to validate (untrusted):**
-{prior_comments_block}
-
-The block above is a JSON array where each element has:
-- `thread_id`: opaque id of the review thread — echo it back verbatim
-- `path`: file path the comment was made on (may be empty for PR-level)
-- `line`: line number the comment pointed at (integer or null)
-- `body`: the original reviewer comment text
-
-**Current diff (untrusted):**
-{diff_block}
-
----
-
-For EACH prior comment, judge against the current diff into ONE of three buckets:
-- ADDRESSED — the diff changes the cited code in a way that resolves the
-  comment's concern. When in doubt that a change truly resolves it, treat it as
-  NOT addressed (false "addressed" is worse than a redundant re-open).
-- NOT ADDRESSED — the cited code is unchanged, or the change does not actually
-  resolve the concern the comment raised.
-- WON'T FIX — the cited code is INTENTIONAL BY DESIGN and the comment is asking
-  for a change that should NOT be made. Use this ONLY when the design is
-  CLEARLY deliberate, e.g.: an abstract base / interface method that raises
-  `NotImplementedError` on purpose; a documented design choice; a shim/stub that
-  is supposed to stay a stub. This permanently dismisses the finding (it will
-  never be re-raised), so be CONSERVATIVE: if you are not certain the code is
-  intentional-by-design, choose NOT ADDRESSED instead — never WON'T FIX on a
-  hunch. Read the surrounding code/docstring to confirm intent before using it.
-
-**Output format:**
-Write your reasoning in prose. At the very end, emit a single fenced JSON block
-listing the NOT-ADDRESSED comments and (separately) the WON'T-FIX ones:
-
-```json
-{{"unaddressed": [
-  {{"thread_id": "...", "path": "...", "line": 1,
-    "original_body": "...", "detail": "why still unaddressed"}}
-], "wont_fix": [
-  {{"thread_id": "...", "reason": "why this is intentional by design"}}
-]}}
-```
-
-Rules:
-- `unaddressed`: array of the prior comments the diff does NOT resolve. Echo the
-  comment's `thread_id` VERBATIM (this is how the thread is matched — it must be
-  exact); include the original `path`/`line`; `original_body` is the original
-  comment text (verbatim or trimmed); `detail` states concretely what is still
-  missing.
-- `wont_fix`: array of comments asking to change INTENTIONAL-BY-DESIGN code.
-  Echo the `thread_id` VERBATIM; `reason` cites the concrete evidence of intent
-  (the abstract method, the docstring, the design note). Omit or leave empty
-  when none apply.
-- A thread_id appears in AT MOST ONE bucket. Addressed comments appear in
-  NEITHER list.
-- If every prior comment is addressed, emit `{{"unaddressed": [], "wont_fix": []}}`.
-- Emit only one JSON block, at the very end (the parser takes the LAST one).
-"""
 
 
 def get_review_validation_prompt(
@@ -272,54 +111,15 @@ def get_review_validation_prompt(
 
     """
     fenced = fence_content()
-    return REVIEW_VALIDATION_PROMPT.format(
+    return PromptCatalog.current().render(
+        "pr_review/validation.j2",
         pr_number=pr_number,
         issue_number=issue_number,
         prior_comments_block=fenced.fence("PRIOR_COMMENTS", prior_comments_json),
         diff_block=fenced.fence("DIFF", diff_text),
         untrusted_notice=fenced.untrusted_notice,
-        terse_output_directive=_TERSE_OUTPUT_DIRECTIVE,
+        terse_output_directive=get_terse_output_directive(),
     )
-
-
-COMMENT_DIFFICULTY_PROMPT = """
-{terse_output_directive}
-
-You are CLASSIFYING the difficulty of unresolved PR review comments on issue
-#{issue_number}, so the right model tier can be assigned to fix each one.
-
-You are NOT reviewing the code and NOT fixing anything. For each comment, judge
-how hard the FIX is, using these tiers:
-
-- `simple` — mechanical / local: a typo, rename, doc tweak, import, one-line
-  guard, or formatting. A junior model can do it from the comment alone.
-- `medium` — a localized logic change, a small refactor, handling an edge case,
-  or a test addition that needs reading one or two functions.
-- `hard` — cross-cutting or subtle: a design change spanning files, a tricky
-  correctness/concurrency/security fix, or anything needing real reasoning about
-  invariants. When genuinely unsure between two tiers, pick the HIGHER one.
-
-{untrusted_notice}
-
-**Review comments to classify (untrusted):**
-{comments_block}
-
-The block above is a JSON array; each element has `thread_id`, `path`, `line`,
-and `body`.
-
-**Output format:**
-Write brief reasoning in prose, then end with exactly one fenced JSON block
-mapping each `thread_id` to its difficulty:
-
-```json
-{{"classifications": {{"<thread_id>": "simple|medium|hard"}}}}
-```
-
-Rules:
-- Include EVERY `thread_id` from the input exactly once.
-- Use only the three labels `simple`, `medium`, `hard`.
-- Emit only one JSON block, at the very end (the parser takes the LAST one).
-"""
 
 
 def get_comment_difficulty_prompt(
@@ -343,11 +143,12 @@ def get_comment_difficulty_prompt(
 
     """
     fenced = fence_content()
-    return COMMENT_DIFFICULTY_PROMPT.format(
+    return PromptCatalog.current().render(
+        "pr_review/comment_difficulty.j2",
         issue_number=issue_number,
         comments_block=fenced.fence("REVIEW_COMMENTS", comments_json),
         untrusted_notice=fenced.untrusted_notice,
-        terse_output_directive=_TERSE_OUTPUT_DIRECTIVE,
+        terse_output_directive=get_terse_output_directive(),
     )
 
 
@@ -371,18 +172,11 @@ def get_pr_description(
         Formatted PR description
 
     """
-    # Use f-string construction instead of .format() to avoid KeyError on curly braces in content
-    return f"""## Summary
-{summary}
-
-## Changes
-{changes}
-
-## Testing
-{testing}
-
-## Closes
-Closes #{issue_number}
-
-Generated by {generated_by}
-"""
+    return PromptCatalog.current().render(
+        "pr_review/description.j2",
+        issue_number=issue_number,
+        summary=summary,
+        changes=changes,
+        testing=testing,
+        generated_by=generated_by,
+    )

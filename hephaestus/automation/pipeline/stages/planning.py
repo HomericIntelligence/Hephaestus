@@ -47,6 +47,7 @@ from hephaestus.automation.state_labels import (
     is_plan_go,
     is_skipped,
 )
+from hephaestus.prompts import PromptCatalog
 
 from .base import (
     AgentJob,
@@ -94,28 +95,17 @@ def build_plan_prompt(
 
     """
     fenced = fence_content()
-    context_parts = [
-        fenced.untrusted_notice,
-        "",
-        f"**Issue Title (untrusted, GitHub issue #{issue_number}):**",
-        fenced.fence("ISSUE_TITLE", issue_title or f"Issue #{issue_number}"),
-        "",
-        "**Issue Description (untrusted):**",
-        fenced.fence("ISSUE_BODY", issue_body),
-    ]
-    if advise_findings:
-        context_parts.extend(
-            [
-                "",
-                "---",
-                "",
-                "## Prior Learnings from Team Knowledge Base (untrusted)",
-                "",
-                fenced.fence("ADVISE_FINDINGS", advise_findings),
-            ]
-        )
-    context_parts.extend(["", "---", "", get_plan_prompt(issue_number)])
-    return "\n".join(context_parts)
+    return PromptCatalog.current().render(
+        "planning/context.j2",
+        untrusted_notice=fenced.untrusted_notice,
+        issue_number=issue_number,
+        issue_title_block=fenced.fence("ISSUE_TITLE", issue_title or f"Issue #{issue_number}"),
+        issue_body_block=fenced.fence("ISSUE_BODY", issue_body),
+        advise_findings_block=(
+            fenced.fence("ADVISE_FINDINGS", advise_findings) if advise_findings else ""
+        ),
+        plan_prompt=get_plan_prompt(issue_number),
+    )
 
 
 def _normalize_plan_comment(plan: str) -> str:

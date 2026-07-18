@@ -97,6 +97,24 @@ are cut on demand by pushing a signed `vX.Y.Z` git tag (see
 5. Before pushing, run the fast quality gate: `just check`
    (lint + format-check + typecheck). Run `just --list` to see every recipe.
 
+### Secret-scanning failures
+
+The mandatory `gitleaks` pre-commit hook scans every staged change with generic
+secret rules, even when the optional operator-local `.heph-private-denylist`
+does not exist. Handle a finding as follows:
+
+1. Treat it as a real credential first: remove it from the change and rotate or
+   revoke it if it was ever usable.
+2. For synthetic fixtures or examples, replace the value with a placeholder
+   that cannot be mistaken for a credential.
+3. If an exact non-secret value must remain, add `gitleaks:allow` only to that
+   specific line and explain the exception in the pull request. Do not use
+   `SKIP=gitleaks` or `--no-verify`.
+4. If the pinned scanner release has a tool-wide regression, roll both the
+   pre-commit revision and the CI image back to the previous known-good
+   Gitleaks release in a reviewed PR while keeping the hook enabled. Remove
+   temporary line-scoped exceptions after the regression is resolved.
+
 ### Platform Support
 
 The uv developer environment and the published wheel intentionally cover
@@ -216,8 +234,10 @@ computes the next semver string and prints the `git tag` commands to run.
 
 ## Dependency Updates
 
-- **Dependabot** is configured for Python and GitHub Actions updates in
-  [`.github/dependabot.yml`](.github/dependabot.yml).
+- **Dependabot** owns the root Python dependency lifecycle through the `uv`
+  ecosystem in [`.github/dependabot.yml`](.github/dependabot.yml):
+  `pyproject.toml` declarations and the committed `uv.lock`. It opens grouped
+  Python dependency PRs weekly and also manages `github-actions` updates.
 - Refresh the lockfile deliberately when updating dependencies:
 
   ```bash
@@ -227,6 +247,24 @@ computes the next semver string and prints the `git tag` commands to run.
 
   Review and commit the resulting `uv.lock` together with any corresponding
   `pyproject.toml` change. `uv lock --check` is the CI consistency check.
+
+### Python dependency and `uv.lock` lifecycle
+
+`uv.lock` is committed and must remain synchronized with the dependency
+declarations in `pyproject.toml`. Dependabot owns the routine weekly updates;
+when changing dependencies manually, regenerate and commit `uv.lock` with the
+same change:
+
+```bash
+uv lock                                  # resolve declared dependency changes
+uv lock --upgrade-package <name>         # upgrade one package deliberately
+uv lock --upgrade                         # upgrade all packages deliberately
+uv lock --check                           # verify the committed lock is fresh
+```
+
+The `uv lock --check` pre-commit hook runs for `pyproject.toml` and `uv.lock`
+changes and is enforced by the required CI lint job. The check is read-only;
+use one of the update commands above to refresh the lock before committing.
 
 ## Pull Request Process
 

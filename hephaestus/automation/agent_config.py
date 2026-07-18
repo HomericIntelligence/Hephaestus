@@ -25,6 +25,17 @@ operator can override without code changes (e.g. when one tier's quota is
 exhausted). Unknown overrides emit a **warning** but are still accepted so
 operators can experiment with preview models without a code change.
 
+Codex reasoning overrides
+-------------------------
+``hephaestus-automation-loop`` accepts explicit per-role Codex reasoning
+controls: ``--planner-reasoning-effort``, ``--implementer-reasoning-effort``,
+and ``--reviewer-reasoning-effort``. Each takes ``default``, ``low``,
+``medium``, ``high``, or ``xhigh``. A role-specific setting takes precedence
+over that role's model alias default; ``default`` deliberately omits Codex's
+``model_reasoning_effort`` option. When a setting is omitted, the selected
+model alias retains its existing default. These controls are applied only to
+the Codex provider and never modify Claude or Pi model IDs.
+
 Timeouts
 --------
 Each phase that shells out to an agent CLI or ``gh`` has historically

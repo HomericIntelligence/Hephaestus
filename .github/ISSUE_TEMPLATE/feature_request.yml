@@ -24,6 +24,30 @@ body:
       description: Any alternative solutions or workarounds you've considered.
     validations:
       required: false
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: Acceptance Criteria
+      description: >
+        List the specific, testable outcomes that must be true for this feature
+        to be considered complete.
+      placeholder: |
+        - [ ] Given ..., when ..., then ...
+        - [ ] The behavior is covered by ...
+    validations:
+      required: true
+  - type: textarea
+    id: verification_plan
+    attributes:
+      label: Verification Plan
+      description: >
+        For each acceptance criterion, provide the command, automated test, or
+        manual check that proves it, plus the expected evidence.
+      placeholder: |
+        - Criterion 1: `pixi run pytest ...`
+          Expected evidence: ...
+    validations:
+      required: true
   - type: dropdown
     id: severity
     attributes:
@@ -55,6 +79,6 @@ body:
     attributes:
       value: >
         ℹ️ On submit this issue is automatically labeled `state:needs-plan` (see
-        [auto-label-needs-plan](https://github.com/mvillmow/Hephaestus/blob/main/docs/auto-label-needs-plan.md));
+        [auto-label-needs-plan](https://github.com/HomericIntelligence/Hephaestus/blob/main/docs/auto-label-needs-plan.md));
         the planning pipeline picks it up next loop. You need not set any
         `state:*` label yourself.

@@ -29,6 +29,7 @@ from hephaestus.agents.runtime import (
     run_agent_session,
     uses_direct_agent_runner,
 )
+from hephaestus.automation.prompts.catalog import PromptCatalog
 from hephaestus.io.utils import write_secure
 
 from .claude_invoke import invoke_claude_with_session
@@ -169,55 +170,24 @@ class CIFixOrchestrator:
         dirty_lines = dirty_tracked_changes or []
         dirty_block = "\n".join(f"- {line}" for line in dirty_lines)
         if dirty_block:
-            dirty_block = (
-                "\n\nThe local worktree also contains uncommitted tracked changes "
-                "or relevant untracked files from the previous turn. Review this "
-                "existing work first and either commit it after verification or "
-                f"amend it before committing:\n\n{dirty_block}\n"
+            dirty_block = PromptCatalog.current().render(
+                "ci/dirty_worktree_block.j2", dirty_block=dirty_block
             )
         remote_block = (
-            "The required CI checks below are STILL failing on the remote"
+            PromptCatalog.current().render("ci/remote_checks_failing.j2").strip()
             if failing_check_names
-            else "The remote checks may be green, but the PR still needs a committed "
-            "repair before the driver can push"
+            else PromptCatalog.current().render("ci/remote_repair_needed.j2").strip()
         )
-        return (
-            f"{review_threads_block}"
-            f"## Force-Engagement Retry — Previous Turn Produced No Commit\n\n"
-            f"You just returned from a CI-fix session for PR {pr_ref(pr_number)} "
-            f"(issue {issue_ref(issue_number)}) WITHOUT producing a new commit on "
-            f"branch `{pr_head_branch}`. {remote_block}:\n\n"
-            f"{failing_block}\n\n"
-            f"{dirty_block}"
-            f"Returning no commit when required checks are still red is itself a "
-            f"bug; returning no commit after editing tracked files is also a bug. "
-            f"Fix the code so the failing checks pass and the PR can merge. If no "
-            f"code fix is possible, DO NOT commit a 'blocker' file: a new "
-            f"Markdown/docs file will itself fail the repo's lint gates (e.g. "
-            f"markdownlint) and turn one blocker into two. Instead leave the tree "
-            f"unchanged and report the blocker via the `BLOCKED:` line below — do "
-            f"NOT commit any file to document it.\n\n"
-            f"Working directory: {worktree_path}\n"
-            f"Current branch (DO NOT change, DO NOT create a new branch): "
-            f"{pr_head_branch}\n\n"
-            f"Required behaviour:\n"
-            f"1. Re-read the failing check logs for the names listed above.\n"
-            f"2. Make the minimal change that addresses each failure.\n"
-            f"3. Run `uv run python -m pytest tests/ -v` and "
-            f"`pre-commit run --all-files` locally to verify before committing. "
-            f"This MUST include any markdown/lint hooks — every file you add or "
-            f"edit has to pass the repo's own linters, with no rule disabled.\n"
-            f"4. **Every commit MUST be cryptographically signed and DCO-signed "
-            f"(`git commit -S -s`).** NEVER use `--no-verify`. The repository's "
-            f"CI gate rejects unsigned commits, commits without Signed-off-by "
-            f"trailers, and any commit that bypassed pre-commit hooks.\n"
-            f"5. Do NOT run `git checkout -b`, `git switch -c`, or any command "
-            f"that creates or switches branches — the fix has to land on "
-            f"`{pr_head_branch}`.\n"
-            f"6. Do NOT add a new top-level `CI_BLOCKER.md` or similar doc file to "
-            f"record the blocker — use the `BLOCKED:` line instead.\n\n"
-            f"If after the steps above you still cannot produce a commit, reply "
-            f"with a single line `BLOCKED: <one-sentence reason>` and stop."
+        return PromptCatalog.current().render(
+            "ci/force_engagement.j2",
+            review_threads_block=review_threads_block,
+            pr_ref=pr_ref(pr_number),
+            issue_ref=issue_ref(issue_number),
+            pr_head_branch=pr_head_branch,
+            remote_block=remote_block,
+            failing_block=failing_block,
+            dirty_block=dirty_block,
+            worktree_path=worktree_path,
         )
 
     def record_repeated_no_commit(
@@ -525,25 +495,16 @@ class CIFixOrchestrator:
                 f"Failing checks reported by GitHub:\n{failing_lines}{aggregate_note}\n\n"
             )
         review_threads_block = self._format_review_threads_block(pr_number)
-        return (
-            f"{advise_block}{review_threads_block}"
-            f"Fix the CI failures for PR {pr_ref(pr_number)} (issue {issue_ref(issue_number)}).\n\n"
-            f"Working directory: {worktree_path}\n"
-            f"Current branch (DO NOT change): {pr_head_branch}\n\n"
-            f"{failing_checks_block}"
-            f"CI failure logs:\n{ci_logs}\n\n"
-            "Fix only the code, workflow, commit metadata, or PR metadata needed "
-            "to make the listed CI checks pass; do not implement unrelated issue "
-            "work. If the fix requires new files, add them to git explicitly. "
-            "After fixing:\n"
-            "1. Run: uv run python -m pytest tests/ -v\n"
-            "2. Run: pre-commit run --all-files\n"
-            "3. Commit changes (do NOT push) on the current branch — DO NOT run "
-            "`git checkout -b`, `git switch -c`, or any other command that creates "
-            "or switches to a different branch\n"
-            "4. Every commit MUST be cryptographically signed and DCO-signed "
-            "(`git commit -S -s`); NEVER use `--no-verify`.\n\n"
-            f"Commit message: fix: Address CI failures for PR {pr_ref(pr_number)}\n"
+        return PromptCatalog.current().render(
+            "ci/fix.j2",
+            advise_block=advise_block,
+            review_threads_block=review_threads_block,
+            pr_ref=pr_ref(pr_number),
+            issue_ref=issue_ref(issue_number),
+            worktree_path=worktree_path,
+            pr_head_branch=pr_head_branch,
+            failing_checks_block=failing_checks_block,
+            ci_logs=ci_logs,
         )
 
     def run_ci_fix_session(

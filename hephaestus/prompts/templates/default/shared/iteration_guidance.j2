@@ -1,0 +1,1 @@
+{% if iteration == 0 %}Treat this as a fresh review — no prior context.{% elif iteration == 1 %}The previous iteration was NOGO. Verify whether the issues raised then have actually been resolved in this iteration.{% else %}This is the FINAL iteration. After this review the loop terminates. Be decisive — emit an unambiguous Grade and Verdict.{% endif %}

@@ -34,6 +34,7 @@ import logging
 from hephaestus.automation.agent_config import implementer_model, learn_claude_timeout
 from hephaestus.automation.learn import build_learn_prompt
 from hephaestus.automation.session_naming import AGENT_CI_DRIVER
+from hephaestus.prompts import PromptCatalog
 
 from .base import (
     AgentJob,
@@ -83,9 +84,9 @@ def build_drive_green_learn_prompt(issue_number: int, pr_number: int) -> str:
 
     """
     return build_learn_prompt(
-        f"You just drove PR #{pr_number} (issue #{issue_number}) "
-        "to green CI. Capture concise learnings about what made CI fail and how "
-        "you fixed it, scoped to this issue/PR."
+        PromptCatalog.current().render(
+            "learn/drive_green_context.j2", issue_number=issue_number, pr_number=pr_number
+        )
     )
 
 

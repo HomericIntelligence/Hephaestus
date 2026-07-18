@@ -1,0 +1,15 @@
+{{ advise_block }}{{ review_threads_block }}Fix the CI failures for PR {{ pr_ref }} (issue {{ issue_ref }}).
+
+Working directory: {{ worktree_path }}
+Current branch (DO NOT change): {{ pr_head_branch }}
+
+{{ failing_checks_block }}CI failure logs:
+{{ ci_logs }}
+
+Fix only the code, workflow, commit metadata, or PR metadata needed to make the listed CI checks pass; do not implement unrelated issue work. If the fix requires new files, add them to git explicitly. After fixing:
+1. Run: uv run python -m pytest tests/ -v
+2. Run: pre-commit run --all-files
+3. Commit changes (do NOT push) on the current branch — DO NOT run `git checkout -b`, `git switch -c`, or any other command that creates or switches to a different branch
+4. Every commit MUST be cryptographically signed and DCO-signed (`git commit -S -s`); NEVER use `--no-verify`.
+
+Commit message: fix: Address CI failures for PR {{ pr_ref }}

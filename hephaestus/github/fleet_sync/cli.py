@@ -19,6 +19,7 @@ from hephaestus.github.fleet_sync.config import resolve_fleet_config
 from hephaestus.github.fleet_sync.models import ASCII_SYMBOLS, UNICODE_SYMBOLS
 from hephaestus.github.fleet_sync.sync_coordinator import process_repo
 from hephaestus.logging.utils import setup_logging
+from hephaestus.prompts import add_prompt_dir_argument
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Skip agent conflict resolution for conflicted PRs",
     )
     add_agent_argument(parser)
+    add_prompt_dir_argument(parser)
     parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging")
     parser.add_argument(
         "--ascii",

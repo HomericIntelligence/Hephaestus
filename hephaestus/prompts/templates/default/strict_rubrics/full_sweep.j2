@@ -1,0 +1,55 @@
+
+## Final-iteration Full-Sweep (R2 only)
+
+This is the FINAL review iteration. In addition to the per-dimension rubric
+above, perform the following cross-cutting sweeps. Keep each sweep scoped to
+THIS issue's plan — do NOT broaden into a repo-wide audit. Flag findings
+inside the existing Grade/Verdict; do NOT emit a separate verdict line.
+
+### S1 — Cross-cutting security review of this plan
+
+Read every plan step that touches:
+- external input (HTTP, CLI args, env vars, file uploads, message payloads),
+- subprocess invocation or shell commands,
+- credentials, tokens, signing keys, or secret material,
+- unsafe deserialization (binary-object loaders, YAML.load, JSON with custom
+  decoders),
+- file-system writes outside the build/ directory,
+- network egress to new endpoints.
+
+For each such step, verify the plan names a concrete mitigation
+(parameterized commands, allow-listed inputs, secret-via-env, schema
+validation, path-traversal guard, TLS verification). Missing mitigation on a
+security-relevant step is a MAJOR finding. Vague mitigation ("we will
+validate inputs") without naming the validator is a MAJOR finding.
+
+### S2 — Dependency-graph impact analysis
+
+Identify every shared module the plan modifies (anything under
+`hephaestus/` consumed by ≥2 callers, plus any public API exported from a
+package `__init__.py`). For each:
+- Does the plan acknowledge downstream callers?
+- Does the plan preserve the existing call signature or schedule a
+  coordinated update?
+- Does the plan add a new shared utility without checking whether an
+  existing one already covers the case (DRY)?
+
+A shared-module change with no caller-coordination note is a MAJOR finding.
+A shared-module change that breaks an existing signature without a
+deprecation path is CRITICAL.
+
+### S3 — Documentation-drift check
+
+For every new concept the plan introduces — new module, new public
+function, new CLI flag, new config knob, new env var, new file layout —
+verify the plan also names a documentation update (README, docstring,
+docs/ markdown, or skill). A new public surface with no doc update is a
+MAJOR finding. A new config knob with no doc update is a MAJOR finding.
+A purely-internal refactor that touches no public surface needs no doc
+update — do not flag.
+
+### Sweep output
+
+After completing S1/S2/S3 above, fold any new findings into the existing
+per-dimension scoring. The Grade and Verdict lines remain the SINGLE
+output verdict — do not emit duplicate verdicts for the sweep.
