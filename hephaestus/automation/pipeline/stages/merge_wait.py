@@ -14,7 +14,8 @@ external review artifact, or lease is consulted here.
 - States: ENTER -> ARM -> POLL -> LEARN_WAIT -> MW_FINISH.
 - ARM [M]: persist a prepared record, arm, confirm both GitHub and the
   durable record, then poll.  This is the only automatic call site for
-  ``arm_auto_merge``.  Confirmed recovery resumes POLL without re-arming.
+  ``arm_auto_merge``.  Recovery first disarms any persisted remote arm, then
+  returns to ARM for a fresh live-head and loop-owned-label read.
 - POLL [M]: re-read PR state and the approval label. An open, still-approved
   auto-merge arm timer-parks; a missing label is disarmed and terminalized;
   merged and closed PRs finish normally.
