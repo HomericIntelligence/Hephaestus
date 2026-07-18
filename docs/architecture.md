@@ -2523,10 +2523,13 @@ additive refactors, then test-only and doc-only PRs at the bottom.
 - **Scope.** Convention-only — every `state:skip` label application
   must carry an inline `<!-- skip-reason: … -->` comment so future
   maintainers can grep the rationale.
-- **Doc impact.** §4 (`State-label vocabulary` table — the
-  `state:skip` row references `state:skip` semantics in
-  `state_labels.py`; the new convention is cross-referenced from
-  the table footnote).
+- **Doc impact.** §4 (State-label vocabulary table footnote;
+  `state:skip` row references `state_labels.py` semantics), §5.4
+  (`implementation` writes `state:skip` on no-commits and would
+  carry an inline `<!-- skip-reason: ... -->` per the convention),
+  §5.5 (`pr_review` writes `state:skip` on cap exhaustion; same
+  inline annotation). §10 (observability SLOs may count
+  `state:skip` incidents; counts unaffected by the convention).
 - **Merge-order note.** Convention change — safe to merge anytime;
   coordinates with #2304 (path-log escape fix) since both touch
   comment-form discipline.
