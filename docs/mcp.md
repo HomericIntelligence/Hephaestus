@@ -1,35 +1,54 @@
 # Model Context Protocol (MCP) Configuration
 
-Hephaestus ships a project-scoped `.mcp.json` at the repository root
-with an empty `mcpServers` map. No MCP servers are configured yet — the file
-exists so the configuration surface is explicit and version-controlled for the
-whole team, per the Claude Code project-scope convention.
+Hephaestus keeps a project-scoped `.mcp.json` with an empty `mcpServers`
+object. The empty object is an intentional posture, not incomplete setup.
+Hephaestus does not currently ship or require an MCP server.
 
-## Why the ecosystem references but does not use MCP
+See [ADR-0011](adr/0011-mcp-integration-posture.md) for the architectural
+decision.
 
-The HomericIntelligence ecosystem integrates through mechanisms that are *not*
-MCP servers:
+## Capability boundary
 
-- **Claude Code plugin marketplaces** — e.g. the Mnemosyne marketplace the
-  `learn` skill writes to (see `AGENTS.md`). A marketplace is a plugin source,
-  not an MCP server.
-- **NATS JetStream** — event-driven workflows in `hephaestus/nats/`.
-- **HTTP REST** — Agamemnon agent-management and Hermes message routing.
+MCP is limited to optional project-scoped agent tooling: a supported agent
+client may use `.mcp.json` to discover explicitly approved tools. MCP is not a
+Hephaestus Python API, runtime service surface, plugin distribution mechanism,
+or ecosystem message transport.
 
-None of these is wired through MCP, which is why `mcpServers` is empty today.
+Hephaestus package imports, tests, CLIs, automation, and production workflows
+must not depend on an MCP server being configured or reachable. Authentication
+material must be supplied at runtime and must not be committed to `.mcp.json`.
 
-## Startup behaviour
+## Alternative integration contracts
 
-Adding a server here is safe even if its endpoint is unreachable. MCP startup
-is non-blocking by default: unreachable servers connect in the background, and
-Claude Code prompts for approval before first use of any project-scoped server.
-Only a server marked `alwaysLoad: true` blocks startup, and only up to a
-5-second connect timeout.
+| Integration need | Maintained contract |
+| --- | --- |
+| Agent skills, reusable workflows, and knowledge | Plugin marketplaces and skills, including Mnemosyne |
+| Asynchronous events and workflow messages | `hephaestus.nats` and NATS JetStream |
+| Service APIs and request/response operations | HTTP REST, including Agamemnon and Hermes |
+
+These contracts remain independent of MCP. An agent invoking one of them does
+not make that integration an MCP server.
+
+## Runtime and failure boundary
+
+An optional MCP server may fail without changing Hephaestus runtime behaviour.
+Making MCP mandatory for package operation, automation startup, or a production
+workflow requires a superseding ADR.
 
 ## Adding a server
 
-Add an entry under `mcpServers` in `.mcp.json`. A stdio server uses `command`
-plus `args`; an HTTP server uses `type: "http"` and `url`. Example entry:
+A pull request that adds an entry under `mcpServers` must document:
+
+1. The concrete use case and owning component.
+2. The exposed tools, data boundary, and least-privilege controls.
+3. Runtime authentication without committed secrets.
+4. Startup, timeout, and unavailable-server behaviour.
+
+The pull request must also update this document and the posture assertions in
+`tests/unit/docs/test_mcp_config.py`.
+
+A stdio server uses `command` plus `args`; an HTTP server uses `type: "http"`
+and `url`. Example entry:
 
 ```json
 {
