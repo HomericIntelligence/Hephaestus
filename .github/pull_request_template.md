@@ -50,7 +50,7 @@ Closes #
 - [ ] No new warnings introduced
 - [ ] Conventional commit message format used
 - [ ] Branch named following convention: `<issue-number>-<description>`
-- [ ] Change meets the [Definition of Done](https://github.com/mvillmow/Hephaestus/blob/main/docs/DEFINITION_OF_DONE.md)
+- [ ] Change meets the [Definition of Done](https://github.com/HomericIntelligence/Hephaestus/blob/main/docs/DEFINITION_OF_DONE.md)
 
 ## Additional Notes
 
