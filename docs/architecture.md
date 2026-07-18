@@ -13,6 +13,18 @@ Other folded material:
   (folded into §1 / §5).
 - The architecture excerpts of [`CLAUDE.md`](../CLAUDE.md) (folded into §1).
 
+> **In-flight refactor notice.** [PR #2280](https://github.com/HomericIntelligence/Hephaestus/pull/2280)
+> (`refactor(automation): make PR approval loop-owned`) is OPEN against
+> `main` and refactors the architecture described here. When it merges,
+> the pipeline becomes **7 stages** (REPO, PLANNING, PLAN_REVIEW,
+> IMPLEMENTATION, PR_REVIEW, MERGE_WAIT, FINISHED — `strict_review` and
+> `ci` are removed) and `pr_review` becomes the **sole authority** for
+> `state:implementation-go`, with no strict-GO proof. The doc as written
+> describes the architecture currently on `main`; the new state is
+> itemized in [§15](#15-in-flight-refactor-pr-2280) so future readers can
+> audit the delta at a glance. A follow-up doc rewrite is queued behind
+> PR #2280's merge.
+
 The [`docs/adr/`](adr/) records remain the bind-points for individual
 architectural decisions (`0006-queue-based-in-process-automation-pipeline`,
 `0009-head-bound-strict-review-merge-gate`, `0010-trusted-strict-review-proof`,
@@ -52,6 +64,7 @@ Optimization"), file paths are repo-relative.
 12. [Interrupt semantics and exit codes](#12-interrupt-semantics-and-exit-codes)
 13. [Glossary](#13-glossary)
 14. [Provenance audit checklist](#14-provenance-audit-checklist)
+15. [In-flight refactor: PR #2280](#15-in-flight-refactor-pr-2280)
 
 ---
 
@@ -78,6 +91,12 @@ Optimization"), file paths are repo-relative.
   arming ([ADR-0009](adr/0009-head-bound-strict-review-merge-gate.md),
   [`strict_review.py`](hephaestus/automation/pipeline/stages/strict_review.py),
   [`merge_wait.py`](hephaestus/automation/pipeline/stages/merge_wait.py)).
+  **Planned change (PR #2280, in flight):** the `strict_review` stage is
+  removed; `pr_review` becomes the sole authority for
+  `state:implementation-go`, and `merge_wait` no longer revalidates a
+  strict-GO artifact (because there isn't one). See
+  [§15](#15-in-flight-refactor-pr-2280) for the full delta and the
+  follow-up doc-rewrite plan.
 - **Globally bounded budgets.** Stages count retries on `_on_job_done` so
   `agent_error` retries consume the same per-item budget as ordinary
   attempts; cross-stage regression cycles terminate in finite steps
@@ -1156,7 +1175,7 @@ extension, mirrors legacy
 [`get_address_review_prompt`](hephaestus/automation/prompts/address_review.py),
 [`get_follow_up_prompt`](hephaestus/automation/prompts/follow_up.py).
 
-### 5.6  `strict_review`
+### 5.6  `strict_review`  *(removed by PR #2280; see [§15](#15-in-flight-refactor-pr-2280))*
 
 > Source: [`pipeline/stages/strict_review.py`](hephaestus/automation/pipeline/stages/strict_review.py).
 > ADRs: [`0009-head-bound-strict-review-merge-gate.md`](adr/0009-head-bound-strict-review-merge-gate.md),
@@ -1274,7 +1293,7 @@ current-head GO), `state:implementation-no-go` (durable NOGO feedback).
 **Prompt functions**:
 [`build_strict_review_prompt`](hephaestus/automation/prompts/strict_review_gate.py).
 
-### 5.7  `ci`
+### 5.7  `ci`  *(removed by PR #2280; see [§15](#15-in-flight-refactor-pr-2280))*
 
 > Source: [`pipeline/stages/ci.py`](hephaestus/automation/pipeline/stages/ci.py).
 > Binding contract: §"6. ci" of
@@ -2229,3 +2248,72 @@ following audit pass confirms each section is traceable:
 If any future edit adds a claim without a `[module path](...)` link,
 that claim must back-link before merge, so this audit remains the
 single point of "did we ground every detail?".
+
+## 15. In-flight refactor: PR #2280
+
+PR #2280 ([`refactor(automation): make PR approval loop-owned`](https://github.com/HomericIntelligence/Hephaestus/pull/2280),
+branch `automation-loop-owned-approval`) is OPEN against `main` and
+refactors the architecture described in this document. The sections
+above (§1–§14) describe the **9-stage pipeline as it currently exists on
+`main`**; the new architecture itemized below is *not yet merged* but is
+the expected steady-state shape. A doc-rewrite PR is queued behind
+PR #2280's merge to keep the source-grounded reference accurate.
+
+### Stage-level changes
+
+| Stage | Status after PR #2280 lands |
+|-------|-----------------------------|
+| `repo` | unchanged |
+| `planning` | unchanged |
+| `plan_review` | unchanged |
+| `implementation` | unchanged (but `next` becomes `MERGE_WAIT`; `already_implementation_go_pr` fail-route becomes `MERGE_WAIT`) |
+| `pr_review` | becomes the SOLE authority for `state:implementation-go`; severity-aware GO gate stays; **arms go straight to `merge_wait`** (no strict-GO proof in between) |
+| `strict_review` | **REMOVED** |
+| `ci` | **REMOVED** — CI/CD remains independent branch protection; the loop never changes CI status and never independently authorizes approval |
+| `merge_wait` | unchanged shape, but no longer revalidates a strict-GO proof (because there isn't one); retains sole-armer role |
+| `finished` | unchanged |
+
+### Files removed in PR #2280
+
+- `.github/workflows/strict-review-proof.yml`
+- `hephaestus/automation/pipeline/stages/strict_review.py`
+- `hephaestus/automation/pipeline/stages/ci.py`
+- `hephaestus/automation/strict_review_artifact.py`
+- `hephaestus/automation/strict_review_proof.py`
+- `hephaestus/automation/prompts/_strict_rubric.py`
+- `hephaestus/automation/prompts/strict_review_gate.py`
+- `hephaestus/prompts/templates/default/implementation/strict_remediation.j2`
+- `hephaestus/prompts/templates/default/strict_review/gate.j2`
+
+### Doc sections requiring rewrite after PR #2280 merges
+
+- **§1 Goals** — "single automatic merge authority per head" claim must be retargeted to `pr_review`; `state:implementation-go` is now applied by `pr_review` (not `strict_review`); ADR-0009 (`head-bound-strict-review-merge-gate`) becomes the historical ADR for a now-deprecated gate.
+- **§2 Topology** — Mermaid + ASCII diagrams lose `strict_review` and `ci` nodes; the new shape is `repo → planning → plan_review → implementation → pr_review → merge_wait → finished`.
+- **§3 Cross-cutting invariants** — "strict-review artifact publish" is no longer a durable journal mutation.
+- **§4 WorkItem** — drop `strict_review` references in the `worktree` / `branch` population narrative.
+- **§5 Stage list** — §5.6 `strict_review` and §5.7 `ci` deleted; §5.5 `pr_review` narrative must reflect that the GO gate directly feeds `merge_wait`.
+- **§6 ROUTES table** — drop `StageName.STRICT_REVIEW` and `StageName.CI` rows; rewrite `pr_review.next` (was `STRICT_REVIEW` → becomes `MERGE_WAIT`); rewrite `implementation.fail_routes["already_implementation_go_pr"]` (was `STRICT_REVIEW` → becomes `MERGE_WAIT`); drop `ci_fix` and `rebase` budget keys.
+- **§8 Worker pool / job contract** — `_arm` revalidation semantics change (no more head-bound strict-GO artifact to read back).
+- **§10 Observability** — strict-GO head-bound merge-authorization narrative becomes obsolete; alert thresholds referencing `auto_merge_disable_failed` for strict-review path no longer apply.
+- **§11 Key subsystems** — drop `strict_review_artifact.py`, `strict_review_proof.py`, `prompts/_strict_rubric.py`, `prompts/strict_review_gate.py`; update `pipeline_github.py` references to remove `strict_review_artifact`, `claim_strict_review_lease`, `publish_strict_review_artifact`, `strict_review_evidence` accessors.
+- **§13 Glossary** — `Severity-aware GO gate` semantics change: it now directly arms via `merge_wait` (no strict-GO artifact between).
+- **§14 Provenance audit checklist** — drop `strict_review.py` and `ci.py` from the cite-resolution check.
+
+### Coordinated PR sequencing
+
+PR #2314 (the doc-hygiene work that landed this file as canonical) and
+PR #2280 (the loop-owned-approval refactor) both target `main`
+independently. The doc-update follow-up is intentionally sequenced
+*behind* PR #2280's merge to minimize stale-while-in-flight windows. If
+the doc is updated speculatively before PR #2280 lands, the doc and the
+merged source can disagree in non-obvious ways (line-cite drift,
+budget-key set drift, stage-name membership). The follow-up doc PR
+should:
+
+1. Wait for PR #2280 to merge.
+2. Re-run the audit pass from the prior turn against the post-merge
+   `main` to enumerate every claim in this doc that is now stale.
+3. Rewrite the affected sections in a single commit (per scope:
+   §1 / §2 / §3 / §4 / §5 / §6 / §8 / §10 / §11 / §13 / §14) with new
+   line-cites to the post-merge source.
+4. Delete this §15 and its banner once the rewrite lands.
