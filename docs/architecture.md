@@ -2528,8 +2528,9 @@ additive refactors, then test-only and doc-only PRs at the bottom.
   (`implementation` writes `state:skip` on no-commits and would
   carry an inline `<!-- skip-reason: ... -->` per the convention),
   §5.5 (`pr_review` writes `state:skip` on cap exhaustion; same
-  inline annotation). §10 (observability SLOs may count
-  `state:skip` incidents; counts unaffected by the convention).
+  inline annotation), §11 (the `state_labels.py` module
+  description references the `<!-- skip-reason: ... -->`
+  annotation convention as the cross-cutting convention).
 - **Merge-order note.** Convention change — safe to merge anytime;
   coordinates with #2304 (path-log escape fix) since both touch
   comment-form discipline.
