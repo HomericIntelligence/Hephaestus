@@ -112,7 +112,12 @@ class MergeWaitStage(Stage):
         # contained here rather than using that label to arm auto-merge.
         # Linked PRs still use the label as the sole durable authorization.
         if item.issue is None:
-            return self._disable_and_fail(item, ctx, "merge_wait_orphan")
+            outcome = self._disable_and_fail(item, ctx, "merge_wait_orphan")
+            if isinstance(outcome, Continue):
+                return StageOutcome(Disposition.FINISH_PASS, "merged")
+            if isinstance(outcome, JobRequest):
+                return StageOutcome(Disposition.FINISH_FAIL, "merge_wait_orphan")
+            return outcome
         if item.payload.pop("merge_wait_recovery", False):
             if item.issue is None or item.pr is None:
                 return StageOutcome(Disposition.FINISH_FAIL, "invalid_arm_recovery")

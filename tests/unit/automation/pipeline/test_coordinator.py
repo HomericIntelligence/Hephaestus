@@ -648,6 +648,7 @@ class TestJournalOrder:
         coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
         guard = coordinator.config.strict_review_guard
         assert guard is not None
+        typed_guard: StrictReviewGuard = cast(StrictReviewGuard, guard)
         item = WorkItem(
             repo="repo-a",
             kind=ItemKind.PR,
@@ -658,7 +659,7 @@ class TestJournalOrder:
         )
         owner = id(item)
         contender = owner + 1
-        assert guard.try_claim("org", "repo-a", 2280, owner)
+        assert typed_guard.try_claim("org", "repo-a", 2280, owner)
         item.payload["_strict_review_guard_owner"] = owner
 
         class ArmConfirmationStage:
@@ -667,10 +668,10 @@ class TestJournalOrder:
 
             def step(self, queued: WorkItem, ctx: Any) -> Any:
                 if queued.state == "ARM":
-                    assert not guard.try_claim("org", "repo-a", 2280, contender)
+                    assert not typed_guard.try_claim("org", "repo-a", 2280, contender)
                     return Continue("POLL")
-                assert guard.try_claim("org", "repo-a", 2280, contender)
-                guard.release("org", "repo-a", 2280, contender)
+                assert typed_guard.try_claim("org", "repo-a", 2280, contender)
+                typed_guard.release("org", "repo-a", 2280, contender)
                 return StageOutcome(Disposition.FINISH_PASS, "armed")
 
             def on_job_done(self, queued: WorkItem, result: JobResult, ctx: Any) -> None:
