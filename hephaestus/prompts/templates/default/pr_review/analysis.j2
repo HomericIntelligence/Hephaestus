@@ -25,8 +25,9 @@ Analyze PR #{{ pr_number }} using {{ review_context_kind }} #{{ issue_number }} 
 
 **Code-quality review:**
 
-> If `$athena:pr-review` appears in your available skills, invoke it now using
-> its normal default behavior. Do not ask the skill to change CI behavior.
+> If `$athena:pr-review` appears in your available skills, invoke it now with
+> its `--ci-free` source-review profile. This loop does not consult, modify, or
+> rely on CI/CD evidence.
 > If it is unavailable, perform the equivalent review
 > directly using this prompt. In either case, this review is the loop's sole
 > GO/NOGO decision; `merge_wait` is the separate mechanical auto-merge armer.

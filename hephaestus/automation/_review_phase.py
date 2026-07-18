@@ -318,7 +318,7 @@ class ReviewPhase(StageMixin):
         return reopened, is_clean, reopened_keys
 
     # ------------------------------------------------------------------
-    # Strict review loop
+    # Review convergence loop
     # ------------------------------------------------------------------
 
     def _evaluate_go_verdict(

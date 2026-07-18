@@ -426,13 +426,11 @@ restart reconstruction (at startup, scan GitHub for labels/PR state). Direct PR
 inputs are terminalized at the seed boundary when their PR is already merged or
 closed: merged PRs become `finished(pass)` and closed PRs become
 `finished(fail)`, before branch adoption or label-based routing is attempted.
-Open direct PRs with a linked issue enter the target repo's `pr_review` queue unless the PR already
-carries `state:implementation-go`, in which case they enter `merge_wait`.
-When an open direct PR has no linked `Closes #N` issue, the review work item
-uses the PR number as its numeric review context (GitHub PRs are issue objects)
-and labels that context as `PR #N` in reviewer prompts; all PR-authored body,
-description, prior-review, and diff text remains nonce-fenced as untrusted
-content.
+Open direct PRs with a linked issue enter the target repo's `pr_review` queue
+unless the PR already carries `state:implementation-go`, in which case they
+enter `merge_wait`. An open direct PR without a linked `Closes #N` issue is
+terminalized as failed before review: a PR number or author-controlled PR body
+cannot substitute for independent requirements context.
 The label is the loop's sole durable merge authorization; a restarted or
 adopted item re-reads the label and current PR head before `merge_wait` can
 arm it. CI workflows and external review artifacts do not participate in that

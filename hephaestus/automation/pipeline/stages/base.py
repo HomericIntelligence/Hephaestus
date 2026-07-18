@@ -265,8 +265,8 @@ class StageGitHub(Protocol):
     def defer_auto_merge(self, pr_number: int) -> None:
         """Durably disable auto-merge whenever a stage must revoke eligibility.
 
-        The adapter must read back disabled state for an open PR. Strict review
-        and merge wait use this containment boundary before fresh review and
+        The adapter must read back disabled state for an open PR. PR review and
+        merge wait use this containment boundary before fresh review and
         whenever an existing arm can no longer be retained.
         """
         ...

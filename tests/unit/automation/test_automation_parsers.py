@@ -410,9 +410,9 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             nargs="*",
             help_text=(
                 "PR numbers to drive directly, bypassing issue-to-PR discovery (#918). "
-                "Use when the PR body uses 'Refs #N' or the PR is otherwise not reachable "
-                "via the strict Closes-link lookup. May be combined with --issues; "
-                "duplicate PRs are deduped."
+                "Each PR must carry the repository-policy 'Closes #N' issue link "
+                "so the loop has independent requirements context. May be combined "
+                "with --issues; duplicate PRs are deduped."
             ),
         ),
         _agent_spec(),

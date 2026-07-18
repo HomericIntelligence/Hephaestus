@@ -52,9 +52,10 @@ def get_pr_review_analysis_prompt(
             ``nitpick``-severity comments entirely. When True (``--nitpick``),
             nitpick comments are re-enabled. Either way every emitted comment
             carries a ``severity`` tag (#1083).
-        review_context_kind: Human-readable numeric context kind. Linked PRs
-            use ``"issue"``; unlinked direct ``--prs`` review uses ``"PR"``
-            because GitHub PRs are issue objects but not linked requirements.
+        review_context_kind: Human-readable numeric context kind for the
+            prompt header. Pipeline reviews use the default ``"issue"``;
+            callers with an independently verified alternate context may
+            provide another label.
 
     Returns:
         Formatted PR review analysis prompt
@@ -108,7 +109,7 @@ def get_review_validation_prompt(
             (``path``/``line``/``body``).
         diff_text: The current cumulative PR diff.
         review_context_kind: Human-readable numeric context kind for the
-            prompt header (``"issue"`` or direct-review ``"PR"``).
+            prompt header (defaults to ``"issue"``).
 
     Returns:
         Formatted review-validation prompt.
@@ -144,7 +145,7 @@ def get_comment_difficulty_prompt(
         comments_json: JSON array string of comment dicts
             (``thread_id``/``path``/``line``/``body``).
         review_context_kind: Human-readable numeric context kind for the
-            prompt header (``"issue"`` or direct-review ``"PR"``).
+            prompt header (defaults to ``"issue"``).
 
     Returns:
         Formatted comment-difficulty classification prompt.
