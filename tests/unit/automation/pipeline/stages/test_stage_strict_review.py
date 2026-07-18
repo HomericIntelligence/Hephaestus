@@ -268,28 +268,31 @@ def test_go_labels_current_head_for_merge_wait(make_ctx: Any, make_work_item: An
     # The current-head value is only a transient check while this stage
     # applies GO.  It must not cross into merge_wait where it could become a
     # second authorization condition beside the loop-owned label.
-    assert not {
-        "strict_review_head",
-        "strict_review_attempt",
-        "strict_review_verdict",
-        "strict_review_text",
-        "strict_review_worktree_head",
-        "reviewed_head",
-        "approval_head",
-        "reviewed_sha",
-        "approval_sha",
-        "strict_review_commit",
-        "review_evidence_sha",
-        "proof_sha",
-        "approval_ref",
-        "validated_sha",
-        "gate_revision",
-        "attestation",
-        "approved_head",
-        "authorization_sha",
-        "audit_stamp",
-        "_strict_review_entry_payload_keys",
-    } & item.payload.keys()
+    assert (
+        not {
+            "strict_review_head",
+            "strict_review_attempt",
+            "strict_review_verdict",
+            "strict_review_text",
+            "strict_review_worktree_head",
+            "reviewed_head",
+            "approval_head",
+            "reviewed_sha",
+            "approval_sha",
+            "strict_review_commit",
+            "review_evidence_sha",
+            "proof_sha",
+            "approval_ref",
+            "validated_sha",
+            "gate_revision",
+            "attestation",
+            "approved_head",
+            "authorization_sha",
+            "audit_stamp",
+            "_strict_review_entry_payload_keys",
+        }
+        & item.payload.keys()
+    )
     assert item.payload["strict_review_worktree"] == "/review/strict-12"
     assert "_strict_review_guard_owner" in item.payload
     assert {
