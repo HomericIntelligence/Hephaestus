@@ -388,23 +388,42 @@ def _codex_model_config(model: str, *, use_default: bool = False) -> CodexModelC
             return CodexModelConfig(CODEX_DEFAULT_MODEL, CODEX_DEFAULT_REASONING_EFFORT)
         return CodexModelConfig("")
     lower_model = normalized.lower()
-    if lower_model in {"terra:default", f"{CODEX_GPT_56_TERRA_MODEL}:default"}:
-        return CodexModelConfig(CODEX_GPT_56_TERRA_MODEL)
-    if lower_model in {"sol", CODEX_GPT_56_SOL_MODEL}:
-        return CodexModelConfig(CODEX_GPT_56_SOL_MODEL, CODEX_FABLE_REASONING_EFFORT)
-    if lower_model in {"terra", CODEX_GPT_56_TERRA_MODEL}:
-        return CodexModelConfig(CODEX_GPT_56_TERRA_MODEL, CODEX_OPUS_REASONING_EFFORT)
-    if lower_model in {"luna", CODEX_GPT_56_LUNA_MODEL}:
-        return CodexModelConfig(CODEX_GPT_56_LUNA_MODEL, CODEX_SONNET_REASONING_EFFORT)
-    if lower_model == "fable" or lower_model.startswith("claude-fable-"):
-        return CodexModelConfig(CODEX_FABLE_MODEL, CODEX_FABLE_REASONING_EFFORT)
-    if lower_model == "opus" or lower_model.startswith("claude-opus-"):
-        return CodexModelConfig(CODEX_OPUS_MODEL, CODEX_OPUS_REASONING_EFFORT)
-    if lower_model == "sonnet" or lower_model.startswith("claude-sonnet-"):
-        return CodexModelConfig(CODEX_SONNET_MODEL, CODEX_SONNET_REASONING_EFFORT)
-    if lower_model == "haiku" or lower_model.startswith("claude-haiku-"):
-        return CodexModelConfig(CODEX_HAIKU_MODEL)
-    return CodexModelConfig(normalized)
+    base_model, separator, requested_effort = lower_model.rpartition(":")
+    original_base_model = normalized.rpartition(":")[0]
+    explicit_effort = (
+        requested_effort
+        if separator
+        and requested_effort
+        in {
+            "default",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+        }
+        else ""
+    )
+    alias_model = base_model if explicit_effort else lower_model
+    if alias_model in {"sol", CODEX_GPT_56_SOL_MODEL}:
+        config = CodexModelConfig(CODEX_GPT_56_SOL_MODEL, CODEX_FABLE_REASONING_EFFORT)
+    elif alias_model in {"terra", CODEX_GPT_56_TERRA_MODEL}:
+        config = CodexModelConfig(CODEX_GPT_56_TERRA_MODEL, CODEX_OPUS_REASONING_EFFORT)
+    elif alias_model in {"luna", CODEX_GPT_56_LUNA_MODEL}:
+        config = CodexModelConfig(CODEX_GPT_56_LUNA_MODEL, CODEX_SONNET_REASONING_EFFORT)
+    elif lower_model == "fable" or lower_model.startswith("claude-fable-"):
+        config = CodexModelConfig(CODEX_FABLE_MODEL, CODEX_FABLE_REASONING_EFFORT)
+    elif lower_model == "opus" or lower_model.startswith("claude-opus-"):
+        config = CodexModelConfig(CODEX_OPUS_MODEL, CODEX_OPUS_REASONING_EFFORT)
+    elif lower_model == "sonnet" or lower_model.startswith("claude-sonnet-"):
+        config = CodexModelConfig(CODEX_SONNET_MODEL, CODEX_SONNET_REASONING_EFFORT)
+    elif lower_model == "haiku" or lower_model.startswith("claude-haiku-"):
+        config = CodexModelConfig(CODEX_HAIKU_MODEL)
+    else:
+        config = CodexModelConfig(original_base_model if explicit_effort else normalized)
+    if explicit_effort:
+        reasoning_effort = "" if explicit_effort == "default" else explicit_effort
+        return CodexModelConfig(config.model, reasoning_effort)
+    return config
 
 
 def _codex_model_args(model: str, *, use_default: bool = False) -> list[str]:

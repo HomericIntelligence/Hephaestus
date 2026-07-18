@@ -707,6 +707,17 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             help_text="HEPH_PLANNER_MODEL for child processes",
         ),
         _action_spec(
+            ("--planner-reasoning-effort",),
+            "planner_reasoning_effort",
+            "_StoreAction",
+            "",
+            choices=("default", "low", "medium", "high", "xhigh"),
+            help_text=(
+                "Explicit Codex reasoning effort for this role. Use default to omit "
+                "model_reasoning_effort; when omitted, the selected model alias keeps its default."
+            ),
+        ),
+        _action_spec(
             ("--reviewer-model",),
             "reviewer_model",
             "_StoreAction",
@@ -723,6 +734,28 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "",
             help_text=(
                 "HEPH_IMPLEMENTER_MODEL for child processes (implement, address-review, ci-driver)"
+            ),
+        ),
+        _action_spec(
+            ("--reviewer-reasoning-effort",),
+            "reviewer_reasoning_effort",
+            "_StoreAction",
+            "",
+            choices=("default", "low", "medium", "high", "xhigh"),
+            help_text=(
+                "Explicit Codex reasoning effort for this role. Use default to omit "
+                "model_reasoning_effort; when omitted, the selected model alias keeps its default."
+            ),
+        ),
+        _action_spec(
+            ("--implementer-reasoning-effort",),
+            "implementer_reasoning_effort",
+            "_StoreAction",
+            "",
+            choices=("default", "low", "medium", "high", "xhigh"),
+            help_text=(
+                "Explicit Codex reasoning effort for this role. Use default to omit "
+                "model_reasoning_effort; when omitted, the selected model alias keeps its default."
             ),
         ),
         _action_spec(
