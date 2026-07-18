@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from hephaestus.automation.claude_invoke import ReviewVerdict, parse_review_verdict
+from hephaestus.automation.claude_invoke import ReviewVerdict
 from hephaestus.automation.pipeline.events import ZeroThreadNogoAction
 from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition
@@ -198,7 +198,7 @@ class TestPrReviewStageStep:
     def test_review_wait_requests_review_with_in_worker_parse(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """REVIEW_WAIT submits the inline review job; verdict parsed in-worker.
+        """REVIEW_WAIT submits an in-worker parse retaining verdict and comments.
 
         A submission is NOT an iteration: counters advance only in EVAL and
         only for real verdicts (#1554/#1794).
@@ -213,9 +213,64 @@ class TestPrReviewStageStep:
         assert isinstance(result.job, AgentJob)  # narrow the job union
         assert result.on_done_state == "VALIDATE_WAIT"
         assert result.job.descr == "review"
-        assert result.job.parse is parse_review_verdict  # verdict parsed in-worker
+        assert result.job.parse is not None
         assert result.job.prompt_kwargs["pr_number"] == 1001
         assert item.attempts["pr_review_iter"] == 0  # submission burns nothing
+
+    def test_review_parse_posts_structured_nogo_comments_and_routes_to_remediation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Structured NOGO comments survive the worker boundary and are actionable."""
+        events: list[Any] = []
+        stage = PrReviewStage()
+        github = FakeStageGitHub(unresolved=[(1, 0)], by_severity=[(1, 0, 0)])
+        ctx = make_ctx(github=github, event_fn=events.append)
+        item = make_work_item(issue=1, pr=1001, state="REVIEW_WAIT")
+        item.worktree = "/tmp/wt"
+        response = (
+            "This must be fixed.\n\nVerdict: NOGO\n\n```json\n"
+            '{"comments":[{"path":"hephaestus/automation/pipeline/stages/strict_review.py",'
+            '"line":500,"side":"RIGHT","severity":"critical","body":"race"}],'
+            '"summary":"race found"}\n```'
+        )
+
+        review_request = stage.step(item, ctx)
+        assert isinstance(review_request, JobRequest)
+        assert isinstance(review_request.job, AgentJob)
+        assert review_request.job.parse is not None
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value=review_request.job.parse(response)),
+            ctx,
+        )
+        assert item.payload["review_threads"] == [
+            {
+                "path": "hephaestus/automation/pipeline/stages/strict_review.py",
+                "line": 500,
+                "side": "RIGHT",
+                "severity": "critical",
+                "body": "race",
+            }
+        ]
+
+        item.state = "VALIDATE_WAIT"
+        stage.on_job_done(item, JobResult(ok=True, value='{"unaddressed": []}'), ctx)
+        item.state = "POST"
+        post = stage.step(item, ctx)
+        assert post == Continue(next_state="DIFFICULTY_WAIT")
+        assert github.reviews[1001][0]["comments"] == item.payload["review_threads"]
+
+        item.state = "DIFFICULTY_WAIT"
+        stage.on_job_done(item, JobResult(ok=True, value="critical"), ctx)
+        item.state = "ADDRESS_WAIT"
+        stage.on_job_done(item, JobResult(ok=True, value="addressed"), ctx)
+        item.state = "PUSH_WAIT"
+        stage.on_job_done(item, JobResult(ok=True, value=True), ctx)
+        item.state = "EVAL"
+
+        assert stage.step(item, ctx) == Continue(next_state="REVIEW_WAIT")
+        assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
+        assert events == []
 
     def test_review_wait_forwards_nitpick_config(self, make_ctx: Any, make_work_item: Any) -> None:
         """--nitpick must reach the strict PR-review prompt."""

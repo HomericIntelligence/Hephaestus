@@ -98,11 +98,11 @@ contract):
   ``prompts/implementation.py get_impl_resume_feedback_prompt`` (fresh-PR
   address path), ``prompts/address_review.py get_address_review_prompt``
   (existing-PR address path), ``prompts/follow_up.py get_follow_up_prompt``.
-- Verdict parsed IN-WORKER by ``claude_invoke.parse_review_verdict``
-  (carried as the review job's ``parse`` callable; symbol-scoped zero-I/O
-  exemption mirrors plan_review's). REVIEW_WAIT clears all stale
-  round-scoped payload at submission so a failed later round can never
-  replay an earlier round's verdict or threads.
+- Verdict and structured comments are parsed IN-WORKER (carried as the
+  review job's ``parse`` callable; symbol-scoped zero-I/O exemption mirrors
+  plan_review's). REVIEW_WAIT clears all stale round-scoped payload at
+  submission so a failed later round can never replay an earlier round's
+  verdict or threads.
 - Legacy FOLLOWUP_WAIT intentionally stores nothing in ``on_job_done``: the
   follow-up job's output is a side effect (follow-up issues filed by the
   agent), not a payload value any later state consumes.
@@ -114,6 +114,7 @@ import json
 import logging
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from html import escape
 from typing import Any, cast
 
@@ -163,6 +164,32 @@ from .base import (
 )
 
 logger = logging.getLogger(__name__)
+
+_JSON_RESPONSE_BLOCK_RE = re.compile(
+    r"^[ \t]*```json[ \t]*\r?\n(.*?)\r?\n^[ \t]*```[ \t]*$",
+    re.DOTALL | re.MULTILINE,
+)
+
+
+@dataclass(frozen=True)
+class _ParsedReviewResponse:
+    """Reviewer verdict plus its structured inline comments."""
+
+    verdict: Any
+    comments: tuple[dict[str, Any], ...]
+
+
+def _parse_review_response(response: str) -> _ParsedReviewResponse:
+    """Preserve both the prose verdict and fenced JSON comments from a review."""
+    matches = _JSON_RESPONSE_BLOCK_RE.findall(response)
+    try:
+        parsed = json.loads(matches[-1]) if matches else {}
+    except json.JSONDecodeError:
+        parsed = {}
+    raw_comments = parsed.get("comments", []) if isinstance(parsed, dict) else []
+    comments = tuple(dict(comment) for comment in raw_comments if isinstance(comment, dict))
+    return _ParsedReviewResponse(parse_review_verdict(response), comments)
+
 
 # In-memory mini-states (stage-local strings, never GitHub labels).
 ENTER = "ENTER"
@@ -475,7 +502,7 @@ class PrReviewStage(Stage):
                     )
                 ),
             },
-            parse=parse_review_verdict,  # verdict parsed in-worker
+            parse=_parse_review_response,  # verdict and inline comments parsed in-worker
             descr="review",
         )
         return JobRequest(job, on_done_state=VALIDATE_WAIT)
@@ -599,8 +626,17 @@ class PrReviewStage(Stage):
             return
 
         if item.state == REVIEW_WAIT and result.value is not None:
-            item.payload["review_verdict"] = result.value
-            item.payload["review_text"] = getattr(result.value, "raw", str(result.value))
+            if isinstance(result.value, _ParsedReviewResponse):
+                item.payload["review_verdict"] = result.value.verdict
+                item.payload["review_text"] = result.value.verdict.raw
+                item.payload["review_threads"] = [
+                    dict(comment) for comment in result.value.comments
+                ]
+            else:
+                # Keep direct stage callers and persisted pre-handoff results
+                # compatible; only live AgentJob results use the paired parser.
+                item.payload["review_verdict"] = result.value
+                item.payload["review_text"] = getattr(result.value, "raw", str(result.value))
         elif item.state == VALIDATE_WAIT and result.value is not None:
             item.payload["validation_result"] = result.value
         elif item.state == DIFFICULTY_WAIT and result.value is not None:
