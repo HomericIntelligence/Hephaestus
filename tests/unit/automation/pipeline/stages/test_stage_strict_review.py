@@ -97,6 +97,9 @@ def test_review_job_uses_athena_pr_review_prompt(make_ctx: Any, make_work_item: 
     assert "CI-free" in prompt
     assert "collect_evidence.py" in prompt
     assert "operator-authorized CI-free profile" in prompt
+    assert "sole durable merge authorization" in prompt
+    assert "do not propose, require, or implement a durable head-bound approval record" in prompt
+    assert "cached handoff" in prompt
     assert result.job.sandbox == "read-only"
     assert result.job.agent == "codex"
 
