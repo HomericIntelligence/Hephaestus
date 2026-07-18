@@ -87,13 +87,13 @@ repos:
         pass_filenames: false
 
   # Lock file freshness
-  - repo: local
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.11.28
     hooks:
-      - id: check-uv-lock
+      - id: uv-lock
         name: Check uv lock file
-        description: Verify uv.lock is up to date
-        entry: uv lock --check
-        language: system
+        description: Verify uv.lock is up to date without modifying it
+        args: [--check]
         pass_filenames: false
         files: ^(pyproject\.toml|uv\.lock)$
 
