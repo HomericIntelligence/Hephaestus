@@ -776,9 +776,6 @@ class ImplementationStage(Stage):
         terminal = _terminal_pr_outcome(ctx.github.gh_pr_state(existing_pr), existing_pr)
         if terminal is not None:
             return terminal
-        writable_head = self._writable_head_guard(item, ctx, existing_pr)
-        if writable_head is not None:
-            return writable_head
         defer_failed = self._defer_gate(_issue_number(item), existing_pr, ctx)
         if defer_failed is not None:
             return defer_failed
@@ -788,6 +785,9 @@ class ImplementationStage(Stage):
         impl_go_route = self._impl_go_route(item, ctx, existing_pr)
         if impl_go_route is not None:
             return impl_go_route
+        writable_head = self._writable_head_guard(item, ctx, existing_pr)
+        if writable_head is not None:
+            return writable_head
         if agent_error_reentry:
             # M1: consume the implement budget at GATE-adoption so the
             # pr_review agent_error -> re-adopt cycle is bounded.

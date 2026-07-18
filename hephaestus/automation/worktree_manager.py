@@ -212,7 +212,6 @@ class WorktreeManager:
         *,
         refresh_base: bool = False,
         isolated: bool = False,
-        isolated_name: str | None = None,
         timeout: int | None = None,
     ) -> Path:
         """Create a new worktree for an issue.
@@ -230,10 +229,6 @@ class WorktreeManager:
                 reusing another worktree that holds ``branch_name``. PR review
                 uses this so a preserved writer checkout is never
                 reset or exposed to an agent.
-            isolated_name: Stable name for an isolated checkout.  Callers that
-                need independent detached checkouts for the same PR (for
-                example two PR review attempts) must
-                supply distinct names. Ignored unless ``isolated`` is true.
             timeout: Optional timeout in seconds for each git command.
 
         Returns:
@@ -244,7 +239,7 @@ class WorktreeManager:
 
         """
         with self.lock:
-            isolated_key = isolated_name or f"review-pr-{issue_number}"
+            isolated_key = f"review-pr-{issue_number}"
             worktree_key: int | str = isolated_key if isolated else issue_number
             if worktree_key in self.worktrees:
                 logger.warning("Worktree for issue #%s already exists", issue_number)

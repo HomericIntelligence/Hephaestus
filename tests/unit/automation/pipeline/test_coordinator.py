@@ -338,10 +338,7 @@ class TestQuiescence:
             pr=601,
             stage=StageName.PR_REVIEW,
             state="ENTER",
-            payload={
-                "_enter_pending": True,
-                "direct_pr_worktree_name": "pr-review-pr-601-test",
-            },
+            payload={"_enter_pending": True},
         )
 
         coordinator._run_item(item)
@@ -353,7 +350,6 @@ class TestQuiescence:
         jobs = [handle.job for handle in pool.submitted]
         assert isinstance(jobs[0], GitJob)
         assert jobs[0].kwargs["isolated"] is True
-        assert jobs[0].kwargs["isolated_name"] == "pr-review-pr-601-test"
 
     def test_issue_seed_with_existing_pr_marks_pr_review_adoption(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

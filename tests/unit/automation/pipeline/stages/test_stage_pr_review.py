@@ -196,7 +196,6 @@ class TestPrReviewStageStep:
         github = FakeStageGitHub(pr_head_branch="review-pr")
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, pr=1001, kind=ItemKind.PR, state="ENTER")
-        item.payload["direct_pr_worktree_name"] = "pr-review-pr-1001-test"
         assert item.worktree == ""
 
         result = stage.step(item, ctx)
@@ -210,7 +209,6 @@ class TestPrReviewStageStep:
             "branch_name": "review-pr",
             "refresh_base": False,
             "isolated": True,
-            "isolated_name": "pr-review-pr-1001-test",
             "sync_to_remote": True,
             "pr_number": 1001,
             "repo_root": str(ctx.paths.repo_root),
@@ -227,7 +225,6 @@ class TestPrReviewStageStep:
         ctx = make_ctx(github=FakeStageGitHub(pr_head_branch="review-pr"))
         item = make_work_item(issue=1, pr=1001, kind=ItemKind.ISSUE, state="ENTER")
         item.payload["existing_pr"] = True
-        item.payload["direct_pr_worktree_name"] = "pr-review-pr-1001-test"
 
         result = stage.step(item, ctx)
 
@@ -235,7 +232,6 @@ class TestPrReviewStageStep:
         assert isinstance(result.job, GitJob)
         assert result.job.op == "create_worktree"
         assert result.job.kwargs["isolated"] is True
-        assert result.job.kwargs["isolated_name"] == "pr-review-pr-1001-test"
 
     def test_direct_pr_adoption_completion_enters_review_wait(
         self, make_ctx: Any, make_work_item: Any
@@ -249,7 +245,6 @@ class TestPrReviewStageStep:
             kind=ItemKind.PR,
             state="ENTER",
         )
-        item.payload["direct_pr_worktree_name"] = "pr-review-pr-1001-test"
         request = stage.step(item, ctx)
         assert isinstance(request, JobRequest)
 
@@ -267,28 +262,6 @@ class TestPrReviewStageStep:
         assert item.worktree == "/tmp/review-pr"
         assert item.payload["direct_pr_worktree"] == "/tmp/review-pr"
         assert "direct_pr_worktree_pending" not in item.payload
-
-    def test_direct_pr_review_checkout_name_is_unique_per_item(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """Concurrent direct reviews cannot collide on one detached path."""
-        stage = PrReviewStage()
-        ctx = make_ctx(github=FakeStageGitHub(pr_head_branch="review-pr"))
-        first = make_work_item(issue=1, pr=1001, kind=ItemKind.PR, state="ENTER")
-        second = make_work_item(issue=1, pr=1001, kind=ItemKind.PR, state="ENTER")
-
-        first_result = stage.step(first, ctx)
-        second_result = stage.step(second, ctx)
-
-        assert isinstance(first_result, JobRequest)
-        assert isinstance(second_result, JobRequest)
-        assert isinstance(first_result.job, GitJob)
-        assert isinstance(second_result.job, GitJob)
-        assert first.payload["direct_pr_worktree_name"] != second.payload["direct_pr_worktree_name"]
-        assert first_result.job.kwargs["isolated_name"] == first.payload["direct_pr_worktree_name"]
-        assert (
-            second_result.job.kwargs["isolated_name"] == second.payload["direct_pr_worktree_name"]
-        )
 
     def test_enter_advances_to_review(self, make_ctx: Any, make_work_item: Any) -> None:
         """ENTER advances to REVIEW_WAIT."""

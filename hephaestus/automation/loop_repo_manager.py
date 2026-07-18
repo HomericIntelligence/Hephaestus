@@ -162,9 +162,9 @@ def _list_open_pr_meta(org: str, repo: str) -> list[dict[str, Any]]:
     """Return open PR numbers and author metadata, sorted ascending.
 
     Read-only helper for the pipeline repo stage's ``--drive-green-all``
-    orphan-PR discovery (#1817): PRs with no tracked issue route to strict
-    stage. Raises RuntimeError on failures so discovery does not masquerade
-    as a clean empty run.
+    orphan-PR discovery (#1817): PRs with no tracked issue are terminalized
+    without requirements context. Raises RuntimeError on failures so discovery
+    does not masquerade as a clean empty run.
     """
     try:
         out = gh_call(

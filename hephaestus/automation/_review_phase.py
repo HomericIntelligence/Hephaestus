@@ -1,4 +1,4 @@
-"""Strict in-loop review + address phase.
+"""In-loop review + address phase.
 
 Part of the #712 phase decomposition (the per-issue control flow it once
 fed now lives in the pipeline stages, epic #1809).

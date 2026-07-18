@@ -130,31 +130,6 @@ def test_live_label_authorization_uses_the_current_pr_head(
     assert not any(action == "gh_issue_remove_labels" for action, _ in github.mutation_log)
 
 
-def test_arm_confirmation_accepts_head_drift_under_loop_owned_label(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A push during arming cannot turn discarded review state into a new gate."""
-
-    class PushDuringArmGitHub(_ArmingGitHub):
-        def arm_auto_merge(self, pr_number: int, expected_head_sha: str) -> None:
-            super().arm_auto_merge(pr_number, expected_head_sha)
-            self._pr_state = {
-                "state": "OPEN",
-                "headRefOid": "b" * 40,
-                "autoMergeRequest": {"enabledAt": "now"},
-            }
-
-    github = PushDuringArmGitHub(labels=(True, False))
-    item = make_work_item(stage=StageName.MERGE_WAIT, pr=12, state=ARM)
-
-    result = MergeWaitStage().step(item, make_ctx(github=github))
-
-    assert result == Continue(next_state=POLL)
-    assert github.arming_records[item.issue] == (12, "b" * 40)
-    assert ("defer_auto_merge", (12,)) not in github.mutation_log
-    assert item.armed is True
-
-
 def test_missing_auto_merge_retries_without_revoking_loop_owned_label(
     make_ctx: Any, make_work_item: Any
 ) -> None:

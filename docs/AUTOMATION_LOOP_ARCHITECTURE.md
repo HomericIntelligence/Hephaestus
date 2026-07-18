@@ -6,7 +6,7 @@ subprocess-per-phase loop was removed after the #1818/#1819 cutover.
 
 ## Overview and goals
 
-The automation loop is a single-coordinator, eight-queue state-machine
+The automation loop is a single-coordinator, seven-queue state-machine
 pipeline. The coordinator (main thread) owns queues and performs validation,
 logging, and GitHub manipulation. A single worker pool executes all agent
 invocations, build/test subprocesses, and git/network operations. GitHub labels
@@ -56,7 +56,7 @@ below.
 
 ## Coordinator / worker contract
 
-The main thread (coordinator) owns all eight in-memory stage queues and
+The main thread (coordinator) owns all seven in-memory stage queues and
 performs ONLY: arg parsing, queue seeding, queue draining, validation/logging,
 and GitHub API mutations (labels, comments, PR create/auto-merge disablement — sub-second
 calls). It never launches agent workflows, build/test subprocesses, or
@@ -385,7 +385,7 @@ containment failures finish failed.
 - `prompts/address_review.py get_address_review_prompt`
 - `learn.py build_learn_prompt` (post-merge deduped)
 
-### 8. finished
+### 7. finished
 
 **States**: ENTER → RECORD → CLEANUP → DONE.
 

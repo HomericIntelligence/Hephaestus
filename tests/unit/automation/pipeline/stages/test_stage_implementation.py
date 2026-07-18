@@ -213,6 +213,26 @@ class TestGate:
         assert item.pr == 1001
         assert item.branch == "1-real-branch"
 
+    def test_gate_existing_fork_with_impl_go_routes_to_merge_wait(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A reviewed fork needs no writable head before merge-wait."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub(
+            open_pr=1001,
+            pr_impl_state=(True, False),
+            pr_head_branch="fork-feature",
+            pr_head_writable=False,
+        )
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, state="GATE")
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FAIL_BACK, "already_implementation_go_pr")
+        assert item.pr == 1001
+        assert item.branch == "fork-feature"
+
     def test_gate_existing_item_pr_merged_finishes_before_adoption(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -329,7 +349,7 @@ class TestGate:
         result = stage.step(item, ctx)
 
         assert result == StageOutcome(Disposition.FINISH_FAIL, "pr_head_not_writable")
-        assert github.mutation_log == []
+        assert github.mutation_log == [("defer_auto_merge", (1001,))]
 
     def test_adopted_worktree_job_syncs_without_trunk_reset(
         self, make_ctx: Any, make_work_item: Any

@@ -9,7 +9,7 @@ for the catalog of skills the agents invoke, see the [`skills/`](skills/) direct
 
 The default `hephaestus-automation-loop` path is the queue-based in-process
 pipeline in `hephaestus.automation.pipeline.coordinator`. The coordinator owns
-eight in-memory stage queues and dispatches agent/build/git jobs to a worker
+seven in-memory stage queues and dispatches agent/build/git jobs to a worker
 pool. Each agent job runs either **Claude Code** or **Codex**, chosen via the
 optional `--agent` CLI flag or auto-detected with a Claude preference when
 omitted (see `hephaestus.agents.runtime.add_agent_argument`).

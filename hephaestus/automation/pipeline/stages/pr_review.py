@@ -116,7 +116,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from html import escape
 from typing import Any, cast
-from uuid import uuid4
 
 from hephaestus.automation.agent_config import (
     address_review_claude_timeout,
@@ -492,12 +491,6 @@ class PrReviewStage(Stage):
             return StageOutcome(Disposition.FINISH_FAIL, "direct_pr_no_head_branch")
         item.branch = branch
         item.payload["existing_pr"] = True
-        worktree_name = str(
-            item.payload.setdefault(
-                "direct_pr_worktree_name",
-                f"pr-review-pr-{item.pr}-{uuid4().hex}",
-            )
-        )
         logger.info(
             "pr_review:%d: adopting direct PR #%d (branch %r) for review",
             _issue_number(item),
@@ -513,13 +506,8 @@ class PrReviewStage(Stage):
                 "branch_name": branch,
                 "refresh_base": False,
                 # This mutable review checkout cannot reuse the writer's
-                # branch checkout. It has its own item-specific name so a
-                # direct PR review cannot collide with an implementation run.
+                # branch checkout.
                 "isolated": True,
-                # The name is item-owned and per-attempt. Concurrent direct
-                # reviews of one PR must not remove, reset, or clean up each
-                # other's detached checkout.
-                "isolated_name": worktree_name,
                 "sync_to_remote": True,
                 "pr_number": item.pr,
                 "repo_root": str(ctx.paths.repo_root),

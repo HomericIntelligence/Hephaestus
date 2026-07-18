@@ -817,24 +817,6 @@ class TestCreateWorktreeBranchCollision:
         argvs = [call.args[0] for call in worktree_mocks.run.call_args_list]
         assert ["git", "worktree", "add", "--detach", str(result), "708-auto-impl"] in argvs
 
-    def test_isolated_checkout_uses_distinct_role_name(
-        self, worktree_mocks: Any, tmp_path: Any
-    ) -> None:
-        """Named PR-review checkouts remain isolated from other checkouts."""
-        worktree_mocks.repo_root.return_value = tmp_path
-        worktree_mocks.run.return_value.stdout = "origin/main"
-        manager = WorktreeManager()
-
-        result = manager.create_worktree(
-            725,
-            "708-auto-impl",
-            isolated=True,
-            isolated_name="pr-review-pr-725",
-        )
-
-        assert result == manager.base_dir / "pr-review-pr-725"
-        assert manager.worktrees["pr-review-pr-725"] == result
-
     def test_no_reuse_when_branch_not_checked_out_elsewhere(
         self, worktree_mocks: Any, tmp_path: Any
     ) -> None:

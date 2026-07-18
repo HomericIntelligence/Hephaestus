@@ -88,8 +88,8 @@ class TestPRReviewAnalysisPrompt:
         assert "PR #10" in out
         assert "issue #5" in out
 
-    def test_uses_ci_free_pr_review_skill_profile(self) -> None:
-        """The loop invokes Athena's CI-free profile when available."""
+    def test_uses_default_pr_review_skill_behavior(self) -> None:
+        """The loop invokes Athena's normal PR-review behavior when available."""
         out = prompts.get_pr_review_analysis_prompt(pr_number=1, issue_number=1)
         # The removed policy machinery must be gone.
         assert "POLICY VIOLATION" not in out
@@ -98,8 +98,8 @@ class TestPRReviewAnalysisPrompt:
         assert "COMMITS_SIGNING_STATE" not in out
         assert "Policy checks (MANDATORY" not in out
         assert "$athena:pr-review" in out
-        assert "--ci-free" in out
-        assert "normal default behavior" not in out
+        assert "--ci-free" not in out
+        assert "normal default behavior" in out
         assert "pr-policy" not in out
         assert "CI Status" not in out
         assert "merge_wait" in out
