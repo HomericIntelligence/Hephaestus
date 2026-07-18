@@ -16,7 +16,7 @@ This file describes the typical development workflow for Hephaestus.
 1. **Automated Checks**: Pull-request checks are an independent GitHub concern; automation-loop stages neither read, modify, nor wait on their status.
 2. **PR Policy Gate**: The `pr-policy` CI gate enforces the `Closes #<issue-number>` body line and cryptographically signed commits (`git commit -S`). See `CLAUDE.md` §"Working with GitHub" for the canonical policy.
 3. **Independent Strict Review**: `strict_review` is the only automatic producer of `state:implementation-go`, after its own current-head `$athena:pr-review` pass.
-4. **Merge**: Do not manually enable auto-merge. `merge_wait` conditionally arms only the direct current-head handoff from that loop review; it does not consult CI/CD or an external review artifact.
+4. **Merge**: Do not manually enable auto-merge. `merge_wait` conditionally arms only when the loop-owned `state:implementation-go` label remains present; it does not consult CI/CD or an external review artifact.
 
 ## Testing Workflow
 

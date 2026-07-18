@@ -417,6 +417,12 @@ class TestDiscover:
 
         orphan = [p for p in repo_item.payload["products"] if p.get("kind") == "pr"]
         assert [(p["number"], p["stage"]) for p in orphan] == [(66, StageName.STRICT_REVIEW)]
+        review_item = product_to_work_item("repo-a", orphan[0])
+        assert review_item is not None
+        assert review_item.kind is ItemKind.PR
+        # A PR is itself an issue, so the CI-free review has requirements
+        # context even when discovery found no separate closing issue.
+        assert review_item.issue == review_item.pr == 66
 
     @pytest.mark.parametrize(
         ("include_bot_prs", "include_all_authors", "expected"),
@@ -614,7 +620,7 @@ class TestProductToWorkItem:
         )
 
         assert item is not None
-        assert item.kind is ItemKind.PR and item.pr == 66 and item.issue is None
+        assert item.kind is ItemKind.PR and item.pr == 66 and item.issue == 66
 
     def test_excluded_product_returns_none(self) -> None:
         assert product_to_work_item("repo-a", {"kind": "issue", "number": 5, "stage": None}) is None
