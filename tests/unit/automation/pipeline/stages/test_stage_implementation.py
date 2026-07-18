@@ -1084,6 +1084,32 @@ class TestCommitPushAndPrCreate:
         assert result.disposition == Disposition.RETRY
         assert github.mutation_log == []
 
+    def test_push_failure_retry_reenters_commit_push_without_pr_mutation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A retried failed push must resubmit commit_push before creating a PR."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=9, state="COMMIT_PUSH_WAIT")
+        item.branch = "9-auto-impl"
+        item.worktree = "/tmp/wt"
+
+        stage.on_job_done(item, JobResult(ok=False, error="remote hung up"), ctx)
+        item.state = "PR_CREATE"
+        retry = stage.step(item, ctx)
+
+        assert retry == StageOutcome(Disposition.RETRY, "commit_push failed")
+        assert item.state == "COMMIT_PUSH_WAIT"
+        assert github.mutation_log == []
+
+        retry_job = stage.step(item, ctx)
+
+        assert isinstance(retry_job, JobRequest)
+        assert isinstance(retry_job.job, GitJob)
+        assert retry_job.job.op == "commit_push"
+        assert github.mutation_log == []
+
     def test_unknown_state_fails(self, make_ctx: Any, make_work_item: Any) -> None:
         """An unknown state finishes failed instead of looping silently."""
         stage = ImplementationStage()
