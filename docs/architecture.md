@@ -13,23 +13,16 @@ Other folded material:
   (folded into §1 / §5).
 - The architecture excerpts of [`CLAUDE.md`](../CLAUDE.md) (folded into §1).
 
-> **In-flight refactor notice.** [PR #2280](https://github.com/HomericIntelligence/Hephaestus/pull/2280)
-> (`refactor(automation): make PR approval loop-owned`) is OPEN against
-> `main` and refactors the architecture described here. When it merges,
-> the pipeline becomes **7 stages** (REPO, PLANNING, PLAN_REVIEW,
-> IMPLEMENTATION, PR_REVIEW, MERGE_WAIT, FINISHED — `strict_review` and
-> `ci` are removed) and `pr_review` becomes the **sole authority** for
-> `state:implementation-go`, with no strict-GO proof. The doc as written
-> describes the architecture currently on `main`; the new state is
-> itemized in [§15](#15-in-flight-refactor-pr-2280) so future readers can
-> audit the delta at a glance. A follow-up doc rewrite is queued behind
-> PR #2280's merge.
+> **In-flight refactor notice.** This doc describes the architecture on
+> `main` *today*. Two in-flight refactors cover its scope and are
+> sequenced to merge **before** this doc's rewrite PR: the pipeline
+> becomes **7 stages** (REPO … FINISHED, with `strict_review` and `ci`
+> removed) and `pr_review` becomes the sole authority for
+> `state:implementation-go` — see [PR #2280](https://github.com/HomericIntelligence/Hephaestus/pull/2280)
+> (§15) and 16 other architectural PRs (§16).
 >
-> 16 OTHER architectural PRs are also OPEN against `main` (cataloged in
-> [§16](#16-other-in-flight-architectural-changes-16-prs)) and are
-> sequenced to merge before this doc's rewrite PR. Several of them touch
-> `strict_review` / `ci` files that PR #2280 removes — those are flagged
-> in §16 with merge-order notes.> PR #2280's merge.
+> Banner + §15 + §16 are deleted by the rewrite PR once all in-flight
+> architectural PRs merge.> PR #2280's merge.
 
 The [`docs/adr/`](adr/) records remain the bind-points for individual
 architectural decisions (`0006-queue-based-in-process-automation-pipeline`,
@@ -2308,6 +2301,11 @@ PR #2280's merge to keep the source-grounded reference accurate.
 
 ### Coordinated PR sequencing
 
+
+> **Delete-on-rewrite trigger.** Banner + §15 + §16 are removed by
+> the rewrite PR once all 17 in-flight PRs (#2280 + 16 in §16) merge.
+> The rewrite sequencing plan (§15 inventory) is unchanged.
+
 PR #2314 (the doc-hygiene work that landed this file as canonical) and
 PR #2280 (the loop-owned-approval refactor) both target `main`
 independently. The doc-update follow-up is intentionally sequenced
@@ -2377,9 +2375,13 @@ additive refactors, then test-only and doc-only PRs at the bottom.
 - **Scope.** Splits `hephaestus/automation/_review_phase.py` into
   `_review_loop.py` + `_review_conflict_resolver.py`; updates
   `stages/pr_review.py` to consume the new units.
-- **Doc impact.** §11 (replace the single
-  `_review_phase.py` bullet with bullets for `_review_loop.py` and
-  `_review_conflict_resolver.py`).
+- **Doc impact.** §5.5 (`pr_review.EVAL`, `_handle_zero_thread_nogo`
+  narratives), §6 (ROUTES), §11 (replace the `_review_phase.py`
+  bullet with bullets for `_review_loop.py` and
+  `_review_conflict_resolver.py`), §13 (glossary; audit may surface
+  additional cites in §3 / §13). Every line-cite to
+  `_review_phase.py:<NN>` rebinds to one of the new units post-merge;
+  the audit pass must re-resolve all such citations.
 - **Merge-order note.** Additive refactor — no conflicts.
 
 #### [PR #2210](https://github.com/HomericIntelligence/Hephaestus/pull/2210) — `[mino] Decompose address-review session orchestration`
@@ -2518,15 +2520,9 @@ additive refactors, then test-only and doc-only PRs at the bottom.
 
 ---
 
-**Followup sequencing.** All 17 PRs (the 16 cataloged above PLUS PR #2280)
-are expected to land before the doc-rewrite PR runs. The rewrite PR's job
-is:
-
-1. Wait for these 17 PRs to merge.
-2. Re-run the audit pass against post-merge `main` to enumerate every
-   claim in this doc that is now stale (cite-drift + budget-key drift
-   + stage-name membership).
-3. Rewrite §1–§14 in coordinated commits per scope (one commit per
-   §1 / §2 / §3 / §5 / §6 / §8 / §10 / §11 / §13 / §14, mirroring the
-   §15 inventory).
-4. Delete the front-matter banner, §15, and §16 once the rewrite lands.
+**Rewrite-from-post-merge sequencing.** The full coordination plan is
+defined in [§15](#coordinated-pr-sequencing); §16 is the PR
+inventory that the plan consumes. Re-running the audit pass against
+post-merge `main` will surface any drift in the per-PR doc-impact
+labels above (cite rebinding, budget-key changes, stage-name
+membership).
