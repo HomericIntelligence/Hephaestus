@@ -929,7 +929,7 @@ def ensure_pr_created(
         branch_name: Git branch name
         worktree_path: Path to worktree
         auto_merge: Deprecated compatibility flag; ignored because only
-            MergeWaitStage may conditionally arm after strict review.
+            MergeWaitStage may conditionally arm after PR review.
         status_tracker: StatusTracker instance for slot updates (optional)
         slot_id: Worker slot ID for status updates
         agent: Selected implementation agent for generated PR metadata.
@@ -1006,7 +1006,7 @@ def ensure_pr_created(
     logger.warning("No PR found for branch %s, creating one...", branch_name)
     if auto_merge:
         logger.info(
-            "Keeping auto-merge disabled for branch %s until the strict-review gate exists",
+            "Keeping auto-merge disabled for branch %s until the PR-review gate exists",
             branch_name,
         )
     pr_number = create_pr(
@@ -1037,7 +1037,7 @@ def create_pr(
         issue_number: Issue number
         branch_name: Git branch name
         auto_merge: Deprecated compatibility flag; ignored because only
-            MergeWaitStage may conditionally arm after strict review.
+            MergeWaitStage may conditionally arm after PR review.
         agent: Selected implementation agent for generated PR metadata.
         base: Base branch used for changed-file and commit context.
         worktree_path: Optional worktree path used to invoke the lightweight
@@ -1072,7 +1072,7 @@ def create_pr(
 
     if auto_merge:
         logger.warning(
-            "Ignoring auto_merge=True for branch %s while the strict-review gate is unavailable",
+            "Ignoring auto_merge=True for branch %s while the PR-review gate is unavailable",
             branch_name,
         )
     return gh_pr_create(

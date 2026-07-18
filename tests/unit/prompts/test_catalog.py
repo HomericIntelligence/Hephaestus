@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 
 import pytest
@@ -14,13 +13,22 @@ from hephaestus.automation.prompts.planning import (
 )
 
 
-def test_default_catalog_render_preserves_planning_compatibility() -> None:
-    """The packaged default preserves the established rendered planning prompt."""
+def test_default_catalog_render_exposes_planning_contract() -> None:
+    """The packaged default renders the planning prompt's stable contracts."""
     rendered = get_plan_prompt(99, catalog=PromptCatalog())
 
-    assert hashlib.sha256(rendered.encode()).hexdigest() == (
-        "fc771ef42130ab2a67b73b38902690611dc433c2588d73d42820201da2a05061"
-    )
+    # Interpolation is observable without pinning unrelated wording or whitespace.
+    assert "Create an implementation plan for GitHub issue #99." in rendered
+    assert "{{ issue_number }}" not in rendered
+
+    # The worked examples remain properly fenced so their commands are unambiguous.
+    assert "```bash" in rendered
+    assert rendered.count("```") % 2 == 0
+
+    # The planner must return the complete markdown artifact, not a status summary.
+    assert "Your FINAL message must BE the complete plan, as markdown" in rendered
+    assert "starting with the\n`# Implementation Plan` heading" in rendered
+    assert "Do NOT post a status note, changelog, or" in rendered
 
 
 def test_legacy_prompt_constant_remains_a_jinja_backed_format_template() -> None:

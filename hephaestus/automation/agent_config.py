@@ -342,9 +342,6 @@ AGENT_IMPLEMENTER = "implementer"
 AGENT_PR_REVIEWER = "pr-reviewer"
 AGENT_ADDRESS_REVIEW = "address-review"
 AGENT_CI_DRIVER = "ci-driver"
-# Independent, read-only reviewer that is bound to a specific PR head.  It
-# intentionally does not share the generic review-loop session family.
-AGENT_STRICT_REVIEW = "strict-review"
 # Lightweight read-only metadata writers. They are deliberately separate from
 # implementer/reviewer sessions so commit and PR text generation cannot inherit
 # or mutate a code-producing transcript.
@@ -364,7 +361,6 @@ _ALL_AGENTS = frozenset(
         AGENT_PR_REVIEWER,
         AGENT_ADDRESS_REVIEW,
         AGENT_CI_DRIVER,
-        AGENT_STRICT_REVIEW,
         AGENT_COMMIT_MESSAGE,
         AGENT_PR_MESSAGE,
         AGENT_COMMENT_CLASSIFIER,
@@ -425,28 +421,13 @@ def reviewer_agent(base_agent: str, iteration: int) -> str:
     return f"{base_agent}-r{iteration}"
 
 
-def strict_review_agent(head_sha: str, attempt: int) -> str:
-    """Return a fresh strict-review session token for one head and attempt."""
-    if not head_sha:
-        raise ValueError("head_sha must be non-empty")
-    if attempt < 0:
-        raise ValueError(f"attempt must be >= 0, got {attempt}")
-    return f"{AGENT_STRICT_REVIEW}-{head_sha[:12]}-a{attempt}"
-
-
 def _is_valid_agent(agent: str) -> bool:
     """Return True for a known base agent or a per-iteration reviewer token."""
     if agent in _ALL_AGENTS:
         return True
     # Accept the reviewer_agent() form: "<base>-r<N>".
     base, sep, suffix = agent.rpartition("-r")
-    if sep and base in _PER_ITERATION_REVIEWERS and suffix.isdigit():
-        return True
-    prefix = f"{AGENT_STRICT_REVIEW}-"
-    if agent.startswith(prefix):
-        head, attempt_sep, attempt = agent[len(prefix) :].rpartition("-a")
-        return bool(attempt_sep and head) and attempt.isdigit()
-    return False
+    return bool(sep and base in _PER_ITERATION_REVIEWERS and suffix.isdigit())
 
 
 def _model_token(model: str | None) -> str:
@@ -590,7 +571,6 @@ __all__ = [
     "AGENT_PR_MESSAGE",
     "AGENT_PR_REVIEWER",
     "AGENT_REVIEW_TIMEOUT",
-    "AGENT_STRICT_REVIEW",
     # Model selection
     "CODEX_ADVISE",
     "DEFAULT_AGENT_TIMEOUT",
@@ -641,5 +621,4 @@ __all__ = [
     "session_name",
     "session_uuid",
     "short_githash",
-    "strict_review_agent",
 ]

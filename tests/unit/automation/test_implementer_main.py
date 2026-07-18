@@ -79,10 +79,10 @@ def test_main_builds_implementation_scope_and_dispatches(tmp_path: Path) -> None
     assert config.repos == ["widget"]
     assert config.issues == [123]
     assert config.dry_run is True
-    # Scope is trimmed to exactly implementation + pr_review.
+    # Scope includes implementation, review, and merge wait.
     assert config.scope is not None
     assert config.scope.stages == frozenset(
-        {StageName.IMPLEMENTATION, StageName.PR_REVIEW, StageName.STRICT_REVIEW}
+        {StageName.IMPLEMENTATION, StageName.PR_REVIEW, StageName.MERGE_WAIT}
     )
 
 

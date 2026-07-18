@@ -23,11 +23,8 @@ D1 — Correctness & completeness (HIGHEST PRIORITY / NOGO gate).
     Does the diff correctly and completely do what the issue asks, without
     introducing bugs, regressions, or security holes? A genuine correctness
     defect forces an overall NOGO verdict regardless of every other dimension.
-    NOTE: repo PR policy (Closes #N / signed commits) is NOT graded here — the
-    GitHub CI gate ``pr-policy`` enforces it authoritatively.
-    ``auto-merge-policy`` is advisory; the independent strict-review and
-    merge-wait stages control automatic arming. Do not re-check policy; focus
-    on whether the code is correct and complete.
+    NOTE: repository submission policy is NOT graded here. Do not re-check it;
+    focus on whether the code is correct and complete.
 
 D2 — Diff review of CHANGED lines only.
     Restrict findings to lines actually modified in the PR diff above.
@@ -48,18 +45,16 @@ D3 — Inline-comment quality.
     citation. Comments that fail this bar must be omitted, not
     softened.
 
-D4 — CI failure analysis (only when CI Status block is non-empty).
-    When the CI Status block reports failures, the review MUST identify
-    the failing job(s), quote the relevant error signal, and tie each
-    failure to a diff hunk (or note "unrelated to diff" with evidence).
-    Silently ignoring red CI is a major finding against the review.
+D4 — Verification evidence.
+    Evaluate the tests and checks the change supplies or claims. Tie any
+    missing or failing evidence to the relevant diff hunk; do not treat an
+    external workflow status as authorization for this review.
 
 D5 — Runnable evidence for metric / training-run claims (NOGO gate).
     Per ADR-014 (Odysseus docs/adr/014-runnable-evidence-for-metric-claims.md):
     any claim of a measured metric, accuracy, loss, convergence, benchmark
     number, or "successful run" is treated as UNPROVEN unless it is backed by
-    output produced by a gate the author does not control — a CI-produced
-    artifact or independently re-executed output pasted verbatim. A log file
+    independently re-executed output. A log file
     committed into the diff (e.g. ``validation/epoch1.log``, a results table, a
     metrics JSON) is NOT evidence, no matter how plausible: the author can write
     any numbers into it. Grade this dimension:

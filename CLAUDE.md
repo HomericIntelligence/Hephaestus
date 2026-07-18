@@ -272,7 +272,7 @@ takes no argument.
 | `repo-analyze-full` | — | Full-coverage audit — one swarm agent per section, no sampling cap |
 | `repo-analyze-quick-full` | — | Quick health check with full file coverage |
 | `repo-analyze-strict-full` | — | Strict audit with full file coverage (swarm per section) |
-| `review-pr-strict` | — | Ruthlessly thorough PR-alignment audit with full coverage |
+| `pr-review` | — | Athena full-coverage pull-request review |
 | `worktree-cleanup` | `"<optional: --dry-run>"` | Audit + prune git worktrees (never deletes branches) |
 | `tidy` | `"<optional: --dry-run \| --no-swarm \| --trunk BRANCH \| --max-concurrent N>"` | Rebase all local branches with swarm conflict resolution |
 | `create-reusable-utilities` | — | Port/generalize utility scripts for cross-project reuse |
@@ -289,7 +289,7 @@ Is the task well-defined with predictable steps?
 │   ├─ Is it ready to ship? → verification → finish-branch
 │   ├─ Is it a CI/CD pipeline setup? → github-actions-python-cicd
 │   ├─ Is it a repo audit? → repo-analyze (or its quick/strict/full variants)
-│   └─ Is it a PR review? → code-review (or review-pr-strict for alignment audits)
+│   └─ Is it a PR review? → `$athena:pr-review`
 │
 └─ NO → Use a Sub-Agent
     ├─ Does it require exploration/discovery? → Use sub-agent
@@ -336,12 +336,14 @@ The required CI gate `pr-policy` and the PR reviewer enforce:
 2. Every commit MUST be cryptographically signed (`git commit -S`) and carry a
    DCO `Signed-off-by` trailer.
 
-`pr-policy` blocks PRs that fail those checks. The queue's #2055
-head-bound strict-review gate is the sole automatic producer of
-`state:implementation-go`; it requires an authenticated artifact for the exact
-current head. `merge_wait` is the sole automatic armer and revalidates that
-artifact before and after arming. Branch protection and required reviews still
-govern whether GitHub merges the PR.
+`pr-policy` blocks PRs that fail those checks. The queue runs
+`$athena:pr-review` in its normal default profile when available, then applies
+`state:implementation-go` on GO; `merge_wait` is the sole automatic armer and
+consumes that loop-owned label.
+Normal review may collect CI/CD evidence and incorporate it into its binary
+verdict, but the loop does not change CI/CD. CI workflows and external
+artifacts never independently grant that authority. Branch protection and
+required reviews still govern whether GitHub merges the PR.
 
 ```bash
 # 1. Create feature branch
@@ -361,7 +363,7 @@ gh pr create \
   --body "$(printf 'Summary of change.\n\nCloses #<issue-number>\n')"
 
 # 5. Do not use --admin or bypass branch protection. Queue-owned auto-merge,
-#    when eligible, is armed only by merge_wait after strict review.
+#    when eligible, is armed only by merge_wait after loop review applies its label.
 ```
 
 ### Commit Message Format

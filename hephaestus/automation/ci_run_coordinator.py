@@ -43,7 +43,7 @@ def classify_ci_state(checks: list[dict[str, Any]]) -> CiConclusion:
     can classify in one sub-second call and timer-park on PENDING. GREEN
     mirrors the legacy ``all_green`` semantics EXACTLY (conclusions all in
     :data:`GREEN_CONCLUSIONS`). The pipeline then contains auto-merge and stops
-    until the strict-review gate exists. Returns:
+    until the queue review path handles it. Returns:
         NO_CHECKS: empty list — no CI configured; caller treats as success.
         PENDING:   at least one required check has status != "completed".
         GREEN:     all required completed, conclusions all in
@@ -264,7 +264,7 @@ class CIDriveRunCoordinator:
         return remaining
 
     def drive_issue(self, issue_number: int, pr_number: int, slot_id: int) -> WorkerResult:
-        """Contain a legacy PR and stop until the strict-review gate exists."""
+        """Contain a legacy PR and stop until the queue review path handles it."""
         with self._status.slot() as acquired_slot:
             if acquired_slot is None:
                 return WorkerResult(
@@ -284,7 +284,7 @@ class CIDriveRunCoordinator:
                     issue_number=issue_number,
                     success=False,
                     pr_number=pr_number,
-                    error="strict_gate_unavailable",
+                    error="merge_wait_unavailable",
                 )
             except Exception as exc:
                 logger.error("Issue #%s: unexpected error: %s", issue_number, exc)

@@ -195,6 +195,55 @@ class TestRepoScoping:
             ]
         ]
 
+    @pytest.mark.parametrize(
+        ("payload", "expected"),
+        [
+            (
+                {
+                    "headRepository": {"name": "repo-a"},
+                    "headRepositoryOwner": {"login": "org"},
+                },
+                True,
+            ),
+            (
+                {
+                    "headRepository": {"name": "repo-a"},
+                    "headRepositoryOwner": {"login": "contributor"},
+                },
+                False,
+            ),
+        ],
+    )
+    def test_pr_head_writable_requires_base_repository_identity(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        payload: dict[str, object],
+        expected: bool,
+    ) -> None:
+        """Fork heads are readable but cannot receive a base-origin address push."""
+        calls: list[list[str]] = []
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            return SimpleNamespace(stdout=json.dumps(payload))
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+
+        assert adapter.pr_head_is_writable(17) is expected
+        assert calls == [
+            [
+                "pr",
+                "view",
+                "17",
+                "--json",
+                "headRepository,headRepositoryOwner",
+                "--repo",
+                "org/repo-a",
+            ]
+        ]
+
     def test_label_mutators_include_repo_arg(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1229,34 +1278,42 @@ class TestReadSurface:
 
         assert issue is None
 
-    def test_pr_manager_reads(
+    def test_pr_review_context_reads_body_and_complete_diff(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The review stage gets authoritative inputs rather than empty defaults."""
+        calls: list[list[str]] = []
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            if argv[:2] == ["pr", "view"]:
+                return SimpleNamespace(stdout=json.dumps({"body": "Closes #1899\n"}))
+            if argv[:2] == ["pr", "diff"]:
+                return SimpleNamespace(stdout="diff --git a/a.py b/a.py\n+new\n")
+            raise AssertionError(f"unexpected gh invocation: {argv}")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        context = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).pr_review_context(
+            1984
+        )
+
+        assert context == {
+            "pr_diff": "diff --git a/a.py b/a.py\n+new\n",
+            "pr_description": "Closes #1899\n",
+        }
+        assert calls == [
+            ["pr", "view", "1984", "--json", "body", "--repo", "org/repo-a"],
+            ["pr", "diff", "1984", "--repo", "org/repo-a"],
+        ]
+
+    def test_pr_manager_implementation_label_read(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
             pr_manager_mod, "pr_has_implementation_state_label", lambda n: (True, False)
         )
-        monkeypatch.setattr(pr_manager_mod, "pr_is_genuinely_stuck", lambda n: True)
-
         assert adapter.pr_has_implementation_state_label(7) == (True, False)
-        assert adapter.pr_is_genuinely_stuck(7) is True
-
-    def test_pr_checks_reads_live_even_in_dry_run(
-        self, dry_adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        checks = [{"name": "ci"}]
-        mock = MagicMock(return_value=checks)
-        monkeypatch.setattr(github_api_mod, "gh_pr_checks", mock)
-
-        assert dry_adapter.pr_checks(7) == checks
-        mock.assert_called_once_with(7, dry_run=False)
-
-    def test_check_inspector_delegation(self, adapter: pg.PipelineGitHub) -> None:
-        adapter._inspector = MagicMock()
-        adapter._inspector.failing_required_check_names.return_value = ["lint"]
-        adapter._inspector.pending_required_check_names.return_value = ["test"]
-
-        assert adapter.failing_required_check_names(7) == ["lint"]
-        assert adapter.pending_required_check_names(7) == ["test"]
 
 
 class TestUnresolvedThreads:
@@ -1312,9 +1369,24 @@ class TestGhPrState:
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         payload = {"state": "OPEN", "headRefOid": "abc", "mergedAt": None}
-        monkeypatch.setattr(pg, "gh_call", lambda argv: SimpleNamespace(stdout=json.dumps(payload)))
+        calls: list[list[str]] = []
+
+        def fake_gh_call(argv: list[str]) -> Any:
+            calls.append(argv)
+            return SimpleNamespace(stdout=json.dumps(payload))
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
 
         assert adapter.gh_pr_state(7) == payload
+        assert calls == [
+            [
+                "pr",
+                "view",
+                "7",
+                "--json",
+                "state,headRefOid,mergedAt,baseRefName,autoMergeRequest",
+            ]
+        ]
 
     def test_failure_returns_none(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
@@ -1327,190 +1399,8 @@ class TestGhPrState:
         assert adapter.gh_pr_state(7) is None
 
 
-class TestStrictReviewEvidence:
-    """Current-head evidence hydration for the independent strict reviewer."""
-
-    _head = "a" * 40
-
-    def _adapter_with_responses(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        *,
-        diff: str = "diff --git a/a.py b/a.py\n+index 1..2 100644\n--- a/a.py\n+++ b/a.py\n+x\n",
-        final_head: str | None = None,
-        raise_on_diff: bool = False,
-    ) -> tuple[pg.PipelineGitHub, list[list[str]]]:
-        """Build an adapter with explicit repo-scoped evidence responses."""
-        calls: list[list[str]] = []
-        prior_review = "Grade: A\nVerdict: GO"
-
-        def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
-            calls.append(argv)
-            if argv == [
-                "pr",
-                "view",
-                "71",
-                "--json",
-                "state,headRefOid,reviews",
-                "--repo",
-                "org/repo-a",
-            ]:
-                return SimpleNamespace(
-                    stdout=json.dumps(
-                        {
-                            "state": "OPEN",
-                            "headRefOid": self._head,
-                            "reviews": [
-                                {"author": {"login": "human"}, "body": "Verdict: NOGO"},
-                                {
-                                    "author": {"login": "hephaestus-bot"},
-                                    "body": prior_review,
-                                },
-                            ],
-                        }
-                    )
-                )
-            if argv == ["api", "user", "--jq", ".login"]:
-                return SimpleNamespace(stdout="hephaestus-bot\n")
-            if argv == [
-                "issue",
-                "view",
-                "2055",
-                "--json",
-                "title,body",
-                "--repo",
-                "org/repo-a",
-            ]:
-                return SimpleNamespace(
-                    stdout=json.dumps({"title": "Strict gate", "body": "Required."})
-                )
-            if argv == ["pr", "diff", "71", "--repo", "org/repo-a"]:
-                if raise_on_diff:
-                    raise RuntimeError("diff unavailable")
-                return SimpleNamespace(stdout=diff)
-            if argv == [
-                "pr",
-                "checks",
-                "71",
-                "--json",
-                "name,state,bucket,workflow",
-                "--repo",
-                "org/repo-a",
-            ]:
-                return SimpleNamespace(stdout=json.dumps([{"name": "unit", "bucket": "pass"}]))
-            if argv == [
-                "pr",
-                "view",
-                "71",
-                "--json",
-                "state,headRefOid,mergedAt,mergeStateStatus,baseRefName,autoMergeRequest",
-                "--repo",
-                "org/repo-a",
-            ]:
-                return SimpleNamespace(
-                    stdout=json.dumps(
-                        {
-                            "state": "OPEN",
-                            "headRefOid": final_head if final_head is not None else self._head,
-                        }
-                    )
-                )
-            raise AssertionError(f"unexpected gh invocation: {argv!r}")
-
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
-        return pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path), calls
-
-    def test_hydrates_bounded_repo_scoped_evidence_for_exact_head(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        adapter, calls = self._adapter_with_responses(tmp_path, monkeypatch)
-
-        evidence = adapter.strict_review_evidence(71, self._head.upper(), 2055)
-
-        assert evidence is not None
-        assert evidence.head_sha == self._head
-        assert evidence.issue_title == "Strict gate"
-        assert evidence.issue_body == "Required."
-        assert evidence.diff.startswith("diff --git")
-        assert "unit: status=completed, conclusion=success" in evidence.ci_status
-        assert evidence.prior_pr_review_verdict == "Grade: A\nVerdict: GO"
-        assert ["pr", "diff", "71", "--repo", "org/repo-a"] in calls
-        assert all("--repo" in call for call in calls if call[0] == "pr")
-
-    def test_empty_diff_is_ambiguous_and_fails_closed(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        adapter, _calls = self._adapter_with_responses(tmp_path, monkeypatch, diff=" \n")
-
-        assert adapter.strict_review_evidence(71, self._head, 2055) is None
-
-    def test_head_change_during_hydration_invalidates_evidence(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        adapter, _calls = self._adapter_with_responses(tmp_path, monkeypatch, final_head="b" * 40)
-
-        assert adapter.strict_review_evidence(71, self._head, 2055) is None
-
-    def test_evidence_read_error_fails_closed(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        adapter, _calls = self._adapter_with_responses(tmp_path, monkeypatch, raise_on_diff=True)
-
-        assert adapter.strict_review_evidence(71, self._head, 2055) is None
-
-
-class TestDriveGreenArmingRecords:
-    """arm_drive_green / learn-terminal / learn-result over ArmingStateStore."""
-
-    def test_arm_then_terminal_roundtrip(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(pg, "get_pr_head_branch", lambda n: "1817-auto-impl")
-        assert adapter.drive_green_learn_terminal(3) is False
-
-        adapter.arm_drive_green(3, 70, "deadbeef")
-        assert adapter.drive_green_learn_terminal(3) is False  # armed, not terminal
-
-        adapter.mark_drive_green_learn_result(3, succeeded=True)
-        assert adapter.drive_green_learn_terminal(3) is True
-
-    def test_arm_phase_requires_exact_readback_confirmation(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Pre-RPC intent cannot make restart recovery skip ARM."""
-        monkeypatch.setattr(pg, "get_pr_head_branch", lambda n: "1817-auto-impl")
-
-        adapter.arm_drive_green(8, 74, "face")
-        prepared = adapter._arming.load(8)
-        assert prepared is not None
-        assert prepared["auto_merge_arm_status"] == "prepared"
-        assert adapter.drive_green_arm_confirmed(8, 74) is False
-
-        adapter.confirm_drive_green_arm(8, 74, "face")
-
-        confirmed = adapter._arming.load(8)
-        assert confirmed is not None
-        assert confirmed["auto_merge_arm_status"] == "confirmed"
-        assert confirmed["auto_merge_confirmed_at"]
-        assert adapter.drive_green_arm_confirmed(8, 74) is True
-
-        # A retry at the same exact record must not downgrade confirmation.
-        adapter.arm_drive_green(8, 74, "face")
-        assert adapter.drive_green_arm_confirmed(8, 74) is True
-
-    def test_arm_confirmation_rejects_a_missing_or_mismatched_prepared_record(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A durable confirmation remains bound to the prepared PR and head."""
-        monkeypatch.setattr(pg, "get_pr_head_branch", lambda n: "branch")
-        adapter.arm_drive_green(9, 75, "cafe")
-
-        with pytest.raises(RuntimeError, match="missing or mismatched"):
-            adapter.confirm_drive_green_arm(9, 76, "cafe")
-        with pytest.raises(RuntimeError, match="missing or mismatched"):
-            adapter.confirm_drive_green_arm(9, 75, "other")
-        assert adapter.drive_green_arm_confirmed(9, 75) is False
+class TestDriveGreenLearning:
+    """Post-merge learning state remains independent of merge arming."""
 
     def test_learn_claim_is_durable_and_never_replayable(self, adapter: pg.PipelineGitHub) -> None:
         """A crash after dispatch claim is an explicit unknown, never a replay."""
@@ -1518,7 +1408,6 @@ class TestDriveGreenArmingRecords:
         assert adapter.drive_green_learn_inflight(31) is True
         assert adapter.claim_drive_green_learn(31, 701) is False
         assert adapter.drive_green_learn_terminal(31) is False
-        assert adapter.pending_drive_green_arms() == [(31, 701)]
 
     def test_concurrent_learn_claims_allow_exactly_one_dispatch(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
@@ -1588,37 +1477,6 @@ class TestDriveGreenArmingRecords:
         adapter.mark_drive_green_learn_result(4, succeeded=False)
 
         assert adapter.drive_green_learn_terminal(4) is True
-
-    def test_arm_never_overwrites_terminal_record(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(pg, "get_pr_head_branch", lambda n: "b")
-        adapter.mark_drive_green_learn_result(5, succeeded=True)
-
-        adapter.arm_drive_green(5, 71, "cafe")
-
-        record = adapter._arming.load(5)
-        assert record is not None
-        assert record["learn_status"] == "succeeded"  # evidence preserved
-
-    def test_pending_arm_scan_recovers_only_non_terminal_records(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(pg, "get_pr_head_branch", lambda n: "b")
-        adapter.arm_drive_green(6, 72, "face")
-
-        assert adapter.pending_drive_green_arms() == [(6, 72)]
-
-        adapter.mark_drive_green_learn_result(6, succeeded=True)
-        assert adapter.pending_drive_green_arms() == []
-
-    def test_arm_record_write_failure_is_not_silently_acknowledged(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(adapter._arming, "save", lambda _issue, _record: False)
-
-        with pytest.raises(RuntimeError, match="could not persist drive-green arming record"):
-            adapter.arm_drive_green(7, 73, "cafe")
 
 
 class TestRateBudget:

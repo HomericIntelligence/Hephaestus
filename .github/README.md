@@ -47,9 +47,9 @@ shellcheck, the `pr-policy` gate (enforces `Closes #N` and signed commits),
 unit/integration/shell tests, wheel build, security scans (pip-audit, Gitleaks,
 bandit), workflow-schema validation, and version-sync. It also runs the
 advisory `auto-merge-policy` job. It is intentionally **not** a required
-check: the queue's `strict_review` and `merge_wait` stages enforce the
-head-bound proof and conditional automatic arming. The privileged label-event
-auto-merge workflow remains removed.
+check: the automation loop runs `$athena:pr-review`, owns the
+`state:implementation-go` label, and conditionally arms in `merge_wait`. The
+privileged label-event auto-merge workflow remains removed.
 
 ### Auto-Tag Workflow (`workflows/auto-tag.yml`)
 

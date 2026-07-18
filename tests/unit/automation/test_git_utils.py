@@ -22,6 +22,7 @@ from hephaestus.automation.git_utils import (
     issue_auto_impl_branch_name,
     push_branch,
     push_current_branch_with_lease_on_divergence,
+    push_head_to_branch,
     rebase_worktree_onto,
     run,
     safe_git_fetch,
@@ -313,6 +314,21 @@ class TestPushBranch:
 
         git_utils_mocks.run.assert_called_once_with(
             ["git", "push", "origin", "123-auto-impl"],
+            cwd=tmp_path,
+            timeout=42,
+        )
+
+
+class TestPushDetachedHead:
+    """Tests for publishing direct PR-review commits from a detached checkout."""
+
+    def test_pushes_head_to_branch_without_force_or_proof(
+        self, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        push_head_to_branch("123-auto-impl", tmp_path, timeout=42)
+
+        git_utils_mocks.run.assert_called_once_with(
+            ["git", "push", "origin", "HEAD:refs/heads/123-auto-impl"],
             cwd=tmp_path,
             timeout=42,
         )

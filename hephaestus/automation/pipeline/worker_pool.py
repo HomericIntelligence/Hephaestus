@@ -376,9 +376,6 @@ class WorkerPool:
         the executing worker identity.
         """
         try:
-            verification_failure = self._verify_expected_worktree(job)
-            if verification_failure is not None:
-                return verification_failure
             agent = resolve_agent(job.agent)
             is_claude = agent == "claude"
             session_agent = job.session_agent or job.agent
@@ -388,7 +385,7 @@ class WorkerPool:
                 if is_claude:
                     claude_kwargs: dict[str, Any] = {}
                     if job.sandbox == "read-only":
-                        claude_kwargs["allowed_tools"] = "Read,Glob,Grep"
+                        claude_kwargs["allowed_tools"] = job.allowed_tools or "Read,Glob,Grep"
                         claude_kwargs["permission_mode"] = "dontAsk"
                     stdout, _ = claude_invoke.invoke_claude_with_session(
                         repo=job.repo,
@@ -455,55 +452,6 @@ class WorkerPool:
                 ok=False,
                 error=f"{type(exc).__name__}: {exc!s}"[:_ERR_MAX],
             )
-
-    @staticmethod
-    def _verify_expected_worktree(job: AgentJob) -> JobResult | None:
-        """Fail closed unless a strict-review worktree is clean at its reviewed SHA."""
-        if not job.expected_head_sha:
-            return None
-        local_head = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=str(job.cwd),
-            capture_output=True,
-            text=True,
-            timeout=job.timeout_s,
-            check=False,
-        )
-        actual_head = (local_head.stdout or "").strip()
-        if local_head.returncode != 0 or actual_head.lower() != job.expected_head_sha.lower():
-            return JobResult(
-                ok=False,
-                error=(
-                    "local_head_mismatch: "
-                    f"expected={job.expected_head_sha} actual={actual_head or '<unreadable>'}"
-                )[:_ERR_MAX],
-                stdout_tail=(local_head.stdout or "")[-_TAIL:],
-                stderr_tail=(local_head.stderr or "")[-_TAIL:],
-            )
-        logger.info(
-            "agent job %s verified local HEAD %s against remote-reviewed head",
-            job.descr or job.agent,
-            actual_head[:12],
-        )
-        worktree_status = subprocess.run(
-            ["git", "status", "--porcelain=v1", "--untracked-files=all"],
-            cwd=str(job.cwd),
-            capture_output=True,
-            text=True,
-            timeout=job.timeout_s,
-            check=False,
-        )
-        if worktree_status.returncode != 0 or (worktree_status.stdout or "").strip():
-            return JobResult(
-                ok=False,
-                error=(
-                    "local_worktree_dirty: strict review requires a clean worktree "
-                    f"at {job.expected_head_sha}"
-                )[:_ERR_MAX],
-                stdout_tail=(worktree_status.stdout or "")[-_TAIL:],
-                stderr_tail=(worktree_status.stderr or "")[-_TAIL:],
-            )
-        return None
 
     def _run_build_test(self, job: BuildTestJob) -> JobResult:
         """Run a build/test job (subprocess with argv)."""
@@ -719,10 +667,12 @@ class WorkerPool:
                 ok=False,
                 error="commit_push requires non-empty 'worktree_path' and 'issue_number' kwargs",
             )
-        # NOTE: commit_if_changes returns False BOTH for "worktree clean,
-        # nothing to commit" AND for "commit attempted but failed" (it logs
-        # and swallows the RuntimeError). Do not push in either case; stages
-        # consume value=False as the no-real-commit path.
+        # ``commit_if_changes`` returns False for a clean worktree.  An agent
+        # is instructed to leave its edits uncommitted, but a defensive
+        # recovery still recognizes a clean branch that is ahead of its
+        # remote tracking ref: the coordinator, not the agent, publishes that
+        # already-created commit so every subsequent review binds to the new
+        # remote head.
         changed = git_utils.commit_if_changes(
             int(issue_number),
             Path(worktree_path),
@@ -731,10 +681,26 @@ class WorkerPool:
             timeout=job.timeout_s,
         )
         if not changed:
-            return JobResult(ok=True, value=False)
-        git_utils.push_branch(
-            str(job.kwargs.get("branch", "HEAD")),
-            Path(worktree_path),
-            timeout=job.timeout_s,
-        )
-        return JobResult(ok=True, value=changed)
+            branch = str(job.kwargs.get("branch") or "")
+            if not branch or not git_utils.has_unpushed_commits(
+                branch, Path(worktree_path), timeout=job.timeout_s
+            ):
+                return JobResult(ok=True, value=False)
+            status = git_utils.run(
+                ["git", "status", "--porcelain"],
+                cwd=Path(worktree_path),
+                capture_output=True,
+                timeout=job.timeout_s,
+            )
+            if status.stdout.strip():
+                return JobResult(ok=False, error="commit_push left uncommitted changes")
+        branch = str(job.kwargs.get("branch", "HEAD"))
+        if bool(job.kwargs.get("publish_detached_head", False)):
+            git_utils.push_head_to_branch(
+                branch,
+                Path(worktree_path),
+                timeout=job.timeout_s,
+            )
+        else:
+            git_utils.push_branch(branch, Path(worktree_path), timeout=job.timeout_s)
+        return JobResult(ok=True, value=True)

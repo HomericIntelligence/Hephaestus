@@ -26,8 +26,6 @@ class TestStageName:
             "plan_review",
             "implementation",
             "pr_review",
-            "strict_review",
-            "ci",
             "merge_wait",
             "finished",
         }
@@ -155,7 +153,7 @@ class TestROUTES:
         route = ROUTES[StageName.FINISHED]
         assert route.next == StageName.FINISHED
 
-    def test_routes_match_strict_review_stage_contract(self) -> None:
+    def test_routes_match_single_pr_review_stage_contract(self) -> None:
         """Pin the full stage table while the companion documentation lands separately."""
         expected: dict[StageName, Route] = {
             StageName.REPO: Route(
@@ -181,13 +179,13 @@ class TestROUTES:
                 next=StageName.PR_REVIEW,
                 fail_routes={
                     "plan_not_go": StageName.PLAN_REVIEW,
-                    "already_implementation_go_pr": StageName.STRICT_REVIEW,
+                    "already_implementation_go_pr": StageName.MERGE_WAIT,
                     "*": StageName.FINISHED,
                 },
                 budgets={"implement": 2, "test_fix": 1},
             ),
             StageName.PR_REVIEW: Route(
-                next=StageName.STRICT_REVIEW,
+                next=StageName.MERGE_WAIT,
                 fail_routes={
                     "agent_error": StageName.IMPLEMENTATION,
                     "human_blocked": StageName.FINISHED,
@@ -196,33 +194,11 @@ class TestROUTES:
                 },
                 budgets={"pr_review_iter": 3, "pr_review_hard": 6},
             ),
-            StageName.STRICT_REVIEW: Route(
-                next=StageName.CI,
-                fail_routes={
-                    "nogo": StageName.IMPLEMENTATION,
-                    "head_changed": StageName.STRICT_REVIEW,
-                    "*": StageName.STRICT_REVIEW,
-                },
-                budgets={"strict_review_iter": 1},
-            ),
-            StageName.CI: Route(
-                next=StageName.MERGE_WAIT,
-                fail_routes={
-                    "fix_exhausted": StageName.IMPLEMENTATION,
-                    "not_implementation_go": StageName.STRICT_REVIEW,
-                    "not_strict_review_go": StageName.STRICT_REVIEW,
-                    "missing_worktree": StageName.IMPLEMENTATION,
-                    "no_pr": StageName.FINISHED,
-                    "*": StageName.CI,
-                },
-                budgets={"ci_fix": 1, "rebase": 2},
-            ),
             StageName.MERGE_WAIT: Route(
                 next=StageName.FINISHED,
                 fail_routes={
                     "closed": StageName.FINISHED,
-                    "strict_gate_unavailable": StageName.STRICT_REVIEW,
-                    "arm_confirm_failed": StageName.STRICT_REVIEW,
+                    "not_implementation_go": StageName.PR_REVIEW,
                     "*": StageName.FINISHED,
                 },
                 budgets={},
@@ -231,11 +207,10 @@ class TestROUTES:
         }
         assert expected == ROUTES
 
-    def test_ci_requires_strict_review_before_maintenance(self) -> None:
-        """Both absent implementation state and absent proof return to strict review."""
-        ci_route = ROUTES[StageName.CI]
-        assert ci_route.fail_routes["not_implementation_go"] is StageName.STRICT_REVIEW
-        assert ci_route.fail_routes["not_strict_review_go"] is StageName.STRICT_REVIEW
+    def test_pr_review_advances_directly_to_merge_wait(self) -> None:
+        """The active loop has no CI/CD stage between review and merge wait."""
+        assert ROUTES[StageName.PR_REVIEW].next is StageName.MERGE_WAIT
+        assert "ci_fix" not in routing.budget_keys()
 
     def test_merge_budget_provenance_uses_stable_source_references(self) -> None:
         """#1902: merge-budget provenance should not pin volatile line numbers."""
@@ -256,7 +231,7 @@ class TestPipelineScope:
         trimmed = scope.trimmed_routes()
 
         assert StageName.FINISHED in trimmed
-        for stage in StageName:
+        for stage in ROUTES:
             assert stage in trimmed
             assert trimmed[stage].next == ROUTES[stage].next
 
@@ -275,7 +250,7 @@ class TestPipelineScope:
 
         assert len(trimmed) == 4
         assert StageName.REPO not in trimmed
-        assert StageName.CI not in trimmed
+        assert StageName.MERGE_WAIT not in trimmed
 
     def test_pipeline_scope_rewrites_out_of_scope_next_target(self) -> None:
         """Out-of-scope next targets are rewritten to FINISHED."""
@@ -338,9 +313,9 @@ class TestPipelineScope:
             PipelineScope(frozenset())
 
     def test_pipeline_scope_rejects_non_contiguous(self) -> None:
-        """A gapped scope (e.g. planning + ci) silently drops stages — reject it."""
+        """A gapped scope silently drops stages — reject it."""
         with pytest.raises(ValueError, match="contiguous"):
-            PipelineScope(frozenset({StageName.PLANNING, StageName.CI}))
+            PipelineScope(frozenset({StageName.PLANNING, StageName.MERGE_WAIT}))
 
     def test_pipeline_scope_finished_never_breaks_contiguity(self) -> None:
         """FINISHED (universal sink) is allowed in any scope."""

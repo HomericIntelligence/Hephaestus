@@ -365,7 +365,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--implementer-model",
         default="",
-        help="HEPH_IMPLEMENTER_MODEL for child processes (implement, address-review, ci-driver)",
+        help="HEPH_IMPLEMENTER_MODEL for child processes (implement, address-review, drive-green)",
     )
     p.add_argument(
         "--reviewer-reasoning-effort",
@@ -464,9 +464,10 @@ def _pipeline_scope_for_phases(phases: tuple[str, ...]) -> PipelineScope | None:
     ``None`` preserves the default full pipeline, including repo discovery.
     Partial selections use the same stage ownership as the focused wrapper
     CLIs: plan = planning+plan_review, implement = implementation+pr_review+
-    strict_review, drive-green = strict_review+ci+merge_wait.  The overlap
-    makes either operational entry point safe for a legacy implementation-GO
-    PR that still needs a current-head independent review.
+    merge_wait, drive-green = pr_review+merge_wait. The overlap
+    lets either operational entry point resume an already-approved PR through
+    merge-wait, where the loop re-reads its approval label and live PR head
+    before arming; it does not require an ephemeral review handoff.
     """
     selected = set(phases)
     if selected == set(ALL_SELECTABLE):
@@ -479,11 +480,10 @@ def _pipeline_scope_for_phases(phases: tuple[str, ...]) -> PipelineScope | None:
         "implement": (
             StageName.IMPLEMENTATION,
             StageName.PR_REVIEW,
-            StageName.STRICT_REVIEW,
+            StageName.MERGE_WAIT,
         ),
         "drive-green": (
-            StageName.STRICT_REVIEW,
-            StageName.CI,
+            StageName.PR_REVIEW,
             StageName.MERGE_WAIT,
         ),
     }

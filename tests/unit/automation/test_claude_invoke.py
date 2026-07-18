@@ -1,4 +1,4 @@
-"""Tests for the review-verdict parser used by the strict review loops."""
+"""Tests for the review-verdict parser used by automation review loops."""
 
 from __future__ import annotations
 
@@ -149,14 +149,21 @@ class TestParseReviewVerdict:
         v = parse_review_verdict("Grade: F\nVerdict: NO GO")
         assert v.verdict == "NOGO"
 
+    def test_conditional_go_is_a_nogo_for_the_binary_review_gate(self) -> None:
+        """A conditional skill approval must not pass the loop's GO gate."""
+        v = parse_review_verdict("Grade: B\nVerdict: CONDITIONAL GO")
+        assert v.grade == "B"
+        assert v.verdict == "NOGO"
+        assert v.is_go is False
+
     def test_missing_verdict_is_ambiguous(self) -> None:
         """Missing verdict => AMBIGUOUS, treated as not-GO by the loop."""
         v = parse_review_verdict("Grade: B")
         assert v.verdict == "AMBIGUOUS"
         assert v.is_go is False
 
-    def test_missing_grade_only_verdict(self) -> None:
-        """Verdict without grade is still actionable."""
+    def test_missing_grade_keeps_the_verdict_ungraded(self) -> None:
+        """Verdict-only plan reviews remain readable but have no grade."""
         v = parse_review_verdict("Verdict: GO")
         assert v.grade is None
         assert v.verdict == "GO"
@@ -173,6 +180,20 @@ class TestParseReviewVerdict:
         v = parse_review_verdict("grade: c-\nverdict: nogo")
         assert v.grade == "C-"
         assert v.verdict == "NOGO"
+
+    def test_last_grade_and_verdict_win(self) -> None:
+        """The reviewer's final summary overrides earlier quoted verdicts."""
+        v = parse_review_verdict(
+            "Quoted context:\nGrade: F\nVerdict: NOGO\n\nFinal review:\nGrade: A\nVerdict: GO"
+        )
+        assert v.grade == "A"
+        assert v.verdict == "GO"
+
+    def test_later_unpaired_verdict_does_not_borrow_an_earlier_grade(self) -> None:
+        """The PR stage can fail closed when the final verdict has no grade."""
+        v = parse_review_verdict("Grade: F\nVerdict: NOGO\n\nLater summary:\nVerdict: GO")
+        assert v.grade is None
+        assert v.verdict == "GO"
 
 
 class TestInfraErrorVerdict:
@@ -373,8 +394,8 @@ class TestParseReviewVerdictProperties:
             assert parse_review_verdict(text).verdict == "AMBIGUOUS"
 
     @given(st.sampled_from(_VERDICT_TOKENS), st.text(max_size=200))
-    def test_anchored_verdict_line_classifies(self, token: str, noise: str) -> None:
-        body = f"{noise}\nVerdict: {token}\n"
+    def test_anchored_grade_verdict_pair_classifies(self, token: str, noise: str) -> None:
+        body = f"{noise}\nGrade: F\nVerdict: {token}\n"
         normalized = token.replace("-", "").replace(" ", "")
         expected = {"GO": "GO", "ERROR": "ERROR"}.get(normalized, "NOGO")
         assert parse_review_verdict(body).verdict == expected

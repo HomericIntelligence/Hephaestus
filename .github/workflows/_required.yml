@@ -6,8 +6,7 @@ name: Required Checks
 on:
   pull_request:
     # This workflow is the sole source of code-validation contexts. Label and
-    # auto-merge events are deliberately handled by dedicated policy/proof
-    # workflows: a skipped heavy job reports a successful context, so allowing
+    # auto-merge events remain outside this workflow: a skipped heavy job reports a successful context, so allowing
     # those events here could mask a still-running or failed code-event check.
     types:
       - opened
@@ -443,9 +442,9 @@ jobs:
 
   auto-merge-policy:
     name: auto-merge-policy
-    # Advisory (NOT a required check): the queue's strict_review and
-    # merge_wait stages are the authoritative head-bound arming gate. This
-    # job reports observable PR state but never substitutes for that protocol.
+    # Advisory (NOT a required check): the automation loop owns review,
+    # approval labeling, and merge arming. This job reports observable PR
+    # state but never authorizes the loop or substitutes for that process.
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -481,7 +480,7 @@ jobs:
 
           state=$(jq -r '.autoMergeRequest' pr.json)
           if [ "$state" != "null" ] && [ -n "$state" ]; then
-            echo "::notice::Auto-merge is armed; queue-owned strict-review and merge-wait controls are authoritative."
+            echo "::notice::Auto-merge is armed by the automation loop."
             exit 0
           fi
           echo "OK: auto-merge is currently disabled"

@@ -43,8 +43,18 @@ class TestListOpenPrMeta:
             result = loop_repo_manager._list_open_pr_meta("acme", "widget")
 
         assert result == [
-            {"number": 3, "user": {"login": "alice", "type": "User"}},
-            {"number": 9, "user": {"login": "depbot", "type": "Bot"}},
+            {
+                "number": 3,
+                "state": "OPEN",
+                "isDraft": False,
+                "user": {"login": "alice", "type": "User"},
+            },
+            {
+                "number": 9,
+                "state": "OPEN",
+                "isDraft": False,
+                "user": {"login": "depbot", "type": "Bot"},
+            },
         ]
         assert mock_gh.call_args.args[0] == [
             "api",
@@ -63,8 +73,8 @@ class TestListOpenPrMeta:
             result = loop_repo_manager._list_open_pr_meta("acme", "widget")
 
         assert result == [
-            {"number": 7, "user": {"login": None, "type": None}},
-            {"number": 8, "user": {"login": None, "type": None}},
+            {"number": 7, "state": "OPEN", "isDraft": False, "user": {"login": None, "type": None}},
+            {"number": 8, "state": "OPEN", "isDraft": False, "user": {"login": None, "type": None}},
         ]
 
     @pytest.mark.parametrize("stdout", ["not-json", "{}"])
@@ -443,8 +453,8 @@ class TestCountFailingPrs:
     loop_runner re-export that no longer exists.
     """
 
-    def test_count_failing_prs_counts_only_failing_conclusions(self) -> None:
-        """PRs with failing conclusions are counted."""
+    def test_count_failing_prs_counts_open_non_draft_prs_without_check_data(self) -> None:
+        """Open non-draft PRs are counted without consulting CI/CD data."""
         import json
 
         from hephaestus.automation.loop_repo_manager import _count_failing_prs
@@ -453,20 +463,17 @@ class TestCountFailingPrs:
             {
                 "number": 1,
                 "isDraft": False,
-                "statusCheckRollup": [{"conclusion": "FAILURE"}],
-                "mergeStateStatus": "CLEAN",
+                "state": "OPEN",
             },
             {
                 "number": 2,
                 "isDraft": False,
-                "statusCheckRollup": [{"conclusion": "SUCCESS"}],
-                "mergeStateStatus": "CLEAN",
+                "state": "OPEN",
             },
             {
                 "number": 3,
                 "isDraft": False,
-                "statusCheckRollup": [{"conclusion": "CANCELLED"}],
-                "mergeStateStatus": "CLEAN",
+                "state": "CLOSED",
             },
         ]
         with patch("hephaestus.automation.loop_repo_manager.gh_call") as mock_gh:
@@ -484,8 +491,7 @@ class TestCountFailingPrs:
             {
                 "number": 1,
                 "isDraft": True,
-                "statusCheckRollup": [{"conclusion": "FAILURE"}],
-                "mergeStateStatus": "CLEAN",
+                "state": "OPEN",
             },
         ]
         with patch("hephaestus.automation.loop_repo_manager.gh_call") as mock_gh:
@@ -541,8 +547,7 @@ class TestCountFailingPrs:
             {
                 "number": i,
                 "isDraft": False,
-                "statusCheckRollup": [{"conclusion": "FAILURE"}],
-                "mergeStateStatus": "CLEAN",
+                "state": "OPEN",
             }
             for i in range(1, 1001)
         ]

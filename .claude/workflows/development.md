@@ -13,10 +13,10 @@ This file describes the typical development workflow for Hephaestus.
 
 ## Code Review Process
 
-1. **Automated Checks**: All PRs must pass pre-commit hooks, the three classic branch-protection contexts (`required-checks-gate`, `test (ubuntu-latest, 3.12, unit)`, and `test (ubuntu-latest, 3.12, integration)`), and the direct ruleset contexts in `docs/ci/required-checks.md`.
+1. **Automated Checks**: Normal `$athena:pr-review` assesses PR check evidence; automation-loop stages do not modify CI/CD state.
 2. **PR Policy Gate**: The `pr-policy` CI gate enforces the `Closes #<issue-number>` body line and cryptographically signed commits (`git commit -S`). See `CLAUDE.md` §"Working with GitHub" for the canonical policy.
-3. **Independent Strict Review**: `strict_review` is the only automatic producer of `state:implementation-go`; its authenticated GO proof is bound to the exact PR head.
-4. **Merge**: Do not manually enable auto-merge. After the strict-review gate and required checks pass, `merge_wait` conditionally arms only that reviewed head.
+3. **Loop-owned Review**: `pr_review` invokes `$athena:pr-review` with its normal default behavior; a clean GO applies `state:implementation-go`.
+4. **Merge**: Do not manually enable auto-merge. `merge_wait` conditionally arms only when the loop-owned `state:implementation-go` label remains present; it does not consult CI/CD or an external review artifact.
 
 ## Testing Workflow
 

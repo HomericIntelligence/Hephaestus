@@ -53,4 +53,4 @@ hephaestus-automation-loop --issues <N>
 ## See also
 
 - [Automation loop crashed mid-issue](automation-loop-crash.md)
-- [CI-driver stall (green-but-BLOCKED)](ci-driver-stall.md)
+- [Drive-green stall](ci-driver-stall.md)

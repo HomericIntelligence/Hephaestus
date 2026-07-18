@@ -53,7 +53,7 @@ def clocked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Coordinato
     return coordinator, clock
 
 
-def _item(issue: int, stage: StageName = StageName.CI) -> WorkItem:
+def _item(issue: int, stage: StageName = StageName.PR_REVIEW) -> WorkItem:
     return WorkItem(repo="repo-a", kind=ItemKind.ISSUE, issue=issue, stage=stage, state="POLL")
 
 
@@ -83,7 +83,7 @@ class TestTimerHeap:
         coordinator._wake_timers()
 
         assert len(coordinator.timers) == 1
-        assert len(coordinator.queues[StageName.CI]) == 1
+        assert len(coordinator.queues[StageName.PR_REVIEW]) == 1
 
     def test_seq_tiebreak_prevents_workitem_comparison(
         self, clocked: tuple[Coordinator, FakeClock]
@@ -127,7 +127,7 @@ class TestRetryDelayConsumption:
         coordinator._route(item, StageOutcome(Disposition.RETRY, "transient"))
 
         assert coordinator.timers == []
-        assert len(coordinator.queues[StageName.CI]) == 1
+        assert len(coordinator.queues[StageName.PR_REVIEW]) == 1
 
     def test_retry_preserves_stage_and_state(self, clocked: tuple[Coordinator, FakeClock]) -> None:
         """RETRY re-steps the SAME stage state; it never re-runs on_enter."""
@@ -139,7 +139,7 @@ class TestRetryDelayConsumption:
         clock.now += 2.0
         coordinator._wake_timers()
 
-        assert item.stage is StageName.CI
+        assert item.stage is StageName.PR_REVIEW
         assert item.state == "POLL"
         assert item.payload.get("_enter_pending") is not True
 
@@ -166,7 +166,7 @@ class TestStepWatchdog:
             def on_job_done(self, item: WorkItem, result: Any, ctx: Any) -> None:
                 pass
 
-        coordinator.stages[StageName.CI] = SlowStage()
+        coordinator.stages[StageName.PR_REVIEW] = SlowStage()
         item = _item(12)
 
         with caplog.at_level("WARNING"):
@@ -192,7 +192,7 @@ class TestStepWatchdog:
             def on_job_done(self, item: WorkItem, result: Any, ctx: Any) -> None:
                 pass
 
-        coordinator.stages[StageName.CI] = FastStage()
+        coordinator.stages[StageName.PR_REVIEW] = FastStage()
 
         with caplog.at_level("WARNING"):
             coordinator._run_item(_item(13))

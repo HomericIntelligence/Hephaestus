@@ -10,8 +10,7 @@ binding contract):
 - States: ENTER -> GATE -> WORKTREE_WAIT -> DIRTY_DECISION_WAIT ->
   ADVISE_WAIT -> IMPLEMENT_WAIT -> TEST_WAIT -> TESTFIX_WAIT ->
   COMMIT_PUSH_WAIT -> PR_CREATE. The existing-PR fast path short-circuits
-  WORKTREE_WAIT -> DIRTY_DECISION_WAIT -> ADOPTED (ADVANCE to pr_review)
-  or ADOPTED_CI (fail-back to ci for implementation-go PRs).
+  WORKTREE_WAIT -> DIRTY_DECISION_WAIT -> ADOPTED (ADVANCE to pr_review).
 - Budgets: ``implement`` = 2 (bounds implement attempts INCLUDING
   agent_error retries — the doc's "agent_error -> RETRY (consumes the
   implement budget)"), ``test_fix`` = 1 (one fix attempt on red pre-PR
@@ -20,9 +19,8 @@ binding contract):
   skips the item regardless of plan-go/implementation-go, before either the
   existing-PR fast path or the fresh-implement plan-go gate below. Then the
   existing-PR fast path (``_review_existing_pr`` semantics): a PR already
-  carrying ``state:implementation-go`` fails back
-  ``already_implementation_go_pr`` (routes to ci) with ``item.pr`` /
-  ``item.branch`` set for the ci stage; a PR without it adopts the PR's
+  carrying ``state:implementation-go`` routes to ``merge_wait``; a PR without
+  it adopts the PR's
   REAL head branch, re-ensures the auto-merge deferral [durable], cuts a
   worktree on the ADOPTED branch (``refresh_base=False`` +
   ``sync_to_remote`` — the anti-clobber reset of
@@ -75,7 +73,6 @@ from hephaestus.automation.agent_config import (
     implementer_claude_timeout,
     implementer_model,
 )
-from hephaestus.automation.prompts._shared import fence_content
 from hephaestus.automation.prompts.advise import get_advise_prompt_builder
 from hephaestus.automation.prompts.implementation import (
     get_dirty_reused_worktree_decision_prompt,
@@ -128,7 +125,6 @@ GATE = "GATE"
 WORKTREE_WAIT = "WORKTREE_WAIT"
 DIRTY_DECISION_WAIT = "DIRTY_DECISION_WAIT"
 ADOPTED = "ADOPTED"
-ADOPTED_CI = "ADOPTED_CI"
 ADVISE_WAIT = "ADVISE_WAIT"
 IMPLEMENT_WAIT = "IMPLEMENT_WAIT"
 TEST_WAIT = "TEST_WAIT"
@@ -142,7 +138,6 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
     WORKTREE_WAIT: "_worktree_wait",
     DIRTY_DECISION_WAIT: "_dirty_decision_wait",
     ADOPTED: "_adopted",
-    ADOPTED_CI: "_adopted_ci",
     ADVISE_WAIT: "_advise_wait",
     IMPLEMENT_WAIT: "_implement_wait",
     TEST_WAIT: "_test_wait",
@@ -183,7 +178,6 @@ def build_implementation_prompt(
     branch_name: str = "",
     worktree_path: str = "",
     advise_findings: str = "",
-    strict_review_feedback: str = "",
 ) -> str:
     """Compose the implementation prompt with the advise-findings block.
 
@@ -200,7 +194,6 @@ def build_implementation_prompt(
         branch_name: Feature branch the worktree is on.
         worktree_path: Worktree the implementer works in.
         advise_findings: Advise-step findings; empty string means no block.
-        strict_review_feedback: Fail-closed strict-NOGO feedback to remediate.
 
     Returns:
         The full implementer prompt, with the findings block appended when
@@ -214,22 +207,13 @@ def build_implementation_prompt(
         branch_name=branch_name,
         worktree_path=worktree_path,
     )
-    if not advise_findings and not strict_review_feedback:
+    if not advise_findings:
         return prompt
     blocks: list[str] = [prompt]
     if advise_findings:
         blocks.append(
             PromptCatalog.current().render(
                 "implementation/advise_append.j2", advise_findings=advise_findings
-            )
-        )
-    if strict_review_feedback:
-        fenced = fence_content()
-        blocks.append(
-            PromptCatalog.current().render(
-                "implementation/strict_remediation.j2",
-                untrusted_notice=fenced.untrusted_notice,
-                feedback_block=fenced.fence("STRICT_REVIEW_NOGO", strict_review_feedback),
             )
         )
     return "".join(blocks)
@@ -350,7 +334,7 @@ class ImplementationStage(Stage):
             # Worktree creation failed: transient infrastructure, not an
             # implement outcome. If the retry budget remains, retry the
             # worktree job itself; do not let adopted-PR state fall through
-            # to ADOPTED/ADOPTED_CI without a valid synced worktree.
+            # to ADOPTED without a valid synced worktree.
             outcome = self._git_retry(item, "worktree creation failed")
             if outcome.disposition is Disposition.RETRY:
                 item.state = WORKTREE_WAIT
@@ -358,13 +342,8 @@ class ImplementationStage(Stage):
         # Adopted-PR path: after the (clean or salvaged) worktree is
         # ready, skip the implement leg — the PR's code already exists;
         # pr_review's address leg drives it from here.
-        if item.payload.get("strict_review_feedback"):
-            # A strict NOGO is a real remediation request, not the normal
-            # existing-PR adoption shortcut.  Preserve the synced PR branch
-            # but run implement/test/push with the fenced feedback.
-            adopted_next = IMPLEMENT_WAIT
-        elif item.payload.get("existing_pr_impl_go"):
-            adopted_next = ADOPTED_CI
+        if item.payload.get("existing_pr_impl_go"):
+            adopted_next = ADOPTED
         else:
             adopted_next = ADOPTED if item.payload.get("existing_pr") else ADVISE_WAIT
         if not item.payload.get("worktree_dirty"):
@@ -401,17 +380,6 @@ class ImplementationStage(Stage):
             item.branch,
         )
         return StageOutcome(Disposition.ADVANCE, f"existing PR #{item.pr}")
-
-    def _adopted_ci(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """ADOPTED_CI routes an implementation-go PR to CI after worktree setup."""
-        issue = _issue_number(item)
-        logger.info(
-            "implementation:%d: adopted implementation-go PR #%s (branch %r); routing to ci",
-            issue,
-            item.pr,
-            item.branch,
-        )
-        return StageOutcome(Disposition.FAIL_BACK, "already_implementation_go_pr")
 
     def _advise_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """ADVISE_WAIT either skips advice or submits the advise job."""
@@ -472,7 +440,6 @@ class ImplementationStage(Stage):
                 "branch_name": item.branch,
                 "worktree_path": item.worktree,
                 "advise_findings": item.payload.get("advise_findings", ""),
-                "strict_review_feedback": item.payload.get("strict_review_feedback", ""),
             },
             descr="implement",
         )
@@ -722,8 +689,8 @@ class ImplementationStage(Stage):
 
         Split out of :meth:`_gate` for the same readability reason as
         :meth:`_skip_gate`. Existing PRs may have been armed by the
-        pre-strict-review policy; a failed read-back must stop adoption before
-        worktree preparation or later strict-review routing.
+        a previous auto-merge configuration; a failed read-back must stop
+        adoption before worktree preparation or review routing.
 
         Args:
             issue: The GitHub issue number (for log messages).
@@ -751,10 +718,8 @@ class ImplementationStage(Stage):
         """Route an adopted PR that already carries ``state:implementation-go``.
 
         Split out of :meth:`_gate` for the same readability reason as
-        :meth:`_skip_gate`. A late-stage entry that only knew the PR (no
-        worktree yet) must prepare one before the strict-review route (m7);
-        an entry that already has a worktree can fail back to strict review
-        directly.
+        :meth:`_skip_gate`. The loop-owned label is the durable authorization,
+        so both fresh and adopted entries route directly to ``merge_wait``.
 
         Args:
             item: The work item under evaluation (``item.pr``/``item.branch``
@@ -771,23 +736,83 @@ class ImplementationStage(Stage):
         has_go, _has_no_go = ctx.github.pr_has_implementation_state_label(existing_pr)
         if not has_go:
             return None
-        # item.pr/item.branch are set above so strict_review receives
-        # a fully-identified PR (m7). Its read-only worker needs a per-item
-        # exact-head worktree; prepare one first when
-        # this is a late-stage entry that only knew the PR.
-        if item.worktree:
-            logger.info(
-                "implementation:%d: PR #%d already implementation-go; routing to strict review",
-                item.issue,
-                existing_pr,
-            )
-            return StageOutcome(Disposition.FAIL_BACK, "already_implementation_go_pr")
-        item.payload["existing_pr"] = True
-        item.payload["existing_pr_impl_go"] = True
         logger.info(
-            "implementation:%d: PR #%d implementation-go; preparing worktree before strict review",
+            "implementation:%d: PR #%d already implementation-go; routing to merge-wait",
             item.issue,
             existing_pr,
+        )
+        return StageOutcome(Disposition.FAIL_BACK, "already_implementation_go_pr")
+
+    @staticmethod
+    def _writable_head_guard(
+        item: WorkItem, ctx: StageContext, existing_pr: int
+    ) -> StageOutcome | None:
+        """Fail closed when an existing PR head belongs to a fork.
+
+        Fork heads can be fetched for review, but implementation must never
+        address them by creating a same-named branch on the base repository's
+        origin.
+        """
+        if ctx.github.pr_head_is_writable(existing_pr):
+            return None
+        logger.warning(
+            "implementation:%d: PR #%d head is not writable through this repository; "
+            "refusing to address a fork from the base origin",
+            item.issue,
+            existing_pr,
+        )
+        return StageOutcome(Disposition.FINISH_FAIL, "pr_head_not_writable")
+
+    def _adopt_existing_pr(
+        self,
+        item: WorkItem,
+        ctx: StageContext,
+        existing_pr: int,
+        *,
+        agent_error_reentry: bool,
+    ) -> StepResult:
+        """Validate and adopt an existing writable PR for normal review."""
+        item.pr = existing_pr
+        terminal = _terminal_pr_outcome(ctx.github.gh_pr_state(existing_pr), existing_pr)
+        if terminal is not None:
+            return terminal
+        defer_failed = self._defer_gate(_issue_number(item), existing_pr, ctx)
+        if defer_failed is not None:
+            return defer_failed
+        head_branch = ctx.github.get_pr_head_branch(existing_pr)
+        if head_branch:
+            item.branch = head_branch
+        impl_go_route = self._impl_go_route(item, ctx, existing_pr)
+        if impl_go_route is not None:
+            return impl_go_route
+        writable_head = self._writable_head_guard(item, ctx, existing_pr)
+        if writable_head is not None:
+            return writable_head
+        if agent_error_reentry:
+            # M1: consume the implement budget at GATE-adoption so the
+            # pr_review agent_error -> re-adopt cycle is bounded.
+            attempts = item.attempts.get("implement", 0) + 1
+            item.attempts["implement"] = attempts
+            budget = ctx.budget("implement")
+            if attempts >= budget:
+                logger.error(
+                    "implementation:%d: agent_error fail-backs exhausted the "
+                    "implement budget (%d/%d) re-adopting PR #%d — stopping; "
+                    "the review/address infrastructure failed repeatedly and "
+                    "re-adopting the same PR cannot fix it (manual look needed)",
+                    item.issue,
+                    attempts,
+                    budget,
+                    existing_pr,
+                )
+                return StageOutcome(Disposition.FINISH_FAIL, "agent_error_exhausted")
+        # Adopt the PR's REAL head branch — never assume {issue}-auto-impl.
+        item.payload["existing_pr"] = True
+        logger.info(
+            "implementation:%d: existing PR #%d (branch %r); preparing adopted worktree",
+            item.issue,
+            existing_pr,
+            item.branch,
         )
         return Continue(next_state=WORKTREE_WAIT)
 
@@ -827,48 +852,12 @@ class ImplementationStage(Stage):
 
         existing_pr = item.pr or ctx.github.find_pr_for_issue(item.issue)
         if existing_pr:
-            item.pr = existing_pr
-            terminal = _terminal_pr_outcome(ctx.github.gh_pr_state(existing_pr), existing_pr)
-            if terminal is not None:
-                return terminal
-            defer_failed = self._defer_gate(item.issue, existing_pr, ctx)
-            if defer_failed is not None:
-                return defer_failed
-            head_branch = ctx.github.get_pr_head_branch(existing_pr)
-            if head_branch:
-                item.branch = head_branch
-            impl_go_route = self._impl_go_route(item, ctx, existing_pr)
-            if impl_go_route is not None:
-                return impl_go_route
-            if agent_error_reentry:
-                # M1: consume the implement budget at GATE-adoption so the
-                # pr_review agent_error -> re-adopt cycle is bounded.
-                attempts = item.attempts.get("implement", 0) + 1
-                item.attempts["implement"] = attempts
-                budget = ctx.budget("implement")
-                if attempts >= budget:
-                    logger.error(
-                        "implementation:%d: agent_error fail-backs exhausted the "
-                        "implement budget (%d/%d) re-adopting PR #%d — stopping; "
-                        "the review/address infrastructure failed repeatedly and "
-                        "re-adopting the same PR cannot fix it (manual look needed)",
-                        item.issue,
-                        attempts,
-                        budget,
-                        existing_pr,
-                    )
-                    return StageOutcome(Disposition.FINISH_FAIL, "agent_error_exhausted")
-            # Adopt the PR's REAL head branch — never assume {issue}-auto-impl
-            # (the _review_existing_pr branch-assumption bug). Auto-merge was
-            # already verified disabled above before the branch was inspected.
-            item.payload["existing_pr"] = True
-            logger.info(
-                "implementation:%d: existing PR #%d (branch %r); preparing adopted worktree",
-                item.issue,
+            return self._adopt_existing_pr(
+                item,
+                ctx,
                 existing_pr,
-                item.branch,
+                agent_error_reentry=agent_error_reentry,
             )
-            return Continue(next_state=WORKTREE_WAIT)
 
         # At-or-past (never equality): plan-go OR already implementation-go
         # both satisfy the gate; anything earlier fails back to plan_review.

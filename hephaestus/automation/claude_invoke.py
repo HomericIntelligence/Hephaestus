@@ -4,7 +4,7 @@ Verdict parsing, rate-limit detection, and deterministic-session invocation.
 
 What lives here:
 
-- :func:`parse_review_verdict` — verdict parser used by the strict review loops
+- :func:`parse_review_verdict` — verdict parser used by automation review loops
 - :func:`scan_quota_reset` — shared cross-stream rate-limit scanner so all
   phases get identical 429 handling.
 - :func:`detect_model_usage_cap` — classifier for the model-specific
@@ -642,12 +642,14 @@ class ReviewVerdict:
         return self.verdict == "ERROR"
 
 
-_GRADE_RE = re.compile(
-    r"^\s*\**\s*Grade\s*:\s*\**\s*([A-F][+-]?)(?![A-Za-z])",
+_VERDICT_RE = re.compile(
+    r"^\s*\**\s*Verdict\s*:\s*\**\s*(CONDITIONAL[\s-]?GO|GO|NO[\s-]?GO|ERROR)\b",
     re.MULTILINE | re.IGNORECASE,
 )
-_VERDICT_RE = re.compile(
-    r"^\s*\**\s*Verdict\s*:\s*\**\s*(GO|NO[\s-]?GO|ERROR)\b", re.MULTILINE | re.IGNORECASE
+_SUMMARY_PAIR_RE = re.compile(
+    r"^\s*\**\s*Grade\s*:\s*\**\s*(?P<grade>[A-F][+-]?)(?![A-Za-z])[ \t]*\r?\n"
+    r"^\s*\**\s*Verdict\s*:\s*\**\s*(?P<verdict>CONDITIONAL[\s-]?GO|GO|NO[\s-]?GO|ERROR)\b",
+    re.MULTILINE | re.IGNORECASE,
 )
 
 # Sentinel review text emitted when the reviewer subprocess itself fails
@@ -662,13 +664,16 @@ def parse_review_verdict(text: str) -> ReviewVerdict:
 
     Looks for lines like:
         Grade: B+
-        Verdict: GO     (or NOGO, NO-GO, NO GO, ERROR)
+        Verdict: GO     (or CONDITIONAL GO, NOGO, NO-GO, NO GO, ERROR)
 
-    A response missing or contradicting these markers is treated as
-    AMBIGUOUS — which the loop treats as NoGo (continue iterating). An explicit
-    ``Verdict: ERROR`` marks a reviewer-infrastructure failure (see
+    A response missing a verdict is treated as AMBIGUOUS — which the loop
+    treats as NoGo (continue iterating). A grade is associated only with an
+    immediately adjacent preceding ``Grade`` line, so a final verdict cannot
+    borrow a grade from an earlier summary. An explicit ``Verdict: ERROR`` marks
+    a reviewer-infrastructure failure (see
     :data:`INFRA_ERROR_REVIEW_TEXT`) and is surfaced as ``verdict="ERROR"`` so
-    callers can distinguish it from a genuine NOGO.
+    callers can distinguish it from a genuine NOGO. ``CONDITIONAL GO`` is
+    normalized to NOGO because the pipeline's gate is binary.
 
     Args:
         text: The full review text from Claude.
@@ -677,19 +682,21 @@ def parse_review_verdict(text: str) -> ReviewVerdict:
         :class:`ReviewVerdict`.
 
     """
-    grade_match = _GRADE_RE.search(text)
-    grade = grade_match.group(1).upper() if grade_match else None
+    # Last verdict wins. A grade belongs to it only when it appears in the
+    # immediately preceding Grade/Verdict pair; this preserves plan-review's
+    # historical verdict-only format while allowing PR review to reject an
+    # ungraded final verdict fail-closed.
+    pairs = list(_SUMMARY_PAIR_RE.finditer(text))
+    verdicts = list(_VERDICT_RE.finditer(text))
+    if not verdicts:
+        return ReviewVerdict(grade=None, verdict="AMBIGUOUS", raw=text)
 
-    verdict_match = _VERDICT_RE.search(text)
-    if verdict_match:
-        raw_verdict = re.sub(r"[\s-]", "", verdict_match.group(1).upper())
-        if raw_verdict == "GO":
-            verdict = "GO"
-        elif raw_verdict == "ERROR":
-            verdict = "ERROR"
-        else:
-            verdict = "NOGO"
-    else:
-        verdict = "AMBIGUOUS"
-
+    final_verdict = verdicts[-1]
+    matching_pair = next(
+        (pair for pair in reversed(pairs) if pair.start("verdict") == final_verdict.start(1)),
+        None,
+    )
+    raw_verdict = re.sub(r"[\s-]", "", final_verdict.group(1).upper())
+    verdict = "GO" if raw_verdict == "GO" else "ERROR" if raw_verdict == "ERROR" else "NOGO"
+    grade = matching_pair.group("grade").upper() if matching_pair else None
     return ReviewVerdict(grade=grade, verdict=verdict, raw=text)

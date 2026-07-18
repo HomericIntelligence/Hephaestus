@@ -4,6 +4,11 @@ Contains the canonical implementation prompt, the iteration-aware impl-loop
 review prompt, and the resume-after-NOGO feedback prompt.
 """
 
+from ._review_rubric import (
+    get_full_sweep_suffix,
+    get_implementation_loop_review_rubric,
+    get_review_output_format,
+)
 from ._shared import (
     _iteration_guidance,
     _iteration_label,
@@ -11,11 +16,6 @@ from ._shared import (
     _relativize_path,
     fence_content,
     get_terse_output_directive,
-)
-from ._strict_rubric import (
-    get_full_sweep_suffix,
-    get_implementation_loop_strict_rubric,
-    get_strict_review_output_format,
 )
 from .catalog import PromptCatalog
 
@@ -90,7 +90,7 @@ def get_impl_loop_review_prompt(
     full_sweep_suffix = get_full_sweep_suffix().strip() if iteration == 2 else ""
     return PromptCatalog.current().render(
         "implementation/loop_review.j2",
-        rubric=get_implementation_loop_strict_rubric().strip(),
+        rubric=get_implementation_loop_review_rubric().strip(),
         iteration=iteration,
         iteration_label=_iteration_label(iteration),
         iteration_guidance=_iteration_guidance(iteration),
@@ -101,7 +101,7 @@ def get_impl_loop_review_prompt(
         files_changed=files_changed or "_(no files changed)_",
         prior_review_block=_prior_review_block(prior_review),
         full_sweep_suffix=full_sweep_suffix,
-        output_format=get_strict_review_output_format().strip(),
+        output_format=get_review_output_format().strip(),
         untrusted_notice=fenced.untrusted_notice,
         terse_output_directive=get_terse_output_directive(),
     )

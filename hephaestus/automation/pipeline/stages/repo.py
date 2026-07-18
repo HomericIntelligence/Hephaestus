@@ -17,7 +17,7 @@ Steps:
    ``ctx.github.skip_epics`` [durable, BEFORE excluding], classify each kept
    issue via the REUSED :func:`~..seeding.seed_issue` /
    :func:`~..seeding.classify_issue`, and (``--drive-green-all``) route
-   orphan PRs (open PRs with no tracked issue) to the ci queue.
+   open PRs with a linked tracked issue to PR review.
 4. [M] SEEDED: expose the classified products in
    ``item.payload["products"]`` — the coordinator (queue owner) performs the
    actual queue pushes when routing the repo item — and finish
@@ -60,7 +60,9 @@ logger = logging.getLogger(__name__)
 def _drive_green_pr_is_in_scope(
     pr: dict[str, Any], *, include_bot_prs: bool, viewer_login: str
 ) -> bool:
-    """Return whether an orphan PR belongs to the configured author scope."""
+    """Return whether an orphan PR is eligible and belongs to author scope."""
+    if not _pr_discovery.pr_needs_loop_review(pr):
+        return False
     if not include_bot_prs and _pr_discovery._is_bot_pr_author(pr):
         return False
     if not _pr_discovery._is_viewer_authored(pr, viewer_login):
@@ -255,7 +257,8 @@ class RepoStage(Stage):
                 }
             )
 
-        # --drive-green-all: orphan PRs (no tracked issue) -> ci stage.
+        # --drive-green-all: only linked PRs can be reviewed. Orphans have no
+        # requirements context and must remain outside the automation loop.
         if getattr(ctx.config, "drive_green_all", False):
             include_bot_prs = bool(getattr(ctx.config, "include_bot_prs", True))
             include_all_authors = bool(getattr(ctx.config, "include_all_authors", False))
@@ -273,13 +276,10 @@ class RepoStage(Stage):
                     pr, include_bot_prs=include_bot_prs, viewer_login=viewer_login
                 ):
                     continue
-                products.append(
-                    {
-                        "kind": "pr",
-                        "number": pr_number,
-                        "stage": StageName.STRICT_REVIEW,
-                        "reason": f"orphan PR #{pr_number} (drive-green-all)",
-                    }
+                logger.info(
+                    "repo:%s: skipping orphan PR #%d; no linked issue supplies requirements",
+                    item.repo,
+                    pr_number,
                 )
 
         item.payload["products"] = products
@@ -329,7 +329,13 @@ def product_to_work_item(repo: str, product: dict[str, Any]) -> WorkItem | None:
     item = WorkItem(
         repo=repo,
         kind=kind,
-        issue=number if kind is ItemKind.ISSUE else None,
+        # A PR number never supplies issue requirements. Linked issue context
+        # is required before a PR can enter the review stage.
+        issue=(
+            number
+            if kind is ItemKind.ISSUE
+            else (int(product["issue"]) if product.get("issue") is not None else None)
+        ),
         pr=int(product["pr"]) if product.get("pr") else (number if kind is ItemKind.PR else None),
         stage=stage,
         state="ENTER",

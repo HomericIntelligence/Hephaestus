@@ -379,7 +379,7 @@ def test_legacy_drive_stops_after_verified_auto_merge_deferral() -> None:
 
     assert deferred == [42]
     assert result.success is False
-    assert result.error == "strict_gate_unavailable"
+    assert result.error == "merge_wait_unavailable"
 
 
 def test_legacy_dry_run_still_delegates_auto_merge_deferral() -> None:
@@ -410,7 +410,7 @@ def test_legacy_dry_run_still_delegates_auto_merge_deferral() -> None:
     result = coordinator.drive_issue(issue_number=7, pr_number=42, slot_id=0)
 
     assert deferred == [42]
-    assert result.error == "strict_gate_unavailable"
+    assert result.error == "merge_wait_unavailable"
 
 
 def test_legacy_drive_reports_failed_auto_merge_deferral() -> None:
@@ -453,7 +453,7 @@ def test_legacy_coordinator_dry_run_deferral_avoids_gh_mutation() -> None:
 
 
 def test_legacy_arm_and_wait_refuses_even_during_dry_run() -> None:
-    """The retired compatibility entry reports the unavailable strict gate, never success."""
+    """The retired compatibility entry reports unavailable merge waiting, never success."""
     coordinator = _coordinator(
         lambda _args, **_kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
         lambda _pr_number: {"state": "OPEN"},
@@ -463,7 +463,7 @@ def test_legacy_arm_and_wait_refuses_even_during_dry_run() -> None:
     result = coordinator.arm_and_wait_for_merge(issue_number=7, pr_number=42, acquired_slot=0)
 
     assert result.success is False
-    assert result.error == "strict_gate_unavailable"
+    assert result.error == "merge_wait_unavailable"
 
 
 def test_legacy_arm_and_wait_reports_failed_auto_merge_containment() -> None:

@@ -274,6 +274,55 @@ def push_branch(branch_name: str, worktree_path: Path, *, timeout: int | None = 
         raise RuntimeError(f"Failed to push branch {branch_name}: {e}") from e
 
 
+def push_head_to_branch(
+    branch_name: str, worktree_path: Path, *, timeout: int | None = None
+) -> None:
+    """Publish detached ``HEAD`` to ``origin/<branch_name>`` safely.
+
+    Direct PR review uses a detached, isolated worktree so it can never reset
+    or remove a writer checkout.  Addressing commits therefore live on its
+    detached ``HEAD`` rather than on the local branch ref.  An ordinary
+    fast-forward push of that exact HEAD fails closed if the PR branch changed;
+    it neither records a proof nor force-updates another writer's work.
+    """
+    try:
+        run(
+            [
+                "git",
+                "push",
+                "origin",
+                f"HEAD:refs/heads/{branch_name}",
+            ],
+            cwd=worktree_path,
+            **_timeout_kw(timeout),
+        )
+        logger.info("Published detached HEAD to origin/%s", branch_name)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"Failed to publish detached HEAD to branch {branch_name}: {e}") from e
+
+
+def has_unpushed_commits(
+    branch_name: str, worktree_path: Path, *, timeout: int | None = None
+) -> bool:
+    """Return whether ``HEAD`` is ahead of ``origin/<branch_name>``.
+
+    This is used only by the coordinator-owned commit/push handoff to recover
+    an address agent that committed locally despite its prompt.  It performs
+    no network operation; worktree synchronization fetched the tracking ref
+    before the agent ran.
+    """
+    result = run(
+        ["git", "rev-list", "--count", f"origin/{branch_name}..HEAD"],
+        cwd=worktree_path,
+        capture_output=True,
+        **_timeout_kw(timeout),
+    )
+    try:
+        return int((result.stdout or "0").strip()) > 0
+    except ValueError as exc:
+        raise RuntimeError(f"Could not count unpushed commits for {branch_name}") from exc
+
+
 def safe_git_fetch(repo_root: Path, retries: int = 3) -> bool:
     """Safely fetch from git remote with retry and exponential backoff.
 

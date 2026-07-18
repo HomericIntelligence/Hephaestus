@@ -180,15 +180,15 @@ class TestWorkerPoolSubmitComplete:
         pool: WorkerPool,
         completion_q: CompletionQueue,
     ) -> None:
-        """Strict-review jobs must not be silently widened to workspace-write."""
+        """Read-only jobs must not be silently widened to workspace-write."""
         job = _agent_job(agent="codex", sandbox="read-only")
-        session_result = MagicMock(stdout="strict review")
+        session_result = MagicMock(stdout="review")
 
         with (
             patch(f"{_WP}.resolve_agent", return_value="codex"),
             patch(f"{_WP}.run_agent_session", return_value=session_result) as mock_session,
         ):
-            pool.submit(job, StageName.STRICT_REVIEW)
+            pool.submit(job, StageName.PR_REVIEW)
             _handle, result = completion_q.get(timeout=10)
 
         assert result.ok is True
@@ -199,7 +199,7 @@ class TestWorkerPoolSubmitComplete:
         pool: WorkerPool,
         completion_q: CompletionQueue,
     ) -> None:
-        """Strict-review Claude jobs receive no write or shell capability."""
+        """A read-only job keeps Claude's historic restricted tool scope."""
         job = _agent_job(sandbox="read-only")
         with (
             patch(f"{_WP}.resolve_agent", return_value="claude"),
@@ -208,62 +208,34 @@ class TestWorkerPoolSubmitComplete:
                 return_value=("GO", "s"),
             ) as invoke,
         ):
-            pool.submit(job, StageName.STRICT_REVIEW)
+            pool.submit(job, StageName.PR_REVIEW)
             _handle, result = completion_q.get(timeout=10)
 
         assert result.ok is True
         assert invoke.call_args.kwargs["allowed_tools"] == "Read,Glob,Grep"
         assert invoke.call_args.kwargs["permission_mode"] == "dontAsk"
 
-    def test_expected_head_mismatch_blocks_agent_before_invocation(
+    def test_read_only_agent_job_honors_its_explicit_skill_scope(
         self,
         pool: WorkerPool,
         completion_q: CompletionQueue,
     ) -> None:
-        """A strict reviewer never sees a worktree at a different commit."""
-        expected = "a" * 40
-        job = _agent_job(expected_head_sha=expected)
-        head_result = subprocess.CompletedProcess(
-            ["git", "rev-parse", "HEAD"], 0, stdout=("b" * 40) + "\n", stderr=""
-        )
+        """The PR-review worker can invoke its declared read-only skill."""
+        allowed_tools = "Read,Glob,Grep,Bash,Skill,Agent,WebFetch"
+        job = _agent_job(sandbox="read-only", allowed_tools=allowed_tools)
         with (
-            patch(f"{_WP}.subprocess.run", return_value=head_result),
-            patch(f"{_WP}.claude_invoke.invoke_claude_with_session") as invoke,
+            patch(f"{_WP}.resolve_agent", return_value="claude"),
+            patch(
+                f"{_WP}.claude_invoke.invoke_claude_with_session",
+                return_value=("GO", "s"),
+            ) as invoke,
         ):
-            pool.submit(job, StageName.STRICT_REVIEW)
+            pool.submit(job, StageName.PR_REVIEW)
             _handle, result = completion_q.get(timeout=10)
 
-        assert result.ok is False
-        assert result.error is not None and "local_head_mismatch" in result.error
-        invoke.assert_not_called()
-
-    def test_dirty_expected_head_worktree_blocks_agent_before_invocation(
-        self,
-        pool: WorkerPool,
-        completion_q: CompletionQueue,
-    ) -> None:
-        """Matching SHA alone is insufficient when local files differ from it."""
-        expected = "a" * 40
-        job = _agent_job(expected_head_sha=expected)
-        head_result = subprocess.CompletedProcess(
-            ["git", "rev-parse", "HEAD"], 0, stdout=expected + "\n", stderr=""
-        )
-        dirty_result = subprocess.CompletedProcess(
-            ["git", "status", "--porcelain=v1", "--untracked-files=all"],
-            0,
-            stdout=" M implementation.py\n?? untracked.txt\n",
-            stderr="",
-        )
-        with (
-            patch(f"{_WP}.subprocess.run", side_effect=[head_result, dirty_result]),
-            patch(f"{_WP}.claude_invoke.invoke_claude_with_session") as invoke,
-        ):
-            pool.submit(job, StageName.STRICT_REVIEW)
-            _handle, result = completion_q.get(timeout=10)
-
-        assert result.ok is False
-        assert result.error is not None and "local_worktree_dirty" in result.error
-        invoke.assert_not_called()
+        assert result.ok is True
+        assert invoke.call_args.kwargs["allowed_tools"] == allowed_tools
+        assert invoke.call_args.kwargs["permission_mode"] == "dontAsk"
 
     def test_submit_and_complete_build_test_job(
         self,
@@ -278,7 +250,7 @@ class TestWorkerPoolSubmitComplete:
             timeout_s=60,
         )
 
-        pool.submit(job, StageName.CI)
+        pool.submit(job, StageName.PR_REVIEW)
         handle, result = completion_q.get(timeout=10)
 
         assert handle.job is job
@@ -306,7 +278,7 @@ class TestWorkerPoolSubmitComplete:
         with patch(f"{_WP}.subprocess.run", return_value=completed):
             pool.submit(
                 job,
-                StageName.CI,
+                StageName.PR_REVIEW,
                 claim_key="test/repo#123",
                 claim_stage="ci",
             )
@@ -361,7 +333,7 @@ class TestWorkerPoolSubmitComplete:
             with patch(f"{_WP}.subprocess.run", side_effect=complete_after_both_workers_enter):
                 pool.submit(
                     jobs[0],
-                    StageName.CI,
+                    StageName.PR_REVIEW,
                     claim_key="test/repo#123",
                     claim_stage="ci",
                 )
@@ -406,7 +378,7 @@ class TestWorkerPoolSubmitComplete:
             timeout_s=60,
         )
 
-        pool.submit(job, StageName.CI)
+        pool.submit(job, StageName.PR_REVIEW)
         _, result = completion_q.get(timeout=10)
 
         assert result.ok is False
@@ -429,7 +401,7 @@ class TestWorkerPoolSubmitComplete:
             f"{_WP}.subprocess.run",
             side_effect=subprocess.TimeoutExpired(cmd=["sleep", "60"], timeout=1),
         ):
-            pool.submit(job, StageName.CI)
+            pool.submit(job, StageName.PR_REVIEW)
             _, result = completion_q.get(timeout=10)
 
         assert result.ok is False
@@ -733,7 +705,7 @@ class TestInterruptedPostCheck:
             patch(f"{_WP}.claude_invoke.invoke_claude_with_session") as mock_invoke,
         ):
             mock_invoke.return_value = ("done", "sid")
-            pool.submit(job, StageName.CI)
+            pool.submit(job, StageName.PR_REVIEW)
             assert started.wait(timeout=10), "job never started"
             shutdown_event.set()
             _handle, result = completion_q.get(timeout=10)
@@ -852,6 +824,46 @@ class TestGitOps:
             "status": "",
             "diff": "",
         }
+
+    def test_create_isolated_worktree_syncs_only_detached_checkout(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """PR review syncs its returned detached path, never a writer checkout."""
+        review_path = tmp_path / "build" / ".worktrees" / "pr-review-pr-70"
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 70,
+                "branch_name": "70-existing",
+                "isolated": True,
+                "repo_root": str(tmp_path),
+                "sync_to_remote": True,
+                "pr_number": 70,
+            },
+        )
+        instance = MagicMock()
+        instance.create_worktree.return_value = review_path
+        with (
+            patch(f"{_WP}.WorktreeManager", return_value=instance),
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+            patch(f"{_WP}.git_utils.sync_worktree_to_remote_branch") as mock_sync,
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        instance.create_worktree.assert_called_once_with(
+            issue_number=70,
+            branch_name="70-existing",
+            isolated=True,
+            timeout=60,
+        )
+        mock_sync.assert_called_once_with(review_path, "70-existing", pr_number=70, timeout=60)
+        assert result.ok is True
 
     def test_create_worktree_defaults_repo_root_to_ambient_cwd(
         self,
@@ -1060,7 +1072,7 @@ class TestGitOps:
             ) as mock_commit,
             patch("hephaestus.automation.git_utils.push_branch") as mock_push,
         ):
-            pool.submit(job, StageName.CI)
+            pool.submit(job, StageName.PR_REVIEW)
             _, result = completion_q.get(timeout=10)
 
         mock_commit.assert_called_once_with(
@@ -1091,12 +1103,101 @@ class TestGitOps:
             patch("hephaestus.automation.git_utils.commit_if_changes", return_value=False),
             patch("hephaestus.automation.git_utils.push_branch") as mock_push,
         ):
-            pool.submit(job, StageName.CI)
+            pool.submit(job, StageName.PR_REVIEW)
             _, result = completion_q.get(timeout=10)
 
         mock_push.assert_not_called()
         assert result.ok is True
         assert result.value is False
+
+    def test_commit_push_publishes_agent_precommitted_change(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A clean tree ahead of its remote branch still needs coordinator-owned push."""
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={"issue_number": 5, "worktree_path": tmp_path, "branch": "5-auto"},
+        )
+        with (
+            patch("hephaestus.automation.git_utils.commit_if_changes", return_value=False),
+            patch(
+                "hephaestus.automation.git_utils.has_unpushed_commits", return_value=True
+            ) as mock_ahead,
+            patch("hephaestus.automation.git_utils.run", return_value=MagicMock(stdout="")),
+            patch("hephaestus.automation.git_utils.push_branch") as mock_push,
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        mock_ahead.assert_called_once_with("5-auto", tmp_path, timeout=60)
+        mock_push.assert_called_once_with("5-auto", tmp_path, timeout=60)
+        assert result.ok is True
+        assert result.value is True
+
+    def test_commit_push_does_not_publish_dirty_worktree_after_failed_commit(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A failed commit cannot publish an older unpushed branch tip."""
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={"issue_number": 5, "worktree_path": tmp_path, "branch": "5-auto"},
+        )
+        with (
+            patch("hephaestus.automation.git_utils.commit_if_changes", return_value=False),
+            patch("hephaestus.automation.git_utils.has_unpushed_commits", return_value=True),
+            patch(
+                "hephaestus.automation.git_utils.run",
+                return_value=MagicMock(stdout=" M uncommitted-change.py\\n"),
+            ),
+            patch("hephaestus.automation.git_utils.push_branch") as mock_push,
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        mock_push.assert_not_called()
+        assert result.ok is False
+        assert result.error == "commit_push left uncommitted changes"
+
+    def test_commit_push_publishes_detached_pr_review_head(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """Direct PR review publishes its detached HEAD, never a writer ref."""
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 5,
+                "worktree_path": tmp_path,
+                "branch": "5-auto",
+                "publish_detached_head": True,
+            },
+        )
+        with (
+            patch("hephaestus.automation.git_utils.commit_if_changes", return_value=True),
+            patch("hephaestus.automation.git_utils.push_head_to_branch") as mock_push,
+            patch("hephaestus.automation.git_utils.push_branch") as normal_push,
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        mock_push.assert_called_once_with("5-auto", tmp_path, timeout=60)
+        normal_push.assert_not_called()
+        assert result.ok is True
+        assert result.value is True
 
     def test_commit_push_missing_worktree_path_is_error(
         self,
@@ -1114,7 +1215,7 @@ class TestGitOps:
             patch("hephaestus.automation.git_utils.commit_if_changes") as mock_commit,
             patch("hephaestus.automation.git_utils.push_branch") as mock_push,
         ):
-            pool.submit(job, StageName.CI)
+            pool.submit(job, StageName.PR_REVIEW)
             _, result = completion_q.get(timeout=10)
 
         mock_commit.assert_not_called()
@@ -1536,7 +1637,7 @@ class TestShutdownAndCancel:
             mock_invoke.return_value = ("done", "sid")
             pool.submit(slow_job, StageName.PLANNING)
             assert started.wait(timeout=10), "slow job never started"
-            pool.submit(queued_job, StageName.CI)  # queued behind the busy worker
+            pool.submit(queued_job, StageName.PR_REVIEW)  # queued behind the busy worker
             pool.shutdown()  # sets shutdown event + cancel_futures=True
             release.set()
 
@@ -1561,7 +1662,7 @@ class TestOnFutureDone:
         """A cancelled future synthesizes no completion tuple."""
         handle = JobHandle(
             job=BuildTestJob(repo="r", cwd=Path("/tmp"), argv=("true",), timeout_s=1),
-            on_done_state=StageName.CI,
+            on_done_state=StageName.PR_REVIEW,
         )
         future: Future[JobResult] = Future()
         future.cancel()
@@ -1592,7 +1693,7 @@ class TestOnFutureDone:
         """RuntimeError from future.result() becomes worker_crash with traceback."""
         handle = JobHandle(
             job=BuildTestJob(repo="r", cwd=Path("/tmp"), argv=("true",), timeout_s=1),
-            on_done_state=StageName.CI,
+            on_done_state=StageName.PR_REVIEW,
         )
         future: Future[JobResult] = Future()
         future.set_exception(RuntimeError("boom"))
@@ -1628,7 +1729,7 @@ class TestOnFutureDone:
         """Process-control escapes stay at lower severity and do not log tracebacks."""
         handle = JobHandle(
             job=BuildTestJob(repo="r", cwd=Path("/tmp"), argv=("true",), timeout_s=1),
-            on_done_state=StageName.CI,
+            on_done_state=StageName.PR_REVIEW,
         )
         future: Future[JobResult] = Future()
         future.set_exception(exc)
@@ -1654,7 +1755,7 @@ class TestOnFutureDone:
         monkeypatch.setattr(f"{_WP}._ERR_MAX", small_err_max)
         handle = JobHandle(
             job=BuildTestJob(repo="r", cwd=Path("/tmp"), argv=("true",), timeout_s=1),
-            on_done_state=StageName.CI,
+            on_done_state=StageName.PR_REVIEW,
         )
         future: Future[JobResult] = Future()
         future.set_exception(RuntimeError("w" * 200))

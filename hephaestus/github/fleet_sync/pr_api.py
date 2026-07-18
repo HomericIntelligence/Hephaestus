@@ -144,7 +144,5 @@ def merge_pr(pr: PRInfo, org: str, dry_run: bool = False) -> bool:
         return False
     if not _defer_auto_merge(pr, org):
         return False
-    logger.error(
-        "  Refusing to merge PR #%d while the strict-review gate is unavailable", pr.number
-    )
+    logger.error("  Refusing to merge PR #%d while the PR-review gate is unavailable", pr.number)
     return False

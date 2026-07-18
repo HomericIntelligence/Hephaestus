@@ -9,9 +9,9 @@ Steps:
 1. [M] RECORD: append the item's :class:`~..work_item.ItemResult` to the run
    ledger (the coordinator injects its ledger list at construction — queue
    and ledger ownership stay with the coordinator).
-2. [W:G] CLEANUP: ``GitJob(op="remove_worktree")`` on pass; on fail the
-   worktree is PRESERVED for debugging and recorded in the preserved list
-   the end-of-run summary prints.
+2. [W:G] CLEANUP: remove the implementation worktree on pass; on fail, preserve that writer
+   worktree for debugging and record it in the preserved list the end-of-run
+   summary prints.
 
 Verdicts: terminal — no outgoing routes (the coordinator drops the item
 when the sink emits its final outcome).
@@ -112,7 +112,7 @@ class FinishedStage(Stage):
         return StageOutcome(Disposition.FINISH_FAIL, note=f"unknown state: {item.state}")
 
     def _cleanup(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """Remove the worktree on pass; preserve (and record) it on fail."""
+        """Clean or preserve the writer worktree."""
         if not item.worktree:
             return Continue(next_state="DONE")
 

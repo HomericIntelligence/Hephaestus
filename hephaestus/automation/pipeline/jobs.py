@@ -36,12 +36,13 @@ class AgentJob:
     prompt_kwargs: dict[str, Any] = field(default_factory=dict)
     output_format: str = "text"
     parse: Callable[[str], Any] | None = None  # e.g. claude_invoke.parse_review_verdict
-    # When present, the worker captures ``git rev-parse HEAD`` in ``cwd`` and
-    # refuses to invoke the agent unless it equals this remote-reviewed SHA.
-    expected_head_sha: str = ""
-    # Existing agent jobs retain the established write-capable default; the
-    # independent strict-review stage explicitly requests ``read-only``.
+    # Existing agent jobs retain the established write-capable default; callers
+    # that only inspect repository state request ``read-only`` explicitly.
     sandbox: str = "workspace-write"
+    # Optional Claude tool scope for a read-only job.  Most reviewers use the
+    # conservative default assigned by WorkerPool; the full PR-review skill
+    # declares the additional read-only helper capabilities it needs.
+    allowed_tools: str | None = None
     descr: str = ""
 
 

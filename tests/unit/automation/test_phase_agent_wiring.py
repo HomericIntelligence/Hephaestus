@@ -246,37 +246,6 @@ def test_per_iteration_reviewer_does_not_pin_foreign_agent(
     )
 
 
-# Advise-first (#30): each stage opens its run with an advise step gated by
-# ``enable_advise``. Every provider receives the same selected-skill context
-# block explicitly injected into the downstream task prompt.
-ADVISE_FIRST_STAGES_ADVISE_AGENT: list[tuple[str, tuple[str, ...]]] = [
-    # Stage 1's advise step moved into the pipeline planning stage (#1820):
-    # ``pipeline/stages/planning.py`` runs advise under AGENT_ADVISE gated by
-    # ``enable_advise`` (asserted by test_stage_planning.py), so the legacy
-    # ``planner.py`` row was dropped.
-    # Stage 3's advise step moved into the pipeline CI stage (#1822):
-    # ``pipeline/stages/ci.py`` seeds ``advise_findings`` (coordinator-owned,
-    # gated by ``enable_advise`` — asserted by test_stage_ci.py), so the legacy
-    # ``ci_driver.py`` row was dropped.
-]
-
-
-@pytest.mark.parametrize("module_file, companions", ADVISE_FIRST_STAGES_ADVISE_AGENT)
-def test_stage_runs_advise_under_advise_agent(
-    module_file: str, companions: tuple[str, ...]
-) -> None:
-    """Planner and CI driver run /advise under AGENT_ADVISE, gated by enable_advise.
-
-    Advise-first (#30) is the mechanism that pulls prior learnings into each
-    stage before it acts. For these stages the advise session always runs under
-    ``AGENT_ADVISE`` (never the stage's own session), and every stage must let
-    operators turn it off via ``enable_advise``.
-    """
-    src = _read_phase_sources(module_file, companions)
-    assert "AGENT_ADVISE" in src, f"{module_file} must run its advise step under AGENT_ADVISE"
-    assert "enable_advise" in src, f"{module_file} must gate advise behind enable_advise"
-
-
 def test_implementer_prepends_advise_context_for_all_agents() -> None:
     """The implementation stage injects selected-skill context into the prompt.
 

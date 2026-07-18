@@ -107,7 +107,11 @@ class TestAgentErrorPingPongTerminates:
         # ROUTES: agent_error -> implementation. GATE re-adopts, consuming
         # the implement budget; the adopted worktree leg runs and ADVANCEs.
         item.state = "ENTER"
-        outcome = _drive(impl_stage, item, ctx, FakeWorkerPool())
+        implementation_pool = FakeWorkerPool()
+        implementation_pool.queue_result(
+            JobResult(ok=True, value={"path": "/tmp/adopted-pr", "dirty": False})
+        )
+        outcome = _drive(impl_stage, item, ctx, implementation_pool)
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition == Disposition.ADVANCE
         assert item.attempts["implement"] == 1  # the bound moved

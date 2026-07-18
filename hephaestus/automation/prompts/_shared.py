@@ -123,8 +123,8 @@ def _prior_review_block(
 
 
 # Token-reduction directive (#1082). Composed into every agent prompt via
-# template-context injection. The GitHub-output
-# carve-out MUST stay the first line so brevity never truncates pr-policy
+# template-context injection. The GitHub-output carve-out MUST stay the first
+# line so brevity never truncates final
 # artifacts (see learn-agents-fabricate-closes-issue-numbers.md). The
 # no-early-exit clause is bounded to *transient* external state so agents do
 # NOT spin on permanent failures (auth, 4xx) — see

@@ -46,7 +46,7 @@ class TestImplementationPrompt:
         assert "`git push`" in out
         assert "`gh pr create`" in out
         assert "Do not enable auto-merge yourself" in out
-        assert "state:implementation-go" not in out
+        assert "mark_pr_implementation_go" not in out
         # The implementation agent should not run the PR verification/mutation commands.
         assert "gh pr view" not in out
         assert "gh api graphql" not in out
@@ -88,14 +88,8 @@ class TestPRReviewAnalysisPrompt:
         assert "PR #10" in out
         assert "issue #5" in out
 
-    def test_omits_policy_checks_defers_to_ci_gates(self) -> None:
-        """The reviewer no longer enforces repo policy — CI gates own it.
-
-        Closes #N and signed commits are enforced by CI. Auto-merge containment
-        is enforced by the queue pipeline's strict-review gate, not the
-        in-loop LLM reviewer (which fabricated false POLICY VIOLATIONs from
-        empty/stale data).
-        """
+    def test_uses_default_pr_review_skill_behavior(self) -> None:
+        """The loop invokes Athena's normal PR-review behavior when available."""
         out = prompts.get_pr_review_analysis_prompt(pr_number=1, issue_number=1)
         # The removed policy machinery must be gone.
         assert "POLICY VIOLATION" not in out
@@ -103,13 +97,17 @@ class TestPRReviewAnalysisPrompt:
         assert "signature_valid" not in out
         assert "COMMITS_SIGNING_STATE" not in out
         assert "Policy checks (MANDATORY" not in out
-        # But the prompt should tell the reviewer the CI gates own policy.
-        assert "pr-policy" in out
-        assert "independent strict-review" in out
-        assert "merge-wait" in out
-        assert "acceptable to merge" not in out
-        assert "eligible for independent strict review" in out
-        assert "independent strict-review" in (prompts.get_pr_review_analysis_prompt.__doc__ or "")
+        assert "$athena:pr-review" in out
+        assert "--ci-free" not in out
+        assert "normal default behavior" in out
+        assert "Do not return the skill's raw report" in out
+        assert "CONDITIONAL GO" in out
+        assert "pr-policy" not in out
+        assert "CI Status" not in out
+        assert "merge_wait" in out
+        assert "independent secondary review" not in out
+        assert "eligible for secondary review" not in out
+        assert "$athena:pr-review" in (prompts.get_pr_review_analysis_prompt.__doc__ or "")
         # The code-quality verdict contract stays intact.
         assert "Verdict: NOGO" in out
         assert "Verdict: GO" in out
@@ -141,21 +139,21 @@ class TestPRReviewAnalysisPrompt:
         assert "nitpick" in out
         assert "major" in out
 
-    def test_pr_review_prompt_contains_strict_rubric(self) -> None:
-        """Prompt must embed the strict rubric.
+    def test_pr_review_prompt_contains_review_rubric(self) -> None:
+        """Prompt must embed the review rubric.
 
         Verifies the strict-grading scale, PR-specific dimensions, and the
         seven software-engineering principles (P1–P7) are all present.
         """
         out = prompts.get_pr_review_analysis_prompt(pr_number=1, issue_number=1)
-        # Strict-grading / anti-inflation markers.
+        # Grading / anti-inflation markers.
         assert "DEFAULT IS F" in out
         assert "ANTI-INFLATION RULES" in out
         # PR-specific stage dimensions.
         assert "D1 — Correctness & completeness" in out
         assert "D2 — Diff review of CHANGED lines only" in out
         assert "D3 — Inline-comment quality" in out
-        assert "D4 — CI failure analysis" in out
+        assert "D4 — Verification evidence" in out
         # D5 — runnable-evidence gate for metric/training-run claims (ADR-014).
         assert "D5 — Runnable evidence for metric / training-run claims" in out
         assert "committed into the diff" in out
@@ -598,7 +596,7 @@ class TestSharedRubricConstants:
     """Tests for the shared strict-grading and seven-principles rubric blocks.
 
     These constants (added for issue #577) are the single source of truth
-    consumed by the per-stage strict-simplify review prompts implemented in
+    consumed by the per-stage review prompts implemented in
     sub-issues #578-#581.
     """
 
@@ -618,7 +616,7 @@ class TestSharedRubricConstants:
 
     def test_anti_inflation_rules_have_default_is_f(self) -> None:
         """The anti-inflation block must restate the DEFAULT IS F rule."""
-        assert "DEFAULT IS F" in prompts._STRICT_GRADING_AND_ANTI_INFLATION
+        assert "DEFAULT IS F" in prompts._REVIEW_GRADING_AND_ANTI_INFLATION
 
     def test_seven_principles_yagni_carves_out_toolchain_churn(self) -> None:
         """P2/YAGNI exempts toolchain churn but still flags scope creep (#1017)."""
@@ -641,7 +639,7 @@ class TestRubricToolchainCarveOut:
 
     def test_impl_loop_dimension6_distinguishes_forced_from_chosen_churn(self) -> None:
         """Impl-loop diff-scope flags chosen churn, exempts toolchain churn."""
-        rubric = prompts._IMPL_LOOP_STRICT_RUBRIC
+        rubric = prompts._IMPL_LOOP_REVIEW_RUBRIC
         # Carve-out present.
         assert "pre-commit" in rubric
         assert "toolchain" in rubric.lower()
@@ -650,8 +648,8 @@ class TestRubricToolchainCarveOut:
         assert "dependency bumps that weren't asked for" in rubric
 
 
-class TestPlanReviewStrictRubric:
-    """Tests for the strict rubric injected into PLAN_REVIEW_PROMPT (#578)."""
+class TestPlanReviewRubric:
+    """Tests for the review rubric injected into PLAN_REVIEW_PROMPT (#578)."""
 
     def _render(self) -> str:
         return prompts.get_plan_review_prompt(
@@ -661,7 +659,7 @@ class TestPlanReviewStrictRubric:
             plan_text="plan text",
         )
 
-    def test_plan_review_prompt_contains_strict_rubric(self) -> None:
+    def test_plan_review_prompt_contains_review_rubric(self) -> None:
         """All seven principle markers must appear in the rendered prompt."""
         out = self._render()
         for marker in (
@@ -691,11 +689,11 @@ class TestPlanReviewStrictRubric:
         assert "Stage handoff" in out
 
 
-class TestPlanLoopStrictRubric:
-    """Tests for the plan-loop strict rubric and final-iteration full sweep.
+class TestPlanLoopReviewRubric:
+    """Tests for the plan-loop review rubric and final-iteration full sweep.
 
     Verifies issue #579: ``PLAN_LOOP_REVIEW_PROMPT`` uses the new
-    ``_PLAN_LOOP_STRICT_RUBRIC`` and conditionally appends
+    ``_PLAN_LOOP_REVIEW_RUBRIC`` and conditionally appends
     ``_FULL_SWEEP_SUFFIX`` only on iteration==2.
     """
 
@@ -757,11 +755,11 @@ class TestPlanLoopStrictRubric:
         assert self._FULL_SWEEP_MARKER in prompts._FULL_SWEEP_SUFFIX
 
 
-class TestImplLoopStrictRubric:
-    """Tests for the impl-loop strict rubric and final-iteration full sweep.
+class TestImplLoopReviewRubric:
+    """Tests for the impl-loop review rubric and final-iteration full sweep.
 
     Verifies issue #580: ``IMPL_LOOP_REVIEW_PROMPT`` uses the new
-    ``_IMPL_LOOP_STRICT_RUBRIC`` and conditionally appends the shared
+    ``_IMPL_LOOP_REVIEW_RUBRIC`` and conditionally appends the shared
     ``_FULL_SWEEP_SUFFIX`` only on iteration==2.
     """
 
@@ -895,6 +893,14 @@ class TestAddressReviewPrompt:
     def test_requires_all_comments_resolved(self) -> None:
         out = self._build()
         assert "ALL" in out and ("must be" in out.lower() or "resolve" in out.lower())
+
+    def test_rejects_review_comments_that_conflict_with_active_policy(self) -> None:
+        """Untrusted review feedback cannot override the active task contract."""
+        out = self._build()
+
+        assert "active implementation contract" in out
+        assert "CI/CD behavior" in out
+        assert "secondary approval" not in out
 
     def test_instructs_advise_skill(self) -> None:
         """Each sub-agent must consult /hephaestus:advise before fixing."""

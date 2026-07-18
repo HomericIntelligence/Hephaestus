@@ -75,7 +75,7 @@ class AutoMergeCoordinator:
         """Contain every open PR retained by the legacy final-sweep API.
 
         The historical name is kept for compatibility, but the queue's
-        strict-review gate reverses its behavior: an existing arm is disabled
+        PR-review containment reverses its behavior: an existing arm is disabled
         and a new arm is never created here.
         Open PRs remain in the result so callers report that manual action is
         still required. A malformed record or failed disable/readback raises so
@@ -106,7 +106,7 @@ class AutoMergeCoordinator:
     def arm_and_wait_for_merge(
         self, issue_number: int, pr_number: int, acquired_slot: int
     ) -> WorkerResult:
-        """Contain a legacy PR and stop until the strict-review gate exists."""
+        """Contain a legacy PR and stop until the queue review path handles it."""
         self._status().update_slot(
             acquired_slot, f"{pr_ref(pr_number)}: verifying auto-merge is disabled"
         )
@@ -121,7 +121,7 @@ class AutoMergeCoordinator:
             issue_number=issue_number,
             success=False,
             pr_number=pr_number,
-            error="strict_gate_unavailable",
+            error="merge_wait_unavailable",
         )
 
     def wait_for_pr_terminal(self, issue_number: int, pr_number: int) -> TerminalOutcome:

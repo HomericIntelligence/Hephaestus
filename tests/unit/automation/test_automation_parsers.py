@@ -398,7 +398,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             nargs="+",
             help_text=(
                 "Scope to these issue numbers' PRs. Requires at least one issue number when given. "
-                "Omit the flag entirely to drive every failing open PR discovered via gh "
+                "Omit the flag entirely to drive every open PR discovered via gh "
                 "(issue-linked PRs plus bot-authored PRs)."
             ),
         ),
@@ -410,9 +410,9 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             nargs="*",
             help_text=(
                 "PR numbers to drive directly, bypassing issue-to-PR discovery (#918). "
-                "Use when the PR body uses 'Refs #N' or the PR is otherwise not reachable "
-                "via the strict Closes-link lookup. May be combined with --issues; "
-                "duplicate PRs are deduped."
+                "Each PR must carry the repository-policy 'Closes #N' issue link "
+                "so the loop has independent requirements context. May be combined "
+                "with --issues; duplicate PRs are deduped."
             ),
         ),
         _agent_spec(),
@@ -421,7 +421,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             _dry_help("Suppress GitHub writes and git pushes (no comments, no merges, no pushes).")
         ),
         _no_ui_spec(),
-        _store_true("--no-advise", "no_advise", "Skip the advise step before CI fixing"),
+        _store_true("--no-advise", "no_advise", "Skip the advise step before loop review"),
         _verbose_spec("Enable verbose logging"),
         _action_spec(
             ("--no-include-bot-prs",),
@@ -443,31 +443,6 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "(`gh api user`) (#821). Explicit --issues and --prs scopes are processed "
             "regardless of author.",
         ),
-        _action_spec(
-            ("--no-mechanical-rebase",),
-            "enable_mechanical_rebase",
-            "_StoreFalseAction",
-            True,
-            nargs=0,
-            help_text=(
-                "Disable the mechanical git rebase that runs before the CI-fix agent. "
-                "By default a PR that is behind/conflicting with its base is rebased and "
-                "pushed with no agent spend; only PRs whose rebase hits real conflicts "
-                "fall through to the agent (#871). Pass this flag to require the agent "
-                "for all behind/conflicting PRs."
-            ),
-        ),
-        _action_spec(
-            ("--max-fix-iterations",),
-            "max_fix_iterations",
-            "_StoreAction",
-            1,
-            help_text=(
-                "Number of CI-fix attempts per failing PR before giving up (default: 1). "
-                "The issue-major loop passes its --drive-green-loops here so a PR that "
-                "will not go green is abandoned after N tries."
-            ),
-        ),
         _timeout_spec(
             "--agent-timeout",
             "agent_timeout",
@@ -482,11 +457,6 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "--learn-timeout",
             "learn_timeout",
             "Timeout for the /learn agent session (default: 7200).",
-        ),
-        _timeout_spec(
-            "--poll-max-wait",
-            "poll_max_wait",
-            "Max wall-clock seconds to poll CI before backing off (default: 1200).",
         ),
         *_github_throttle_specs(),
         _json_spec(),
@@ -532,7 +502,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
         _store_true(
             "--no-auto-merge",
             "no_auto_merge",
-            "(Deprecated, ignored) merge authorization is owned by strict_review and merge_wait",
+            "(Deprecated, ignored) merge arming is owned by merge_wait",
         ),
         _dry_run_spec(
             _dry_help("Suppress GitHub mutations and git pushes (no PR creation, no commits).")
@@ -733,7 +703,8 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "_StoreAction",
             "",
             help_text=(
-                "HEPH_IMPLEMENTER_MODEL for child processes (implement, address-review, ci-driver)"
+                "HEPH_IMPLEMENTER_MODEL for child processes "
+                "(implement, address-review, drive-green)"
             ),
         ),
         _action_spec(
@@ -882,11 +853,11 @@ def test_parser_action_specs_are_preserved(
     assert _sorted_specs(_specs(factory())) == _sorted_specs(expected)
 
 
-def test_ci_driver_help_describes_the_strict_review_gate() -> None:
-    """The CI driver advertises the queue-owned strict-review gate."""
+def test_ci_driver_help_describes_loop_owned_review() -> None:
+    """The historical driver advertises loop-owned review and arming."""
     description = ci_driver._build_parser().description or ""
 
-    assert "strict-review auto-merge gate" in description
+    assert "loop-owned PR review" in description
     assert "enable auto-merge" not in description
 
 

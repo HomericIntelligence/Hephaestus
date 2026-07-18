@@ -206,7 +206,9 @@ def _invoke_and_parse_review_session(
         timeout=timeout,
         output_format="json",
         permission_mode="dontAsk",
-        allowed_tools="Read,Glob,Grep",
+        # The normal $athena:pr-review skill is read-only, but its declared
+        # workflow uses local Bash helpers and review subagents.
+        allowed_tools="Read,Glob,Grep,Bash,Skill,Agent,WebFetch",
         # Pipe the prompt via stdin, not argv: the PR-review prompt embeds the
         # full diff and can be tens of KB, which overflows ARG_MAX and raises
         # `[Errno 7] Argument list too long` when passed as a positional arg.
@@ -292,7 +294,6 @@ def run_pr_review_analysis(
             issue_number=issue_number,
             pr_diff=diff_text,
             issue_body=context.get("issue_body", ""),
-            ci_status=context.get("ci_status", ""),
             pr_description=context.get("pr_description", ""),
             advise_findings=context.get("advise_findings", ""),
             # #1083: nitpicks are suppressed unless --nitpick threaded the flag
@@ -425,7 +426,6 @@ def gather_impl_review_context(
             composed_body_chars=len(composed_body) + len(advise_findings),
         ),
         "issue_body": composed_body,
-        "ci_status": "",
         "review_comments": "",
         "pr_description": "",
         "advise_findings": advise_findings,

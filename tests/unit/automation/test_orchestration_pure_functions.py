@@ -62,43 +62,6 @@ class TestLoopRunnerPureFunctions:
 
 
 # ---------------------------------------------------------------------------
-# ci_driver — confirmed from ci_driver.py:82-97
-# ---------------------------------------------------------------------------
-class TestCIDriverPureFunctions:
-    """Test pure helpers in ci_driver (omitted from coverage measurement)."""
-
-    def test_pr_is_failing_blocked_merge_state(self) -> None:
-        # mergeStateStatus == "BLOCKED" → True regardless of rollup
-        from hephaestus.automation.ci_driver import _pr_is_failing
-
-        pr = {"isDraft": False, "mergeStateStatus": "BLOCKED", "statusCheckRollup": []}
-        assert _pr_is_failing(pr) is True
-
-    def test_pr_is_failing_draft_is_not_failing(self) -> None:
-        # Draft PRs are excluded — ci_driver.py:85
-        from hephaestus.automation.ci_driver import _pr_is_failing
-
-        pr = {"isDraft": True, "mergeStateStatus": "BLOCKED", "statusCheckRollup": []}
-        assert _pr_is_failing(pr) is False
-
-    def test_pr_is_failing_all_success(self) -> None:
-        from hephaestus.automation.ci_driver import _pr_is_failing
-
-        pr = {
-            "isDraft": False,
-            "mergeStateStatus": "MERGEABLE",
-            "statusCheckRollup": [{"conclusion": "SUCCESS"}],
-        }
-        assert _pr_is_failing(pr) is False
-
-    def test_pr_is_failing_empty_rollup_not_blocked(self) -> None:
-        from hephaestus.automation.ci_driver import _pr_is_failing
-
-        pr = {"isDraft": False, "mergeStateStatus": "MERGEABLE", "statusCheckRollup": []}
-        assert _pr_is_failing(pr) is False
-
-
-# ---------------------------------------------------------------------------
 # github_api — confirmed from github_api.py:417-422 and :533-544
 # ---------------------------------------------------------------------------
 class TestGithubApiPureFunctions:

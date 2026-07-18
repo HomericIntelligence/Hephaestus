@@ -176,10 +176,10 @@ class TestGate:
         assert isinstance(result, Continue)
         assert result.next_state == "WORKTREE_WAIT"
 
-    def test_gate_existing_pr_with_impl_go_routes_to_ci(
+    def test_gate_existing_pr_with_impl_go_routes_to_merge_wait(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """An implementation-go PR with a worktree routes straight to CI."""
+        """An implementation-go PR with a worktree routes to merge-wait."""
         stage = ImplementationStage()
         github = FakeStageGitHub(
             open_pr=1001, pr_impl_state=(True, False), pr_head_branch="1-real-branch"
@@ -196,10 +196,10 @@ class TestGate:
         assert item.pr == 1001  # set before the fail-back (m7)
         assert item.branch == "1-real-branch"
 
-    def test_gate_existing_pr_with_impl_go_without_worktree_adopts_first(
+    def test_gate_existing_pr_with_impl_go_without_worktree_routes_to_merge_wait(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """An implementation-go PR still needs an isolated worktree before CI."""
+        """An implementation-go PR does not need adoption before merge-wait."""
         stage = ImplementationStage()
         github = FakeStageGitHub(
             open_pr=1001, pr_impl_state=(True, False), pr_head_branch="1-real-branch"
@@ -209,12 +209,29 @@ class TestGate:
 
         result = stage.step(item, ctx)
 
-        assert isinstance(result, Continue)
-        assert result.next_state == "WORKTREE_WAIT"
+        assert result == StageOutcome(Disposition.FAIL_BACK, "already_implementation_go_pr")
         assert item.pr == 1001
         assert item.branch == "1-real-branch"
-        assert item.payload["existing_pr"] is True
-        assert item.payload["existing_pr_impl_go"] is True
+
+    def test_gate_existing_fork_with_impl_go_routes_to_merge_wait(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A reviewed fork needs no writable head before merge-wait."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub(
+            open_pr=1001,
+            pr_impl_state=(True, False),
+            pr_head_branch="fork-feature",
+            pr_head_writable=False,
+        )
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, state="GATE")
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FAIL_BACK, "already_implementation_go_pr")
+        assert item.pr == 1001
+        assert item.branch == "fork-feature"
 
     def test_gate_existing_item_pr_merged_finishes_before_adoption(
         self, make_ctx: Any, make_work_item: Any
@@ -315,6 +332,24 @@ class TestGate:
         assert stage.step(item, ctx) == StageOutcome(
             Disposition.FINISH_FAIL, "auto_merge_disable_failed"
         )
+
+    def test_gate_existing_fork_pr_fails_closed_before_worktree_or_agent(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Fork heads cannot be addressed by pushing a base-origin branch."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub(
+            open_pr=1001,
+            pr_head_branch="fork-feature",
+            pr_head_writable=False,
+        )
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="GATE")
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "pr_head_not_writable")
+        assert github.mutation_log == [("defer_auto_merge", (1001,))]
 
     def test_adopted_worktree_job_syncs_without_trunk_reset(
         self, make_ctx: Any, make_work_item: Any
@@ -506,7 +541,7 @@ class TestGitErrorRetryCap:
     def test_adopted_impl_go_worktree_failure_retries_worktree_not_ci(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A failed adopted worktree sync must not flow through ADOPTED_CI."""
+        """A failed adopted worktree sync must not bypass the adopted path."""
         stage = ImplementationStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state="WORKTREE_WAIT")

@@ -29,13 +29,16 @@ def _map_pr_check(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-_GH_PR_CHECKS_NO_CHECKS_FRAGMENT: str = "no checks reported"
+_GH_PR_CHECKS_NO_CHECKS_FRAGMENTS: tuple[str, ...] = (
+    "no checks reported",
+    "no required checks reported",
+)
 
 
 def _is_gh_pr_checks_no_checks_error(exc: subprocess.CalledProcessError) -> bool:
     """Return True iff a failed ``gh pr checks`` is the no-checks-yet case."""
     blob = (exc.stderr or "") + (exc.stdout or "")
-    return _GH_PR_CHECKS_NO_CHECKS_FRAGMENT in blob
+    return any(fragment in blob for fragment in _GH_PR_CHECKS_NO_CHECKS_FRAGMENTS)
 
 
 def gh_pr_checks(
@@ -79,7 +82,7 @@ def gh_pr_checks(
             _api.logger.info(
                 "PR #%s has no check runs registered yet (gh: %s); treating as empty",
                 pr_number,
-                _GH_PR_CHECKS_NO_CHECKS_FRAGMENT,
+                "; ".join(_GH_PR_CHECKS_NO_CHECKS_FRAGMENTS),
             )
             return []
         raise

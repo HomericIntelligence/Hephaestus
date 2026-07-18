@@ -160,7 +160,7 @@ class TestScanFileDetectsViolations:
         assert any(f.rule == "wrong-merge-strategy" for f in findings)
 
     def test_detects_auto_merge_flag(self, tmp_path: Path) -> None:
-        """Should flag gh pr merge --auto --squash during the strict-gate bootstrap."""
+        """Should flag gh pr merge --auto --squash during merge-wait bootstrap."""
         md = make_md(
             tmp_path,
             "bad.md",
