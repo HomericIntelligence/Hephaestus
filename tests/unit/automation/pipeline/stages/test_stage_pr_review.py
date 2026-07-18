@@ -20,6 +20,7 @@ from hephaestus.automation.pipeline.stages.pr_review import (
     PrReviewStage,
     _surviving_threads,
 )
+from hephaestus.automation.pipeline.work_item import ItemKind
 from hephaestus.automation.prompts.address_review import get_address_review_prompt
 from hephaestus.automation.prompts.implementation import get_impl_resume_feedback_prompt
 from hephaestus.automation.state_labels import STATE_SKIP
@@ -75,7 +76,7 @@ class TestPrReviewStageOnEnter:
         stage = PrReviewStage()
         github = FakeStageGitHub()
         ctx = make_ctx(github=github, dry_run=True)
-        item = make_work_item(issue=1, pr=1001, state="ENTER")
+        item = make_work_item(issue=1, pr=1001, kind=ItemKind.PR, state="ENTER")
 
         assert stage.on_enter(item, ctx) is None
         assert github.mutation_log == [("defer_auto_merge", (1001,))]
@@ -183,6 +184,19 @@ class TestPrReviewStageStep:
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.FAIL_BACK
         assert result.note == "agent_error"
+
+    def test_direct_pr_without_worktree_fails_back_before_review(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A direct PR must adopt its branch before a reviewer sees it."""
+        stage = PrReviewStage()
+        item = make_work_item(issue=1, pr=1001, kind=ItemKind.PR, state="ENTER")
+        assert item.worktree == ""
+
+        result = stage.step(item, make_ctx())
+
+        assert result == StageOutcome(Disposition.FAIL_BACK, "agent_error")
+        assert item.payload["agent_error_failback"] is True
 
     def test_enter_advances_to_review(self, make_ctx: Any, make_work_item: Any) -> None:
         """ENTER advances to REVIEW_WAIT."""

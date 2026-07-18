@@ -150,6 +150,7 @@ from .base import (
     Continue,
     Disposition,
     GitJob,
+    ItemKind,
     JobRequest,
     JobResult,
     Stage,
@@ -444,6 +445,16 @@ class PrReviewStage(Stage):
             # Nothing to review: fail back to implementation, whose
             # PR_CREATE step is the designated (re)creation path.
             logger.warning("pr_review:%d: no PR on item; failing back", item.issue)
+            return self._fail_back_agent_error(item)
+        if item.kind is ItemKind.PR and item.state == "ENTER" and not item.worktree:
+            # A direct PR seed has no adopted checkout yet.  Never review from
+            # the shared repository root with an empty diff/body context: the
+            # implementation stage owns exact-branch adoption.
+            logger.warning(
+                "pr_review:%d: no adopted worktree for PR #%d; failing back",
+                item.issue,
+                item.pr,
+            )
             return self._fail_back_agent_error(item)
 
         handler_name = _STEP_HANDLER_NAMES.get(item.state)

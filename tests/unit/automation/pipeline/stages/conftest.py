@@ -351,6 +351,16 @@ class _Config:
         self.agent = "claude"
         self.dry_run = dry_run
         self.pre_pr_test_argv = PRE_PR_TEST_ARGV
+        self.strict_review_guard = _PermissiveStrictReviewGuard()
+
+
+class _PermissiveStrictReviewGuard:
+    """Minimal loop-ownership capability for ordinary isolated stage tests."""
+
+    def try_claim(self, org: str, repo: str, pr_number: int, owner: int) -> bool:
+        """Accept the sole test item; concurrency cases use a dedicated fake."""
+        del org, repo, pr_number, owner
+        return True
 
 
 class _Paths:

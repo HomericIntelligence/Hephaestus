@@ -84,6 +84,7 @@ def test_main_builds_implementation_scope_and_dispatches(tmp_path: Path) -> None
     assert config.scope.stages == frozenset(
         {StageName.IMPLEMENTATION, StageName.PR_REVIEW, StageName.STRICT_REVIEW}
     )
+    assert config.strict_review_guard is not None
 
 
 def test_main_maps_max_workers_to_worker_pool(tmp_path: Path) -> None:

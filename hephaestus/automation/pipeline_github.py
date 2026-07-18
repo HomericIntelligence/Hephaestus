@@ -915,10 +915,12 @@ class PipelineGitHub:
         """Read shared PR state for seed, implementation, and merge_wait.
 
         One ``gh pr view`` returns ``{state, headRefOid, mergedAt,
-        mergeStateStatus, baseRefName}``; ``None`` signals a read failure.
+        baseRefName, autoMergeRequest}``; ``None`` signals a read failure.
         Seed and implementation paths use the result for terminal-state
         checks before branch adoption or label routing, while merge_wait uses it
-        for head capture and merge-state polling.
+        for head capture and lifecycle polling. It deliberately excludes
+        GitHub merge-readiness and check-status fields: the automation loop
+        neither reads nor relies on CI/CD.
         """
         try:
             result = self._gh(
@@ -927,7 +929,7 @@ class PipelineGitHub:
                     "view",
                     str(pr_number),
                     "--json",
-                    "state,headRefOid,mergedAt,mergeStateStatus,baseRefName,autoMergeRequest",
+                    "state,headRefOid,mergedAt,baseRefName,autoMergeRequest",
                 ]
             )
             data = json.loads(result.stdout or "{}")

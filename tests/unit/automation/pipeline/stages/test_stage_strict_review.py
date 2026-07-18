@@ -63,6 +63,18 @@ def test_same_head_strict_review_loser_retries_without_a_second_review(
     )
 
 
+def test_strict_review_without_an_ownership_guard_fails_closed(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A production entrypoint may never silently run strict review unguarded."""
+    item = make_work_item(stage=StageName.STRICT_REVIEW, pr=12, state="ENTER")
+    config = SimpleNamespace(strict_review_guard=None)
+
+    assert StrictReviewStage().step(item, make_ctx(config=config)) == StageOutcome(
+        Disposition.FINISH_FAIL, "strict_review_guard_unavailable"
+    )
+
+
 def test_review_job_uses_athena_pr_review_prompt(make_ctx: Any, make_work_item: Any) -> None:
     """The approval reviewer is explicitly the Athena PR-review skill."""
     item = make_work_item(
@@ -78,11 +90,12 @@ def test_review_job_uses_athena_pr_review_prompt(make_ctx: Any, make_work_item: 
     assert isinstance(result, JobRequest)
     assert isinstance(result.job, AgentJob)
     prompt = result.job.prompt_builder(**result.job.prompt_kwargs)
-    assert "MUST invoke and follow the `$athena:pr-review` skill" in prompt
+    assert "MUST invoke `$athena:pr-review --ci-free 12`" in prompt
     assert "Automation-loop handoff: <GO|NOGO>" in prompt
     assert "PR-review-specific graded dimensions" not in prompt
     assert "CI-free" in prompt
     assert "collect_evidence.py" in prompt
+    assert "operator-authorized CI-free profile" in prompt
     assert result.job.sandbox == "read-only"
     assert result.job.agent == "codex"
 

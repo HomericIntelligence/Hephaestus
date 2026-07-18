@@ -45,6 +45,7 @@ from hephaestus.automation.pipeline.stages.pr_review import (
     PrReviewStage,
 )
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
+from hephaestus.automation.strict_review_guard import StrictReviewGuard
 from hephaestus.resilience import (
     all_circuit_breaker_snapshots,
     get_circuit_breaker,
@@ -111,6 +112,7 @@ def make_coordinator(
         dry_run=dry_run,
         serialize_file_overlap=serialize_file_overlap,
         projects_dir=tmp_path,
+        strict_review_guard=StrictReviewGuard(),
     )
     gh = github or FakeStageGitHub()
     pool = FakeWorkerPool()

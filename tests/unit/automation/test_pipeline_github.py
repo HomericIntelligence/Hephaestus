@@ -1291,9 +1291,24 @@ class TestGhPrState:
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         payload = {"state": "OPEN", "headRefOid": "abc", "mergedAt": None}
-        monkeypatch.setattr(pg, "gh_call", lambda argv: SimpleNamespace(stdout=json.dumps(payload)))
+        calls: list[list[str]] = []
+
+        def fake_gh_call(argv: list[str]) -> Any:
+            calls.append(argv)
+            return SimpleNamespace(stdout=json.dumps(payload))
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
 
         assert adapter.gh_pr_state(7) == payload
+        assert calls == [
+            [
+                "pr",
+                "view",
+                "7",
+                "--json",
+                "state,headRefOid,mergedAt,baseRefName,autoMergeRequest",
+            ]
+        ]
 
     def test_failure_returns_none(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
@@ -1373,7 +1388,7 @@ class TestStrictReviewEvidence:
                 "view",
                 "71",
                 "--json",
-                "state,headRefOid,mergedAt,mergeStateStatus,baseRefName,autoMergeRequest",
+                "state,headRefOid,mergedAt,baseRefName,autoMergeRequest",
                 "--repo",
                 "org/repo-a",
             ]:

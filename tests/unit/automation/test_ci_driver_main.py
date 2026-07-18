@@ -81,6 +81,7 @@ def test_main_builds_review_merge_wait_scope_and_dispatches() -> None:
     # Scope is trimmed to exactly strict_review + merge_wait.
     assert config.scope is not None
     assert config.scope.stages == frozenset({StageName.STRICT_REVIEW, StageName.MERGE_WAIT})
+    assert config.strict_review_guard is not None
 
 
 def test_main_scoped_run_disables_drive_green_all() -> None:

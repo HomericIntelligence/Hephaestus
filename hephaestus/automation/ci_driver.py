@@ -44,6 +44,7 @@ from hephaestus.config.paths import resolve_projects_dir
 from ._review_utils import build_automation_parser
 from .git_utils import get_repo_slug
 from .pipeline.routing import PipelineScope, StageName
+from .strict_review_guard import StrictReviewGuard
 
 logger = logging.getLogger(__name__)
 
@@ -272,6 +273,7 @@ def main() -> int:
             include_all_authors=args.include_all_authors,
             projects_dir=resolve_projects_dir(None, prefer_cwd_parent=True),
             json_out=args.json,
+            strict_review_guard=StrictReviewGuard(),
             scope=PipelineScope(_CI_DRIVER_SCOPE_STAGES),
         )
 

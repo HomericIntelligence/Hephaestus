@@ -2,7 +2,8 @@
 
 - Status: Accepted
 - Date: 2026-07-17
-- Tracks: #2053, #2268, #2269, #2278
+- Tracks: #2053, #2269
+- Retires: #2268, #2278 (CI/lease-dependent approval policies)
 - Supersedes: ADR-0009 and ADR-0010
 
 ## Context
@@ -46,10 +47,10 @@ loop-owned `state:implementation-go` label. The required review is
 
 - A restart before the label is applied reruns review instead of recovering an
   external proof; this is the expected fail-safe behavior.
-- One active loop leader owns strict review for a repository. Cooperating loop
-  processes on one host use a local PR ownership lock; multi-host concurrent
-  loop leaders are not supported without a separately authorized loop-owned
-  coordinator.
+- Exactly one active loop leader owns strict review for a repository globally.
+  Cooperating processes on that leader host use a local PR ownership lock;
+  multi-host concurrent leaders are unsupported without a separately
+  authorized loop-owned coordinator.
 - CI/CD continues to validate code and protect branches, but the automation
   loop never reads, changes, or relies on it.
 - The retired policy no longer appears as an active contract.

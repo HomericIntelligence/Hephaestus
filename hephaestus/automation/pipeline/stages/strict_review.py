@@ -81,6 +81,13 @@ EVAL = "EVAL"
 SR_FINISH = "SR_FINISH"
 FINISH = SR_FINISH
 
+# Ownership can be absent only in a broken entrypoint configuration.  Keep
+# that distinct from a contended, healthy guard so the former fails closed
+# instead of silently running a second independent review.
+_OWNERSHIP_CLAIMED = "claimed"
+_OWNERSHIP_BUSY = "busy"
+_OWNERSHIP_UNAVAILABLE = "unavailable"
+
 #: HTML-comment marker for the NOGO remediation feedback comment.
 STRICT_REVIEW_NOGO_MARKER = "<!-- hephaestus-strict-review-nogo -->"
 
@@ -137,7 +144,10 @@ class StrictReviewStage(Stage):
 
     def _claim_and_contain_entry(self, item: WorkItem, ctx: StageContext) -> StageOutcome | None:
         """Claim the PR before its ingress containment writes."""
-        if not self._claim_review_ownership(item, ctx):
+        ownership = self._claim_review_ownership(item, ctx)
+        if ownership == _OWNERSHIP_UNAVAILABLE:
+            return StageOutcome(Disposition.FINISH_FAIL, "strict_review_guard_unavailable")
+        if ownership != _OWNERSHIP_CLAIMED:
             item.payload["retry_delay_s"] = 1
             return StageOutcome(Disposition.RETRY, "strict_review_busy")
         outcome = self._contain_and_revoke_on_entry(item, ctx)
@@ -277,7 +287,10 @@ class StrictReviewStage(Stage):
             # NOGO cannot safely enter the issue-bound implementation stage.
             return StageOutcome(Disposition.FINISH_FAIL, "strict_review_orphan")
 
-        if not self._claim_review_ownership(item, ctx):
+        ownership = self._claim_review_ownership(item, ctx)
+        if ownership == _OWNERSHIP_UNAVAILABLE:
+            return StageOutcome(Disposition.FINISH_FAIL, "strict_review_guard_unavailable")
+        if ownership != _OWNERSHIP_CLAIMED:
             item.payload["retry_delay_s"] = 1
             return StageOutcome(Disposition.RETRY, "strict_review_busy")
         if item.state == ENTER and not item.payload.get("_strict_review_entry_contained"):
@@ -309,14 +322,18 @@ class StrictReviewStage(Stage):
         return StageOutcome(Disposition.FINISH_FAIL, f"unknown state: {item.state}")
 
     @staticmethod
-    def _claim_review_ownership(item: WorkItem, ctx: StageContext) -> bool:
+    def _claim_review_ownership(item: WorkItem, ctx: StageContext) -> str:
         """Claim this PR's loop-owned review slot before any gate action."""
         guard = getattr(ctx.config, "strict_review_guard", None)
         if guard is None:
-            return True
+            logger.error(
+                "strict_review:%s: no ownership guard is configured; failing closed",
+                item.issue,
+            )
+            return _OWNERSHIP_UNAVAILABLE
         pr_number = item.pr
         if pr_number is None:  # guarded by step(); narrowing
-            return False
+            return _OWNERSHIP_UNAVAILABLE
         owner = id(item)
         try:
             claimed = bool(guard.try_claim(ctx.org, item.repo, pr_number, owner))
@@ -327,10 +344,11 @@ class StrictReviewStage(Stage):
                 pr_number,
                 exc,
             )
-            return False
+            return _OWNERSHIP_BUSY
         if claimed:
             item.payload["_strict_review_guard_owner"] = owner
-        return claimed
+            return _OWNERSHIP_CLAIMED
+        return _OWNERSHIP_BUSY
 
     def _head_check(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """HEAD_CHECK [M]: capture the PR's live head SHA before dispatching review."""

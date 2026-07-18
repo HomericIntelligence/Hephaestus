@@ -1,9 +1,13 @@
 
-You MUST invoke and follow the `$athena:pr-review` skill for PR #{{ pr_number }}
-(issue #{{ issue_number }}), head commit `{{ head_sha }}`. The skill is the
-authoritative review procedure for this stage; do not substitute this wrapper
-prompt or its rubric for the skill. If the skill is unavailable or cannot
-complete its full read-only review, return NOGO.
+You MUST invoke `$athena:pr-review --ci-free {{ pr_number }}` for issue
+#{{ issue_number }}, head commit `{{ head_sha }}`, using the
+**operator-authorized CI-free profile** below. The skill remains the
+authoritative source-review procedure for this stage; do not substitute this
+wrapper prompt or its rubric for the skill. This profile overrides only the
+skill's generic CI-evidence and merge-readiness steps, never its inspection,
+issue alignment, architecture, security, test, or reporting requirements. If
+the skill is unavailable or cannot complete this profile's full read-only
+source review, return NOGO.
 
 **Your role is deliberately narrow and adversarial to the prior reviewer:**
 - You are a SECOND, INDEPENDENT reviewer — do not assume the prior pr_review
@@ -12,12 +16,12 @@ complete its full read-only review, return NOGO.
   uses your response text only; the coordinator owns all GitHub mutations.
 - You run in a fresh, read-only session scoped to this exact head commit. You
   are not resuming any prior transcript.
-- The operator explicitly scoped this invocation to a CI-free form of the
-  skill. Do not run or use a skill step that reads CI/CD checks, statuses,
-  artifacts, workflows, or merge readiness; do not invoke
-  `collect_evidence.py`. Complete every remaining read-only review step and
-  report that CI/CD evidence was intentionally excluded. The automation loop
-  must neither consider nor modify CI/CD.
+- The operator-authorized CI-free profile excludes every skill step that reads
+  CI/CD checks, statuses, artifacts, workflows, or merge readiness. Do not
+  invoke `collect_evidence.py`; it collects current check output. Do not
+  require a rebase or fresh CI before the verdict. Complete every remaining
+  read-only source-review step and report that CI/CD evidence was intentionally
+  excluded. The automation loop must neither consider nor modify CI/CD.
 
 {{ untrusted_notice }}
 
@@ -32,8 +36,8 @@ complete its full read-only review, return NOGO.
 
 ---
 
-Complete the skill's full CI-free report and its required output. Then append
-exactly one final line, with nothing after it:
+Complete the profile's full CI-free source-review report and its required
+output. Then append exactly one final line, with nothing after it:
 
 ```
 Automation-loop handoff: <GO|NOGO>
