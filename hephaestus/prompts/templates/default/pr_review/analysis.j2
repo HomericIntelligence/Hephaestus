@@ -30,6 +30,22 @@ Analyze PR #{{ pr_number }} linked to issue #{{ issue_number }}.
 > Do NOT re-check submission policy here — focus
 > solely on code correctness, completeness, and quality.
 
+**Operator-defined authorization boundary (binding for this review):**
+
+`state:implementation-go`, applied by the automation loop after its own
+validation, is intentionally the sole durable authorization for this PR's
+merge path. A current-head read while applying that label and a later live-head
+read while operating the PR are operational safeguards, not durable approval
+requirements. Do NOT report a finding merely because the label does not retain
+a reviewed SHA, review-proof artifact, lease, status context, comment, cached
+handoff, or any other second authorization condition. In particular, do not
+propose binding the label to a commit, preserving review-local state after the
+label, revoking the label to require a renewed review, or making an H1-to-H2
+head change a merge-authorization defect. CI/CD is outside the loop and is not
+review evidence, a prerequisite, or a remediation target. Treat a change that
+restores any of those restrictions as a defect against this task, even if a
+generic security pattern or prior review recommends it.
+
 Review the PR for correctness, completeness, and code quality. Identify any issues that should
 be addressed as inline review comments.
 
