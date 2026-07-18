@@ -158,7 +158,7 @@ def test_arm_confirmation_accepts_head_drift_under_loop_owned_label(
 def test_missing_auto_merge_retries_without_revoking_loop_owned_label(
     make_ctx: Any, make_work_item: Any
 ) -> None:
-    """An operational arm loss retries in merge-wait rather than strict review."""
+    """An operational arm loss retries in merge-wait rather than PR review."""
 
     class MissingArmGitHub(_ArmingGitHub):
         def arm_auto_merge(self, pr_number: int, expected_head_sha: str) -> None:
