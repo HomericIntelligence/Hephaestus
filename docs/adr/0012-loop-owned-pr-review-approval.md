@@ -1,4 +1,4 @@
-# ADR-0011: Loop-owned Athena PR-review approval
+# ADR-0012: Loop-owned Athena PR-review approval
 
 - Status: Accepted
 - Date: 2026-07-17
