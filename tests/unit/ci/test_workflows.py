@@ -359,11 +359,42 @@ class TestPiCliSetup:
 class TestAutoTagReleaseDispatch:
     """Regression tests for the one-click release workflow chain."""
 
-    def _workflow(self) -> dict[str, Any]:
+    def _workflow(self) -> dict[object, Any]:
         return yaml.safe_load(AUTO_TAG_WORKFLOW.read_text(encoding="utf-8"))
 
     def _steps(self) -> list[dict[str, Any]]:
         return self._workflow()["jobs"]["auto-tag"]["steps"]
+
+    def test_bump_kind_input_is_restricted_choice(self) -> None:
+        """Manual dispatch must expose only the supported semantic-version bumps."""
+        workflow = self._workflow()
+        # PyYAML 1.1 parses the unquoted GitHub Actions `on` key as boolean True.
+        bump_kind = workflow[True]["workflow_dispatch"]["inputs"]["bump_kind"]
+
+        assert bump_kind["type"] == "choice"
+        assert bump_kind["options"] == ["patch", "minor", "major"]
+        assert bump_kind["default"] == "patch"
+
+    def test_unknown_bump_kind_is_rejected(self) -> None:
+        """Non-UI dispatch callers must not turn an unknown value into a patch bump."""
+        compute_step = next(
+            step
+            for step in self._steps()
+            if step.get("name") == "Compute next version and push tag"
+        )
+        run = compute_step["run"]
+
+        assert "patch|*)" not in run
+        assert re.search(r"(?m)^\s+patch\)\s*$", run) is not None
+
+        invalid_branch = re.search(
+            r"(?ms)^\s+\*\)\s*$\n(?P<body>.*?)(?=^\s+;;\s*$)",
+            run,
+        )
+        assert invalid_branch is not None
+        body = invalid_branch.group("body")
+        assert "::error::Invalid bump_kind" in body
+        assert "exit 1" in body
 
     def test_auto_tag_can_dispatch_workflows(self) -> None:
         """The release dispatch API requires the workflow actions permission."""

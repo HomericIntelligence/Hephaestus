@@ -7,6 +7,11 @@ on:
         description: "Version component to bump: patch | minor | major"
         required: false
         default: "patch"
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
 
 permissions:
   actions: write
@@ -78,8 +83,12 @@ jobs:
             minor)
               NEXT="${MAJOR}.$((MINOR + 1)).0"
               ;;
-            patch|*)
+            patch)
               NEXT="${MAJOR}.${MINOR}.$((PATCH + 1))"
+              ;;
+            *)
+              echo "::error::Invalid bump_kind '${BUMP_KIND}'. Expected one of: patch, minor, major." >&2
+              exit 1
               ;;
           esac
           TAG="v${NEXT}"
