@@ -325,7 +325,7 @@ class TestQuiescence:
     def test_direct_pr_worktree_completion_advances_without_resubmitting(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Coordinator completion order preserves a direct PR's synced worktree."""
+        """Coordinator completion keeps a direct PR's review checkout separate."""
         head = "a" * 40
         github = FakeStageGitHub(
             pr_state={"state": "OPEN", "headRefOid": head, "autoMergeRequest": None},
@@ -358,8 +358,11 @@ class TestQuiescence:
             if getattr(handle.job, "op", "") == "create_worktree"
         ]
         assert len(worktree_jobs) == 1
-        assert item.worktree == str(tmp_path / "pr-601")
-        assert any(isinstance(handle.job, AgentJob) for handle in pool.submitted)
+        assert item.worktree == ""
+        assert item.payload["strict_review_worktree"] == str(tmp_path / "pr-601")
+        review_jobs = [handle.job for handle in pool.submitted if isinstance(handle.job, AgentJob)]
+        assert review_jobs
+        assert review_jobs[-1].cwd == tmp_path / "pr-601"
 
 
 def _fake_in_flight_item(coordinator: Coordinator, item: WorkItem) -> JobHandle:
