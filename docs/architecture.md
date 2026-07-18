@@ -2518,11 +2518,19 @@ additive refactors, then test-only and doc-only PRs at the bottom.
   keep doc citations while stripping test citations).
 - **Merge-order note.** Bug-fix — safe to merge anytime.
 
+#### [PR #2264](https://github.com/HomericIntelligence/Hephaestus/pull/2264) — `[Feat] Document every state:skip application with a reason comment`
+
+- **Scope.** Convention-only — every `state:skip` label application
+  must carry an inline `<!-- skip-reason: … -->` comment so future
+  maintainers can grep the rationale.
+- **Doc impact.** §4 (`State-label vocabulary` table — the
+  `state:skip` row references `state:skip` semantics in
+  `state_labels.py`; the new convention is cross-referenced from
+  the table footnote).
+- **Merge-order note.** Convention change — safe to merge anytime;
+  coordinates with #2304 (path-log escape fix) since both touch
+  comment-form discipline.
+
 ---
 
-**Rewrite-from-post-merge sequencing.** The full coordination plan is
-defined in [§15](#coordinated-pr-sequencing); §16 is the PR
-inventory that the plan consumes. Re-running the audit pass against
-post-merge `main` will surface any drift in the per-PR doc-impact
-labels above (cite rebinding, budget-key changes, stage-name
-membership).
+*See [§15’s Coordinated PR sequencing](#coordinated-pr-sequencing) for the rewrite plan and the delete-on-rewrite trigger.*
