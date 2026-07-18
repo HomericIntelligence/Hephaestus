@@ -36,6 +36,12 @@ Analyze PR #{{ pr_number }} using {{ review_context_kind }} #{{ issue_number }} 
 > directly using this prompt. In either case, this review is the loop's sole
 > GO/NOGO decision; `merge_wait` is the separate mechanical auto-merge armer.
 
+**Assume the code is WRONG; your job is to prove it right.** Do not review for
+plausibility — review for falsification: trace each changed execution path,
+verify the tests actually exercise the change (and would FAIL if the change
+were broken), and actively hunt for the input, state, or sequence that breaks
+it. Conclude GO only after that hunt comes up empty.
+
 Review the PR for correctness, completeness, and code quality. Identify any issues that should
 be addressed as inline review comments.
 
