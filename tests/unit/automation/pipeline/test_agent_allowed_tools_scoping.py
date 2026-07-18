@@ -56,6 +56,7 @@ EXPECTED_SCOPES = {
     ("pr_review.py", "_followup_wait", "get_follow_up_prompt"): READ_ONLY,
     ("pr_review.py", "_address", "get_address_review_prompt"): ADDRESS,
     ("pr_review.py", "_address", "get_impl_resume_feedback_prompt"): WRITE,
+    ("strict_review.py", "_review_wait", "build_strict_review_prompt"): READ_ONLY,
     ("ci.py", "_request_fix", "prompt_builder"): WRITE,
     ("merge_wait.py", "_request_learn", "build_drive_green_learn_prompt"): WRITE,
 }

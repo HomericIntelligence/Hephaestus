@@ -408,6 +408,9 @@ class StrictReviewStage(Stage):
             session_agent=strict_review_agent(head_sha, attempt),
             expected_head_sha=head_sha,
             sandbox="read-only",
+            # Strict review is a read-only falsification pass; it inspects the
+            # worktree and never mutates code or GitHub state (mirrors pr_review).
+            allowed_tools="Read,Glob,Grep",
             # Diff / CI status / prior verdict are seeded into item.payload
             # by the coordinator, which owns the gh reads (mirrors pr_review).
             prompt_kwargs={
