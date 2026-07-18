@@ -95,6 +95,19 @@ repos:
         types: [python]
         pass_filenames: false
 
+  # Security: GitHub Actions workflow SAST (issue #2151). Offline + medium
+  # threshold matches the required security/workflow-scan CI job; keep the two
+  # flag sets identical (drift-guarded by tests/unit/ci/test_zizmor_config.py).
+  - repo: local
+    hooks:
+      - id: zizmor
+        name: zizmor (GitHub Actions SAST)
+        description: Static security analysis of GitHub Actions workflows
+        entry: uv run zizmor --no-online-audits --min-severity medium .github/workflows/
+        language: system
+        files: ^\.github/workflows/.*\.ya?ml$
+        pass_filenames: false
+
   # Lock file freshness
   - repo: https://github.com/astral-sh/uv-pre-commit
     rev: 0.11.28
