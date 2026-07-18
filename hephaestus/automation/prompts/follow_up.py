@@ -3,6 +3,7 @@
 from ._shared import get_terse_output_directive
 from .catalog import PromptCatalog
 
+
 def get_follow_up_prompt(issue_number: int) -> str:
     """Get the follow-up prompt for identifying future work.
 

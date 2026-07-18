@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 from .catalog import PromptCatalog
+
 _DEFAULT_PLUGIN_SKILLS_SUBPATH = Path(".claude/plugins/marketplaces/Hephaestus/skills")
 _STRICT_SKILL_NAME = "pr-review"
 

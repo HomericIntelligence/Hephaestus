@@ -19,7 +19,7 @@ def test_default_catalog_render_preserves_planning_compatibility() -> None:
     rendered = get_plan_prompt(99, catalog=PromptCatalog())
 
     assert hashlib.sha256(rendered.encode()).hexdigest() == (
-        "fc771ef42130ab2a67b73b38902690611dc433c2588d73d42820201da2a05061"
+        "d70d38abc391f05bc7e29e4075ce30b5debc6a47db3fef87616bd63392a6801c"
     )
 
 

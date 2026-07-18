@@ -18,6 +18,7 @@ from ._strict_rubric import (
     get_strict_review_output_format,
 )
 from .catalog import PromptCatalog
+
 # Prompt the implementer receives when resuming its session to address a
 # NoGo review verdict. Used on iterations 1 and 2 of the impl loop.
 

@@ -7,6 +7,7 @@ plain PR description template.
 from ._shared import fence_content, get_terse_output_directive
 from ._strict_rubric import get_pr_strict_rubric
 from .catalog import PromptCatalog
+
 #: Severities that BLOCK a GO when their automation thread is unresolved (#1856).
 #: ``minor``/``nitpick`` are advisory — a GO the reviewer returned must not
 #: deadlock to state:skip over a nit it declined to block on. An unmarked or

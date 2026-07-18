@@ -703,7 +703,8 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "_StoreAction",
             "",
             help_text=(
-                "HEPH_IMPLEMENTER_MODEL for child processes (implement, address-review, drive-green)"
+                "HEPH_IMPLEMENTER_MODEL for child processes "
+                "(implement, address-review, drive-green)"
             ),
         ),
         _action_spec(
