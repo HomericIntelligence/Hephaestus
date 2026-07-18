@@ -101,6 +101,90 @@ def test_strict_review_uses_codex_even_when_the_loop_agent_is_claude(
     assert result.job.agent == "codex"
 
 
+def test_strict_review_ingress_disarms_before_revoking_the_go_label(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A prior arm cannot merge in a label-write-before-deferral window."""
+    item = make_work_item(
+        stage=StageName.STRICT_REVIEW,
+        pr=12,
+        state="ENTER",
+    )
+    github = FakeStageGitHub(
+        pr_state={"state": "OPEN", "headRefOid": _HEAD, "autoMergeRequest": None}
+    )
+
+    assert StrictReviewStage().on_enter(item, make_ctx(github=github)) is None
+
+    actions = [action for action, _args in github.mutation_log]
+    assert actions.index("defer_auto_merge") < actions.index("gh_issue_remove_labels")
+
+
+def test_strict_review_ingress_rechecks_after_revoking_the_go_label(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A same-head re-arm during label removal cannot survive into review."""
+
+    class RearmDuringLabelRemovalGitHub(FakeStageGitHub):
+        def defer_auto_merge(self, pr_number: int) -> None:
+            super().defer_auto_merge(pr_number)
+            self._pr_state = {"state": "OPEN", "headRefOid": _HEAD, "autoMergeRequest": None}
+
+        def remove_labels(self, pr_number: int, labels: list[str]) -> None:
+            super().remove_labels(pr_number, labels)
+            self._pr_state = {
+                "state": "OPEN",
+                "headRefOid": _HEAD,
+                "autoMergeRequest": {"enabledAt": "raced"},
+            }
+
+    item = make_work_item(stage=StageName.STRICT_REVIEW, pr=12, state="ENTER")
+    github = RearmDuringLabelRemovalGitHub(
+        pr_state={"state": "OPEN", "headRefOid": _HEAD, "autoMergeRequest": None}
+    )
+
+    assert StrictReviewStage().on_enter(item, make_ctx(github=github)) is None
+
+    assert [action for action, _args in github.mutation_log].count("defer_auto_merge") == 2
+    state = github.gh_pr_state(12)
+    assert state is not None
+    assert state["autoMergeRequest"] is None
+
+
+def test_strict_review_ingress_rechecks_after_go_label_removal_error(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """An ambiguous failed label RPC cannot leave a same-head re-arm live."""
+
+    class RearmAndFailLabelRemovalGitHub(FakeStageGitHub):
+        def defer_auto_merge(self, pr_number: int) -> None:
+            super().defer_auto_merge(pr_number)
+            self._pr_state = {"state": "OPEN", "headRefOid": _HEAD, "autoMergeRequest": None}
+
+        def remove_labels(self, pr_number: int, labels: list[str]) -> None:
+            super().remove_labels(pr_number, labels)
+            self._pr_state = {
+                "state": "OPEN",
+                "headRefOid": _HEAD,
+                "autoMergeRequest": {"enabledAt": "raced"},
+            }
+            raise RuntimeError("label response lost")
+
+    item = make_work_item(stage=StageName.STRICT_REVIEW, pr=12, state="ENTER")
+    github = RearmAndFailLabelRemovalGitHub(
+        pr_state={"state": "OPEN", "headRefOid": _HEAD, "autoMergeRequest": None}
+    )
+
+    assert StrictReviewStage().on_enter(item, make_ctx(github=github)) == StageOutcome(
+        Disposition.FINISH_FAIL, "implementation_go_revoke_failed"
+    )
+
+    assert [action for action, _args in github.mutation_log].count("defer_auto_merge") == 2
+    state = github.gh_pr_state(12)
+    assert state is not None
+    assert state["autoMergeRequest"] is None
+
+
 def test_go_revokes_label_when_a_push_races_the_label_write(
     make_ctx: Any, make_work_item: Any
 ) -> None:
@@ -172,6 +256,87 @@ def test_nogo_disables_auto_merge_and_returns_to_implementation(
     assert ("defer_auto_merge", (12,)) in github.mutation_log
     assert ("mark_pr_implementation_no_go", (12,)) in github.mutation_log
     assert any("Missing a regression test." in body for body in github.comments[12])
+
+
+def test_nogo_rechecks_after_go_label_revocation(make_ctx: Any, make_work_item: Any) -> None:
+    """A same-head re-arm during NOGO containment remains disarmed."""
+
+    class RearmDuringGoRevocationGitHub(FakeStageGitHub):
+        def defer_auto_merge(self, pr_number: int) -> None:
+            super().defer_auto_merge(pr_number)
+            self._pr_state = {"state": "OPEN", "headRefOid": _HEAD, "autoMergeRequest": None}
+
+        def remove_labels(self, pr_number: int, labels: list[str]) -> None:
+            super().remove_labels(pr_number, labels)
+            self._pr_state = {
+                "state": "OPEN",
+                "headRefOid": _HEAD,
+                "autoMergeRequest": {"enabledAt": "raced"},
+            }
+
+    item = make_work_item(
+        stage=StageName.STRICT_REVIEW,
+        pr=12,
+        state=EVAL,
+        payload={
+            "strict_review_head": _HEAD,
+            "strict_review_verdict": "NOGO",
+            "strict_review_text": "Missing a regression test.\nGrade: C\nVerdict: NOGO",
+        },
+    )
+    github = RearmDuringGoRevocationGitHub(
+        pr_state={"state": "OPEN", "headRefOid": _HEAD, "autoMergeRequest": None}
+    )
+
+    assert StrictReviewStage().step(item, make_ctx(github=github)) == StageOutcome(
+        Disposition.FAIL_BACK, "nogo"
+    )
+
+    assert [action for action, _args in github.mutation_log].count("defer_auto_merge") == 2
+    state = github.gh_pr_state(12)
+    assert state is not None
+    assert state["autoMergeRequest"] is None
+
+
+def test_nogo_rechecks_after_go_label_removal_error(make_ctx: Any, make_work_item: Any) -> None:
+    """NOGO containment repeats deferral after an ambiguous label error."""
+
+    class RearmAndFailLabelRemovalGitHub(FakeStageGitHub):
+        def defer_auto_merge(self, pr_number: int) -> None:
+            super().defer_auto_merge(pr_number)
+            self._pr_state = {"state": "OPEN", "headRefOid": _HEAD, "autoMergeRequest": None}
+
+        def remove_labels(self, pr_number: int, labels: list[str]) -> None:
+            super().remove_labels(pr_number, labels)
+            self._pr_state = {
+                "state": "OPEN",
+                "headRefOid": _HEAD,
+                "autoMergeRequest": {"enabledAt": "raced"},
+            }
+            raise RuntimeError("label response lost")
+
+    item = make_work_item(
+        stage=StageName.STRICT_REVIEW,
+        pr=12,
+        state=EVAL,
+        payload={
+            "strict_review_head": _HEAD,
+            "strict_review_verdict": "NOGO",
+            "strict_review_text": "Missing a regression test.\nGrade: C\nVerdict: NOGO",
+        },
+    )
+    github = RearmAndFailLabelRemovalGitHub(
+        pr_state={"state": "OPEN", "headRefOid": _HEAD, "autoMergeRequest": None}
+    )
+
+    assert StrictReviewStage().step(item, make_ctx(github=github)) == StageOutcome(
+        Disposition.FINISH_FAIL, "auto_merge_disable_failed"
+    )
+
+    assert [action for action, _args in github.mutation_log].count("defer_auto_merge") == 2
+    state = github.gh_pr_state(12)
+    assert state is not None
+    assert state["autoMergeRequest"] is None
 
 
 def test_nogo_push_during_containment_restarts_without_stale_feedback(

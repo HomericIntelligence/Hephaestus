@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import logging
 import re
+from typing import Any
 
 from hephaestus.automation.agent_config import pr_reviewer_claude_timeout, reviewer_model
 from hephaestus.automation.claude_invoke import ReviewVerdict
@@ -146,10 +147,27 @@ class StrictReviewStage(Stage):
         pr_number = item.pr
         if pr_number is None:  # guarded by on_enter; narrowing
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
-        pr_state = ctx.github.gh_pr_state(pr_number)
+        # An ingress can arrive from a restart with GitHub already holding a
+        # previous auto-merge arm.  Disarm it before *any* label mutation or
+        # state read: label removal alone does not prevent that arm from
+        # merging while this independent review is being scheduled.
+        pr_state = self._defer_and_read_disabled(pr_number, ctx)
+        if pr_state is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_disable_failed")
         terminal = _terminal_pr_outcome(pr_state, pr_number)
         if terminal is not None:
             return terminal
+        label_revoked, pr_state = self._revoke_go_and_recontain(pr_number, ctx)
+        # Label removal is a separate remote mutation.  A parallel actor can
+        # re-arm the same head during that call, so repeat disable+readback
+        # before a reviewer is ever allowed to inspect it.
+        if pr_state is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_disable_failed")
+        terminal = _terminal_pr_outcome(pr_state, pr_number)
+        if terminal is not None:
+            return terminal
+        if not label_revoked:
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_revoke_failed")
         live_head = str((pr_state or {}).get("headRefOid") or "")
         if not live_head:
             return StageOutcome(Disposition.FINISH_FAIL, "no_head_sha")
@@ -169,13 +187,31 @@ class StrictReviewStage(Stage):
             item.payload.pop("strict_review_failed", None)
             item.payload.pop("strict_review_worktree_head", None)
             item.state = ENTER
-        if not self._clear_go_and_verify_disabled(pr_number, ctx):
-            return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_disable_failed")
         return None
 
     def _clear_go_and_verify_disabled(self, pr_number: int, ctx: StageContext) -> bool:
-        """Durably clear the GO label and verify auto-merge is actually disabled."""
-        labels_cleared = True
+        """Disarm/read back first, then remove the obsolete GO label."""
+        if self._defer_and_read_disabled(pr_number, ctx) is None:
+            return False
+        label_revoked, final_state = self._revoke_go_and_recontain(pr_number, ctx)
+        return label_revoked and final_state is not None
+
+    def _revoke_go_and_recontain(
+        self, pr_number: int, ctx: StageContext
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """Remove GO, then always re-disable and read back the remote arm.
+
+        A failed label mutation is ambiguous: GitHub may have applied it even
+        though the client lost the response.  Therefore the final containment
+        runs regardless and callers distinguish a verified label error from
+        an inability to establish a safely disarmed state.
+        """
+        label_revoked = self._remove_go_label(pr_number, ctx)
+        return label_revoked, self._defer_and_read_disabled(pr_number, ctx)
+
+    @staticmethod
+    def _remove_go_label(pr_number: int, ctx: StageContext) -> bool:
+        """Remove a stale label only after the PR is confirmed disarmed."""
         try:
             ctx.github.remove_labels(pr_number, [STATE_IMPLEMENTATION_GO])
         except Exception as e:
@@ -184,11 +220,13 @@ class StrictReviewStage(Stage):
                 pr_number,
                 e,
             )
-            # Do not short-circuit containment: a failed label mutation says
-            # nothing about a pre-existing remote auto-merge arm.  We still
-            # must attempt the independent deferral below before stopping.
-            labels_cleared = False
-        deferred = True
+            # Deferral is already read-back confirmed before this call; keep
+            # the failure explicit rather than letting an unlabeled PR drift.
+            return False
+        return True
+
+    def _defer_and_read_disabled(self, pr_number: int, ctx: StageContext) -> dict[str, Any] | None:
+        """Disable auto-merge and return its readback only when unarmed."""
         try:
             ctx.github.defer_auto_merge(pr_number)
         except Exception as e:
@@ -197,20 +235,15 @@ class StrictReviewStage(Stage):
                 pr_number,
                 e,
             )
-            deferred = False
-        disabled = deferred and self._auto_merge_is_disabled(pr_number, ctx)
-        return labels_cleared and disabled
-
-    def _auto_merge_is_disabled(self, pr_number: int, ctx: StageContext) -> bool:
-        """Read back the disabled state; ambiguity is containment failure."""
+            return None
         confirmed = ctx.github.gh_pr_state(pr_number)
         if confirmed is None or confirmed.get("autoMergeRequest"):
             logger.error(
                 "strict_review: PR #%d could not verify auto-merge disabled after defer",
                 pr_number,
             )
-            return False
-        return True
+            return None
+        return confirmed
 
     def step(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Execute the next strict-review action for the item's current state.

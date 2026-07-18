@@ -484,6 +484,96 @@ class TestJournalOrder:
         push_idx = next(i for i, entry in enumerate(trace) if entry[:2] == ("push", "plan_review"))
         assert mutation_idx < push_idx, f"push preceded durable mutation: {trace}"
 
+    def test_strict_review_ingress_defers_auto_merge_before_queue_push(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A reseeded strict-review item cannot wait queued with an old arm live."""
+        coordinator, _, gh = make_coordinator(tmp_path, monkeypatch)
+        original_log = gh._log
+
+        def shared_log(name: str, *args: Any) -> None:
+            original_log(name, *args)
+            coordinator.event_log.append(("mutation", name, args))
+
+        gh._log = shared_log  # type: ignore[method-assign]
+        item = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.PR,
+            issue=2053,
+            pr=2280,
+            stage=StageName.STRICT_REVIEW,
+            state="ENTER",
+        )
+
+        coordinator._push_item(item, StageName.STRICT_REVIEW, enter=True)
+
+        assert coordinator.queues[StageName.STRICT_REVIEW].snapshot() == [item]
+        trace = coordinator.event_log
+        defer_idx = next(
+            i for i, entry in enumerate(trace) if entry[:2] == ("mutation", "defer_auto_merge")
+        )
+        push_idx = next(
+            i for i, entry in enumerate(trace) if entry[:2] == ("push", "strict_review")
+        )
+        assert defer_idx < push_idx, f"strict review queued before auto-merge containment: {trace}"
+
+    def test_strict_review_ingress_finishes_when_containment_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed ingress deferral cannot leave the PR queued for review."""
+        coordinator, _, gh = make_coordinator(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            gh,
+            "defer_auto_merge",
+            lambda _pr_number: (_ for _ in ()).throw(RuntimeError("GitHub unavailable")),
+        )
+        item = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.PR,
+            issue=2053,
+            pr=2280,
+            stage=StageName.STRICT_REVIEW,
+            state="ENTER",
+        )
+
+        coordinator._push_item(item, StageName.STRICT_REVIEW, enter=True)
+
+        assert coordinator.queues[StageName.STRICT_REVIEW].snapshot() == []
+        assert item.result is not None
+        assert item.result.reason == "strict_review_ingress_auto_merge_disable_failed"
+        assert coordinator.queues[StageName.FINISHED].snapshot() == [item]
+
+    def test_recovered_merge_wait_arm_is_deferred_before_queue_push(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A restart cannot leave a persisted arm live while ARM is queued."""
+        coordinator, _, gh = make_coordinator(tmp_path, monkeypatch)
+        original_log = gh._log
+
+        def shared_log(name: str, *args: Any) -> None:
+            original_log(name, *args)
+            coordinator.event_log.append(("mutation", name, args))
+
+        gh._log = shared_log  # type: ignore[method-assign]
+        item = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.PR,
+            issue=2053,
+            pr=2280,
+            stage=StageName.MERGE_WAIT,
+            state="ENTER",
+            payload={"merge_wait_recovery": True},
+        )
+
+        coordinator._push_item(item, StageName.MERGE_WAIT, enter=True)
+
+        trace = coordinator.event_log
+        defer_idx = next(
+            i for i, entry in enumerate(trace) if entry[:2] == ("mutation", "defer_auto_merge")
+        )
+        push_idx = next(i for i, entry in enumerate(trace) if entry[:2] == ("push", "merge_wait"))
+        assert defer_idx < push_idx, f"recovery queued before auto-merge containment: {trace}"
+
 
 class TestDrainOrder:
     """Downstream-first queue draining."""

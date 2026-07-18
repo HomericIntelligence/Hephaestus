@@ -1346,6 +1346,12 @@ class Coordinator:
 
         Every durable GitHub mutation for this transition already happened
         inside the stage, immediately before the outcome that got us here.
+        The one narrow exception is review-gate ingress: a direct/reseeded
+        strict-review item, or a merge-wait arm-recovery item, can carry a
+        stale remote auto-merge arm before its queued stage gets CPU time, so
+        the coordinator disarms it *before* queueing.  Those stages repeat
+        the check on entry to defend every other invocation path and an
+        external re-arm between enqueue and drain.
 
         Upstream idempotency guard (#2107): a genuinely NEW ISSUE work item whose
         ``(repo, issue)`` is already queued (any stage) or in-flight is refused —
@@ -1362,6 +1368,32 @@ class Coordinator:
         ):
             logger.info("seed skipped: #%s already queued/in-flight in %s", item.issue, item.repo)
             return
+        requires_ingress_containment = stage is StageName.STRICT_REVIEW or (
+            stage is StageName.MERGE_WAIT and bool(item.payload.get("merge_wait_recovery"))
+        )
+        if requires_ingress_containment and enter and item.pr is not None:
+            try:
+                self._ctx_for(item).github.defer_auto_merge(item.pr)
+            except Exception as exc:
+                # Do not queue a review when an old arm could merge the PR
+                # before that review completes.  ``_finish`` records the
+                # containment failure without re-entering strict_review.
+                logger.error(
+                    "review-gate ingress: failed to defer auto-merge for PR #%d: %s",
+                    item.pr,
+                    exc,
+                )
+                failure_reason = (
+                    "strict_review_ingress_auto_merge_disable_failed"
+                    if stage is StageName.STRICT_REVIEW
+                    else "merge_wait_recovery_auto_merge_disable_failed"
+                )
+                self._finish(
+                    item,
+                    passed=False,
+                    reason=failure_reason,
+                )
+                return
         item.stage = stage
         if enter:
             item.state = "ENTER"

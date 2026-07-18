@@ -109,6 +109,107 @@ def test_stale_in_memory_review_handoff_is_contained_before_arm(
     assert not any(action == "arm_auto_merge" for action, _ in github.mutation_log)
     assert ("defer_auto_merge", (12,)) in github.mutation_log
     assert any(action == "gh_issue_remove_labels" for action, _ in github.mutation_log)
+    actions = [action for action, _args in github.mutation_log]
+    assert actions.index("defer_auto_merge") < actions.index("gh_issue_remove_labels")
+
+
+def test_recovered_arm_is_disarmed_before_rechecking_the_handoff(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A restart cannot leave a former arm live until ARM gets a queue turn."""
+    item = make_work_item(
+        stage=StageName.MERGE_WAIT,
+        pr=12,
+        state="ENTER",
+        payload={"merge_wait_recovery": True},
+    )
+    github = FakeStageGitHub(pr_state={"state": "OPEN", "headRefOid": "a" * 40})
+
+    assert MergeWaitStage().on_enter(item, make_ctx(github=github)) is None
+
+    assert item.state == ARM
+    assert github.mutation_log[0] == ("defer_auto_merge", (12,))
+
+
+def test_stale_handoff_rechecks_after_revoking_the_go_label(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A same-head re-arm during stale-label removal cannot survive failback."""
+
+    class RearmDuringLabelRemovalGitHub(_ArmingGitHub):
+        def __init__(self) -> None:
+            super().__init__(labels=(True, False))
+            self._pr_state = {"state": "OPEN", "headRefOid": "b" * 40}
+
+        def defer_auto_merge(self, pr_number: int) -> None:
+            super().defer_auto_merge(pr_number)
+            self._pr_state = {"state": "OPEN", "headRefOid": "b" * 40, "autoMergeRequest": None}
+
+        def remove_labels(self, pr_number: int, labels: list[str]) -> None:
+            super().remove_labels(pr_number, labels)
+            self._pr_state = {
+                "state": "OPEN",
+                "headRefOid": "b" * 40,
+                "autoMergeRequest": {"enabledAt": "raced"},
+            }
+
+    github = RearmDuringLabelRemovalGitHub()
+    item = make_work_item(
+        stage=StageName.MERGE_WAIT,
+        pr=12,
+        state=ARM,
+        payload={"pr_review_skill_head": "a" * 40},
+    )
+
+    assert MergeWaitStage().step(item, make_ctx(github=github)) == StageOutcome(
+        Disposition.FAIL_BACK, "review_stale"
+    )
+
+    assert [action for action, _args in github.mutation_log].count("defer_auto_merge") == 2
+    state = github.gh_pr_state(12)
+    assert state is not None
+    assert state["autoMergeRequest"] is None
+
+
+def test_stale_handoff_rechecks_after_go_label_removal_error(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """An ambiguous stale-label error cannot leave a former arm live."""
+
+    class RearmAndFailLabelRemovalGitHub(_ArmingGitHub):
+        def __init__(self) -> None:
+            super().__init__(labels=(True, False))
+            self._pr_state = {"state": "OPEN", "headRefOid": "b" * 40}
+
+        def defer_auto_merge(self, pr_number: int) -> None:
+            super().defer_auto_merge(pr_number)
+            self._pr_state = {"state": "OPEN", "headRefOid": "b" * 40, "autoMergeRequest": None}
+
+        def remove_labels(self, pr_number: int, labels: list[str]) -> None:
+            super().remove_labels(pr_number, labels)
+            self._pr_state = {
+                "state": "OPEN",
+                "headRefOid": "b" * 40,
+                "autoMergeRequest": {"enabledAt": "raced"},
+            }
+            raise RuntimeError("label response lost")
+
+    github = RearmAndFailLabelRemovalGitHub()
+    item = make_work_item(
+        stage=StageName.MERGE_WAIT,
+        pr=12,
+        state=ARM,
+        payload={"pr_review_skill_head": "a" * 40},
+    )
+
+    assert MergeWaitStage().step(item, make_ctx(github=github)) == StageOutcome(
+        Disposition.FINISH_FAIL, "implementation_go_revoke_failed"
+    )
+
+    assert [action for action, _args in github.mutation_log].count("defer_auto_merge") == 2
+    state = github.gh_pr_state(12)
+    assert state is not None
+    assert state["autoMergeRequest"] is None
 
 
 def test_armed_labeled_pr_polls_without_rechecking_external_state(
