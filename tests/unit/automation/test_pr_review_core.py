@@ -233,6 +233,37 @@ class TestRunPrReviewAnalysis:
             )
         assert captured["agent"] == "pr-reviewer-r1"
 
+    def test_claude_review_scope_can_run_athena_pr_review_skill(self, tmp_path: Path) -> None:
+        """The legacy review path keeps the skill's read-only helper surface."""
+        captured: dict[str, str] = {}
+
+        def _fake_invoke(**kwargs: object) -> tuple[str, str]:
+            captured["allowed_tools"] = str(kwargs["allowed_tools"])
+            return (
+                '{"result": "```json\\n{\\"comments\\": [], \\"summary\\": \\"ok\\"}\\n```"}',
+                "",
+            )
+
+        with (
+            patch("hephaestus.automation.pr_review_core.get_repo_root", return_value=tmp_path),
+            patch("hephaestus.automation.pr_review_core.get_repo_slug", return_value="Repo"),
+            patch(
+                "hephaestus.automation.pr_review_core.invoke_claude_with_session",
+                side_effect=_fake_invoke,
+            ),
+        ):
+            run_pr_review_analysis(
+                pr_number=1,
+                issue_number=1,
+                worktree_path=tmp_path,
+                context={"pr_diff": "d"},
+                agent="claude",
+                state_dir=tmp_path,
+                dry_run=False,
+            )
+
+        assert captured["allowed_tools"] == "Read,Glob,Grep,Bash,Skill,Agent,WebFetch"
+
     def test_error_envelope_propagates_not_parsed_as_verdict(self, tmp_path: Path) -> None:
         """An is_error:true envelope must raise, not be parsed into a bogus verdict.
 

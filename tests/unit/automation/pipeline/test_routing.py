@@ -199,7 +199,6 @@ class TestROUTES:
                 fail_routes={
                     "closed": StageName.FINISHED,
                     "not_implementation_go": StageName.PR_REVIEW,
-                    "arm_confirm_failed": StageName.PR_REVIEW,
                     "*": StageName.FINISHED,
                 },
                 budgets={},

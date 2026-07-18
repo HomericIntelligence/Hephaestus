@@ -131,11 +131,10 @@ ROUTES: dict[StageName, Route] = {
         next=StageName.FINISHED,
         fail_routes={
             "closed": StageName.FINISHED,
-            # A missing loop-owned approval label needs a fresh independent
-            # review, not terminal abandonment. Containment failures such as
-            # inability to disarm or persist the arm remain terminal.
+            # A missing loop-owned approval label needs a fresh review, not
+            # terminal abandonment. Other merge-wait failures are terminal;
+            # the stage never reconciles a state owned by another run.
             "not_implementation_go": StageName.PR_REVIEW,
-            "arm_confirm_failed": StageName.PR_REVIEW,
             "*": StageName.FINISHED,
         },
         budgets={},

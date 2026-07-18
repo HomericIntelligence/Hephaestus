@@ -1278,6 +1278,35 @@ class TestReadSurface:
 
         assert issue is None
 
+    def test_pr_review_context_reads_body_and_complete_diff(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The review stage gets authoritative inputs rather than empty defaults."""
+        calls: list[list[str]] = []
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            if argv[:2] == ["pr", "view"]:
+                return SimpleNamespace(stdout=json.dumps({"body": "Closes #1899\n"}))
+            if argv[:2] == ["pr", "diff"]:
+                return SimpleNamespace(stdout="diff --git a/a.py b/a.py\n+new\n")
+            raise AssertionError(f"unexpected gh invocation: {argv}")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        context = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).pr_review_context(
+            1984
+        )
+
+        assert context == {
+            "pr_diff": "diff --git a/a.py b/a.py\n+new\n",
+            "pr_description": "Closes #1899\n",
+        }
+        assert calls == [
+            ["pr", "view", "1984", "--json", "body", "--repo", "org/repo-a"],
+            ["pr", "diff", "1984", "--repo", "org/repo-a"],
+        ]
+
     def test_pr_manager_implementation_label_read(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1370,57 +1399,8 @@ class TestGhPrState:
         assert adapter.gh_pr_state(7) is None
 
 
-class TestDriveGreenArmingRecords:
-    """arm_drive_green / learn-terminal / learn-result over ArmingStateStore."""
-
-    def test_arm_then_terminal_roundtrip(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(pg, "get_pr_head_branch", lambda n: "1817-auto-impl")
-        assert adapter.drive_green_learn_terminal(3) is False
-
-        adapter.arm_drive_green(3, 70, "deadbeef")
-        assert adapter.drive_green_learn_terminal(3) is False  # armed, not terminal
-
-        adapter.mark_drive_green_learn_result(3, succeeded=True)
-        assert adapter.drive_green_learn_terminal(3) is True
-
-    def test_arm_phase_requires_exact_readback_confirmation(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Pre-RPC intent cannot make restart recovery skip ARM."""
-        monkeypatch.setattr(pg, "get_pr_head_branch", lambda n: "1817-auto-impl")
-
-        adapter.arm_drive_green(8, 74, "face")
-        prepared = adapter._arming.load(8)
-        assert prepared is not None
-        assert prepared["auto_merge_arm_status"] == "prepared"
-        assert adapter.drive_green_arm_confirmed(8, 74) is False
-
-        adapter.confirm_drive_green_arm(8, 74, "face")
-
-        confirmed = adapter._arming.load(8)
-        assert confirmed is not None
-        assert confirmed["auto_merge_arm_status"] == "confirmed"
-        assert confirmed["auto_merge_confirmed_at"]
-        assert adapter.drive_green_arm_confirmed(8, 74) is True
-
-        # A retry at the same exact record must not downgrade confirmation.
-        adapter.arm_drive_green(8, 74, "face")
-        assert adapter.drive_green_arm_confirmed(8, 74) is True
-
-    def test_arm_confirmation_rejects_a_missing_or_mismatched_prepared_record(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A durable confirmation remains bound to the prepared PR and head."""
-        monkeypatch.setattr(pg, "get_pr_head_branch", lambda n: "branch")
-        adapter.arm_drive_green(9, 75, "cafe")
-
-        with pytest.raises(RuntimeError, match="missing or mismatched"):
-            adapter.confirm_drive_green_arm(9, 76, "cafe")
-        with pytest.raises(RuntimeError, match="missing or mismatched"):
-            adapter.confirm_drive_green_arm(9, 75, "other")
-        assert adapter.drive_green_arm_confirmed(9, 75) is False
+class TestDriveGreenLearning:
+    """Post-merge learning state remains independent of merge arming."""
 
     def test_learn_claim_is_durable_and_never_replayable(self, adapter: pg.PipelineGitHub) -> None:
         """A crash after dispatch claim is an explicit unknown, never a replay."""
@@ -1428,7 +1408,6 @@ class TestDriveGreenArmingRecords:
         assert adapter.drive_green_learn_inflight(31) is True
         assert adapter.claim_drive_green_learn(31, 701) is False
         assert adapter.drive_green_learn_terminal(31) is False
-        assert adapter.pending_drive_green_arms() == [(31, 701)]
 
     def test_concurrent_learn_claims_allow_exactly_one_dispatch(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
@@ -1498,37 +1477,6 @@ class TestDriveGreenArmingRecords:
         adapter.mark_drive_green_learn_result(4, succeeded=False)
 
         assert adapter.drive_green_learn_terminal(4) is True
-
-    def test_arm_never_overwrites_terminal_record(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(pg, "get_pr_head_branch", lambda n: "b")
-        adapter.mark_drive_green_learn_result(5, succeeded=True)
-
-        adapter.arm_drive_green(5, 71, "cafe")
-
-        record = adapter._arming.load(5)
-        assert record is not None
-        assert record["learn_status"] == "succeeded"  # evidence preserved
-
-    def test_pending_arm_scan_recovers_only_non_terminal_records(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(pg, "get_pr_head_branch", lambda n: "b")
-        adapter.arm_drive_green(6, 72, "face")
-
-        assert adapter.pending_drive_green_arms() == [(6, 72)]
-
-        adapter.mark_drive_green_learn_result(6, succeeded=True)
-        assert adapter.pending_drive_green_arms() == []
-
-    def test_arm_record_write_failure_is_not_silently_acknowledged(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(adapter._arming, "save", lambda _issue, _record: False)
-
-        with pytest.raises(RuntimeError, match="could not persist drive-green arming record"):
-            adapter.arm_drive_green(7, 73, "cafe")
 
 
 class TestRateBudget:

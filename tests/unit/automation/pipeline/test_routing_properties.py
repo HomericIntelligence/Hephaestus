@@ -57,9 +57,6 @@ _REASON_BUDGET: dict[str, str | None] = {
     "no_pr": None,
     # #2054 terminalizes every open merge-wait item after containment.
     "closed": None,
-    # A missing loop-owned label routes merge-wait back to review without
-    # consuming a stage-local retry budget.
-    "arm_confirm_failed": None,
     "unknown_reason": None,
 }
 

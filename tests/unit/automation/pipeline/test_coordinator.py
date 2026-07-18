@@ -386,24 +386,33 @@ class TestQuiescence:
         assert entries[0].passed is False
         assert "no linked issue" in entries[0].reason
 
-    def test_direct_pr_with_linked_issue_preserves_requirements_context(
+    def test_direct_pr_with_linked_issue_preserves_full_review_context(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A real resolved issue remains available to the downstream gates."""
-        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
-        entry = SeedEntry(
-            kind="pr",
-            identifier=701,
-            stage=StageName.PR_REVIEW,
-            reason="direct PR awaiting review",
-            pr_number=701,
-            issue_number=700,
+        github = FakeStageGitHub(
+            pr_issue=700,
+            issue_title="Review the migration",
+            issue_body="Preserve the requirements context.",
+            pr_review_context={
+                "pr_diff": "diff --git a/a.py b/a.py\n+@@ -1 +1 @@\n-old\n+new\n",
+                "pr_description": "Closes #700\n\nCarry review inputs.",
+            },
+        )
+        config = PipelineConfig(org="org", repos=["repo-a"], prs=[701], projects_dir=tmp_path)
+        coordinator = Coordinator(
+            config, github=github, pool=FakeWorkerPool(), install_signals=False
         )
 
-        item = coordinator._entry_to_item(entry, "repo-a")
+        entries = coordinator._seed_direct_scope("repo-a")
+        item = coordinator._entry_to_item(entries[0], "repo-a")
 
         assert item.pr == 701
         assert item.issue == 700
+        assert item.payload["issue_title"] == "Review the migration"
+        assert item.payload["issue_body"] == "Preserve the requirements context."
+        assert item.payload["pr_diff"].startswith("diff --git")
+        assert item.payload["pr_description"].startswith("Closes #700")
 
 
 def _fake_in_flight_item(coordinator: Coordinator, item: WorkItem) -> JobHandle:
@@ -1501,7 +1510,6 @@ class TestPipelineScopeWiring:
     def _scoped_config(
         self, tmp_path: Path, *, issues: list[int], force: bool = False
     ) -> PipelineConfig:
-        from hephaestus.automation.pipeline.routing import PipelineScope
 
         return PipelineConfig(
             org="org",
@@ -1565,156 +1573,6 @@ class TestPipelineScopeWiring:
         assert entries[0].issue_body == "Use the real issue body."
         assert item.payload["issue_title"] == "Hydrate planner context"
         assert item.payload["issue_body"] == "Use the real issue body."
-
-    def test_direct_merged_pr_with_pending_arm_record_reenters_merge_wait(
-        self, tmp_path: Path
-    ) -> None:
-        """A restarted drive must not drop the post-merge learn handoff (#2055)."""
-
-        class _RecoveryGitHub(FakeStageGitHub):
-            def pending_drive_green_arms(self) -> list[tuple[int, int]]:
-                return [(2055, 601)]
-
-        config = PipelineConfig(
-            org="org",
-            repos=["repo-a"],
-            prs=[601],
-            projects_dir=tmp_path,
-            scope=PipelineScope(frozenset({StageName.MERGE_WAIT})),
-        )
-        github = _RecoveryGitHub(
-            pr_issue=2055,
-            pr_state={"state": "MERGED", "headRefOid": "a" * 40},
-        )
-        coordinator = Coordinator(
-            config, github=github, pool=FakeWorkerPool(), install_signals=False
-        )
-
-        entries = coordinator._seed_direct_scope("repo-a")
-
-        assert len(entries) == 1
-        assert entries[0].stage is StageName.MERGE_WAIT
-        assert entries[0].issue_number == 2055
-        assert entries[0].merge_wait_recovery is True
-
-    def test_direct_open_pr_with_pending_arm_record_preserves_merge_wait_recovery(
-        self, tmp_path: Path
-    ) -> None:
-        """An explicit PR restart preserves its durable arm handoff too."""
-
-        class _RecoveryGitHub(FakeStageGitHub):
-            def pending_drive_green_arms(self) -> list[tuple[int, int]]:
-                return [(2055, 601)]
-
-        config = PipelineConfig(
-            org="org",
-            repos=["repo-a"],
-            prs=[601],
-            projects_dir=tmp_path,
-            scope=PipelineScope(frozenset({StageName.MERGE_WAIT})),
-        )
-        coordinator = Coordinator(
-            config,
-            github=_RecoveryGitHub(
-                pr_issue=2055,
-                pr_state={"state": "OPEN", "headRefOid": "a" * 40},
-            ),
-            pool=FakeWorkerPool(),
-            install_signals=False,
-        )
-
-        entries = coordinator._seed_direct_scope("repo-a")
-        item = coordinator._entry_to_item(entries[0], "repo-a")
-
-        assert len(entries) == 1
-        assert entries[0].stage is StageName.MERGE_WAIT
-        assert entries[0].merge_wait_recovery is True
-        assert item.payload["merge_wait_recovery"] is True
-
-    def test_repo_recovery_seed_marks_merge_wait_reconstruction(self, tmp_path: Path) -> None:
-        """The no-CLI-scope recovery scan carries the same stage handoff."""
-
-        class _RecoveryGitHub(FakeStageGitHub):
-            def pending_drive_green_arms(self) -> list[tuple[int, int]]:
-                return [(2055, 601)]
-
-        config = PipelineConfig(
-            org="org",
-            repos=["repo-a"],
-            projects_dir=tmp_path,
-            scope=PipelineScope(frozenset({StageName.MERGE_WAIT})),
-        )
-        coordinator = Coordinator(
-            config,
-            github=_RecoveryGitHub(),
-            pool=FakeWorkerPool(),
-            install_signals=False,
-        )
-
-        entries = coordinator._pending_arm_recovery_entries()
-        item = coordinator._entry_to_item(entries[0], "repo-a")
-
-        assert len(entries) == 1
-        assert entries[0].stage is StageName.MERGE_WAIT
-        assert entries[0].merge_wait_recovery is True
-        assert item.payload["merge_wait_recovery"] is True
-
-    def test_direct_merged_issue_with_pending_arm_record_reenters_merge_wait(
-        self, tmp_path: Path
-    ) -> None:
-        """Issue-scoped restart preserves the same post-merge learn handoff."""
-
-        class _RecoveryGitHub(FakeStageGitHub):
-            def pending_drive_green_arms(self) -> list[tuple[int, int]]:
-                return [(2055, 601)]
-
-        config = PipelineConfig(
-            org="org",
-            repos=["repo-a"],
-            issues=[2055],
-            projects_dir=tmp_path,
-            scope=PipelineScope(frozenset({StageName.MERGE_WAIT})),
-        )
-        github = _RecoveryGitHub(merged_pr=601)
-        coordinator = Coordinator(
-            config, github=github, pool=FakeWorkerPool(), install_signals=False
-        )
-
-        entries = coordinator._seed_direct_scope("repo-a")
-
-        assert len(entries) == 1
-        assert entries[0].stage is StageName.MERGE_WAIT
-        assert entries[0].pr_number == 601
-        assert entries[0].merge_wait_recovery is True
-
-    def test_issue_scoped_pending_arm_recovers_before_closed_issue_filter(
-        self, tmp_path: Path
-    ) -> None:
-        """A merged PR's closed issue still restores its unconsumed learn record."""
-
-        class _RecoveryGitHub(FakeStageGitHub):
-            def pending_drive_green_arms(self) -> list[tuple[int, int]]:
-                return [(2055, 601)]
-
-        config = PipelineConfig(
-            org="org",
-            repos=["repo-a"],
-            issues=[2055],
-            projects_dir=tmp_path,
-            scope=PipelineScope(frozenset({StageName.MERGE_WAIT})),
-        )
-        coordinator = Coordinator(
-            config,
-            github=_RecoveryGitHub(merged_pr=601),
-            pool=FakeWorkerPool(),
-            install_signals=False,
-        )
-
-        assert coordinator._seed_pass() == 1
-        assert coordinator.items[0].stage is StageName.MERGE_WAIT
-        assert coordinator.items[0].issue == 2055
-        assert coordinator.items[0].pr == 601
-        assert coordinator.items[0].payload["merge_wait_recovery"] is True
 
     def test_seed_pass_filters_closed_explicit_issues_before_classification(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1781,8 +1639,6 @@ class TestPipelineScopeWiring:
         scope. force is a redo knob for work at-or-past the scope, not a
         fast-forward that advances un-started upstream work into it.
         """
-        from hephaestus.automation.pipeline.routing import PipelineScope
-
         # Scope starts at IMPLEMENTATION; PLANNING is pre-scope.
         scope = PipelineScope(frozenset({StageName.IMPLEMENTATION, StageName.PR_REVIEW}))
         config = self._scoped_config(tmp_path, issues=[1], force=True)

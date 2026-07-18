@@ -32,8 +32,9 @@ it belongs in that stage rather than in GitHub Actions.
    collect CI/CD evidence and incorporate it into its binary verdict, but CI
    never independently authorizes the loop.
 3. `merge_wait` is the sole automatic armer and consumes the loop-owned label.
-   A restart re-reads that label and the live PR head; the head is operational
-   arm/recovery metadata only, never a post-label invalidation or additional
+   Each invocation reads the live PR head only to make one conditional arm
+   request. An existing, changed, or lost arm is warned about and left for an
+   operator; it is never reclaimed, retried, or used as an additional
    authorization requirement. Normal GitHub branch protection and explicit
    operator authority remain independent of this loop decision.
 

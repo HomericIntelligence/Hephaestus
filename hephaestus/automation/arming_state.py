@@ -1,4 +1,4 @@
-"""On-disk arming-record persistence for the drive-green flow.
+"""On-disk post-merge learning-record persistence for the drive-green flow.
 
 Owns the ``drive-green-armed-<n>.json`` files under the driver's
 ``state_dir``. Extracted from
@@ -31,13 +31,6 @@ from hephaestus.io.utils import write_secure
 from ._review_utils import load_state_file
 
 logger = logging.getLogger(__name__)
-
-# ``armed_at`` records the intent written before the remote GraphQL mutation;
-# it is deliberately *not* evidence that GitHub accepted auto-merge.  The
-# pipeline therefore persists this small state machine so restart recovery can
-# distinguish a pre-RPC record from an arm that was read back from GitHub.
-ARM_STATUS_PREPARED = "prepared"
-ARM_STATUS_CONFIRMED = "confirmed"
 
 
 class ArmingStateStore:

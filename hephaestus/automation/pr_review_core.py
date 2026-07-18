@@ -206,7 +206,9 @@ def _invoke_and_parse_review_session(
         timeout=timeout,
         output_format="json",
         permission_mode="dontAsk",
-        allowed_tools="Read,Glob,Grep",
+        # The normal $athena:pr-review skill is read-only, but its declared
+        # workflow uses local Bash helpers and review subagents.
+        allowed_tools="Read,Glob,Grep,Bash,Skill,Agent,WebFetch",
         # Pipe the prompt via stdin, not argv: the PR-review prompt embeds the
         # full diff and can be tens of KB, which overflows ARG_MAX and raises
         # `[Errno 7] Argument list too long` when passed as a positional arg.

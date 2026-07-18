@@ -2,7 +2,7 @@
 
 ## Semantics
 
-The coordinator runs on the process main thread and owns all eight stage
+The coordinator runs on the process main thread and owns all seven stage
 queues, the timer heap, the in-flight registry, all routing, and (through the
 :class:`~hephaestus.automation.pipeline_github.PipelineGitHub` accessor) every
 GitHub API mutation. A single worker pool executes agent, build/test, and
@@ -1393,8 +1393,6 @@ class Coordinator:
         discovery_repos = [] if self.config.issues or self.config.prs else self.config.repos
         entries = _seeding.seed_from_cli(discovery_repos, [], [])
         default_repo = self.config.repos[0] if self.config.repos else ""
-        if not self.config.issues and not self.config.prs:
-            entries.extend(self._pending_arm_recovery_entries())
         if self.config.issues or self.config.prs:
             entries.extend(self._seed_direct_scope(default_repo))
         pushed = 0
@@ -1417,40 +1415,6 @@ class Coordinator:
             self._push_item(item, item.stage, enter=True)
             pushed += 1
         return pushed
-
-    def _pending_arm_recovery_entries(self) -> list[_seeding.SeedEntry]:
-        """Seed non-terminal durable arms through merge_wait after a restart."""
-        entries: list[_seeding.SeedEntry] = []
-        scope_stages = self.config.scope.stages if self.config.scope is not None else None
-        for repo in self.config.repos:
-            reader = getattr(self._ctx_for_repo(repo).github, "pending_drive_green_arms", None)
-            if not callable(reader):
-                continue
-            try:
-                records = reader()
-            except Exception as exc:
-                logger.warning("drive-green arm recovery read failed for %s: %s", repo, exc)
-                continue
-            for issue_number, pr_number in records:
-                stage, reason, passed = self._scope_seed_decision(
-                    issue_number,
-                    StageName.MERGE_WAIT,
-                    f"PR #{pr_number} has a pending durable drive-green arm record",
-                    scope_stages,
-                )
-                entries.append(
-                    _seeding.SeedEntry(
-                        kind="pr",
-                        identifier=pr_number,
-                        stage=stage,
-                        reason=reason,
-                        pr_number=pr_number,
-                        issue_number=issue_number,
-                        passed=passed,
-                        merge_wait_recovery=True,
-                    )
-                )
-        return entries
 
     def _clamp_seed_stage_to_scope(
         self,
@@ -1537,33 +1501,8 @@ class Coordinator:
         github = self._ctx_for_repo(repo).github if repo else self.github
         entries: list[_seeding.SeedEntry] = []
         scope_stages = self.config.scope.stages if self.config.scope is not None else None
-        reader = getattr(github, "pending_drive_green_arms", None)
-        pending_arms = set(reader()) if callable(reader) else set()
         requested_issues = list(self.config.issues)
-        recovered_issues: set[int] = set()
-        for issue, pr in pending_arms:
-            if issue not in requested_issues:
-                continue
-            stage, reason, passed = self._scope_seed_decision(
-                issue,
-                StageName.MERGE_WAIT,
-                f"PR #{pr} has a pending durable drive-green arm record",
-                scope_stages,
-            )
-            entries.append(
-                _seeding.SeedEntry(
-                    kind="pr",
-                    identifier=pr,
-                    stage=stage,
-                    reason=reason,
-                    pr_number=pr,
-                    issue_number=issue,
-                    passed=passed,
-                    merge_wait_recovery=True,
-                )
-            )
-            recovered_issues.add(issue)
-        issue_numbers = [issue for issue in requested_issues if issue not in recovered_issues]
+        issue_numbers = requested_issues
         if issue_numbers:
             issue_numbers = _admission._filter_open_issues(repo, issue_numbers)
         for issue in issue_numbers:
@@ -1590,26 +1529,6 @@ class Coordinator:
                 )
                 continue
             scope_identifier = issue_number if issue_number is not None else pr
-            if issue_number is not None and (issue_number, pr) in pending_arms:
-                stage, reason, passed = self._scope_seed_decision(
-                    scope_identifier,
-                    StageName.MERGE_WAIT,
-                    f"PR #{pr} has a pending durable drive-green arm record",
-                    scope_stages,
-                )
-                entries.append(
-                    _seeding.SeedEntry(
-                        kind="pr",
-                        identifier=pr,
-                        stage=stage,
-                        reason=reason,
-                        pr_number=pr,
-                        issue_number=issue_number,
-                        passed=passed,
-                        merge_wait_recovery=True,
-                    )
-                )
-                continue
             pr_state = github.gh_pr_state(pr)
             pr_state_name = ((pr_state or {}).get("state") or "").upper()
             if pr_state_name == "MERGED":
@@ -1658,6 +1577,28 @@ class Coordinator:
                     )
                 )
             else:
+                issue_facts: _seeding.IssueFacts | None
+                review_context: dict[str, str] | None
+                try:
+                    issue_facts = _seeding.seed_issue_from_github(issue_number, github)
+                    review_context = github.pr_review_context(pr)
+                except Exception as exc:
+                    logger.warning("PR #%d: review context read failed: %s", pr, exc)
+                    review_context = None
+                    issue_facts = None
+                if issue_facts is None or review_context is None:
+                    entries.append(
+                        _seeding.SeedEntry(
+                            kind="pr",
+                            identifier=pr,
+                            stage=StageName.FINISHED,
+                            reason=f"PR #{pr} review context could not be read",
+                            pr_number=pr,
+                            issue_number=issue_number,
+                            passed=False,
+                        )
+                    )
+                    continue
                 stage, reason, passed = self._scope_seed_decision(
                     scope_identifier,
                     StageName.PR_REVIEW,
@@ -1672,6 +1613,10 @@ class Coordinator:
                         reason=reason,
                         pr_number=pr,
                         issue_number=issue_number,
+                        issue_title=issue_facts.title,
+                        issue_body=issue_facts.body,
+                        pr_diff=review_context["pr_diff"],
+                        pr_description=review_context["pr_description"],
                         passed=passed,
                     )
                 )
@@ -1703,6 +1648,10 @@ class Coordinator:
                 pr=entry.pr_number or int(entry.identifier),
                 stage=entry.stage,
             )
+            item.payload["issue_title"] = entry.issue_title
+            item.payload["issue_body"] = entry.issue_body
+            item.payload["pr_diff"] = entry.pr_diff
+            item.payload["pr_description"] = entry.pr_description
         else:
             item = WorkItem(
                 repo=default_repo,
@@ -1721,8 +1670,6 @@ class Coordinator:
                 item.payload["existing_pr"] = True
         item.state = "ENTER"
         item.payload["entry_reason"] = entry.reason
-        if entry.merge_wait_recovery:
-            item.payload["merge_wait_recovery"] = True
         return item
 
     def _reseed_if_converged(self) -> bool:

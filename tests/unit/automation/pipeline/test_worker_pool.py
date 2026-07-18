@@ -215,6 +215,28 @@ class TestWorkerPoolSubmitComplete:
         assert invoke.call_args.kwargs["allowed_tools"] == "Read,Glob,Grep"
         assert invoke.call_args.kwargs["permission_mode"] == "dontAsk"
 
+    def test_read_only_agent_job_honors_its_explicit_skill_scope(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+    ) -> None:
+        """The PR-review worker can invoke its declared read-only skill."""
+        allowed_tools = "Read,Glob,Grep,Bash,Skill,Agent,WebFetch"
+        job = _agent_job(sandbox="read-only", allowed_tools=allowed_tools)
+        with (
+            patch(f"{_WP}.resolve_agent", return_value="claude"),
+            patch(
+                f"{_WP}.claude_invoke.invoke_claude_with_session",
+                return_value=("GO", "s"),
+            ) as invoke,
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _handle, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        assert invoke.call_args.kwargs["allowed_tools"] == allowed_tools
+        assert invoke.call_args.kwargs["permission_mode"] == "dontAsk"
+
     def test_submit_and_complete_build_test_job(
         self,
         pool: WorkerPool,

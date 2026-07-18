@@ -38,8 +38,6 @@ from hephaestus.automation._review_utils import (
     get_pr_head_branch,
 )
 from hephaestus.automation.arming_state import (
-    ARM_STATUS_CONFIRMED,
-    ARM_STATUS_PREPARED,
     ArmingStateStore,
 )
 from hephaestus.automation.git_utils import issue_auto_impl_branch_name
@@ -643,6 +641,30 @@ class PipelineGitHub:
             return None
         return int(match.group(1))
 
+    def pr_review_context(self, pr_number: int) -> dict[str, str] | None:
+        """Read the exact PR body and diff used by an automated review.
+
+        A direct ``--prs`` seed must not grant the only review GO/NOGO based
+        solely on a PR number.  Both reads are coordinator-owned and failures
+        are explicit so the caller can finish the item for operator triage.
+        """
+        try:
+            body_result = self._gh(["pr", "view", str(pr_number), "--json", "body"])
+            body_data = json.loads(body_result.stdout or "{}")
+            if not isinstance(body_data, dict):
+                return None
+            diff_result = self._gh(["pr", "diff", str(pr_number)])
+        except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError) as exc:
+            logger.warning("PR #%s: review context read failed: %s", pr_number, exc)
+            return None
+        body = body_data.get("body")
+        if not isinstance(body, str):
+            return None
+        return {
+            "pr_diff": github_api.strip_null_bytes(diff_result.stdout or ""),
+            "pr_description": github_api.strip_null_bytes(body),
+        }
+
     def has_existing_plan(self, issue_number: int) -> bool:
         """Labels-first plan gate incl. comment-scan backfill (``is_plan_review_go``)."""
         if self._repo_slug is not None:
@@ -846,43 +868,6 @@ class PipelineGitHub:
         """
         record = self._arming.load(issue_number) or {}
         return str(record.get("learn_status") or "").lower() == "in_progress"
-
-    def pending_drive_green_arms(self) -> list[tuple[int, int]]:
-        """Return non-terminal durable arm records for pipeline restart recovery."""
-        try:
-            paths = sorted(ensure_state_dir(self._repo_root).glob("drive-green-armed-*.json"))
-        except OSError as exc:
-            logger.warning("drive-green arm recovery scan failed: %s", exc)
-            return []
-        pending: list[tuple[int, int]] = []
-        for path in paths:
-            try:
-                issue_number = int(path.stem.rsplit("-", 1)[-1])
-            except ValueError:
-                continue
-            if self.drive_green_learn_terminal(issue_number):
-                continue
-            record = self._arming.load(issue_number)
-            pr_number = (record or {}).get("pr_number")
-            if isinstance(pr_number, int) and pr_number > 0:
-                pending.append((issue_number, pr_number))
-        return pending
-
-    def drive_green_arm_confirmed(self, issue_number: int, pr_number: int) -> bool:
-        """Return whether a durable record confirms GitHub armed this PR.
-
-        ``armed_at`` is written before the remote arm request, so it cannot
-        prove that the request succeeded. This is recovery metadata only:
-        merge-wait always re-reads the loop-owned label and live GitHub state
-        before it resumes arming. Legacy records with no arm status return
-        ``False`` and take that same reconciliation path.
-        """
-        record = self._arming.load(issue_number) or {}
-        return (
-            record.get("pr_number") == pr_number
-            and record.get("auto_merge_arm_status") == ARM_STATUS_CONFIRMED
-            and bool(record.get("auto_merge_confirmed_at"))
-        )
 
     # -- mutator surface (dry-run honored here) -------------------------------
 
@@ -1203,93 +1188,6 @@ class PipelineGitHub:
                 )
             return thread_ids
         return github_api.gh_pr_review_post(pr_number, threads, summary)
-
-    def arm_drive_green(self, issue_number: int, pr_number: int, head_sha: str) -> None:
-        """Persist the drive-green arming record (``ArmingStateStore.save``).
-
-        An already-terminal record is never overwritten because it is the
-        post-merge ``/learn`` dedupe key. This prepared transition precedes
-        the remote request and records only recovery metadata; it is not a
-        review proof or a merge authorization.
-        """
-        if self._skip(f"arm drive-green record for #{issue_number} (PR #{pr_number})"):
-            return
-        if self.drive_green_learn_terminal(issue_number):
-            return
-        existing = self._arming.load(issue_number)
-        if (
-            existing is not None
-            and existing.get("pr_number") == pr_number
-            and existing.get("head_sha_at_arming") == head_sha
-            and existing.get("auto_merge_arm_status") == ARM_STATUS_CONFIRMED
-            and existing.get("auto_merge_confirmed_at")
-        ):
-            # Never downgrade a durable confirmed arm to prepared if an
-            # in-process caller is retried after it has already confirmed.
-            return
-        record = {
-            "pr_number": pr_number,
-            "pr_head_branch": self.get_pr_head_branch(pr_number) or "",
-            "head_sha_at_arming": head_sha,
-            "armed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "auto_merge_arm_status": ARM_STATUS_PREPARED,
-            "learn_attempted_at": None,
-            "learn_captured_at": None,
-            "learn_status": None,
-            "learn_succeeded_at": None,
-        }
-        if not self._arming.save(issue_number, record):
-            raise RuntimeError(
-                f"could not persist drive-green arming record for issue #{issue_number}"
-            )
-        persisted = self._arming.load(issue_number)
-        if (
-            persisted is None
-            or persisted.get("pr_number") != pr_number
-            or persisted.get("head_sha_at_arming") != head_sha
-        ):
-            raise RuntimeError(
-                f"could not verify drive-green arming record for issue #{issue_number}"
-            )
-
-    def confirm_drive_green_arm(self, issue_number: int, pr_number: int, head_sha: str) -> None:
-        """Persist a read-back-confirmed remote arm for restart recovery.
-
-        This transition occurs only after merge-wait has observed a live
-        approval label and ``autoMergeRequest``. The prepared record is
-        refreshed to the observed head first, so this check is a local
-        recovery invariant and never a review-proof or label-validity check.
-        """
-        if self._skip(f"confirm drive-green arm for #{issue_number} (PR #{pr_number})"):
-            return
-        record = self._arming.load(issue_number)
-        if (
-            record is None
-            or record.get("pr_number") != pr_number
-            or record.get("head_sha_at_arming") != head_sha
-        ):
-            raise RuntimeError(
-                f"cannot confirm missing or mismatched drive-green arm for issue #{issue_number}"
-            )
-        if record.get("auto_merge_arm_status") == ARM_STATUS_CONFIRMED:
-            return
-        record["auto_merge_arm_status"] = ARM_STATUS_CONFIRMED
-        record["auto_merge_confirmed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        if not self._arming.save(issue_number, record):
-            raise RuntimeError(
-                f"could not persist drive-green arm confirmation for issue #{issue_number}"
-            )
-        persisted = self._arming.load(issue_number)
-        if (
-            persisted is None
-            or persisted.get("pr_number") != pr_number
-            or persisted.get("head_sha_at_arming") != head_sha
-            or persisted.get("auto_merge_arm_status") != ARM_STATUS_CONFIRMED
-            or not persisted.get("auto_merge_confirmed_at")
-        ):
-            raise RuntimeError(
-                f"could not verify drive-green arm confirmation for issue #{issue_number}"
-            )
 
     def claim_drive_green_learn(self, issue_number: int, pr_number: int) -> bool:
         """Persist and read back the pre-dispatch /learn claim.

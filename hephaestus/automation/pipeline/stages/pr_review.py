@@ -393,7 +393,7 @@ class PrReviewStage(Stage):
     """
 
     def on_enter(self, item: WorkItem, ctx: StageContext) -> StageOutcome | None:
-        """Contain an existing arm, then reset the cycle-relative round counter.
+        """Hydrate review inputs, contain an existing arm, and reset the round counter.
 
         ``attempts["pr_review_iter"]`` is per-lifetime (routing.py: attempts
         are never reset), so the per-cycle review budget is tracked in
@@ -412,6 +412,15 @@ class PrReviewStage(Stage):
 
         """
         if item.pr is not None:
+            review_context = ctx.github.pr_review_context(item.pr)
+            if review_context is None:
+                logger.warning(
+                    "pr_review:%s: review context unavailable for PR #%d",
+                    item.issue,
+                    item.pr,
+                )
+                return StageOutcome(Disposition.FINISH_FAIL, "pr_review_context_unavailable")
+            item.payload.update(review_context)
             try:
                 ctx.github.defer_auto_merge(item.pr)
             except Exception as exc:
@@ -554,8 +563,14 @@ class PrReviewStage(Stage):
             cwd=_worktree_path(item, ctx),
             timeout_s=pr_reviewer_claude_timeout(),
             session_agent=AGENT_PR_REVIEWER,
-            # Diff and body context are seeded into item.payload by
-            # the coordinator (#1817), which owns the gh reads.
+            sandbox="read-only",
+            # The normal $athena:pr-review skill is read-only, but its
+            # declared workflow uses local Bash helpers and review subagents.
+            # Keep that capability on the sole GO/NOGO review job only;
+            # validation and difficulty jobs retain WorkerPool's read scope.
+            allowed_tools="Read,Glob,Grep,Bash,Skill,Agent,WebFetch",
+            # on_enter refreshes diff and body context through the stage
+            # adapter before every review cycle.
             prompt_kwargs={
                 "pr_number": item.pr,
                 "issue_number": item.issue,
@@ -595,6 +610,7 @@ class PrReviewStage(Stage):
             cwd=_worktree_path(item, ctx),
             timeout_s=pr_reviewer_claude_timeout(),
             session_agent=AGENT_PR_REVIEWER,
+            sandbox="read-only",
             prompt_kwargs={
                 "pr_number": item.pr,
                 "issue_number": item.issue,
@@ -619,6 +635,7 @@ class PrReviewStage(Stage):
             cwd=_worktree_path(item, ctx),
             timeout_s=pr_reviewer_claude_timeout(),
             session_agent=AGENT_COMMENT_CLASSIFIER,
+            sandbox="read-only",
             prompt_kwargs={
                 "issue_number": item.issue,
                 "comments_json": json.dumps(item.payload.get("review_threads", [])),

@@ -42,7 +42,7 @@ _EXPECTED_REASONS: dict[StageName, set[str]] = {
     # human_blocked is emitted as FINISH_FAIL (terminal), not FAIL_BACK —
     # its ROUTES row entry (-> FINISHED) documents the same destination.
     StageName.PR_REVIEW: {"agent_error"},
-    StageName.MERGE_WAIT: set(),
+    StageName.MERGE_WAIT: {"not_implementation_go"},
 }
 
 
@@ -95,7 +95,7 @@ def test_scan_is_not_vacuous() -> None:
     """The AST scan finds real emissions (guards against a silent no-op scan)."""
     assert "agent_error" in _fail_back_reason_literals(pr_review)
     assert "plan_not_go" in _fail_back_reason_literals(implementation)
-    assert _fail_back_reason_literals(merge_wait) == set()
+    assert "not_implementation_go" in _fail_back_reason_literals(merge_wait)
 
 
 def test_named_reasons_route_where_the_doc_says() -> None:

@@ -53,6 +53,7 @@ class FakeStageGitHub(FakeGitHub):
         unresolved: list[tuple[int, int]] | None = None,
         by_severity: list[tuple[int, int, int]] | None = None,
         pr_state: dict[str, Any] | None = None,
+        pr_review_context: dict[str, str] | None = None,
         learn_terminal: bool = False,
         resolve_count: int = 0,
     ) -> None:
@@ -104,10 +105,16 @@ class FakeStageGitHub(FakeGitHub):
             else [(a, 0, h) for (a, h) in self._unresolved]  # legacy: all automation = blocking
         )
         self._pr_state = pr_state
+        self._pr_review_context = (
+            pr_review_context
+            if pr_review_context is not None
+            else {
+                "pr_diff": "diff --git a/a.py b/a.py\n+@@ -1 +1 @@\n-old\n+new\n",
+                "pr_description": "Closes #1",
+            }
+        )
         self._learn_terminal = learn_terminal
         self._resolve_count = resolve_count
-        self.arming_records: dict[int, tuple[int, str]] = {}
-        self.confirmed_arming_records: set[int] = set()
         self.learn_results: dict[int, bool] = {}
         self.learn_claims: set[int] = set()
 
@@ -158,6 +165,11 @@ class FakeStageGitHub(FakeGitHub):
     def pr_has_implementation_state_label(self, pr_number: int) -> tuple[bool, bool]:
         """Mirror pr_manager.pr_has_implementation_state_label (canned answer)."""
         return self._pr_impl_state
+
+    def pr_review_context(self, pr_number: int) -> dict[str, str] | None:
+        """Mirror PipelineGitHub's atomic PR-review input read."""
+        del pr_number
+        return dict(self._pr_review_context) if self._pr_review_context is not None else None
 
     def count_unresolved_threads(self, pr_number: int) -> tuple[int, int]:
         """Mirror _review_phase._count_unresolved_threads_blocking_go (FIFO).
@@ -259,28 +271,6 @@ class FakeStageGitHub(FakeGitHub):
         """Mirror ci_driver.CIDriver._gh_pr_state (canned answer)."""
         del pr_number  # single canned answer; not per-PR keyed
         return self._pr_state
-
-    def arm_drive_green(self, issue_number: int, pr_number: int, head_sha: str) -> None:
-        """Mirror ci_driver.CIDriver._arm_drive_green (records the arming record)."""
-        self.arming_records[issue_number] = (pr_number, head_sha)
-        self.confirmed_arming_records.discard(issue_number)
-        self._log("arm_drive_green", issue_number, pr_number, head_sha)
-
-    def confirm_drive_green_arm(self, issue_number: int, pr_number: int, head_sha: str) -> None:
-        """Mirror the read-back-confirmed durable drive-green arm transition."""
-        if self.arming_records.get(issue_number) != (pr_number, head_sha):
-            raise RuntimeError("arm record is missing or mismatched")
-        self.confirmed_arming_records.add(issue_number)
-        self._log("confirm_drive_green_arm", issue_number, pr_number, head_sha)
-
-    def drive_green_arm_confirmed(self, issue_number: int, pr_number: int) -> bool:
-        """Return whether the canned arming record was confirmed remotely."""
-        record = self.arming_records.get(issue_number)
-        return (
-            record is not None
-            and record[0] == pr_number
-            and issue_number in self.confirmed_arming_records
-        )
 
     def drive_green_learn_terminal(self, issue_number: int) -> bool:
         """Mirror ci_driver._learn_record_terminal over the arming record.

@@ -135,6 +135,10 @@ class StageGitHub(Protocol):
         """Return the linked issue for this PR, if its body has ``Closes #N``."""
         pass
 
+    def pr_review_context(self, pr_number: int) -> dict[str, str] | None:
+        """Return the PR body and complete diff required for source review."""
+        ...
+
     def has_existing_plan(self, issue_number: int) -> bool:
         """Return True when the issue already counts as planned.
 
@@ -265,9 +269,9 @@ class StageGitHub(Protocol):
     def defer_auto_merge(self, pr_number: int) -> None:
         """Durably disable auto-merge whenever a stage must revoke eligibility.
 
-        The adapter must read back disabled state for an open PR. PR review and
-        merge wait use this containment boundary before fresh review and
-        whenever an existing arm can no longer be retained.
+        The adapter must read back disabled state for an open PR. Implementation
+        and PR review use this containment boundary before changing or reviewing
+        a PR; merge_wait never changes an arm it did not create.
         """
         ...
 
@@ -296,9 +300,9 @@ class StageGitHub(Protocol):
         Reserved exclusively for ``MergeWaitStage`` after it has re-read the
         loop-owned ``state:implementation-go`` label. The adapter must pass
         the live head to GitHub's conditional arm API to make this one request
-        operationally current. A changed head is not a second authorization
-        gate: merge-wait re-reads the label and reconciles or retries the arm
-        without revoking that label. No earlier stage may call it.
+        operationally current. If a different process/run has already changed
+        that state, merge-wait warns and leaves it for the operator; it does
+        not reconcile, retry, or revoke it. No earlier stage may call it.
         """
         pass
 
@@ -314,18 +318,6 @@ class StageGitHub(Protocol):
         merged/closed terminal-state checks before branch adoption or further
         routing. The merge_wait path uses the same contract to capture the
         head OID and classify merged, closed, and open lifecycle states.
-        """
-        ...
-
-    def arm_drive_green(self, issue_number: int, pr_number: int, head_sha: str) -> None:
-        """Durably persist the drive-green arming record (crash-safe).
-
-        Reserved for #2055's label-gated arming protocol. It mirrors
-        ``ci_driver.CIDriver._arm_drive_green`` /
-        ``ArmingStateStore.save``: written and read back immediately before
-        :meth:`arm_auto_merge`, so a crash during the remote arm cannot lose
-        the fact that this PR (at this head SHA) was eligible to arm — the
-        post-merge ``/learn`` dedupe keys off this record.
         """
         ...
 

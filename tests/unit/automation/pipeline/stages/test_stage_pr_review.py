@@ -60,6 +60,42 @@ def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int
 class TestPrReviewStageOnEnter:
     """on_enter cycle-relative counter reset (attempts are per-lifetime)."""
 
+    def test_on_enter_hydrates_authoritative_pr_review_context(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Every PR review receives the current diff and PR description."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(
+            pr_review_context={
+                "pr_diff": "diff --git a/example.py b/example.py\n+new line\n",
+                "pr_description": "Closes #1\n\nReview this implementation.",
+            }
+        )
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="ENTER")
+
+        assert stage.on_enter(item, ctx) is None
+        assert item.payload["pr_diff"] == "diff --git a/example.py b/example.py\n+new line\n"
+        assert item.payload["pr_description"] == "Closes #1\n\nReview this implementation."
+
+    def test_on_enter_stops_when_pr_review_context_is_unavailable(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A review may not issue a verdict without its authoritative inputs."""
+
+        class ContextUnavailableGitHub(FakeStageGitHub):
+            def pr_review_context(self, pr_number: int) -> dict[str, str] | None:
+                del pr_number
+                return None
+
+        stage = PrReviewStage()
+        ctx = make_ctx(github=ContextUnavailableGitHub())
+        item = make_work_item(issue=1, pr=1001, state="ENTER")
+
+        assert stage.on_enter(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "pr_review_context_unavailable"
+        )
+
     def test_on_enter_defers_auto_merge_and_proceeds(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -292,6 +328,8 @@ class TestPrReviewStageStep:
         assert isinstance(result.job, AgentJob)  # narrow the job union
         assert result.on_done_state == "VALIDATE_WAIT"
         assert result.job.descr == "review"
+        assert result.job.sandbox == "read-only"
+        assert result.job.allowed_tools == "Read,Glob,Grep,Bash,Skill,Agent,WebFetch"
         assert result.job.parse is not None
         assert result.job.prompt_kwargs["pr_number"] == 1001
         assert item.attempts["pr_review_iter"] == 0  # submission burns nothing
@@ -362,6 +400,25 @@ class TestPrReviewStageStep:
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)
         assert result.job.prompt_kwargs["include_nitpicks"] is True
+
+    def test_validation_and_difficulty_jobs_are_read_only(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Review-only analysis never receives write-capable agent permissions."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="VALIDATE_WAIT")
+
+        validation = stage.step(item, ctx)
+        assert isinstance(validation, JobRequest)
+        assert isinstance(validation.job, AgentJob)
+        assert validation.job.sandbox == "read-only"
+
+        item.state = "DIFFICULTY_WAIT"
+        difficulty = stage.step(item, ctx)
+        assert isinstance(difficulty, JobRequest)
+        assert isinstance(difficulty.job, AgentJob)
+        assert difficulty.job.sandbox == "read-only"
 
     def test_review_wait_clears_stale_round_payload(
         self, make_ctx: Any, make_work_item: Any

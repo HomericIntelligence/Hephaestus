@@ -134,11 +134,9 @@ class SeedEntry:
             planner/reviewer/implementer prompts.
         issue_body: Issue body copied into the issue WorkItem payload for
             planner/reviewer/implementer prompts.
+        pr_diff: Complete PR diff copied into a direct PR review payload.
+        pr_description: PR body copied into a direct PR review payload.
         passed: Terminal result for entries clamped directly to ``finished``.
-        merge_wait_recovery: Whether this entry was reconstructed from a
-            durable drive-green arm record.  Merge-wait consults that record
-            on entry to disarm any persisted remote arm and return to ARM for
-            a fresh live-head and loop-owned-label read.
         skip_tag_obligation: Durable write that must complete before this
             entry's exclusion can be honored, when it is an untagged epic.
 
@@ -152,8 +150,9 @@ class SeedEntry:
     issue_number: int | None = None
     issue_title: str = ""
     issue_body: str = ""
+    pr_diff: str = ""
+    pr_description: str = ""
     passed: bool = True
-    merge_wait_recovery: bool = False
     skip_tag_obligation: EpicSkipTagObligation | None = None
 
 

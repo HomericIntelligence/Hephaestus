@@ -25,10 +25,10 @@ CI/CD is outside the loop's direct authorization boundary. Normal PR review
 may collect check evidence and incorporate it into its binary verdict, but the
 loop does not change CI/CD and no workflow, status, artifact, or lease can
 independently cause an approval or label transition. `merge_wait` is the sole
-automatic armer and consumes the loop-owned label. A restart re-reads that
-label and the live PR head.
-The live head is used only to issue or recover an auto-merge request; it never
-invalidates an already-issued loop-owned label or causes post-label re-review.
+automatic armer and consumes the loop-owned label. Each invocation re-reads the
+label and live PR head immediately before its one arm request. If it detects an
+arm or conflicting state owned by another process/run, it warns and stops
+processing that item; operators own reconciliation.
 
 ## Queue topology
 
@@ -53,8 +53,8 @@ repo ─> planning ─> plan_review ─> implementation ─> pr_review ─> merg
 ```
 
 The complete edge set — including implementation → plan_review (`plan_not_go`)
-and merge-wait recovery back to PR review — is normative in the ROUTES table
-below.
+and merge_wait's missing-approval route back to PR review — is normative in
+the ROUTES table below.
 
 ## Coordinator / worker contract
 
@@ -207,10 +207,10 @@ per-repo in-flight cap.
    fast path (per `_review_existing_pr` semantics) → skip to step 8.
 2. [W:G] Create/refresh worktree (`worktree_manager.create_worktree(
    refresh_base=True)`).
-3. [W:A] **Dirty worktree decision** — `prompts/implementation.py:299
+3. [W:A] **Dirty worktree decision** — `prompts/implementation.py
    get_dirty_reused_worktree_decision_prompt`.
 4. [W:A] **Advise step**.
-5. [W:A] **Implement step** — `prompts/implementation.py:217
+5. [W:A] **Implement step** — `prompts/implementation.py
    get_implementation_prompt`.
 6. [W:B] **Test step** (optional) — `_run_tests_in_worktree` (`uv run
    pytest`); on failure, RETRY with budget test_fix.
@@ -245,21 +245,22 @@ approval label and advances to merge_wait; it does not itself arm a merge.
 
 **Steps**:
 
-1. [M] **ENTER**: verify auto-merge is disabled before any review work. A
-   failed read-back finishes `auto_merge_disable_failed`.
+1. [M] **ENTER**: load the current PR diff and description, then verify
+   auto-merge is disabled before any review work. An unavailable review input
+   or failed disable read-back finishes the item for operator triage.
 2. [W:A] **Review step** — `prompts/pr_review.py
    get_pr_review_analysis_prompt` invokes `$athena:pr-review` in its normal
    default profile when available, otherwise performs the inline fallback;
    output is review body plus grade and verdict.
-3. [W:A] **Validation step** — `prompts/pr_review.py:232
+3. [W:A] **Validation step** — `prompts/pr_review.py
    get_review_validation_prompt`.
 4. [M] **POST**: post surviving inline threads and a final review comment with
    total grade and GO/NOGO to PR [durable].
-5. [W:A] **Difficulty step** — `prompts/pr_review.py:310
+5. [W:A] **Difficulty step** — `prompts/pr_review.py
    get_comment_difficulty_prompt`.
 6. [W:A] **Address step**: if fresh PR → resume implementer with
    `prompts/implementation.py get_impl_resume_feedback_prompt`; if
-   existing-PR path → `prompts/address_review.py:181
+   existing-PR path → `prompts/address_review.py
    get_address_review_prompt`.
 7. [W:G] Push (commit+force-push addressing changes).
 8. [M] **EVAL**: invoke `_evaluate_go_verdict` (parse reviewerAgent verdict:
@@ -324,19 +325,19 @@ blocking. Each posted review comment carries a fail-safe severity marker
 prepended to its body at post time (`hephaestus/automation/prompts/pr_review.py`
 defines `BLOCKING_SEVERITIES = {"critical", "major"}`,
 `VALID_SEVERITIES`, `SEVERITY_MARKER_PREFIX`). Extraction
-(`_thread_severity_is_blocking`, `hephaestus/automation/pipeline_github.py:148`)
+(`_thread_severity_is_blocking` in `hephaestus/automation/pipeline_github.py`)
 uses line-prefix anchoring (`stripped.startswith(prefix) and
 stripped.endswith("-->")`) to avoid substring false positives, and defaults
 an unmarked or unparseable thread to blocking.
 
-`count_unresolved_threads_by_severity` (`hephaestus/automation/pipeline_github.py:625`)
+`count_unresolved_threads_by_severity` in `hephaestus/automation/pipeline_github.py`
 returns `(blocking_automation, minor_automation, human)`: human-authored
 threads are never downgraded regardless of marker; only automation-owned
 threads are split by severity. The gate
-(`hephaestus/automation/pipeline/stages/pr_review.py:723`) requires
+in `hephaestus/automation/pipeline/stages/pr_review.py` requires
 `human == 0` and `blocking_automation == 0` to arm a GO; if
 `minor_automation > 0` it calls `resolve_automation_threads`
-(`hephaestus/automation/pipeline_github.py:647`) to resolve the waved
+in `hephaestus/automation/pipeline_github.py` to resolve the waved
 advisory threads before arming, so `required_review_thread_resolution`
 does not re-block the PR at the merge stage.
 
@@ -353,30 +354,31 @@ Related: #1554 (original minor-thread deadlock this replaces), #1575
 
 ### 6. merge_wait
 
-**States**: ENTER → ARM. Already-merged PRs may continue through POLL and
+**States**: ENTER → ARM → POLL. Already-merged PRs may continue through
 LEARN_WAIT solely to preserve the existing post-merge learn dedupe.
 
 **Steps**:
 
-1. [M] **PREPARE**: for an open PR, read the current head and validate the
-   loop-owned `state:implementation-go` label.
-2. [M] **ARM/CONFIRM**: arm only through GitHub's conditional
-   `--match-head-commit` request for that prepared head; re-read the PR,
-   current GO label immediately after arming. A changed head,
-   absent confirmation, or record-write failure disables auto-merge and fails
-   closed. A PR that merged
-   in the race window follows the existing deduped learn path.
-3. [M] **POLL**: every armed poll revalidates the loop-owned label and GitHub's
-   `autoMergeRequest`; a later disarm revokes eligibility
-   and returns to PR review. An already-merged PR continues to
-   **LEARN_WAIT** for exactly-once post-merge learning.
+1. [M] **ARM**: for an open PR, read the current head and validate the
+   loop-owned `state:implementation-go` label. If auto-merge is already armed,
+   warn and finish the current item without touching that external state.
+   Otherwise issue one conditional `--match-head-commit` auto-merge request
+   for the observed head. A PR that merged during the read/arm window follows
+   the existing deduped learn path.
+2. [M] **POLL**: only the arm issued by this item is polled. It revalidates the
+   loop-owned label and GitHub's `autoMergeRequest`; a missing label routes
+   back to PR review, while a lost arm warns and finishes failed for operator
+   triage. It never retries, disarms, takes over, or recovers external state.
+   An already-merged PR continues to **LEARN_WAIT** for exactly-once
+   post-merge learning.
 
-**Verdicts**: RETRY while waiting for GitHub; FAIL_BACK to PR review on a
-missing label; FINISH_FAIL on a containment failure; FINISH_PASS after a
-merged PR's deduped learn step.
+**Verdicts**: RETRY while this item's arm remains pending; FAIL_BACK to PR
+review on a missing label; FINISH_PASS when an external arm is detected or a
+merged PR's deduped learn completes; FINISH_FAIL when PR state cannot be read,
+the arm request fails, or this item's arm disappears.
 
-**Fail routes**: missing-label or arm-confirmation failures → pr_review;
-containment failures finish failed.
+**Fail routes**: missing label → pr_review; all external/conflicting state is
+warned about and left for an operator rather than reconciled by the loop.
 
 **Budgets**: merge/poll budgets remain bounded by the coordinator routes.
 
@@ -418,7 +420,7 @@ globally bounded.
 | plan_review | implementation | planning (nogo, default), finished(fail) on plan_cycles_exhausted | plan_review_iter=3, plan_cycles=2 |
 | implementation | pr_review | plan_review (plan_not_go), merge_wait (already_implementation_go_pr), finished(fail) on exhaustion | implement=2, test_fix=1 |
 | pr_review | merge_wait | implementation (agent_error), finished(fail) on human_blocked or failed disable verification, finished(skip) on exhaustion | pr_review_iter=3, pr_review_hard=6 |
-| merge_wait | finished(pass) | pr_review on missing loop-owned label or arm confirmation; finished(fail) on containment failure; existing merged PRs learn then pass | merge/poll bounded by routes |
+| merge_wait | finished(pass) | pr_review on missing loop-owned label; finish current item on unreadable, lost, or externally-owned auto-merge state; existing merged PRs learn then pass | merge/poll bounded by routes |
 | finished | — | — | — |
 
 ## Seeding and reconstruction

@@ -39,6 +39,10 @@ class AgentJob:
     # Existing agent jobs retain the established write-capable default; callers
     # that only inspect repository state request ``read-only`` explicitly.
     sandbox: str = "workspace-write"
+    # Optional Claude tool scope for a read-only job.  Most reviewers use the
+    # conservative default assigned by WorkerPool; the full PR-review skill
+    # declares the additional read-only helper capabilities it needs.
+    allowed_tools: str | None = None
     descr: str = ""
 
 
