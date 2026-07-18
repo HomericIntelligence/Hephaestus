@@ -23,6 +23,11 @@ def _status(stdout: str = "", returncode: int = 0) -> MagicMock:
     return MagicMock(stdout=stdout, returncode=returncode)
 
 
+def _porcelain(*records: str) -> str:
+    """Build mocked ``git status --porcelain=v1 -z`` output."""
+    return "\0".join(records) + ("\0" if records else "")
+
+
 class TestCommitChanges:
     """Tests for commit changes."""
 
@@ -32,13 +37,13 @@ class TestCommitChanges:
                 pr_manager.commit_changes(1, Path("/tmp/wt"))
 
     def test_only_secret_files_raises(self) -> None:
-        porcelain = "?? .env\n?? id_rsa\n M secrets/foo.key\n"
+        porcelain = _porcelain("?? .env", "?? id_rsa", " M secrets/foo.key")
         with patch.object(pr_manager, "run", return_value=_status(porcelain)):
             with pytest.raises(RuntimeError, match="All changes appear to be secret"):
                 pr_manager.commit_changes(2, Path("/tmp/wt"))
 
     def test_filters_secrets_and_commits(self) -> None:
-        porcelain = " M src/foo.py\n?? .env\n?? data.key\n M src/bar.py\n"
+        porcelain = _porcelain(" M src/foo.py", "?? .env", "?? data.key", " M src/bar.py")
         run_mock = MagicMock(
             side_effect=[
                 _status(porcelain),  # git status
@@ -66,7 +71,7 @@ class TestCommitChanges:
         assert "data.key" not in add_call
 
     def test_allowed_paths_prevent_staging_unlisted_artifacts(self) -> None:
-        porcelain = " M hephaestus/automation/ci_driver.py\n?? output.log\n"
+        porcelain = _porcelain(" M hephaestus/automation/ci_driver.py", "?? output.log")
         run_mock = MagicMock(
             side_effect=[
                 _status(porcelain),  # git status
@@ -99,7 +104,7 @@ class TestCommitChanges:
         ]
 
     def test_commit_uses_cryptographic_signature_and_dco_signoff(self) -> None:
-        porcelain = " M src/foo.py\n"
+        porcelain = _porcelain(" M src/foo.py")
         run_mock = MagicMock(
             side_effect=[
                 _status(porcelain),  # git status
@@ -124,7 +129,7 @@ class TestCommitChanges:
         assert "-m" in commit_cmd
 
     def test_commit_changes_threads_git_timeout(self) -> None:
-        porcelain = " M src/foo.py\n"
+        porcelain = _porcelain(" M src/foo.py")
         run_mock = MagicMock(
             side_effect=[
                 _status(porcelain),  # git status
@@ -155,7 +160,7 @@ class TestCommitChanges:
         ]
 
     def test_handles_renamed_files(self) -> None:
-        porcelain = "R  old.py -> new.py\n"
+        porcelain = _porcelain("R  new.py", "old.py")
         run_mock = MagicMock(
             side_effect=[
                 _status(porcelain),
@@ -178,7 +183,7 @@ class TestCommitChanges:
         assert "new.py" in add_call
 
     def test_stages_deleted_files_without_pathspec(self) -> None:
-        porcelain = " D hephaestus/github/fleet_sync.py\n"
+        porcelain = _porcelain(" D hephaestus/github/fleet_sync.py")
         run_mock = MagicMock(
             side_effect=[
                 _status(porcelain),
@@ -202,7 +207,7 @@ class TestCommitChanges:
         assert add_call == ["git", "add", "-u", "--", "hephaestus/github/fleet_sync.py"]
 
     def test_uses_message_agent_for_commit_subject_and_body(self) -> None:
-        porcelain = " M LICENSE\n M NOTICE\n"
+        porcelain = _porcelain(" M LICENSE", " M NOTICE")
         run_mock = MagicMock(
             side_effect=[
                 _status(porcelain),  # git status
@@ -240,7 +245,7 @@ class TestCommitChanges:
         assert "Co-Authored-By: Codex <noreply@openai.com>" in commit_msg
 
     def test_commit_message_agent_invalid_output_falls_back(self) -> None:
-        porcelain = " M src/feature.py\n"
+        porcelain = _porcelain(" M src/feature.py")
         run_mock = MagicMock(
             side_effect=[
                 _status(porcelain),  # git status
@@ -268,7 +273,7 @@ class TestCommitChanges:
     def test_commit_clears_local_committer_identity(self) -> None:
         run_mock = MagicMock(
             side_effect=[
-                _status(" M src/foo.py\n"),  # git status
+                _status(_porcelain(" M src/foo.py")),  # git status
                 _status(""),  # git add
                 _status("M\tsrc/foo.py\n"),  # changed files context
                 _status(" src/foo.py | 1 +\n"),  # stat context
@@ -740,7 +745,7 @@ class TestCoAuthorLine:
     """commit_changes emits a human Co-Authored-By and a separate Implemented-By trailer (#717)."""
 
     def test_claude_coauthor_is_human_name_not_model_id(self) -> None:
-        porcelain = " M src/feature.py\n"
+        porcelain = _porcelain(" M src/feature.py")
         run_mock = MagicMock(
             side_effect=[
                 _status(porcelain),  # git status
@@ -772,7 +777,7 @@ class TestCoAuthorLine:
         assert "claude-test-model-9" not in coauthor_line
 
     def test_claude_implemented_by_carries_model_id(self) -> None:
-        porcelain = " M src/feature.py\n"
+        porcelain = _porcelain(" M src/feature.py")
         run_mock = MagicMock(
             side_effect=[
                 _status(porcelain),  # git status
@@ -799,7 +804,7 @@ class TestCoAuthorLine:
 
     def test_implemented_by_reflects_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("HEPH_IMPLEMENTER_MODEL", "claude-env-override-5")
-        porcelain = " M foo.py\n"
+        porcelain = _porcelain(" M foo.py")
         run_mock = MagicMock(
             side_effect=[
                 _status(porcelain),  # git status
@@ -830,7 +835,7 @@ class TestCoAuthorLine:
         assert coauthor_line == "Co-Authored-By: Claude Code <noreply@anthropic.com>"
 
     def test_codex_coauthor_is_codex_human_name(self) -> None:
-        porcelain = " M foo.py\n"
+        porcelain = _porcelain(" M foo.py")
         run_mock = MagicMock(
             side_effect=[
                 _status(porcelain),  # git status
@@ -862,7 +867,7 @@ class TestCoAuthorLine:
         mock_model.assert_not_called()
 
     def test_pi_coauthor_and_provenance_are_pi(self) -> None:
-        porcelain = " M foo.py\n"
+        porcelain = _porcelain(" M foo.py")
         run_mock = MagicMock(
             side_effect=[
                 _status(porcelain),  # git status
