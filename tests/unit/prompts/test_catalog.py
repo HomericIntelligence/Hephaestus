@@ -23,6 +23,23 @@ def test_default_catalog_render_preserves_planning_compatibility() -> None:
     )
 
 
+def test_default_templates_resolve_by_filesystem_path_not_package_metadata() -> None:
+    """The default loader is ``__file__``-relative, immune to the rebuild race (#2308).
+
+    ``PackageLoader`` consults importlib package metadata, which is transiently
+    inconsistent right after an editable-install rebuild and crashed reviewer
+    workers. The default loader must resolve templates by a filesystem path
+    that exists on disk, independent of installed metadata.
+    """
+    from hephaestus.prompts.catalog import _DEFAULT_TEMPLATES_DIR
+
+    assert _DEFAULT_TEMPLATES_DIR.is_dir()
+    assert (_DEFAULT_TEMPLATES_DIR / "pr_review" / "analysis.j2").is_file()
+    # The catalog loads its templates from that path (no PackageLoader involved).
+    names = PromptCatalog()._environment.list_templates()
+    assert "pr_review/analysis.j2" in names
+
+
 def test_legacy_prompt_constant_remains_a_jinja_backed_format_template() -> None:
     """Existing ``PLAN_PROMPT.format`` callers retain their rendered prompt."""
     from hephaestus.automation.prompts import PLAN_PROMPT
