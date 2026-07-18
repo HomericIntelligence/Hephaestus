@@ -920,11 +920,11 @@ class PipelineGitHub:
         return resolved
 
     def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
-        """Read shared PR state for seed, CI, implementation, and merge_wait.
+        """Read shared PR state for seed, implementation, and merge_wait.
 
         One ``gh pr view`` returns ``{state, headRefOid, mergedAt,
         mergeStateStatus, baseRefName}``; ``None`` signals a read failure.
-        Seed, CI, and implementation paths use the result for terminal-state
+        Seed and implementation paths use the result for terminal-state
         checks before branch adoption or label routing, while merge_wait uses it
         for head capture and merge-state polling.
         """

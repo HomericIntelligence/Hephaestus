@@ -260,7 +260,7 @@ def main() -> int:
             issues=issues,
             prs=prs,
             # A single loop pass is sufficient: strict review either approves
-            # or routes back; merge_wait only arms a loop-owned label.
+            # or routes back; merge_wait arms only its direct review handoff.
             loops=1,
             # --max-workers maps to the pipeline worker-pool size.
             max_workers=args.max_workers,

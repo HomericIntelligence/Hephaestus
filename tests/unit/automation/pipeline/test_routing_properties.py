@@ -38,7 +38,7 @@ _REASONS = [*_DECLARED_REASONS, "unknown_reason"]
 # none and resolve purely via the "*" default. Fail-back EXITS that leave
 # their stage rather than retry it consume no retry budget: plan_not_go
 # (implementation -> plan_review), already_implementation_go_pr (-> strict_review),
-# not_implementation_go / review_stale (ci -> strict_review),
+# not_implementation_go / review_stale (merge_wait -> strict_review),
 # missing_worktree (-> implementation),
 # no_pr (-> finished), and strict-gate re-review routes from merge_wait all
 # map to None.

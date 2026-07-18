@@ -338,8 +338,10 @@ The required CI gate `pr-policy` and the PR reviewer enforce:
 
 `pr-policy` blocks PRs that fail those checks. The queue runs
 `$athena:pr-review` in-loop for the current PR head, then applies
-`state:implementation-go`; `merge_wait` is the sole automatic armer. The loop
-never reads, changes, or relies on CI/CD. CI workflows and external artifacts
+`state:implementation-go`; `merge_wait` is the sole automatic armer and
+accepts it only with the direct current-head strict-review handoff. A restart
+re-enters strict review. The loop never reads, changes, or relies on CI/CD. CI
+workflows and external artifacts
 never grant that authority. Branch protection and required reviews still govern
 whether GitHub merges the PR.
 

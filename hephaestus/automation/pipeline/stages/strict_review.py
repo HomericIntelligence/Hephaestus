@@ -49,7 +49,7 @@ from hephaestus.automation.agent_config import pr_reviewer_claude_timeout, revie
 from hephaestus.automation.claude_invoke import ReviewVerdict
 from hephaestus.automation.prompts.strict_review_gate import build_strict_review_prompt
 from hephaestus.automation.session_naming import strict_review_agent
-from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_GO
+from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_GO, STATE_IMPLEMENTATION_NO_GO
 
 from .base import (
     GIT_JOB_TIMEOUT_S,
@@ -482,8 +482,23 @@ class StrictReviewStage(Stage):
             return current_outcome
         if not self._clear_go_and_verify_disabled(pr_number, ctx):
             return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_disable_failed")
+        # Containment itself can race with a push.  Do not attach stale
+        # remediation feedback or an implementation-no-go label to that new
+        # head; restart the review after the safe revocation/defer completed.
+        current_outcome = self._current_head_or_restart(
+            item, ctx, head_sha, action="NOGO containment"
+        )
+        if current_outcome is not None:
+            return current_outcome
         if not self._post_nogo_remediation(pr_number, ctx, verdict_text):
             return StageOutcome(Disposition.FINISH_FAIL, "strict_nogo_feedback_failed")
+        # Posting feedback is not an authorization boundary, but a push while
+        # it is written must still prevent the H1 verdict from labeling H2.
+        current_outcome = self._current_head_or_restart(
+            item, ctx, head_sha, action="NOGO remediation"
+        )
+        if current_outcome is not None:
+            return current_outcome
         try:
             ctx.github.mark_pr_implementation_no_go(pr_number)
         except Exception as e:
@@ -493,6 +508,22 @@ class StrictReviewStage(Stage):
                 e,
             )
             return StageOutcome(Disposition.FINISH_FAIL, "strict_nogo_label_failed")
+        # The label write is another racing mutation.  Revoke a stale NOGO
+        # immediately and restart instead of leaving H2 with H1's verdict.
+        current_outcome = self._current_head_or_restart(
+            item, ctx, head_sha, action="implementation-no-go handoff"
+        )
+        if current_outcome is not None:
+            try:
+                ctx.github.remove_labels(pr_number, [STATE_IMPLEMENTATION_NO_GO])
+            except Exception as exc:
+                logger.error(
+                    "strict_review: failed to revoke stale implementation-no-go on PR #%d: %s",
+                    pr_number,
+                    exc,
+                )
+                return StageOutcome(Disposition.FINISH_FAIL, "implementation_no_go_revoke_failed")
+            return current_outcome
         item.payload["strict_review_feedback"] = verdict_text
         item.payload.pop("existing_pr_impl_go", None)
         return StageOutcome(Disposition.FAIL_BACK, "nogo")

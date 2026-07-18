@@ -180,7 +180,7 @@ class TestROUTES:
                 next=StageName.PR_REVIEW,
                 fail_routes={
                     "plan_not_go": StageName.PLAN_REVIEW,
-                    "already_implementation_go_pr": StageName.MERGE_WAIT,
+                    "already_implementation_go_pr": StageName.STRICT_REVIEW,
                     "*": StageName.FINISHED,
                 },
                 budgets={"implement": 2, "test_fix": 1},

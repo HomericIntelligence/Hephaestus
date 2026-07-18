@@ -46,7 +46,7 @@ class TestImplementationPrompt:
         assert "`git push`" in out
         assert "`gh pr create`" in out
         assert "Do not enable auto-merge yourself" in out
-        assert "state:implementation-go" not in out
+        assert "mark_pr_implementation_go" not in out
         # The implementation agent should not run the PR verification/mutation commands.
         assert "gh pr view" not in out
         assert "gh api graphql" not in out

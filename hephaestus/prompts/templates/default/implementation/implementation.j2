@@ -90,8 +90,9 @@ After you return, the orchestrator will:
 3. Create or reuse the pull request for this branch.
 4. Ensure the PR body contains the exact policy line `Closes #{{ issue_number }}`.
 5. Do not enable auto-merge yourself. An internal review GO remains internal;
-   the queue's independent strict-review stage alone may publish a head-bound
-   proof and implementation-GO label.
+   the queue's independent strict-review stage alone may apply the
+   loop-owned `state:implementation-go` label after its current-head
+   `$athena:pr-review` pass.
 
 Missing `Closes #N` or signed-commit policy is enforced outside the automation
 loop. Only the queue's strict-review and merge-wait stages may authorize and

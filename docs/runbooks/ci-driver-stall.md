@@ -2,7 +2,8 @@
 
 Use this runbook when a PR carries loop-owned `state:implementation-go` and
 remains blocked. `merge_wait` is the sole automatic armer and conditionally
-arms the current head; CI/CD is outside the loop.
+arms only the direct current-head strict-review handoff; CI/CD is outside the
+loop.
 
 ## Containment
 

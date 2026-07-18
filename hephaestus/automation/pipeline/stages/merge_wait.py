@@ -94,13 +94,12 @@ class MergeWaitStage(Stage):
     def on_enter(self, item: WorkItem, ctx: StageContext) -> StageOutcome | None:
         """Initialize the mini-state and restore a confirmed arm to POLL.
 
-        A recovery seed carries only the fact that an arming record exists.
-        The adapter distinguishes the durable pre-RPC ``prepared`` record
-        from a post-read-back ``confirmed`` record.  Only the latter can
-        resume POLL: that step immediately revalidates the current remote
-        arm and label. Prepared and legacy records go to
-        ARM, where an already-live remote arm is contained/confirmed instead
-        of being enabled a second time.
+        A recovery seed carries only a merge-wait record, not the ephemeral
+        current-head handoff from strict_review.  It therefore always starts
+        from ARM.  ARM routes an open PR back to strict_review unless that
+        direct current-head handoff is present; a merged PR still reaches the
+        normal deduplicated learning path.  This prevents an old label from
+        authorizing a pushed head after a restart.
 
         Args:
             item: The work item being processed.
@@ -113,32 +112,10 @@ class MergeWaitStage(Stage):
         if item.payload.pop("merge_wait_recovery", False):
             if item.issue is None or item.pr is None:
                 return StageOutcome(Disposition.FINISH_FAIL, "invalid_arm_recovery")
-            confirmation_reader = getattr(ctx.github, "drive_green_arm_confirmed", None)
-            if not callable(confirmation_reader):
-                logger.error(
-                    "merge_wait:%d: adapter cannot read durable arm confirmation",
-                    item.issue,
-                )
-                return StageOutcome(Disposition.FINISH_FAIL, "arm_recovery_state_unavailable")
-            try:
-                confirmed = bool(confirmation_reader(item.issue, item.pr))
-            except Exception as exc:
-                logger.error(
-                    "merge_wait:%d: durable arm confirmation read failed: %s",
-                    item.issue,
-                    exc,
-                )
-                return StageOutcome(Disposition.FINISH_FAIL, "arm_recovery_state_unavailable")
-            if confirmed:
-                item.armed = True
-                item.payload.setdefault("merge_wait_started_at", ctx.now())
-                item.state = POLL
-                return None
-            # Keep this marker until ARM has inspected the live state.  A
-            # process can die after GitHub accepted the arm but before the
-            # confirmation transition reaches disk; do not duplicate-enable
-            # that already-live arm on recovery.
-            item.payload["merge_wait_prepared_recovery"] = True
+            item.armed = False
+            item.payload.pop("merge_wait_head", None)
+            item.state = ARM
+            return None
         if not item.state:
             item.state = ENTER
         return None
@@ -191,9 +168,11 @@ class MergeWaitStage(Stage):
             return terminal
         head_sha = str((pr_state or {}).get("headRefOid") or "")
         reviewed_head = str(item.payload.get("pr_review_skill_head") or "")
-        if reviewed_head and reviewed_head != head_sha:
-            # A handoff from strict_review is head-bound. Contain a push that
-            # arrived after its post-label read and before this arm attempt.
+        if not reviewed_head or not head_sha or reviewed_head != head_sha:
+            # Only the direct strict_review handoff carries the reviewed
+            # current head.  A restart/reseed cannot reconstruct it from the
+            # label, so it must repeat strict_review rather than arm a
+            # possibly pushed head.
             try:
                 ctx.github.remove_labels(item.pr, [STATE_IMPLEMENTATION_GO])
             except Exception as exc:

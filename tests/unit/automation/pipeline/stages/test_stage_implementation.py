@@ -176,10 +176,10 @@ class TestGate:
         assert isinstance(result, Continue)
         assert result.next_state == "WORKTREE_WAIT"
 
-    def test_gate_existing_pr_with_impl_go_routes_to_ci(
+    def test_gate_existing_pr_with_impl_go_routes_to_strict_review(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """An implementation-go PR with a worktree routes straight to CI."""
+        """An implementation-go PR with a worktree re-enters strict review."""
         stage = ImplementationStage()
         github = FakeStageGitHub(
             open_pr=1001, pr_impl_state=(True, False), pr_head_branch="1-real-branch"
@@ -196,10 +196,10 @@ class TestGate:
         assert item.pr == 1001  # set before the fail-back (m7)
         assert item.branch == "1-real-branch"
 
-    def test_gate_existing_pr_with_impl_go_without_worktree_adopts_first(
+    def test_gate_existing_pr_with_impl_go_without_worktree_reenters_strict_review(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """An implementation-go PR still needs an isolated worktree before CI."""
+        """An implementation-go PR does not need adoption before strict review."""
         stage = ImplementationStage()
         github = FakeStageGitHub(
             open_pr=1001, pr_impl_state=(True, False), pr_head_branch="1-real-branch"
@@ -209,12 +209,9 @@ class TestGate:
 
         result = stage.step(item, ctx)
 
-        assert isinstance(result, Continue)
-        assert result.next_state == "WORKTREE_WAIT"
+        assert result == StageOutcome(Disposition.FAIL_BACK, "already_implementation_go_pr")
         assert item.pr == 1001
         assert item.branch == "1-real-branch"
-        assert item.payload["existing_pr"] is True
-        assert item.payload["existing_pr_impl_go"] is True
 
     def test_gate_existing_item_pr_merged_finishes_before_adoption(
         self, make_ctx: Any, make_work_item: Any

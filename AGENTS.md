@@ -18,8 +18,9 @@ omitted (see `hephaestus.agents.runtime.add_agent_argument`).
 `$athena:pr-review` skill between `pr_review` and `merge_wait`. After a
 current-head GO, `strict_review` applies `state:implementation-go` itself.
 The loop never reads, changes, or relies on CI/CD. `merge_wait` is the sole
-automatic armer and uses that loop-owned label; no workflow, status, artifact,
-or lease authorizes it.
+automatic armer and uses that label only with the direct current-head handoff
+from `strict_review`; a restart repeats the loop review. No workflow, status,
+artifact, or lease authorizes it.
 
 | Queue stage | Module | Purpose |
 |-------------|--------|---------|
@@ -29,7 +30,7 @@ or lease authorizes it.
 | implementation | `hephaestus.automation.pipeline.stages.implementation` | Worktree creation, implementation, tests, commit/push, and PR creation |
 | pr_review | `hephaestus.automation.pipeline.stages.pr_review` | Inline PR review, validation, comment addressing, and implementation labels |
 | strict_review | `hephaestus.automation.pipeline.stages.strict_review` | Read-only Codex `$athena:pr-review` pass for the current PR head; applies loop-owned approval |
-| merge_wait | `hephaestus.automation.pipeline.stages.merge_wait` | Sole automatic armer after the loop-owned label; preserves post-merge learn |
+| merge_wait | `hephaestus.automation.pipeline.stages.merge_wait` | Sole automatic armer after the direct current-head review handoff; preserves post-merge learn |
 | finished | `hephaestus.automation.pipeline.stages.finished` | Terminal ledger and worktree cleanup/preservation |
 
 Console scripts preserve their historical names. Stage-scoped wrappers are

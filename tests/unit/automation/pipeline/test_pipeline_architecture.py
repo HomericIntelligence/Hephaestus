@@ -207,7 +207,7 @@ def test_legacy_auto_merge_coordinator_is_fail_closed() -> None:
 
 
 def test_merge_wait_is_the_sole_pipeline_auto_merge_armer() -> None:
-    """Only the post-proof merge-wait stage may call the arming capability."""
+    """Only the post-review merge-wait stage may call the arming capability."""
     callers: set[str] = set()
     for path in _PIPELINE.glob("stages/*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))

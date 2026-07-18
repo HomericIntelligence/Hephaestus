@@ -174,6 +174,64 @@ def test_nogo_disables_auto_merge_and_returns_to_implementation(
     assert any("Missing a regression test." in body for body in github.comments[12])
 
 
+def test_nogo_push_during_containment_restarts_without_stale_feedback(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A NOGO for H1 cannot annotate or label a pushed H2."""
+
+    class PushDuringContainmentGitHub(FakeStageGitHub):
+        def defer_auto_merge(self, pr_number: int) -> None:
+            super().defer_auto_merge(pr_number)
+            self._pr_state = {"state": "OPEN", "headRefOid": "b" * 40}
+
+    item = make_work_item(
+        stage=StageName.STRICT_REVIEW,
+        pr=12,
+        state=EVAL,
+        payload={
+            "strict_review_head": _HEAD,
+            "strict_review_verdict": "NOGO",
+            "strict_review_text": "Missing a regression test.\nGrade: C\nVerdict: NOGO",
+        },
+    )
+    github = PushDuringContainmentGitHub(pr_state={"state": "OPEN", "headRefOid": _HEAD})
+
+    result = StrictReviewStage().step(item, make_ctx(github=github))
+
+    assert result == Continue(next_state=HEAD_CHECK)
+    assert ("mark_pr_implementation_no_go", (12,)) not in github.mutation_log
+    assert github.comments.get(12, []) == []
+
+
+def test_nogo_push_during_label_write_revokes_stale_label(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A push after NOGO remediation cannot retain H1's no-go label on H2."""
+
+    class PushDuringNoGoLabelGitHub(FakeStageGitHub):
+        def mark_pr_implementation_no_go(self, pr_number: int) -> None:
+            super().mark_pr_implementation_no_go(pr_number)
+            self._pr_state = {"state": "OPEN", "headRefOid": "b" * 40}
+
+    item = make_work_item(
+        stage=StageName.STRICT_REVIEW,
+        pr=12,
+        state=EVAL,
+        payload={
+            "strict_review_head": _HEAD,
+            "strict_review_verdict": "NOGO",
+            "strict_review_text": "Missing a regression test.\nGrade: C\nVerdict: NOGO",
+        },
+    )
+    github = PushDuringNoGoLabelGitHub(pr_state={"state": "OPEN", "headRefOid": _HEAD})
+
+    result = StrictReviewStage().step(item, make_ctx(github=github))
+
+    assert result == Continue(next_state=HEAD_CHECK)
+    assert ("mark_pr_implementation_no_go", (12,)) in github.mutation_log
+    assert any(action == "gh_issue_remove_labels" for action, _ in github.mutation_log)
+
+
 def test_head_drift_restarts_review_without_handing_off_old_verdict(
     make_ctx: Any, make_work_item: Any
 ) -> None:

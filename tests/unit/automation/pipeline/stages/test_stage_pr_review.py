@@ -1154,7 +1154,7 @@ class TestFullWalks:
 
         Round 1: review NOGO, 2 automation threads open -> difficulty ->
         address -> push -> EVAL loops. Round 2: review GO, all threads
-        resolved -> durable artifact -> strict-review advance.
+        resolved -> in-loop strict-review advance.
         """
         stage = PrReviewStage()
         # POST calls count_unresolved_threads once per round; EVAL calls the

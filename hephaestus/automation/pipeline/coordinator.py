@@ -1630,7 +1630,7 @@ class Coordinator:
             if has_go:
                 stage, reason, passed = self._scope_seed_decision(
                     scope_identifier,
-                    StageName.MERGE_WAIT,
+                    StageName.STRICT_REVIEW,
                     f"PR #{pr} carries {STATE_IMPLEMENTATION_GO}",
                     scope_stages,
                 )

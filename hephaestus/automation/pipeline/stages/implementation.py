@@ -19,8 +19,8 @@ binding contract):
   skips the item regardless of plan-go/implementation-go, before either the
   existing-PR fast path or the fresh-implement plan-go gate below. Then the
   existing-PR fast path (``_review_existing_pr`` semantics): a PR already
-  carrying ``state:implementation-go`` routes directly to ``merge_wait``;
-  a PR without it adopts the PR's
+  carrying ``state:implementation-go`` re-enters ``strict_review`` so the
+  label is rebound to the live head; a PR without it adopts the PR's
   REAL head branch, re-ensures the auto-merge deferral [durable], cuts a
   worktree on the ADOPTED branch (``refresh_base=False`` +
   ``sync_to_remote`` — the anti-clobber reset of
@@ -736,10 +736,9 @@ class ImplementationStage(Stage):
         """Route an adopted PR that already carries ``state:implementation-go``.
 
         Split out of :meth:`_gate` for the same readability reason as
-        :meth:`_skip_gate`. A late-stage entry that only knew the PR (no
-        worktree yet) must prepare one before the strict-review route (m7);
-        an entry that already has a worktree can fail back to strict review
-        directly.
+        :meth:`_skip_gate`. A label does not preserve the exact head that
+        strict review inspected, so both fresh and adopted entries re-enter
+        strict review directly. That stage owns its read-only worktree.
 
         Args:
             item: The work item under evaluation (``item.pr``/``item.branch``
@@ -756,25 +755,12 @@ class ImplementationStage(Stage):
         has_go, _has_no_go = ctx.github.pr_has_implementation_state_label(existing_pr)
         if not has_go:
             return None
-        # item.pr/item.branch are set above so strict_review receives
-        # a fully-identified PR (m7). Its read-only worker needs a per-item
-        # exact-head worktree; prepare one first when
-        # this is a late-stage entry that only knew the PR.
-        if item.worktree:
-            logger.info(
-                "implementation:%d: PR #%d already implementation-go; routing to strict review",
-                item.issue,
-                existing_pr,
-            )
-            return StageOutcome(Disposition.FAIL_BACK, "already_implementation_go_pr")
-        item.payload["existing_pr"] = True
-        item.payload["existing_pr_impl_go"] = True
         logger.info(
-            "implementation:%d: PR #%d implementation-go; preparing worktree before strict review",
+            "implementation:%d: PR #%d already implementation-go; routing to strict review",
             item.issue,
             existing_pr,
         )
-        return Continue(next_state=WORKTREE_WAIT)
+        return StageOutcome(Disposition.FAIL_BACK, "already_implementation_go_pr")
 
     def _gate(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """GATE [M]: existing-PR fast path, then the plan-review verdict gate.

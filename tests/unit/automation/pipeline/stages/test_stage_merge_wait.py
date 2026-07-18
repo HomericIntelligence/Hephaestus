@@ -26,12 +26,17 @@ class _ArmingGitHub(FakeStageGitHub):
         }
 
 
-def test_implementation_go_label_arms_without_an_external_gate(
+def test_direct_strict_review_handoff_arms_without_an_external_gate(
     make_ctx: Any, make_work_item: Any
 ) -> None:
-    """Merge-wait consumes the loop-owned label and no external artifact."""
+    """Merge-wait consumes the loop-owned label and exact in-memory handoff."""
     github = _ArmingGitHub(labels=(True, False))
-    item = make_work_item(stage=StageName.MERGE_WAIT, pr=12, state=ARM)
+    item = make_work_item(
+        stage=StageName.MERGE_WAIT,
+        pr=12,
+        state=ARM,
+        payload={"pr_review_skill_head": "a" * 40},
+    )
 
     result = MergeWaitStage().step(item, make_ctx(github=github))
 
@@ -45,12 +50,35 @@ def test_implementation_go_label_arms_without_an_external_gate(
 def test_missing_implementation_go_is_contained(make_ctx: Any, make_work_item: Any) -> None:
     """No label means no arm; the item returns to the in-loop review path."""
     github = _ArmingGitHub(labels=(False, False))
-    item = make_work_item(stage=StageName.MERGE_WAIT, pr=12, state=ARM)
+    item = make_work_item(
+        stage=StageName.MERGE_WAIT,
+        pr=12,
+        state=ARM,
+        payload={"pr_review_skill_head": "a" * 40},
+    )
 
     result = MergeWaitStage().step(item, make_ctx(github=github))
 
     assert result == StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
     assert not any(action == "arm_auto_merge" for action, _ in github.mutation_log)
+
+
+def test_label_without_direct_review_handoff_restarts_strict_review(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A restarted label cannot arm an unreviewed pushed head."""
+    github = _ArmingGitHub(labels=(True, False))
+    item = make_work_item(
+        stage=StageName.MERGE_WAIT,
+        pr=12,
+        state=ARM,
+    )
+
+    result = MergeWaitStage().step(item, make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.FAIL_BACK, "review_stale")
+    assert not any(action == "arm_auto_merge" for action, _ in github.mutation_log)
+    assert any(action == "gh_issue_remove_labels" for action, _ in github.mutation_log)
 
 
 def test_stale_in_memory_review_handoff_is_contained_before_arm(
@@ -88,7 +116,12 @@ def test_armed_labeled_pr_polls_without_rechecking_external_state(
 ) -> None:
     """Once armed, the loop waits on GitHub while the loop-owned label remains."""
     github = _ArmingGitHub(labels=(True, False))
-    item = make_work_item(stage=StageName.MERGE_WAIT, pr=12, state=ARM)
+    item = make_work_item(
+        stage=StageName.MERGE_WAIT,
+        pr=12,
+        state=ARM,
+        payload={"pr_review_skill_head": "a" * 40},
+    )
     stage = MergeWaitStage()
 
     assert isinstance(stage.step(item, make_ctx(github=github)), Continue)
@@ -111,7 +144,12 @@ def test_post_arm_head_drift_revokes_auto_merge(make_ctx: Any, make_work_item: A
             }
 
     github = DriftingGitHub(labels=(True, False))
-    item = make_work_item(stage=StageName.MERGE_WAIT, pr=12, state=ARM)
+    item = make_work_item(
+        stage=StageName.MERGE_WAIT,
+        pr=12,
+        state=ARM,
+        payload={"pr_review_skill_head": "a" * 40},
+    )
     stage = MergeWaitStage()
 
     assert isinstance(stage.step(item, make_ctx(github=github)), Continue)
@@ -138,7 +176,12 @@ def test_arm_failure_is_contained_before_finishing(make_ctx: Any, make_work_item
             raise RuntimeError("transport failure")
 
     github = FailingArmGitHub(labels=(True, False))
-    item = make_work_item(stage=StageName.MERGE_WAIT, pr=12, state=ARM)
+    item = make_work_item(
+        stage=StageName.MERGE_WAIT,
+        pr=12,
+        state=ARM,
+        payload={"pr_review_skill_head": "a" * 40},
+    )
 
     result = MergeWaitStage().step(item, make_ctx(github=github))
 

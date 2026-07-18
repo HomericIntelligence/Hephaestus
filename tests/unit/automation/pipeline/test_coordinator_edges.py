@@ -553,7 +553,7 @@ class TestSeedingEdges:
             SeedEntry(
                 kind="pr",
                 identifier=88,
-                stage=StageName.MERGE_WAIT,
+                stage=StageName.STRICT_REVIEW,
                 reason="impl-go",
             )
         ]
@@ -561,7 +561,7 @@ class TestSeedingEdges:
 
         coordinator._seed_pass()
 
-        item = coordinator.queues[StageName.MERGE_WAIT].snapshot()[0]
+        item = coordinator.queues[StageName.STRICT_REVIEW].snapshot()[0]
         assert item.kind is ItemKind.PR and item.pr == 88 and item.repo == "repo-a"
 
     def test_issue_entry_with_pr_preserves_pr_number(
@@ -628,7 +628,7 @@ class TestSeedingEdges:
         coordinator._seed_pass()
 
         assert created == [("target-repo", tmp_path / "target-repo")]
-        item = coordinator.queues[StageName.MERGE_WAIT].snapshot()[0]
+        item = coordinator.queues[StageName.STRICT_REVIEW].snapshot()[0]
         assert item.repo == "target-repo"
         assert item.kind is ItemKind.ISSUE
         assert item.issue == 1818
@@ -643,7 +643,11 @@ class TestSeedingEdges:
             "gh_pr_label_names",
             MagicMock(side_effect=AssertionError("ambient PR label seeding called")),
         )
-        target_github = FakeStageGitHub(pr_impl_state=(True, False), pr_issue=1818)
+        target_github = FakeStageGitHub(
+            pr_impl_state=(True, False),
+            pr_issue=1818,
+            pr_state={"state": "OPEN", "headRefOid": "a" * 40},
+        )
         created: list[tuple[str, Path]] = []
 
         def github_factory(repo: str, repo_root: Path) -> FakeStageGitHub:
@@ -668,7 +672,7 @@ class TestSeedingEdges:
         coordinator._seed_pass()
 
         assert created == [("target-repo", tmp_path / "target-repo")]
-        item = coordinator.queues[StageName.MERGE_WAIT].snapshot()[0]
+        item = coordinator.queues[StageName.STRICT_REVIEW].snapshot()[0]
         assert item.repo == "target-repo"
         assert item.kind is ItemKind.PR
         assert item.issue == 1818

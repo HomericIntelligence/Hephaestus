@@ -248,7 +248,7 @@ def gh_pr_create(
 
     ``auto_merge`` is retained for API compatibility but ignored: only
     ``MergeWaitStage`` may conditionally arm after a head-bound strict-review
-    proof.
+    in-loop review handoff.
 
     The CI gate (``.github/workflows/_required.yml`` job ``pr-policy``) and the
     PR review prompt re-check the same three properties, so a slip past one
