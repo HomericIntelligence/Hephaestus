@@ -8,8 +8,8 @@ Hephaestus supports **Python 3.10–3.13** (`requires-python = ">=3.10"` in
 
 | Version | Supported       |
 |---------|-----------------|
-| 0.9.x   | ✅ Supported    |
-| < 0.9   | ❌ End of life  |
+| 0.10.x  | ✅ Supported    |
+| < 0.10  | ❌ End of life  |
 
 ## Reporting a Vulnerability
 
