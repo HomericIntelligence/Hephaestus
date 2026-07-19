@@ -806,10 +806,10 @@ def _select_commit_paths(
 
     for status, path in entries:
         if allowed is not None and path not in allowed:
-            logger.debug("Skipping non-allowlisted file: %s", path)
+            logger.debug("Skipping non-allowlisted file: %r", path)
             continue
         if _is_secret_path(path):
-            logger.warning("Skipping potential secret file: %s", path)
+            logger.warning("Skipping potential secret file: %r", path)
             continue
         if "D" in status:
             update_paths.append(path)
