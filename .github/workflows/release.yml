@@ -113,6 +113,10 @@ jobs:
         # sdist-contents / package-import guarantee a merged PR does (issue #1499).
         # --override-ini clears the unit coverage addopts; --strict-markers is safe
         # because the `integration` marker is registered in pyproject.toml.
+        # uv sync installed every [project.scripts] binary, so the CLI
+        # entry-point checks must never skip here (#2173).
+        env:
+          HEPHAESTUS_REQUIRE_CLI: "1"
         run: uv run pytest tests/integration --override-ini="addopts=" -v --strict-markers
 
   type-check:
