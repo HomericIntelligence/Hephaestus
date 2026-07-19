@@ -281,10 +281,9 @@ jobs:
     # Enforces the two HARD repo PR policies on every PR. Both checks are gated
     # by `if: always()` so one failure still surfaces the other:
     #   1. PR body contains `Closes #N` on its own line.
-    #   2. Every commit on the PR has a verified signature.
-    # The auto-merge ↔ implementation-review state machine moved to the separate
-    # `auto-merge-policy` job (#1080) so its timing-sensitive verdict no longer
-    # blocks merge — it is intentionally NOT in the required-checks ruleset.
+    #   2. Commit subjects follow Conventional Commits and carry a DCO trailer.
+    # Commit signature verification is enforced by the GitHub ruleset
+    # (`required_signatures`), not duplicated here.
     # Push events are skipped because there is no PR to inspect. Merge-group
     # events post this required context through a dedicated step because the
     # PR-specific policy was already checked on the source PR and the synthetic
@@ -332,10 +331,10 @@ jobs:
         run: |
           set -euo pipefail
           # `gh pr view --json body` exposes the PR body (for the Closes #N
-          # check) but DOES NOT expose per-commit signatures; we use the GraphQL
-          # API for that. Two separate queries are fine here — the workflow runs
-          # at most once per PR event and the policy gate must be cheap to read
-          # and debug. (The auto-merge/labels read moved to auto-merge-policy.)
+          # check); the GraphQL query below fetches commit messages for the
+          # Conventional Commit and DCO checks. Two separate queries are fine
+          # here — the workflow runs at most once per PR event and the policy
+          # gate must be cheap to read and debug.
           gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
             --json body \
             > pr.json
@@ -371,7 +370,7 @@ jobs:
           set -euo pipefail
           # Dependabot PR bodies are auto-generated and structurally never carry
           # a `Closes #N` line. Exempt ONLY this body check for dependabot[bot]
-          # (#1070) — Check 2 (signing) and the auto-merge-policy job still apply.
+          # (#1070) — the remaining policy checks still apply.
           if [ "$PR_AUTHOR" = "dependabot[bot]" ]; then
             echo "OK: Dependabot PR — 'Closes #N' body check is not applicable"
             exit 0
@@ -389,28 +388,9 @@ jobs:
             exit 1
           fi
 
-      - name: "Check 2: every commit is signed"
-        if: >-
-          github.event_name == 'pull_request' && always() &&
-          steps.fetch.outcome == 'success'
-        run: |
-          set -euo pipefail
-          # Build "<oid> <isValid>" rows from the GraphQL response. A null
-          # signature object means an unsigned commit, which the // false
-          # default coerces to false (rather than dropping the row).
-          bad=$(jq -r '.data.repository.pullRequest.commits.nodes[]
-                       | "\(.commit.oid) \(.commit.signature.isValid // false)"' commits.json \
-                | awk '$2 != "true" { print $1 }')
-          if [ -n "$bad" ]; then
-            echo "::error::The following commits are unsigned or have invalid signatures:"
-            # shellcheck disable=SC2086  # word-splitting of $bad is intentional
-            printf '  %s\n' $bad
-            msg="::error::Every commit MUST be cryptographically signed."
-            msg+=" Re-sign with: git rebase --exec 'git commit --amend --no-edit -S -s' origin/main"
-            echo "$msg"
-            exit 1
-          fi
-          echo "OK: all commits have verified signatures"
+      # Commit signature verification is enforced by the GitHub ruleset
+      # (`required_signatures` on `homeric-main-baseline`), so pr-policy no
+      # longer duplicates it here.
 
       - name: "Check 3: commit subjects follow Conventional Commits"
         if: >-
@@ -452,51 +432,6 @@ jobs:
           jq -j '.data.repository.pullRequest.commits.nodes[]
                  | .commit.message + "\u0000"' commits.json \
             | python3 scripts/check_dco_signoff.py -
-
-  auto-merge-policy:
-    name: auto-merge-policy
-    # Advisory (NOT a required check): the automation loop owns review,
-    # approval labeling, and merge arming. This job reports observable PR
-    # state but never authorizes the loop or substitutes for that process.
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      pull-requests: read
-    env:
-      GH_TOKEN: ${{ github.token }}
-      PR_NUMBER: ${{ github.event.pull_request.number }}
-    steps:
-      - name: "Report auto-merge state"
-        run: |
-          set -euo pipefail
-          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
-            --json autoMergeRequest,labels,state \
-            > pr.json
-          if ! jq -e '
-              type == "object"
-              and has("state")
-              and has("autoMergeRequest")
-              and (.state | type == "string")
-              and (.state == "OPEN" or .state == "MERGED" or .state == "CLOSED")
-              and (.autoMergeRequest == null or (.autoMergeRequest | type == "object"))
-            ' pr.json > /dev/null; then
-            echo "::error::Incomplete PR state response; cannot report auto-merge state."
-            exit 1
-          fi
-          pr_state=$(jq -r '.state' pr.json)
-          if [ "$pr_state" != "OPEN" ]; then
-            echo "OK: PR state is $pr_state; auto-merge policy is terminal"
-            exit 0
-          fi
-
-          state=$(jq -r '.autoMergeRequest' pr.json)
-          if [ "$state" != "null" ] && [ -n "$state" ]; then
-            echo "::notice::Auto-merge is armed by the automation loop."
-            exit 0
-          fi
-          echo "OK: auto-merge is currently disabled"
 
   unit-tests:
     name: unit-tests

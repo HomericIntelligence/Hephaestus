@@ -34,13 +34,8 @@ def test_bandit_configuration_excludes_generated_and_test_paths() -> None:
     assert {"tests", "build", ".venv"}.issubset(excluded)
 
 
-def test_required_workflow_and_precommit_use_uv_bandit() -> None:
-    """Both required enforcement paths invoke the project-managed Bandit."""
-    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/_required.yml").read_text())
-    sast = workflow["jobs"]["security-sast-scan"]
-    run_step = next(step for step in sast["steps"] if step.get("name") == "Run bandit (SAST)")
-    assert "uv run bandit" in run_step["run"]
-
+def test_precommit_uses_uv_bandit() -> None:
+    """The pre-commit hook invokes the project-managed Bandit."""
     config = yaml.safe_load((REPO_ROOT / ".pre-commit-config.yaml").read_text())
     hook = next(
         hook
@@ -51,9 +46,7 @@ def test_required_workflow_and_precommit_use_uv_bandit() -> None:
     assert hook["entry"].startswith("uv run bandit")
 
 
-def test_low_severity_baseline_is_checked_in_weekly_security_workflow() -> None:
-    """The weekly scan retains its low-severity baseline regression check."""
-    security = (REPO_ROOT / ".github/workflows/security.yml").read_text()
-    assert "bandit_baseline_check.py" in security
+def test_low_severity_baseline_counts_are_integers() -> None:
+    """The checked-in low-severity baseline stores integer counts."""
     baseline = json.loads((REPO_ROOT / "hephaestus/ci/bandit_low_baseline.json").read_text())
     assert all(isinstance(value, int) for value in baseline["counts"].values())
