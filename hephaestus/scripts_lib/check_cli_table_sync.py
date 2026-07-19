@@ -7,18 +7,20 @@ README mentions every command declared in [project.scripts] and exits non-zero
 with a clear diff otherwise.
 
 Beyond verifying that every command name appears in README.md, the script also
-verifies the prose counts in ``README.md`` (e.g. "44 console scripts") and in
-``docs/index.md`` (e.g. "44 CLI entry points") agree with the actual length of
-``[project.scripts]``.  This prevents documentation drift like #857, where
-README.md claimed 42 and docs/index.md claimed 37+ even though the real count
-was 44.
+verifies the prose counts in ``README.md`` (e.g. "44 console scripts"),
+``COMPATIBILITY.md`` (e.g. "44 console scripts"), and ``docs/index.md`` (e.g.
+"44 CLI entry points") agree with the actual length of ``[project.scripts]``.
+This prevents documentation drift like #857, where README.md claimed 42 and
+docs/index.md claimed 37+ even though the real count was 44, and like #2164,
+where COMPATIBILITY.md claimed 53.
 
 Usage:
     python3 -m hephaestus.scripts_lib.check_cli_table_sync
 
 Exit codes:
     0  All pyproject.toml scripts are documented in README.md AND the prose
-       counts in README.md / docs/index.md match the actual count.
+       counts in README.md / COMPATIBILITY.md / docs/index.md match the actual
+       count.
     1  One or more scripts are missing from the README CLI section OR a prose
        count is wrong.
 """
@@ -64,14 +66,24 @@ DOCS_INDEX = REPO_ROOT / "docs" / "index.md"
 # Regex that matches a backtick-quoted command name anywhere in the README.
 _BACKTICK_CMD_RE = re.compile(r"`(hephaestus-[a-z0-9-]+)`")
 
-# Regex that matches the README prose "<N> console scripts".
-_README_PROSE_RE = re.compile(r"(\d+)\s+console scripts")
+# Regex that matches prose of the form "<N> console scripts" (README.md and
+# COMPATIBILITY.md share this wording).
+_CONSOLE_SCRIPT_PROSE_RE = re.compile(r"(\d+)\s+console scripts")
 
 # Regex that matches the docs/index.md prose "<N>+? CLI entry points".  The
 # optional ``+`` is intentionally allowed in the pattern so legacy text like
 # "37+" parses cleanly, but the check below treats the bare integer as
 # authoritative.
 _DOCS_INDEX_PROSE_RE = re.compile(r"(\d+)\+?\s+CLI entry points")
+
+# Each guarded document, its prose regex, and the human-readable count label
+# used in mismatch diagnostics.  Extending this tuple is all that is required to
+# guard another prose count.
+_PROSE_COUNT_CHECKS: tuple[tuple[str, re.Pattern[str], str], ...] = (
+    ("README.md", _CONSOLE_SCRIPT_PROSE_RE, "console scripts"),
+    ("COMPATIBILITY.md", _CONSOLE_SCRIPT_PROSE_RE, "console scripts"),
+    ("docs/index.md", _DOCS_INDEX_PROSE_RE, "CLI entry points"),
+)
 
 
 def _load_scripts(repo_root: Path | None = None) -> set[str]:
@@ -91,11 +103,13 @@ def _readme_documented_commands(repo_root: Path | None = None) -> set[str]:
 
 
 def check_prose_counts(repo_root: Path, expected_count: int) -> tuple[bool, list[str]]:
-    """Verify the prose counts in README.md and docs/index.md match expected_count.
+    """Verify the documented CLI prose counts match ``expected_count``.
 
-    The check runs the regex against the full file text and treats a missing
-    match as a mismatch — silently dropping the prose sentence would erode the
-    guard rail that this checker exists to provide.
+    The guard covers ``README.md``, ``COMPATIBILITY.md``, and ``docs/index.md``
+    (see ``_PROSE_COUNT_CHECKS``).  The check runs each file's regex against the
+    full file text and treats a missing file or a missing match as a mismatch —
+    silently dropping the prose sentence would erode the guard rail that this
+    checker exists to provide.
 
     Args:
         repo_root: Repository root to search under.  Used so tests can point at
@@ -111,44 +125,26 @@ def check_prose_counts(repo_root: Path, expected_count: int) -> tuple[bool, list
     """
     mismatches: list[str] = []
 
-    readme = repo_root / "README.md"
-    docs_index = repo_root / "docs" / "index.md"
+    for relative_path, pattern, count_label in _PROSE_COUNT_CHECKS:
+        path = repo_root / relative_path
+        if not path.is_file():
+            mismatches.append(f"{relative_path} not found at {path}")
+            continue
 
-    if not readme.is_file():
-        mismatches.append(f"README.md not found at {readme}")
-    else:
-        readme_text = readme.read_text(encoding="utf-8")
-        match = _README_PROSE_RE.search(readme_text)
+        match = pattern.search(path.read_text(encoding="utf-8"))
         if match is None:
             mismatches.append(
-                "README.md: missing prose sentence matching "
-                "r'(\\d+)\\s+console scripts' — has the wording changed?"
+                f"{relative_path}: missing prose sentence matching "
+                f"r'{pattern.pattern}' — has the wording changed?"
             )
-        else:
-            actual = int(match.group(1))
-            if actual != expected_count:
-                mismatches.append(
-                    f"README.md: prose says '{actual} console scripts' but "
-                    f"pyproject.toml [project.scripts] has {expected_count} entries"
-                )
+            continue
 
-    if not docs_index.is_file():
-        mismatches.append(f"docs/index.md not found at {docs_index}")
-    else:
-        docs_text = docs_index.read_text(encoding="utf-8")
-        match = _DOCS_INDEX_PROSE_RE.search(docs_text)
-        if match is None:
+        actual = int(match.group(1))
+        if actual != expected_count:
             mismatches.append(
-                "docs/index.md: missing prose sentence matching "
-                "r'(\\d+)\\+?\\s+CLI entry points' — has the wording changed?"
+                f"{relative_path}: prose says '{actual} {count_label}' but "
+                f"pyproject.toml [project.scripts] has {expected_count} entries"
             )
-        else:
-            actual = int(match.group(1))
-            if actual != expected_count:
-                mismatches.append(
-                    f"docs/index.md: prose says '{actual} CLI entry points' but "
-                    f"pyproject.toml [project.scripts] has {expected_count} entries"
-                )
 
     return (len(mismatches) == 0, mismatches)
 
@@ -202,7 +198,7 @@ def main() -> int:
     if ok:
         print(
             f"OK: all {len(declared)} pyproject.toml scripts are documented in README.md, "
-            "and prose counts in README.md and docs/index.md agree."
+            "and prose counts in README.md, COMPATIBILITY.md, and docs/index.md agree."
         )
         return 0
 
