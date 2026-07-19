@@ -15,8 +15,10 @@ on:
       - ready_for_review
   push:
     branches: [main]
-  merge_group:
-    types: [checks_requested]
+  # merge_group intentionally removed: merge-queue checks are served by the
+  # single fast `merge-queue-smoke` job in merge-queue-smoke.yml. Re-running
+  # all 16+ jobs per queue entry serialized on runner slots (70-90 min per
+  # merge). PR-side jobs in this workflow are unchanged.
 
 concurrency:
   group: required-${{ github.workflow }}-${{ github.head_ref || github.sha }}

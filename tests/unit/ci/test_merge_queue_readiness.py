@@ -66,11 +66,35 @@ def _changes_gate_code_event(action: str, tmp_path: Path) -> bool:
 
 
 @pytest.mark.parametrize("workflow_name", REQUIRED_WORKFLOWS)
-def test_required_workflows_run_for_merge_group_checks_requested(workflow_name: str) -> None:
-    """Every workflow supplying a required context must run for queue checks."""
+def test_required_workflows_do_not_run_for_merge_group(workflow_name: str) -> None:
+    """Queue checks are served solely by the fast merge-queue smoke workflow.
+
+    Re-running the full required matrix per queue entry serialized on runner
+    slots (70-90 min per merge). merge_group is therefore removed here and
+    handled ONLY by merge-queue-smoke.yml, whose single `merge-queue-smoke`
+    job is the sole queue-side check. PR-side CI is untouched.
+    """
     events = _events(_load_workflow(workflow_name))
 
-    assert events.get("merge_group") == {"types": ["checks_requested"]}
+    assert "merge_group" not in events
+
+
+def test_merge_queue_smoke_is_the_only_merge_group_workflow() -> None:
+    """Exactly one workflow handles merge_group, with one fast smoke job."""
+    smoke_events = _events(_load_workflow("merge-queue-smoke.yml"))
+    assert smoke_events == {"merge_group": {"types": ["checks_requested"]}}
+
+    smoke_jobs = _load_workflow("merge-queue-smoke.yml")["jobs"]
+    assert list(smoke_jobs) == ["merge-queue-smoke"]
+    assert smoke_jobs["merge-queue-smoke"]["name"] == "merge-queue-smoke"
+    assert int(smoke_jobs["merge-queue-smoke"]["timeout-minutes"]) <= 5
+
+    merge_group_workflows = [
+        path.name
+        for path in sorted(WORKFLOW_DIR.glob("*.yml"))
+        if "merge_group" in _events(_load_workflow(path.name))
+    ]
+    assert merge_group_workflows == ["merge-queue-smoke.yml"]
 
 
 def test_required_workflows_preserve_pull_request_and_push_behavior() -> None:
