@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
@@ -129,6 +130,36 @@ class TestSelectCommitPaths:
         )
         with pytest.raises(FrozenInstanceError):
             paths.add_paths = ()  # type: ignore[misc]
+
+    def test_escapes_control_characters_in_skip_logs(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Path payloads preserved by _parse_porcelain_status (PR #2208) may carry
+        # newlines / terminal control chars; skip logs must render them escaped so a
+        # filename cannot forge a log line or emit terminal escapes (issue #2231).
+        newline_path = "src/forged\nINJECTED log line.py"
+        # Basename stays ``.env`` so the secret (warning) branch fires on a real
+        # secret name while the control payload rides in a leading path segment.
+        control_path = "sub/\x1b]0;pwned\x07/.env"
+        entries = (
+            (" M", newline_path),
+            ("??", control_path),
+        )
+
+        with caplog.at_level(logging.DEBUG, logger=pr_manager.logger.name):
+            paths = pr_manager._select_commit_paths(entries, allowed_paths=(control_path,))
+
+        # Selection semantics unchanged: newline_path filtered (not allowlisted),
+        # control_path filtered (secret .env basename), nothing staged.
+        assert paths == pr_manager._CommitPaths(add_paths=(), update_paths=())
+
+        skip_messages = [record.getMessage() for record in caplog.records]
+        assert any(repr(newline_path) in message for message in skip_messages)
+        assert any(repr(control_path) in message for message in skip_messages)
+        # Each untrusted value is a single escaped record — no raw newline or ESC leaks.
+        for message in skip_messages:
+            assert "\n" not in message
+            assert "\x1b" not in message
 
 
 class TestStageCommitPaths:
