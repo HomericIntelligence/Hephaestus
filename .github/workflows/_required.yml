@@ -591,6 +591,7 @@ jobs:
           # hatch-vcs derives the wheel version from git tags.
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - name: Set up Python 3.12
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
