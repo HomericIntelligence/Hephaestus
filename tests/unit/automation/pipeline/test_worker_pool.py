@@ -29,6 +29,10 @@ from hephaestus.automation.pipeline.jobs import (
 from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.worker_pool import WorkerPool, _repo_lock_path
+from hephaestus.automation.session_naming import (
+    AGENT_IMPLEMENTER,
+    AGENT_PR_REVIEWER,
+)
 from hephaestus.prompts import PromptCatalog
 from hephaestus.resilience import CircuitBreakerOpenError, get_circuit_breaker
 from hephaestus.utils.file_lock import LockUnavailableError
@@ -1819,3 +1823,66 @@ class TestShutdownReapsSubprocess:
         assert elapsed < 15, f"shutdown did not reap the subprocess fast ({elapsed:.1f}s)"
         assert result.ok is False
         assert result.interrupted is True
+
+
+class TestAgentToolScopes:
+    """Worker pool passes explicit least-privilege scopes to Claude (#2160)."""
+
+    def _invoke_kwargs(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        session_agent: str,
+    ) -> dict[str, Any]:
+        """Submit a Claude job for ``session_agent`` and return invoke kwargs."""
+        job = _agent_job(session_agent=session_agent)
+        with (
+            patch(f"{_WP}.resolve_agent", return_value="claude"),
+            patch(
+                f"{_WP}.claude_invoke.invoke_claude_with_session",
+                return_value=("out", "sid"),
+            ) as invoke,
+        ):
+            pool.submit(job, StageName.IMPLEMENTATION)
+            _handle, result = completion_q.get(timeout=10)
+        assert result.ok is True
+        return cast("dict[str, Any]", invoke.call_args.kwargs)
+
+    def test_reviewer_job_gets_read_only_scope(
+        self, pool: WorkerPool, completion_q: CompletionQueue
+    ) -> None:
+        kwargs = self._invoke_kwargs(pool, completion_q, AGENT_PR_REVIEWER)
+        assert kwargs["allowed_tools"] == "Read,Glob,Grep"
+        assert kwargs["permission_mode"] == "dontAsk"
+
+    def test_implementer_job_gets_write_scope(
+        self, pool: WorkerPool, completion_q: CompletionQueue
+    ) -> None:
+        kwargs = self._invoke_kwargs(pool, completion_q, AGENT_IMPLEMENTER)
+        assert kwargs["allowed_tools"] == "Read,Write,Edit,Glob,Grep,Bash"
+        assert kwargs["permission_mode"] == "dontAsk"
+
+    def test_unmapped_agent_fails_closed_to_read_only(
+        self, pool: WorkerPool, completion_q: CompletionQueue
+    ) -> None:
+        kwargs = self._invoke_kwargs(pool, completion_q, "mystery-agent")
+        assert kwargs["allowed_tools"] == "Read,Glob,Grep"
+        assert kwargs["permission_mode"] == "dontAsk"
+
+    def test_read_only_sandbox_clamps_write_agent_to_read_only(
+        self, pool: WorkerPool, completion_q: CompletionQueue
+    ) -> None:
+        """A read-only sandbox overrides a write-capable session agent."""
+        job = _agent_job(session_agent=AGENT_IMPLEMENTER, sandbox="read-only")
+        with (
+            patch(f"{_WP}.resolve_agent", return_value="claude"),
+            patch(
+                f"{_WP}.claude_invoke.invoke_claude_with_session",
+                return_value=("out", "sid"),
+            ) as invoke,
+        ):
+            pool.submit(job, StageName.IMPLEMENTATION)
+            _handle, result = completion_q.get(timeout=10)
+        assert result.ok is True
+        assert invoke.call_args.kwargs["allowed_tools"] == "Read,Glob,Grep"
+        assert invoke.call_args.kwargs["permission_mode"] == "dontAsk"
