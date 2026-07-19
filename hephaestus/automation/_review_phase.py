@@ -64,6 +64,7 @@ from .git_utils import (
 from .github_api import (
     gh_current_login,
     gh_issue_add_labels,
+    gh_issue_upsert_comment,
     gh_pr_list_unresolved_threads,
 )
 from .models import PLAN_COMMENT_MARKER, ImplementationState
@@ -76,7 +77,7 @@ from .prompts import get_impl_loop_review_prompt, get_impl_resume_feedback_promp
 from .review_validator import validate_prior_comments_addressed
 from .session_naming import AGENT_IMPLEMENTER, current_trunk_githash  # noqa: F401
 from .state import review as review_state
-from .state_labels import STATE_SKIP
+from .state_labels import SKIP_REASON_MARKER, STATE_SKIP, format_skip_reason_comment
 
 if TYPE_CHECKING:
     from ._stage_context import StageContext
@@ -1202,6 +1203,16 @@ class ReviewPhase(StageMixin):
             )
             with contextlib.suppress(Exception):
                 gh_issue_add_labels(issue_number, [STATE_SKIP])
+                gh_issue_upsert_comment(
+                    issue_number,
+                    SKIP_REASON_MARKER,
+                    format_skip_reason_comment(
+                        f"the PR review loop ended without GO "
+                        f"(verdict={last_verdict!r} after {iterations_run} "
+                        f"iteration(s)); push commits addressing the review, "
+                        f"then remove this label to re-enter the loop."
+                    ),
+                )
         elif last_verdict == "ERROR":
             logger.warning(
                 "#%d: review loop ended in reviewer-infrastructure ERROR after %d "

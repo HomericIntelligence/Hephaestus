@@ -884,7 +884,14 @@ class ImplementationStage(Stage):
             logger.warning(
                 "implementation:%d: no commits vs base; applying %s", item.issue, STATE_SKIP
             )
-            write_skip_label(item.issue, ctx)
+            write_skip_label(
+                item.issue,
+                ctx,
+                "the implementation session ended with no commits versus the "
+                "base branch — there is nothing to open a PR from. Re-scope "
+                "the issue or implement manually, then remove this label to "
+                "re-enter the loop.",
+            )
             return StageOutcome(Disposition.SKIP, "no commits vs base")
         if item.payload.pop("git_error", None):
             # Push failed: transient git/network trouble — RETRY the stage

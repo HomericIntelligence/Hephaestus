@@ -6,7 +6,12 @@ import json
 
 import hephaestus.automation.github_api as _api
 
-from ..state_labels import STATE_SKIP, is_skipped
+from ..state_labels import (
+    SKIP_REASON_MARKER,
+    STATE_SKIP,
+    format_skip_reason_comment,
+    is_skipped,
+)
 
 
 def _label_cache_key(repo: tuple[str, str] | None = None) -> str:
@@ -165,6 +170,18 @@ def skip_epics(epics_labels: dict[int, list[str]], repo: tuple[str, str] | None 
             continue
         _api.gh_issue_add_labels(number, [STATE_SKIP], repo=repo)
         _api.logger.info("Issue #%s is an epic/roadmap tracking issue; tagged state:skip", number)
+        try:
+            _api.gh_issue_upsert_comment(
+                number,
+                SKIP_REASON_MARKER,
+                format_skip_reason_comment(
+                    "excluded from the planning loop as an epic/roadmap tracking "
+                    "issue (checklist of child work, not a code task)"
+                ),
+                repo=repo,
+            )
+        except Exception as exc:  # pragma: no cover - defensive best-effort
+            _api.logger.warning("could not post skip-reason comment on #%s: %s", number, exc)
 
 
 def gh_issue_remove_labels(issue_number: int, labels: list[str]) -> None:

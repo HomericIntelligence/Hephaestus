@@ -55,12 +55,14 @@ from hephaestus.automation.review_state import (
 from hephaestus.automation.state_labels import (
     ALL_IMPLEMENTATION_STATE_LABELS,
     ALL_STATE_LABELS,
+    SKIP_REASON_MARKER,
     STATE_IMPLEMENTATION_GO,
     STATE_IMPLEMENTATION_NO_GO,
     STATE_LABEL_SPECS,
     STATE_PLAN_GO,
     STATE_PLAN_NO_GO,
     STATE_SKIP,
+    format_skip_reason_comment,
     has_label,
     is_implementation_go,
     is_plan_go,
@@ -933,15 +935,22 @@ class PipelineGitHub:
 
     def upsert_plan_comment(self, issue_number: int, body: str) -> None:
         """Upsert the single plan comment keyed on ``PLAN_COMMENT_MARKER``."""
-        if self._skip(f"upsert plan comment on #{issue_number}"):
+        self.upsert_issue_comment(issue_number, PLAN_COMMENT_MARKER, body)
+
+    def upsert_issue_comment(self, issue_number: int, marker: str, body: str) -> None:
+        """Upsert the single issue comment keyed on ``marker`` (repo-scoped).
+
+        Generalizes the plan-comment upsert (#2256): one comment per marker,
+        updated in place, older duplicates deleted.
+        """
+        if self._skip(f"upsert {marker!r} comment on #{issue_number}"):
             return
         if self._repo_slug is not None:
             comments = self._repo_issue_comments(issue_number)
             matching = [
                 c
                 for c in comments
-                if str(c.get("body", "")).startswith(PLAN_COMMENT_MARKER)
-                and c.get("databaseId") is not None
+                if str(c.get("body", "")).startswith(marker) and c.get("databaseId") is not None
             ]
             if not matching:
                 with github_api._body_file(body) as path:
@@ -973,7 +982,7 @@ class PipelineGitHub:
                     ]
                 )
             return
-        github_api.gh_issue_upsert_comment(issue_number, PLAN_COMMENT_MARKER, body)
+        github_api.gh_issue_upsert_comment(issue_number, marker, body)
 
     def create_pr(self, issue_number: int, branch: str, title: str, body: str) -> int:
         """Durably ensure the PR exists and return its number (idempotent).
@@ -1276,6 +1285,17 @@ class PipelineGitHub:
             for number, labels in epics_labels.items():
                 if STATE_SKIP not in labels:
                     self._add_labels(number, [STATE_SKIP])
+                    try:
+                        self.upsert_issue_comment(
+                            number,
+                            SKIP_REASON_MARKER,
+                            format_skip_reason_comment(
+                                "excluded from the planning loop as an epic/roadmap "
+                                "tracking issue (checklist of child work, not a code task)"
+                            ),
+                        )
+                    except Exception as exc:  # pragma: no cover - best-effort
+                        logger.warning("could not post skip-reason comment on #%s: %s", number, exc)
             return
         github_api.skip_epics(epics_labels)
 

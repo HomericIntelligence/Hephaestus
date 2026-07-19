@@ -1150,6 +1150,7 @@ class TestProgressAwareBudget:
             ("mark_pr_implementation_no_go", (1001,)),
             ("defer_auto_merge", (1001,)),
             ("gh_issue_add_labels", (12, (STATE_SKIP,))),
+            ("gh_issue_upsert_comment", (12, "<!-- hephaestus-state-skip-reason -->")),
         ]
         assert item.payload["pr_review_round"] == 3
 
@@ -1183,7 +1184,10 @@ class TestProgressAwareBudget:
         assert item.payload["pr_review_round"] == 5
         assert item.attempts["pr_review_iter"] == 5  # lifetime audit trail
         assert item.attempts["pr_review_hard"] == 2  # extension rounds 4 and 5
-        assert github.mutation_log[-1] == ("gh_issue_add_labels", (13, (STATE_SKIP,)))
+        assert github.mutation_log[-2:] == [
+            ("gh_issue_add_labels", (13, (STATE_SKIP,))),
+            ("gh_issue_upsert_comment", (13, "<!-- hephaestus-state-skip-reason -->")),
+        ]
 
     def test_hard_cap_stops_even_with_progress(self, make_ctx: Any, make_work_item: Any) -> None:
         """Round 6 is the absolute ceiling even while threads keep decreasing."""
@@ -1424,7 +1428,10 @@ class TestFullWalks:
         assert outcome.disposition == Disposition.SKIP
         assert outcome.note == "exhaustion"
         assert item.attempts["pr_review_iter"] == 3
-        assert github.mutation_log[-1] == ("gh_issue_add_labels", (22, (STATE_SKIP,)))
+        assert github.mutation_log[-2:] == [
+            ("gh_issue_add_labels", (22, (STATE_SKIP,))),
+            ("gh_issue_upsert_comment", (22, "<!-- hephaestus-state-skip-reason -->")),
+        ]
 
     def test_zero_thread_nogo_retries_without_skip(
         self, make_ctx: Any, make_work_item: Any
@@ -1565,7 +1572,10 @@ class TestFullWalks:
         assert "agent_error_failback" not in item.payload
         assert events[-1].action is ZeroThreadNogoAction.ESCALATE_SKIP
         assert not any(entry[0] == "mark_pr_implementation_no_go" for entry in github.mutation_log)
-        assert github.mutation_log[-1] == ("gh_issue_add_labels", (25, (STATE_SKIP,)))
+        assert github.mutation_log[-2:] == [
+            ("gh_issue_add_labels", (25, (STATE_SKIP,))),
+            ("gh_issue_upsert_comment", (25, "<!-- hephaestus-state-skip-reason -->")),
+        ]
 
     def test_zero_thread_nogo_comment_failure_still_retries(
         self, make_ctx: Any, make_work_item: Any
