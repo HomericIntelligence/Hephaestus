@@ -93,7 +93,7 @@ dev = [
     # GitHub Actions workflow security scanner (issue #2151); complements
     # bandit (Python) and ShellCheck (shell). See SECURITY.md.
     "zizmor>=1.27,<2",
-    "pdoc>=14.0,<15",
+    "pdoc>=14.0,<17",
     "pytest-watcher>=0.4,<1",
     "tomli>=2.0,<3;python_version<'3.11'",
 ]
