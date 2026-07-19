@@ -32,7 +32,20 @@ def _find_default_config() -> Path | None:
 
 
 def _load_fleet_config(config_path: str | None) -> tuple[str | None, list[str] | None]:
-    """Load org and repos from config file, auto-discovering if needed."""
+    """Load org and repos from config file, auto-discovering if needed.
+
+    Raises:
+        RuntimeError: If an explicitly provided ``config_path`` does not exist,
+            or if the config file exists but fails to load.
+
+    """
+    if config_path is not None and not Path(config_path).exists():
+        raise RuntimeError(
+            f"fleet config file not found: {config_path}. "
+            f"Pass an existing file to --config, or omit it to auto-discover "
+            f"{DEFAULT_FLEET_CONFIG_FILENAME}"
+        )
+
     if config_path is None:
         found_config = _find_default_config()
         if found_config is not None:
@@ -43,15 +56,14 @@ def _load_fleet_config(config_path: str | None) -> tuple[str | None, list[str] |
 
     if config_path is not None:
         config_path_obj = Path(config_path)
-        if config_path_obj.exists():
-            try:
-                cfg = load_config(config_path_obj)
-                file_org = cfg.get("org")
-                file_repos_raw = cfg.get("repos")
-                if isinstance(file_repos_raw, list):
-                    file_repos = file_repos_raw
-            except (FileNotFoundError, ValueError, RuntimeError) as e:
-                raise RuntimeError(f"Failed to load fleet config from {config_path}: {e}") from e
+        try:
+            cfg = load_config(config_path_obj)
+            file_org = cfg.get("org")
+            file_repos_raw = cfg.get("repos")
+            if isinstance(file_repos_raw, list):
+                file_repos = file_repos_raw
+        except (FileNotFoundError, ValueError, RuntimeError) as e:
+            raise RuntimeError(f"Failed to load fleet config from {config_path}: {e}") from e
 
     return file_org, file_repos
 

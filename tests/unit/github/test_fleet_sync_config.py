@@ -9,6 +9,13 @@ import pytest
 from hephaestus.github.fleet_sync import resolve_fleet_config
 
 
+@pytest.fixture
+def no_discovered_config():
+    """Disable .fleet.yml auto-discovery so env/CLI layers are tested in isolation."""
+    with patch("hephaestus.github.fleet_sync.config._find_default_config", return_value=None):
+        yield
+
+
 class TestResolveFleetConfig:
     """Tests for resolve_fleet_config() layered resolution chain."""
 
@@ -62,30 +69,22 @@ class TestResolveFleetConfig:
         with pytest.raises(RuntimeError, match="no fleet repos configured"):
             resolve_fleet_config(cli_org=None, cli_repos=None, config_path=str(cfg))
 
-    def test_env_repos_comma_split(self, monkeypatch, tmp_path) -> None:
+    def test_env_repos_comma_split(self, monkeypatch, no_discovered_config) -> None:
         """FLEET_REPOS is comma-separated with whitespace trimmed."""
         monkeypatch.setenv("FLEET_ORG", "Org")
         monkeypatch.setenv("FLEET_REPOS", "r1, r2 ,r3")
-        _, repos = resolve_fleet_config(
-            cli_org=None,
-            cli_repos=None,
-            config_path=str(tmp_path / "nonexistent.yml"),
-        )
+        _, repos = resolve_fleet_config(cli_org=None, cli_repos=None, config_path=None)
         assert repos == ["r1", "r2", "r3"]
 
-    def test_env_repos_numeric_not_coerced(self, monkeypatch, tmp_path) -> None:
+    def test_env_repos_numeric_not_coerced(self, monkeypatch, no_discovered_config) -> None:
         """FLEET_REPOS=123,456 stays as strings, not converted to int (R0-Major regression)."""
         monkeypatch.setenv("FLEET_ORG", "Org")
         monkeypatch.setenv("FLEET_REPOS", "123,456")
-        _, repos = resolve_fleet_config(
-            cli_org=None,
-            cli_repos=None,
-            config_path=str(tmp_path / "nonexistent.yml"),
-        )
+        _, repos = resolve_fleet_config(cli_org=None, cli_repos=None, config_path=None)
         assert repos == ["123", "456"]
         assert all(isinstance(r, str) for r in repos)
 
-    def test_env_repos_empty_after_split_raises(self, monkeypatch, tmp_path) -> None:
+    def test_env_repos_empty_after_split_raises(self, monkeypatch, no_discovered_config) -> None:
         """FLEET_REPOS set but with no valid entries fails with the differentiated error.
 
         The matcher pins the FLEET_REPOS-specific diagnostic (``FLEET_REPOS is set``)
@@ -95,14 +94,10 @@ class TestResolveFleetConfig:
         monkeypatch.setenv("FLEET_ORG", "Org")
         monkeypatch.setenv("FLEET_REPOS", " , , ")
         with pytest.raises(RuntimeError, match=r"FLEET_REPOS is set but contains no valid entries"):
-            resolve_fleet_config(
-                cli_org=None,
-                cli_repos=None,
-                config_path=str(tmp_path / "nope.yml"),
-            )
+            resolve_fleet_config(cli_org=None, cli_repos=None, config_path=None)
 
     def test_env_repos_empty_string_raises_differentiated_error(
-        self, monkeypatch, tmp_path
+        self, monkeypatch, no_discovered_config
     ) -> None:
         """FLEET_REPOS='' (set but empty) hits the differentiated error, not the generic one.
 
@@ -113,13 +108,9 @@ class TestResolveFleetConfig:
         monkeypatch.setenv("FLEET_ORG", "Org")
         monkeypatch.setenv("FLEET_REPOS", "")
         with pytest.raises(RuntimeError, match=r"FLEET_REPOS is set but contains no valid entries"):
-            resolve_fleet_config(
-                cli_org=None,
-                cli_repos=None,
-                config_path=str(tmp_path / "nope.yml"),
-            )
+            resolve_fleet_config(cli_org=None, cli_repos=None, config_path=None)
 
-    def test_cli_repos_override_bad_env_repos(self, monkeypatch, tmp_path) -> None:
+    def test_cli_repos_override_bad_env_repos(self, monkeypatch, no_discovered_config) -> None:
         """An explicit --repos overrides a malformed FLEET_REPOS without erroring.
 
         The differentiated FLEET_REPOS error must NOT fire when a higher-priority CLI
@@ -127,23 +118,25 @@ class TestResolveFleetConfig:
         """
         monkeypatch.setenv("FLEET_ORG", "Org")
         monkeypatch.setenv("FLEET_REPOS", " , , ")
-        org, repos = resolve_fleet_config(
-            cli_org=None,
-            cli_repos=["repoX"],
-            config_path=str(tmp_path / "nope.yml"),
-        )
+        org, repos = resolve_fleet_config(cli_org=None, cli_repos=["repoX"], config_path=None)
         assert org == "Org"
         assert repos == ["repoX"]
 
-    def test_missing_config_file_falls_through_to_env(self, monkeypatch, tmp_path) -> None:
-        """Missing config file does not raise — falls through to env vars."""
+    def test_explicit_missing_config_file_raises(self, monkeypatch, tmp_path) -> None:
+        """An explicit nonexistent --config path fails closed even when env is set."""
         monkeypatch.setenv("FLEET_ORG", "Org")
         monkeypatch.setenv("FLEET_REPOS", "r1")
-        org, repos = resolve_fleet_config(
-            cli_org=None,
-            cli_repos=None,
-            config_path=str(tmp_path / "nope.yml"),
-        )
+        missing = tmp_path / "nope.yml"
+        with pytest.raises(RuntimeError, match=r"fleet config file not found: .*nope\.yml"):
+            resolve_fleet_config(cli_org=None, cli_repos=None, config_path=str(missing))
+
+    def test_no_discovered_config_falls_through_to_env(
+        self, monkeypatch, no_discovered_config
+    ) -> None:
+        """Auto-discovery finding nothing (config_path=None) still falls through to env."""
+        monkeypatch.setenv("FLEET_ORG", "Org")
+        monkeypatch.setenv("FLEET_REPOS", "r1")
+        org, repos = resolve_fleet_config(cli_org=None, cli_repos=None, config_path=None)
         assert org == "Org"
         assert repos == ["r1"]
 
