@@ -14,6 +14,7 @@ needs hands-on recovery.
 | [Claude quota exhausted (429)](claude-quota-exhausted.md) | A stage emits `Verdict: ERROR` and the issue is left unlabeled because the Claude API quota / session limit was hit. |
 | [Reviving a state:skip-labeled issue](state-skip-revival.md) | An issue was labeled `state:skip` after automation already started work on it (planned or opened a PR) and you want to resume driving it. |
 | [No silent failures](no-silent-failures.md) | Policy reference: why `\|\| true`, `continue-on-error`, and advisory `::warning::` are forbidden, and how to fix a tripped hook. |
+| [Backup and disaster recovery](backup-restore.md) | You need to back up or restore `build/.issue_implementer` state, or rebuild a lost workstation end-to-end (policy: ADR-0012). |
 
 ## Before you start
 
