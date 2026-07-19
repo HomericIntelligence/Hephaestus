@@ -17,7 +17,6 @@ from contextlib import ExitStack, contextmanager
 from contextvars import copy_context
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
 
 from hephaestus.agents.runtime import resolve_agent, run_agent_session
 from hephaestus.automation import claude_invoke, git_utils, subprocess_registry
@@ -31,6 +30,11 @@ from hephaestus.automation.pipeline.jobs import (
 )
 from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.routing import StageName
+from hephaestus.automation.pipeline.tool_scopes import (
+    DEFAULT_TOOL_SCOPE,
+    ToolScope,
+    tool_scope_for,
+)
 from hephaestus.automation.worktree_manager import WorktreeManager
 from hephaestus.resilience import (
     CircuitBreakerOpenError,
@@ -383,10 +387,16 @@ class WorkerPool:
 
             def _invoke() -> str:
                 if is_claude:
-                    claude_kwargs: dict[str, Any] = {}
-                    if job.sandbox == "read-only":
-                        claude_kwargs["allowed_tools"] = job.allowed_tools or "Read,Glob,Grep"
-                        claude_kwargs["permission_mode"] = "dontAsk"
+                    # Scope priority: an explicit per-job grant (a stage that
+                    # knows its exact needs, e.g. pr_review) wins; a read-only
+                    # sandbox without one clamps to the fail-closed default;
+                    # everything else resolves by session-agent role.
+                    if job.allowed_tools:
+                        scope = ToolScope(job.allowed_tools)
+                    elif job.sandbox == "read-only":
+                        scope = DEFAULT_TOOL_SCOPE
+                    else:
+                        scope = tool_scope_for(session_agent)
                     stdout, _ = claude_invoke.invoke_claude_with_session(
                         repo=job.repo,
                         issue=job.issue,
@@ -396,7 +406,8 @@ class WorkerPool:
                         cwd=job.cwd,
                         timeout=job.timeout_s,
                         output_format=job.output_format,
-                        **claude_kwargs,
+                        allowed_tools=scope.allowed_tools,
+                        permission_mode=scope.permission_mode,
                     )
                     return stdout
                 else:
