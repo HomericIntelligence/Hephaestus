@@ -13,9 +13,13 @@ from jinja2 import (
     ChoiceLoader,
     Environment,
     FileSystemLoader,
-    PackageLoader,
     StrictUndefined,
 )
+
+#: Packaged default templates, resolved by filesystem path relative to this
+#: module so loading never depends on importlib package metadata (which races
+#: an editable-install rebuild, #2308).
+_DEFAULT_TEMPLATES_DIR = Path(__file__).resolve().parent / "templates" / "default"
 
 _ACTIVE_CATALOG: ContextVar[PromptCatalog | None] = ContextVar(
     "hephaestus_active_prompt_catalog", default=None
@@ -39,7 +43,14 @@ class PromptCatalog:
             if not resolved_override.is_dir():
                 raise ValueError(f"Prompt override directory does not exist: {override_root}")
             loaders.append(FileSystemLoader(str(resolved_override)))
-        loaders.append(PackageLoader("hephaestus.prompts", "templates/default"))
+        # Resolve the packaged templates by filesystem path relative to this
+        # module, NOT via ``PackageLoader``. PackageLoader consults importlib
+        # package metadata, which is transiently inconsistent for the few
+        # seconds after an editable-install rebuild — workers that import the
+        # catalog in that window crash with "PackageLoader could not find
+        # 'templates/default'" even though the files are on disk (#2308). A
+        # ``__file__``-relative FileSystemLoader has no metadata dependency.
+        loaders.append(FileSystemLoader(str(_DEFAULT_TEMPLATES_DIR)))
         self._environment = Environment(
             loader=ChoiceLoader(loaders),
             # Prompt templates are plain text; escaping would alter rendered
