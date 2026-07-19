@@ -4,13 +4,17 @@
 
 Hephaestus is the foundational utilities and tooling repository of the HomericIntelligence ecosystem, providing standardized components that support development across all other projects. We prioritize modularity, reliability, and consistency across a diverse set of cross-cutting concerns: configuration management, logging, GitHub automation, and agent coordination.
 
-## Current Focus (Q2 2026)
+## Current Focus (Q3 2026)
 
-The strict 2026-04-28 repository audit (Epic #310) is now **closed**. The active work is remediating findings from the follow-up strict 2026-05-28 audit, tracked as individual `audit-finding` issues. This ongoing work spans:
+Remediation of the strict 2026-05-28 audit findings (`audit-finding` issues) continues, now alongside hardening of the queue-based automation pipeline delivered under Epic #1809 and the fail-closed auto-merge bootstrap (#2054/#2055). This ongoing work spans:
 
 1. **Audit Remediation** — Addressing the open `audit-finding` issues across the 15 audit dimensions. Focus areas include documentation currency, automation module test coverage, fixing f-string logging anti-patterns, and continued hardening of the 3-stage review-PR pipeline (collapsed from the prior 6-phase design in #677/#679).
 
-2. **Automation Package Stabilization** — Refactoring and hardening the automation modules (PR review, CI driver, issue implementation) to improve single responsibility, observability, and idempotency. This includes fixing critical bugs in the CI state machine and worktree management.
+2. **Automation Pipeline Hardening** — Stabilizing the queue-based
+   plan → implement → review pipeline (Epic #1809): drive-green loop
+   behavior, orphan-PR recovery, epic/skip-tag scoping, and restoring
+   queue-owned auto-merge arming behind the #2054 fail-closed bootstrap
+   (#2055).
 
 3. **CLI Tool Coverage Expansion** — Expanding the CLI entry point test suite from 13 of 47 declared tools to full coverage, ensuring all command-line interfaces are properly validated.
 
@@ -73,4 +77,4 @@ that is the release maintainer; there is no separate roadmap committee.
 PR editing it directly). The roadmap is refreshed to reflect current focus
 areas as Epics are created or priorities shift.
 
-Last updated: 2026-07-01
+Last updated: 2026-07-18
