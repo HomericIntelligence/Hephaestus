@@ -185,6 +185,25 @@ def validate_agent_flags(parser: argparse.ArgumentParser, args: argparse.Namespa
         )
 
 
+def validate_input_files(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Reject missing prompt/skill files with a CLI diagnostic instead of a traceback.
+
+    ``run_agent`` reads these paths with a bare ``read_text`` (:func:`read_prompt`);
+    without this gate a nonexistent ``--prompt-file`` (or ``--skill-file``) surfaces
+    as an uncaught ``FileNotFoundError``, and a directory passed as a prompt raises
+    ``IsADirectoryError``. ``.is_file()`` converts both into a controlled
+    ``parser.error`` diagnostic (usage line + ``error: ...`` on stderr, exit code 2).
+    See issue #2171.
+    """
+    prompt_file = Path(args.prompt_file).expanduser().resolve()
+    if not prompt_file.is_file():
+        parser.error(f"--prompt-file does not exist or is not a file: {prompt_file}")
+    if args.skill_file:
+        skill_file = Path(args.skill_file).expanduser().resolve()
+        if not skill_file.is_file():
+            parser.error(f"--skill-file does not exist or is not a file: {skill_file}")
+
+
 def run_agent(args: argparse.Namespace) -> int:
     """Run one provider-selected automation stage and persist its output/log files."""
     repo_root = Path(args.repo_root).expanduser().resolve()
@@ -222,6 +241,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     validate_agent_flags(parser, args)
+    validate_input_files(parser, args)
 
     install_sigtstp_only()
     with terminal_guard():
