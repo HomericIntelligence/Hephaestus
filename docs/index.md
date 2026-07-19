@@ -51,7 +51,7 @@ See the [README](../README.md) for installation and development setup instructio
 
 - [Audit Reviewer](audit-reviewer.md) — `hephaestus-audit-prs`: coordinator-pattern auditor for ALL open PRs (issue #994)
 - [MCP Integration Posture](mcp.md) — Capability boundary, alternative integration contracts, and project-scoped `.mcp.json` change control
-- [NATS JetStream Configuration](nats.md) - TLS defaults, certificate file paths, and local plaintext exceptions for `hephaestus.nats`
+- [NATS JetStream Configuration](nats.md) — TLS defaults, certificate file paths, local plaintext exceptions, and the at-most-once failed-message retention policy for `hephaestus.nats`
 - [Observability: metrics, alerts, and SLOs](observability.md) — Automation pipeline metric catalog, alert ownership, and SLOs
 - [Operations Runbooks](runbooks/index.md) — Operator recovery procedures for the automation pipeline (loop crash, corrupted worktree, drive-green stall, quota exhaustion)
 - [Performance Testing](performance-testing.md) — Bounded worker-pool load, capacity, latency, and sustained-concurrency testing
