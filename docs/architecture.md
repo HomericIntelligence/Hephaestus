@@ -1009,10 +1009,10 @@ real-commit.
 
 [`PrReviewStage._eval`](hephaestus/automation/pipeline/stages/pr_review.py) implements
 the severity-aware GO gate from
-[`pipeline_github.py:928`](hephaestus/automation/pipeline_github.py).
+[`pipeline_github.py count_unresolved_threads_by_severity`](hephaestus/automation/pipeline_github.py).
 A `<!-- hephaestus-severity: X -->` marker (`X` in
 `critical|major|minor|nitpick`) is prepended to every posted comment
-([`prompts/pr_review.py:16-22`](hephaestus/automation/prompts/pr_review.py):
+([`prompts/pr_review.py`](hephaestus/automation/prompts/pr_review.py):
 `BLOCKING_SEVERITIES = {"critical","major"}`, `VALID_SEVERITIES`,
 `SEVERITY_MARKER_PREFIX`). [`_thread_severity_is_blocking`](hephaestus/automation/pipeline_github.py)
 uses line-prefix anchoring to avoid substring false positives
@@ -1691,13 +1691,13 @@ per-repo-scoped accessor factory):
 `find_merged_pr_for_issue`, `has_existing_plan`,
 `pr_has_implementation_state_label`,
 `count_unresolved_threads`, `count_unresolved_threads_by_severity`
-(`pipeline_github.py:928` — severity-aware counter used by
+(`pipeline_github.py` — severity-aware counter used by
 [§5.5's gate](#55-pr_review)),
 `failing_required_check_names`, `pending_required_check_names`,
 `pr_is_genuinely_stuck`, `drive_green_learn_terminal`,
 `drive_green_learn_inflight`, `drive_green_arm_confirmed`,
 `pending_drive_green_arms`,
-`rate_budget_ok` (`pipeline_github.py:142` — called by the
+`rate_budget_ok` (`pipeline_github.py` — called by the
 coordinator's `_rate_budget_ok`),
 `arm_auto_merge` (called ONLY by `merge_wait`),
 `claim_drive_green_learn`, `mark_drive_green_learn_result`
