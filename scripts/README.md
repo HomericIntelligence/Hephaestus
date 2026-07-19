@@ -31,8 +31,12 @@ through installed `hephaestus-*` console scripts.
   `.heph-private-denylist` in tracked/staged files, without echoing values.
 - **`check_security_policy_no_hardcoded_date.py`** — Reject hard-coded
   `As of YYYY-MM-DD` stamps in `SECURITY.md` (issue #730).
-- **`check_security_version_consistency.py`** — Keep the `SECURITY.md`
-  supported-versions table anchored to the latest `vX.Y.Z` git tag.
+
+### Operations
+
+- **`backup_state.py`** — Archive the tiered operational state (per the
+  backup/disaster-recovery ADR) for restore; runs under bare `python3` so it
+  works in the broken environment it recovers.
 
 ### Markdown
 
