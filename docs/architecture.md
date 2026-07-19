@@ -1766,6 +1766,22 @@ hands every `op="create_worktree"` job to `WorktreeManager`:
 on pass (`force=True`); on fail it logs and reflects in the
 preserved list used by the end-of-run summary.
 
+### Legacy compatibility inventory and retirement gates
+
+"Compatibility" here means accepting durable GitHub state written before the
+head-bound strict-review pipeline. Comments that cite legacy behavior only as
+algorithm provenance are not compatibility branches.
+
+| Compatibility family | Current containment | Removal gate |
+|---|---|---|
+| `legacy_issue_impl_go_fallback` in `pipeline/seeding.py` | An issue-level implementation-GO on an open PR is treated as a legacy fallback and routes the PR back to `pr_review` only when the PR does not carry authoritative implementation-NOGO. Each use emits the named warning marker. | After #2055 is deployed, a complete supported-repository seed pass must report zero fallback observations; then remove the issue-label branch and its classifier tests. |
+| `already_implementation_go_pr` and `not_implementation_go` across `routing.py` and `implementation.py` | Legacy-GO PRs may receive bounded maintenance, but every entry verifies auto-merge is disabled and `merge_wait` stops at `strict_gate_unavailable`. | Remove only after #2055 reconstructs eligibility from head-bound strict-review proof and the supported repositories contain zero open legacy implementation-GO PRs. Remove both route reasons, their stage branches, architecture rows, and tests together. |
+
+The former `pr_review` follow-up mini-states were removed by #2140: queue
+mini-states are not persisted, no current transition produced those states,
+and future post-strict-review follow-up behavior must be introduced as an
+explicit transition owned by the strict-review design.
+
 ---
 
 ## 12. Interrupt semantics and exit codes

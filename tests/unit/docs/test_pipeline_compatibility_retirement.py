@@ -3,7 +3,7 @@
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
-ARCHITECTURE = ROOT / "docs" / "AUTOMATION_LOOP_ARCHITECTURE.md"
+ARCHITECTURE = ROOT / "docs" / "architecture.md"
 PR_REVIEW = ROOT / "hephaestus" / "automation" / "pipeline" / "stages" / "pr_review.py"
 
 
