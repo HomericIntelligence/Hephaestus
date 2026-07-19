@@ -56,6 +56,7 @@ See the [README](../README.md) for installation and development setup instructio
 - [Operations Runbooks](runbooks/index.md) — Operator recovery procedures for the automation pipeline (loop crash, corrupted worktree, drive-green stall, quota exhaustion)
 - [Performance Testing](performance-testing.md) — Bounded worker-pool load, capacity, latency, and sustained-concurrency testing
 - [Privacy, Retention, and Deletion Policy](../PRIVACY.md) — data inventory, retention periods, deletion procedures, and GDPR contact (issue #2175)
+- [Third-Party Services](third-party-services.md) — Vendor inventory, responsibility split, and availability expectations for GitHub, PyPI, and agent providers (issue #2177)
 
 ## Contributing
 
