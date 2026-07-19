@@ -1,0 +1,56 @@
+# Fast merge-queue gate. This is the ONLY workflow that runs on merge_group
+# events: _required.yml and test.yml no longer trigger there, so re-running
+# the full 16-job matrix per queue entry (70-90 min of runner-slot starvation)
+# is replaced by this single job. PR-side CI is completely untouched; after
+# the ruleset flip, `merge-queue-smoke` is the only ruleset-required context
+# and is produced exclusively on merge_group events by this job.
+#
+# The steps below are real, fail-fast validations borrowed from the repo's
+# fastest required jobs (deps/version-sync, schema-validation, symlink-check).
+# They are NOT decorative: a broken lockfile, malformed workflow, or broken
+# symlink in the merge group fails the queue entry.
+name: Merge Queue Smoke
+
+on:
+  merge_group:
+    types: [checks_requested]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mq-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  merge-queue-smoke:
+    name: merge-queue-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
+        with:
+          enable-cache: true
+
+      - name: Check uv.lock is in sync with pyproject.toml
+        run: uv lock --check
+
+      - name: Validate GitHub workflow schemas
+        run: |
+          set -euo pipefail
+          mapfile -t wf_files < <(find .github/workflows -name "*.yml")
+          if [ "${#wf_files[@]}" -eq 0 ]; then
+            echo "No workflow files to validate"
+            exit 0
+          fi
+          uvx check-jsonschema \
+            --builtin-schema vendor.github-workflows \
+            "${wf_files[@]}"
+
+      - name: Run symlink check
+        run: bash scripts/check-symlinks.sh
