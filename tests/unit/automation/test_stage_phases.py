@@ -22,6 +22,8 @@ from hephaestus.automation._followup_phase import FollowUpPhase
 from hephaestus.automation._implement_phase import ImplementPhase, _prepend_advise
 from hephaestus.automation._plan_phase import PlanPhase, _phase_env
 from hephaestus.automation._pr_create_phase import PRCreatePhase
+from hephaestus.automation._review_conflict_resolver import ConflictResolutionRequest
+from hephaestus.automation._review_loop import ReviewLoopResult
 from hephaestus.automation._review_phase import ReviewPhase, _is_automation_owned_thread
 from hephaestus.automation._stage_context import StageContext, StageMixin
 
@@ -444,6 +446,17 @@ def test_review_phase_push_branch_delegates(tmp_path: Path) -> None:
     mock_push.assert_called_once_with("b", tmp_path)
 
 
+def test_review_phase_push_rebased_branch_uses_lease(tmp_path: Path) -> None:
+    """A rebased branch is published through the force-with-lease helper."""
+    phase = ReviewPhase(_make_ctx(tmp_path))
+    with mock.patch(
+        "hephaestus.automation._review_phase.push_current_branch_with_lease_on_divergence"
+    ) as push:
+        phase._push_rebased_branch("b", tmp_path)
+
+    push.assert_called_once_with(tmp_path, branch="b", push_ref="HEAD:b")
+
+
 def test_review_phase_commit_if_changes_delegates_to_git_utils(tmp_path: Path) -> None:
     """_commit_if_changes delegates to the canonical git helper."""
     phase = ReviewPhase(_make_ctx(tmp_path))
@@ -478,220 +491,60 @@ def test_review_phase_commit_if_changes_clean_returns_false(tmp_path: Path) -> N
     )
 
 
-# ---------------------------------------------------------------------------
-# #1328: pre-review conflict gate
-# ---------------------------------------------------------------------------
-
-
-def _gh_json(payload: dict[str, Any]) -> SimpleNamespace:
-    """Stub a gh result carrying JSON stdout."""
-    return SimpleNamespace(stdout=json.dumps(payload), stderr="")
-
-
-def test_review_phase_merge_state_uses_owner_repo_slug(tmp_path: Path) -> None:
-    """``gh pr view --repo`` requires OWNER/REPO, not the short repo slug."""
+def test_review_phase_loop_facade_preserves_tuple_contract(tmp_path: Path) -> None:
+    """The review-loop compatibility facade returns its historical tuple."""
     phase = ReviewPhase(_make_ctx(tmp_path))
-    with (
-        mock.patch("hephaestus.automation._review_phase.get_repo_info", return_value=("o", "r")),
-        mock.patch(
-            "hephaestus.automation._review_phase.gh_call",
-            return_value=_gh_json({"mergeStateStatus": "dirty", "mergeable": "conflicting"}),
-        ) as gh_call,
-    ):
-        assert phase._pr_merge_state(12) == ("DIRTY", "CONFLICTING")
-    args = gh_call.call_args.args[0]
-    assert args[args.index("--repo") + 1] == "o/r"
-
-
-def test_conflict_gate_clean_pr_proceeds_without_resolution(tmp_path: Path) -> None:
-    """#1328: a non-conflicting PR returns True with no rebase/agent spend."""
-    phase = ReviewPhase(_make_ctx(tmp_path))
-    with (
-        mock.patch.object(
-            phase, "_pr_merge_state", return_value=("CLEAN", "MERGEABLE")
-        ) as merge_state,
-        mock.patch("hephaestus.automation._review_phase.rebase_worktree_onto") as rebase,
-        mock.patch.object(phase, "_resume_impl_with_feedback") as resume,
-    ):
-        result = phase._resolve_conflict_before_review(
-            issue_number=7,
-            pr_number=12,
-            worktree_path=tmp_path,
-            branch_name="b",
-            session_id="sess",
-            slot_id=None,
-            thread_id=None,
-            state=None,
-        )
-    assert result is True
-    merge_state.assert_called_once()
-    rebase.assert_not_called()
-    resume.assert_not_called()
-
-
-def test_conflict_gate_mechanical_rebase_clears_conflict(tmp_path: Path) -> None:
-    """#1328: a clean mechanical rebase clears the conflict without the agent."""
-    phase = ReviewPhase(_make_ctx(tmp_path))
-    with (
-        mock.patch.object(
-            phase,
-            "_pr_merge_state",
-            side_effect=[("DIRTY", "CONFLICTING"), ("CLEAN", "MERGEABLE")],
-        ),
-        mock.patch(
-            "hephaestus.automation._review_phase.gh_call",
-            return_value=_gh_json({"baseRefName": "main"}),
-        ),
-        mock.patch("hephaestus.automation._review_phase.sync_worktree_to_remote_branch"),
-        mock.patch(
-            "hephaestus.automation._review_phase.rebase_worktree_onto", return_value=True
-        ) as rebase,
-        mock.patch(
-            "hephaestus.automation._review_phase.push_current_branch_with_lease_on_divergence"
-        ) as push,
-        mock.patch.object(phase, "_resume_impl_with_feedback") as resume,
-    ):
-        result = phase._resolve_conflict_before_review(
-            issue_number=7,
-            pr_number=12,
-            worktree_path=tmp_path,
-            branch_name="b",
-            session_id="sess",
-            slot_id=None,
-            thread_id=None,
-            state=None,
-        )
-    assert result is True
-    rebase.assert_called_once()
-    push.assert_called_once()
-    resume.assert_not_called()  # agent never needed — rebase cleared it
-
-
-def test_conflict_gate_dispatches_agent_when_rebase_conflicts(tmp_path: Path) -> None:
-    """#1328: a still-conflicting rebase hands off to the implementation agent."""
-    phase = ReviewPhase(_make_ctx(tmp_path))
-    runner = cast(Any, phase.ctx.runner)
-    runner._commit_if_changes = mock.Mock(return_value=True)
-    runner._push_branch = mock.Mock()
-    with (
-        mock.patch.object(
-            phase,
-            "_pr_merge_state",
-            # initial=DIRTY → rebase fails → agent resolves → final=CLEAN
-            side_effect=[("DIRTY", "CONFLICTING"), ("CLEAN", "MERGEABLE")],
-        ),
-        mock.patch(
-            "hephaestus.automation._review_phase.gh_call",
-            return_value=_gh_json({"baseRefName": "main"}),
-        ),
-        mock.patch("hephaestus.automation._review_phase.sync_worktree_to_remote_branch"),
-        mock.patch("hephaestus.automation._review_phase.rebase_worktree_onto", return_value=False),
-        mock.patch.object(phase, "_resume_impl_with_feedback", return_value=True) as resume,
-    ):
-        result = phase._resolve_conflict_before_review(
-            issue_number=7,
-            pr_number=12,
-            worktree_path=tmp_path,
-            branch_name="b",
-            session_id="sess",
-            slot_id=None,
-            thread_id=None,
-            state=None,
-        )
-    assert result is True
-    resume.assert_called_once()
-    runner._commit_if_changes.assert_called_once()
-    runner._push_branch.assert_called_once()
-
-
-def test_conflict_gate_unresolved_returns_false(tmp_path: Path) -> None:
-    """#1328: an unresolved conflict after the agent returns False (not-GO)."""
-    phase = ReviewPhase(_make_ctx(tmp_path))
-    runner = cast(Any, phase.ctx.runner)
-    runner._commit_if_changes = mock.Mock(return_value=True)
-    runner._push_branch = mock.Mock()
-    with (
-        mock.patch.object(
-            phase,
-            "_pr_merge_state",
-            side_effect=[("DIRTY", "CONFLICTING"), ("DIRTY", "CONFLICTING")],
-        ),
-        mock.patch(
-            "hephaestus.automation._review_phase.gh_call",
-            return_value=_gh_json({"baseRefName": "main"}),
-        ),
-        mock.patch("hephaestus.automation._review_phase.sync_worktree_to_remote_branch"),
-        mock.patch("hephaestus.automation._review_phase.rebase_worktree_onto", return_value=False),
-        mock.patch.object(phase, "_resume_impl_with_feedback", return_value=True),
-    ):
-        result = phase._resolve_conflict_before_review(
-            issue_number=7,
-            pr_number=12,
-            worktree_path=tmp_path,
-            branch_name="b",
-            session_id="sess",
-            slot_id=None,
-            thread_id=None,
-            state=None,
-        )
-    assert result is False
-
-
-def test_review_loop_resolves_conflict_before_first_review(tmp_path: Path) -> None:
-    """#1328: the conflict gate runs BEFORE the first review iteration."""
-    phase = ReviewPhase(_make_ctx(tmp_path))
-    call_order: list[str] = []
-
-    def _gate(**_kwargs: Any) -> bool:
-        call_order.append("gate")
-        return True
-
-    def _iter(**_kwargs: Any) -> tuple[Any, ...]:
-        call_order.append("review")
-        # verdict, grade, review_text, posted_thread_ids, go_blocked, reopened, should_break,
-        # prior_reopened_keys, validator_clean
-        return "GO", "A", "ok", [], False, [], True, set(), True
-
-    with (
-        mock.patch.object(phase, "_resolve_conflict_before_review", side_effect=_gate) as gate,
-        mock.patch.object(phase, "_process_review_iteration", side_effect=_iter),
-        mock.patch.object(phase, "_finalize_review_outcome"),
-    ):
-        phase._run_impl_review_loop(
+    outcome = ReviewLoopResult(iterations_run=2, verdict="GO", grade="A")
+    with mock.patch("hephaestus.automation._review_phase.ReviewLoopCoordinator") as coordinator:
+        coordinator.return_value.run.return_value = outcome
+        result = phase._run_impl_review_loop(
             issue_number=7,
             worktree_path=tmp_path,
             branch_name="b",
-            issue_title="t",
+            issue_title="title",
             issue_body="body",
-            session_id="sess",
+            session_id="session",
             slot_id=None,
             thread_id=None,
             pr_number=12,
         )
-    gate.assert_called_once()
-    assert call_order[0] == "gate"
-    assert "review" in call_order
+
+    assert result == (2, "GO", "A")
+    assert coordinator.return_value.run.call_args.kwargs == {"has_pr": True}
 
 
-def test_review_loop_skips_reviewer_when_conflict_unresolved(tmp_path: Path) -> None:
-    """#1328: an unresolved conflict skips the reviewer entirely (not-GO)."""
+def test_review_phase_conflict_facade_constructs_request(tmp_path: Path) -> None:
+    """The conflict facade binds phase state without exposing StageContext."""
     phase = ReviewPhase(_make_ctx(tmp_path))
     with (
-        mock.patch.object(phase, "_resolve_conflict_before_review", return_value=False),
-        mock.patch.object(phase, "_process_review_iteration") as review,
-        mock.patch.object(phase, "_finalize_review_outcome") as finalize,
+        mock.patch("hephaestus.automation._review_phase.ReviewConflictResolver") as resolver,
+        mock.patch.object(phase, "_push_rebased_branch") as push_rebased,
+        mock.patch.object(phase, "_push_branch") as push_agent,
     ):
-        iterations, verdict, grade = phase._run_impl_review_loop(
+        resolver.return_value.resolve.return_value = True
+        result = phase._resolve_conflict_before_review(
             issue_number=7,
+            pr_number=12,
             worktree_path=tmp_path,
             branch_name="b",
-            issue_title="t",
-            issue_body="body",
-            session_id="sess",
-            slot_id=None,
-            thread_id=None,
-            pr_number=12,
+            session_id="session",
+            slot_id=3,
+            thread_id=4,
+            state=None,
         )
-    review.assert_not_called()  # reviewer never runs on a conflicted PR
-    assert (iterations, verdict, grade) == (0, "NOGO", None)
-    finalize.assert_called_once()
+        resolver.call_args.kwargs["push_rebased_branch"]("b", tmp_path)
+        resolver.call_args.kwargs["push_agent_branch"]("b", tmp_path)
+
+    assert result is True
+    push_rebased.assert_called_once_with("b", tmp_path)
+    push_agent.assert_called_once_with("b", tmp_path)
+    assert resolver.return_value.resolve.call_args.args == (
+        ConflictResolutionRequest(
+            issue_number=7,
+            pr_number=12,
+            worktree_path=tmp_path,
+            branch_name="b",
+            slot_id=3,
+            thread_id=4,
+        ),
+    )

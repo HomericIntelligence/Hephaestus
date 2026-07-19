@@ -1,8 +1,10 @@
 """PR-review stage: review, validate, post, address, and evaluate.
 
-Re-houses the fused implementation-review loop from ``_review_phase.py``
-(``_run_impl_review_loop`` :671, ``_evaluate_go_verdict`` :314,
-``_review_thread_count_decreased`` :155) and its collaborators
+Re-houses the legacy implementation-review semantics now isolated in
+``_review_loop.ReviewLoopCoordinator`` and
+``_review_conflict_resolver.ReviewConflictResolver``. The queue stage remains
+the live implementation of the review/validate/address state machine. Its
+collaborators include
 (``pr_reviewer.review_pr_inline``, ``review_validator
 .validate_prior_comments_addressed``, ``address_review
 .run_address_fix_session``) as a pipeline stage
@@ -16,8 +18,9 @@ contract):
 - Budgets: ``pr_review_iter`` = 3 (soft cap), ``pr_review_hard`` = 6 (hard
   cap; rounds 4-6 are admitted ONLY while the unresolved-thread count
   strictly decreases — the #1554 progress-aware extension, legacy
-  ``_review_thread_count_decreased`` + the budget bump at
-  ``_run_impl_review_loop:758-770``). Both read from ROUTES via
+  ``_review_thread_count_decreased`` +
+  :class:`_review_loop.ReviewLoopCoordinator`'s progress-extension contract).
+  Both read from ROUTES via
   ``ctx.budget``, never hardcoded here.
 - Iteration accounting: ``item.attempts["pr_review_iter"]`` is the
   PER-LIFETIME audit trail (routing.py contract: attempts are never
