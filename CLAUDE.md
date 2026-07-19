@@ -49,7 +49,6 @@ Hephaestus/
 │   ├── validation/             # README, schema, and structural validation
 │   └── version/                # Version management
 ├── scripts/                    # Automation and maintenance scripts
-├── skills/                     # Claude Code skill definitions (23 SKILL.md skills; kebab-case naming for plugin format)
 ├── tests/                      # Unit and integration tests
 │   ├── unit/                   # Unit tests (mirror hephaestus/ subpackages; a small sanctioned set of extra dirs covers non-package targets — scripts/, docs/, shell, top-level modules)
 │   └── integration/            # Integration tests
@@ -57,8 +56,10 @@ Hephaestus/
 └── .claude/                    # Claude Code configurations
 ```
 
-Skill directories use kebab-case (`code-review`, `git-worktrees`) per the
-Claude Code plugin format. All Python packages use lowercase_snake_case.
+Agent skills are supplied by the Athena plugins enabled in
+`.claude/settings.json`; plugin skill names use kebab-case
+(`code-review`, `git-worktrees`). All Python packages use
+lowercase_snake_case.
 
 ## Library vs product layer
 
@@ -241,43 +242,44 @@ Skip Extended Thinking for:
 
 ### Automatic Skill Selection
 
-Before beginning any substantive task, invoke `/hephaestus:skill-advisor` to determine if a structured
-skill applies. Use `Skill(skill: "hephaestus:skill-advisor", args: "<task description>")`.
+Before beginning any substantive task, invoke `/athena:skill-advisor` to determine if a structured
+skill applies. Use `Skill(skill: "athena:skill-advisor", args: "<task description>")`.
 
 If you are a myrmidon-swarm subagent with a specific task prompt, skip this and follow your prompt directly.
 
 ### Skill Catalog
 
-Invoke a skill with `Skill(skill: "hephaestus:<name>", args: "<argument>")`, or
-`/hephaestus:<name> <argument>` interactively. The **Arguments** column mirrors each
-skill's `argument-hint` frontmatter in `skills/<name>/SKILL.md`; `—` means the skill
-takes no argument.
+Invoke an Athena skill with `Skill(skill: "athena:<name>", args: "<argument>")`, or
+`/athena:<name> <argument>` interactively. The **Arguments** column mirrors the
+Athena plugin's `argument-hint` frontmatter; `—` means the skill takes no
+argument. `.claude/settings.json` is the
+repository-local source of truth for which skill plugins are enabled.
 
 | Skill | Arguments | When to Use |
 |-------|-----------|-------------|
-| `skill-advisor` | `<task description>` | Before any task — routes to the correct skill |
-| `advise` | `<task description>` | Before starting work — search Mnemosyne for prior learnings |
-| `learn` | — | After completing work — capture session learnings in Mnemosyne |
-| `myrmidon-swarm` | `<task description>` | Complex multi-step tasks requiring parallel agent coordination |
-| `brainstorm` | `<idea or feature description>` | Before implementing a new feature — design before code |
-| `test-driven-development` | `<feature or bugfix description>` | Before writing implementation code — RED-GREEN-REFACTOR |
-| `systematic-debugging` | `<description of the bug or failure>` | Before proposing fixes — root cause first |
-| `verification` | `<what you are verifying>` | Before claiming work is done — evidence before assertions |
-| `git-worktrees` | `<branch-name or feature description>` | When needing isolated branch workspace |
-| `finish-branch` | `"<optional: base branch name>"` | When implementation is complete — branch completion workflow |
-| `code-review` | `<what was implemented>` | After major feature completion — Sonnet reviewer + feedback reception |
-| `repo-analyze` | — | Comprehensive 15-dimension repository audit |
-| `repo-analyze-quick` | — | Quick repository health check |
-| `repo-analyze-strict` | — | Ruthlessly thorough repository audit |
-| `repo-analyze-full` | — | Full-coverage audit — one swarm agent per section, no sampling cap |
-| `repo-analyze-quick-full` | — | Quick health check with full file coverage |
-| `repo-analyze-strict-full` | — | Strict audit with full file coverage (swarm per section) |
-| `pr-review` | — | Athena full-coverage pull-request review |
-| `worktree-cleanup` | `"<optional: --dry-run>"` | Audit + prune git worktrees (never deletes branches) |
-| `tidy` | `"<optional: --dry-run \| --no-swarm \| --trunk BRANCH \| --max-concurrent N>"` | Rebase all local branches with swarm conflict resolution |
-| `create-reusable-utilities` | — | Port/generalize utility scripts for cross-project reuse |
-| `github-actions-python-cicd` | — | Set up a Python GitHub Actions CI/CD pipeline |
-| `python-repo-modernization` | `<path to Python repo to modernize>` | Bring a Python repo to production-grade quality |
+| `athena:skill-advisor` | `<task description>` | Before any task — routes to the correct skill |
+| `athena:advise` | `<task description>` | Before starting work — search Mnemosyne for prior learnings |
+| `athena:learn` | — | After completing work — capture session learnings in Mnemosyne |
+| `athena:myrmidon-swarm` | `<task description>` | Complex multi-step tasks requiring parallel agent coordination |
+| `athena:brainstorm` | `<idea or feature description>` | Before implementing a new feature — design before code |
+| `athena:test-driven-development` | `<feature or bugfix description>` | Before writing implementation code — RED-GREEN-REFACTOR |
+| `athena:systematic-debugging` | `<description of the bug or failure>` | Before proposing fixes — root cause first |
+| `athena:verification` | `<what you are verifying>` | Before claiming work is done — evidence before assertions |
+| `athena:git-worktrees` | `<branch-name or feature description>` | When needing isolated branch workspace |
+| `athena:finish-branch` | `"<optional: base branch name>"` | When implementation is complete — branch completion workflow |
+| `athena:code-review` | `<what was implemented>` | After major feature completion — Sonnet reviewer + feedback reception |
+| `athena:repo-analyze` | — | Comprehensive 15-dimension repository audit |
+| `athena:repo-analyze-quick` | — | Quick repository health check |
+| `athena:repo-analyze-strict` | — | Ruthlessly thorough repository audit |
+| `athena:repo-analyze-full` | — | Full-coverage audit — one swarm agent per section, no sampling cap |
+| `athena:repo-analyze-quick-full` | — | Quick health check with full file coverage |
+| `athena:repo-analyze-strict-full` | — | Strict audit with full file coverage (swarm per section) |
+| `athena:pr-review` | — | Athena full-coverage pull-request review |
+| `athena:worktree-cleanup` | `"<optional: --dry-run>"` | Audit + prune git worktrees (never deletes branches) |
+| `athena:tidy` | `"<optional: --dry-run \| --no-swarm \| --trunk BRANCH \| --max-concurrent N>"` | Rebase all local branches with swarm conflict resolution |
+| `athena:create-reusable-utilities` | — | Port/generalize utility scripts for cross-project reuse |
+| `athena:github-actions-python-cicd` | — | Set up a Python GitHub Actions CI/CD pipeline |
+| `athena:python-repo-modernization` | `<path to Python repo to modernize>` | Bring a Python repo to production-grade quality |
 
 ### Agent Skills vs Sub-Agents Decision Tree
 

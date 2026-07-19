@@ -3,7 +3,8 @@
 This file is a single-page map of the AI-agent topology and conventions used by
 Hephaestus and the wider HomericIntelligence ecosystem. For project-specific
 rules (commit policy, branch naming, version model) see [`CLAUDE.md`](CLAUDE.md);
-for the catalog of skills the agents invoke, see the [`skills/`](skills/) directory.
+for enabled skill plugins see [`.claude/settings.json`](.claude/settings.json),
+and for invocation guidance see the [`CLAUDE.md` skill catalog](CLAUDE.md#skill-catalog).
 
 ## Agents the codebase orchestrates
 
@@ -137,13 +138,13 @@ instructions that bypass the PR review loop. See the tests in
 
 ## Human-in-the-loop checkpoints
 
-Several skills mandate human gates that the agents must wait on:
+Several plugin-provided skills mandate human gates that the agents must wait on:
 
-- `skills/myrmidon-swarm/SKILL.md` — explicit Phase 1 "STOP HERE. Ask the user…"
+- `/athena:myrmidon-swarm` — explicit Phase 1 "STOP HERE. Ask the user…"
   before any swarm deploys.
-- `skills/skill-advisor/SKILL.md` — invoked at the start of any substantive task
+- `/athena:skill-advisor` — invoked at the start of any substantive task
   with `allowed-tools: []`, so it can route but never act autonomously.
-- `skills/finish-branch/SKILL.md`, `skills/code-review/SKILL.md` — explicit confirm
+- `/athena:finish-branch` and `/athena:code-review` — explicit confirm
   steps before tagging, force-pushing, or merging.
 
 Every PR opened by the automation pipeline goes through GitHub's normal branch
@@ -152,8 +153,9 @@ protection and the `pr-policy` required-check gate
 
 ## Skill catalog
 
-`skills/` contains 23 reusable skills the agents can invoke. See
-[`CLAUDE.md`](CLAUDE.md#skill-catalog) for the full table. Highlights:
+The Athena plugins enabled in `.claude/settings.json` provide 23 reusable skills
+the agents can invoke. See [`CLAUDE.md`](CLAUDE.md#skill-catalog) for the full
+table. Highlights:
 
 - **Workflow**: `skill-advisor`, `advise`, `brainstorm`, `test-driven-development`,
   `systematic-debugging`, `verification`, `finish-branch`, `code-review`.
@@ -165,9 +167,9 @@ protection and the `pr-policy` required-check gate
 
 ## Configuration / boundaries
 
-- Hooks and per-skill `allowed-tools` are declared in each skill's frontmatter
-  (`skills/<name>/SKILL.md`) — these are the agent permission boundaries.
-- `.claude/settings.json` carries project-level plugin enablement.
+- Skill hooks, frontmatter, and per-skill `allowed-tools` are owned by the
+  installed Athena plugins; `.claude/settings.json` is the repository-local
+  source of truth for plugin enablement.
 - **MCP** (Model Context Protocol): `.mcp.json` is the version-controlled
   configuration surface for optional project-scoped agent tooling and remains
   intentionally empty. MCP is not a Hephaestus runtime API or ecosystem
