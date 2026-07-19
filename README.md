@@ -12,7 +12,7 @@ Shared utilities and tooling for the HomericIntelligence ecosystem, powered by [
 
 ## Overview
 
-Hephaestus provides standardized utility functions and tools that can be shared across all HomericIntelligence repositories. Following the principles in [CLAUDE.md](CLAUDE.md), this project emphasizes:
+Hephaestus provides standardized utility functions and tools that can be shared across all HomericIntelligence repositories. Following the principles in [AGENTS.md](AGENTS.md), this project emphasizes:
 
 - **Modularity**: Well-defined, reusable components
 - **Simplicity**: KISS (Keep It Simple, Stupid) principle
@@ -446,7 +446,7 @@ hephaestus-check-complexity --help
 
 ## Development Guidelines
 
-1. Follow the principles in [CLAUDE.md](CLAUDE.md)
+1. Follow the principles in [AGENTS.md](AGENTS.md)
 2. Write comprehensive unit tests for all new functionality
 3. Document all public functions with Google-style docstrings
 4. Use type hints for all function parameters and return values

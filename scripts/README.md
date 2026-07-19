@@ -115,7 +115,7 @@ scripts/check-symlinks.sh
 
 ## Design Principles
 
-Following CLAUDE.md guidelines:
+Following AGENTS.md guidelines:
 
 - **KISS** (Keep It Simple, Stupid) — Scripts are thin wrappers
 - **DRY** (Don't Repeat Yourself) — Logic lives in `hephaestus.*` modules; the

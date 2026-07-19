@@ -120,18 +120,18 @@ class TestCheckClaudeMdThreshold:
     """Tests for check_claude_md_threshold()."""
 
     def test_matching_threshold(self, tmp_path: Path) -> None:
-        (tmp_path / "CLAUDE.md").write_text("We maintain 80%+ test coverage.")
+        (tmp_path / "AGENTS.md").write_text("We maintain 80%+ test coverage.")
         assert check_claude_md_threshold(tmp_path, 80) == []
 
     def test_mismatch(self, tmp_path: Path) -> None:
-        (tmp_path / "CLAUDE.md").write_text("We maintain 75%+ test coverage.")
+        (tmp_path / "AGENTS.md").write_text("We maintain 75%+ test coverage.")
         errors = check_claude_md_threshold(tmp_path, 80)
         assert len(errors) == 1
         assert "75%" in errors[0]
         assert "80%" in errors[0]
 
     def test_no_mention(self, tmp_path: Path) -> None:
-        (tmp_path / "CLAUDE.md").write_text("No coverage info here.")
+        (tmp_path / "AGENTS.md").write_text("No coverage info here.")
         errors = check_claude_md_threshold(tmp_path, 80)
         assert len(errors) == 1
         assert "No coverage threshold" in errors[0]
@@ -142,7 +142,7 @@ class TestCheckClaudeMdThreshold:
         assert "not found" in errors[0]
 
     def test_percent_without_plus(self, tmp_path: Path) -> None:
-        (tmp_path / "CLAUDE.md").write_text("We require 80% test coverage.")
+        (tmp_path / "AGENTS.md").write_text("We require 80% test coverage.")
         assert check_claude_md_threshold(tmp_path, 80) == []
 
 
@@ -286,7 +286,7 @@ class TestCheckDocConfigConsistency:
 
     def _setup_valid_repo(self, tmp_path: Path) -> None:
         _write_pyproject(tmp_path, _minimal_pyproject(fail_under=80))
-        (tmp_path / "CLAUDE.md").write_text("We maintain 80%+ test coverage.")
+        (tmp_path / "AGENTS.md").write_text("We maintain 80%+ test coverage.")
         (tmp_path / "README.md").write_text("Run pytest --cov=hephaestus")
         (tmp_path / "docs").mkdir(exist_ok=True)
         (tmp_path / "docs" / "DEFINITION_OF_DONE.md").write_text(
@@ -300,7 +300,7 @@ class TestCheckDocConfigConsistency:
 
     def test_threshold_mismatch_fails(self, tmp_path: Path) -> None:
         _write_pyproject(tmp_path, _minimal_pyproject(fail_under=90))
-        (tmp_path / "CLAUDE.md").write_text("We maintain 80%+ test coverage.")
+        (tmp_path / "AGENTS.md").write_text("We maintain 80%+ test coverage.")
         (tmp_path / "README.md").write_text("")
         result = check_doc_config_consistency(tmp_path, skip_test_count=True)
         assert result == 1
@@ -341,7 +341,7 @@ class TestMain:
 
     def test_valid_repo(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         _write_pyproject(tmp_path, _minimal_pyproject(fail_under=80))
-        (tmp_path / "CLAUDE.md").write_text("We maintain 80%+ test coverage.")
+        (tmp_path / "AGENTS.md").write_text("We maintain 80%+ test coverage.")
         (tmp_path / "README.md").write_text("Run pytest --cov=hephaestus")
         (tmp_path / "docs").mkdir(exist_ok=True)
         (tmp_path / "docs" / "DEFINITION_OF_DONE.md").write_text(
@@ -360,7 +360,7 @@ class TestMain:
 
     def test_mismatch_fails(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         _write_pyproject(tmp_path, _minimal_pyproject(fail_under=90))
-        (tmp_path / "CLAUDE.md").write_text("We maintain 80%+ test coverage.")
+        (tmp_path / "AGENTS.md").write_text("We maintain 80%+ test coverage.")
         (tmp_path / "README.md").write_text("")
         monkeypatch.setattr(
             "sys.argv",
