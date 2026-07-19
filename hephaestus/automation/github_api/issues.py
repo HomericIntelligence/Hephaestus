@@ -107,12 +107,22 @@ def gh_issue_json(issue_number: int) -> dict[str, Any]:
         raise RuntimeError(f"Failed to fetch issue #{issue_number}: {e}") from e
 
 
-def gh_issue_comment(issue_number: int, body: str) -> None:
+def _repo_args(repo: tuple[str, str] | None) -> list[str]:
+    """Return the explicit ``--repo owner/name`` selector args when given."""
+    if repo is None:
+        return []
+    owner, name = repo
+    return ["--repo", f"{owner}/{name}"]
+
+
+def gh_issue_comment(issue_number: int, body: str, repo: tuple[str, str] | None = None) -> None:
     """Post a comment to an issue.
 
     Args:
         issue_number: GitHub issue number
         body: Comment body text
+        repo: ``(owner, name)`` owning *issue_number*; ambient cwd when omitted
+            (correct only for single-repo callers, #2245/#2256)
 
     Raises:
         RuntimeError: If comment post fails
@@ -120,7 +130,9 @@ def gh_issue_comment(issue_number: int, body: str) -> None:
     """
     try:
         with _body_file(body) as path:
-            _api._gh_call(["issue", "comment", str(issue_number), "--body-file", path])
+            _api._gh_call(
+                ["issue", "comment", str(issue_number), "--body-file", path, *_repo_args(repo)]
+            )
         _api.logger.info("Posted comment to issue #%s", issue_number)
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Failed to post comment to issue #{issue_number}: {e}") from e
@@ -217,7 +229,12 @@ def gh_issue_delete_comment(comment_id: int) -> None:
         raise RuntimeError(f"Failed to delete issue comment {comment_id}: {e}") from e
 
 
-def gh_issue_upsert_comment(issue_number: int, marker_prefix: str, body: str) -> int | None:
+def gh_issue_upsert_comment(
+    issue_number: int,
+    marker_prefix: str,
+    body: str,
+    repo: tuple[str, str] | None = None,
+) -> int | None:
     """Create-or-update the single issue comment whose body starts with ``marker_prefix``.
 
     Enforces the "one comment per role" invariant: the pipeline must keep at
@@ -244,7 +261,7 @@ def gh_issue_upsert_comment(issue_number: int, marker_prefix: str, body: str) ->
         RuntimeError: If a create/update/delete call fails.
 
     """
-    comments = _api._fetch_issue_comment_ids(issue_number)
+    comments = _api._fetch_issue_comment_ids(issue_number, repo)
     matching = [
         c
         for c in comments
@@ -253,13 +270,13 @@ def gh_issue_upsert_comment(issue_number: int, marker_prefix: str, body: str) ->
 
     if not matching:
         # No existing comment with this marker — create a fresh one.
-        _api.gh_issue_comment(issue_number, body)
+        _api.gh_issue_comment(issue_number, body, repo=repo)
         return None
 
     # Newest matching comment wins (list is chronological → last element).
     target = matching[-1]
     target_id = int(target["databaseId"])
-    owner, name = _api.get_repo_info()
+    owner, name = repo if repo is not None else _api.get_repo_info()
 
     # Delete older duplicates so only one comment with this marker remains.
     for dup in matching[:-1]:

@@ -2587,7 +2587,7 @@ class TestUpsertAndDeleteComment:
         self, mock_create: Any, _mock_fetch: Any, _mock_repo: Any
     ) -> None:
         rv = gh_issue_upsert_comment(5, "# Implementation Plan", "# Implementation Plan\nbody")
-        mock_create.assert_called_once_with(5, "# Implementation Plan\nbody")
+        mock_create.assert_called_once_with(5, "# Implementation Plan\nbody", repo=None)
         assert rv is None  # fresh create: id not parsed
 
     @patch("hephaestus.automation.github_api.get_repo_info", return_value=("o", "r"))

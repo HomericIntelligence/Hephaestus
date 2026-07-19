@@ -57,7 +57,11 @@ from pathlib import Path
 from typing import Any, Protocol, TypeAlias, runtime_checkable
 
 from hephaestus.agents.runtime import DEFAULT_AGENT
-from hephaestus.automation.state_labels import STATE_SKIP
+from hephaestus.automation.state_labels import (
+    SKIP_REASON_MARKER,
+    STATE_SKIP,
+    format_skip_reason_comment,
+)
 
 from ..events import StageEvent
 from ..jobs import AgentJob, BuildTestJob, GitJob, JobHandle, JobResult
@@ -172,6 +176,10 @@ class StageGitHub(Protocol):
 
     def close_issue_as_covered(self, issue_number: int, pr_number: int) -> None:
         """Close the issue as covered by a merged PR (``_review_utils``)."""
+        ...
+
+    def upsert_issue_comment(self, issue_number: int, marker: str, body: str) -> None:
+        """Upsert the single issue comment keyed on ``marker`` (#2256)."""
         ...
 
     def upsert_plan_comment(self, issue_number: int, body: str) -> None:
@@ -566,15 +574,18 @@ def _terminal_pr_outcome(pr_state: dict[str, Any] | None, pr_number: int) -> Sta
     return None
 
 
-def write_skip_label(issue_number: int, ctx: StageContext) -> None:
-    """Durably apply ``state:skip``, non-fatally (legacy warn pattern).
+def write_skip_label(issue_number: int, ctx: StageContext, reason: str) -> None:
+    """Durably apply ``state:skip`` with a reason comment, non-fatally.
 
     Single home for the exhaustion/no-commits skip write (previously
-    duplicated across the implementation and pr_review stages).
+    duplicated across the implementation and pr_review stages). The reason
+    is documented on the issue via the marker-keyed skip-reason comment so
+    it survives outside ephemeral run logs (#2256).
 
     Args:
         issue_number: GitHub issue number.
         ctx: Stage context carrying the GitHub accessor.
+        reason: Human-readable explanation for the skip, posted as a comment.
 
     """
     try:
@@ -584,6 +595,16 @@ def write_skip_label(issue_number: int, ctx: StageContext) -> None:
             "pipeline:%d: failed to add label %r (non-fatal): %s",
             issue_number,
             STATE_SKIP,
+            e,
+        )
+    try:
+        ctx.github.upsert_issue_comment(
+            issue_number, SKIP_REASON_MARKER, format_skip_reason_comment(reason)
+        )
+    except Exception as e:
+        logger.warning(
+            "pipeline:%d: failed to post skip-reason comment (non-fatal): %s",
+            issue_number,
             e,
         )
 

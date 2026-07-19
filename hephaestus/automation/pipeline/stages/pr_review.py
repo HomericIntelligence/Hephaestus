@@ -982,7 +982,15 @@ class PrReviewStage(Stage):
             automation_unresolved,
             STATE_SKIP,
         )
-        write_skip_label(item.issue, ctx)
+        write_skip_label(
+            item.issue,
+            ctx,
+            f"PR review rounds exhausted at round {round_done} with the "
+            f"automation-unresolved thread count stuck "
+            f"({prev_unresolved} -> {automation_unresolved}); further re-review "
+            f"cannot make progress. Push new commits addressing the review "
+            f"feedback, then remove this label to re-enter the loop.",
+        )
         return StageOutcome(Disposition.SKIP, "exhaustion")
 
     @staticmethod
@@ -1070,7 +1078,16 @@ class PrReviewStage(Stage):
             item.issue,
             STATE_SKIP,
         )
-        write_skip_label(_issue_number(item), ctx)
+        write_skip_label(
+            _issue_number(item),
+            ctx,
+            f"the reviewer returned NOGO with zero actionable review threads "
+            f"{retries} time(s) in a row on PR #{pr_number}; the input is "
+            f"deterministic, so re-review cannot change the verdict (#2079). "
+            f"See the review-anomaly comment on the PR for the reviewer's "
+            f"summary; push new commits, then remove this label to re-enter "
+            f"the loop.",
+        )
         return StageOutcome(Disposition.SKIP, "zero_thread_nogo_exhausted")
 
     @staticmethod
