@@ -25,6 +25,58 @@ To report a vulnerability, email **<research@villmow.us>** with:
 You can expect an acknowledgement within 48 hours and a status update within 7 days.
 We will coordinate disclosure timing with you once a fix is available.
 
+### Safe Harbor & Scope Eligibility
+
+We consider security research conducted in good faith and in line with this
+policy to be authorized. For eligible research we
+**will not pursue or support legal action** against you, and we waive
+restrictions in our repository terms that would otherwise prohibit that
+research, to the extent those restrictions would conflict with it.
+
+Research is **eligible** for safe harbor when all of the following hold:
+
+- It targets the assets named in the [threat model](#threat-model): code in
+  this repository and your **own** local installation of it.
+- It respects the reporting channel above — no public disclosure before a
+  coordinated fix, and no access to, modification of, or retention of data
+  that is not yours (if you encounter such data, stop and report immediately).
+- It stays within the threat model's **in-scope** classes (unsafe
+  deserialization, command/subprocess injection, secret leakage, dependency
+  supply chain).
+
+Research is **ineligible** (voids safe harbor) when it involves:
+
+- Social engineering, phishing, or physical attacks against maintainers,
+  contributors, or infrastructure operators.
+- Denial of service or resource-exhaustion testing against shared
+  infrastructure (GitHub, PyPI, CI runners) — DoS is out of scope per the
+  threat model in any case.
+- Testing third-party services (GitHub, PyPI, NATS providers) rather than
+  this repository's code; report those to the affected vendor instead.
+- Automated scanning that generates spam issues, emails, or pull requests.
+
+If you are unsure whether planned research is eligible, email
+**<research@villmow.us>** first and we will clarify before you proceed.
+
+### Remediation Handling
+
+After the 48-hour acknowledgement, reports move through a defined lifecycle:
+
+1. **Triage** — we validate the report and assign a severity (aligned with
+   your assessment where possible) within 7 days, as part of the status
+   update promised above.
+2. **Remediation targets** — from triage, we aim to land a fix within:
+   **Critical**: 7 days · **High**: 30 days · **Medium**: 60 days ·
+   **Low**: 90 days or next scheduled release.
+3. **Release & advisory** — fixes ship in a signed `vX.Y.Z` release; for
+   Critical/High issues we publish a GitHub Security Advisory crediting the
+   reporter (unless you prefer to remain anonymous).
+4. **Coordinated disclosure** — we ask that you hold public disclosure until
+   a fix is released or **90 days** from the acknowledgement, whichever comes
+   first; we will tell you when the fix lands and coordinate timing, and we
+   may ask for a short extension for actively exploited or unusually complex
+   issues.
+
 ## Security Considerations
 
 ### Threat Model
