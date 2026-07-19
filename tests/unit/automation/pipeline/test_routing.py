@@ -60,15 +60,37 @@ class TestDisposition:
         assert {d.value for d in Disposition} == expected
 
     def test_finish_fail_has_terminal_comment(self) -> None:
-        """FINISH_FAIL keeps the terse terminal-fail rationale comment."""
-        source_lines = Path(routing.__file__).read_text(encoding="utf-8").splitlines()
-        for index, line in enumerate(source_lines):
-            if line.strip() == 'FINISH_FAIL = "finish_fail"':
-                assert index > 0
-                assert source_lines[index - 1].strip() == "# terminal fail; no S105 needed"
-                break
-        else:
-            pytest.fail("FINISH_FAIL enum member not found")
+        """FINISH_FAIL carries the terse terminal-fail rationale comment.
+
+        Stable against reorders (#2298): parses ``routing.py`` as a Python AST,
+        locates ``Disposition.FINISH_FAIL``, and verifies the immediately-preceding
+        source line carries the rationale comment. Asserts on the comment text
+        and the proximity rule, not on a specific line number.
+        """
+        import ast
+
+        source = Path(routing.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        disposition_cls = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef) and node.name == "Disposition"
+        )
+        finish_fail_stmt = next(
+            stmt
+            for stmt in disposition_cls.body
+            if isinstance(stmt, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "FINISH_FAIL"
+                for target in stmt.targets
+            )
+        )
+        finish_fail_line = finish_fail_stmt.lineno  # 1-indexed
+        previous_line = source.splitlines()[finish_fail_line - 2]
+        assert previous_line.strip() == "# terminal fail; no S105 needed", (
+            f"expected rationale comment immediately above FINISH_FAIL; "
+            f"got line {finish_fail_line - 1}: {previous_line!r}"
+        )
 
 
 class TestStageOutcome:
@@ -219,6 +241,41 @@ class TestROUTES:
         assert "loop_runner.py:" not in source
         assert "LoopConfig.drive_green_loops" in source
         assert "--drive-green-loops" in source
+
+    def test_review_iter_budget_provenance_uses_stable_source_references(self) -> None:
+        """Sibling of #1902 for plan_review / pr_review hard-cap cites.
+
+        The cheap defense against cite rot: assert the comment block names
+        the budget-determining CONSTANT and its value, and does NOT pin a
+        volatile ``:NN`` line number that drifts the first time someone
+        reorders a constants block.
+        """
+        assert routing.__file__ is not None
+        # Scope the assertions to the ROUTES provenance comment block so
+        # an unrelated ``_review_phase.py:NN`` cite elsewhere in routing.py
+        # does not false-positive (#2298 reviewer feedback).
+        source_lines = Path(routing.__file__).read_text(encoding="utf-8").splitlines()
+        block_start: int | None = None
+        block_end: int | None = None
+        for index, line in enumerate(source_lines):
+            if "Budget provenance:" in line:
+                block_start = index
+            if line.startswith("ROUTES: dict["):
+                block_end = index
+                break
+        assert block_start is not None and block_end is not None
+        block = "\n".join(source_lines[block_start:block_end])
+        assert "_review_phase.py MAX_REVIEW_ITERATIONS (=3)" in block
+        assert "_review_phase.py MAX_REVIEW_ITERATIONS_HARD_CAP (=3*2)" in block
+        assert "review_thread_resolver.py _BLOCKED_ADDRESS_MAX_ATTEMPTS (=2)" in block
+        # No ``_review_phase.py:<NN>`` cite may replace the value-tag form.
+        cite_lines = [
+            tail
+            for line in block.splitlines()
+            if "<-" in line
+            for tail in [line.split("<-", 1)[-1]]
+        ]
+        assert not any("_review_phase.py:" in tail for tail in cite_lines)
 
 
 class TestPipelineScope:
