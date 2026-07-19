@@ -535,6 +535,7 @@ class Coordinator:
             "inflight_jobs": len(self.in_flight),
             "circuit_breakers": circuit_breakers,
             "loops_run": self._loops_run,
+            "stalled_ticks": self._stalled_ticks,
         }
 
     def _health_snapshot(self) -> dict[str, Any]:
@@ -571,6 +572,15 @@ class Coordinator:
         for repo in self._observed_inflight_repos - current_repos:
             inflight_by_repo.set(0, labels={"repo": repo})
         self._observed_inflight_repos = current_repos
+
+        registry.gauge(
+            "hephaestus_pipeline_loops_total",
+            "Reseed passes run by this coordinator process.",
+        ).set(snapshot["loops_run"])
+        registry.gauge(
+            "hephaestus_pipeline_stalled_ticks",
+            "Consecutive drain ticks without pipeline progress.",
+        ).set(snapshot["stalled_ticks"])
 
         breaker_states = registry.gauge(
             "hephaestus_circuit_breaker_state",
@@ -855,6 +865,19 @@ class Coordinator:
         if isinstance(handle.job, AgentJob):
             self._agent_job_count += 1
             self._agent_job_time_s += result.duration_s
+        if self._metrics_registry is not None:
+            outcome = "interrupted" if result.interrupted else ("ok" if result.ok else "failed")
+            self._metrics_registry.counter(
+                "hephaestus_pipeline_jobs_total",
+                "Completed pipeline jobs by stage and outcome.",
+            ).inc(labels={"stage": item.stage.value, "outcome": outcome})
+            if isinstance(handle.job, AgentJob):
+                # Counter.inc rejects negative amounts; a monotonic-clock skew
+                # could yield a tiny negative duration, so clamp defensively.
+                self._metrics_registry.counter(
+                    "hephaestus_pipeline_agent_job_seconds_total",
+                    "Cumulative agent job wall-clock seconds.",
+                ).inc(max(result.duration_s, 0.0))
 
         if result.interrupted:
             self._park_resumable(item)
