@@ -16,7 +16,6 @@ from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages.pr_review import (
     ADOPT_WORKTREE_WAIT,
-    PR_FINISH,
     REVIEW_ERROR_RETRY_CAP,
     PrReviewStage,
     _surviving_threads,
@@ -626,22 +625,18 @@ class TestPrReviewStageStep:
 
         assert result == StageOutcome(Disposition.FINISH_FAIL, "pr_head_not_writable")
 
-    def test_followup_wait_requests_follow_up(self, make_ctx: Any, make_work_item: Any) -> None:
-        """Legacy FOLLOWUP_WAIT submits the follow-up job, then finishes."""
+    @pytest.mark.parametrize("state", ["FOLLOWUP_WAIT", "PR_FINISH"])
+    def test_retired_legacy_followup_states_fail_closed(
+        self, state: str, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Retired follow-up states do not regain an active stage handler."""
         stage = PrReviewStage()
         ctx = make_ctx()
-        item = make_work_item(issue=1, pr=1001, state="FOLLOWUP_WAIT")
+        item = make_work_item(issue=1, pr=1001, state=state)
 
         result = stage.step(item, ctx)
 
-        assert isinstance(result, JobRequest)
-        assert result.job.descr == "follow_up"
-        assert result.on_done_state == PR_FINISH
-
-        item.state = PR_FINISH
-        outcome = stage.step(item, ctx)
-        assert isinstance(outcome, StageOutcome)
-        assert outcome.disposition == Disposition.ADVANCE
+        assert result == StageOutcome(Disposition.FINISH_FAIL, f"unknown state: {state}")
 
     def test_unknown_state_fails(self, make_ctx: Any, make_work_item: Any) -> None:
         """An unknown state finishes failed instead of looping silently."""
@@ -1350,19 +1345,6 @@ class TestPrReviewOnJobDone:
         item.state = "PUSH_WAIT"
         stage.on_job_done(item, JobResult(ok=False, error="push rejected"), ctx)
         assert item.payload["address_error"] is True
-
-    def test_followup_result_is_intentionally_silent(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """FOLLOWUP output is a side effect: no payload key is written."""
-        stage = PrReviewStage()
-        ctx = make_ctx()
-        item = make_work_item(issue=1, pr=1001, state="FOLLOWUP_WAIT")
-        snapshot = dict(item.payload)
-
-        stage.on_job_done(item, JobResult(ok=True, value="filed follow-ups"), ctx)
-
-        assert item.payload == snapshot
 
 
 class TestFullWalks:

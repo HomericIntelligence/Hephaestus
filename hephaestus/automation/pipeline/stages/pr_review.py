@@ -1,4 +1,4 @@
-"""PR-review stage: review, validate, post, address, evaluate, follow up.
+"""PR-review stage: review, validate, post, address, and evaluate.
 
 Re-houses the fused implementation-review loop from ``_review_phase.py``
 (``_run_impl_review_loop`` :671, ``_evaluate_go_verdict`` :314,
@@ -11,8 +11,8 @@ contract):
 
 - States: ENTER -> REVIEW_WAIT -> VALIDATE_WAIT -> POST -> DIFFICULTY_WAIT
   -> ADDRESS_WAIT -> PUSH_WAIT -> EVAL -> (loop to REVIEW_WAIT) or terminal
-  advance to ``merge_wait``. ``FOLLOWUP_WAIT`` remains only to drain legacy
-  persisted work; a clean GO never enters it.
+  advance to ``merge_wait``. The legacy follow-up mini-states have been
+  retired (#2140); a clean GO advances to ``merge_wait`` from EVAL.
 - Budgets: ``pr_review_iter`` = 3 (soft cap), ``pr_review_hard`` = 6 (hard
   cap; rounds 4-6 are admitted ONLY while the unresolved-thread count
   strictly decreases — the #1554 progress-aware extension, legacy
@@ -95,16 +95,13 @@ contract):
   ``prompts/pr_review.py get_pr_review_analysis_prompt`` /
   ``get_review_validation_prompt`` / ``get_comment_difficulty_prompt``,
   ``prompts/implementation.py get_impl_resume_feedback_prompt`` (fresh-PR
-  address path), ``prompts/address_review.py get_address_review_prompt``
-  (existing-PR address path), ``prompts/follow_up.py get_follow_up_prompt``.
+  address path), and ``prompts/address_review.py get_address_review_prompt``
+  (existing-PR address path).
 - Verdict and structured comments are parsed IN-WORKER (carried as the
   review job's ``parse`` callable; symbol-scoped zero-I/O exemption mirrors
   plan_review's). REVIEW_WAIT clears all stale round-scoped payload at
   submission so a failed later round can never replay an earlier round's
   verdict or threads.
-- Legacy FOLLOWUP_WAIT intentionally stores nothing in ``on_job_done``: the
-  follow-up job's output is a side effect (follow-up issues filed by the
-  agent), not a payload value any later state consumes.
 """
 
 from __future__ import annotations
@@ -119,7 +116,6 @@ from typing import Any, cast
 
 from hephaestus.automation.agent_config import (
     address_review_claude_timeout,
-    follow_up_claude_timeout,
     implementer_claude_timeout,
     implementer_model,
     pr_reviewer_claude_timeout,
@@ -127,7 +123,6 @@ from hephaestus.automation.agent_config import (
 )
 from hephaestus.automation.claude_invoke import parse_review_verdict
 from hephaestus.automation.prompts.address_review import get_address_review_prompt
-from hephaestus.automation.prompts.follow_up import get_follow_up_prompt
 from hephaestus.automation.prompts.implementation import get_impl_resume_feedback_prompt
 from hephaestus.automation.prompts.pr_review import (
     get_comment_difficulty_prompt,
@@ -201,9 +196,6 @@ DIFFICULTY_WAIT = "DIFFICULTY_WAIT"
 ADDRESS_WAIT = "ADDRESS_WAIT"
 PUSH_WAIT = "PUSH_WAIT"
 EVAL = "EVAL"
-FOLLOWUP_WAIT = "FOLLOWUP_WAIT"
-PR_FINISH = "PR_FINISH"
-FINISH = PR_FINISH
 
 _STEP_HANDLER_NAMES: dict[str, str] = {
     ENTER: "_enter",
@@ -215,8 +207,6 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
     ADDRESS_WAIT: "_address",
     PUSH_WAIT: "_push_wait",
     EVAL: "_eval",
-    FOLLOWUP_WAIT: "_followup_wait",
-    PR_FINISH: "_finish",
 }
 
 
@@ -386,10 +376,7 @@ class PrReviewStage(Stage):
       feedback; existing-PR path runs the address-review session.
     - PUSH_WAIT: commit+push the addressing changes.
     - EVAL [M]: re-housed ``_evaluate_go_verdict`` + budget gate (see
-      module docstring).
-    - FOLLOWUP_WAIT (legacy persisted work only): submit the follow-up job,
-      then PR_FINISH -> FINISHED. A clean GO advances to ``merge_wait``
-      from EVAL instead.
+      module docstring). A clean GO advances to ``merge_wait`` from EVAL.
     """
 
     def on_enter(self, item: WorkItem, ctx: StageContext) -> StageOutcome | None:
@@ -669,30 +656,6 @@ class PrReviewStage(Stage):
         )
         return JobRequest(git_job, on_done_state=EVAL)
 
-    def _followup_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """Drain a legacy follow-up item without granting merge eligibility."""
-        issue = _issue_number(item)
-        logger.info("pr_review:%d: requesting follow-up job", issue)
-        job = AgentJob(
-            repo=item.repo,
-            issue=issue,
-            agent=agent_provider(ctx),
-            model=stage_model(ctx, "implementer", implementer_model),
-            prompt_builder=get_follow_up_prompt,
-            cwd=_worktree_path(item, ctx),
-            timeout_s=follow_up_claude_timeout(),
-            session_agent=AGENT_IMPLEMENTER,  # resume implementer session (legacy parity)
-            prompt_kwargs={"issue_number": item.issue},
-            descr="follow_up",
-        )
-        return JobRequest(job, on_done_state=PR_FINISH)
-
-    def _finish(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """Finish a legacy follow-up item after its side-effect job completes."""
-        issue = _issue_number(item)
-        logger.info("pr_review:%d: legacy follow-up completed; advancing to finished", issue)
-        return StageOutcome(Disposition.ADVANCE, "legacy_followup_completed")
-
     def on_job_done(self, item: WorkItem, result: JobResult, ctx: StageContext) -> None:
         """Store job results on the item payload (state is still the WAIT state).
 
@@ -736,9 +699,6 @@ class PrReviewStage(Stage):
             item.payload["difficulty_tiers"] = str(result.value)
         elif item.state == ADDRESS_WAIT and result.value is not None:
             item.payload["address_output"] = str(result.value)
-        # FOLLOWUP_WAIT intentionally has no branch: the follow-up job's
-        # output is a side effect (issues filed by the agent), not a payload
-        # value any later state consumes.
 
     @staticmethod
     def _on_direct_pr_worktree_done(item: WorkItem, result: JobResult) -> None:
