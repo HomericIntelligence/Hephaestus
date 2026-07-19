@@ -1,17 +1,22 @@
 
 Search Mnemosyne for relevant prior learnings before this automation stage.
 
-**Issue:** #{{ issue_number }}: {{ issue_title }}
+{{ untrusted_notice }}
 
-{{ issue_body }}
+**Issue:** #{{ issue_number }}
+
+**Issue title (untrusted):**
+{{ issue_title_block }}
+
+**Issue description (untrusted):**
+{{ issue_body_block }}
 
 ---
 
 **Marketplace:** {{ marketplace_path }}
 
-```json
-{{ marketplace_json }}
-```
+**Marketplace catalog (untrusted):**
+{{ marketplace_json_block }}
 
 ---
 
