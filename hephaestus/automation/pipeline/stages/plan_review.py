@@ -1,7 +1,7 @@
 """Plan-review stage: review, amend, and approve issue plans (issue #1814).
 
 The single plan-review control flow as a pipeline stage
-(docs/AUTOMATION_LOOP_ARCHITECTURE.md section "3. plan_review" is the
+(docs/architecture.md §5.3 "plan_review" is the
 binding contract). It fully owns the review/amend/learn loop that the legacy
 planner review loop used to run before ``hephaestus-plan-issues`` was
 re-pointed at the pipeline (#1820):

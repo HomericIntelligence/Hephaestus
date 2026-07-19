@@ -8,7 +8,7 @@ Crash matrix: after each representative durable mutation, "crash" (discard all
 in-memory state) and re-run the seeding classifier against the resulting
 FakeGitHub state — the item must land in the same-or-earlier stage, never lost,
 never duplicated. The table below covers every GitHub-journal reconstruction
-row from docs/AUTOMATION_LOOP_ARCHITECTURE.md.
+row from docs/architecture.md §7.
 """
 
 from __future__ import annotations

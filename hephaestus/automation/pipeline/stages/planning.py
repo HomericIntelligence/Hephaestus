@@ -1,7 +1,7 @@
 """Planning stage: generate and verify issue plans (issue #1814).
 
 The single planning control flow as a pipeline stage
-(docs/AUTOMATION_LOOP_ARCHITECTURE.md section "2. planning" is the binding
+(docs/architecture.md §5.2 "planning" is the binding
 contract). Since ``hephaestus-plan-issues`` was re-pointed at the pipeline
 (#1820) this stage — with :class:`~...plan_review.PlanReviewStage` — is the
 only issue-planning implementation:
