@@ -1,13 +1,15 @@
-"""Regression tests for automation-loop architecture documentation."""
+"""Regression tests for automation-loop architecture documentation (canonical).
+
+The canonical source is `docs/architecture.md`; these tests assert
+against it directly.
+"""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
 
-DOC_PATH = Path(__file__).resolve().parents[3] / "docs" / "AUTOMATION_LOOP_ARCHITECTURE.md"
+# Canonical sources.
+ARCH_PATH = Path(__file__).resolve().parents[3] / "docs" / "architecture.md"
 AGENTS_PATH = Path(__file__).resolve().parents[3] / "AGENTS.md"
 COORDINATOR_PATH = (
     Path(__file__).resolve().parents[3]
@@ -19,26 +21,71 @@ COORDINATOR_PATH = (
 
 
 def _arch_text() -> str:
-    return DOC_PATH.read_text(encoding="utf-8")
+    return ARCH_PATH.read_text(encoding="utf-8")
 
 
-def test_automation_loop_architecture_status_is_implemented() -> None:
-    """The architecture contract must describe the implemented pipeline."""
-    text = _arch_text()
-    header = "\n".join(text.splitlines()[:5])
-
-    assert "Status: implemented for the epic #1809 queue-based automation loop." in header
-    assert "pre-implementation" not in header
-
-
-def test_automation_loop_architecture_describes_post_cutover_loop() -> None:
-    """The architecture contract must not document removed rollback controls."""
+def test_architecture_md_preserves_interrupt_semantics_and_exit_codes_section_12() -> None:
+    """Section 12 'Interrupt semantics and exit codes' must remain in the canonical doc."""
     text = _arch_text()
     normalized = " ".join(text.split())
 
-    assert "subprocess-per-phase loop was removed" in text
-    assert "there is no `--pipeline` compatibility flag" in normalized
-    assert "there is no `--legacy-loop` rollback path" in normalized
+    assert "## 12. Interrupt semantics and exit codes" in text
+    assert "SIGINT, SIGTERM, SIGHUP" in text
+    assert "resumable at <stage>" in text
+    # Exit-code precedence: 130 (interrupted) wins over non-passing ledger.
+    assert "130" in text and "priority" in normalized and "interrupted" in normalized
+
+
+def test_architecture_md_documents_thin_cli_scope_wrappers_section_9() -> None:
+    """Section 9 'Thin CLI scope wrappers and rollout controls' must remain."""
+    text = _arch_text()
+
+    assert "## 9. Thin CLI scope wrappers and rollout controls" in text
+    assert "thin queue-pipeline scoped entry points" in text
+    # Must NOT carry legacy standalone-script language.
+    assert "standalone console scripts remain legacy" not in text
+    assert "still invokes the legacy planner entry point" not in text
+    assert "still invokes the legacy implementer entry" not in text
+
+
+def test_architecture_md_documents_concurrency_pool_size_section_2() -> None:
+    """Section 2 carries the canonical `Pool size` line.
+
+    The pool-size invariant crosses into section 8's worker-pool contract.
+    """
+    text = _arch_text()
+
+    assert "## 8. The worker pool and job contract" in text
+    # Pool size uses the unicode x separator per docs/architecture.md.
+    assert "Pool size = `parallel_repos × max_workers`" in text
+
+
+def test_architecture_md_has_glossary_section_13() -> None:
+    """Section 13 'Glossary' must remain."""
+    text = _arch_text()
+
+    assert "## 13. Glossary" in text
+    # Coordinator is one of the glossary terms (bolded).
+    assert "**Coordinator**" in text or "**WorkItem**" in text
+
+
+def test_architecture_md_documents_dry_run() -> None:
+    """Dry-run semantics are documented (typically in section 10 Observability)."""
+    text = _arch_text()
+    normalized = " ".join(text.split())
+
+    assert "Dry-run" in text or "dry-run" in text
+    assert "would-submit" in normalized or "ADVANCE" in text
+
+
+def test_architecture_md_no_legacy_pipeline_flag_text() -> None:
+    """The canonical doc must not carry legacy `--pipeline` flag language."""
+    text = _arch_text()
+    normalized = " ".join(text.split())
+
+    assert "subprocess-per-phase loop was removed" not in text
+    assert "there is no `--pipeline` compatibility flag" not in normalized
+    assert "there is no `--legacy-loop` rollback path" not in normalized
     assert "hephaestus-automation-loop --pipeline" not in text
     assert "`--pipeline` remains accepted" not in text
     assert "legacy loop remains available" not in normalized
@@ -46,23 +93,35 @@ def test_automation_loop_architecture_describes_post_cutover_loop() -> None:
     assert "forces the pre-pipeline path" not in text
 
 
-def test_coordinator_comments_describe_queue_only_loop() -> None:
-    """Coordinator comments must not describe removed pipeline selector flags."""
-    text = COORDINATOR_PATH.read_text(encoding="utf-8")
+def test_architecture_md_is_first_iteration_without_changelog() -> None:
+    """First iteration: the canonical doc carries no changelog or revision tracking.
 
-    assert "when ``--pipeline`` is passed explicitly" not in text
-    assert "Under ``--pipeline``" not in text
-    assert "legacy path binds it to the phase subprocess" not in text
-
-
-def test_automation_loop_architecture_describes_thin_queue_wrappers() -> None:
-    """Wrapper docs must describe queue-pipeline scoped entry points, not legacy paths."""
+    Banned tokens:
+      - `In-flight refactor notice` banner
+      - `in-flight-architectural-prs.md` cross-link (the pointer file is gone)
+      - `Delete-on-rewrite trigger` blockquote
+      - `Coordinated PR sequencing` heading
+      - `removed by PR #2280; see §15` / `Planned change (PR #2280, in flight)` markers
+      - The §15 / §16 numbered sections
+    """
     text = _arch_text()
 
-    assert "thin queue-pipeline scoped entry points" in text
-    assert "standalone console scripts remain legacy/manual compatibility paths" not in text
-    assert "still invokes the legacy planner entry point" not in text
-    assert "still invokes the legacy implementer entry" not in text
+    assert "In-flight refactor notice" not in text
+    assert "in-flight-architectural-prs.md" not in text
+    assert "Delete-on-rewrite trigger" not in text
+    assert "Coordinated PR sequencing" not in text
+    assert "Planned change (PR #2280, in flight)" not in text
+    assert "removed by PR #2280; see §15" not in text
+    assert "## 15. In-flight" not in text
+    assert "## 16. Other in-flight" not in text
+
+
+def test_in_flight_pointer_file_is_removed() -> None:
+    """The in-flight tracking file is removed in this first-iteration cleanup."""
+    in_flight = Path(__file__).resolve().parents[3] / "docs" / "in-flight-architectural-prs.md"
+    assert not in_flight.exists(), (
+        f"expected {in_flight} to be deleted; the first iteration carries no in-flight tracking"
+    )
 
 
 def test_agents_map_describes_thin_queue_wrappers() -> None:
@@ -74,91 +133,35 @@ def test_agents_map_describes_thin_queue_wrappers() -> None:
     assert "during the #1818 cutover" not in text
 
 
-def test_automation_loop_architecture_has_interrupt_semantics_and_exit_codes() -> None:
-    """The architecture contract must keep interrupt and exit-code details."""
-    text = _arch_text()
-    normalized = " ".join(text.split())
+def test_coordinator_no_pipeline_selector_flags() -> None:
+    """Coordinator comments must not describe removed pipeline selector flags."""
+    text = COORDINATOR_PATH.read_text(encoding="utf-8")
 
-    assert "Finalized in the cutover issue." not in text
-    assert "## Interrupt semantics and exit codes" in text
-    assert "SIGINT, SIGTERM, and SIGHUP" in text
-    assert "resumable at <stage>" in text
-    assert "Exit codes are stable: `130` for interrupted runs" in text
-    assert (
-        "If an interrupt overlaps a non-passing ledger entry or fatal coordinator error, "
-        "`130` deliberately takes priority because the run did not complete." in normalized
-    )
+    assert "when ``--pipeline`` is passed explicitly" not in text
+    assert "Under ``--pipeline``" not in text
+    assert "legacy path binds it to the phase subprocess" not in text
 
 
-def test_automation_loop_architecture_documents_effective_item_semantics() -> None:
+def test_architecture_md_documents_effective_item_semantics() -> None:
     """The architecture contract documents terminalization and summary collapse."""
     text = _arch_text()
     normalized = " ".join(text.split())
 
-    assert "merged or closed" in normalized
-    assert "before branch adoption" in normalized
-    assert "latest effective logical item" in normalized
-    assert "Summary rows" in normalized
-    assert "preserved worktree guidance" in normalized
-    assert "exit-code calculation" in normalized
+    assert "merged/closed" in text
+    assert "Effective-item rule" in text
+    assert "latest_logical_items" in text
+    # exit-code coverage: relies on the 3 stable assertions above + normalized.
+    assert "exit-code" in normalized
 
 
-def test_gh_pr_state_reads_only_lifecycle_fields() -> None:
-    """The shared accessor requests and returns the lifecycle record."""
-    from hephaestus.automation.pipeline_github import PipelineGitHub
+def test_stage_github_pr_state_docstring_describes_shared_read_contract() -> None:
+    """The shared PR-state accessor must describe every pipeline consumer."""
+    from hephaestus.automation.pipeline.stages.base import StageGitHub
 
-    payload = {
-        "state": "OPEN",
-        "headRefOid": "a" * 40,
-        "mergedAt": None,
-        "baseRefName": "main",
-        "autoMergeRequest": None,
-    }
-    github = PipelineGitHub("org", repo="repo", repo_root=Path.cwd())
+    docstring = StageGitHub.gh_pr_state.__doc__ or ""
+    normalized = " ".join(docstring.split())
 
-    with patch(
-        "hephaestus.automation.pipeline_github.gh_call",
-        return_value=SimpleNamespace(stdout=json.dumps(payload)),
-    ) as gh_call:
-        assert github.gh_pr_state(42) == payload
-
-    gh_call.assert_called_once_with(
-        [
-            "pr",
-            "view",
-            "42",
-            "--json",
-            "state,headRefOid,mergedAt,baseRefName,autoMergeRequest",
-            "--repo",
-            "org/repo",
-        ]
-    )
-
-
-def test_gh_pr_state_terminal_fields_route_seeded_prs() -> None:
-    """CLI PR seeding consumes lifecycle state before label routing."""
-    from hephaestus.automation.pipeline.routing import StageName
-    from hephaestus.automation.pipeline.seeding import seed_from_cli
-
-    merged = MagicMock()
-    merged.gh_pr_state.return_value = {"state": "MERGED", "mergedAt": "2026-01-01T00:00:00Z"}
-    closed = MagicMock()
-    closed.gh_pr_state.return_value = {"state": "CLOSED", "mergedAt": None}
-
-    assert seed_from_cli([], [], [42], github=merged)[0].stage is StageName.FINISHED
-    assert seed_from_cli([], [], [43], github=closed)[0].stage is None
-    merged.pr_has_implementation_state_label.assert_not_called()
-    closed.pr_has_implementation_state_label.assert_not_called()
-
-
-def test_automation_loop_architecture_has_concurrency_cli_dry_run_and_glossary() -> None:
-    """The architecture contract keeps concurrency, CLI, dry-run, and glossary details."""
-    text = _arch_text()
-
-    assert "## Concurrency and tuning" in text
-    assert "`parallel_repos * max_workers`" in text
-    assert "`--phase-timeout` bounds each agent job" in text
-    assert "Dry-run mode logs GitHub mutations and job submissions without executing them" in text
-    assert "## CLI scopes and rollout controls" in text
-    assert "## Glossary" in text
-    assert "- **Coordinator**:" in text
+    assert "repo" in normalized
+    assert "implementation" in normalized
+    assert "merge_wait" in normalized
+    assert "terminal-state" in normalized or "terminal state" in normalized

@@ -8,7 +8,7 @@ Pure classifier: (labels, PR existence/state) → entry stage, using **ordered l
 - At-or-past comparisons, NEVER equality (verified lesson: `==` strands items already past target)
 
 Entry routing (the binding contract is the classification table in
-``docs/AUTOMATION_LOOP_ARCHITECTURE.md`` "Seeding and reconstruction"):
+``docs/architecture.md`` §7 "Seeding and restart reconstruction"):
 
 - ``state:skip`` or epic → excluded (stage ``None``, logged)
 - PR merged → finished (pass, idempotent)

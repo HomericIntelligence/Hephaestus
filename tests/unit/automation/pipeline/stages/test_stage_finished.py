@@ -21,8 +21,9 @@ from hephaestus.automation.pipeline.stages.base import Continue, JobRequest, Sta
 from hephaestus.automation.pipeline.stages.finished import FinishedStage
 from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkItem
 
+# tests/unit/automation/pipeline/stages/ -> parents[5] = repo root
 ROOT = Path(__file__).resolve().parents[5]
-ARCHITECTURE_DOC = ROOT / "docs" / "AUTOMATION_LOOP_ARCHITECTURE.md"
+ARCHITECTURE_DOC = ROOT / "docs" / "architecture.md"
 
 
 @pytest.fixture
@@ -70,7 +71,7 @@ def _finished_doc_section() -> str:
     """Return the architecture doc's finished-stage section."""
     text = ARCHITECTURE_DOC.read_text(encoding="utf-8")
     match = re.search(
-        r"^### \d+\. finished\n(?P<section>.*?)(?=^## ROUTES table)",
+        r"### \d+\.\d*\s+`?finished`?[^\n]*\n(?P<section>.*?)(?=## )",
         text,
         re.M | re.S,
     )
@@ -80,9 +81,11 @@ def _finished_doc_section() -> str:
 
 def _state_list(text: str) -> str:
     """Extract and normalize a single-line state list."""
-    match = re.search(r"(?:\*\*)?States(?:\*\*)?:\s*(?P<states>[^.\n]+)", text)
+    match = re.search(r"(?:\*\*)?States(?:\*\*)?[:.]\s*(?P<states>[^\n]+?)(?=[\.\n])", text)
     assert match is not None
-    return match.group("states").strip().replace("→", "->")
+    return (
+        match.group("states").strip().replace("→", "->").replace("**", "").replace("`", "").strip()
+    )
 
 
 class TestRecord:

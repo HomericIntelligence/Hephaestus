@@ -4,7 +4,7 @@ Re-houses the implementation control flow from the legacy per-issue phase
 runner (dispatch, plan-ready gate, existing-PR review, and the
 ``ensure_pr_auto_merge_deferred`` call) and
 ``_pr_create_phase.PRCreatePhase._finalize_pr`` (:36) as a pipeline stage
-(docs/AUTOMATION_LOOP_ARCHITECTURE.md section "4. implementation" is the
+(docs/architecture.md §5.4 "implementation" is the
 binding contract):
 
 - States: ENTER -> GATE -> WORKTREE_WAIT -> DIRTY_DECISION_WAIT ->

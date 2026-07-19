@@ -180,3 +180,7 @@ table. Highlights:
 - The deferred follow-ups for cross-agent abstraction (a formal `AgentProtocol`)
   and for wiring `hephaestus.resilience` into the GitHub call path are tracked
   in issues #468 and #469.
+
+## Canonical architecture reference
+
+The **canonical unified reference** for the queue-pipeline, stage semantics, ROUTES table, scope trimming, durable journal, worker pool, and observability lives at [\`docs/architecture.md\`](../docs/architecture.md). Update the doc (not this file) when the topology changes; this file remains the agent-topology map and skill catalog.

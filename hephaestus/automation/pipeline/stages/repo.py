@@ -1,6 +1,6 @@
 """Repo stage: discover and classify issues from a GitHub repository (epic #1809).
 
-Binding contract: docs/AUTOMATION_LOOP_ARCHITECTURE.md section "1. repo".
+Binding contract: docs/architecture.md §5.1 "repo".
 
 States: ENTER -> CLONE_WAIT -> DISCOVER -> SEEDED.
 
