@@ -16,6 +16,13 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
+RELEASE_JOBS = (
+    "test",
+    "type-check",
+    "publish-testpypi",
+    "build-and-publish",
+    "deploy-docs",
+)
 
 
 def _load_workflow() -> dict[str, Any]:
@@ -39,14 +46,23 @@ def _step_using(job_name: str, action_substring: str) -> dict[str, Any]:
     return matches[0]
 
 
+def _needs(job_name: str) -> list[str]:
+    needs = _job(job_name)["needs"]
+    return [needs] if isinstance(needs, str) else needs
+
+
 class TestPublishTestPyPIJobExists:
     """The staging job must exist and run before build-and-publish."""
 
     def test_job_present(self) -> None:
         assert "publish-testpypi" in _load_workflow()["jobs"]
 
-    def test_needs_test_and_type_check(self) -> None:
-        assert _job("publish-testpypi")["needs"] == ["test", "type-check"]
+    def test_needs_resolver_test_and_type_check(self) -> None:
+        assert _job("publish-testpypi")["needs"] == [
+            "resolve-release",
+            "test",
+            "type-check",
+        ]
 
     def test_uses_testpypi_environment(self) -> None:
         assert _job("publish-testpypi")["environment"] == "testpypi"
@@ -58,8 +74,9 @@ class TestBuildAndPublishDependsOnTestPyPI:
     def test_needs_includes_publish_testpypi(self) -> None:
         assert "publish-testpypi" in _job("build-and-publish")["needs"]
 
-    def test_still_needs_test_and_type_check(self) -> None:
+    def test_still_needs_resolver_test_and_type_check(self) -> None:
         needs = _job("build-and-publish")["needs"]
+        assert "resolve-release" in needs
         assert "test" in needs
         assert "type-check" in needs
 
@@ -134,3 +151,73 @@ class TestSmokeInstallStep:
         run = self._smoke_step()["run"]
         assert "import hephaestus; print(hephaestus.__version__)" in run
         assert "version mismatch" in run.lower()
+
+
+class TestImmutableReleaseRef:
+    """Every release operation must consume one centrally resolved tag commit."""
+
+    def _resolve_step(self) -> dict[str, Any]:
+        matches = [step for step in _steps("resolve-release") if step.get("id") == "resolve"]
+        assert len(matches) == 1
+        return matches[0]
+
+    def test_resolver_exports_one_tag_and_sha(self) -> None:
+        assert _job("resolve-release")["outputs"] == {
+            "tag": "${{ steps.resolve.outputs.tag }}",
+            "sha": "${{ steps.resolve.outputs.sha }}",
+        }
+
+    def test_resolver_uses_only_read_repository_permission(self) -> None:
+        """Tag resolution must not inherit publication or OIDC permissions."""
+        assert _job("resolve-release")["permissions"] == {"contents": "read"}
+
+    def test_dispatch_input_has_priority_and_resolves_exact_tag_commit(self) -> None:
+        step = self._resolve_step()
+        run = step["run"]
+
+        assert step["env"]["INPUT_TAG"] == "${{ inputs.tag }}"
+        assert run.index('if [ -n "$INPUT_TAG" ]') < run.index(
+            'elif [[ "$EVENT_REF" == refs/tags/* ]]'
+        )
+        assert 'git rev-parse --verify "refs/tags/${TAG}^{commit}"' in run
+        assert 'echo "sha=${SHA}" >> "$GITHUB_OUTPUT"' in run
+
+    def test_resolver_fails_closed_for_missing_or_noncommit_tag(self) -> None:
+        run = self._resolve_step()["run"]
+
+        assert "git for-each-ref" in run
+        assert 'if ! SHA="$(git rev-parse --verify "refs/tags/${TAG}^{commit}")"; then' in run
+        assert "::error::No release tag could be resolved" in run
+        assert "::error::Release tag ${TAG} does not resolve to a commit" in run
+
+    def test_every_release_job_checks_out_resolved_sha(self) -> None:
+        expected_ref = "${{ needs.resolve-release.outputs.sha }}"
+
+        for job_name in RELEASE_JOBS:
+            assert "resolve-release" in _needs(job_name)
+            checkout = _step_using(job_name, "actions/checkout")
+            assert checkout["with"]["ref"] == expected_ref
+
+    def test_downstream_jobs_do_not_reresolve_or_checkout_the_tag(self) -> None:
+        for job_name in RELEASE_JOBS:
+            steps = _steps(job_name)
+            scripts = "\n".join(str(step.get("run", "")) for step in steps)
+
+            assert all(step.get("name") != "Resolve tag" for step in steps)
+            for command in (
+                "git tag --list",
+                "git for-each-ref",
+                "git rev-parse",
+                "git checkout",
+            ):
+                assert command not in scripts
+
+            job_text = yaml.safe_dump(_job(job_name), sort_keys=False)
+            assert "${{ inputs.tag }}" not in job_text
+            assert "${{ github.ref }}" not in job_text
+
+    def test_downstream_tag_consumers_use_resolver_output(self) -> None:
+        workflow_text = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+
+        assert "steps.tag.outputs.tag" not in workflow_text
+        assert "${{ needs.resolve-release.outputs.tag }}" in workflow_text
