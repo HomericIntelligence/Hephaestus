@@ -61,6 +61,37 @@ def _cli_subprocess_env() -> dict[str, str]:
     return env
 
 
+REQUIRE_CLI_ENV = "HEPHAESTUS_REQUIRE_CLI"
+
+
+def _resolve_binary(command: str) -> str:
+    """Return the console-script path, skipping — or failing — when absent.
+
+    By default a missing binary skips (developer checkouts without an
+    install). When ``HEPHAESTUS_REQUIRE_CLI=1`` (set by CI lanes that
+    install the package first), a missing binary is a hard failure so the
+    installed-artifact checks can never silently skip (#2173).
+
+    Args:
+        command: The console-script command name to resolve on ``PATH``.
+
+    Returns:
+        The absolute path to the resolved console-script binary.
+
+    Raises:
+        Skipped: When the binary is absent and the gate is not set.
+        Failed: When the binary is absent and ``HEPHAESTUS_REQUIRE_CLI=1``.
+
+    """
+    binary = shutil.which(command)
+    if binary is None:
+        message = f"{command} not on PATH — install with `pip install -e .` or run with uv"
+        if os.environ.get(REQUIRE_CLI_ENV) == "1":
+            pytest.fail(f"{message} (skip forbidden: {REQUIRE_CLI_ENV}=1)")
+        pytest.skip(message)
+    return binary
+
+
 class TestCLITargetImportable:
     """Every entry point's target ``module:attr`` must be an importable callable."""
 
@@ -88,10 +119,7 @@ class TestCLIHelpFlag:
         # Windows operators. Skip the help-flag check on that platform.
         if sys.platform == "win32" and "automation" in module_path:
             pytest.skip("automation CLIs require POSIX stdlib (curses/fcntl)")
-        binary: str | None = shutil.which(command)
-        if binary is None:
-            pytest.skip(f"{command} not on PATH — install with `pip install -e .` or run with uv")
-        assert binary is not None  # narrow for mypy; pytest.skip already returned
+        binary = _resolve_binary(command)
 
         result = subprocess.run(
             [binary, "--help"],
@@ -124,10 +152,7 @@ class TestCLIJsonFlag:
         """
         if sys.platform == "win32" and "automation" in module_path:
             pytest.skip("automation CLIs require POSIX stdlib (curses/fcntl)")
-        binary: str | None = shutil.which(command)
-        if binary is None:
-            pytest.skip(f"{command} not on PATH — install with `pip install -e .` or run with uv")
-        assert binary is not None
+        binary = _resolve_binary(command)
 
         result = subprocess.run(
             [binary, "--help"],
@@ -158,10 +183,7 @@ class TestCLIVersionFlag:
         """``<cmd> --version`` must exit 0 and print a version line."""
         if sys.platform == "win32" and "automation" in module_path:
             pytest.skip("automation CLIs require POSIX stdlib (curses/fcntl)")
-        binary: str | None = shutil.which(command)
-        if binary is None:
-            pytest.skip(f"{command} not on PATH — install with `pip install -e .` or run with uv")
-        assert binary is not None
+        binary = _resolve_binary(command)
 
         result = subprocess.run(
             [binary, "--version"],
@@ -186,10 +208,7 @@ class TestCLIVersionFlag:
         """``<cmd> -V`` must also work (short form of --version)."""
         if sys.platform == "win32" and "automation" in module_path:
             pytest.skip("automation CLIs require POSIX stdlib (curses/fcntl)")
-        binary: str | None = shutil.which(command)
-        if binary is None:
-            pytest.skip(f"{command} not on PATH — install with `pip install -e .` or run with uv")
-        assert binary is not None
+        binary = _resolve_binary(command)
 
         result = subprocess.run(
             [binary, "-V"],
@@ -221,10 +240,7 @@ class TestMaxWorkersValidation:
 
     def test_automation_loop_rejects_zero_max_workers(self) -> None:
         """hephaestus-automation-loop --max-workers=0 exits non-zero with clear error."""
-        binary = shutil.which("hephaestus-automation-loop")
-        if binary is None:
-            pytest.skip("hephaestus-automation-loop not on PATH")
-        assert binary is not None  # narrow Optional[str] for mypy
+        binary = _resolve_binary("hephaestus-automation-loop")
 
         result = subprocess.run(
             [binary, "--max-workers", "0"],
@@ -237,3 +253,21 @@ class TestMaxWorkersValidation:
         assert result.returncode != 0, "Expected non-zero exit for --max-workers=0"
         assert "--max-workers" in result.stderr, "Error must mention --max-workers argument"
         assert "invalid choice" in result.stderr.lower(), "Error must mention invalid choice"
+
+
+class TestRequireCliGate:
+    """The HEPHAESTUS_REQUIRE_CLI gate must fail — not skip — on missing binaries."""
+
+    def test_missing_binary_skips_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(REQUIRE_CLI_ENV, raising=False)
+        with pytest.raises(pytest.skip.Exception):
+            _resolve_binary("hephaestus-definitely-not-a-real-binary")
+
+    def test_missing_binary_fails_when_required(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(REQUIRE_CLI_ENV, "1")
+        with pytest.raises(pytest.fail.Exception):
+            _resolve_binary("hephaestus-definitely-not-a-real-binary")
+
+    def test_present_binary_resolves(self) -> None:
+        # `python3` (POSIX) / `python` is always on PATH in the test env.
+        assert _resolve_binary("python3" if sys.platform != "win32" else "python")
