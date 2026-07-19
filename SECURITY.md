@@ -86,6 +86,11 @@ GitHub client's built-in retry/backoff and on GitHub's own per-token rate
 limits. Downstream services that embed these utilities are responsible for
 applying their own rate limiting and abuse controls at their request edge.
 
+### Privacy, Retention, and Deletion
+
+Data-handling scope, retention periods, deletion procedures, and the GDPR
+data-subject request channel are published in [PRIVACY.md](PRIVACY.md).
+
 ### Dependency Suppression Ledger
 
 Known-but-accepted dependency vulnerabilities are tracked in the pip-audit
