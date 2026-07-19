@@ -392,3 +392,70 @@ def test_main_rejects_approval_with_pi_agent(
         agent_stage.main(argv)
     assert exc.value.code == 2
     assert "--approval=on-request" in capsys.readouterr().err
+
+
+def test_main_rejects_missing_prompt_file(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A nonexistent --prompt-file must be a CLI diagnostic, not a traceback (issue #2171)."""
+    argv = [
+        "--prompt-file",
+        str(tmp_path / "missing.md"),
+        "--repo-root",
+        str(tmp_path),
+        "--stage",
+        "x",
+        "--output",
+        str(tmp_path / "out.txt"),
+    ]
+    with pytest.raises(SystemExit) as exc:
+        agent_stage.main(argv)
+    assert exc.value.code == 2
+    assert "--prompt-file does not exist" in capsys.readouterr().err
+
+
+def test_main_rejects_missing_skill_file(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A nonexistent --skill-file must be a CLI diagnostic, not a traceback (issue #2171)."""
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("p", encoding="utf-8")
+    argv = [
+        "--prompt-file",
+        str(prompt_file),
+        "--repo-root",
+        str(tmp_path),
+        "--stage",
+        "x",
+        "--output",
+        str(tmp_path / "out.txt"),
+        "--skill-file",
+        str(tmp_path / "missing-skill.md"),
+    ]
+    with pytest.raises(SystemExit) as exc:
+        agent_stage.main(argv)
+    assert exc.value.code == 2
+    assert "--skill-file does not exist" in capsys.readouterr().err
+
+
+def test_main_rejects_prompt_file_that_is_a_directory(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A directory passed as --prompt-file must be a CLI diagnostic (issue #2171)."""
+    argv = [
+        "--prompt-file",
+        str(tmp_path),
+        "--repo-root",
+        str(tmp_path),
+        "--stage",
+        "x",
+        "--output",
+        str(tmp_path / "out.txt"),
+    ]
+    with pytest.raises(SystemExit) as exc:
+        agent_stage.main(argv)
+    assert exc.value.code == 2
+    assert "--prompt-file does not exist or is not a file" in capsys.readouterr().err
