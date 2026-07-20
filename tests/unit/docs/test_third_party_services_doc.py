@@ -40,19 +40,42 @@ def _documented_action_owners() -> set[str]:
     return owners
 
 
-def test_inventory_names_every_required_service() -> None:
-    """Every required third-party service must appear in the inventory."""
+def _inventory_table_rows() -> list[list[str]]:
+    """Parse the ``## Service inventory`` markdown table into cell rows.
+
+    Returns the header row followed by every data row, each as a list of
+    trimmed cell strings. Raises if the section or its table is missing, so a
+    heading/format rename fails loudly instead of silently matching nothing.
+    """
     text = DOC.read_text(encoding="utf-8")
-    missing = [service for service in REQUIRED_SERVICES if service not in text]
-    assert missing == [], f"docs/third-party-services.md missing services: {missing}"
+    section = re.search(r"^## Service inventory\n(.*?)(?=^## |\Z)", text, re.MULTILINE | re.DOTALL)
+    assert section is not None, "docs/third-party-services.md has no '## Service inventory' section"
+    lines = [line for line in section.group(1).splitlines() if line.strip().startswith("|")]
+    assert len(lines) >= 2, "no markdown table found under '## Service inventory'"
+    # Row 1 is the header; row 2 is the '---' separator; skip it.
+    data_lines = [line for line in lines if not re.fullmatch(r"[\s|:-]+", line)]
+    rows = [line.strip().strip("|").split("|") for line in data_lines]
+    return [[cell.strip() for cell in row] for row in rows]
+
+
+def test_inventory_names_every_required_service() -> None:
+    """Every required third-party service must have its own inventory row."""
+    rows = _inventory_table_rows()
+    service_cells = [row[0] for row in rows[1:]]
+    missing = [
+        service
+        for service in REQUIRED_SERVICES
+        if not any(service in cell for cell in service_cells)
+    ]
+    assert missing == [], f"docs/third-party-services.md missing service rows: {missing}"
 
 
 def test_inventory_has_responsibility_and_status_columns() -> None:
-    """The inventory must split responsibility and cite status pages."""
-    text = DOC.read_text(encoding="utf-8")
-    assert "Our responsibility" in text
-    assert "Vendor responsibility" in text
-    assert "status page" in text.lower()
+    """The inventory table header must split responsibility and cite a status column."""
+    header = _inventory_table_rows()[0]
+    assert any("our responsibility" in cell.lower() for cell in header), header
+    assert any("vendor responsibility" in cell.lower() for cell in header), header
+    assert any("status" in cell.lower() for cell in header), header
 
 
 def test_every_third_party_action_owner_is_documented() -> None:
