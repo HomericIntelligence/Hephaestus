@@ -734,7 +734,13 @@ def test_main_resolves_agent_before_building_config(monkeypatch: pytest.MonkeyPa
 
 def test_main_errors_on_empty_repo_list() -> None:
     """An empty resolved repo list is a clean exit-1, not a pipeline dispatch."""
-    with patch.object(loop_runner, "_resolve_org_and_repos", return_value=("Org", [], None)):
+    # resolve_agent() probes PATH for a real backend; mock it so the test does
+    # not depend on `claude`/`codex`/`pi` being installed (release runners have
+    # no agent backend).
+    with (
+        patch.object(loop_runner, "resolve_agent", return_value="claude"),
+        patch.object(loop_runner, "_resolve_org_and_repos", return_value=("Org", [], None)),
+    ):
         rc = main(["--org", "Org"])
     assert rc == 1
 
