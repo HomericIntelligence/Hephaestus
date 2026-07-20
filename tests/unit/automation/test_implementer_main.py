@@ -182,6 +182,10 @@ def test_main_health_check_short_circuits(tmp_path: Path) -> None:
     with (
         patch.object(sys, "argv", ["hephaestus-implement-issues", "--health-check"]),
         patch.object(implementer_mod, "get_repo_root", return_value=tmp_path),
+        # resolve_agent() probes PATH for a real backend; mock it so the test
+        # does not depend on `claude`/`codex`/`pi` being installed (release
+        # runners have no agent backend).
+        patch.object(implementer_mod, "resolve_agent", return_value="claude"),
         patch("hephaestus.github.client.gh_call", side_effect=OSError("missing gh")),
         patch(
             "hephaestus.automation.pipeline.coordinator.run_pipeline",
