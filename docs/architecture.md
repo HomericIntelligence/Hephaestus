@@ -49,9 +49,11 @@ Optimization"), file paths are repo-relative.
 - **Single durable journal.** GitHub labels, comments, PR state and
  `ArmingStateStore` records are the only
  crash-resistant truth. Stages may not persist any other state. Restart =
- re-run: queue reconstruction reads the journal
- ([`_seed_pass`](hephaestus/automation/pipeline/coordinator.py),
- [`seed_from_cli`](hephaestus/automation/pipeline/seeding.py)).
+re-run: queue reconstruction reads the journal
+([`coordinator._seed_pass`](hephaestus/automation/pipeline/coordinator.py),
+[`seed_from_cli`](hephaestus/automation/pipeline/seeding.py)) — distinct from
+the per-repo seed-side [`repo._seed_pass`](hephaestus/automation/pipeline/stages/repo.py)
+in §5.1, which tags `state:skip` on epics before any other durable mutation.
 - **Interrupt = resumable, never failed.** A SIGINT/SIGTERM/SIGHUP during a
  run parks the touched item with `ItemResult(passed=False,
  reason="resumable at <stage>", …)`. A subsequent restart seeds it back
@@ -1067,11 +1069,13 @@ The gate logic at [`PrReviewStage._eval`](hephaestus/automation/pipeline/stages/
  automation may never resolve human threads.
 - `blocking_automation > 0` → downgraded to NOGO; runs the
  address leg on the NEXT round (DELIBERATE 1-round cost over
- legacy so the budget/extension gate stays a single chokepoint).
-- `blocking == 0, minor > 0` →
- [`resolve_automation_threads`](hephaestus/automation/pipeline/stages/base.py)
- before arming so `required_review_thread_resolution` does not
- re-block at merge.
+ legacy so the budget/extension gate stays a single chokepoint).- `blocking == 0, minor > 0` →
+[`resolve_automation_threads`](hephaestus/automation/pipeline_github.py)
+inside [`_handle_clean_go`](hephaestus/automation/pipeline/stages/pr_review.py)
+at [`pr_review.py:1177`](hephaestus/automation/pipeline/stages/pr_review.py)
+before [`_write_go`](hephaestus/automation/pipeline/stages/pr_review.py) writes
+`state:implementation-go`, so `required_review_thread_resolution` does not
+re-block at merge.
 - Clean GO → verify `defer_auto_merge` is still disabled, apply
  `state:implementation-go` (the **sole** stage that writes this label) and ADVANCE to `merge_wait`. **NEVER** arms auto-merge —
  that is exclusively `merge_wait`'s job.
