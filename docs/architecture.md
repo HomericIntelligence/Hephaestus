@@ -1662,6 +1662,38 @@ remain as thin compatibility shims re-exporting `_resolve_model`,
  branch name (`{issue}-auto-impl`); referenced by
  [`implementation._gate`](hephaestus/automation/pipeline/stages/implementation.py).
 
+### [`routing.py`](hephaestus/automation/pipeline/routing.py)
+
+The single source of truth for pipeline stage transitions, fail
+routes, and per-stage budgets — every §5 stage section and the §6
+ROUTES table cite this file for the canonical numbers. Declares:
+
+- [`StageName`](hephaestus/automation/pipeline/routing.py) — the
+ `str`-flavored 7-stage enum (`REPO → PLANNING → PLAN_REVIEW →
+ IMPLEMENTATION → PR_REVIEW → MERGE_WAIT → FINISHED`); declaration
+ order matches [`PIPELINE_ORDER`](hephaestus/automation/pipeline/routing.py)
+ and the reversed
+ [`_DRAIN_ORDER`](hephaestus/automation/pipeline/coordinator.py).
+- [`Disposition`](hephaestus/automation/pipeline/routing.py)
+ — the routing-outcome enum (`ADVANCE`, `RETRY`, `FAIL_BACK`,
+ `SKIP`, `BLOCKED`, `FINISH_PASS`, `FINISH_FAIL`); the disposition
+ funnel is exhaustive — a new value is a static `TypeError`, not a
+ silent miss.
+- [`ROUTES`](hephaestus/automation/pipeline/routing.py) — the
+ typed `dict[StageName, Route]` table. Each row binds a stage to
+ its `next`, `fail_routes` and per-key budgets; the canonical
+ numbers are cited inline in each §5.x block and listed centrally
+ in §6. Stage code never re-defines these numbers — the table is
+ the single source of truth. Schema / table consistency is
+ enforced by
+ [`tests/unit/automation/pipeline/test_routing.py`](tests/unit/automation/pipeline/test_routing.py);
+ runtime cross-stage budget guards are
+ [`_route_fail_back`](hephaestus/automation/pipeline/coordinator.py)
+ plus the safety cap
+ [`_FAIL_BACK_CAP`](hephaestus/automation/pipeline/coordinator.py)
+ (the sum of every per-key budget — guarantees forward progress
+ even under a per-stage budget-bookkeeping bug).
+
 ### [`prompts/`](hephaestus/automation/prompts/)
 
 Each stage section in §5 lists the prompt function(s) it imports; this
@@ -1894,7 +1926,11 @@ CI can react consistently.
 ## 14. Provenance audit checklist
 
 Every claim in this document is grounded in the source it cites. The
-following audit pass confirms each section is traceable:
+following audit pass confirms each section is traceable. The ADR-by-ADR
+binding record lives under [`docs/adr/`](adr/); this checklist
+cross-cites the modules each ADR binds, rather than re-listing each
+ADR — ADRs are the bind-points (per §1), this checklist is the
+source-grounded index.
 
 - §1 → [`AGENTS.md`](../AGENTS.md) §"Agents the codebase orchestrates",
  [`state_labels.py`](hephaestus/automation/state_labels.py),
