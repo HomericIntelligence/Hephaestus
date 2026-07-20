@@ -138,7 +138,10 @@ jobs:
           enable-cache: false  # release artifacts must not read/write a shared cache (zizmor cache-poisoning)
 
       - name: Run mypy type checking
-        run: uv run mypy
+        # Explicit targets: bare `uv run mypy` errors with "Missing target"
+        # because pyproject has no default mypy `files`. Match the required
+        # `lint` pre-commit hook (uv run mypy hephaestus/ scripts/ tests/).
+        run: uv run mypy hephaestus/ scripts/ tests/
 
   publish-testpypi:
     runs-on: ubuntu-24.04

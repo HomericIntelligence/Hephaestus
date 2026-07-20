@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Shared test fixtures for Hephaestus tests."""
 
+import contextlib
 import json
 
 import pytest
@@ -11,23 +12,27 @@ import yaml
 def _agents_authenticated_by_default(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Stub the agent install+auth pre-flight (#1175) to pass by default.
+    """Stub agent install+auth resolution suite-wide (#1175).
 
-    ``resolve_agent`` now refuses a ``--agent claude|codex|pi`` selection unless the
-    CLI is installed AND reports authenticated (#1175) — a real guard so an
-    unauthenticated backend cannot silently produce empty output. But these CLIs
-    is installed in CI, so every test that dispatches a named agent through
-    automation, fleet-sync, tidy, etc. (mocking the actual run_* call) would
-    otherwise hit ``RuntimeError: Agent '...' is not installed``. Default the
-    pre-flight to "authenticated" suite-wide so those mocked-dispatch tests pass.
+    A real agent backend (``claude``/``codex``/``pi``) is deliberately NOT
+    installed or authenticated in CI/CD — we do not want tests to set up agent
+    accounts or spend tokens. But ``resolve_agent`` refuses a selection unless a
+    CLI is installed on PATH AND reports authenticated, so every test that
+    dispatches a named agent (mocking the actual run_* call) would otherwise hit
+    ``RuntimeError: ... not installed / not authenticated`` on an agent-free
+    runner. Stub both halves suite-wide:
 
-    EXCEPTION: ``tests/unit/agents/test_runtime.py`` tests the pre-flight machinery
-    itself (``resolve_agent``/``is_agent_authenticated``), driving the real
-    install+auth detection via patched ``shutil.which``/``subprocess.run``. Stubbing
-    ``is_agent_authenticated`` there would short-circuit the very logic under test,
-    so skip the stub for that module — it owns the real behaviour. Other tests that
-    need the unauthenticated path can likewise override this with their own
-    monkeypatch (last-writer-wins).
+    * ``is_agent_authenticated`` -> always True.
+    * ``resolve_agent`` -> return the requested backend, or ``"claude"`` when the
+      caller passed no ``--agent`` — with no PATH probe. This makes the whole
+      suite independent of whether an agent binary exists on the runner.
+
+    EXCEPTION: ``tests/unit/agents/test_runtime.py`` tests the resolution
+    machinery itself, driving real install+auth detection via patched
+    ``shutil.which``/``subprocess.run``. Stubbing it there would short-circuit the
+    logic under test, so skip the stub for that module. Other tests that need the
+    unauthenticated/uninstalled path can override with their own monkeypatch
+    (last-writer-wins).
     """
     if request.module.__name__.endswith("agents.test_runtime"):
         return
@@ -35,6 +40,18 @@ def _agents_authenticated_by_default(
         "hephaestus.agents.runtime.is_agent_authenticated",
         lambda _agent: True,
     )
+
+    def _stub_resolve_agent(agent: str | None) -> str:
+        return agent if agent is not None else "claude"
+
+    # Patch at the runtime module and at every automation module that imported
+    # ``resolve_agent`` by value (``from ...runtime import resolve_agent``).
+    monkeypatch.setattr("hephaestus.agents.runtime.resolve_agent", _stub_resolve_agent)
+    for mod in ("implementer", "loop_runner", "planner", "pr_reviewer", "audit_reviewer"):
+        target = f"hephaestus.automation.{mod}.resolve_agent"
+        # A module that does not import resolve_agent by value has nothing to patch.
+        with contextlib.suppress(AttributeError):
+            monkeypatch.setattr(target, _stub_resolve_agent)
 
 
 @pytest.fixture
