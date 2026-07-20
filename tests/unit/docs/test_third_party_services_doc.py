@@ -80,10 +80,12 @@ def test_inventory_has_responsibility_and_status_columns() -> None:
 
 def test_every_third_party_action_owner_is_documented() -> None:
     """A new external CI vendor must be added to the inventory table."""
-    text = DOC.read_text(encoding="utf-8")
     owners = _documented_action_owners() - FIRST_PARTY_ACTION_OWNERS
     assert owners, "no remote action owners found — regex or workflow layout changed"
-    missing = sorted(owner for owner in owners if owner not in text)
+    service_cells = [row[0].lower() for row in _inventory_table_rows()[1:]]
+    missing = sorted(
+        owner for owner in owners if not any(owner.lower() in cell for cell in service_cells)
+    )
     assert missing == [], f"CI action owners absent from docs/third-party-services.md: {missing}"
 
 
