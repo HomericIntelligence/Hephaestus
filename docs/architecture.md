@@ -1929,8 +1929,8 @@ Every claim in this document is grounded in the source it cites. The
 following audit pass confirms each section is traceable. The ADR-by-ADR
 binding record lives under [`docs/adr/`](adr/); this checklist
 cross-cites the modules each ADR binds, rather than re-listing each
-ADR — ADRs are the bind-points (per §1), this checklist is the
-source-grounded index.
+ADR — ADRs are the bind-points and historical record (per §1), this
+checklist is the source-grounded index.
 
 - §1 → [`AGENTS.md`](../AGENTS.md) §"Agents the codebase orchestrates",
  [`state_labels.py`](hephaestus/automation/state_labels.py),
