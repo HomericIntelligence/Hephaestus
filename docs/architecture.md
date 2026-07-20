@@ -9,7 +9,7 @@ architectural decisions (`0006-queue-based-in-process-automation-pipeline`,
 This file is source-grounded: every operational claim links to the module
 that backs it, in the form `[module/file.py](path/to/file.py)` or
 `[§module/Class.func](path/to/file.py)`. Per the project convention
-(`"Code References": 'DO'` in [`CLAUDE.md`](../CLAUDE.md) §"Claude Code
+(`"Code References": 'DO'` in [`AGENTS.md`](../AGENTS.md) §"Claude Code
 Optimization"), file paths are repo-relative.
 
 ---
@@ -899,7 +899,7 @@ git-failure counter (`GIT_ERROR_RETRY_CAP`).
  (PR creation is the stage's journal entry — durable). **The pipeline
  does NOT guarantee signed commits or DCO trailers**: that policy is
  enforced by the GitHub `pr-policy` required check
- ([`CLAUDE.md`](../CLAUDE.md) §"PR policy"); the implementer session
+ ([`AGENTS.md`](../AGENTS.md) §"PR policy"); the implementer session
  writes signed commits through
  [`worker_pool._git_commit_push`](hephaestus/automation/pipeline/worker_pool.py)
  → [`git_utils.commit_if_changes`](hephaestus/automation/git_utils.py).
@@ -1856,7 +1856,7 @@ following audit pass confirms each section is traceable:
  [`state_labels.py`](hephaestus/automation/state_labels.py),
  [`routing.py`](hephaestus/automation/pipeline/routing.py),
  [`coordinator.py`](hephaestus/automation/pipeline/coordinator.py);
- design principles from [`CLAUDE.md`](../CLAUDE.md).
+ design principles from [`AGENTS.md`](../AGENTS.md).
 - §2 → [`coordinator.py`](hephaestus/automation/pipeline/coordinator.py)
  (`_DRAIN_ORDER`, `run`, `_step_with_watchdog`,
  `_default_stages`…)
