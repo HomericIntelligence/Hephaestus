@@ -454,6 +454,8 @@ two pairs:
 | `state:implementation-go` | review-scope | [`pr_review._eval`](hephaestus/automation/pipeline/stages/pr_review.py) — **sole authority** |
 | `state:skip` | absolute | operator / exhaustion in [`pr_review`](hephaestus/automation/pipeline/stages/pr_review.py) / [`implementation`](hephaestus/automation/pipeline/stages/implementation.py) |
 
+Every **stage-issued** `state:skip` durable write (the `pr_review` and `implementation` write paths) is accompanied by a `gh_issue_upsert_comment` companion produced via [`format_skip_reason_comment`](hephaestus/automation/state_labels.py), using the [`SKIP_REASON_MARKER`](hephaestus/automation/state_labels.py) prefix `<!-- hephaestus-state-skip-reason -->` so the reason survives outside the run log (#2264). The seed-side `state:skip` for epics in [`repo._seed_pass`](hephaestus/automation/pipeline/stages/repo.py) does NOT pair a comment, because epics are excluded before any other durable mutation.
+
 Label colors per [`STATE_LABEL_SPECS`](hephaestus/automation/state_labels.py).
 Provisioning script
 ([`hephaestus-ensure-state-labels`](scripts/)) creates them on a repo.
@@ -1051,7 +1053,7 @@ The gate logic at [`PrReviewStage._eval`](hephaestus/automation/pipeline/stages/
  that is exclusively `merge_wait`'s job.
 **Durable writes**: review-thread posts, severity markers, `post_pr_comment`
 on `HUMAN_BLOCKED`, `state:implementation-no-go` (every real NOGO),
-`state:skip` (cap exhaustions),
+`state:skip` (cap exhaustions; with companion [`format_skip_reason_comment`](hephaestus/automation/state_labels.py) comment per #2264),
 `resolve_automation_threads` (advisory waved threads).
 **Owned labels**: `state:implementation-no-go` (NOGO verdict, before
 retry/regress) [durable], `state:skip` (exhaustion) [durable]
@@ -1458,7 +1460,7 @@ out-of-band.
 | `hephaestus-implement-issues` | `implementation → pr_review` | [`implementer`](hephaestus/automation/implementer.py) |
 | `hephaestus-review-prs` | `pr_review` (internal slice) | [`pr_reviewer`](hephaestus/automation/pr_reviewer.py) |
 | `hephaestus-drive-prs-green` | `merge_wait` (post-merge learn) | `hephaestus-drive-prs-green` script |
-| `hephaestus-merge-prs` | (manual merge-driving, queues disabled) | [`hephaestus.github.pr_merge`](hephaestus/github/pr_merge.py) |
+| `hephaestus-merge-prs` | (manual merge-driving, queues disabled) | [`hephaestus.github.pr_merge`](hephaestus/github/pr_merge.py) — gaining `--use-merge-queue` for merge-queue-protected repos (#2312, OPEN) |
 | `hephaestus-agent-stage` | (one-shot stage invocation) | [`agent_stage`](hephaestus/automation/agent_stage.py) |
 
 `--run-pre-pr-tests` is an opt-in queue-runner flag enabling the
@@ -1642,8 +1644,8 @@ prompts.** The module contract is enforced by test coverage:
  a verdict line or injecting instructions that bypass the strict
  review loop. Builders that do not fence user content are flagged
  in test regressions.
-- [`prompts/catalog.py`](hephaestus/automation/prompts/catalog.py) —
- the [`PromptCatalog`](hephaestus/automation/prompts/catalog.py) registry.
+- [`prompts/catalog.py`](hephaestus/prompts/catalog.py) (top-level; re-exported as [`automation/prompts/catalog.py`](hephaestus/automation/prompts/catalog.py)) —
+ the [`PromptCatalog`](hephaestus/prompts/catalog.py) registry; builds a [`jinja2.Environment`](hephaestus/prompts/catalog.py) over a [`FileSystemLoader`](hephaestus/prompts/catalog.py) resolved from `__file__`-relative paths (deliberately NOT `PackageLoader`, to avoid importlib editable-install staleness, #2308).
  Every prompt path passes through
  `PromptCatalog.current().render(name.j2, **kwargs)` so the same
  prompt rendered in different roles (planner, planner-amend,
@@ -1839,6 +1841,11 @@ CI can react consistently.
  matching the live `headRefOid` of the PR. `merge_wait` captures the
  head SHA at arm time and polls it; a head drift between ARM and POLL
  is a terminal containment failure.
+- **Skip-reason marker** — the `<!-- hephaestus-state-skip-reason -->` HTML-comment marker ([`SKIP_REASON_MARKER`](hephaestus/automation/state_labels.py)) that prefixes every `state:skip` reason-comment body produced by [`format_skip_reason_comment`](hephaestus/automation/state_labels.py), so a repo reader can deterministically trace the automated skip reason.
+- **File-system loader** — the Jinja `FileSystemLoader` resolved from `__file__`-relative paths in [`prompts/catalog.py`](hephaestus/prompts/catalog.py); deliberately NOT `PackageLoader` to avoid importlib editable-install staleness (#2310).
+- **Conflict-resolution request** — the [`ConflictResolutionRequest`](hephaestus/automation/_review_conflict_resolver.py) immutable context consumed by the cohesive [`ReviewConflictResolver`](hephaestus/automation/_review_conflict_resolver.py) unit split out of `_review_phase.py` (#2209).
+- **Advise-skipped breadcrumb** — the [`advise_skipped(reason)`](hephaestus/automation/advise_runner.py) marker string returned by [`run_advise`](hephaestus/automation/advise_runner.py) when Mnemosyne is unavailable, so a stage aborts as `SKIP` rather than failing; the reason is forwarded verbatim from [`resolve_marketplace`](hephaestus/automation/advise_runner.py) (e.g. `clone_failed`, `manifest_missing`).
+
 - **Severity-aware GO gate** — logic that classifies posted review
  comments by marker (`critical|major|minor|nitpick`) and decides
  whether the `pr_review` round can advance. **See [§5.5 _Gate
