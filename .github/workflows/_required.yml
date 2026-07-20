@@ -384,7 +384,7 @@ jobs:
             echo "OK: PR body contains a Closes #N line"
           else
             msg='::error::PR body must contain a line matching `^Closes #N$`'
-            msg+=' (literal "Closes", capital C, on its own line). See CLAUDE.md PR policy.'
+            msg+=' (literal "Closes", capital C, on its own line). See AGENTS.md PR policy.'
             echo "$msg"
             exit 1
           fi

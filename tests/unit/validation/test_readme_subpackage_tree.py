@@ -1,7 +1,7 @@
-"""Guard: README and CLAUDE.md directory trees must list every hephaestus/ subpackage.
+"""Guard: README and AGENTS.md directory trees must list every hephaestus/ subpackage.
 
 Prevents doc-vs-reality drift (issues #1188, #1449): scripts_lib/ was on disk
-but absent from the CLAUDE.md tree while the doc still claimed 20 subpackages.
+but absent from the agent-contract tree while the doc still claimed 20 subpackages.
 """
 
 from pathlib import Path
@@ -9,7 +9,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PACKAGE_DIR = REPO_ROOT / "hephaestus"
 README = REPO_ROOT / "README.md"
-CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
+AGENTS_MD = REPO_ROOT / "AGENTS.md"
 
 
 def _real_subpackages() -> set[str]:
@@ -32,12 +32,12 @@ def test_readme_tree_lists_every_subpackage() -> None:
     assert not missing, f"README directory tree omits subpackage(s): {missing}"
 
 
-def test_claude_md_tree_lists_every_subpackage() -> None:
-    """Every real subpackage must appear in the CLAUDE.md directory tree block."""
-    claude_md = CLAUDE_MD.read_text(encoding="utf-8")
+def test_agents_md_tree_lists_every_subpackage() -> None:
+    """Every real subpackage must appear in the AGENTS.md directory tree block."""
+    agents_md = AGENTS_MD.read_text(encoding="utf-8")
     missing = sorted(
         name
         for name in _real_subpackages()
-        if f"├── {name}/" not in claude_md and f"└── {name}/" not in claude_md
+        if f"├── {name}/" not in agents_md and f"└── {name}/" not in agents_md
     )
-    assert not missing, f"CLAUDE.md directory tree omits subpackage(s): {missing}"
+    assert not missing, f"AGENTS.md directory tree omits subpackage(s): {missing}"

@@ -93,5 +93,5 @@ def test_agents_md_has_design_philosophy_section() -> None:
     # Core principles the section is grounded in.
     for principle in ("KISS", "YAGNI", "SOLID", "POLA"):
         assert principle in agents_md, f"Design Philosophy missing {principle}"
-    # Cross-link back to the canonical principle list in CLAUDE.md.
-    assert "CLAUDE.md#key-development-principles" in agents_md
+    # Cross-link back to the canonical principle list in AGENTS.md itself.
+    assert "#key-development-principles" in agents_md

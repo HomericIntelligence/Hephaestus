@@ -1,9 +1,9 @@
 """Enforce consistency between documentation metric values and authoritative config sources.
 
-Checks that values documented in CLAUDE.md and README.md match what is configured in
+Checks that values documented in AGENTS.md and README.md match what is configured in
 ``pyproject.toml``:
 
-1. Coverage threshold in CLAUDE.md AND docs/DEFINITION_OF_DONE.md matches ``fail_under``
+1. Coverage threshold in AGENTS.md AND docs/DEFINITION_OF_DONE.md matches ``fail_under``
    in ``[tool.coverage.report]``.
 2. ``--cov=<path>`` in README.md matches ``addopts`` in ``[tool.pytest.ini_options]``.
 3. If ``--cov-fail-under=N`` is present in ``addopts``, it must match ``fail_under`` in
@@ -147,7 +147,7 @@ def extract_cov_fail_under_from_addopts(repo_root: Path) -> int | None:
 
 
 def check_claude_md_threshold(repo_root: Path, expected: int) -> list[str]:
-    """Check that CLAUDE.md documents the correct coverage threshold.
+    """Check that AGENTS.md documents the correct coverage threshold.
 
     Searches for ``<N>%+ test coverage`` (or ``<N>% test coverage``) and verifies
     the integer matches *expected*.
@@ -160,15 +160,15 @@ def check_claude_md_threshold(repo_root: Path, expected: int) -> list[str]:
         List of error strings (empty if all checks pass).
 
     """
-    claude_md = repo_root / "CLAUDE.md"
-    if not claude_md.exists():
-        return [f"CLAUDE.md not found at {claude_md}"]
+    agents_md = repo_root / "AGENTS.md"
+    if not agents_md.exists():
+        return [f"AGENTS.md not found at {agents_md}"]
 
-    text = claude_md.read_text(encoding="utf-8")
+    text = agents_md.read_text(encoding="utf-8")
     matches = re.findall(r"(\d+)%\+?\s+test coverage", text)
     if not matches:
         return [
-            "CLAUDE.md: No coverage threshold mention found "
+            "AGENTS.md: No coverage threshold mention found "
             "(expected pattern: '<N>%+ test coverage')"
         ]
 
@@ -177,8 +177,8 @@ def check_claude_md_threshold(repo_root: Path, expected: int) -> list[str]:
         found = int(raw)
         if found != expected:
             errors.append(
-                f"CLAUDE.md: Coverage threshold mismatch — "
-                f"CLAUDE.md says {found}%, pyproject.toml says {expected}%"
+                f"AGENTS.md: Coverage threshold mismatch — "
+                f"AGENTS.md says {found}%, pyproject.toml says {expected}%"
             )
     return errors
 
@@ -187,7 +187,7 @@ def check_dod_threshold(repo_root: Path, expected: int) -> list[str]:
     """Check that docs/DEFINITION_OF_DONE.md documents the correct coverage threshold.
 
     The DoD references the gate in two distinct phrasings that differ from
-    CLAUDE.md's: ``--cov-fail-under=<N>`` (row 10) and ``drops total under <N>%``
+    AGENTS.md's: ``--cov-fail-under=<N>`` (row 10) and ``drops total under <N>%``
     (row F2). Both must match the authoritative *expected* value. The match is
     anchored on these gate-specific shapes rather than a free ``<N>%`` scan so it
     does not false-positive on unrelated numbers (the 10% tolerance, Python 3.10).
@@ -354,7 +354,7 @@ def check_doc_config_consistency(
     """Run all doc/config consistency checks and return an exit code.
 
     Checks:
-    1. CLAUDE.md AND docs/DEFINITION_OF_DONE.md coverage threshold vs
+    1. AGENTS.md AND docs/DEFINITION_OF_DONE.md coverage threshold vs
        ``[tool.coverage.report].fail_under``.
     2. README.md ``--cov=<path>`` vs ``[tool.pytest.ini_options].addopts``.
     3. ``--cov-fail-under`` in addopts (if present) vs ``fail_under``.
@@ -392,7 +392,7 @@ def check_doc_config_consistency(
 
 
 def _run_threshold_check(repo_root: Path, expected: int, verbose: bool) -> list[str]:
-    """Run CLAUDE.md and DEFINITION_OF_DONE.md coverage threshold checks.
+    """Run AGENTS.md and DEFINITION_OF_DONE.md coverage threshold checks.
 
     Args:
         repo_root: Repository root.
@@ -407,7 +407,7 @@ def _run_threshold_check(repo_root: Path, expected: int, verbose: bool) -> list[
     errors += check_dod_threshold(repo_root, expected)
     if not errors and verbose:
         print(
-            f"PASS: CLAUDE.md and DEFINITION_OF_DONE.md coverage threshold "
+            f"PASS: AGENTS.md and DEFINITION_OF_DONE.md coverage threshold "
             f"match pyproject.toml ({expected}%)"
         )
     return errors

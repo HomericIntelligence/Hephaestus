@@ -22,7 +22,7 @@ needs hands-on recovery.
   [`../../AGENTS.md`](../../AGENTS.md). Use it to identify which module owns the
   behavior you are recovering.
 - **PR & state-label policy** — the PR policy (signed commits, `Closes #N`,
-  auto-merge gating) lives in [`../../CLAUDE.md`](../../CLAUDE.md).
+  auto-merge gating) lives in [`../../AGENTS.md`](../../AGENTS.md).
 
 ## State-label reference
 
