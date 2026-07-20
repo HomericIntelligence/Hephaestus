@@ -1072,7 +1072,6 @@ The gate logic at [`PrReviewStage._eval`](hephaestus/automation/pipeline/stages/
  legacy so the budget/extension gate stays a single chokepoint).- `blocking == 0, minor > 0` →
 [`resolve_automation_threads`](hephaestus/automation/pipeline_github.py)
 inside [`_handle_clean_go`](hephaestus/automation/pipeline/stages/pr_review.py)
-at [`pr_review.py:1177`](hephaestus/automation/pipeline/stages/pr_review.py)
 before [`_write_go`](hephaestus/automation/pipeline/stages/pr_review.py) writes
 `state:implementation-go`, so `required_review_thread_resolution` does not
 re-block at merge.
@@ -1369,7 +1368,7 @@ When `--issues` or `--prs` is set, the resolved `--repos` list is used
 ONLY for context — repo discovery is NOT enqueued, so a scoped run
 cannot reconstruct every open issue in the repo (deliberate scope
 isolation).
-After `_seed_pass`, if all queues + timers + in-flight are empty,
+After `coordinator._seed_pass`, if all queues + timers + in-flight are empty,
 [`_reseed_if_converged`](hephaestus/automation/pipeline/coordinator.py)
 re-seeds up to `--loops` and either exits on a zero-work pass or
 continues.
