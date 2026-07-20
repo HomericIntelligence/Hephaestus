@@ -66,7 +66,7 @@ Rebuild in this order (target RTO ≤ 1 hour, per ADR-0013):
    ADR-0008, pre-commit hooks).
 3. `gh auth login` — restore GitHub credentials.
 4. Import the GPG signing key and set `git config user.signingkey` — required
-   for signed commits (see [`../../CLAUDE.md`](../../CLAUDE.md)).
+   for signed commits (see [`../../AGENTS.md`](../../AGENTS.md)).
 5. Re-authenticate the Claude CLI.
 6. Restore tier-3 state from your latest archive with `restore --force`.
 7. Resume in-flight issue work via the
@@ -91,7 +91,7 @@ continuously tested, not merely documented.
 
 Credentials and secrets are **never** archived — GitHub auth (`gh auth`), the
 GPG signing key, and Claude CLI auth are inventoried above and re-provisioned on
-recovery, upholding the CLAUDE.md secrets policy. Tier-1 state (GitHub) and
+recovery, upholding the AGENTS.md secrets policy. Tier-1 state (GitHub) and
 tier-2 state (recreatable via `uv.lock`) are likewise out of scope for archival;
 they are re-derived, not restored.
 

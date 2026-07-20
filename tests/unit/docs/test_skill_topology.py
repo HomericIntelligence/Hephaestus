@@ -4,11 +4,12 @@ import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-SKILL_GUIDES = (
-    REPO_ROOT / "AGENTS.md",
+SKILL_GUIDES = (REPO_ROOT / "AGENTS.md",)
+TOPOLOGY_FILES = (
+    *SKILL_GUIDES,
     REPO_ROOT / "CLAUDE.md",
+    REPO_ROOT / ".markdownlint.yaml",
 )
-TOPOLOGY_FILES = (*SKILL_GUIDES, REPO_ROOT / ".markdownlint.yaml")
 
 LOCAL_SKILLS_PATH = re.compile(r"(?<![\w.-])(?:\./|Hephaestus/)?skills(?=[/\\`)])")
 

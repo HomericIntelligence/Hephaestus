@@ -37,4 +37,4 @@ current-head `$athena:pr-review` path first.
 ## See Also
 
 - [Automation loop crashed mid-issue](automation-loop-crash.md)
-- PR and state-label policy: [`../../CLAUDE.md`](../../CLAUDE.md)
+- PR and state-label policy: [`../../AGENTS.md`](../../AGENTS.md)
