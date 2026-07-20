@@ -336,15 +336,27 @@ def _is_merge_queue_error(exc: subprocess.CalledProcessError) -> bool:
     return _MERGE_QUEUE_REQUIRED_MARKER in blob and _HTTP_405_MARKER in blob
 
 
-def _enqueue_pr(repo_name: str, pr_number: int) -> dict[str, Any]:
+def _enqueue_pr(repo_name: str, pr_number: int, head_sha: str) -> dict[str, Any]:
     """Add ``pr_number`` to the branch's merge queue via ``gh pr merge``.
 
     The merge queue owns the merge method and rebuilds/merges the PR server-side,
     so no ``--squash``/``--merge`` flag is passed (passing one is rejected on a
-    queue-enabled branch). ``gh pr merge`` exits 0 both when it newly enqueues the
-    PR and when the PR is already queued; both are success from our perspective.
+    queue-enabled branch). ``--match-head-commit`` preserves the direct-merge
+    compare-and-swap guard, preventing a changed PR head from being enqueued.
+    ``gh pr merge`` exits 0 both when it newly enqueues the PR and when the PR is
+    already queued; both are success from our perspective.
     """
-    result = gh_call(["pr", "merge", str(pr_number), "--repo", repo_name])
+    result = gh_call(
+        [
+            "pr",
+            "merge",
+            str(pr_number),
+            "--repo",
+            repo_name,
+            "--match-head-commit",
+            head_sha,
+        ]
+    )
     blob = f"{result.stdout or ''}{getattr(result, 'stderr', '') or ''}"
     return {"queued": True, "message": blob.strip() or "enqueued in merge queue"}
 
@@ -372,7 +384,7 @@ def _merge_pr(repo_name: str, pr_number: int, head_sha: str) -> dict[str, Any]:
         )
     except subprocess.CalledProcessError as exc:
         if _is_merge_queue_error(exc):
-            return _enqueue_pr(repo_name, pr_number)
+            return _enqueue_pr(repo_name, pr_number, head_sha)
         raise
     return payload if isinstance(payload, dict) else {"merged": False, "message": str(payload)}
 

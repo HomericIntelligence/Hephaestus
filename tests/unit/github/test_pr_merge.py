@@ -713,6 +713,8 @@ class TestMergeQueueHandling:
         assert pr_merge_calls, "expected a `gh pr merge` enqueue call"
         enqueue = pr_merge_calls[0]
         assert "--squash" not in enqueue and "--merge" not in enqueue and "--rebase" not in enqueue
+        assert "--match-head-commit" in enqueue
+        assert enqueue[enqueue.index("--match-head-commit") + 1] == "deadbeef"
 
     def test_merge_pr_reraises_non_queue_error(self, monkeypatch) -> None:
         """A non-merge-queue failure is not swallowed."""
@@ -745,10 +747,20 @@ class TestMergeQueueHandling:
 
         monkeypatch.setattr(pr_merge_module, "gh_call", fake_gh_call)
 
-        out = _enqueue_pr("owner/repo", 9)
+        out = _enqueue_pr("owner/repo", 9, "cafebabe")
 
         assert out["queued"] is True
-        assert captured == [["pr", "merge", "9", "--repo", "owner/repo"]]
+        assert captured == [
+            [
+                "pr",
+                "merge",
+                "9",
+                "--repo",
+                "owner/repo",
+                "--match-head-commit",
+                "cafebabe",
+            ]
+        ]
 
     def test_handle_merge_result_logs_queued_as_success(self) -> None:
         """A queued result must not be logged as a failure."""
