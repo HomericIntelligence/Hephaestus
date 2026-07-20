@@ -64,3 +64,25 @@ If a deployment breaks after adopting the TLS default, the short-term rollback i
 to point `NATS_URL` at a loopback development broker and set `NATS_TLS=false`, or
 to set `NATS_ALLOW_PLAINTEXT=true` only for an explicitly isolated non-production
 broker while certificate provisioning is repaired.
+
+## Failed-message retention
+
+`NATSSubscriberThread` deliberately provides best-effort, at-most-once delivery
+for non-critical events where losing a failed message is acceptable or the
+authoritative upstream source can reconstruct and re-emit it.
+
+- A malformed UTF-8 or JSON payload is warning-logged, acknowledged, and never
+  passed to the handler.
+- A handler exception is recorded in `last_error`, logged with its traceback,
+  and acknowledged without updating `last_message_at`.
+
+Acknowledged failures are **not retained** by Hephaestus. There is no built-in
+dead-letter queue (DLQ), replay store, or operator replay command. Logs and
+`last_error` are observability signals, not durable storage.
+
+Workflows requiring durable processing, audit trails, or operator-driven replay
+must not use this abstraction unchanged. They require a consumer that persists
+the raw message and failure to a DLQ or replay store before acknowledging it.
+Simply withholding acknowledgement is not an adequate substitute because a
+permanently malformed or handler-rejected message can create an unbounded
+poison-message redelivery loop.

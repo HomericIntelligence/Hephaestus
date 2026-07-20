@@ -109,12 +109,17 @@ class NATSSubscriberThread(threading.Thread):
 
     Delivery semantics
     ------------------
-    Messages are acked **unconditionally** after the handler returns, including
-    when the handler raises — this is *at-most-once* delivery by design. A
-    failing handler does NOT trigger JetStream redelivery (which would loop
-    forever on a poison message); instead the exception is recorded in
-    :attr:`last_error` and logged via ``logger.exception``. Handlers needing
-    retry semantics must implement them internally.
+    This subscriber provides best-effort, *at-most-once* handling for
+    non-critical events. Malformed UTF-8 or JSON payloads are warning-logged
+    and acked without invoking the handler. Handler exceptions are recorded in
+    :attr:`last_error`, logged via ``logger.exception``, and acked without
+    updating :attr:`last_message_at`.
+
+    There is no built-in retry, replay store, or DLQ; neither failure class is
+    durably retained after acknowledgement. Workflows requiring durable or
+    auditable processing must use a consumer that persists failures before
+    acknowledging them. Acking failures here prevents poison-message
+    redelivery loops.
 
     Configurable stop timeout
     -------------------------

@@ -251,6 +251,36 @@ def test_both_timeout_aliases_are_caught(exc_type: type[BaseException]) -> None:
     nc.drain.assert_awaited_once()
 
 
+@pytest.mark.parametrize("payload", [b"\xff", b"{not-json"])
+def test_malformed_payload_is_logged_acked_and_not_dispatched(
+    payload: bytes,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Malformed UTF-8/JSON is observed and acked without dispatch."""
+    handler = MagicMock()
+    thread = NATSSubscriberThread(
+        config=NATSConfig(enabled=True, subjects=["hi.tasks.>"]),
+        handler=handler,
+    )
+    msg = _make_msg({})
+    msg.data = payload
+
+    async def next_msg(timeout: float = 0.0) -> MagicMock:
+        thread._stop_event.set()
+        return msg
+
+    caplog.set_level("WARNING", logger="hephaestus.nats.subscriber")
+    nats_module, nc = _install_fake_nats(AsyncMock(side_effect=next_msg))
+    _run_loop(thread, nats_module)
+
+    msg.ack.assert_awaited_once()
+    handler.assert_not_called()
+    assert thread.last_error is None
+    assert thread.last_message_at is None
+    assert "Failed to decode message on hi.tasks.demo (seq=0)" in caplog.text
+    nc.drain.assert_awaited_once()
+
+
 def test_ack_is_awaited_even_when_handler_raises() -> None:
     """A raising handler must NOT block the ack — at-most-once by design (#1551).
 
