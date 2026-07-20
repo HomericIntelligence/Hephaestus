@@ -143,112 +143,10 @@ jobs:
         # `lint` pre-commit hook (uv run mypy hephaestus/ scripts/ tests/).
         run: uv run mypy hephaestus/ scripts/ tests/
 
-  publish-testpypi:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    needs: [resolve-release, test, type-check]
-    environment: testpypi
-    permissions:
-      contents: read
-      id-token: write  # TestPyPI trusted-publisher OIDC
-
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-        with:
-          ref: ${{ needs.resolve-release.outputs.sha }}
-          fetch-depth: 0
-          fetch-tags: true
-          persist-credentials: false
-
-      - name: Setup uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
-        with:
-          enable-cache: false  # release artifacts must not read/write a shared cache (zizmor cache-poisoning)
-
-      - name: Build package
-        shell: bash
-        run: |
-          # This is the only build of the release dist. build-and-publish
-          # downloads the artifact produced here rather than rebuilding, so
-          # the bytes smoke-tested against TestPyPI are byte-identical to
-          # the bytes promoted to production PyPI.
-          #
-          # hatch-vcs derives the version from git; a dirty tree would taint it
-          # with a +dirty/.devN suffix and publish a wrong version.
-          if [ -n "$(git status --porcelain)" ]; then
-            echo "::error::Working tree is dirty — refusing to build"
-            git status --porcelain
-            exit 1
-          fi
-          uv run python -m build
-          ls -1 dist/
-
-      - name: Upload dist for reuse by build-and-publish
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: release-dist
-          path: dist/
-          retention-days: 1
-
-      - name: Publish to TestPyPI
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # release/v1
-        with:
-          repository-url: https://test.pypi.org/legacy/
-          verbose: true
-          # No skip-existing: a re-dispatch for the same tag must publish and
-          # smoke-test THIS run's freshly built dist, not silently pass by
-          # smoke-testing a stale artifact left on TestPyPI from an earlier
-          # partial run. If TestPyPI already has this exact version (e.g. a
-          # re-dispatch after a downstream failure with no code change), this
-          # step fails loudly — the fix is to yank the stale TestPyPI release
-          # or bump the version, not to skip and hope the old upload matches.
-
-      - name: Smoke-install from TestPyPI
-        shell: bash
-        env:
-          TAG: ${{ needs.resolve-release.outputs.tag }}
-        run: |
-          EXPECTED_VERSION="${TAG#v}"
-          uv venv /tmp/testpypi-smoke
-
-          # TestPyPI has an index-propagation delay after a successful upload
-          # before `pip` can resolve the new release. Retry on "no matching
-          # distribution" only; any other pip failure (bad deps, broken wheel)
-          # fails immediately rather than burning the full retry window.
-          ATTEMPTS=10
-          SLEEP_SECONDS=30
-          for i in $(seq 1 "$ATTEMPTS"); do
-            if OUTPUT=$(uv pip install --python /tmp/testpypi-smoke/bin/python --no-cache-dir \
-                --index-url https://test.pypi.org/simple/ \
-                --extra-index-url https://pypi.org/simple/ \
-                "HomericIntelligence-Hephaestus==${EXPECTED_VERSION}" 2>&1); then
-              echo "$OUTPUT"
-              break
-            fi
-            echo "$OUTPUT"
-            if ! echo "$OUTPUT" | grep -qi "no matching distribution\|could not find a version"; then
-              echo "::error::pip install failed for a reason other than index propagation — not retrying"
-              exit 1
-            fi
-            if [ "$i" -eq "$ATTEMPTS" ]; then
-              echo "::error::TestPyPI release ${EXPECTED_VERSION} did not become installable after $((ATTEMPTS * SLEEP_SECONDS))s"
-              exit 1
-            fi
-            echo "Attempt $i/$ATTEMPTS: not yet propagated, retrying in ${SLEEP_SECONDS}s..."
-            sleep "$SLEEP_SECONDS"
-          done
-
-          INSTALLED_VERSION=$(/tmp/testpypi-smoke/bin/python -c "import hephaestus; print(hephaestus.__version__)")
-          if [ "$INSTALLED_VERSION" != "$EXPECTED_VERSION" ]; then
-            echo "::error::TestPyPI smoke-install version mismatch: expected ${EXPECTED_VERSION}, got ${INSTALLED_VERSION}"
-            exit 1
-          fi
-          echo "TestPyPI smoke-install passed: ${INSTALLED_VERSION}"
-
   build-and-publish:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    needs: [resolve-release, test, type-check, publish-testpypi]
+    needs: [resolve-release, test, type-check]
     environment: pypi
     permissions:
       contents: write  # Create GitHub Release / upload assets
@@ -284,11 +182,18 @@ jobs:
           fi
           echo "Version check passed: $TAG_VERSION"
 
-      - name: Download dist built by publish-testpypi
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v6.0.0
-        with:
-          name: release-dist
-          path: dist/
+      - name: Build package
+        shell: bash
+        run: |
+          # hatch-vcs derives the version from git; a dirty tree would taint it
+          # with a +dirty/.devN suffix and publish a wrong version.
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::Working tree is dirty — refusing to build"
+            git status --porcelain
+            exit 1
+          fi
+          uv run python -m build
+          ls -1 dist/
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # release/v1
