@@ -673,6 +673,20 @@ class TestMergeQueueHandling:
         exc.stdout = ""
         assert _is_merge_queue_error(exc) is False
 
+    def test_is_merge_queue_error_requires_405_even_with_matching_text(self) -> None:
+        """The message substring alone must not be enough without the 405 status."""
+        exc = subprocess.CalledProcessError(1, ["gh", "api"])
+        exc.stderr = "gh: validation failed for PR titled 'fix merge queue' (HTTP 422)"
+        exc.stdout = ""
+        assert _is_merge_queue_error(exc) is False
+
+    def test_is_merge_queue_error_requires_marker_even_with_405(self) -> None:
+        """A bare HTTP 405 without the merge-queue phrase must not match."""
+        exc = subprocess.CalledProcessError(1, ["gh", "api"])
+        exc.stderr = "gh: Method Not Allowed (HTTP 405)"
+        exc.stdout = ""
+        assert _is_merge_queue_error(exc) is False
+
     def test_merge_pr_enqueues_when_merge_queue_required(self, monkeypatch) -> None:
         """A 405 merge-queue error falls back to `gh pr merge` and reports queued."""
         calls: list[list[str]] = []

@@ -322,14 +322,18 @@ def _legacy_status_and_log(repo_name: str, head_sha: str) -> str:
 # GitHub returns HTTP 405 with this message from the direct merge API when the
 # base branch is protected by a merge queue: the PR cannot be merged directly and
 # must be enqueued instead. Matched case-insensitively on the message substring so
-# a wording change in the surrounding text does not break detection.
+# a wording change in the surrounding text does not break detection. Gated on the
+# "(HTTP 405)" marker `gh` appends to stderr so an unrelated failure whose message
+# happens to mention "merge queue" (e.g. in a PR title or comment echoed back by
+# the API) is not misclassified as the queue-required case.
 _MERGE_QUEUE_REQUIRED_MARKER = "merge queue"
+_HTTP_405_MARKER = "(http 405)"
 
 
 def _is_merge_queue_error(exc: subprocess.CalledProcessError) -> bool:
     """Return whether a failed direct-merge call means the repo uses a merge queue."""
     blob = f"{getattr(exc, 'stderr', '') or ''}{getattr(exc, 'stdout', '') or ''}".lower()
-    return _MERGE_QUEUE_REQUIRED_MARKER in blob
+    return _MERGE_QUEUE_REQUIRED_MARKER in blob and _HTTP_405_MARKER in blob
 
 
 def _enqueue_pr(repo_name: str, pr_number: int) -> dict[str, Any]:
