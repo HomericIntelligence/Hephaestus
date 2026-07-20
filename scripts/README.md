@@ -31,6 +31,9 @@ through installed `hephaestus-*` console scripts.
   `.heph-private-denylist` in tracked/staged files, without echoing values.
 - **`check_security_policy_no_hardcoded_date.py`** — Reject hard-coded
   `As of YYYY-MM-DD` stamps in `SECURITY.md` (issue #730).
+- **`check_security_version_consistency.py`** — Keep `SECURITY.md`'s
+  supported-versions table anchored to the latest `vX.Y.Z` git tag (with a
+  48h grace period after a fresh tag before it's enforced).
 
 ### Operations
 
