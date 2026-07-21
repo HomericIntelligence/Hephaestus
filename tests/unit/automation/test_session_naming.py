@@ -323,6 +323,29 @@ class TestSessionTranscriptResolver:
             assert resolve_session_jsonl_path(sid, repo_root) == transcript
             assert resolve_session_jsonl_path(sid, worktree) == transcript
 
+    def test_root_transcript_allows_removed_worktree_cwd(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A root-held transcript survives replacement of its recorded worktree."""
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        repo_root = tmp_path / "owner" / "Repo"
+        removed_worktree = repo_root / "build" / ".worktrees" / "issue-2284-a"
+        replacement_worktree = repo_root / "build" / ".worktrees" / "issue-2284-c"
+        removed_worktree.mkdir(parents=True)
+        replacement_worktree.mkdir(parents=True)
+        sid = session_uuid("Repo", 2284, AGENT_PLAN_REVIEWER, "fable")
+        transcript = session_jsonl_path(sid, repo_root)
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text(f'{{"cwd": "{removed_worktree.resolve()}"}}\n', encoding="utf-8")
+        removed_worktree.rmdir()
+
+        with patch.object(
+            agent_config,
+            "_registered_worktree_roots",
+            return_value=(repo_root.resolve(), replacement_worktree.resolve()),
+        ):
+            assert resolve_session_jsonl_path(sid, replacement_worktree) == transcript
+
     def test_unrelated_checkout_transcript_is_ignored(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
