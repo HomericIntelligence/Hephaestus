@@ -13,7 +13,7 @@ import pytest
 from hephaestus.automation.auto_merge_coordinator import AutoMergeCoordinator
 from hephaestus.automation.ci_run_coordinator import CIDriveRunCoordinator
 from hephaestus.automation.git_utils import pr_ref
-from hephaestus.automation.models import CIDriverOptions
+from hephaestus.automation.models import CIDriverOptions, WorkerResult
 
 
 def _coordinator(gh_call: Any, gh_pr_state: Any, *, dry_run: bool = False) -> AutoMergeCoordinator:
@@ -34,6 +34,52 @@ def _coordinator(gh_call: Any, gh_pr_state: Any, *, dry_run: bool = False) -> Au
         attempt_mechanical_rebase=lambda _issue_number, _pr_number, _slot: False,
         recheck_and_arm_after_fix=lambda *_args, **_kwargs: None,
     )
+
+
+def test_wait_for_pr_terminal_routes_any_failed_required_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed required check is actionable regardless of its historical name."""
+    monkeypatch.setenv("HEPH_PR_MERGE_MAX_WAIT", "0")
+    coordinator = _coordinator(
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+        lambda _pr_number: {"state": "OPEN", "mergeStateStatus": "BLOCKED"},
+    )
+    coordinator._failing_required_check_names = lambda _pr_number: ["auto-merge-policy"]
+
+    assert coordinator.wait_for_pr_terminal(7, 42) == "FAILING"
+
+
+def test_handle_failing_pr_routes_any_failed_required_check_to_fix_flow() -> None:
+    """The former advisory job's failure follows the ordinary CI-fix path."""
+    calls: list[tuple[int, int, int]] = []
+    expected = WorkerResult(issue_number=7, success=False, pr_number=42, error="fix failed")
+
+    def attempt_ci_fixes(issue: int, pr: int, slot: int) -> WorkerResult:
+        calls.append((issue, pr, slot))
+        return expected
+
+    coordinator = CIDriveRunCoordinator(
+        options_provider=lambda: SimpleNamespace(max_fix_iterations=1),
+        worktree_manager=SimpleNamespace(),
+        status_tracker=SimpleNamespace(),
+        discovery=SimpleNamespace(),
+        check_inspector=SimpleNamespace(),
+        fix_flow=SimpleNamespace(attempt_ci_fixes=attempt_ci_fixes),
+        auto_merge=SimpleNamespace(),
+        arming=SimpleNamespace(),
+        set_shared_pr_issues=lambda _shared: None,
+    )
+
+    result = coordinator.handle_failing_pr(
+        7,
+        42,
+        0,
+        [{"name": "auto-merge-policy", "conclusion": "failure"}],
+    )
+
+    assert calls == [(7, 42, 0)]
+    assert result is expected
 
 
 def test_legacy_open_pr_sweep_disables_prearmed_auto_merge() -> None:

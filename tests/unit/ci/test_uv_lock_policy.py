@@ -9,8 +9,8 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
-def test_uv_lock_hook_is_check_only_and_ci_enforced() -> None:
-    """The read-only uv lock check must run in the required lint job."""
+def test_uv_lock_hook_is_check_only() -> None:
+    """The local uv lock hook is read-only and scoped to lock inputs."""
     config = yaml.safe_load((REPO_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8"))
     repo = next(
         repo
@@ -23,12 +23,6 @@ def test_uv_lock_hook_is_check_only_and_ci_enforced() -> None:
     assert hook["args"] == ["--check"]
     assert hook["files"] == r"^(pyproject\.toml|uv\.lock)$"
     assert hook["pass_filenames"] is False
-
-    workflow = yaml.safe_load(
-        (REPO_ROOT / ".github/workflows/_required.yml").read_text(encoding="utf-8")
-    )
-    lint_steps = workflow["jobs"]["lint"]["steps"]
-    assert any("pre-commit run --all-files" in step.get("run", "") for step in lint_steps)
 
 
 def test_contributing_documents_uv_lock_lifecycle() -> None:

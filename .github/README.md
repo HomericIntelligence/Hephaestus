@@ -43,12 +43,12 @@ Builds and publishes the package to PyPI on version tag push (`v*`).
 
 The consolidated required-status-check gate that runs on every pull request to
 `main` (and on push to `main`). It aggregates lint, `uv-lock-check`,
-shellcheck, the `pr-policy` gate (enforces `Closes #N` and signed commits),
-unit/integration/shell tests, wheel build, security scans (pip-audit, Gitleaks,
-bandit), workflow-schema validation, and version-sync. It also runs the
-advisory `auto-merge-policy` job. It is intentionally **not** a required
-check: the automation loop runs `$athena:pr-review`, owns the
-`state:implementation-go` label. `merge_wait` may then make a bounded sequence
+shellcheck, the `pr-policy` gate (enforces `Closes #N`, Conventional Commit
+subjects, and DCO trailers), unit/integration/shell tests, wheel build,
+security scans (pip-audit, Gitleaks, bandit), workflow-schema validation, and
+version-sync. Cryptographic commit signatures are enforced by the active
+`homeric-main-baseline` ruleset. The automation loop runs `$athena:pr-review`
+and owns the `state:implementation-go` label. `merge_wait` may then make a bounded sequence
 (default: five) of individual SHA-conditional ordinary REST squash-merge
 requests. Every request has fresh reviewed-head, open-`main`, unarmed, and
 exclusive-label admission; only retryable HTTP 405 readiness and unresolved

@@ -4,8 +4,9 @@ r"""Validate that a commit message carries a DCO Signed-off-by trailer.
 Enforces the Developer Certificate of Origin requirement documented in
 CONTRIBUTING.md ("Developer Certificate of Origin (DCO)"): every commit must
 include a Signed-off-by: Name <email> trailer (added by ``git commit -s``).
-This is distinct from, and additional to, the cryptographic ``-S`` signature
-that ``pr-policy`` Check 2 enforces.
+This is distinct from the cryptographic ``-S`` signature enforced by the
+``homeric-main-baseline`` ruleset. The local hook and ``pr-policy`` Check 3
+enforce DCO.
 
 Used by both the local ``commit-msg`` pre-commit hook (the message file path is
 passed as argv[0]) and the ``pr-policy`` CI job (full commit messages are piped

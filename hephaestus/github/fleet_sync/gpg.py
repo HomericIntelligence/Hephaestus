@@ -59,7 +59,7 @@ def _validate_resign_email(email: str) -> str:
             f"fleet_sync: resign email {email!r} is not a UID on the configured "
             f"GPG signing key (key UIDs: {key_emails or 'none'}). Re-signing with "
             "this email would produce commits GitHub marks unverified, failing the "
-            "pr-policy 'every commit is signed' check at merge. Set FLEET_GIT_EMAIL "
+            "homeric-main-baseline required-signatures rule at merge. Set FLEET_GIT_EMAIL "
             "(or git config user.email) to an address on the signing key, or set "
             "FLEET_SKIP_EMAIL_KEY_CHECK=1 to bypass."
         )

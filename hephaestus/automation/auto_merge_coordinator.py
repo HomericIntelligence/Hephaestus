@@ -18,13 +18,7 @@ from .pr_manager import pr_has_implementation_go_label
 
 logger = logging.getLogger(__name__)
 
-AUTO_MERGE_POLICY_CHECK = "auto-merge-policy"
 TerminalOutcome = Literal["MERGED", "CLOSED", "FAILING", "DIRTY", "BLOCKED", "TIMEOUT"]
-
-
-def without_auto_merge_policy(check_names: list[str]) -> list[str]:
-    """Return failing checks that can plausibly be fixed by a CI-fix agent."""
-    return [name for name in check_names if name != AUTO_MERGE_POLICY_CHECK]
 
 
 class AutoMergeCoordinator:
@@ -141,13 +135,12 @@ class AutoMergeCoordinator:
                 logger.info("Issue #%s: PR #%s closed without merging", issue_number, pr_number)
                 return "CLOSED"
             failing = self._failing_required_check_names(pr_number)
-            fixable_failing = without_auto_merge_policy(failing)
-            if fixable_failing:
+            if failing:
                 logger.warning(
                     "Issue #%s: PR #%s went red while awaiting merge (failing: %s)",
                     issue_number,
                     pr_number,
-                    ", ".join(fixable_failing),
+                    ", ".join(failing),
                 )
                 return "FAILING"
             merge_status = ((gh_state or {}).get("mergeStateStatus") or "").upper()
@@ -159,7 +152,6 @@ class AutoMergeCoordinator:
                     merge_status,
                 )
                 return "DIRTY"
-            policy_only_failure = bool(failing) and not fixable_failing
             if merge_status == "BLOCKED" and not failing:
                 pending = self._pending_required_check_names(pr_number)
                 if not pending:
@@ -169,12 +161,6 @@ class AutoMergeCoordinator:
                         pr_number,
                     )
                     return "BLOCKED"
-            if merge_status == "BLOCKED" and policy_only_failure:
-                logger.info(
-                    "Issue #%s: PR #%s is BLOCKED only by auto-merge-policy",
-                    issue_number,
-                    pr_number,
-                )
             sleep_secs = min(2**attempt, 60)
             if elapsed + sleep_secs > max_wait:
                 logger.warning(

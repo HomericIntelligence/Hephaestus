@@ -13,9 +13,9 @@ A piece of work is **done** when every item below is true.
 |---|-------------|-------------|
 | 1 | Branch named `<issue-number>-<description>` | Convention (PR reviewer) |
 | 2 | PR body contains the literal line `Closes #<issue-number>` (capital C, no colon, on its own line) | CI gate `pr-policy` (`.github/workflows/_required.yml`) |
-| 3 | Every commit on the branch is cryptographically signed and DCO-signed (`git commit -S -s`) | CI gate `pr-policy` |
-| 4 | `pr_review` writes loop-owned `state:implementation-go` only after a structural audit and fresh GitHub facts confirm the exact open, unarmed reviewed head, complete thread state, and exclusive-label readback. Review prose, grades, and GO-shaped output are audit evidence only. The durable label is the sole implementation-state authority. `merge_wait` observes operational readiness for up to 15 minutes before a request, but readiness never authorizes merging. Immediately before each individual SHA-conditional ordinary REST squash-merge request, it revalidates the same open `main` PR, confirmed-unarmed state, exclusive label, threads, and protection. The merge budget (default: five) bounds actual requests and transport-ambiguity retries, not readiness polling. No queue stage uses `gh pr merge`, mutates native auto-merge, manages a merge queue, or bypasses protection. | Queue gate; advisory `auto-merge-policy` and human review |
-| 5 | Commit messages follow Conventional Commits (`type(scope): description`) | CI gate `pr-policy` (Check 3) + local `commit-msg` hook `conventional-commit-msg` |
+| 3 | Every commit on the branch is cryptographically signed and DCO-signed (`git commit -S -s`) | `homeric-main-baseline` ruleset (`required_signatures`) + CI `pr-policy` DCO check |
+| 4 | `pr_review` writes loop-owned `state:implementation-go` only after a structural audit and fresh GitHub facts confirm the exact open, unarmed reviewed head, complete thread state, and exclusive-label readback. Review prose, grades, and GO-shaped output are audit evidence only. The durable label is the sole implementation-state authority. `merge_wait` observes operational readiness for up to 15 minutes before a request, but readiness never authorizes merging. Immediately before each individual SHA-conditional ordinary REST squash-merge request, it revalidates the same open `main` PR, confirmed-unarmed state, exclusive label, threads, and protection. The merge budget (default: five) bounds actual requests and transport-ambiguity retries, not readiness polling. No queue stage uses `gh pr merge`, mutates native auto-merge, manages a merge queue, or bypasses protection. | Queue gate and human review |
+| 5 | Commit messages follow Conventional Commits (`type(scope): description`) | CI gate `pr-policy` (Check 2) + local `commit-msg` hook `conventional-commit-msg` |
 | 6 | `uv run ruff check hephaestus/ tests/` passes | CI job `lint` |
 | 7 | `uv run ruff format --check hephaestus/ tests/` passes (no files would be reformatted) | CI job `lint` |
 | 8 | `uv run mypy hephaestus/ scripts/ tests/` returns `Success: no issues found in N source files` | CI job `lint` |
@@ -38,7 +38,7 @@ A piece of work is **done** when every item below is true.
 > protection contexts (`required-checks-gate` and the two Python 3.12 matrix
 > contexts) and the direct GitHub ruleset contexts documented in
 > [`docs/ci/required-checks.md`](ci/required-checks.md) do. The aggregate gate
-> excludes advisory `auto-merge-policy`. Review output is audit evidence only;
+> Review output is audit evidence only;
 > the durable `state:implementation-go` label is the sole implementation-state
 > authority, and `merge_wait` additionally requires its current-process
 > reviewed-head proof before conditional merge admission. Reporting checks do

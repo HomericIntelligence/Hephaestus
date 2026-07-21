@@ -10,10 +10,6 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, cast
 
 from ._review_utils import drain_completed_futures, print_worker_summary
-from .auto_merge_coordinator import (
-    AUTO_MERGE_POLICY_CHECK,
-    without_auto_merge_policy,
-)
 from .git_utils import issue_ref, pr_ref
 from .models import WorkerResult
 
@@ -80,22 +76,18 @@ class PrMergeState(enum.Enum):
 def classify_pr_merge_state(
     gh_state: dict[str, Any] | None,
     failing: list[str],
-    fixable_failing: list[str],
     pending: list[str],
 ) -> PrMergeState:
     """Branch logic of _wait_for_pr_terminal (issue #1816), no sleep/no I/O.
 
-    Mirrors ci_driver.py:1515-1582 exactly. The policy-only-failure logging
-    branch (:1575-1582) is intentionally omitted: it only logs and does NOT
-    change the returned state (falls through to PENDING either way), so
-    dropping it preserves behavior — verified against ci_driver.py:1575-1582.
+    A completed failed required check is actionable regardless of its name.
     """
     state = ((gh_state or {}).get("state") or "").upper()
     if state == "MERGED":
         return PrMergeState.MERGED
     if state == "CLOSED":
         return PrMergeState.CLOSED
-    if fixable_failing:
+    if failing:
         return PrMergeState.FAILING
     merge_status = ((gh_state or {}).get("mergeStateStatus") or "").upper()
     if merge_status in ("DIRTY", "CONFLICTING"):
@@ -334,15 +326,6 @@ class CIDriveRunCoordinator:
         failing = [c for c in required_checks if c.get("conclusion") == "failure"]
         if not failing:
             return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
-        failing_names = [str(c.get("name") or "") for c in failing]
-        fixable_names = without_auto_merge_policy(failing_names)
-        if not fixable_names and AUTO_MERGE_POLICY_CHECK in failing_names:
-            if not self._auto_merge.pr_has_implementation_go(pr_number):
-                return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
-            return cast(
-                WorkerResult,
-                self._auto_merge.arm_and_wait_for_merge(issue_number, pr_number, acquired_slot),
-            )
         fix_result = cast(
             WorkerResult | None,
             self._fix_flow.attempt_ci_fixes(issue_number, pr_number, acquired_slot),
