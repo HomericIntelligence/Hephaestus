@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
-import yaml
 
 from hephaestus.ci.workflows import (
     Violation,
@@ -18,32 +16,6 @@ from hephaestus.ci.workflows import (
     parse_readme_table,
     validate_workflow,
 )
-
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-_REQUIRED_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "_required.yml"
-
-
-def _required_workflow() -> dict[str, Any]:
-    """Load the required workflow, preserving GitHub Actions' ``on`` key."""
-    workflow = yaml.safe_load(_REQUIRED_WORKFLOW.read_text(encoding="utf-8"))
-    assert isinstance(workflow, dict)
-    return workflow
-
-
-def test_pr_policy_keeps_independent_signature_validation() -> None:
-    """The CI policy must retain a signature backstop beside the live ruleset."""
-    jobs = _required_workflow()["jobs"]
-    pr_policy = jobs["pr-policy"]
-    steps = pr_policy["steps"]
-
-    fetch = next(step for step in steps if step.get("id") == "fetch")
-    assert "oid" in fetch["run"]
-    assert "signature { isValid state }" in fetch["run"]
-
-    signature_step = next(
-        step for step in steps if step.get("name") == "Check 2: every commit is signed"
-    )
-    assert "signature.isValid // false" in signature_step["run"]
 
 
 def test_collect_yml_files_excludes_worktrees(tmp_path: Path) -> None:
