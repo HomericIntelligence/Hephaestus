@@ -13,7 +13,7 @@ class TestFindHardcodedDates:
 
     def test_returns_empty_when_no_date(self, tmp_path: Path) -> None:
         f = tmp_path / "SECURITY.md"
-        f.write_text("# Security Policy\n\nAs of the 0.9.x release line.\n")
+        f.write_text("# Security Policy\n\nThis policy applies to the latest release.\n")
         assert find_hardcoded_dates(f) == []
 
     def test_flags_iso_date_in_as_of_line(self, tmp_path: Path) -> None:
