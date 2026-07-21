@@ -71,7 +71,7 @@ Agent skills are supplied by the Athena plugins enabled in
 lowercase_snake_case.
 
 The product layer resides in `hephaestus/automation/`, and its mirrored unit
-tests reside in `tests/unit/`.
+tests reside in `tests/unit/automation/`.
 
 ## Library vs product layer
 
