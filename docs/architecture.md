@@ -970,8 +970,9 @@ pipeline stage and act as the **sole authority** for
 **Pre-conditions.** Item has an `issue` AND a `pr` number; otherwise
 fail back to implementation via [`_fail_back_agent_error`](hephaestus/automation/pipeline/stages/pr_review.py).
 **States.** `ENTER → REVIEW_WAIT → VALIDATE_WAIT → POST →
-DIFFICULTY_WAIT → ADDRESS_WAIT → PUSH_WAIT → EVAL → (loop or
-FOLLOWUP_WAIT → PR_FINISH) or ADVANCE to`merge_wait`.
+DIFFICULTY_WAIT → ADDRESS_WAIT → PUSH_WAIT → EVAL →
+COMPACT_WRITER_WAIT → REVIEW_WAIT` (retry loop), or ADVANCE to
+`merge_wait`.
 
 #### on_enter [M]
 
@@ -991,6 +992,11 @@ Clear all round-scoped payload
 so a failed later round can never replay an earlier round's results.
 Submit `AgentJob` with
 [`get_pr_review_analysis_prompt`](hephaestus/automation/prompts/pr_review.py)
+
+- The reviewer session token is `reviewer_agent(AGENT_PR_REVIEWER, round)`.
+  It is new for every round so a reviewer cannot inherit its own prior
+  verdict. `VALIDATE_WAIT` reuses that same round token only to validate the
+  review it just produced.
 
 - `parse=parse_review_verdict`. Reviewer text lands in
 `payload["review_verdict"]`; raw review text in `payload["review_text"]`.
@@ -1042,6 +1048,17 @@ delegates the durable log write to [`_persist_address_fix_log`](hephaestus/autom
 "real-commit gate" (#1575): the `value` returned flags no-commit vs.
 real-commit.
 
+#### COMPACT_WRITER_WAIT [W:C]
+
+On a retryable non-GO result, a Claude-backed item with a worktree submits a
+best-effort `CompactJob` for the resumable writer session before the next
+`REVIEW_WAIT`: the implementer for a pipeline-created PR, or the
+address-review writer for an adopted PR. The job sends `/compact` with the
+writer's implementation model and always continues to review, including when
+the session does not exist or compaction fails. Reviewer sessions are not
+compacted because they are deliberately new per round. Codex has no resumable
+multi-turn session and therefore bypasses this state directly to `REVIEW_WAIT`.
+
 #### EVAL [M]
 
 [`PrReviewStage._eval`](hephaestus/automation/pipeline/stages/pr_review.py) implements
@@ -1071,7 +1088,8 @@ The gate logic at [`PrReviewStage._eval`](hephaestus/automation/pipeline/stages/
 3. **Real NOGO/AMBIGUOUS round** → apply
  `state:implementation-no-go` (non-fatal pair write under
  [`PostReviewManager`](hephaestus/automation/pipeline/stages/pr_review.py)),
- bump round counters, RETRY loop. cap exhaustion → `SKIP` with
+ bump round counters, compact the resumable writer where applicable, then
+ re-review. cap exhaustion → `SKIP` with
  `state:skip` durable write.
 4. **GO round** → check the (blocking, minor, human) triple:
 

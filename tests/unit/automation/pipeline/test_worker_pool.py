@@ -22,6 +22,7 @@ from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.jobs import (
     AgentJob,
     BuildTestJob,
+    CompactJob,
     GitJob,
     JobHandle,
     JobResult,
@@ -148,6 +149,35 @@ class TestWorkerPoolSubmitComplete:
         assert handle.on_done_state == StageName.IMPLEMENTATION
         assert result.ok is True
         assert "Test output" in str(result.value)
+
+    def test_compact_job_is_best_effort_and_returns_its_result(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+    ) -> None:
+        """A failed /compact never blocks the next review round."""
+        job = CompactJob(
+            repo="test/repo",
+            issue=123,
+            session_agent="implementer",
+            model="claude-haiku-4-5",
+            cwd=Path("/tmp"),
+            timeout_s=60,
+        )
+        with patch(f"{_WP}.compact_session", return_value=False) as compact:
+            pool.submit(job, StageName.PR_REVIEW)
+            _handle, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        assert result.value is False
+        compact.assert_called_once_with(
+            repo="test/repo",
+            issue=123,
+            agent="implementer",
+            cwd=Path("/tmp"),
+            timeout=60,
+            model="claude-haiku-4-5",
+        )
 
     def test_submit_and_complete_non_claude_agent_job(
         self,

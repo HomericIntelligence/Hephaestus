@@ -1,4 +1,4 @@
-"""Worker pool: the only place agent, build/test, and git/network work runs.
+"""Worker pool: the only place agent, build/test, git, and session work runs.
 
 The coordinator submits frozen jobs and drains ``(handle, result)`` tuples from
 the completion queue. Workers never touch WorkItems or stage queues and never
@@ -20,10 +20,12 @@ from pathlib import Path
 
 from hephaestus.agents.runtime import resolve_agent, run_agent_session
 from hephaestus.automation import claude_invoke, git_utils, subprocess_registry
+from hephaestus.automation.learn import compact_session
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.jobs import (
     AgentJob,
     BuildTestJob,
+    CompactJob,
     GitJob,
     JobHandle,
     JobResult,
@@ -191,7 +193,7 @@ class WorkerPool:
 
     def submit(
         self,
-        job: AgentJob | BuildTestJob | GitJob,
+        job: AgentJob | BuildTestJob | GitJob | CompactJob,
         on_done_state: str | StageName,
         *,
         claim_key: str = "",
@@ -281,7 +283,7 @@ class WorkerPool:
 
     def _run(
         self,
-        job: AgentJob | BuildTestJob | GitJob,
+        job: AgentJob | BuildTestJob | GitJob | CompactJob,
         claim_key: str = "",
         claim_stage: str = "",
     ) -> JobResult:
@@ -321,6 +323,8 @@ class WorkerPool:
                     result = self._run_build_test(job)
                 elif isinstance(job, GitJob):
                     result = self._run_git(job)
+                elif isinstance(job, CompactJob):
+                    result = self._run_compact(job)
                 else:
                     raise TypeError(f"unknown job type {type(job)}")
             except (KeyboardInterrupt, SystemExit, GeneratorExit) as exc:
@@ -463,6 +467,21 @@ class WorkerPool:
                 ok=False,
                 error=f"{type(exc).__name__}: {exc!s}"[:_ERR_MAX],
             )
+
+    @staticmethod
+    def _run_compact(job: CompactJob) -> JobResult:
+        """Compact a Claude session without making compaction a hard gate."""
+        compacted = compact_session(
+            repo=job.repo,
+            issue=job.issue,
+            agent=job.session_agent,
+            cwd=job.cwd,
+            timeout=job.timeout_s,
+            model=job.model,
+        )
+        # ``compact_session`` intentionally swallows expected failures; a
+        # missing or uncompactable transcript must not stall a review cycle.
+        return JobResult(ok=True, value=compacted)
 
     def _run_build_test(self, job: BuildTestJob) -> JobResult:
         """Run a build/test job (subprocess with argv)."""

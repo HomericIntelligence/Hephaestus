@@ -90,6 +90,25 @@ class GitJob:
 
 
 @dataclass(frozen=True)
+class CompactJob:
+    """Best-effort compaction of one resumable Claude session.
+
+    ``CompactJob`` is deliberately distinct from :class:`AgentJob`: it sends
+    the Claude CLI's built-in ``/compact`` command to an existing session and
+    never runs an implementation or review prompt.  Stages only create it for
+    the Claude provider; direct-agent runtimes have no resumable session.
+    """
+
+    repo: str
+    issue: int | str
+    session_agent: str
+    model: str
+    cwd: Path
+    timeout_s: int
+    descr: str = "compact_session"
+
+
+@dataclass(frozen=True)
 class JobResult:
     """Result of a completed job."""
 
@@ -115,5 +134,5 @@ class JobHandle:
     never break hashing.
     """
 
-    job: AgentJob | BuildTestJob | GitJob
+    job: AgentJob | BuildTestJob | GitJob | CompactJob
     on_done_state: str | StageName
