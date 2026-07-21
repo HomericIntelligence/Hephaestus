@@ -70,6 +70,9 @@ Agent skills are supplied by the Athena plugins enabled in
 (`code-review`, `git-worktrees`). All Python packages use
 lowercase_snake_case.
 
+The product layer resides in `hephaestus/automation/`, and its mirrored unit
+tests reside in `tests/unit/automation/`.
+
 ## Library vs product layer
 
 `hephaestus/automation/` is a **product layer** (26.1k LoC, 53.9% of the

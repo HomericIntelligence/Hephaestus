@@ -2,7 +2,7 @@ r"""Guard: every coverage-omitted automation module must be unit-tested.
 
 The automation modules in pyproject.toml[tool.coverage.run].omit are excluded
 from coverage because their orchestration loops need a live claude/gh CLI. The
-contract (documented in CLAUDE.md and the pyproject comment) is that each
+contract (documented in AGENTS.md and the pyproject comment) is that each
 module's pure-function helpers ARE unit-tested in tests/unit/automation/.
 
 test_omit_allowlist.py freezes the *membership* of that list; this module

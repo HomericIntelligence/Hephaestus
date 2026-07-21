@@ -2,7 +2,7 @@
 """Reject tracked files under ``build/``.
 
 ``build/`` is the sanctioned, gitignored scratch location for the automation
-loop (see ``hephaestus/automation/loop_runner.py`` and CLAUDE.md). Its name
+loop (see ``hephaestus/automation/loop_runner.py`` and AGENTS.md). Its name
 collides with the packaging-output convention, so a stray ``git add build/...``
 or a widened sdist allowlist could sweep automation logs into a distribution
 (issue #1214). This guard hard-fails if anything becomes tracked under

@@ -146,7 +146,7 @@ def extract_cov_fail_under_from_addopts(repo_root: Path) -> int | None:
     return None
 
 
-def check_claude_md_threshold(repo_root: Path, expected: int) -> list[str]:
+def check_agents_md_threshold(repo_root: Path, expected: int) -> list[str]:
     """Check that AGENTS.md documents the correct coverage threshold.
 
     Searches for ``<N>%+ test coverage`` (or ``<N>% test coverage``) and verifies
@@ -181,6 +181,11 @@ def check_claude_md_threshold(repo_root: Path, expected: int) -> list[str]:
                 f"AGENTS.md says {found}%, pyproject.toml says {expected}%"
             )
     return errors
+
+
+def check_claude_md_threshold(repo_root: Path, expected: int) -> list[str]:
+    """Compatibility alias for :func:`check_agents_md_threshold`."""
+    return check_agents_md_threshold(repo_root, expected)
 
 
 def check_dod_threshold(repo_root: Path, expected: int) -> list[str]:
@@ -403,7 +408,7 @@ def _run_threshold_check(repo_root: Path, expected: int, verbose: bool) -> list[
         List of error strings (empty if passing).
 
     """
-    errors = check_claude_md_threshold(repo_root, expected)
+    errors = check_agents_md_threshold(repo_root, expected)
     errors += check_dod_threshold(repo_root, expected)
     if not errors and verbose:
         print(
@@ -510,7 +515,7 @@ def main() -> int:
     if args.json:
         expected_threshold = load_coverage_threshold(repo_root)
         all_errors: list[str] = []
-        all_errors.extend(check_claude_md_threshold(repo_root, expected_threshold))
+        all_errors.extend(check_agents_md_threshold(repo_root, expected_threshold))
         all_errors.extend(check_dod_threshold(repo_root, expected_threshold))
         cov_path = extract_cov_path(repo_root)
         all_errors.extend(check_readme_cov_path(repo_root, cov_path))

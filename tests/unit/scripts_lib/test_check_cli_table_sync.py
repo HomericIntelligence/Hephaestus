@@ -71,3 +71,14 @@ def test_docs_reference_to_unknown_command_is_reported(tmp_path: Path) -> None:
         "docs/runbook.md: references `hephaestus-ghost-command` "
         "which is not in pyproject.toml [project.scripts]"
     ]
+
+
+def test_docs_reference_check_scans_agents_md(tmp_path: Path) -> None:
+    """The canonical agent contract is included in command-reference checks."""
+    (tmp_path / "README.md").write_text("", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("Run `hephaestus-ghost-command`.\n", encoding="utf-8")
+
+    assert mod.check_docs_command_references(tmp_path, {"hephaestus-real"}) == [
+        "AGENTS.md: references `hephaestus-ghost-command` "
+        "which is not in pyproject.toml [project.scripts]"
+    ]

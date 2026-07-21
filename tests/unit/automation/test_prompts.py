@@ -640,7 +640,7 @@ class TestSharedRubricConstants:
     """
 
     def test_seven_principles_block_has_all_seven(self) -> None:
-        """All seven CLAUDE.md principles must appear as named graded dimensions."""
+        """All seven AGENTS.md principles must appear as named graded dimensions."""
         block = prompts._SEVEN_PRINCIPLES_DIMENSIONS
         for marker in (
             "P1 — KISS",
