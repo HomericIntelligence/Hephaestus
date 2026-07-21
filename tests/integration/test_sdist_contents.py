@@ -25,6 +25,14 @@ REQUIRED_TOP_LEVEL_FILES = {
     "pyproject.toml",
 }
 
+PROMPT_TEMPLATE_PREFIX = "hephaestus/prompts/templates/default/"
+
+
+def _source_prompt_templates() -> set[str]:
+    """Return repository-relative names of every default prompt template."""
+    template_root = REPO_ROOT / PROMPT_TEMPLATE_PREFIX
+    return {path.relative_to(REPO_ROOT).as_posix() for path in template_root.rglob("*.j2")}
+
 
 def _dependency_name(requirement: str) -> str:
     """Return the normalized package name from a simple requirement string."""
@@ -51,8 +59,8 @@ def test_dev_group_includes_build_backend_for_no_isolation_sdist() -> None:
 
 
 @pytest.mark.integration
-def test_sdist_includes_notice_and_compatibility(tmp_path: Path) -> None:
-    """Building the sdist must include NOTICE and COMPATIBILITY.md (issue #765)."""
+def test_sdist_includes_notice_compatibility_and_prompt_templates(tmp_path: Path) -> None:
+    """Building the sdist must include metadata and all default prompts."""
     probe = subprocess.run(
         [sys.executable, "-m", "build", "--help"],
         cwd=REPO_ROOT.parent,
@@ -85,12 +93,21 @@ def test_sdist_includes_notice_and_compatibility(tmp_path: Path) -> None:
 
     with tarfile.open(sdists[0], "r:gz") as tf:
         # sdist members are prefixed with "<name>-<version>/"; strip the prefix.
-        top_level = {
-            Path(m.name).parts[1]
-            for m in tf.getmembers()
-            if len(Path(m.name).parts) == 2 and m.isfile()
+        members = {
+            member.name.split("/", 1)[1]
+            for member in tf.getmembers()
+            if member.isfile() and "/" in member.name
         }
+
+    top_level = {name for name in members if "/" not in name}
 
     missing = REQUIRED_TOP_LEVEL_FILES - top_level
     assert not missing, f"sdist is missing required files: {sorted(missing)}"
     assert len(top_level) > 3, f"suspiciously few top-level files: {top_level}"
+
+    expected_templates = _source_prompt_templates()
+    actual_templates = {
+        name for name in members if name.startswith(PROMPT_TEMPLATE_PREFIX) and name.endswith(".j2")
+    }
+    assert expected_templates, "source prompt catalog is empty"
+    assert actual_templates == expected_templates

@@ -28,6 +28,13 @@ EXPECTED_PACKAGE_FILES = {
 }
 
 FORBIDDEN_PREFIXES = ("tests/", "scripts/", "docs/", ".github/", ".claude/")
+PROMPT_TEMPLATE_PREFIX = "hephaestus/prompts/templates/default/"
+
+
+def _source_prompt_templates() -> set[str]:
+    """Return repository-relative names of every default prompt template."""
+    template_root = REPO_ROOT / PROMPT_TEMPLATE_PREFIX
+    return {path.relative_to(REPO_ROOT).as_posix() for path in template_root.rglob("*.j2")}
 
 
 @pytest.fixture(scope="module")
@@ -93,6 +100,20 @@ def test_wheel_excludes_repo_scaffolding(wheel_path: Path) -> None:
     """Only the hephaestus package ships — no tests, scripts, docs, or CI config."""
     offenders = [m for m in _members(wheel_path) if m.startswith(FORBIDDEN_PREFIXES)]
     assert not offenders, f"wheel leaked repo scaffolding: {offenders}"
+
+
+@pytest.mark.integration
+def test_wheel_contains_all_default_prompt_templates(wheel_path: Path) -> None:
+    """Every source default prompt ships in the distributable wheel."""
+    expected_templates = _source_prompt_templates()
+    actual_templates = {
+        name
+        for name in _members(wheel_path)
+        if name.startswith(PROMPT_TEMPLATE_PREFIX) and name.endswith(".j2")
+    }
+
+    assert expected_templates, "source prompt catalog is empty"
+    assert actual_templates == expected_templates
 
 
 @pytest.mark.integration
