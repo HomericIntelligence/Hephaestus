@@ -114,7 +114,6 @@ Examples:
             "Suppress GitHub writes and git pushes (no comments, no merges, no pushes)."
         ),
         add_no_ui=True,
-        add_version=False,
     )
 
     parser.add_argument(

@@ -460,6 +460,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
         ),
         *_github_throttle_specs(),
         _json_spec(),
+        _version_spec(),
     ),
     "implementer": (
         _action_spec(

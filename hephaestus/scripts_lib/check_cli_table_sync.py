@@ -1,28 +1,19 @@
 #!/usr/bin/env python3
-"""Check that README.md CLI table is in sync with pyproject.toml [project.scripts].
+"""Check that documentation reflects every packaged console script.
 
 This script is wired into pre-commit (see .pre-commit-config.yaml) and runs
-whenever README.md or pyproject.toml changes.  It succeeds silently when the
-README mentions every command declared in [project.scripts] and exits non-zero
-with a clear diff otherwise.
-
-Beyond verifying that every command name appears in README.md, the script also
-verifies the prose counts in ``README.md`` (e.g. "44 console scripts"),
-``COMPATIBILITY.md`` (e.g. "44 console scripts"), and ``docs/index.md`` (e.g.
-"44 CLI entry points") agree with the actual length of ``[project.scripts]``.
-This prevents documentation drift like #857, where README.md claimed 42 and
-docs/index.md claimed 37+ even though the real count was 44, and like #2164,
-where COMPATIBILITY.md claimed 53.
+whenever a guarded documentation surface or pyproject.toml changes. It verifies
+that every declared command has a README reference, that the three documented
+source-derived script counts agree with pyproject.toml, and that every
+backticked ``hephaestus-*`` reference in the guarded docs names a registered
+console script.
 
 Usage:
     python3 -m hephaestus.scripts_lib.check_cli_table_sync
 
 Exit codes:
-    0  All pyproject.toml scripts are documented in README.md AND the prose
-       counts in README.md / COMPATIBILITY.md / docs/index.md match the actual
-       count.
-    1  One or more scripts are missing from the README CLI section OR a prose
-       count is wrong.
+    0  The documented console-script inventory matches pyproject.toml.
+    1  A documented command or source-derived count is out of sync.
 """
 
 from __future__ import annotations
@@ -61,29 +52,21 @@ def _get_tomllib() -> types.ModuleType:
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 README = REPO_ROOT / "README.md"
-DOCS_INDEX = REPO_ROOT / "docs" / "index.md"
 
-# Regex that matches a backtick-quoted command name anywhere in the README.
+# Regex that matches a backtick-quoted command name in a guarded document.
 _BACKTICK_CMD_RE = re.compile(r"`(hephaestus-[a-z0-9-]+)`")
 
-# Regex that matches prose of the form "<N> console scripts" (README.md and
-# COMPATIBILITY.md share this wording).
+# Regexes for source-derived count prose in the public documentation.
 _CONSOLE_SCRIPT_PROSE_RE = re.compile(r"(\d+)\s+console scripts")
-
-# Regex that matches the docs/index.md prose "<N>+? CLI entry points".  The
-# optional ``+`` is intentionally allowed in the pattern so legacy text like
-# "37+" parses cleanly, but the check below treats the bare integer as
-# authoritative.
 _DOCS_INDEX_PROSE_RE = re.compile(r"(\d+)\+?\s+CLI entry points")
 
-# Each guarded document, its prose regex, and the human-readable count label
-# used in mismatch diagnostics.  Extending this tuple is all that is required to
-# guard another prose count.
 _PROSE_COUNT_CHECKS: tuple[tuple[str, re.Pattern[str], str], ...] = (
     ("README.md", _CONSOLE_SCRIPT_PROSE_RE, "console scripts"),
     ("COMPATIBILITY.md", _CONSOLE_SCRIPT_PROSE_RE, "console scripts"),
     ("docs/index.md", _DOCS_INDEX_PROSE_RE, "CLI entry points"),
 )
+
+_DOC_SCAN_GLOBS = ("README.md", "COMPATIBILITY.md", "CLAUDE.md", "docs/**/*.md")
 
 
 def _load_scripts(repo_root: Path | None = None) -> set[str]:
@@ -103,26 +86,7 @@ def _readme_documented_commands(repo_root: Path | None = None) -> set[str]:
 
 
 def check_prose_counts(repo_root: Path, expected_count: int) -> tuple[bool, list[str]]:
-    """Verify the documented CLI prose counts match ``expected_count``.
-
-    The guard covers ``README.md``, ``COMPATIBILITY.md``, and ``docs/index.md``
-    (see ``_PROSE_COUNT_CHECKS``).  The check runs each file's regex against the
-    full file text and treats a missing file or a missing match as a mismatch —
-    silently dropping the prose sentence would erode the guard rail that this
-    checker exists to provide.
-
-    Args:
-        repo_root: Repository root to search under.  Used so tests can point at
-            a temporary scratch directory.
-        expected_count: The authoritative count of ``[project.scripts]`` keys.
-
-    Returns:
-        ``(ok, mismatches)``.  ``ok`` is ``True`` iff every prose count matches
-        ``expected_count``.  ``mismatches`` is a list of human-readable strings,
-        one per offending file, that explain what was found vs. what was
-        expected.  An empty list means everything passed.
-
-    """
+    """Return whether each source-derived documentation count is current."""
     mismatches: list[str] = []
 
     for relative_path, pattern, count_label in _PROSE_COUNT_CHECKS:
@@ -134,8 +98,7 @@ def check_prose_counts(repo_root: Path, expected_count: int) -> tuple[bool, list
         match = pattern.search(path.read_text(encoding="utf-8"))
         if match is None:
             mismatches.append(
-                f"{relative_path}: missing prose sentence matching "
-                f"r'{pattern.pattern}' — has the wording changed?"
+                f"{relative_path}: missing prose sentence matching r'{pattern.pattern}'"
             )
             continue
 
@@ -146,7 +109,23 @@ def check_prose_counts(repo_root: Path, expected_count: int) -> tuple[bool, list
                 f"pyproject.toml [project.scripts] has {expected_count} entries"
             )
 
-    return (len(mismatches) == 0, mismatches)
+    return (not mismatches, mismatches)
+
+
+def check_docs_command_references(repo_root: Path, declared: set[str]) -> list[str]:
+    """Return guarded docs references that do not name registered commands."""
+    problems: list[str] = []
+
+    for pattern in _DOC_SCAN_GLOBS:
+        for path in sorted(repo_root.glob(pattern)):
+            commands = set(_BACKTICK_CMD_RE.findall(path.read_text(encoding="utf-8")))
+            for command in sorted(commands - declared):
+                problems.append(
+                    f"{path.relative_to(repo_root)}: references `{command}` "
+                    "which is not in pyproject.toml [project.scripts]"
+                )
+
+    return problems
 
 
 def main() -> int:
@@ -165,7 +144,6 @@ def main() -> int:
     documented = _readme_documented_commands()
 
     missing = sorted(declared - documented)
-    extra = sorted(documented - declared)
 
     ok = True
 
@@ -178,27 +156,26 @@ def main() -> int:
             print(f"  - {cmd}")
         print()
 
-    if extra:
-        # Extra entries are not an error — they could appear in prose / examples
-        # that postdate a removal.  Just warn.
-        print("WARNING: The following commands appear in README.md but NOT in pyproject.toml.")
-        print("         They may be stale; consider removing them.\n")
-        for cmd in extra:
-            print(f"  - {cmd}")
-        print()
-
     prose_ok, prose_mismatches = check_prose_counts(REPO_ROOT, len(declared))
     if not prose_ok:
         ok = False
         print("ERROR: Prose counts disagree with pyproject.toml [project.scripts]:\n")
-        for line in prose_mismatches:
-            print(f"  - {line}")
+        for mismatch in prose_mismatches:
+            print(f"  - {mismatch}")
+        print()
+
+    reference_problems = check_docs_command_references(REPO_ROOT, declared)
+    if reference_problems:
+        ok = False
+        print("ERROR: Documentation references unregistered console scripts:\n")
+        for problem in reference_problems:
+            print(f"  - {problem}")
         print()
 
     if ok:
         print(
-            f"OK: all {len(declared)} pyproject.toml scripts are documented in README.md, "
-            "and prose counts in README.md, COMPATIBILITY.md, and docs/index.md agree."
+            f"OK: all {len(declared)} pyproject.toml scripts are documented, "
+            "source-derived counts agree, and guarded docs reference registered commands."
         )
         return 0
 

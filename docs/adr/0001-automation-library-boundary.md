@@ -34,11 +34,13 @@ Adopt a **dual-layer package** with four guarantees:
    `pydantic` (used by `hephaestus/automation/models.py`) and `tzdata` on
    Windows (used indirectly via `hephaestus.github.rate_limit`).
 
-3. **Six console scripts** ship registered in `[project.scripts]` —
+3. **The automation console scripts** ship registered in `[project.scripts]` —
    `hephaestus-automation-loop`, `hephaestus-plan-issues`,
    `hephaestus-implement-issues`, `hephaestus-review-prs`,
-   `hephaestus-agent-stage`, `hephaestus-ensure-state-labels`. They require
-   the `[automation]` extra to be honest about their dependency surface.
+   `hephaestus-audit-prs`, `hephaestus-drive-prs-green`,
+   `hephaestus-agent-stage`, `hephaestus-ensure-state-labels` (eight as of
+   issue #2169; six at acceptance). They require the `[automation]` extra to
+   be honest about their dependency surface.
    As of issue #1458, `pydantic` is no longer a base dependency — it ships
    only in the `[automation]` extra, so a base install does not provide it
    and these scripts genuinely require `[automation]`.
@@ -51,8 +53,8 @@ Adopt a **dual-layer package** with four guarantees:
 ## Alternatives considered
 
 - **Carve out to a `homeric-automation` distribution.** Rejected: requires
-  new repo, dual uv.lock, CI sweep of every workflow invoking the seven
-  automation console scripts. The `ci-library-migration-audit` team-knowledge
+  new repo, dual uv.lock, CI sweep of every workflow invoking the automation
+  console scripts. The `ci-library-migration-audit` team-knowledge
   skill documents how prone that path is to silent CI breakage.
 - **Status quo (just document).** Rejected: leaves no installable boundary;
   future edits could wire automation into the lazy-import map and silently
