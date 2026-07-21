@@ -40,7 +40,7 @@ def _documented_action_owners(repo_root: Path = REPO_ROOT) -> set[str]:
             for definition in definitions.rglob(pattern):
                 text = definition.read_text(encoding="utf-8")
                 for match in re.finditer(
-                    r"^\s*(?:-\s*)?uses:\s*([\w.-]+)/[\w./-]+@", text, re.MULTILINE
+                    r"^\s*(?:-\s*)?uses:\s*[\"']?([\w.-]+)/[\w./-]+@", text, re.MULTILINE
                 ):
                     owners.add(match.group(1))
     return owners
@@ -120,6 +120,20 @@ def test_named_step_action_owner_is_discovered(tmp_path: Path) -> None:
     )
 
     assert _documented_action_owners(tmp_path) == {"example"}
+
+
+def test_quoted_action_owner_is_discovered(tmp_path: Path) -> None:
+    """Quoted remote action references cannot bypass the external-owner guard."""
+    workflow = tmp_path / ".github" / "workflows" / "release.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text(
+        "steps:\n"
+        '  - uses: "example/publish@0123456789abcdef0123456789abcdef01234567"\n'
+        "  - uses: 'second/setup@0123456789abcdef0123456789abcdef01234567'\n",
+        encoding="utf-8",
+    )
+
+    assert _documented_action_owners(tmp_path) == {"example", "second"}
 
 
 def test_doc_is_linked_from_index() -> None:
