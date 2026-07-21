@@ -130,7 +130,7 @@ def test_mechanical_rebase_uses_lease_push_then_requires_clean_readback() -> Non
 
 
 def test_agent_fallback_runs_only_after_mechanical_resolution_fails() -> None:
-    """The implementation agent is not spent before the mechanical fast path."""
+    """A conflicted mechanical rebase is explained before the agent fallback."""
     fakes = _resolver()
     fakes.merge_state.side_effect = [("DIRTY", "CONFLICTING"), ("CLEAN", "MERGEABLE")]
 
@@ -140,6 +140,11 @@ def test_agent_fallback_runs_only_after_mechanical_resolution_fails() -> None:
     fakes.commit.assert_called_once()
     fakes.push_rebased.assert_not_called()
     fakes.push_agent.assert_called_once_with("7-auto-impl", Path("/worktree"))
+    assert any(
+        "mechanical rebase hit conflicts; aborted; deferring to implementation agent"
+        in str(call.args[1])
+        for call in fakes.log.call_args_list
+    )
 
 
 @pytest.mark.parametrize(
