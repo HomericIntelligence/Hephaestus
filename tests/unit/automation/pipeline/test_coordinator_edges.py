@@ -17,6 +17,7 @@ from typing import Any, get_type_hints
 from unittest.mock import MagicMock
 
 import pytest
+from jinja2 import TemplateNotFound, TemplateSyntaxError
 
 import hephaestus.automation.pipeline as pipeline_pkg
 import hephaestus.automation.pipeline.coordinator as coordinator_mod
@@ -26,7 +27,9 @@ import hephaestus.automation.pipeline.seeding as seeding_mod
 import hephaestus.automation.pipeline.stages.base as stage_base_mod
 import hephaestus.automation.pipeline.stages.pr_review as pr_review_mod
 import hephaestus.automation.pipeline.work_item as work_item_mod
+import hephaestus.prompts.catalog as prompt_catalog_mod
 from hephaestus.automation.state_labels import STATE_PLAN_GO
+from hephaestus.prompts import PromptCatalog
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
@@ -144,6 +147,77 @@ class TestWiring:
         config = PipelineConfig(org="org", repos=["r"], dry_run=True, projects_dir=tmp_path)
 
         assert run_pipeline(config) == 7
+
+    @staticmethod
+    def _stub_pipeline_runtime(
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> tuple[MagicMock, MagicMock]:
+        """Prevent pipeline construction while asserting preflight ordering."""
+        coordinator_factory = MagicMock()
+        coordinator_factory.return_value.run.return_value = 0
+        github_factory = MagicMock()
+        monkeypatch.setattr(coordinator_mod, "Coordinator", coordinator_factory)
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline_github.PipelineGitHub",
+            github_factory,
+        )
+        return coordinator_factory, github_factory
+
+    def test_run_pipeline_prompt_preflight_rejects_empty_template_tree(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Absent packaged prompts abort before GitHub or coordinator setup."""
+        coordinator_factory, github_factory = self._stub_pipeline_runtime(monkeypatch)
+        monkeypatch.setattr(prompt_catalog_mod, "_DEFAULT_TEMPLATES_DIR", tmp_path)
+        PromptCatalog.clear_current()
+
+        try:
+            with pytest.raises(SystemExit) as exc_info:
+                run_pipeline(PipelineConfig(org="org", repos=["repo"], projects_dir=tmp_path))
+        finally:
+            PromptCatalog.clear_current()
+
+        assert exc_info.value.code != 0
+        assert "Prompt templates missing" in str(exc_info.value)
+        assert "`uv sync`" in str(exc_info.value)
+        assert isinstance(exc_info.value.__cause__, TemplateNotFound)
+        github_factory.assert_not_called()
+        coordinator_factory.assert_not_called()
+
+    def test_run_pipeline_prompt_preflight_translates_loader_value_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The observed catalog loader failure gives operators remediation."""
+        failure = ValueError(
+            "PackageLoader could not find a 'templates/default' directory "
+            "in the 'hephaestus.prompts' package."
+        )
+        monkeypatch.setattr(PromptCatalog, "current", MagicMock(side_effect=failure))
+        coordinator_factory, github_factory = self._stub_pipeline_runtime(monkeypatch)
+
+        with pytest.raises(SystemExit, match="uv sync") as exc_info:
+            run_pipeline(PipelineConfig(org="org", repos=["repo"], projects_dir=tmp_path))
+
+        assert exc_info.value.__cause__ is failure
+        github_factory.assert_not_called()
+        coordinator_factory.assert_not_called()
+
+    def test_run_pipeline_prompt_preflight_preserves_template_syntax_errors(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Template defects remain distinguishable from missing resources."""
+        failure = TemplateSyntaxError("unexpected template token", 1)
+        catalog = MagicMock()
+        catalog.render.side_effect = failure
+        monkeypatch.setattr(PromptCatalog, "current", MagicMock(return_value=catalog))
+        coordinator_factory, github_factory = self._stub_pipeline_runtime(monkeypatch)
+
+        with pytest.raises(TemplateSyntaxError) as exc_info:
+            run_pipeline(PipelineConfig(org="org", repos=["repo"], projects_dir=tmp_path))
+
+        assert exc_info.value is failure
+        github_factory.assert_not_called()
+        coordinator_factory.assert_not_called()
 
     def test_explicit_repo_root_reaches_context_and_scoped_accessor(self, tmp_path: Path) -> None:
         """A noncanonical checkout stays authoritative throughout coordinator wiring."""
