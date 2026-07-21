@@ -23,6 +23,7 @@ NORMATIVE_DOCS = (
     "docs/runbooks/index.md",
     "docs/runbooks/ci-driver-stall.md",
 )
+SNAPSHOT_FREE_DOCS = tuple(path for path in NORMATIVE_DOCS if path != "docs/ROADMAP.md")
 
 FORBIDDEN_SNAPSHOT_PATTERNS = (
     re.compile(r"\bas of 20\d{2}-\d{2}-\d{2}\b", re.IGNORECASE),
@@ -38,7 +39,7 @@ FORBIDDEN_SNAPSHOT_PATTERNS = (
 )
 
 
-@pytest.mark.parametrize("relative_path", NORMATIVE_DOCS)
+@pytest.mark.parametrize("relative_path", SNAPSHOT_FREE_DOCS)
 def test_normative_docs_have_no_unowned_snapshots(relative_path: str) -> None:
     """Reject calendar, source-size, and unvalidated inventory snapshots."""
     text = (REPO_ROOT / relative_path).read_text(encoding="utf-8")

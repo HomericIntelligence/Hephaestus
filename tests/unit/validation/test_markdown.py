@@ -99,10 +99,7 @@ class TestValidateLinksMain:
             ],
         )
         rc = main()
-        # Even if validate_all_links returns no broken links, the test must not
-        # depend on the validator's intra-file traversal — assert the exit
-        # code only.
-        assert rc in (0, 1), "main() must return an int exit code"
+        assert rc == 0
         capsys.readouterr()  # drain output
 
     def test_main_json_output_emits_valid_json(

@@ -134,6 +134,14 @@ repos:
         pass_filenames: false
         files: ^(README\.md|pyproject\.toml)$
 
+      - id: check-doc-maintenance
+        name: Check normative documentation maintenance
+        description: Reject unsupported operational snapshots and invalid maintained sources
+        entry: uv run python -m hephaestus.validation.doc_maintenance
+        language: system
+        pass_filenames: false
+        files: ^(.*\.md|pyproject\.toml|hephaestus/automation/pipeline/routing\.py|\.github/CODEOWNERS|\.github/workflows/_required\.yml)$
+
   # Claude settings permission path check
   - repo: local
     hooks:

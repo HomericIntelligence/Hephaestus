@@ -10,6 +10,7 @@ VALIDATION_MODULES = {
     "complexity.py": 1,
     "coverage.py": 1,
     "doc_config.py": 1,
+    "doc_maintenance.py": 1,
     "doc_policy.py": 1,
     "docstrings.py": 1,
     "markdown.py": 2,

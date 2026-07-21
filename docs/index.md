@@ -25,6 +25,9 @@ mechanism are named.
 ADRs and release notes may retain dates, issue numbers, and measured values as
 historical evidence; they are not sources for current operating state.
 
+See [Documentation Maintenance](documentation-maintenance.md) for the full
+living-document scope and the source, ownership, and validation contracts.
+
 ## Subpackages
 
 - **hephaestus.agents** — Agent frontmatter, loader, runtime, stats
