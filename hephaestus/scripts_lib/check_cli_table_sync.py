@@ -66,7 +66,7 @@ _PROSE_COUNT_CHECKS: tuple[tuple[str, re.Pattern[str], str], ...] = (
     ("docs/index.md", _DOCS_INDEX_PROSE_RE, "CLI entry points"),
 )
 
-_DOC_SCAN_GLOBS = ("README.md", "COMPATIBILITY.md", "CLAUDE.md", "docs/**/*.md")
+_DOC_SCAN_GLOBS = ("README.md", "COMPATIBILITY.md", "AGENTS.md", "docs/**/*.md")
 
 
 def _load_scripts(repo_root: Path | None = None) -> set[str]:

@@ -1,4 +1,4 @@
-"""CLAUDE.md block extraction utilities.
+"""Markdown block extraction utilities.
 
 Provides generic block-extraction helpers for splitting a markdown file into
 named sections.  Block definitions (line ranges + filenames) are supplied by
@@ -12,7 +12,7 @@ Usage::
         ("B01", 1, 11, "B01-overview.md"),
         ("B02", 13, 67, "B02-rules.md"),
     ]
-    created = extract_blocks(Path("CLAUDE.md"), Path("out/"), blocks)
+    created = extract_blocks(Path("AGENTS.md"), Path("out/"), blocks)
 """
 
 from __future__ import annotations
@@ -28,12 +28,13 @@ def discover_blocks(
     claude_md_path: Path,
     block_defs: list[BlockDef],
 ) -> list[BlockDef]:
-    """Return block definitions for a CLAUDE.md file.
+    """Return block definitions for a Markdown source file.
 
     Validates that *claude_md_path* exists and returns *block_defs* as-is.
 
     Args:
-        claude_md_path: Path to the CLAUDE.md file.
+        claude_md_path: Path to the Markdown source file. The parameter name is
+            retained for keyword-call compatibility.
         block_defs: Explicit block definitions ``(id, start, end, filename)``.
             Lines are 1-indexed.
 
@@ -45,7 +46,7 @@ def discover_blocks(
 
     """
     if not claude_md_path.exists():
-        raise FileNotFoundError(f"CLAUDE.md not found: {claude_md_path}")
+        raise FileNotFoundError(f"Markdown source not found: {claude_md_path}")
     return block_defs
 
 
@@ -57,7 +58,7 @@ def extract_blocks(
     """Extract sections of *source_file* into separate files.
 
     Args:
-        source_file: Markdown file to split (typically ``CLAUDE.md``).
+        source_file: Markdown file to split.
         output_dir: Directory where extracted block files are written.
             Created if it does not exist.
         block_defs: Block definitions ``(id, start, end, filename)``.
