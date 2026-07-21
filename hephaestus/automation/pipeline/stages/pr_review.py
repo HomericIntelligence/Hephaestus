@@ -681,6 +681,7 @@ class PrReviewStage(Stage):
             cwd=_worktree_path(item, ctx),
             timeout_s=pr_reviewer_claude_timeout(),
             session_id=item.session_ids.get(AGENT_PR_REVIEWER),
+            sandbox="read-only",
         )
         return JobRequest(job, on_done_state=COMPACT_WRITER_WAIT)
 
@@ -700,6 +701,7 @@ class PrReviewStage(Stage):
             cwd=_worktree_path(item, ctx),
             timeout_s=implementer_claude_timeout(),
             session_id=item.session_ids.get(session_agent),
+            sandbox="read-only",
         )
         return JobRequest(job, on_done_state=REVIEW_WAIT)
 
