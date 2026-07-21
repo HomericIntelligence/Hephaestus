@@ -1,139 +1,94 @@
-"""Functional contracts for the repository agent-guidance entry points.
+"""Regression contract for the canonical repository agent guidance."""
 
-These tests assert *functionality*, not document content: the legacy Claude
-entry point must still route readers to the canonical contract, and no live
-policy consumer may keep citing the deprecated pointer file. The prose inside
-the documents is intentionally not pinned — behavior gates (pr-policy,
-doc-config validator, link validation) own those guarantees.
-"""
-
-import hashlib
-import os
 from pathlib import Path
 
-import pytest
-
 REPO_ROOT = Path(__file__).resolve().parents[3]
+
+EXPECTED_POINTER = (
+    "# Claude Code guidance\n\n"
+    "Follow [`AGENTS.md`](AGENTS.md). It is the sole authoritative "
+    "agent contract for this repository.\n"
+)
+
+REQUIRED_SECTIONS = {
+    "## Project Overview": ("**Purpose**:", "Role in Ecosystem"),
+    "## Repository Structure": ("hephaestus/automation/", "tests/unit/"),
+    "## Library vs product layer": ("automation → library", "Coverage omit-list invariant"),
+    "## Python Development Guidelines": ("Python 3.10+", "83%+ test coverage enforced"),
+    "## Key Development Principles": ("KISS", "YAGNI", "SOLID", "POLA"),
+    "## Security Configuration Guidelines": (
+        "Never hardcode secrets",
+        "Validate input types and ranges",
+    ),
+    "## Documentation Rules": ("No CHANGELOG.md.",),
+    "## Claude Code Optimization": ("athena:skill-advisor", "Agent Skills vs Sub-Agents"),
+    "## Working with GitHub": ("Closes #<issue-number>", "git commit -S", "Signed-off-by"),
+    "## Environment Setup": ("just bootstrap", "uv sync"),
+    "## Common Commands": ("--no-verify", "uv run mypy"),
+    "## Troubleshooting": ("Import Errors", "Test Failures"),
+    "## Key Files and Directories": ("hephaestus/utils/", "pyproject.toml"),
+    "## Version Management": (
+        'dynamic = ["version"]',
+        "Make sure all temporary files are in the build/ directory.",
+    ),
+    "## AI-agent topology": ("single-page map",),
+    "## Agents the codebase orchestrates": ("seven in-memory stage queues",),
+    "## Canonical architecture reference": ("docs/architecture.md",),
+}
 
 ALLOWED_CLAUDE_REFERENCE_LINES = {
     Path(".github/CODEOWNERS"): {"CLAUDE.md @mvillmow"},
     Path("docs/adr/0001-automation-library-boundary.md"): {
-        "At decision time this guidance lived in `CLAUDE.md`; "
-        "it is now consolidated in `AGENTS.md`."
+        "At decision time this guidance lived in `CLAUDE.md`; it is now consolidated in "
+        "`AGENTS.md`."
     },
 }
 
-# Preserve the exact external review record without excluding other fixture content.
-HISTORICAL_FIXTURE_DIGESTS = {
-    Path("tests/fixtures/review-exchange/scylla-2093-state-carrier.txt"): (
-        "54b1cdff9e8113fd6af7bf2a5ec6c8ac50279e8f39973963e3904ca2d911e79a"
-    ),
-}
-
-EXCLUDED_PARTS = {
-    ".git",
-    ".hypothesis",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".ruff_cache",
-    ".tmp",
-    ".venv",
-    ".worktrees",
-    "build",
-}
+EXCLUDED_PARTS = {".git", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".venv", "build"}
 
 
-def _find_unexpected_claude_references(repo_root: Path, test_file: Path) -> list[str]:
-    """Return unauthorized legacy-contract references below a source root."""
-    unexpected: list[str] = []
-    for root, dirnames, filenames in os.walk(repo_root):
-        dirnames[:] = [dirname for dirname in dirnames if dirname not in EXCLUDED_PARTS]
-        for filename in filenames:
-            path = Path(root) / filename
-            if path.resolve() == test_file.resolve():
-                continue
-            relative = path.relative_to(repo_root)
-            content = path.read_bytes()
-            if (
-                relative in HISTORICAL_FIXTURE_DIGESTS
-                and hashlib.sha256(content).hexdigest() == HISTORICAL_FIXTURE_DIGESTS[relative]
-            ):
-                continue
-            try:
-                lines = content.decode("utf-8").splitlines()
-            except UnicodeDecodeError:
-                continue
-
-            allowed = ALLOWED_CLAUDE_REFERENCE_LINES.get(relative, set())
-            for number, line in enumerate(lines, 1):
-                if "CLAUDE.md" in line and line.strip() not in allowed:
-                    unexpected.append(f"{relative}:{number}: {line.strip()}")
-    return unexpected
+def _section(text: str, heading: str) -> str:
+    start = text.index(heading)
+    end = text.find("\n## ", start + len(heading))
+    return text[start:] if end == -1 else text[start:end]
 
 
-def test_claude_md_routes_readers_to_the_canonical_contract() -> None:
-    """The legacy entry point must link readers to the canonical AGENTS.md."""
-    claude_md = REPO_ROOT / "CLAUDE.md"
-    agents_md = REPO_ROOT / "AGENTS.md"
-    assert agents_md.is_file(), "canonical contract must exist"
-    text = claude_md.read_text(encoding="utf-8")
-    assert "(AGENTS.md)" in text, "CLAUDE.md must reference AGENTS.md"
-    # The relative link must resolve from CLAUDE.md's directory (repo root).
-    assert (claude_md.parent / "AGENTS.md").resolve() == agents_md.resolve()
+def test_claude_md_is_exact_pointer() -> None:
+    """The legacy file remains only as the documented compatibility pointer."""
+    assert (REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8") == EXPECTED_POINTER
 
 
-def test_hypothesis_cache_is_not_repository_source() -> None:
-    """Property-test caches stay under build and outside policy scans."""
-    assert ".hypothesis" in EXCLUDED_PARTS
-    assert Path(os.environ["HYPOTHESIS_STORAGE_DIRECTORY"]) == (REPO_ROOT / "build" / ".hypothesis")
-
-
-def test_agent_contract_scan_excludes_foreign_worktree_roots(tmp_path: Path) -> None:
-    """A foreign ignored worktree cannot add policy references to this checkout."""
-    foreign = tmp_path / ".worktrees" / "codex" / "branch" / "policy.md"
-    foreign.parent.mkdir(parents=True)
-    foreign.write_text("Use CLAUDE.md here.\n", encoding="utf-8")
-
-    assert _find_unexpected_claude_references(tmp_path, Path(__file__)) == []
-
-
-def test_agent_contract_scan_keeps_untracked_source_candidates(tmp_path: Path) -> None:
-    """An ordinary untracked source file remains in the policy scan."""
-    candidate = tmp_path / "docs" / "policy.md"
-    candidate.parent.mkdir()
-    candidate.write_text("Use CLAUDE.md here.\n", encoding="utf-8")
-
-    assert _find_unexpected_claude_references(tmp_path, Path(__file__)) == [
-        "docs/policy.md:1: Use CLAUDE.md here."
-    ]
+def test_source_sections_and_directives_are_preserved() -> None:
+    """The consolidated contract retains every mapped policy section."""
+    text = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    positions = []
+    for heading, markers in REQUIRED_SECTIONS.items():
+        section = _section(text, heading)
+        positions.append(text.index(heading))
+        for marker in markers:
+            assert marker in section, f"{heading} lost directive {marker!r}"
+    assert positions == sorted(positions)
 
 
 def test_only_explicit_compatibility_and_history_references_remain() -> None:
-    """No live policy consumer may continue citing the legacy pointer."""
-    assert _find_unexpected_claude_references(REPO_ROOT, Path(__file__)) == []
+    """Live consumers must use AGENTS.md instead of the compatibility pointer."""
+    test_file = Path(__file__).resolve()
+    unexpected: list[str] = []
 
+    for path in REPO_ROOT.rglob("*"):
+        if not path.is_file() or path.resolve() == test_file:
+            continue
+        relative = path.relative_to(REPO_ROOT)
+        if any(part in EXCLUDED_PARTS for part in relative.parts):
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except UnicodeDecodeError:
+            continue
 
-@pytest.mark.parametrize(
-    ("destination", "changed", "unexpected"),
-    [
-        ("tests/fixtures/review-exchange/scylla-2093-state-carrier.txt", False, False),
-        ("tests/fixtures/review-exchange/scylla-2093-state-carrier.txt", True, True),
-        ("tests/fixtures/review-exchange/other.txt", False, True),
-        ("docs/policy.txt", False, True),
-    ],
-)
-def test_historical_fixture_exception_requires_exact_path_and_content(
-    tmp_path: Path, destination: str, changed: bool, unexpected: bool
-) -> None:
-    """Exclude only unchanged historical evidence at its registered path."""
-    source = REPO_ROOT / "tests/fixtures/review-exchange/scylla-2093-state-carrier.txt"
-    content = source.read_bytes()
-    target = tmp_path / destination
-    target.parent.mkdir(parents=True)
-    target.write_bytes(content + (b"\nChanged historical evidence.\n" if changed else b""))
+        allowed = ALLOWED_CLAUDE_REFERENCE_LINES.get(relative, set())
+        for number, line in enumerate(lines, 1):
+            if "CLAUDE.md" in line and line.strip() not in allowed:
+                unexpected.append(f"{relative}:{number}: {line.strip()}")
 
-    findings = _find_unexpected_claude_references(tmp_path, Path(__file__))
-
-    assert bool(findings) is unexpected
-    if unexpected:
-        assert all(finding.startswith(f"{destination}:") for finding in findings)
+    assert unexpected == []
