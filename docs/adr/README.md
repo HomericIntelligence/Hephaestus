@@ -26,3 +26,4 @@ numbered, and listed here.
 | [0011](0011-mcp-integration-posture.md) | MCP is optional project-scoped agent tooling | Accepted |
 | [0012](0012-loop-owned-pr-review-approval.md) | Loop-owned Athena PR-review approval | Accepted |
 | [0013](0013-backup-and-disaster-recovery-policy.md) | Tiered backup and disaster-recovery policy | Accepted |
+| [0014](0014-fixture-based-workflow-validator-tests.md) | Fixture-based workflow validator tests | Accepted |

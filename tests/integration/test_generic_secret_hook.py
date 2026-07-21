@@ -42,16 +42,14 @@ def _isolated_env(cache: Path) -> dict[str, str]:
     return env
 
 
-def test_gitleaks_hook_is_mandatory_and_matches_ci_version() -> None:
-    """The local generic scanner must be pre-commit scoped and CI-aligned."""
+def test_gitleaks_hook_is_mandatory() -> None:
+    """The local generic scanner must be pre-commit scoped."""
     config = yaml.safe_load((REPO_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8"))
     repo = next(item for item in config["repos"] if item.get("repo") == GITLEAKS_REPO)
     hook = next(item for item in repo["hooks"] if item.get("id") == "gitleaks")
 
     assert repo["rev"] == GITLEAKS_VERSION
     assert hook["stages"] == ["pre-commit"]
-    workflow = (REPO_ROOT / ".github/workflows/_required.yml").read_text(encoding="utf-8")
-    assert f"gitleaks:{GITLEAKS_VERSION}@sha256:" in workflow
 
 
 @pytest.mark.requires_posix

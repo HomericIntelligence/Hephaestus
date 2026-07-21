@@ -13,8 +13,8 @@ A piece of work is **done** when every item below is true.
 |---|-------------|-------------|
 | 1 | Branch named `<issue-number>-<description>` | Convention (PR reviewer) |
 | 2 | PR body contains the literal line `Closes #<issue-number>` (capital C, no colon, on its own line) | CI gate `pr-policy` (`.github/workflows/_required.yml`) |
-| 3 | Every commit on the branch is cryptographically signed and DCO-signed (`git commit -S -s`) | CI gate `pr-policy` |
-| 4 | Auto-merge is armed only by `merge_wait`, after `pr_review` has run `$athena:pr-review` in its default profile (or the inline fallback) and applied loop-owned `state:implementation-go` on GO. | Queue gate; advisory `auto-merge-policy` and human review |
+| 3 | Every commit on the branch is cryptographically signed and DCO-signed (`git commit -S -s`) | `homeric-main-baseline` ruleset (`required_signatures`) + CI `pr-policy` signature and DCO checks |
+| 4 | Auto-merge is armed only by `merge_wait`, after `pr_review` has run `$athena:pr-review` in its default profile (or the inline fallback) and applied loop-owned `state:implementation-go` on GO. | Queue gate and human review |
 | 5 | Commit messages follow Conventional Commits (`type(scope): description`) | CI gate `pr-policy` (Check 3) + local `commit-msg` hook `conventional-commit-msg` |
 | 6 | `uv run ruff check hephaestus/ tests/` passes | CI job `lint` |
 | 7 | `uv run ruff format --check hephaestus/ tests/` passes (no files would be reformatted) | CI job `lint` |
@@ -38,9 +38,10 @@ A piece of work is **done** when every item below is true.
 > protection contexts (`required-checks-gate` and the two Python 3.12 matrix
 > contexts) and the direct GitHub ruleset contexts documented in
 > [`docs/ci/required-checks.md`](ci/required-checks.md) do. The aggregate gate
-> excludes advisory `auto-merge-policy`; the automation loop's in-process
-> review result and its `state:implementation-go` label, rather than any
-> reporting check, are the automatic-merge authority.
+> reports required workflow results; it does not authorize automatic merge. The
+> automation loop's in-process review result and its
+> `state:implementation-go` label, rather than any reporting check, are the
+> automatic-merge authority.
 
 ## For new features
 

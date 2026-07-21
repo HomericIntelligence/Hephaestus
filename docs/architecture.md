@@ -929,9 +929,10 @@ git-failure counter (`GIT_ERROR_RETRY_CAP`).
 3. `github.create_pr(issue, branch, title, body)` with a body composed by
  [`get_pr_description`](hephaestus/automation/prompts/pr_review.py)
  (PR creation is the stage's journal entry — durable). **The pipeline
- does NOT guarantee signed commits or DCO trailers**: that policy is
- enforced by the GitHub `pr-policy` required check
- ([`AGENTS.md`](../AGENTS.md) §"PR policy"); the implementer session
+ does NOT guarantee signed commits or DCO trailers**: the implementation
+ worker writes signed, DCO-bearing commits, the `homeric-main-baseline`
+ ruleset is the authoritative merge-time signature gate, and `pr-policy`
+ validates the PR body, Conventional Commit subjects, and DCO trailers. The implementer session
  writes signed commits through
  [`worker_pool._git_commit_push`](hephaestus/automation/pipeline/worker_pool.py)
  → [`git_utils.commit_if_changes`](hephaestus/automation/git_utils.py).

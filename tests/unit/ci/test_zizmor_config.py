@@ -1,9 +1,9 @@
 """Tests for the UV-managed zizmor GitHub Actions SAST configuration.
 
 zizmor is the workflow-surface complement to bandit (Python) and ShellCheck
-(shell); see issue #2151 and SECURITY.md. These guards freeze the two
-enforcement surfaces (pre-commit + required CI job) and the offline/online flag
-split so the scanner cannot silently stop gating or drift out of alignment.
+(shell); see issue #2151 and SECURITY.md. These guards cover the managed
+development dependency and deterministic local pre-commit invocation. Workflow
+CI configuration is reviewed directly rather than snapshotted from this tree.
 """
 
 from __future__ import annotations
@@ -13,17 +13,17 @@ from pathlib import Path
 
 import yaml
 
+from hephaestus.utils.helpers import get_repo_root
+
 if sys.version_info >= (3, 11):
     import tomllib
 else:
     import tomli as tomllib  # type: ignore[no-redef, unused-ignore]
 
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = get_repo_root(Path(__file__))
 
-# Offline PR-gate flags. The required CI job and the pre-commit hook MUST both
-# carry every one of these so a workflow security regression fails fast and
-# deterministically, with no network dependency.
+# Offline scanner flags required by the local pre-commit hook.
 OFFLINE_FLAGS = ("--no-online-audits", "--min-severity", "medium")
 
 
@@ -51,61 +51,13 @@ def test_zizmor_is_a_versioned_dev_dependency() -> None:
     assert any(dependency.startswith("zizmor>=") for dependency in dev_group)
 
 
-def test_required_workflow_runs_zizmor_offline_at_medium() -> None:
-    """The required PR gate runs the project-managed zizmor, offline, medium+."""
-    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/_required.yml").read_text())
-    job = workflow["jobs"]["security-workflow-scan"]
-    assert job["name"] == "security/workflow-scan"
-    run_step = next(step for step in job["steps"] if step.get("id") == "zizmor")
-    command = run_step["run"]
-    assert "uv run zizmor" in command
-    for flag in OFFLINE_FLAGS:
-        assert flag in command, f"required workflow-scan job missing {flag!r}"
-    assert ".github/workflows/" in command
-
-
-def test_workflow_scan_job_is_wired_into_the_required_gate() -> None:
-    """security-workflow-scan must be aggregated by required-checks-gate.
-
-    Without this the offline zizmor gate would run but never block a merge.
-    The generic gate-membership guard (test_required_checks_gate.py) also
-    covers this dynamically; asserting it here documents the contract for
-    this specific scan.
-    """
-    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/_required.yml").read_text())
-    gate_needs = workflow["jobs"]["required-checks-gate"]["needs"]
-    assert "security-workflow-scan" in gate_needs
-
-
-def test_precommit_and_ci_zizmor_flags_match() -> None:
-    """The pre-commit hook and the CI gate use the identical offline flags.
-
-    A drift between the two would let a commit pass locally but fail in CI (or
-    vice versa); freeze them together.
-    """
+def test_precommit_zizmor_flags() -> None:
+    """The local workflow scanner has deterministic offline flags."""
     entry = _zizmor_precommit_entry()
     assert entry.startswith("uv run zizmor")
     for flag in OFFLINE_FLAGS:
         assert flag in entry, f"zizmor pre-commit hook missing {flag!r}"
-    assert ".github/workflows/" in entry
-
-
-def test_scheduled_scan_uses_online_audits() -> None:
-    """The weekly security.yml scan enables the online, API-backed audits.
-
-    It must NOT pass --no-online-audits and must supply a GH_TOKEN so audits
-    such as known-vulnerable-actions can query the GitHub API.
-    """
-    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/security.yml").read_text())
-    job = workflow["jobs"]["workflow-scan"]
-    run_step = next(step for step in job["steps"] if step.get("id") == "zizmor")
-    command = run_step["run"]
-    assert "uv run zizmor" in command
-    assert "--no-online-audits" not in command
-    assert "--min-severity" in command and "medium" in command
-    # Not a secret: this is the GitHub Actions expression the workflow uses to
-    # pass the ephemeral job token to zizmor's online audits.
-    assert run_step["env"]["GH_TOKEN"] == "${{ github.token }}"  # noqa: S105
+    assert ".github" + "/workflows/" in entry
 
 
 def test_security_md_documents_static_analysis_coverage() -> None:

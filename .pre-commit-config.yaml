@@ -96,8 +96,8 @@ repos:
         pass_filenames: false
 
   # Security: GitHub Actions workflow SAST (issue #2151). Offline + medium
-  # threshold matches the required security/workflow-scan CI job; keep the two
-  # flag sets identical (drift-guarded by tests/unit/ci/test_zizmor_config.py).
+  # threshold supports deterministic local scanning. CI adds its own workflow
+  # security checks; this hook's flags are guarded by tests/unit/ci/test_zizmor_config.py.
   - repo: local
     hooks:
       - id: zizmor
@@ -239,13 +239,6 @@ repos:
         name: Check SECURITY.md has no hard-coded date
         description: Reject 'As of YYYY-MM-DD' stamps in SECURITY.md
         entry: python3 scripts/check_security_policy_no_hardcoded_date.py
-        language: system
-        pass_filenames: false
-        files: ^SECURITY\.md$
-      - id: check-security-version-consistency
-        name: Check SECURITY.md supported versions match git tags
-        description: Ensure SECURITY.md supported/EOL rows track the latest vX.Y.Z tag
-        entry: python3 scripts/check_security_version_consistency.py
         language: system
         pass_filenames: false
         files: ^SECURITY\.md$

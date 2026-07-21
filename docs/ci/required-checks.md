@@ -38,8 +38,9 @@ The active ruleset requires these direct contexts:
 | `deps/version-sync` | `.github/workflows/_required.yml` |
 | `pr-policy` | `.github/workflows/_required.yml` |
 
-`auto-merge-policy` is advisory. It reports GitHub state but does not grant
-automation authority and is not a required context.
+The active `homeric-main-baseline` branch ruleset also applies
+`required_signatures` to `main`. Signature enforcement is repository policy,
+not a duplicate GitHub Actions context.
 
 ## Aggregate workflow coverage
 

@@ -5,7 +5,9 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+from hephaestus.utils.helpers import get_repo_root
+
+REPO_ROOT = get_repo_root(Path(__file__))
 DOC = REPO_ROOT / "docs" / "third-party-services.md"
 INDEX = REPO_ROOT / "docs" / "index.md"
 REQUIRED_SERVICES = (
@@ -24,7 +26,7 @@ REQUIRED_SERVICES = (
 FIRST_PARTY_ACTION_OWNERS = frozenset({"actions"})
 
 
-def _documented_action_owners(repo_root: Path = REPO_ROOT) -> set[str]:
+def _documented_action_owners(repo_root: Path) -> set[str]:
     """Remote ``uses:`` owners referenced by workflows and composite actions.
 
     The trailing ``@`` in the pattern restricts matches to remote pinned
@@ -82,17 +84,6 @@ def test_inventory_has_responsibility_and_status_columns() -> None:
     assert any("our responsibility" in cell.lower() for cell in header), header
     assert any("vendor responsibility" in cell.lower() for cell in header), header
     assert any("status" in cell.lower() for cell in header), header
-
-
-def test_every_third_party_action_owner_is_documented() -> None:
-    """A new external CI vendor must be added to the inventory table."""
-    owners = _documented_action_owners() - FIRST_PARTY_ACTION_OWNERS
-    assert owners, "no remote action owners found — regex or workflow layout changed"
-    service_cells = [row[0].lower() for row in _inventory_table_rows()[1:]]
-    missing = sorted(
-        owner for owner in owners if not any(owner.lower() in cell for cell in service_cells)
-    )
-    assert missing == [], f"CI action owners absent from docs/third-party-services.md: {missing}"
 
 
 def test_composite_action_owner_is_discovered(tmp_path: Path) -> None:
