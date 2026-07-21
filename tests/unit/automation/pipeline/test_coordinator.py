@@ -984,14 +984,17 @@ class TestImplementationAdmission:
         # so the coordinator must resolve each issue's repo from its own item (#1795).
         item_a = _issue_item(21, StageName.IMPLEMENTATION, repo="repo-a")
         item_a.payload["dependencies"] = [22]
+        item_a.payload["file_overlap_deferrals"] = 100
         item_b = _issue_item(22, StageName.IMPLEMENTATION, repo="repo-b")
         coordinator._push_item(item_a, StageName.IMPLEMENTATION, enter=True)
         coordinator._push_item(item_b, StageName.IMPLEMENTATION, enter=True)
+        seen_order: list[int] = []
         seen_repo_of: dict[int, tuple[str, str]] = {}
 
         def _fake_select(
             issues: list[int], repo_of: dict[int, tuple[str, str]] | None = None
         ) -> tuple[list[int], list[int]]:
+            seen_order.extend(issues)
             seen_repo_of.update(repo_of or {})
             return issues[:1], issues[1:]  # defer everything but the first
 
@@ -1004,8 +1007,97 @@ class TestImplementationAdmission:
 
         assert run_order == [22]  # dependency first; 21 deferred by overlap
         assert len(coordinator.queues[StageName.IMPLEMENTATION]) == 1
+        assert seen_order == [22, 21]  # dependency ordering outranks aging
         # Each issue is scoped to the repo of ITS OWN WorkItem, not the ambient CWD.
         assert seen_repo_of == {21: ("org", "repo-a"), 22: ("org", "repo-b")}
+
+    def test_file_overlap_aging_dispatches_starved_issue(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A real overlap deferral gains priority once a worker slot opens."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        run_order: list[int] = []
+
+        class RecordingStage(StubStage):
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                run_order.append(item.issue or 0)
+                return StageOutcome(Disposition.SKIP, "recorded")
+
+        coordinator.stages[StageName.IMPLEMENTATION] = RecordingStage()
+        preferred = _issue_item(21, StageName.IMPLEMENTATION)
+        starved = _issue_item(22, StageName.IMPLEMENTATION)
+        coordinator._push_item(preferred, StageName.IMPLEMENTATION, enter=True)
+        coordinator._push_item(starved, StageName.IMPLEMENTATION, enter=True)
+        plans = {
+            21: {"hephaestus/automation/pipeline/coordinator.py"},
+            22: {"hephaestus/automation/pipeline/coordinator.py"},
+        }
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
+            lambda issue, repo=None: plans[issue],
+        )
+
+        coordinator.inflight_per_repo["repo-a"] = 2
+        coordinator._drain_implementation()
+
+        assert run_order == []
+        assert starved.payload["file_overlap_deferrals"] == 1
+
+        coordinator.inflight_per_repo["repo-a"] = 0
+        coordinator._drain_implementation()
+
+        assert run_order == [22]
+        assert "file_overlap_deferrals" not in starved.payload
+        assert preferred.payload["file_overlap_deferrals"] == 1
+
+    @pytest.mark.parametrize(
+        ("starting_count", "expected_level"),
+        [
+            (9, logging.INFO),
+            (10, logging.WARNING),
+            (11, logging.WARNING),
+        ],
+    )
+    def test_file_overlap_warning_threshold(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        starting_count: int,
+        expected_level: int,
+    ) -> None:
+        """Only overlap deferrals above the visibility threshold warn."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        leader = _issue_item(21, StageName.IMPLEMENTATION)
+        target = _issue_item(22, StageName.IMPLEMENTATION)
+        leader.payload["file_overlap_deferrals"] = starting_count + 100
+        target.payload["file_overlap_deferrals"] = starting_count
+        coordinator._push_item(leader, StageName.IMPLEMENTATION, enter=True)
+        coordinator._push_item(target, StageName.IMPLEMENTATION, enter=True)
+        plans = {
+            21: {"hephaestus/automation/pipeline/coordinator.py"},
+            22: {"hephaestus/automation/pipeline/coordinator.py"},
+        }
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
+            lambda issue, repo=None: plans[issue],
+        )
+        coordinator.inflight_per_repo["repo-a"] = 2
+
+        with caplog.at_level(
+            logging.INFO,
+            logger="hephaestus.automation.pipeline.coordinator",
+        ):
+            coordinator._drain_implementation()
+
+        records = [
+            record
+            for record in caplog.records
+            if "implementation #22 deferred (file overlap)" in record.message
+        ]
+        assert target.payload["file_overlap_deferrals"] == starting_count + 1
+        assert len(records) == 1
+        assert records[0].levelno == expected_level
 
     def test_file_overlap_serialization_can_be_disabled(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

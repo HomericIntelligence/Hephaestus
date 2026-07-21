@@ -149,6 +149,12 @@ _STALL_TICKS_BEFORE_FORCE = 3
 #: that never yields a JobRequest/StageOutcome would otherwise spin forever).
 _MAX_STEPS_PER_TICK = 100
 
+#: WorkItem payload key holding consecutive file-overlap deferrals.
+_FILE_OVERLAP_DEFERRALS_KEY = "file_overlap_deferrals"
+
+#: Deferral counts strictly above this value are logged as warnings.
+_FILE_OVERLAP_WARNING_THRESHOLD = 10
+
 #: Global safety cap on FAIL_BACK regressions per item: the sum of every
 #: budget in ROUTES. Stages enforce the real per-key budgets themselves (the
 #: house on_job_done pattern); this cap only guarantees cross-stage regression
@@ -1003,6 +1009,10 @@ class Coordinator:
         (``A#71`` vs ``B#71``) are NOT duplicates and must both dispatch; the
         old code (and the pre-#2057 assert) keyed on issue number alone and
         would have silently dropped one or crashed (#2057).
+
+        Consecutive file-overlap deferrals are a stable priority input among
+        dependency-ready peers. Dependency ordering remains authoritative, and
+        an item's age is cleared only after it has been admitted for dispatch.
         """
         q = self.queues[StageName.IMPLEMENTATION]
         if not len(q):
@@ -1017,6 +1027,14 @@ class Coordinator:
             )
             for number, item in issue_items.items()
         ]
+        # Stable sorting makes age a priority only among dependency-ready peers;
+        # order_for_implementation still enforces every in-queue dependency edge.
+        infos.sort(
+            key=lambda info: int(
+                issue_items[info.number].payload.get(_FILE_OVERLAP_DEFERRALS_KEY, 0)
+            ),
+            reverse=True,
+        )
         ordered = _admission.order_for_implementation(infos)
         dispatch = ordered
         if self.config.serialize_file_overlap and self.config.max_workers > 1 and len(ordered) > 1:
@@ -1029,7 +1047,18 @@ class Coordinator:
             }
             dispatch, deferred = _admission._select_non_overlapping(ordered, repo_of=repo_of)
             for number in deferred:
-                logger.info("implementation #%s deferred (file overlap)", number)
+                item = issue_items[number]
+                deferrals = int(item.payload.get(_FILE_OVERLAP_DEFERRALS_KEY, 0)) + 1
+                item.payload[_FILE_OVERLAP_DEFERRALS_KEY] = deferrals
+                log_deferral = (
+                    logger.warning if deferrals > _FILE_OVERLAP_WARNING_THRESHOLD else logger.info
+                )
+                log_deferral(
+                    "implementation #%s deferred (file overlap); deferrals=%s threshold=%s",
+                    number,
+                    deferrals,
+                    _FILE_OVERLAP_WARNING_THRESHOLD,
+                )
         ran: set[int] = set()
         # Cross-repo same-number items bypass the number-keyed gates and dispatch
         # directly — they are distinct work that the ordering model cannot rank.
@@ -1038,6 +1067,7 @@ class Coordinator:
         for item in dispatch_items:
             if self.shutdown.is_set() or not self._admit(item):
                 continue  # stays queued (re-pushed below)
+            item.payload.pop(_FILE_OVERLAP_DEFERRALS_KEY, None)
             ran.add(id(item))
             self._record_event("drain", StageName.IMPLEMENTATION.value, self._item_key(item))
             self._run_item(item)
