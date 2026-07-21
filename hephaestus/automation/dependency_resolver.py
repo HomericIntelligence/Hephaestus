@@ -24,6 +24,7 @@ stage too — see ``IssueImplementer.run`` for the canonical call shape.
 import logging
 import re
 from collections import defaultdict, deque
+from heapq import heapify, heappop, heappush
 
 from .github_api import fetch_issue_info, gh_issue_json, prefetch_issue_states
 from .models import DependencyGraph, IssueInfo, IssueState
@@ -337,6 +338,10 @@ class DependencyResolver:
     def topological_sort(self) -> list[int]:
         """Perform topological sort of the dependency graph.
 
+        Among valid topological orders, retain ``add_issue`` order as a stable
+        priority. A newly ready issue therefore reclaims its original priority
+        ahead of lower-priority ready peers.
+
         Returns:
             List of issue numbers in topological order
 
@@ -361,23 +366,29 @@ class DependencyResolver:
                 reverse_deps[dep].append(issue_num)
                 in_degree[issue_num] += 1
 
-        # Find all nodes with in-degree 0 (no dependencies)
-        queue: deque[int] = deque()
-        for issue_num in self.graph.issues:
-            if in_degree[issue_num] == 0:
-                queue.append(issue_num)
+        # Keep source insertion order as the tie-breaker at every Kahn step.
+        # A FIFO queue only observes that priority once: a dependent that
+        # becomes ready after a lower-priority peer is queued would otherwise
+        # run behind it.
+        priority = {issue_num: index for index, issue_num in enumerate(self.graph.issues)}
+        ready = [
+            (priority[issue_num], issue_num)
+            for issue_num in self.graph.issues
+            if not in_degree[issue_num]
+        ]
+        heapify(ready)
 
         result: list[int] = []
 
-        while queue:
-            node = queue.popleft()
+        while ready:
+            _, node = heappop(ready)
             result.append(node)
 
             # Process all issues that depend on this node (O(1) lookup now)
             for dependent in reverse_deps[node]:
                 in_degree[dependent] -= 1
                 if in_degree[dependent] == 0:
-                    queue.append(dependent)
+                    heappush(ready, (priority[dependent], dependent))
 
         if len(result) != len(self.graph.issues):
             raise CyclicDependencyError("Graph contains cycles")
