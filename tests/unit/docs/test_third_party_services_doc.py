@@ -8,8 +8,6 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DOC = REPO_ROOT / "docs" / "third-party-services.md"
 INDEX = REPO_ROOT / "docs" / "index.md"
-WORKFLOWS = REPO_ROOT / ".github" / "workflows"
-
 REQUIRED_SERVICES = (
     "GitHub",
     "PyPI",
@@ -42,7 +40,7 @@ def _documented_action_owners(repo_root: Path = REPO_ROOT) -> set[str]:
             for definition in definitions.rglob(pattern):
                 text = definition.read_text(encoding="utf-8")
                 for match in re.finditer(
-                    r"^\s*-\s*uses:\s*([\w.-]+)/[\w./-]+@", text, re.MULTILINE
+                    r"^\s*(?:-\s*)?uses:\s*([\w.-]+)/[\w./-]+@", text, re.MULTILINE
                 ):
                     owners.add(match.group(1))
     return owners
@@ -104,6 +102,20 @@ def test_composite_action_owner_is_discovered(tmp_path: Path) -> None:
     action.write_text(
         "runs:\n  using: composite\n  steps:\n"
         "    - uses: example/setup-tool@0123456789abcdef0123456789abcdef01234567\n",
+        encoding="utf-8",
+    )
+
+    assert _documented_action_owners(tmp_path) == {"example"}
+
+
+def test_named_step_action_owner_is_discovered(tmp_path: Path) -> None:
+    """A named workflow step cannot bypass the external-owner guard."""
+    workflow = tmp_path / ".github" / "workflows" / "release.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text(
+        "steps:\n"
+        "  - name: Publish package\n"
+        "    uses: example/publish@0123456789abcdef0123456789abcdef01234567\n",
         encoding="utf-8",
     )
 
