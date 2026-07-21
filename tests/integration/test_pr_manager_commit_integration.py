@@ -85,9 +85,7 @@ def test_git_produces_real_worktree_type_change(
     repo, relative_path = type_changed_worktree
 
     assert (repo / relative_path).is_symlink()
-    assert pr_manager._read_porcelain_status(repo, git_timeout=10) == (
-        f" T {relative_path}\0"
-    )
+    assert pr_manager._read_porcelain_status(repo, git_timeout=10) == (f" T {relative_path}\0")
 
 
 def test_real_type_change_is_parsed_selected_and_staged(
