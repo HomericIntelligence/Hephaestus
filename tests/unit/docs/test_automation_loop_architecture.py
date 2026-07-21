@@ -48,6 +48,17 @@ def test_architecture_md_documents_thin_cli_scope_wrappers_section_9() -> None:
     assert "still invokes the legacy implementer entry" not in text
 
 
+def test_architecture_md_documents_current_drive_green_scope() -> None:
+    """The wrapper table must match the current drive-green and merge entry points."""
+    text = _arch_text()
+
+    assert "Five console scripts are thin queue-pipeline scoped entry points" in text
+    assert "`pr_review → merge_wait`" in text
+    assert "[`ci_driver`](hephaestus/automation/ci_driver.py)" in text
+    assert "#2312, OPEN" not in text
+    assert "--use-merge-queue" not in text
+
+
 def test_architecture_md_documents_concurrency_pool_size_section_2() -> None:
     """Section 2 carries the canonical `Pool size` line.
 

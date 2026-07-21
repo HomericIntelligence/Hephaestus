@@ -1486,8 +1486,8 @@ out-of-band.
 | `hephaestus-plan-issues` | `planning → plan_review` | [`planner`](hephaestus/automation/planner.py) |
 | `hephaestus-implement-issues` | `implementation → pr_review` | [`implementer`](hephaestus/automation/implementer.py) |
 | `hephaestus-review-prs` | `pr_review` (internal slice) | [`pr_reviewer`](hephaestus/automation/pr_reviewer.py) |
-| `hephaestus-drive-prs-green` | `merge_wait` (post-merge learn) | `hephaestus-drive-prs-green` script |
-| `hephaestus-merge-prs` | (manual merge-driving, queues disabled) | [`hephaestus.github.pr_merge`](hephaestus/github/pr_merge.py) — gaining `--use-merge-queue` for merge-queue-protected repos (#2312, OPEN) |
+| `hephaestus-drive-prs-green` | `pr_review → merge_wait` | [`ci_driver`](hephaestus/automation/ci_driver.py) |
+| `hephaestus-merge-prs` | (manual merge-driving, queues disabled) | [`hephaestus.github.pr_merge`](hephaestus/github/pr_merge.py) |
 | `hephaestus-agent-stage` | (one-shot stage invocation) | [`agent_stage`](hephaestus/automation/agent_stage.py) |
 
 `--run-pre-pr-tests` is an opt-in queue-runner flag enabling the
