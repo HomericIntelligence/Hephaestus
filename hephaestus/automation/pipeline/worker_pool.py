@@ -422,6 +422,8 @@ class WorkerPool:
                         cwd=job.cwd,
                         timeout=job.timeout_s,
                         model=job.model,
+                        sandbox=job.sandbox,
+                        approval="never",
                     )
                 else:
                     agent_result = run_agent_session(
@@ -492,6 +494,7 @@ class WorkerPool:
             timeout=job.timeout_s,
             model=job.model,
             session_id=job.session_id,
+            sandbox=job.sandbox,
         )
         # ``compact_agent_session`` intentionally swallows expected failures; a
         # missing or uncompactable transcript must not stall a review cycle.

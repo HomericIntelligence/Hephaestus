@@ -467,6 +467,7 @@ def compact_agent_session(
     timeout: int | None = None,
     model: str | None = None,
     session_id: str | None = None,
+    sandbox: str = "read-only",
 ) -> bool:
     """Compact a persisted provider session without making it a hard gate.
 
@@ -494,6 +495,8 @@ def compact_agent_session(
             cwd=cwd,
             timeout=timeout_s,
             model=model or "",
+            sandbox=sandbox,
+            approval="never",
         )
     except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError, ValueError) as exc:
         logger.warning(

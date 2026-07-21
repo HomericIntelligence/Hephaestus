@@ -491,6 +491,7 @@ class ImplementationStage(Stage):
             cwd=_worktree_path(item, ctx),
             timeout_s=implementer_claude_timeout(),
             session_agent=AGENT_IMPLEMENTER,
+            resume_session_id=item.session_ids.get(AGENT_IMPLEMENTER),
             prompt_kwargs={
                 "issue_number": item.issue,
                 "prev_iteration": item.attempts.get("test_fix", 0),

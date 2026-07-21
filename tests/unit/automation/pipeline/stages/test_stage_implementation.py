@@ -971,6 +971,21 @@ class TestTestsAndFix:
         stage.on_job_done(item, JobResult(ok=True, value="fixed"), ctx)
         assert item.attempts["test_fix"] == 1
 
+    def test_testfix_resumes_the_saved_direct_implementer_session(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A test repair continues the implementation conversation."""
+        stage = ImplementationStage()
+        ctx = make_ctx(config=SimpleNamespace(agent="codex"))
+        item = make_work_item(issue=1, state="TESTFIX_WAIT")
+        item.session_ids["implementer"] = "implement-session-id"
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)
+        assert result.job.resume_session_id == "implement-session-id"
+
     def test_testfix_budget_exhaustion_finishes_failed(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

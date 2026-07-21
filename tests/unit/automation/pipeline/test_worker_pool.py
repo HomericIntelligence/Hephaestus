@@ -180,6 +180,7 @@ class TestWorkerPoolSubmitComplete:
             timeout=60,
             model="claude-haiku-4-5",
             session_id=None,
+            sandbox="read-only",
         )
 
     def test_submit_and_complete_non_claude_agent_job(
@@ -236,11 +237,37 @@ class TestWorkerPoolSubmitComplete:
             cwd=job.cwd,
             timeout=job.timeout_s,
             model=job.model,
+            sandbox="workspace-write",
+            approval="never",
         )
         run.assert_not_called()
         assert result.ok is True
         assert result.value == "continued"
         assert result.session_id == "saved-codex-session"
+
+    def test_resumed_read_only_agent_job_preserves_its_sandbox(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+    ) -> None:
+        """Resuming review work must not widen the direct agent's tools."""
+        job = _agent_job(
+            agent="pi",
+            sandbox="read-only",
+            resume_session_id="saved-pi-session",
+        )
+        session_result = MagicMock(stdout="continued", session_id="saved-pi-session")
+
+        with (
+            patch(f"{_WP}.resolve_agent", return_value="pi"),
+            patch(f"{_WP}.resume_agent_session", return_value=session_result) as resume,
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _handle, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        assert resume.call_args.kwargs["sandbox"] == "read-only"
+        assert resume.call_args.kwargs["approval"] == "never"
 
     def test_read_only_agent_job_propagates_its_sandbox_to_codex(
         self,

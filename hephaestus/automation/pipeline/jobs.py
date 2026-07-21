@@ -111,6 +111,9 @@ class CompactJob:
     cwd: Path
     timeout_s: int
     session_id: str | None = None
+    # Direct-provider compaction only sends ``/compact`` and never needs write
+    # access.  Keep the policy explicit so it cannot inherit user defaults.
+    sandbox: str = "read-only"
     descr: str = "compact_session"
 
 

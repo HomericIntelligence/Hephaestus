@@ -519,7 +519,15 @@ def test_codex_base_cmd_resume_without_model_preserves_session_model() -> None:
     """Resume should not force the default model unless a model is requested."""
     cmd = agent_runtime._codex_base_cmd(resume_id="session-123", sandbox=None)
 
-    assert cmd == ["codex", "exec", "resume", "session-123", "--json"]
+    assert cmd == [
+        "codex",
+        "exec",
+        "resume",
+        "session-123",
+        "-c",
+        'approval_policy="never"',
+        "--json",
+    ]
 
 
 def test_resume_codex_session_uses_exec_resume(tmp_path: Path) -> None:
@@ -547,6 +555,29 @@ def test_resume_codex_session_uses_exec_resume(tmp_path: Path) -> None:
     ]
     assert result.stdout == "resumed"
     assert result.session_id == "019e1e57-7652-7892-b1ca-c31c93d4b160"
+
+
+def test_resume_codex_session_applies_the_requested_sandbox_and_approval(tmp_path: Path) -> None:
+    """A resumed read-only session must override permissive local defaults."""
+    captured_cmd: list[str] = []
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeCodexPopen:
+        captured_cmd.extend(cmd)
+        stdout = '{"type":"session_meta","payload":{"id":"session-123"}}\\n'
+        return _FakeCodexPopen(cmd, proc_stdout=stdout, final_message="resumed", **kwargs)
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        agent_runtime.resume_codex_session(
+            "session-123",
+            "review again",
+            cwd=tmp_path,
+            timeout=1,
+            sandbox="read-only",
+            approval="never",
+        )
+
+    assert 'sandbox_mode="read-only"' in captured_cmd
+    assert 'approval_policy="never"' in captured_cmd
 
 
 def test_run_pi_session_uses_json_mode_and_captures_session(tmp_path: Path) -> None:
@@ -734,9 +765,12 @@ def test_resume_pi_session_passes_resume_id_without_alias_argv_leak(tmp_path: Pa
             cwd=tmp_path,
             timeout=30,
             model="private-alias",
+            sandbox="read-only",
         )
 
-    assert captured["cmd"][:-1] == ["pi", "--mode", "json", "--session", "pi-session-789"]
+    tools_index = captured["cmd"].index("--tools")
+    assert captured["cmd"][:tools_index] == ["pi", "--mode", "json", "--session", "pi-session-789"]
+    assert captured["cmd"][tools_index + 1] == agent_runtime.PI_READ_ONLY_TOOLS
     assert captured["cmd"][-1].startswith("@")
     assert "--model" not in captured["cmd"]
     assert "private-alias" not in captured["cmd"]

@@ -531,7 +531,15 @@ def _codex_base_cmd(
         ]
     )
     cmd.extend(_codex_model_args(model, use_default=resume_id is None))
-    if resume_id is None:
+    if resume_id is not None:
+        # ``codex exec resume`` does not accept the new-session --sandbox or
+        # --ask-for-approval flags.  Its generic config overrides are the
+        # enforceable equivalent, and must not inherit a permissive user
+        # profile when a pipeline review resumes.
+        if sandbox is not None:
+            cmd.extend(["-c", f"sandbox_mode={json.dumps(sandbox)}"])
+        cmd.extend(["-c", f"approval_policy={json.dumps(approval)}"])
+    else:
         if cwd is None:
             raise ValueError("cwd is required for new Codex exec sessions")
         cmd.extend(["--cd", str(cwd)])
@@ -649,9 +657,16 @@ def resume_codex_session(
     cwd: Path,
     timeout: int,
     model: str = "",
+    sandbox: str = "workspace-write",
+    approval: str = "never",
 ) -> AgentRunResult:
     """Resume a persisted Codex exec session and capture its latest output."""
-    cmd = _codex_base_cmd(model=model, sandbox=None, resume_id=session_id)
+    cmd = _codex_base_cmd(
+        model=model,
+        sandbox=sandbox,
+        approval=approval,
+        resume_id=session_id,
+    )
     return _run_codex_command(cmd, prompt=prompt, cwd=cwd, timeout=timeout)
 
 
@@ -844,15 +859,18 @@ def resume_pi_session(
     cwd: Path,
     timeout: int,
     model: str = "",
+    sandbox: str = "workspace-write",
+    approval: str = "never",
 ) -> AgentRunResult:
     """Resume a Pi JSON-mode session by id."""
+    del approval
     cmd = _pi_base_cmd(session_id=session_id)
     result = _run_pi_command(
         cmd,
         prompt=prompt,
         cwd=cwd,
         timeout=timeout,
-        sandbox="workspace-write",
+        sandbox=sandbox,
         model=model,
     )
     parsed_session_id, event_message = _parse_pi_json_events(result.stdout or "")
@@ -936,12 +954,30 @@ def resume_agent_session(
     cwd: Path,
     timeout: int,
     model: str = "",
+    sandbox: str = "workspace-write",
+    approval: str = "never",
 ) -> AgentRunResult:
     """Resume a direct-runner agent session."""
     if is_codex(agent):
-        return resume_codex_session(session_id, prompt, cwd=cwd, timeout=timeout, model=model)
+        return resume_codex_session(
+            session_id,
+            prompt,
+            cwd=cwd,
+            timeout=timeout,
+            model=model,
+            sandbox=sandbox,
+            approval=approval,
+        )
     if is_pi(agent):
-        return resume_pi_session(session_id, prompt, cwd=cwd, timeout=timeout, model=model)
+        return resume_pi_session(
+            session_id,
+            prompt,
+            cwd=cwd,
+            timeout=timeout,
+            model=model,
+            sandbox=sandbox,
+            approval=approval,
+        )
     raise ValueError(f"Agent '{agent}' does not support direct session resume")
 
 
