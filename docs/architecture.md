@@ -49,9 +49,11 @@ Optimization"), file paths are repo-relative.
 - **Single durable journal.** GitHub labels, comments, PR state and
  `ArmingStateStore` records are the only
  crash-resistant truth. Stages may not persist any other state. Restart =
- re-run: queue reconstruction reads the journal
- ([`_seed_pass`](hephaestus/automation/pipeline/coordinator.py),
- [`seed_from_cli`](hephaestus/automation/pipeline/seeding.py)).
+re-run: queue reconstruction reads the journal
+([`coordinator._seed_pass`](hephaestus/automation/pipeline/coordinator.py),
+[`seed_from_cli`](hephaestus/automation/pipeline/seeding.py)) — distinct from
+the per-repo seed-side [`repo._seed_pass`](hephaestus/automation/pipeline/stages/repo.py)
+in §5.1, which tags `state:skip` on epics before any other durable mutation.
 - **Interrupt = resumable, never failed.** A SIGINT/SIGTERM/SIGHUP during a
  run parks the touched item with `ItemResult(passed=False,
  reason="resumable at <stage>", …)`. A subsequent restart seeds it back
@@ -160,7 +162,16 @@ It NEVER launches agents, builds/tests or git/network operations. It never
 sleeps — wakeups are the timer's responsibility.
 The single worker pool ([`WorkerPool`](hephaestus/automation/pipeline/worker_pool.py))
 executes everything else: agent invocations (Claude or Codex), build/test
-subprocesses and git/network operations. Every git operation crosses
+subprocesses and git/network operations. Every Claude agent invocation
+routed through the worker pool binds to an explicit least-privilege
+`--allowedTools` scope. An explicit [`AgentJob.allowed_tools`](hephaestus/automation/pipeline/jobs.py)
+grant wins (the `pr_review` job uses it for the reviewer skill); absent that,
+read-only sandbox jobs use [`DEFAULT_TOOL_SCOPE`](hephaestus/automation/pipeline/tool_scopes.py),
+and all other jobs resolve through
+[`tool_scope_for(agent)`](hephaestus/automation/pipeline/tool_scopes.py) from
+[`AGENT_TOOL_SCOPES`](hephaestus/automation/pipeline/tool_scopes.py). An
+unmapped role therefore falls through to the same read-only default rather
+than the most permissive scope (#2319). Every git operation crosses
 [`_repo_lock`](hephaestus/automation/pipeline/worker_pool.py) (in-process
 thread lock, outer) **and**
 [`_interruptible_file_lock`](hephaestus/automation/pipeline/worker_pool.py)
@@ -333,6 +344,16 @@ When `--dry-run` is set, the coordinator:
 The fleet-sync `--dry-run` is also a preview contract (see
 [`AGENTS.md`](../AGENTS.md) §"Claude non-interactive permission policy").
 
+### Poisoned-item fail-safety
+
+Every `_run_item` call is wrapped in a per-item `try/except`; an item that
+raises an unhandled exception inside a stage accessor is logged and routed
+to [`FINISH_FAIL`](hephaestus/automation/pipeline/routing.py) instead of
+terminating the loop, so one bad item never poisons the whole run (#2295).
+Equivalently, when a `scope.trimmed_routes()` rewrite or a stage's own
+`ROUTES` row has no `next`/`fail` mapping, the item lands at the next valid
+mapping or `finished(fail)` rather than raising `KeyError`.
+
 ### Closed-schema stage events
 
 Stage-originated JSONL events use the closed schema in
@@ -453,6 +474,17 @@ two pairs:
 | `state:implementation-no-go` | review-scope | [`pr_review._eval`](hephaestus/automation/pipeline/stages/pr_review.py) |
 | `state:implementation-go` | review-scope | [`pr_review._eval`](hephaestus/automation/pipeline/stages/pr_review.py) — **sole authority** |
 | `state:skip` | absolute | operator / exhaustion in [`pr_review`](hephaestus/automation/pipeline/stages/pr_review.py) / [`implementation`](hephaestus/automation/pipeline/stages/implementation.py) |
+
+Every **stage-issued** `state:skip` durable write (the `pr_review` and
+`implementation` write paths, plus repo-stage epic tagging) has a
+best-effort `gh_issue_upsert_comment` companion produced via
+[`format_skip_reason_comment`](hephaestus/automation/state_labels.py), using
+the [`SKIP_REASON_MARKER`](hephaestus/automation/state_labels.py) prefix
+`<!-- hephaestus-state-skip-reason -->` so the reason survives outside the
+run log (#2264). Epic tagging in
+[`repo._seed_pass`](hephaestus/automation/pipeline/stages/repo.py) is the
+sole sanctioned seeding write: it adds both the skip label and this comment
+before excluding the epic from the rest of the pipeline.
 
 Label colors per [`STATE_LABEL_SPECS`](hephaestus/automation/state_labels.py).
 Provisioning script
@@ -903,7 +935,7 @@ git-failure counter (`GIT_ERROR_RETRY_CAP`).
  writes signed commits through
  [`worker_pool._git_commit_push`](hephaestus/automation/pipeline/worker_pool.py)
  → [`git_utils.commit_if_changes`](hephaestus/automation/git_utils.py).
-4. `github.defer_auto_merge(pr)` immediately after creation —
+4. `github.defer_auto_merge(pr)` immediately after creation (preceded when needed by [`_git_retry(item, "commit_push failed")`](hephaestus/automation/pipeline/stages/implementation.py) on a transient prior push; only hard failures consume `implement`; #2274) —
  load-bearing legacy runner order: auto-merge must stay disabled and
  `state:implementation-go` does NOT create merge eligibility by
  itself.
@@ -998,6 +1030,11 @@ composed with `get_impl_resume_feedback_prompt` (resumes the
 implementer session).
 Existing-PR path: `get_address_review_prompt` from
 [`prompts/address_review.py`](hephaestus/automation/prompts/address_review.py).
+The full session is decomposed into [`_invoke_address_fix_session`](hephaestus/automation/address_review_core.py)
+(sub-agent runner), [`_parse_address_fix_session_output`](hephaestus/automation/address_review_core.py)
+(result parsing), and [`resolve_addressed_threads`](hephaestus/automation/address_review_core.py)
+post-pass; the public entry [`run_address_fix_session`](hephaestus/automation/address_review.py)
+delegates the durable log write to [`_persist_address_fix_log`](hephaestus/automation/address_review_core.py) (#2210).
 
 #### PUSH_WAIT [W:G]
 
@@ -1010,6 +1047,8 @@ real-commit.
 [`PrReviewStage._eval`](hephaestus/automation/pipeline/stages/pr_review.py) implements
 the severity-aware GO gate from
 [`pipeline_github.py count_unresolved_threads_by_severity`](hephaestus/automation/pipeline_github.py).
+The reviewer is bound by the falsification-first [`REVIEW POSTURE`](hephaestus/prompts/templates/default/review_rubrics/reviewer.j2) rubric prefix and the anti-inflation grading rules (#2302): the reviewer must attempt to falsify the work, and any dimension not actively falsified caps at `C`.
+
 A `<!-- hephaestus-severity: X -->` marker (`X` in
 `critical|major|minor|nitpick`) is prepended to every posted comment
 ([`prompts/pr_review.py`](hephaestus/automation/prompts/pr_review.py):
@@ -1043,15 +1082,17 @@ The gate logic at [`PrReviewStage._eval`](hephaestus/automation/pipeline/stages/
  address leg on the NEXT round (DELIBERATE 1-round cost over
  legacy so the budget/extension gate stays a single chokepoint).
 - `blocking == 0, minor > 0` →
- [`resolve_automation_threads`](hephaestus/automation/pipeline/stages/base.py)
- before arming so `required_review_thread_resolution` does not
- re-block at merge.
+[`resolve_automation_threads`](hephaestus/automation/pipeline_github.py)
+inside [`_handle_clean_go`](hephaestus/automation/pipeline/stages/pr_review.py)
+before [`_write_go`](hephaestus/automation/pipeline/stages/pr_review.py) writes
+`state:implementation-go`, so `required_review_thread_resolution` does not
+re-block at merge.
 - Clean GO → verify `defer_auto_merge` is still disabled, apply
  `state:implementation-go` (the **sole** stage that writes this label) and ADVANCE to `merge_wait`. **NEVER** arms auto-merge —
  that is exclusively `merge_wait`'s job.
 **Durable writes**: review-thread posts, severity markers, `post_pr_comment`
 on `HUMAN_BLOCKED`, `state:implementation-no-go` (every real NOGO),
-`state:skip` (cap exhaustions),
+`state:skip` (cap exhaustions; with companion [`format_skip_reason_comment`](hephaestus/automation/state_labels.py) comment per #2264),
 `resolve_automation_threads` (advisory waved threads).
 **Owned labels**: `state:implementation-no-go` (NOGO verdict, before
 retry/regress) [durable], `state:skip` (exhaustion) [durable]
@@ -1339,7 +1380,7 @@ When `--issues` or `--prs` is set, the resolved `--repos` list is used
 ONLY for context — repo discovery is NOT enqueued, so a scoped run
 cannot reconstruct every open issue in the repo (deliberate scope
 isolation).
-After `_seed_pass`, if all queues + timers + in-flight are empty,
+After `coordinator._seed_pass`, if all queues + timers + in-flight are empty,
 [`_reseed_if_converged`](hephaestus/automation/pipeline/coordinator.py)
 re-seeds up to `--loops` and either exits on a zero-work pass or
 continues.
@@ -1457,7 +1498,7 @@ out-of-band.
 | `hephaestus-plan-issues` | `planning → plan_review` | [`planner`](hephaestus/automation/planner.py) |
 | `hephaestus-implement-issues` | `implementation → pr_review` | [`implementer`](hephaestus/automation/implementer.py) |
 | `hephaestus-review-prs` | `pr_review` (internal slice) | [`pr_reviewer`](hephaestus/automation/pr_reviewer.py) |
-| `hephaestus-drive-prs-green` | `merge_wait` (post-merge learn) | `hephaestus-drive-prs-green` script |
+| `hephaestus-drive-prs-green` | `pr_review → merge_wait` | [`ci_driver`](hephaestus/automation/ci_driver.py) |
 | `hephaestus-merge-prs` | (manual merge-driving, queues disabled) | [`hephaestus.github.pr_merge`](hephaestus/github/pr_merge.py) |
 | `hephaestus-agent-stage` | (one-shot stage invocation) | [`agent_stage`](hephaestus/automation/agent_stage.py) |
 
@@ -1466,6 +1507,15 @@ out-of-band.
 pre-PR unit-test gate — argv comes from
 `PipelineConfig.pre_pr_test_argv` so non-standard unit-test layouts
 work without code change.
+
+Three Codex-only flags control per-role reasoning effort:
+`--planner-reasoning-effort {default|low|medium|high|xhigh}` and the
+analogous `--reviewer-reasoning-effort` and `--implementer-reasoning-effort`
+([`_build_parser`](hephaestus/automation/loop_runner.py)). A role-specific
+value takes precedence over the selected model alias's `model_reasoning_effort`
+default; `default` deliberately omits the setting so the alias keeps its
+established baseline. These flags are applied only to the Codex provider
+and never modify Claude or Pi model IDs (#2287).
 The default pipeline accepts `--loops`, `--parallel-repos`,
 `--max-workers` and per-agent `--agent` plus per-phase reasoning
 controls:
@@ -1627,6 +1677,38 @@ remain as thin compatibility shims re-exporting `_resolve_model`,
  branch name (`{issue}-auto-impl`); referenced by
  [`implementation._gate`](hephaestus/automation/pipeline/stages/implementation.py).
 
+### [`routing.py`](hephaestus/automation/pipeline/routing.py)
+
+The single source of truth for pipeline stage transitions, fail
+routes, and per-stage budgets — every §5 stage section and the §6
+ROUTES table cite this file for the canonical numbers. Declares:
+
+- [`StageName`](hephaestus/automation/pipeline/routing.py) — the
+ `str`-flavored 7-stage enum (`REPO → PLANNING → PLAN_REVIEW →
+ IMPLEMENTATION → PR_REVIEW → MERGE_WAIT → FINISHED`); declaration
+ order matches [`PIPELINE_ORDER`](hephaestus/automation/pipeline/routing.py)
+ and the reversed
+ [`_DRAIN_ORDER`](hephaestus/automation/pipeline/coordinator.py).
+- [`Disposition`](hephaestus/automation/pipeline/routing.py)
+ — the routing-outcome enum (`ADVANCE`, `RETRY`, `FAIL_BACK`,
+ `SKIP`, `BLOCKED`, `FINISH_PASS`, `FINISH_FAIL`); the disposition
+ funnel is exhaustive — a new value is a static `TypeError`, not a
+ silent miss.
+- [`ROUTES`](hephaestus/automation/pipeline/routing.py) — the
+ typed `dict[StageName, Route]` table. Each row binds a stage to
+ its `next`, `fail_routes` and per-key budgets; the canonical
+ numbers are cited inline in each §5.x block and listed centrally
+ in §6. Stage code never re-defines these numbers — the table is
+ the single source of truth. Schema / table consistency is
+ enforced by
+ [`tests/unit/automation/pipeline/test_routing.py`](tests/unit/automation/pipeline/test_routing.py);
+ runtime cross-stage budget guards are
+ [`_route_fail_back`](hephaestus/automation/pipeline/coordinator.py)
+ plus the safety cap
+ [`_FAIL_BACK_CAP`](hephaestus/automation/pipeline/coordinator.py)
+ (the sum of every per-key budget — guarantees forward progress
+ even under a per-stage budget-bookkeeping bug).
+
 ### [`prompts/`](hephaestus/automation/prompts/)
 
 Each stage section in §5 lists the prompt function(s) it imports; this
@@ -1642,8 +1724,8 @@ prompts.** The module contract is enforced by test coverage:
  a verdict line or injecting instructions that bypass the strict
  review loop. Builders that do not fence user content are flagged
  in test regressions.
-- [`prompts/catalog.py`](hephaestus/automation/prompts/catalog.py) —
- the [`PromptCatalog`](hephaestus/automation/prompts/catalog.py) registry.
+- [`prompts/catalog.py`](hephaestus/prompts/catalog.py) (top-level; re-exported as [`automation/prompts/catalog.py`](hephaestus/automation/prompts/catalog.py)) —
+ the [`PromptCatalog`](hephaestus/prompts/catalog.py) registry; builds a [`jinja2.Environment`](hephaestus/prompts/catalog.py) over a [`FileSystemLoader`](hephaestus/prompts/catalog.py) resolved from `__file__`-relative paths (deliberately NOT `PackageLoader`, to avoid importlib editable-install staleness, #2308).
  Every prompt path passes through
  `PromptCatalog.current().render(name.j2, **kwargs)` so the same
  prompt rendered in different roles (planner, planner-amend,
@@ -1839,6 +1921,15 @@ CI can react consistently.
  matching the live `headRefOid` of the PR. `merge_wait` captures the
  head SHA at arm time and polls it; a head drift between ARM and POLL
  is a terminal containment failure.
+- **Skip-reason marker** — the `<!-- hephaestus-state-skip-reason -->` HTML-comment marker ([`SKIP_REASON_MARKER`](hephaestus/automation/state_labels.py)) that prefixes every `state:skip` reason-comment body produced by [`format_skip_reason_comment`](hephaestus/automation/state_labels.py), so a repo reader can deterministically trace the automated skip reason.
+- **File-system loader** — the Jinja `FileSystemLoader` resolved from `__file__`-relative paths in [`prompts/catalog.py`](hephaestus/prompts/catalog.py); deliberately NOT `PackageLoader` to avoid importlib editable-install staleness (#2308).
+- **Conflict-resolution request** — the [`ConflictResolutionRequest`](hephaestus/automation/_review_conflict_resolver.py) immutable context consumed by the cohesive [`ReviewConflictResolver`](hephaestus/automation/_review_conflict_resolver.py) unit split out of `_review_phase.py` (#2209).
+- **Advise-skipped breadcrumb** — the [`advise_skipped(reason)`](hephaestus/automation/advise_runner.py) marker string returned by [`run_advise`](hephaestus/automation/advise_runner.py) when Mnemosyne is unavailable, so a stage aborts as `SKIP` rather than failing; the reason is forwarded verbatim from [`resolve_marketplace`](hephaestus/automation/advise_runner.py) (e.g. `clone_failed`, `manifest_missing`).
+- **Tool scope** — the explicit `(allowed_tools, permission_mode)` pair in [`AGENT_TOOL_SCOPES`](hephaestus/automation/pipeline/tool_scopes.py) for one of the 9 pipeline agent roles (advise, planner, plan-reviewer, implementer, pr-reviewer, comment-classifier, address-review, ci-driver, learnings); unmapped roles fall through to the read-only [`DEFAULT_TOOL_SCOPE`](hephaestus/automation/pipeline/tool_scopes.py) per the fail-closed security contract (#2319).
+- **Reasoning effort** — explicit Codex-only `--<role>-reasoning-effort` CLI flag value (`default|low|medium|high|xhigh`) mapped onto Codex's `model_reasoning_effort`; `default` omits the setting, `low|medium|high|xhigh` override per-role, and omitted flags preserve the model-alias default (#2287).
+- **Review posture** — the falsification-first rubric prefix [`REVIEW POSTURE`](hephaestus/prompts/templates/default/review_rubrics/reviewer.j2); combined with anti-inflation grading rules, the max grade is `C` for any dimension the reviewer did not actively attempt to falsify (#2302).
+- **Push retry** — [`_git_retry(item, "commit_push failed")`](hephaestus/automation/pipeline/stages/implementation.py) re-attempts a transient push before PR_CREATE; the retry is budget-untouched so the next `implement` attempt remains available (#2274).
+
 - **Severity-aware GO gate** — logic that classifies posted review
  comments by marker (`critical|major|minor|nitpick`) and decides
  whether the `pr_review` round can advance. **See [§5.5 _Gate
@@ -1850,7 +1941,11 @@ CI can react consistently.
 ## 14. Provenance audit checklist
 
 Every claim in this document is grounded in the source it cites. The
-following audit pass confirms each section is traceable:
+following audit pass confirms each section is traceable. The ADR-by-ADR
+binding record lives under [`docs/adr/`](adr/); this checklist
+cross-cites the modules each ADR binds, rather than re-listing each
+ADR — ADRs are the bind-points and historical record (per §1), this
+checklist is the source-grounded index.
 
 - §1 → [`AGENTS.md`](../AGENTS.md) §"Agents the codebase orchestrates",
  [`state_labels.py`](hephaestus/automation/state_labels.py),
