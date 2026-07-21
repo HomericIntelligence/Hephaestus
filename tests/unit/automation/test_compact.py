@@ -161,6 +161,7 @@ class TestCompactAgentSession:
                 cwd=tmp_path,
                 timeout=60,
                 model="gpt-5.6",
+                sandbox="read-only",
             )
 
         assert compacted is True
@@ -171,6 +172,8 @@ class TestCompactAgentSession:
             cwd=tmp_path,
             timeout=60,
             model="gpt-5.6",
+            sandbox="read-only",
+            approval="never",
         )
 
     def test_direct_compact_without_a_session_is_a_safe_noop(self, tmp_path: Path) -> None:

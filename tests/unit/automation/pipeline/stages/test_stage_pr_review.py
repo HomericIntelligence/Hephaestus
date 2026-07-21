@@ -381,6 +381,7 @@ class TestPrReviewStageStep:
         assert isinstance(reviewer_compact, JobRequest)
         assert isinstance(reviewer_compact.job, CompactJob)
         assert reviewer_compact.job.session_agent == "pr-reviewer"
+        assert reviewer_compact.job.sandbox == "read-only"
         assert reviewer_compact.on_done_state == "COMPACT_WRITER_WAIT"
 
         item.state = reviewer_compact.on_done_state
@@ -388,6 +389,7 @@ class TestPrReviewStageStep:
         assert isinstance(writer_compact, JobRequest)
         assert isinstance(writer_compact.job, CompactJob)
         assert writer_compact.job.session_agent == "implementer"
+        assert writer_compact.job.sandbox == "read-only"
         assert writer_compact.on_done_state == "REVIEW_WAIT"
 
     def test_validation_continues_the_reused_reviewer_session(
