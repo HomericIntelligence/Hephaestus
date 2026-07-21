@@ -47,7 +47,7 @@ or recreatable from committed sources (`.venv` via `uv sync` from `uv.lock` per
 2. **Credentials and secrets are never archived.** GitHub auth (`gh auth`), the
    GPG signing key, and Claude CLI auth are inventoried in the runbook and
    re-provisioned on recovery — never written into a backup archive. This
-   upholds the AGENTS.md secrets policy (no secrets in artifacts).
+   upholds the CLAUDE.md secrets policy (no secrets in artifacts).
 
 3. **The restore procedure is continuously tested in CI, not documented in
    prose.** `tests/unit/scripts/test_backup_state.py` executes a
