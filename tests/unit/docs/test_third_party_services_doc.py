@@ -14,6 +14,7 @@ REQUIRED_SERVICES = (
     "GitHub",
     "PyPI",
     "Anthropic",
+    "OpenAI",
     "Pi private provider",
     "npm",
     "Dependabot",
@@ -25,18 +26,25 @@ REQUIRED_SERVICES = (
 FIRST_PARTY_ACTION_OWNERS = frozenset({"actions"})
 
 
-def _documented_action_owners() -> set[str]:
-    """Remote ``uses:`` owners referenced across ``.github/workflows/*.yml``.
+def _documented_action_owners(repo_root: Path = REPO_ROOT) -> set[str]:
+    """Remote ``uses:`` owners referenced by workflows and composite actions.
 
     The trailing ``@`` in the pattern restricts matches to remote pinned
     actions (``owner/repo@ref``), excluding local composite actions referenced
     as ``uses: ./.github/actions/...``.
     """
     owners: set[str] = set()
-    for workflow in WORKFLOWS.glob("*.yml"):
-        text = workflow.read_text(encoding="utf-8")
-        for match in re.finditer(r"^\s*uses:\s*([\w.-]+)/[\w./-]+@", text, re.MULTILINE):
-            owners.add(match.group(1))
+    for definitions in (
+        repo_root / ".github" / "workflows",
+        repo_root / ".github" / "actions",
+    ):
+        for pattern in ("*.yml", "*.yaml"):
+            for definition in definitions.rglob(pattern):
+                text = definition.read_text(encoding="utf-8")
+                for match in re.finditer(
+                    r"^\s*-\s*uses:\s*([\w.-]+)/[\w./-]+@", text, re.MULTILINE
+                ):
+                    owners.add(match.group(1))
     return owners
 
 
@@ -87,6 +95,19 @@ def test_every_third_party_action_owner_is_documented() -> None:
         owner for owner in owners if not any(owner.lower() in cell for cell in service_cells)
     )
     assert missing == [], f"CI action owners absent from docs/third-party-services.md: {missing}"
+
+
+def test_composite_action_owner_is_discovered(tmp_path: Path) -> None:
+    """A nested composite action cannot bypass the external-owner guard."""
+    action = tmp_path / ".github" / "actions" / "bootstrap" / "action.yml"
+    action.parent.mkdir(parents=True)
+    action.write_text(
+        "runs:\n  using: composite\n  steps:\n"
+        "    - uses: example/setup-tool@0123456789abcdef0123456789abcdef01234567\n",
+        encoding="utf-8",
+    )
+
+    assert _documented_action_owners(tmp_path) == {"example"}
 
 
 def test_doc_is_linked_from_index() -> None:
