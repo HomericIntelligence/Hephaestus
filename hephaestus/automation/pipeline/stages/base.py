@@ -64,7 +64,7 @@ from hephaestus.automation.state_labels import (
 )
 
 from ..events import StageEvent
-from ..jobs import AgentJob, BuildTestJob, GitJob, JobHandle, JobResult
+from ..jobs import AgentJob, BuildTestJob, CompactJob, GitJob, JobHandle, JobResult
 from ..routing import ROUTES, Disposition, StageName, StageOutcome
 from ..work_item import ItemKind, WorkItem
 
@@ -72,6 +72,7 @@ __all__ = [
     "GIT_JOB_TIMEOUT_S",
     "AgentJob",
     "BuildTestJob",
+    "CompactJob",
     "Continue",
     "Disposition",
     "GitJob",
@@ -405,14 +406,14 @@ class JobRequest:
     """Request a job be submitted to the worker pool.
 
     Attributes:
-        job: The frozen job spec to submit (agent, build/test, or git — the
-            same union :class:`~..jobs.JobHandle` carries).
+        job: The frozen job spec to submit (agent, build/test, git, or session
+            compaction — the same union :class:`~..jobs.JobHandle` carries).
         on_done_state: The state the coordinator moves the item to after the
             job completes and ``on_job_done`` has run.
 
     """
 
-    job: AgentJob | BuildTestJob | GitJob
+    job: AgentJob | BuildTestJob | GitJob | CompactJob
     on_done_state: str
 
 

@@ -20,6 +20,7 @@ import pytest
 from hephaestus.automation.pipeline.jobs import (
     AgentJob,
     BuildTestJob,
+    CompactJob,
     GitJob,
     JobHandle,
     JobResult,
@@ -83,7 +84,7 @@ class FakeWorkerPool:
 
     def submit(
         self,
-        job: AgentJob | BuildTestJob | GitJob,
+        job: AgentJob | BuildTestJob | GitJob | CompactJob,
         on_done_state: StageName,
         *,
         claim_key: str = "",
@@ -116,12 +117,14 @@ class FakeWorkerPool:
         return handle
 
     @staticmethod
-    def _default_result(job: AgentJob | BuildTestJob | GitJob) -> JobResult:
+    def _default_result(job: AgentJob | BuildTestJob | GitJob | CompactJob) -> JobResult:
         """Synthesize a per-job-type ok result when nothing is scripted."""
         if isinstance(job, AgentJob):
             return JobResult(ok=True, value="fake agent output")
         if isinstance(job, BuildTestJob):
             return JobResult(ok=True, value=0)
+        if isinstance(job, CompactJob):
+            return JobResult(ok=True, value=True)
         # GitJob: mirror the real _dispatch_git_op value semantics so
         # coordinator tests reading result.value see the same shapes —
         # rebase reports clean-rebase True, commit_push reports changed True.

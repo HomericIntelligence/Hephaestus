@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from hephaestus.automation.learn import compact_session
+from hephaestus.automation.learn import compact_agent_session, compact_session
 from hephaestus.automation.session_naming import AGENT_CI_DRIVER, session_uuid
 
 
@@ -145,3 +145,43 @@ class TestCompactSession:
             result = compact_session("test-repo", 42, AGENT_CI_DRIVER, tmp_path)
 
             assert result is True
+
+
+class TestCompactAgentSession:
+    """Provider-neutral compaction preserves direct-runner context."""
+
+    def test_codex_compact_resumes_the_persisted_session(self, tmp_path: Path) -> None:
+        with patch("hephaestus.automation.learn.resume_agent_session") as resume:
+            compacted = compact_agent_session(
+                repo="test-repo",
+                issue=42,
+                provider="codex",
+                session_agent="pr-reviewer",
+                session_id="codex-session",
+                cwd=tmp_path,
+                timeout=60,
+                model="gpt-5.6",
+            )
+
+        assert compacted is True
+        resume.assert_called_once_with(
+            agent="codex",
+            session_id="codex-session",
+            prompt="/compact",
+            cwd=tmp_path,
+            timeout=60,
+            model="gpt-5.6",
+        )
+
+    def test_direct_compact_without_a_session_is_a_safe_noop(self, tmp_path: Path) -> None:
+        with patch("hephaestus.automation.learn.resume_agent_session") as resume:
+            compacted = compact_agent_session(
+                repo="test-repo",
+                issue=42,
+                provider="codex",
+                session_agent="pr-reviewer",
+                cwd=tmp_path,
+            )
+
+        assert compacted is False
+        resume.assert_not_called()

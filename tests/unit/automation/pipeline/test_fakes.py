@@ -1,6 +1,6 @@
 """Direct tests for the shared pipeline test doubles in conftest.py.
 
-FakeWorkerPool must work for all three job types and honor scripted
+FakeWorkerPool must work for all four job types and honor scripted
 results/exceptions; FakeGitHub must record every mutation in mutation_log.
 """
 
@@ -11,6 +11,7 @@ from pathlib import Path
 from hephaestus.automation.pipeline.jobs import (
     AgentJob,
     BuildTestJob,
+    CompactJob,
     GitJob,
     JobResult,
 )
@@ -20,8 +21,8 @@ from hephaestus.automation.pipeline.routing import StageName
 from .conftest import FakeGitHub, FakeWorkerPool
 
 
-def _jobs() -> tuple[AgentJob, BuildTestJob, GitJob]:
-    """One job of each of the three types."""
+def _jobs() -> tuple[AgentJob, BuildTestJob, GitJob, CompactJob]:
+    """One job of each supported type."""
     agent = AgentJob(
         repo="test/repo",
         issue=1,
@@ -33,11 +34,20 @@ def _jobs() -> tuple[AgentJob, BuildTestJob, GitJob]:
     )
     build = BuildTestJob(repo="test/repo", cwd=Path("/tmp"), argv=("true",), timeout_s=60)
     git = GitJob(repo="test/repo", op="rebase", timeout_s=60)
-    return agent, build, git
+    compact = CompactJob(
+        repo="test/repo",
+        issue=1,
+        agent="claude",
+        session_agent="implementer",
+        model="claude-haiku-4-5",
+        cwd=Path("/tmp"),
+        timeout_s=60,
+    )
+    return agent, build, git, compact
 
 
 class TestFakeWorkerPool:
-    """FakeWorkerPool completes inline for all three job types."""
+    """FakeWorkerPool completes inline for all supported job types."""
 
     def test_matches_real_constructor_signature(self) -> None:
         """Positional (size, shutdown, completion_q) construction works."""
@@ -51,7 +61,7 @@ class TestFakeWorkerPool:
         assert fake.shutdown_event is event
         assert fake.completion_q is q
 
-    def test_all_three_job_types_complete_inline(self) -> None:
+    def test_all_job_types_complete_inline(self) -> None:
         """Every job type produces exactly one immediate ok completion."""
         fake = FakeWorkerPool()
         for job in _jobs():
@@ -59,13 +69,13 @@ class TestFakeWorkerPool:
             got_handle, result = fake.completion_q.get_nowait()
             assert got_handle is handle
             assert result.ok is True
-        assert len(fake.submitted) == 3
+        assert len(fake.submitted) == 4
         assert fake.completion_q.empty()
 
     def test_scripted_results_consumed_fifo(self) -> None:
         """script() outcomes are consumed in FIFO order across job types."""
         fake = FakeWorkerPool()
-        agent, build, git = _jobs()
+        agent, build, git, compact = _jobs()
         fake.script(
             JobResult(ok=True, value="first"),
             JobResult(ok=False, error="second failed"),
@@ -77,11 +87,14 @@ class TestFakeWorkerPool:
         _, r2 = fake.completion_q.get_nowait()
         fake.submit(git, StageName.MERGE_WAIT)
         _, r3 = fake.completion_q.get_nowait()
+        fake.submit(compact, StageName.PR_REVIEW)
+        _, r4 = fake.completion_q.get_nowait()
 
         assert r1.value == "first"
         assert r2.ok is False
         assert r2.error == "second failed"
         assert r3.ok is True  # FIFO exhausted -> default ok result
+        assert r4.ok is True
 
     def test_scripted_failure_for_each_job_type(self) -> None:
         """A scripted failing JobResult is delivered for every job type."""
@@ -97,7 +110,7 @@ class TestFakeWorkerPool:
         """queue_exception() delivers an error JobResult, mirroring the pool."""
         fake = FakeWorkerPool()
         fake.queue_exception(RuntimeError("kaboom"))
-        agent, _, _ = _jobs()
+        agent, _, _, _ = _jobs()
         fake.submit(agent, StageName.PLANNING)
         _, result = fake.completion_q.get_nowait()
         assert result.ok is False
@@ -106,7 +119,7 @@ class TestFakeWorkerPool:
     def test_handles_are_unique_per_submit(self) -> None:
         """Identical job specs still yield distinct, dict-keyable handles."""
         fake = FakeWorkerPool()
-        _, _, git = _jobs()
+        _, _, git, _ = _jobs()
         h1 = fake.submit(git, StageName.PR_REVIEW)
         h2 = fake.submit(git, StageName.PR_REVIEW)
         assert h1 is not h2

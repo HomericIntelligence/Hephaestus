@@ -897,6 +897,13 @@ class Coordinator:
             self._park_resumable(item)
             return
 
+        # Direct runners mint an opaque id on the first turn.  Keep it under
+        # the logical role rather than a round number so the next reviewer or
+        # writer turn resumes the same compacted conversation.
+        if isinstance(handle.job, AgentJob) and result.ok and result.session_id:
+            session_key = handle.job.session_agent or handle.job.agent
+            item.session_ids[session_key] = result.session_id
+
         stage = self.stages[item.stage]
         ctx = self._ctx_for(item)
         try:

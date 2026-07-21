@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .coordinator import PipelineConfig, run_pipeline
-    from .jobs import GIT_OPS, AgentJob, BuildTestJob, GitJob, JobHandle, JobResult
+    from .jobs import GIT_OPS, AgentJob, BuildTestJob, CompactJob, GitJob, JobHandle, JobResult
     from .queues import CompletionQueue, StageQueue
     from .routing import (
         ROUTES,
@@ -32,6 +32,7 @@ __all__ = [
     "ROUTES",
     "AgentJob",
     "BuildTestJob",
+    "CompactJob",
     "CompletionQueue",
     "Disposition",
     "GitJob",
@@ -54,6 +55,7 @@ __all__ = [
 _LAZY_EXPORTS: dict[str, str] = {
     "AgentJob": "hephaestus.automation.pipeline.jobs",
     "BuildTestJob": "hephaestus.automation.pipeline.jobs",
+    "CompactJob": "hephaestus.automation.pipeline.jobs",
     "CompletionQueue": "hephaestus.automation.pipeline.queues",
     "Disposition": "hephaestus.automation.pipeline.routing",
     "GIT_OPS": "hephaestus.automation.pipeline.jobs",

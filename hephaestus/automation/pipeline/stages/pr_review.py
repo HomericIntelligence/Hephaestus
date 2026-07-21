@@ -12,7 +12,9 @@ collaborators include
 contract):
 
 - States: ENTER -> REVIEW_WAIT -> VALIDATE_WAIT -> POST -> DIFFICULTY_WAIT
-  -> ADDRESS_WAIT -> PUSH_WAIT -> EVAL -> (loop to REVIEW_WAIT) or terminal
+  -> ADDRESS_WAIT -> PUSH_WAIT -> EVAL -> COMPACT_REVIEWER_WAIT
+  -> COMPACT_WRITER_WAIT -> REVIEW_WAIT
+  or terminal
   advance to ``merge_wait``. The legacy follow-up mini-states have been
   retired (#2140); a clean GO advances to ``merge_wait`` from EVAL.
 - Budgets: ``pr_review_iter`` = 3 (soft cap), ``pr_review_hard`` = 6 (hard
@@ -145,6 +147,7 @@ from ..work_item import ItemKind
 from .base import (
     GIT_JOB_TIMEOUT_S,
     AgentJob,
+    CompactJob,
     Continue,
     Disposition,
     GitJob,
@@ -199,6 +202,8 @@ DIFFICULTY_WAIT = "DIFFICULTY_WAIT"
 ADDRESS_WAIT = "ADDRESS_WAIT"
 PUSH_WAIT = "PUSH_WAIT"
 EVAL = "EVAL"
+COMPACT_REVIEWER_WAIT = "COMPACT_REVIEWER_WAIT"
+COMPACT_WRITER_WAIT = "COMPACT_WRITER_WAIT"
 
 _STEP_HANDLER_NAMES: dict[str, str] = {
     ENTER: "_enter",
@@ -210,6 +215,8 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
     ADDRESS_WAIT: "_address",
     PUSH_WAIT: "_push_wait",
     EVAL: "_eval",
+    COMPACT_REVIEWER_WAIT: "_compact_reviewer_wait",
+    COMPACT_WRITER_WAIT: "_compact_writer_wait",
 }
 
 
@@ -553,6 +560,7 @@ class PrReviewStage(Stage):
             cwd=_worktree_path(item, ctx),
             timeout_s=pr_reviewer_claude_timeout(),
             session_agent=AGENT_PR_REVIEWER,
+            resume_session_id=item.session_ids.get(AGENT_PR_REVIEWER),
             sandbox="read-only",
             # The normal $athena:pr-review skill is read-only, but its
             # declared workflow uses local Bash helpers and review subagents.
@@ -600,6 +608,7 @@ class PrReviewStage(Stage):
             cwd=_worktree_path(item, ctx),
             timeout_s=pr_reviewer_claude_timeout(),
             session_agent=AGENT_PR_REVIEWER,
+            resume_session_id=item.session_ids.get(AGENT_PR_REVIEWER),
             sandbox="read-only",
             prompt_kwargs={
                 "pr_number": item.pr,
@@ -658,6 +667,41 @@ class PrReviewStage(Stage):
             descr="push_fixes",
         )
         return JobRequest(git_job, on_done_state=EVAL)
+
+    def _compact_reviewer_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Compact the reviewer before the next retry continues its session."""
+        if not item.worktree:
+            return Continue(next_state=COMPACT_WRITER_WAIT)
+        job = CompactJob(
+            repo=item.repo,
+            issue=_issue_number(item),
+            agent=agent_provider(ctx),
+            session_agent=AGENT_PR_REVIEWER,
+            model=stage_model(ctx, "reviewer", reviewer_model),
+            cwd=_worktree_path(item, ctx),
+            timeout_s=pr_reviewer_claude_timeout(),
+            session_id=item.session_ids.get(AGENT_PR_REVIEWER),
+        )
+        return JobRequest(job, on_done_state=COMPACT_WRITER_WAIT)
+
+    def _compact_writer_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Compact the writer before the next retry continues its session."""
+        if not item.worktree:
+            return Continue(next_state=REVIEW_WAIT)
+        session_agent = (
+            AGENT_ADDRESS_REVIEW if item.payload.get("existing_pr") else AGENT_IMPLEMENTER
+        )
+        job = CompactJob(
+            repo=item.repo,
+            issue=_issue_number(item),
+            agent=agent_provider(ctx),
+            session_agent=session_agent,
+            model=stage_model(ctx, "implementer", implementer_model),
+            cwd=_worktree_path(item, ctx),
+            timeout_s=implementer_claude_timeout(),
+            session_id=item.session_ids.get(session_agent),
+        )
+        return JobRequest(job, on_done_state=REVIEW_WAIT)
 
     def on_job_done(self, item: WorkItem, result: JobResult, ctx: StageContext) -> None:
         """Store job results on the item payload (state is still the WAIT state).
@@ -815,6 +859,7 @@ class PrReviewStage(Stage):
                 cwd=_worktree_path(item, ctx),
                 timeout_s=address_review_claude_timeout(),
                 session_agent=AGENT_ADDRESS_REVIEW,
+                resume_session_id=item.session_ids.get(AGENT_ADDRESS_REVIEW),
                 prompt_kwargs={
                     "pr_number": item.pr,
                     "issue_number": item.issue,
@@ -839,6 +884,7 @@ class PrReviewStage(Stage):
             cwd=_worktree_path(item, ctx),
             timeout_s=implementer_claude_timeout(),
             session_agent=AGENT_IMPLEMENTER,
+            resume_session_id=item.session_ids.get(AGENT_IMPLEMENTER),
             prompt_kwargs={
                 "issue_number": item.issue,
                 "prev_iteration": item.payload.get("pr_review_round", 0),
@@ -961,7 +1007,7 @@ class PrReviewStage(Stage):
                 soft_cap,
                 unresolved,
             )
-            return Continue(next_state=REVIEW_WAIT)
+            return self._compact_before_next_review(item, ctx)
         made_progress = prev_unresolved is not None and automation_unresolved < prev_unresolved
         if round_done < hard_cap and made_progress:
             # #1554 progress-aware extension: rounds soft_cap+1..hard_cap are
@@ -975,7 +1021,7 @@ class PrReviewStage(Stage):
                 prev_unresolved,
                 automation_unresolved,
             )
-            return Continue(next_state=REVIEW_WAIT)
+            return self._compact_before_next_review(item, ctx)
 
         logger.warning(
             "pr_review:%d: exhausted at round %d (automation unresolved %s -> %d); applying %s",
@@ -995,6 +1041,13 @@ class PrReviewStage(Stage):
             f"feedback, then remove this label to re-enter the loop.",
         )
         return StageOutcome(Disposition.SKIP, "exhaustion")
+
+    @staticmethod
+    def _compact_before_next_review(item: WorkItem, ctx: StageContext) -> Continue:
+        """Compact both persisted sessions before continuing the next review round."""
+        if item.worktree:
+            return Continue(next_state=COMPACT_REVIEWER_WAIT)
+        return Continue(next_state=REVIEW_WAIT)
 
     @staticmethod
     def _is_zero_thread_nogo(verdict: Any, payload: dict[str, Any], total_unresolved: int) -> bool:

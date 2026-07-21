@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -779,6 +780,21 @@ class TestImplementBudget:
         assert result.job.prompt_kwargs["advise_findings"] == "use helpers"
         assert result.job.prompt_kwargs["branch_name"] == "1-auto-impl"
         assert item.attempts["implement"] == 0  # submission burns nothing
+
+    def test_implement_resumes_the_saved_direct_agent_session(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A retried direct implementation keeps its prior working context."""
+        stage = ImplementationStage()
+        ctx = make_ctx(config=SimpleNamespace(agent="codex"))
+        item = make_work_item(issue=1, state="IMPLEMENT_WAIT")
+        item.session_ids["implementer"] = "implement-session-id"
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)
+        assert result.job.resume_session_id == "implement-session-id"
 
     def test_implement_submission_clears_stale_results(
         self, make_ctx: Any, make_work_item: Any
