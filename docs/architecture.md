@@ -1069,7 +1069,8 @@ The gate logic at [`PrReviewStage._eval`](hephaestus/automation/pipeline/stages/
  automation may never resolve human threads.
 - `blocking_automation > 0` → downgraded to NOGO; runs the
  address leg on the NEXT round (DELIBERATE 1-round cost over
- legacy so the budget/extension gate stays a single chokepoint).- `blocking == 0, minor > 0` →
+ legacy so the budget/extension gate stays a single chokepoint).
+- `blocking == 0, minor > 0` →
 [`resolve_automation_threads`](hephaestus/automation/pipeline_github.py)
 inside [`_handle_clean_go`](hephaestus/automation/pipeline/stages/pr_review.py)
 before [`_write_go`](hephaestus/automation/pipeline/stages/pr_review.py) writes

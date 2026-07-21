@@ -52,9 +52,12 @@ def test_architecture_md_documents_current_drive_green_scope() -> None:
     """The wrapper table must match the current drive-green and merge entry points."""
     text = _arch_text()
 
-    assert "Five console scripts are thin queue-pipeline scoped entry points" in text
-    assert "`pr_review → merge_wait`" in text
-    assert "[`ci_driver`](hephaestus/automation/ci_driver.py)" in text
+    drive_green_row = (
+        "| `hephaestus-drive-prs-green` | `pr_review → merge_wait` | "
+        "[`ci_driver`](hephaestus/automation/ci_driver.py) |"
+    )
+    assert drive_green_row in text
+    assert "| `hephaestus-merge-prs` | (manual merge-driving, queues disabled) |" in text
     assert "#2312, OPEN" not in text
     assert "--use-merge-queue" not in text
 
