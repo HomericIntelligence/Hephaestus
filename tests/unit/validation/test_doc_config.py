@@ -11,6 +11,7 @@ import pytest
 from hephaestus.utils.helpers import NETWORK_TIMEOUT
 from hephaestus.validation.doc_config import (
     check_addopts_cov_fail_under,
+    check_agents_md_threshold,
     check_claude_md_threshold,
     check_doc_config_consistency,
     check_dod_threshold,
@@ -116,33 +117,37 @@ class TestExtractCovFailUnder:
         assert extract_cov_fail_under_from_addopts(tmp_path) == 90
 
 
-class TestCheckClaudeMdThreshold:
-    """Tests for check_claude_md_threshold()."""
+class TestCheckAgentsMdThreshold:
+    """Tests for check_agents_md_threshold()."""
 
     def test_matching_threshold(self, tmp_path: Path) -> None:
         (tmp_path / "AGENTS.md").write_text("We maintain 80%+ test coverage.")
-        assert check_claude_md_threshold(tmp_path, 80) == []
+        assert check_agents_md_threshold(tmp_path, 80) == []
 
     def test_mismatch(self, tmp_path: Path) -> None:
         (tmp_path / "AGENTS.md").write_text("We maintain 75%+ test coverage.")
-        errors = check_claude_md_threshold(tmp_path, 80)
+        errors = check_agents_md_threshold(tmp_path, 80)
         assert len(errors) == 1
         assert "75%" in errors[0]
         assert "80%" in errors[0]
 
     def test_no_mention(self, tmp_path: Path) -> None:
         (tmp_path / "AGENTS.md").write_text("No coverage info here.")
-        errors = check_claude_md_threshold(tmp_path, 80)
+        errors = check_agents_md_threshold(tmp_path, 80)
         assert len(errors) == 1
         assert "No coverage threshold" in errors[0]
 
     def test_missing_file(self, tmp_path: Path) -> None:
-        errors = check_claude_md_threshold(tmp_path, 80)
+        errors = check_agents_md_threshold(tmp_path, 80)
         assert len(errors) == 1
         assert "not found" in errors[0]
 
     def test_percent_without_plus(self, tmp_path: Path) -> None:
         (tmp_path / "AGENTS.md").write_text("We require 80% test coverage.")
+        assert check_agents_md_threshold(tmp_path, 80) == []
+
+    def test_legacy_name_delegates(self, tmp_path: Path) -> None:
+        (tmp_path / "AGENTS.md").write_text("We maintain 80%+ test coverage.")
         assert check_claude_md_threshold(tmp_path, 80) == []
 
 

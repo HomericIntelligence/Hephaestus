@@ -67,8 +67,8 @@ Adopt a **dual-layer package** with four guarantees:
 
 - `pyproject.toml` gains a populated
   `[project.optional-dependencies] automation = [...]`.
-- README and CLAUDE.md gain a "Library vs product layer" section pointing
-  here.
+- The agent contract gains a "Library vs product layer" section pointing here.
+  At decision time this guidance lived in `CLAUDE.md`; it is now consolidated in `AGENTS.md`.
 - `tests/unit/validation/test_import_surface.py` fails CI if `import hephaestus` ever
   pulls `curses`, `pydantic`, or any `hephaestus.automation.*` module into
   `sys.modules`.

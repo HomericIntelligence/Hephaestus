@@ -24,7 +24,7 @@ def _body_file(body: str) -> Iterator[str]:
 
     Use with ``gh <subcmd> --body-file <path>`` instead of ``--body <body>`` so
     large bodies (e.g. multi-KB implementation plans) don't bloat error logs or
-    risk hitting argv-size limits. The CLAUDE.md convention says temporary
+    risk hitting argv-size limits. The AGENTS.md convention says temporary
     files belong under ``build/`` of the current repo; if that directory
     exists we use it, otherwise we fall back to the system tempdir.
     """

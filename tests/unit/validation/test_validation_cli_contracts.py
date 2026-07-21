@@ -61,7 +61,7 @@ def test_doc_config_main_uses_shared_repo_root_json_path(
     )
     monkeypatch.setattr(doc_config, "load_coverage_threshold", lambda repo_root: 83.0)
     monkeypatch.setattr(doc_config, "extract_cov_path", lambda repo_root: "hephaestus")
-    monkeypatch.setattr(doc_config, "check_claude_md_threshold", lambda *args: [])
+    monkeypatch.setattr(doc_config, "check_agents_md_threshold", lambda *args: [])
     monkeypatch.setattr(doc_config, "check_dod_threshold", lambda *args: [])
     monkeypatch.setattr(doc_config, "check_readme_cov_path", lambda *args: [])
     monkeypatch.setattr(doc_config, "check_addopts_cov_fail_under", lambda *args: [])

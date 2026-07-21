@@ -16,13 +16,13 @@ class TestDiscoverBlocks:
     """Tests for discover_blocks()."""
 
     def test_returns_provided_defs(self, tmp_path: Path) -> None:
-        f = tmp_path / "CLAUDE.md"
+        f = tmp_path / "AGENTS.md"
         f.write_text(_SAMPLE_MD)
         result = discover_blocks(f, _BLOCK_DEFS)
         assert result == _BLOCK_DEFS
 
     def test_missing_file_raises(self, tmp_path: Path) -> None:
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(FileNotFoundError, match="Markdown source not found"):
             discover_blocks(tmp_path / "nonexistent.md", _BLOCK_DEFS)
 
 
@@ -30,14 +30,14 @@ class TestExtractBlocks:
     """Tests for extract_blocks()."""
 
     def test_creates_output_dir(self, tmp_path: Path) -> None:
-        src = tmp_path / "CLAUDE.md"
+        src = tmp_path / "AGENTS.md"
         src.write_text(_SAMPLE_MD)
         out = tmp_path / "blocks"
         extract_blocks(src, out, _BLOCK_DEFS)
         assert out.is_dir()
 
     def test_creates_block_files(self, tmp_path: Path) -> None:
-        src = tmp_path / "CLAUDE.md"
+        src = tmp_path / "AGENTS.md"
         src.write_text(_SAMPLE_MD)
         out = tmp_path / "blocks"
         created = extract_blocks(src, out, _BLOCK_DEFS)
@@ -46,7 +46,7 @@ class TestExtractBlocks:
             assert path.exists()
 
     def test_block_content_correct(self, tmp_path: Path) -> None:
-        src = tmp_path / "CLAUDE.md"
+        src = tmp_path / "AGENTS.md"
         src.write_text(_SAMPLE_MD)
         out = tmp_path / "blocks"
         extract_blocks(src, out, _BLOCK_DEFS)
@@ -56,7 +56,7 @@ class TestExtractBlocks:
         assert b02 == "Line 4\nLine 5\n"
 
     def test_returns_paths(self, tmp_path: Path) -> None:
-        src = tmp_path / "CLAUDE.md"
+        src = tmp_path / "AGENTS.md"
         src.write_text(_SAMPLE_MD)
         out = tmp_path / "blocks"
         result = extract_blocks(src, out, _BLOCK_DEFS)

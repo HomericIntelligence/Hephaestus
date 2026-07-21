@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check SECURITY.md supported-versions table matches the latest git tag.
 
-Hephaestus uses hatch-vcs dynamic versioning (CLAUDE.md "Version
+Hephaestus uses hatch-vcs dynamic versioning (AGENTS.md "Version
 Management"). The canonical version is the most recent `vX.Y.Z` git tag,
 not any pyproject.toml field. This hook fails if SECURITY.md's supported
 row drifts away from that latest tag's X.Y minor series.

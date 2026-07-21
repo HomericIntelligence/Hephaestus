@@ -23,6 +23,7 @@ EXPECTED_PUBLIC_NAMES = {
     ),
     "hephaestus.validation.doc_config": (
         "check_addopts_cov_fail_under",
+        "check_agents_md_threshold",
         "check_claude_md_threshold",
         "check_doc_config_consistency",
         "check_dod_threshold",

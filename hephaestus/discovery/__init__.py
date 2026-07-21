@@ -1,4 +1,4 @@
-"""Filesystem discovery utilities for agents, skills, and CLAUDE.md blocks.
+"""Filesystem discovery utilities for agents, skills, and Markdown blocks.
 
 Provides generic, path-agnostic functions for discovering and organizing
 resources from codebases.  No hardcoded paths or project-specific names.

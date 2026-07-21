@@ -1,10 +1,10 @@
 """Audit documentation command examples for policy violations.
 
 Scans all markdown files in the repository for command examples that contradict
-policies defined in CLAUDE.md and reports (or counts) violations with file:line
+policies defined in AGENTS.md and reports (or counts) violations with file:line
 references.
 
-Authoritative policy source: CLAUDE.md
+Authoritative policy source: AGENTS.md
 
 Policies enforced:
 
@@ -94,7 +94,7 @@ _RAW_RULES: list[tuple[str, Severity, str, str]] = [
     (
         "no-label-in-pr-create",
         Severity.CRITICAL,
-        "gh pr create must not use --label (labels are prohibited by CLAUDE.md)",
+        "gh pr create must not use --label (labels are prohibited by AGENTS.md)",
         # Match lines where gh pr create is followed by --label as a flag
         # (requires gh pr create to appear first, --label after — as a real flag,
         # not prose describing the flag name).  We anchor to the command by
@@ -104,7 +104,7 @@ _RAW_RULES: list[tuple[str, Severity, str, str]] = [
     (
         "no-verify-in-commit",
         Severity.CRITICAL,
-        "git commit must not use --no-verify (absolutely prohibited by CLAUDE.md)",
+        "git commit must not use --no-verify (absolutely prohibited by AGENTS.md)",
         r"git\s+commit\b.*--no-verify\b",
     ),
     (
@@ -141,7 +141,7 @@ _RAW_RULES: list[tuple[str, Severity, str, str]] = [
     (
         "wrong-branch-naming",
         Severity.WARNING,
-        "Branch names must follow <issue-number>-<description> format (CLAUDE.md)",
+        "Branch names must follow <issue-number>-<description> format (AGENTS.md)",
         # Flag 'git checkout -b <name>' where <name> doesn't start with digits,
         # a placeholder (<...> or {...}), or a skill path (skill/).
         # Excludes lines with a # comment (e.g. examples annotated as wrong).

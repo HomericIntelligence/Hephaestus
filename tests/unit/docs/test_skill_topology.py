@@ -7,7 +7,6 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 SKILL_GUIDES = (REPO_ROOT / "AGENTS.md",)
 TOPOLOGY_FILES = (
     *SKILL_GUIDES,
-    REPO_ROOT / "CLAUDE.md",
     REPO_ROOT / ".markdownlint.yaml",
 )
 
