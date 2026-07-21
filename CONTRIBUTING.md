@@ -273,13 +273,15 @@ use one of the update commands above to refresh the lock before committing.
 
 The `main` branch is protected. The `homeric-main-baseline` ruleset blocks
 unsigned commits; CI's `pr-policy` gate separately blocks a PR that lacks a
-valid issue reference or DCO sign-off:
+valid issue reference, Conventional Commit subject, or DCO sign-off:
 
 1. **Sign every commit**: `git commit -S`. Verify with `git log --show-signature -1`.
 2. **Reference the issue**: the PR body must contain the literal line `Closes #<n>`
    (capital `C`, no colon, on its own line). `Fixes`, `Resolves`, `closes`, and
    `Closes:` are **not** accepted.
-3. **Sign off every commit**: include a DCO `Signed-off-by` trailer, normally
+3. **Use Conventional Commit subjects**: for example,
+   `fix(ci): preserve workflow fixture coverage`.
+4. **Sign off every commit**: include a DCO `Signed-off-by` trailer, normally
    with `git commit -s -S`.
 
 Do not enable auto-merge manually. The queue arms it only after it has run
