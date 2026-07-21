@@ -431,6 +431,13 @@ class TestPiCliSetup:
         assert "npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.80.2" in text
         assert "pi --version" in text
 
+    def test_setup_pi_action_pins_setup_node_by_full_sha(self) -> None:
+        """The composite action must not use a mutable setup-node tag."""
+        text = SETUP_PI_ACTION.read_text(encoding="utf-8")
+        match = re.search(r"uses:\s*actions/setup-node@([^\s]+)", text)
+        assert match is not None
+        assert re.fullmatch(r"[0-9a-f]{40}", match.group(1)) is not None
+
 
 class TestAutoTagReleaseDispatch:
     """Regression tests for the one-click release workflow chain."""
