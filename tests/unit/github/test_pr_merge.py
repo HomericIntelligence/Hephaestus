@@ -7,6 +7,9 @@ from unittest.mock import MagicMock, patch
 
 from hephaestus.github import pr_merge as pr_merge_module
 from hephaestus.github.pr_merge import (
+    _enqueue_pr,
+    _is_merge_queue_error,
+    _merge_pr,
     checks_success_and_log,
     detect_repo_from_remote,
     handle_merge_result,
@@ -649,6 +652,126 @@ class TestSquashOnlyInvariant:
         source = inspect.getsource(pr_merge)
         assert "merge_method=rebase" not in source
         assert "merge_method=squash" in source
+
+
+class TestMergeQueueHandling:
+    """A merge-queue-protected base branch must be enqueued, not treated as an error."""
+
+    @staticmethod
+    def _merge_queue_405() -> subprocess.CalledProcessError:
+        exc = subprocess.CalledProcessError(1, ["gh", "api"])
+        exc.stderr = "gh: Pull Request is in the merge queue. (HTTP 405)"
+        exc.stdout = '{"message":"Pull Request is in the merge queue.","status":"405"}'
+        return exc
+
+    def test_is_merge_queue_error_detects_405(self) -> None:
+        assert _is_merge_queue_error(self._merge_queue_405()) is True
+
+    def test_is_merge_queue_error_ignores_other_failures(self) -> None:
+        exc = subprocess.CalledProcessError(1, ["gh", "api"])
+        exc.stderr = "gh: Merge conflict (HTTP 409)"
+        exc.stdout = ""
+        assert _is_merge_queue_error(exc) is False
+
+    def test_is_merge_queue_error_requires_405_even_with_matching_text(self) -> None:
+        """The message substring alone must not be enough without the 405 status."""
+        exc = subprocess.CalledProcessError(1, ["gh", "api"])
+        exc.stderr = "gh: validation failed for PR titled 'fix merge queue' (HTTP 422)"
+        exc.stdout = ""
+        assert _is_merge_queue_error(exc) is False
+
+    def test_is_merge_queue_error_requires_marker_even_with_405(self) -> None:
+        """A bare HTTP 405 without the merge-queue phrase must not match."""
+        exc = subprocess.CalledProcessError(1, ["gh", "api"])
+        exc.stderr = "gh: Method Not Allowed (HTTP 405)"
+        exc.stdout = ""
+        assert _is_merge_queue_error(exc) is False
+
+    def test_merge_pr_enqueues_when_merge_queue_required(self, monkeypatch) -> None:
+        """A 405 merge-queue error falls back to `gh pr merge` and reports queued."""
+        calls: list[list[str]] = []
+
+        def fake_gh_call(args: list[str]) -> MagicMock:
+            calls.append(args)
+            if args[0] == "api":
+                raise self._merge_queue_405()
+            # gh pr merge <n> --repo ... : enqueue path
+            result = MagicMock()
+            result.stdout = "! Pull request owner/repo#7 is already queued to merge"
+            result.stderr = ""
+            result.returncode = 0
+            return result
+
+        monkeypatch.setattr(pr_merge_module, "gh_call", fake_gh_call)
+
+        out = _merge_pr("owner/repo", 7, "deadbeef")
+
+        assert out["queued"] is True
+        assert out.get("merged") is not True
+        # The enqueue used `gh pr merge` with NO merge-method flag (queue owns it).
+        pr_merge_calls = [c for c in calls if c[:2] == ["pr", "merge"]]
+        assert pr_merge_calls, "expected a `gh pr merge` enqueue call"
+        enqueue = pr_merge_calls[0]
+        assert "--squash" not in enqueue and "--merge" not in enqueue and "--rebase" not in enqueue
+        assert "--match-head-commit" in enqueue
+        assert enqueue[enqueue.index("--match-head-commit") + 1] == "deadbeef"
+
+    def test_merge_pr_reraises_non_queue_error(self, monkeypatch) -> None:
+        """A non-merge-queue failure is not swallowed."""
+        exc = subprocess.CalledProcessError(1, ["gh", "api"])
+        exc.stderr = "gh: Not mergeable (HTTP 405)"
+        exc.stdout = ""
+
+        def fake_gh_call(args: list[str]) -> MagicMock:
+            raise exc
+
+        monkeypatch.setattr(pr_merge_module, "gh_call", fake_gh_call)
+
+        try:
+            _merge_pr("owner/repo", 7, "deadbeef")
+        except subprocess.CalledProcessError:
+            pass
+        else:  # pragma: no cover - defensive
+            raise AssertionError("expected the non-queue error to propagate")
+
+    def test_enqueue_pr_omits_merge_method_flag(self, monkeypatch) -> None:
+        captured: list[list[str]] = []
+
+        def fake_gh_call(args: list[str]) -> MagicMock:
+            captured.append(args)
+            result = MagicMock()
+            result.stdout = ""
+            result.stderr = ""
+            result.returncode = 0
+            return result
+
+        monkeypatch.setattr(pr_merge_module, "gh_call", fake_gh_call)
+
+        out = _enqueue_pr("owner/repo", 9, "cafebabe")
+
+        assert out["queued"] is True
+        assert captured == [
+            [
+                "pr",
+                "merge",
+                "9",
+                "--repo",
+                "owner/repo",
+                "--match-head-commit",
+                "cafebabe",
+            ]
+        ]
+
+    def test_handle_merge_result_logs_queued_as_success(self) -> None:
+        """A queued result must not be logged as a failure."""
+        with patch.object(pr_merge_module, "logger") as mock_logger:
+            handle_merge_result(
+                {"queued": True, "message": "enqueued in merge queue"},
+                pr_number=7,
+                base_branch="main",
+            )
+        mock_logger.error.assert_not_called()
+        mock_logger.info.assert_called_once()
 
 
 class TestCanonicalGitOps:

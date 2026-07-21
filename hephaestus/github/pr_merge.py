@@ -188,10 +188,12 @@ def handle_merge_result(result: Any, pr_number: int, base_branch: str) -> None:
         base_branch: Base branch name
 
     """
+    queued = False
     if isinstance(result, dict):
         merged = result.get("merged")
         message = result.get("message")
         sha = result.get("sha")
+        queued = bool(result.get("queued"))
     else:
         try:
             merged = getattr(result, "merged", None)
@@ -206,6 +208,10 @@ def handle_merge_result(result: Any, pr_number: int, base_branch: str) -> None:
 
     if merged:
         logger.info("  PR #%d merged into %s via squash. sha=%s", pr_number, base_branch, sha)
+    elif queued:
+        # A merge-queue repo does not merge synchronously: the PR is enqueued and
+        # the queue merges it server-side. This is success, not a failure.
+        logger.info("  PR #%d enqueued in the %s merge queue. %s", pr_number, base_branch, message)
     else:
         logger.error("  Failed to merge PR #%d. API message: %s", pr_number, message)
 
@@ -313,20 +319,73 @@ def _legacy_status_and_log(repo_name: str, head_sha: str) -> str:
     return str(payload.get("state") or "unknown")
 
 
-def _merge_pr(repo_name: str, pr_number: int, head_sha: str) -> dict[str, Any]:
-    """Squash-merge ``pr_number`` through the GitHub REST API."""
-    payload = _gh_json(
+# GitHub returns HTTP 405 with this message from the direct merge API when the
+# base branch is protected by a merge queue: the PR cannot be merged directly and
+# must be enqueued instead. Matched case-insensitively on the message substring so
+# a wording change in the surrounding text does not break detection. Gated on the
+# "(HTTP 405)" marker `gh` appends to stderr so an unrelated failure whose message
+# happens to mention "merge queue" (e.g. in a PR title or comment echoed back by
+# the API) is not misclassified as the queue-required case.
+_MERGE_QUEUE_REQUIRED_MARKER = "merge queue"
+_HTTP_405_MARKER = "(http 405)"
+
+
+def _is_merge_queue_error(exc: subprocess.CalledProcessError) -> bool:
+    """Return whether a failed direct-merge call means the repo uses a merge queue."""
+    blob = f"{getattr(exc, 'stderr', '') or ''}{getattr(exc, 'stdout', '') or ''}".lower()
+    return _MERGE_QUEUE_REQUIRED_MARKER in blob and _HTTP_405_MARKER in blob
+
+
+def _enqueue_pr(repo_name: str, pr_number: int, head_sha: str) -> dict[str, Any]:
+    """Add ``pr_number`` to the branch's merge queue via ``gh pr merge``.
+
+    The merge queue owns the merge method and rebuilds/merges the PR server-side,
+    so no ``--squash``/``--merge`` flag is passed (passing one is rejected on a
+    queue-enabled branch). ``--match-head-commit`` preserves the direct-merge
+    compare-and-swap guard, preventing a changed PR head from being enqueued.
+    ``gh pr merge`` exits 0 both when it newly enqueues the PR and when the PR is
+    already queued; both are success from our perspective.
+    """
+    result = gh_call(
         [
-            "api",
-            "-X",
-            "PUT",
-            f"/repos/{repo_name}/pulls/{pr_number}/merge",
-            "-f",
-            "merge_method=squash",
-            "-f",
-            f"sha={head_sha}",
+            "pr",
+            "merge",
+            str(pr_number),
+            "--repo",
+            repo_name,
+            "--match-head-commit",
+            head_sha,
         ]
     )
+    blob = f"{result.stdout or ''}{getattr(result, 'stderr', '') or ''}"
+    return {"queued": True, "message": blob.strip() or "enqueued in merge queue"}
+
+
+def _merge_pr(repo_name: str, pr_number: int, head_sha: str) -> dict[str, Any]:
+    """Merge ``pr_number``, using the branch's merge queue when one is required.
+
+    Tries a direct squash-merge first. If the base branch is protected by a merge
+    queue, the direct merge API returns HTTP 405; in that case the PR is enqueued
+    via ``gh pr merge`` and the result is reported as ``queued`` rather than an
+    error.
+    """
+    try:
+        payload = _gh_json(
+            [
+                "api",
+                "-X",
+                "PUT",
+                f"/repos/{repo_name}/pulls/{pr_number}/merge",
+                "-f",
+                "merge_method=squash",
+                "-f",
+                f"sha={head_sha}",
+            ]
+        )
+    except subprocess.CalledProcessError as exc:
+        if _is_merge_queue_error(exc):
+            return _enqueue_pr(repo_name, pr_number, head_sha)
+        raise
     return payload if isinstance(payload, dict) else {"merged": False, "message": str(payload)}
 
 
