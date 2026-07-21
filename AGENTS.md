@@ -339,13 +339,14 @@ releases from signed `vX.Y.Z` tags; there are no release branches.
 
 #### PR policy
 
-The required CI gate `pr-policy` and the PR reviewer enforce:
+The active `homeric-main-baseline` ruleset requires cryptographically signed
+commits. The required CI gate `pr-policy` and the PR reviewer enforce:
 
 1. The PR body MUST contain the literal line `Closes #<issue-number>` (capital
    `C`, no colon, on its own line). `Fixes`, `Resolves`, `closes`, and
    `Closes:` are NOT accepted.
-2. Every commit MUST be cryptographically signed (`git commit -S`) and carry a
-   DCO `Signed-off-by` trailer.
+2. Conventional Commit subjects.
+3. A DCO `Signed-off-by` trailer on every commit.
 
 `pr-policy` blocks PRs that fail those checks. The queue runs
 `$athena:pr-review` in its normal default profile when available, then applies
@@ -362,7 +363,7 @@ git checkout -b <issue-number>-description
 
 # 2. Make changes and commit (signed)
 git add <files>
-git commit -S -m "type(scope): description"
+git commit -s -S -m "type(scope): description"
 git log --show-signature -1   # verify the signature took
 
 # 3. Push feature branch

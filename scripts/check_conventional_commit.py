@@ -107,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     subjects = _subjects_from_args(args)
     # An empty subject set (no commits / empty stdin) is not a violation;
-    # the pr-policy signing + Closes checks cover the empty-commits anomaly.
+    # the PR-body and DCO policy checks cover malformed empty metadata.
     failed = False
     for subject in subjects:
         err = validate_subject(subject)

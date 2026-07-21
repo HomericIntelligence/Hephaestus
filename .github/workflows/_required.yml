@@ -278,20 +278,20 @@ jobs:
 
   pr-policy:
     name: pr-policy
-    # Enforces the two HARD repo PR policies on every PR. Both checks are gated
+    # Enforces the three HARD repo PR policies on every PR. All checks are gated
     # by `if: always()` so one failure still surfaces the other:
     #   1. PR body contains `Closes #N` on its own line.
-    #   2. Every commit on the PR has a verified signature.
-    # The auto-merge ↔ implementation-review state machine moved to the separate
-    # `auto-merge-policy` job (#1080) so its timing-sensitive verdict no longer
-    # blocks merge — it is intentionally NOT in the required-checks ruleset.
+    #   2. Commit subjects follow Conventional Commits.
+    #   3. Every commit carries a DCO Signed-off-by trailer.
+    # Cryptographic commit signatures are enforced by the active
+    # homeric-main-baseline ruleset, not duplicated in this workflow.
     # Push events are skipped because there is no PR to inspect. Merge-group
     # events post this required context through a dedicated step because the
     # PR-specific policy was already checked on the source PR and the synthetic
     # merge-group payload has no pull_request object.
     #
     # This gate intentionally has NO `needs:` — it runs immediately so the body
-    # and signature checks report without depending on another job's timing.
+    # and commit-metadata checks report without depending on another job's timing.
     # The earlier `needs: lint` workaround (#680) only delayed the read and left
     # a required-check-skipped-on-lint-failure wrinkle.
     if: >-
@@ -310,7 +310,7 @@ jobs:
         run: >-
           echo "PR policy applies to the source PR; merge-group checks validate the synthetic commit."
 
-      # Check 3 invokes scripts/check_conventional_commit.py from the repo tree,
+      # Check 2 invokes scripts/check_conventional_commit.py from the repo tree,
       # so the source must be on disk. Pin the checkout to the PR head SHA: the
       # default bare checkout resolves refs/pull/N/merge, which GitHub computes
       # asynchronously and can lag a fresh push — checking out a merge commit
@@ -332,10 +332,9 @@ jobs:
         run: |
           set -euo pipefail
           # `gh pr view --json body` exposes the PR body (for the Closes #N
-          # check) but DOES NOT expose per-commit signatures; we use the GraphQL
-          # API for that. Two separate queries are fine here — the workflow runs
+          # check). Two separate queries are fine here — the workflow runs
           # at most once per PR event and the policy gate must be cheap to read
-          # and debug. (The auto-merge/labels read moved to auto-merge-policy.)
+          # and debug.
           gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
             --json body \
             > pr.json
@@ -346,9 +345,7 @@ jobs:
                   commits(first:100) {
                     nodes {
                       commit {
-                        oid
                         message
-                        signature { isValid state }
                       }
                     }
                   }
@@ -370,8 +367,7 @@ jobs:
         run: |
           set -euo pipefail
           # Dependabot PR bodies are auto-generated and structurally never carry
-          # a `Closes #N` line. Exempt ONLY this body check for dependabot[bot]
-          # (#1070) — Check 2 (signing) and the auto-merge-policy job still apply.
+          # a `Closes #N` line. Exempt ONLY this body check for dependabot[bot].
           if [ "$PR_AUTHOR" = "dependabot[bot]" ]; then
             echo "OK: Dependabot PR — 'Closes #N' body check is not applicable"
             exit 0
@@ -389,30 +385,7 @@ jobs:
             exit 1
           fi
 
-      - name: "Check 2: every commit is signed"
-        if: >-
-          github.event_name == 'pull_request' && always() &&
-          steps.fetch.outcome == 'success'
-        run: |
-          set -euo pipefail
-          # Build "<oid> <isValid>" rows from the GraphQL response. A null
-          # signature object means an unsigned commit, which the // false
-          # default coerces to false (rather than dropping the row).
-          bad=$(jq -r '.data.repository.pullRequest.commits.nodes[]
-                       | "\(.commit.oid) \(.commit.signature.isValid // false)"' commits.json \
-                | awk '$2 != "true" { print $1 }')
-          if [ -n "$bad" ]; then
-            echo "::error::The following commits are unsigned or have invalid signatures:"
-            # shellcheck disable=SC2086  # word-splitting of $bad is intentional
-            printf '  %s\n' $bad
-            msg="::error::Every commit MUST be cryptographically signed."
-            msg+=" Re-sign with: git rebase --exec 'git commit --amend --no-edit -S -s' origin/main"
-            echo "$msg"
-            exit 1
-          fi
-          echo "OK: all commits have verified signatures"
-
-      - name: "Check 3: commit subjects follow Conventional Commits"
+      - name: "Check 2: commit subjects follow Conventional Commits"
         if: >-
           github.event_name == 'pull_request' && always() &&
           steps.fetch.outcome == 'success'
@@ -432,7 +405,7 @@ jobs:
                  | .commit.message | split("\n")[0]' commits.json \
             | python3 scripts/check_conventional_commit.py -
 
-      - name: "Check 4: every commit carries a DCO Signed-off-by trailer"
+      - name: "Check 3: every commit carries a DCO Signed-off-by trailer"
         if: >-
           github.event_name == 'pull_request' && always() &&
           steps.fetch.outcome == 'success'
@@ -441,62 +414,17 @@ jobs:
         run: |
           set -euo pipefail
           # Dependabot commits are bot-authored, not human DCO attestations;
-          # exempt like Check 1 / Check 3 (#1070).
+          # exempt like Checks 1 and 2 (#1070).
           if [ "$PR_AUTHOR" = "dependabot[bot]" ]; then
             echo "OK: Dependabot PR — DCO sign-off check is not applicable"
             exit 0
           fi
           # Full commit message per node, NUL-separated (the trailer lives in
-          # the body, so unlike Check 3 we keep the whole message). Reuses the
+          # the body, so unlike Check 2 we keep the whole message). Reuses the
           # commits.json already fetched above. Empty set passes by design.
           jq -j '.data.repository.pullRequest.commits.nodes[]
                  | .commit.message + "\u0000"' commits.json \
             | python3 scripts/check_dco_signoff.py -
-
-  auto-merge-policy:
-    name: auto-merge-policy
-    # Advisory (NOT a required check): the automation loop owns review,
-    # approval labeling, and merge arming. This job reports observable PR
-    # state but never authorizes the loop or substitutes for that process.
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      pull-requests: read
-    env:
-      GH_TOKEN: ${{ github.token }}
-      PR_NUMBER: ${{ github.event.pull_request.number }}
-    steps:
-      - name: "Report auto-merge state"
-        run: |
-          set -euo pipefail
-          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
-            --json autoMergeRequest,labels,state \
-            > pr.json
-          if ! jq -e '
-              type == "object"
-              and has("state")
-              and has("autoMergeRequest")
-              and (.state | type == "string")
-              and (.state == "OPEN" or .state == "MERGED" or .state == "CLOSED")
-              and (.autoMergeRequest == null or (.autoMergeRequest | type == "object"))
-            ' pr.json > /dev/null; then
-            echo "::error::Incomplete PR state response; cannot report auto-merge state."
-            exit 1
-          fi
-          pr_state=$(jq -r '.state' pr.json)
-          if [ "$pr_state" != "OPEN" ]; then
-            echo "OK: PR state is $pr_state; auto-merge policy is terminal"
-            exit 0
-          fi
-
-          state=$(jq -r '.autoMergeRequest' pr.json)
-          if [ "$state" != "null" ] && [ -n "$state" ]; then
-            echo "::notice::Auto-merge is armed by the automation loop."
-            exit 0
-          fi
-          echo "OK: auto-merge is currently disabled"
 
   unit-tests:
     name: unit-tests
@@ -972,8 +900,7 @@ jobs:
   # required contexts. It fans in every gating job above so the full workflow
   # has one auditable result; add every new gating job to `needs:`. Update the
   # GitHub ruleset deliberately only when that job also needs its own direct
-  # ruleset context. See docs/ci/required-checks.md and the guard test
-  # tests/unit/ci/test_required_checks_gate.py.
+  # ruleset context. See docs/ci/required-checks.md.
   #
   # `if: always()` is mandatory so an upstream job failure becomes one durable
   # aggregate result. The step below accepts a skipped dependency only for a

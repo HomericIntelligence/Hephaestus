@@ -105,8 +105,9 @@ def _assert_branch_commits_signed(branch: str, base: str = "main") -> None:
         # No range resolved locally — the branch ref is unavailable in this CWD
         # (e.g. pushed to origin but checked out in a separate worktree). This is
         # a resolution failure, NOT a policy violation: never crash create_pr and
-        # strand already-pushed, signed work. GitHub's server-side signature
-        # verification and the pr-policy gate remain the backstop. (#2108)
+        # strand already-pushed, signed work. GitHub's homeric-main-baseline
+        # required-signatures rule remains the authoritative server-side
+        # backstop. (#2108)
         _api.logger.warning(
             "Could not resolve any commit range for branch %r (vs %s); "
             "skipping local sign check and deferring to GitHub verification.",
@@ -250,9 +251,8 @@ def gh_pr_create(
     ``MergeWaitStage`` may conditionally arm after loop-owned PR review
     in-loop review handoff.
 
-    The CI gate (``.github/workflows/_required.yml`` job ``pr-policy``) and the
-    PR review prompt re-check the same three properties, so a slip past one
-    layer will surface at the next.
+    The active ``homeric-main-baseline`` ruleset remains the authoritative
+    server-side signature backstop if this local preflight cannot run.
 
     Args:
         branch: Branch name

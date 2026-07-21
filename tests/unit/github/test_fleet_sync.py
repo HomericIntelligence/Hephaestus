@@ -270,8 +270,9 @@ class TestResignEmailKeyGuard:
     """Regression tests for #1025: re-sign email must match the GPG signing key.
 
     A commit re-signed with an email that is not on the configured signing key
-    signs locally but GitHub reports verified=false/reason=no_user, so pr-policy
-    rejects the PR at merge. get_resign_email() must catch this and fail fast.
+    signs locally but GitHub reports verified=false/reason=no_user, so the
+    required-signatures ruleset rejects it at merge. get_resign_email() must
+    catch this and fail fast.
     """
 
     def _stub_signing_key(self, monkeypatch, *, signingkey: str, uids: list[str]) -> None:

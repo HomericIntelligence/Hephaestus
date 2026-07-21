@@ -453,16 +453,17 @@ hephaestus-check-complexity --help
 
 ## Contributing
 
-The `main` branch is protected; all changes go through a pull request. CI blocks
-PRs that fail its issue-reference, signature, and DCO checks. The loop runs
+The `main` branch is protected; all changes go through a pull request. The
+ruleset requires signed commits, while CI's `pr-policy` checks issue references,
+Conventional Commit subjects, and DCO trailers. The loop runs
 `$athena:pr-review` and then writes `state:implementation-go`; it arms only in
 `merge_wait`. Normal review may collect CI/CD evidence and incorporate it into
 its binary verdict, but the loop does not change CI/CD and no CI workflow
-independently authorizes it. The `auto-merge-policy` check is advisory.
+independently authorizes it.
 
 1. Create a feature branch named `<issue-number>-description`
    (`git checkout -b 123-amazing-feature`).
-2. Commit your changes **signed** (`git commit -S -m "feat(scope): add amazing feature"`),
+2. Commit your changes **signed and DCO-signed** (`git commit -s -S -m "feat(scope): add amazing feature"`),
    using [conventional commit](https://www.conventionalcommits.org/) messages.
 3. Push the branch (`git push -u origin 123-amazing-feature`).
 4. Open a pull request whose body contains the literal line `Closes #123`

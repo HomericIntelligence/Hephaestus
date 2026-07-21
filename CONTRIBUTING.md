@@ -271,8 +271,9 @@ use one of the update commands above to refresh the lock before committing.
 
 ## Pull Request Process
 
-The `main` branch is protected. CI's `pr-policy` gate blocks a PR that lacks a
-valid issue reference, signed commits, or DCO sign-offs:
+The `main` branch is protected. The `homeric-main-baseline` ruleset blocks
+unsigned commits; CI's `pr-policy` gate separately blocks a PR that lacks a
+valid issue reference or DCO sign-off:
 
 1. **Sign every commit**: `git commit -S`. Verify with `git log --show-signature -1`.
 2. **Reference the issue**: the PR body must contain the literal line `Closes #<n>`
@@ -286,8 +287,7 @@ Do not enable auto-merge manually. The queue arms it only after it has run
 `state:implementation-go`. `merge_wait` consumes that loop-owned label; a
 restart re-reads it with the live PR head. Normal review may collect CI/CD
 evidence and incorporate it into its binary verdict, but the loop does not
-change CI/CD and no CI check independently authorizes it; the advisory
-`auto-merge-policy` is not the authorization mechanism.
+change CI/CD and no CI check independently authorizes it.
 
 Also: ensure tests pass locally (`uv run pytest`), keep commits to logical units with
 [conventional commit](https://www.conventionalcommits.org/) messages, and never bypass
@@ -309,7 +309,7 @@ This is **distinct** from the cryptographic signature requirement above, and bot
 - **`-s` (`Signed-off-by:` trailer)** — the *DCO*. A legal attestation that you have the right to
   contribute the change and license it inbound to the project. It proves *provenance of the grant*.
 - **`-S` (GPG/SSH signature)** — *cryptographic authorship/integrity*. It proves *who* authored the
-  commit and that its contents were not tampered with. The `pr-policy` CI gate enforces `-S`.
+  commit and that its contents were not tampered with. The ruleset enforces `-S` at merge.
 
 You can set them together so you never forget:
 
@@ -318,7 +318,7 @@ git config commit.gpgsign true   # always -S
 # add the sign-off per commit with -s (or via a prepare-commit-msg hook)
 ```
 
-Both are now mechanically enforced: the `pr-policy` CI gate (Check 4) fails any PR
+Both are now mechanically enforced: the `pr-policy` CI gate (Check 3) fails any PR
 whose commits lack a valid `Signed-off-by: Name <email>` trailer, and the local
 `dco-signoff-msg` `commit-msg` pre-commit hook rejects an un-signed-off commit
 before it is created. To re-sign existing commits run:

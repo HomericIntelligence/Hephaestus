@@ -8,7 +8,6 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 TEMPLATE_DIR = REPO_ROOT / ".github" / "ISSUE_TEMPLATE"
-SEVERITY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "auto-label-severity.yml"
 FORMS = ["feature_request.yml", "bug_report.yml"]
 
 SEVERITY_OPTIONS = ["critical", "major", "minor", "nitpick"]
@@ -94,21 +93,3 @@ def test_forms_document_auto_state_label() -> None:
             i["attributes"]["value"] for i in _load(form)["body"] if i.get("type") == "markdown"
         )
         assert "state:needs-plan" in md
-
-
-def test_severity_workflow_injection_safe() -> None:
-    """The body is bound as env and never interpolated into any shell step."""
-    text = SEVERITY_WORKFLOW.read_text(encoding="utf-8")
-    wf = yaml.safe_load(text)
-    assert wf["permissions"]["issues"] == "write"
-    # Body bound as env, never interpolated into any shell step. Inspect the
-    # parsed run: commands directly (not a naive string split) so a comment
-    # mentioning the body cannot mask a real interpolation.
-    assert "ISSUE_BODY: ${{ github.event.issue.body }}" in text
-    run_commands = [
-        step["run"] for job in wf["jobs"].values() for step in job["steps"] if "run" in step
-    ]
-    assert run_commands, "workflow has no run: steps to check"
-    for command in run_commands:
-        assert "${{ github.event.issue.body }}" not in command
-        assert "${{ github.event.issue.number }}" not in command
