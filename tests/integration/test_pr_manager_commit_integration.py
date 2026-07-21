@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -18,6 +19,8 @@ _GIT_REPO_ENV_KEYS = (
     "GIT_OBJECT_DIRECTORY",
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
 )
+_GIT_COMMAND_CONFIG_ENV_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
+_GIT_COMMAND_CONFIG_ENV_KEYS = ("GIT_CONFIG_PARAMETERS",)
 
 pytestmark = [
     pytest.mark.integration,
@@ -46,8 +49,16 @@ def type_changed_worktree(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[Path, str]:
     """Create a repository with a tracked regular file replaced by a symlink."""
+    # Simulate a parent process injecting a command-scope config value.
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.symlinks")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "false")
     for key in _GIT_REPO_ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
+    for key in tuple(os.environ):
+        if key in _GIT_COMMAND_CONFIG_ENV_KEYS or key.startswith(_GIT_COMMAND_CONFIG_ENV_PREFIXES):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "0")
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -84,6 +95,9 @@ def test_git_produces_real_worktree_type_change(
     """A real file-to-symlink replacement must produce worktree status `` T``."""
     repo, relative_path = type_changed_worktree
 
+    assert os.environ["GIT_CONFIG_COUNT"] == "0"
+    assert "GIT_CONFIG_KEY_0" not in os.environ
+    assert "GIT_CONFIG_VALUE_0" not in os.environ
     assert (repo / relative_path).is_symlink()
     assert pr_manager._read_porcelain_status(repo, git_timeout=10) == (f" T {relative_path}\0")
 
