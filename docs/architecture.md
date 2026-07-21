@@ -164,12 +164,14 @@ The single worker pool ([`WorkerPool`](hephaestus/automation/pipeline/worker_poo
 executes everything else: agent invocations (Claude or Codex), build/test
 subprocesses and git/network operations. Every Claude agent invocation
 routed through the worker pool binds to an explicit least-privilege
-`--allowedTools` scope chosen from [`AGENT_TOOL_SCOPES`](hephaestus/automation/pipeline/tool_scopes.py)
-via [`tool_scope_for(agent)`](hephaestus/automation/pipeline/tool_scopes.py);
-agents whose role is not in the mapping fall through to the read-only
-[`DEFAULT_TOOL_SCOPE`](hephaestus/automation/pipeline/tool_scopes.py),
-so an unmapped agent degrades to the most restrictive scope, not the
-most permissive (#2319). Every git operation crosses
+`--allowedTools` scope. An explicit [`AgentJob.allowed_tools`](hephaestus/automation/pipeline/jobs.py)
+grant wins (the `pr_review` job uses it for the reviewer skill); absent that,
+read-only sandbox jobs use [`DEFAULT_TOOL_SCOPE`](hephaestus/automation/pipeline/tool_scopes.py),
+and all other jobs resolve through
+[`tool_scope_for(agent)`](hephaestus/automation/pipeline/tool_scopes.py) from
+[`AGENT_TOOL_SCOPES`](hephaestus/automation/pipeline/tool_scopes.py). An
+unmapped role therefore falls through to the same read-only default rather
+than the most permissive scope (#2319). Every git operation crosses
 [`_repo_lock`](hephaestus/automation/pipeline/worker_pool.py) (in-process
 thread lock, outer) **and**
 [`_interruptible_file_lock`](hephaestus/automation/pipeline/worker_pool.py)
@@ -473,7 +475,16 @@ two pairs:
 | `state:implementation-go` | review-scope | [`pr_review._eval`](hephaestus/automation/pipeline/stages/pr_review.py) — **sole authority** |
 | `state:skip` | absolute | operator / exhaustion in [`pr_review`](hephaestus/automation/pipeline/stages/pr_review.py) / [`implementation`](hephaestus/automation/pipeline/stages/implementation.py) |
 
-Every **stage-issued** `state:skip` durable write (the `pr_review` and `implementation` write paths) is accompanied by a `gh_issue_upsert_comment` companion produced via [`format_skip_reason_comment`](hephaestus/automation/state_labels.py), using the [`SKIP_REASON_MARKER`](hephaestus/automation/state_labels.py) prefix `<!-- hephaestus-state-skip-reason -->` so the reason survives outside the run log (#2264). The seed-side `state:skip` for epics in [`repo._seed_pass`](hephaestus/automation/pipeline/stages/repo.py) does NOT pair a comment, because epics are excluded before any other durable mutation.
+Every **stage-issued** `state:skip` durable write (the `pr_review` and
+`implementation` write paths, plus repo-stage epic tagging) has a
+best-effort `gh_issue_upsert_comment` companion produced via
+[`format_skip_reason_comment`](hephaestus/automation/state_labels.py), using
+the [`SKIP_REASON_MARKER`](hephaestus/automation/state_labels.py) prefix
+`<!-- hephaestus-state-skip-reason -->` so the reason survives outside the
+run log (#2264). Epic tagging in
+[`repo._seed_pass`](hephaestus/automation/pipeline/stages/repo.py) is the
+sole sanctioned seeding write: it adds both the skip label and this comment
+before excluding the epic from the rest of the pipeline.
 
 Label colors per [`STATE_LABEL_SPECS`](hephaestus/automation/state_labels.py).
 Provisioning script
