@@ -4,7 +4,7 @@
 
 Hephaestus is the foundational utilities and tooling repository of the HomericIntelligence ecosystem, providing standardized components that support development across all other projects. We prioritize modularity, reliability, and consistency across a diverse set of cross-cutting concerns: configuration management, logging, GitHub automation, and agent coordination.
 
-## Current Focus (Q3 2026)
+## Current Focus
 
 **Owner:** The maintainer cutting the release.
 
@@ -16,7 +16,7 @@ open `audit-finding` issues, and the [pre-release checklist](RELEASING.md#pre-re
 The authoritative current backlog is the set of open GitHub epics and
 `audit-finding` issues. This document records durable direction and planning
 policy; it does not mirror issue open/closed state, issue counts, source
-metrics, or calendar-quarter snapshots.
+metrics, or calendar-based snapshots.
 
 Current themes are:
 
@@ -62,5 +62,3 @@ document when direction changes.
 **How to propose changes.** Open an issue that references this document (or a
 PR editing it directly). Current execution status remains in GitHub, not in a
 manual status inventory.
-
-Last updated: 2026-07-20

@@ -140,7 +140,7 @@ repos:
         entry: uv run python -m hephaestus.validation.doc_maintenance
         language: system
         pass_filenames: false
-        files: ^(.*\.md|pyproject\.toml|hephaestus/automation/pipeline/routing\.py|\.github/CODEOWNERS|\.github/workflows/_required\.yml)$
+        files: ^(.*\.md|pyproject\.toml|hephaestus/automation/pipeline/(routing\.py|stages/.*\.py)|\.github/CODEOWNERS|\.github/workflows/(_required|test)\.yml)$
 
   # Claude settings permission path check
   - repo: local

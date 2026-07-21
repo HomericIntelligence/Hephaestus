@@ -5,11 +5,12 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import json
+import re
 import sys
-from datetime import date
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 def _module() -> object:
@@ -62,9 +63,7 @@ def test_volatile_validation_ignores_fenced_examples(tmp_path: Path) -> None:
 
     findings = _module().validate_volatile_claims(document, repo_root=tmp_path)
 
-    assert [(finding.rule, finding.line) for finding in findings] == [
-        ("temporary-state", 1)
-    ]
+    assert [(finding.rule, finding.line) for finding in findings] == [("temporary-state", 1)]
 
 
 def test_source_contract_reports_missing_semantic_selector(tmp_path: Path) -> None:
@@ -84,8 +83,8 @@ def test_source_contract_reports_missing_semantic_selector(tmp_path: Path) -> No
     assert [finding.rule for finding in findings] == ["missing-semantic-selector"]
 
 
-def test_roadmap_maintenance_uses_injected_today(tmp_path: Path) -> None:
-    """Roadmap freshness is deterministic and reports a past focus quarter."""
+def test_roadmap_maintenance_uses_release_trigger_not_calendar_rollover(tmp_path: Path) -> None:
+    """A release-driven roadmap remains valid after its focus quarter ends."""
     roadmap = tmp_path / "docs" / "ROADMAP.md"
     roadmap.parent.mkdir(parents=True)
     roadmap.write_text(
@@ -97,9 +96,61 @@ def test_roadmap_maintenance_uses_injected_today(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    findings = _module().validate_roadmap_maintenance(tmp_path, today=date(2026, 10, 1))
+    findings = _module().validate_roadmap_maintenance(tmp_path)
 
-    assert {finding.rule for finding in findings} == {"stale-current-focus"}
+    assert findings == []
+
+
+@pytest.mark.parametrize(
+    ("metadata", "rule"),
+    (
+        ("**Owner:** Release maintainer.\n", "missing-roadmap-owner"),
+        ("**Trigger:** Pre-release review.\n", "missing-roadmap-trigger"),
+        ("**Maintained source:** Open epics.\n", "missing-roadmap-source"),
+    ),
+)
+def test_roadmap_maintenance_requires_declared_contract_fields(
+    tmp_path: Path, metadata: str, rule: str
+) -> None:
+    """Each roadmap maintenance field is validated independently."""
+    roadmap = tmp_path / "docs" / "ROADMAP.md"
+    roadmap.parent.mkdir(parents=True)
+    content = (
+        "**Owner:** Release maintainer.\n"
+        "**Trigger:** Pre-release review.\n"
+        "**Maintained source:** Open epics.\n"
+    )
+    roadmap.write_text(
+        content.replace(metadata, ""),
+        encoding="utf-8",
+    )
+
+    findings = _module().validate_roadmap_maintenance(tmp_path)
+
+    assert [finding.rule for finding in findings] == [rule]
+
+
+@pytest.mark.parametrize(
+    "changed_path",
+    (
+        "hephaestus/automation/pipeline/routing.py",
+        "hephaestus/automation/pipeline/stages/implementation.py",
+        ".github/workflows/_required.yml",
+        ".github/workflows/test.yml",
+    ),
+)
+def test_doc_maintenance_hook_covers_declared_source_changes(changed_path: str) -> None:
+    """The maintenance guard runs when a maintained source changes."""
+    repo_root = Path(__file__).resolve().parents[3]
+    config = yaml.safe_load((repo_root / ".pre-commit-config.yaml").read_text(encoding="utf-8"))
+    hook = next(
+        hook
+        for repo in config["repos"]
+        for hook in repo.get("hooks", ())
+        if hook["id"] == "check-doc-maintenance"
+    )
+
+    assert re.search(hook["files"], changed_path)
 
 
 def test_main_json_reports_repository_validation(

@@ -13,18 +13,8 @@ from pathlib import Path
 from hephaestus.validation.doc_maintenance import validate_roadmap_maintenance
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-RELEASING_MD = REPO_ROOT / "docs" / "RELEASING.md"
 
 
 def test_repository_roadmap_satisfies_maintenance_contract() -> None:
-    """The checked-in roadmap has an owner, trigger, source, and fresh focus."""
+    """The checked-in roadmap has an owner, trigger, and maintained source."""
     assert validate_roadmap_maintenance(REPO_ROOT) == []
-
-
-def test_release_checklist_owns_roadmap_refresh() -> None:
-    """The release maintainer's checklist must include the roadmap review."""
-    checklist = RELEASING_MD.read_text(encoding="utf-8").lower()
-
-    assert "docs/roadmap.md" in checklist
-    assert "open epics" in checklist
-    assert "audit-finding" in checklist

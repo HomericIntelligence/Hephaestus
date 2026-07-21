@@ -16,7 +16,6 @@ import json
 import re
 import sys
 from dataclasses import asdict, dataclass
-from datetime import date
 from pathlib import Path
 
 from hephaestus.cli.utils import create_validation_parser, resolve_repo_root
@@ -43,8 +42,6 @@ _METRIC_RE = re.compile(
     r"\b\d{1,3}(?:,\d{3})*\s+(?:lines? of code|loc|tests?|source files?|packages?)\b",
     re.IGNORECASE,
 )
-_FOCUS_RE = re.compile(r"^##\s+Current Focus\s*\(Q([1-4])\s+(\d{4})\)\s*$", re.MULTILINE)
-_LAST_UPDATED_RE = re.compile(r"^Last updated:\s*(\d{4}-\d{2}-\d{2})\s*$", re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -217,13 +214,8 @@ def validate_source_contracts(
     return findings
 
 
-def _current_quarter(today: date) -> tuple[int, int]:
-    """Return the year and calendar quarter containing *today*."""
-    return today.year, (today.month - 1) // 3 + 1
-
-
-def validate_roadmap_maintenance(repo_root: Path, *, today: date | None = None) -> list[Finding]:
-    """Validate roadmap ownership, trigger, source, and deterministic freshness."""
+def validate_roadmap_maintenance(repo_root: Path) -> list[Finding]:
+    """Validate the roadmap's owner, release trigger, and maintained source."""
     roadmap = repo_root / "docs" / "ROADMAP.md"
     if not roadmap.is_file():
         return [Finding("docs/ROADMAP.md", 0, "missing-roadmap", "roadmap is missing")]
@@ -240,48 +232,6 @@ def validate_roadmap_maintenance(repo_root: Path, *, today: date | None = None) 
                 Finding("docs/ROADMAP.md", 0, rule, "roadmap maintenance metadata is missing")
             )
 
-    focus = _FOCUS_RE.search(content)
-    updated = _LAST_UPDATED_RE.search(content)
-    if focus is None or updated is None:
-        findings.append(
-            Finding(
-                "docs/ROADMAP.md",
-                0,
-                "missing-roadmap-freshness",
-                "focus quarter or update date is missing",
-            )
-        )
-        return findings
-
-    try:
-        updated_date = date.fromisoformat(updated.group(1))
-    except ValueError:
-        findings.append(
-            Finding("docs/ROADMAP.md", 0, "invalid-last-updated", "last updated is not ISO-8601")
-        )
-        return findings
-
-    focus_quarter = (int(focus.group(2)), int(focus.group(1)))
-    effective_today = today or date.today()
-    if updated_date > effective_today:
-        findings.append(
-            Finding("docs/ROADMAP.md", 0, "future-last-updated", "last updated is in the future")
-        )
-    if _current_quarter(updated_date) != focus_quarter:
-        findings.append(
-            Finding(
-                "docs/ROADMAP.md",
-                0,
-                "date-outside-focus-quarter",
-                "last updated is outside focus quarter",
-            )
-        )
-    if focus_quarter < _current_quarter(effective_today):
-        findings.append(
-            Finding(
-                "docs/ROADMAP.md", 0, "stale-current-focus", "focus quarter is no longer current"
-            )
-        )
     return findings
 
 
