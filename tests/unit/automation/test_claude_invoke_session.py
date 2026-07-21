@@ -57,7 +57,7 @@ def _make_existing_jsonl(home: Path, cwd: Path, sid: str) -> None:
     del home
     target = session_jsonl_path(sid, cwd)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("{}\n")
+    target.write_text(f'{{"cwd": "{cwd.resolve()}"}}\n')
 
 
 class TestCreateThenResume:
@@ -131,7 +131,7 @@ class TestCreateThenResume:
             if len(calls) == 1:
                 transcript = session_jsonl_path(sid, repo_root)
                 transcript.parent.mkdir(parents=True, exist_ok=True)
-                transcript.write_text("{}\n", encoding="utf-8")
+                transcript.write_text(f'{{"cwd": "{repo_root.resolve()}"}}\n', encoding="utf-8")
             return MagicMock(stdout="ok", stderr="", returncode=0)
 
         monkeypatch.setattr(

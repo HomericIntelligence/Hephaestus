@@ -141,8 +141,7 @@ class PostMergeProcessor:
                 cwd = self._get_worktree_path(issue_number, pr_number)
             except Exception as wt_err:
                 logger.info(
-                    "Issue #%s: no worktree available for /learn (%s); "
-                    "falling back to repo root",
+                    "Issue #%s: no worktree available for /learn (%s); falling back to repo root",
                     issue_number,
                     wt_err,
                 )

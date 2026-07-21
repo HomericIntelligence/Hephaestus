@@ -5,6 +5,7 @@ from __future__ import annotations
 import queue
 import threading
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -40,7 +41,7 @@ def test_plan_reviewer_then_pipeline_worker_resumes_same_transcript(
         if len(calls) == 1:
             transcript = session_jsonl_path(sid, repo_root)
             transcript.parent.mkdir(parents=True, exist_ok=True)
-            transcript.write_text("{}\n", encoding="utf-8")
+            transcript.write_text(f'{{"cwd": "{repo_root.resolve()}"}}\n', encoding="utf-8")
         return MagicMock(stdout="Verdict: GO", stderr="", returncode=0)
 
     monkeypatch.setattr(
@@ -49,7 +50,7 @@ def test_plan_reviewer_then_pipeline_worker_resumes_same_transcript(
         lambda _cwd: (repo_root.resolve(), worktree.resolve()),
     )
     reviewer = PlanReviewer(PlanReviewerOptions(issues=[2284], enable_ui=False))
-    completions: queue.Queue[object] = queue.Queue()
+    completions: queue.Queue[tuple[Any, Any]] = queue.Queue()
     pool = WorkerPool(
         size=1,
         shutdown=threading.Event(),

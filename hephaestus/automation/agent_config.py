@@ -69,6 +69,7 @@ iterations.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -560,6 +561,25 @@ def _registered_worktree_roots(cwd: Path) -> tuple[Path, ...]:
     resolved_cwd = cwd.resolve()
     roots = {resolved_cwd}
     try:
+        repository = subprocess.run(
+            ["git", "-C", str(resolved_cwd), "rev-parse", "--is-inside-work-tree"],
+            check=True,
+            capture_output=True,
+            env=_repo_scoped_git_env(),
+            text=True,
+            timeout=5,
+        )
+    except subprocess.CalledProcessError:
+        # A non-repository has no registered family; its exact cwd remains a
+        # valid transcript owner without masking a Git discovery failure.
+        return (resolved_cwd,)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"unable to determine whether {resolved_cwd} is a Git checkout") from exc
+
+    if repository.stdout.strip() != "true":
+        return (resolved_cwd,)
+
+    try:
         result = subprocess.run(
             [
                 "git",
@@ -576,8 +596,10 @@ def _registered_worktree_roots(cwd: Path) -> tuple[Path, ...]:
             text=True,
             timeout=5,
         )
-    except (OSError, subprocess.SubprocessError):
-        return (resolved_cwd,)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(
+            f"unable to discover registered Git worktrees for {resolved_cwd}"
+        ) from exc
 
     for field in result.stdout.split("\0"):
         if field.startswith("worktree "):
@@ -585,15 +607,53 @@ def _registered_worktree_roots(cwd: Path) -> tuple[Path, ...]:
     return tuple(sorted(roots, key=str))
 
 
-def resolve_session_jsonl_path(uuid_str: str, cwd: Path) -> Path:
-    """Resolve an existing transcript within cwd's registered worktree family."""
-    expected = session_jsonl_path(uuid_str, cwd)
-    candidates = {
-        expected,
-        *(session_jsonl_path(uuid_str, root) for root in _registered_worktree_roots(cwd)),
-    }
+def _recorded_transcript_cwds(transcript: Path) -> set[Path]:
+    """Return normalized cwd values recorded in a Claude transcript."""
+    recorded: set[Path] = set()
+    try:
+        with transcript.open(encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(entry, dict) and isinstance(entry.get("cwd"), str):
+                    recorded.add(Path(entry["cwd"]).resolve())
+    except OSError as exc:
+        logger.warning("Unable to read Claude transcript %s: %s", transcript, exc)
+    return recorded
+
+
+def _transcript_belongs_to_worktree_family(transcript: Path, roots: set[Path]) -> bool:
+    """Return whether *transcript* records only cwd values in *roots*."""
+    recorded_cwds = _recorded_transcript_cwds(transcript)
+    if not recorded_cwds:
+        logger.warning("Ignoring Claude transcript without recorded cwd: %s", transcript)
+        return False
+    if not recorded_cwds.issubset(roots):
+        logger.warning(
+            "Ignoring Claude transcript outside the current worktree family: %s",
+            transcript,
+        )
+        return False
+    return True
+
+
+def resolve_session_jsonl_path(uuid_str: str, cwd: Path) -> Path | None:
+    """Resolve a verified transcript within cwd's registered worktree family.
+
+    Claude's transcript-directory encoding maps both dots and slashes to dashes,
+    so its path alone cannot establish which checkout created a transcript. A
+    candidate is resumable only when every recorded Claude ``cwd`` belongs to
+    the caller's registered worktree family.
+    """
+    roots = set(_registered_worktree_roots(cwd))
+    candidates = {session_jsonl_path(uuid_str, root) for root in roots}
     existing = sorted((candidate for candidate in candidates if candidate.is_file()), key=str)
-    return existing[0] if existing else expected
+    for candidate in existing:
+        if _transcript_belongs_to_worktree_family(candidate, roots):
+            return candidate
+    return None
 
 
 __all__ = [

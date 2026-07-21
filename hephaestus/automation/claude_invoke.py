@@ -306,7 +306,7 @@ def _invoke_claude_once(
     # re-sending full prompts 3x and crossing models); a ``--resume`` or
     # ``--session-id`` failure simply propagates.
     transcript = resolve_session_jsonl_path(sid, cwd)
-    create = not transcript.is_file()
+    create = transcript is None
     mode_args = ["--session-id", sid, "--name", display_name] if create else ["--resume", sid]
     cmd: list[str] = [
         "claude",
