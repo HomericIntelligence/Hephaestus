@@ -456,3 +456,58 @@ def compact_session(
 
     logger.info("Issue #%s: /compact completed for agent=%s (session %s)", issue, agent, sid)
     return True
+
+
+def compact_agent_session(
+    repo: str,
+    issue: int | str,
+    provider: str,
+    session_agent: str,
+    cwd: Path,
+    timeout: int | None = None,
+    model: str | None = None,
+    session_id: str | None = None,
+) -> bool:
+    """Compact a persisted provider session without making it a hard gate.
+
+    Claude sessions use the established deterministic naming scheme.  Direct
+    providers (Codex and Pi) receive the opaque id returned by their previous
+    turn and resume it solely to process ``/compact``.  A missing id means no
+    direct session was created yet, so there is nothing to compact.
+    """
+    if provider == "claude":
+        return compact_session(repo, issue, session_agent, cwd, timeout, model)
+    if not session_id:
+        logger.debug(
+            "Issue #%s: no %s session id to compact for agent=%s; skipping",
+            issue,
+            provider,
+            session_agent,
+        )
+        return False
+    timeout_s = learn_claude_timeout() if timeout is None else timeout
+    try:
+        resume_agent_session(
+            agent=provider,
+            session_id=session_id,
+            prompt="/compact",
+            cwd=cwd,
+            timeout=timeout_s,
+            model=model or "",
+        )
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError, ValueError) as exc:
+        logger.warning(
+            "Issue #%s: /compact failed for provider=%s agent=%s (non-fatal): %s",
+            issue,
+            provider,
+            session_agent,
+            exc,
+        )
+        return False
+    logger.info(
+        "Issue #%s: /compact completed for provider=%s agent=%s",
+        issue,
+        provider,
+        session_agent,
+    )
+    return True

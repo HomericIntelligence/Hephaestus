@@ -18,9 +18,9 @@ from contextvars import copy_context
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from hephaestus.agents.runtime import resolve_agent, run_agent_session
+from hephaestus.agents.runtime import resolve_agent, resume_agent_session, run_agent_session
 from hephaestus.automation import claude_invoke, git_utils, subprocess_registry
-from hephaestus.automation.learn import compact_session
+from hephaestus.automation.learn import compact_agent_session
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.jobs import (
     AgentJob,
@@ -389,7 +389,7 @@ class WorkerPool:
             session_agent = job.session_agent or job.agent
             prompt = job.prompt_builder(**job.prompt_kwargs)
 
-            def _invoke() -> str:
+            def _invoke() -> tuple[str, str | None]:
                 if is_claude:
                     # Scope priority: an explicit per-job grant (a stage that
                     # knows its exact needs, e.g. pr_review) wins; a read-only
@@ -413,7 +413,16 @@ class WorkerPool:
                         allowed_tools=scope.allowed_tools,
                         permission_mode=scope.permission_mode,
                     )
-                    return stdout
+                    return stdout, None
+                if job.resume_session_id:
+                    agent_result = resume_agent_session(
+                        agent=agent,
+                        session_id=job.resume_session_id,
+                        prompt=prompt,
+                        cwd=job.cwd,
+                        timeout=job.timeout_s,
+                        model=job.model,
+                    )
                 else:
                     agent_result = run_agent_session(
                         agent=agent,
@@ -424,9 +433,11 @@ class WorkerPool:
                         sandbox=job.sandbox,
                         approval="never",
                     )
-                    return agent_result.stdout or ""
+                # A resumed command may not repeat the session-start event;
+                # retain the known id in that case.
+                return agent_result.stdout or "", agent_result.session_id or job.resume_session_id
 
-            stdout = resilient_call(
+            stdout, session_id = resilient_call(
                 _invoke,
                 circuit_breaker_name=f"agent:{agent}",
                 retry_predicate=lambda _exc: not self._shutdown.is_set(),
@@ -448,6 +459,7 @@ class WorkerPool:
                 ok=True,
                 value=value if value is not None else stdout,
                 stdout_tail=stdout[-_TAIL:],
+                session_id=session_id,
             )
 
         except CircuitBreakerOpenError:
@@ -470,16 +482,18 @@ class WorkerPool:
 
     @staticmethod
     def _run_compact(job: CompactJob) -> JobResult:
-        """Compact a Claude session without making compaction a hard gate."""
-        compacted = compact_session(
+        """Compact an agent session without making compaction a hard gate."""
+        compacted = compact_agent_session(
             repo=job.repo,
             issue=job.issue,
-            agent=job.session_agent,
+            provider=job.agent,
+            session_agent=job.session_agent,
             cwd=job.cwd,
             timeout=job.timeout_s,
             model=job.model,
+            session_id=job.session_id,
         )
-        # ``compact_session`` intentionally swallows expected failures; a
+        # ``compact_agent_session`` intentionally swallows expected failures; a
         # missing or uncompactable transcript must not stall a review cycle.
         return JobResult(ok=True, value=compacted)
 

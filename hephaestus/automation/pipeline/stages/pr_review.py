@@ -12,7 +12,8 @@ collaborators include
 contract):
 
 - States: ENTER -> REVIEW_WAIT -> VALIDATE_WAIT -> POST -> DIFFICULTY_WAIT
-  -> ADDRESS_WAIT -> PUSH_WAIT -> EVAL -> COMPACT_WRITER_WAIT -> REVIEW_WAIT
+  -> ADDRESS_WAIT -> PUSH_WAIT -> EVAL -> COMPACT_REVIEWER_WAIT
+  -> COMPACT_WRITER_WAIT -> REVIEW_WAIT
   or terminal
   advance to ``merge_wait``. The legacy follow-up mini-states have been
   retired (#2140); a clean GO advances to ``merge_wait`` from EVAL.
@@ -138,7 +139,6 @@ from hephaestus.automation.session_naming import (
     AGENT_COMMENT_CLASSIFIER,
     AGENT_IMPLEMENTER,
     AGENT_PR_REVIEWER,
-    reviewer_agent,
 )
 from hephaestus.automation.state_labels import STATE_SKIP
 
@@ -202,6 +202,7 @@ DIFFICULTY_WAIT = "DIFFICULTY_WAIT"
 ADDRESS_WAIT = "ADDRESS_WAIT"
 PUSH_WAIT = "PUSH_WAIT"
 EVAL = "EVAL"
+COMPACT_REVIEWER_WAIT = "COMPACT_REVIEWER_WAIT"
 COMPACT_WRITER_WAIT = "COMPACT_WRITER_WAIT"
 
 _STEP_HANDLER_NAMES: dict[str, str] = {
@@ -214,6 +215,7 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
     ADDRESS_WAIT: "_address",
     PUSH_WAIT: "_push_wait",
     EVAL: "_eval",
+    COMPACT_REVIEWER_WAIT: "_compact_reviewer_wait",
     COMPACT_WRITER_WAIT: "_compact_writer_wait",
 }
 
@@ -257,7 +259,6 @@ _ROUND_PAYLOAD_KEYS = (
     "push_no_commit",
     "no_commit_retry_done",
     "unaddressed_findings",
-    "review_session_agent",
 )
 
 
@@ -544,8 +545,6 @@ class PrReviewStage(Stage):
         for key in _ROUND_PAYLOAD_KEYS:
             item.payload.pop(key, None)
         round_index = item.payload.get("pr_review_round", 0)
-        review_session_agent = reviewer_agent(AGENT_PR_REVIEWER, round_index)
-        item.payload["review_session_agent"] = review_session_agent
         logger.info(
             "pr_review:%d: requesting review job (round %d, PR #%d)",
             issue,
@@ -560,7 +559,8 @@ class PrReviewStage(Stage):
             prompt_builder=get_pr_review_analysis_prompt,
             cwd=_worktree_path(item, ctx),
             timeout_s=pr_reviewer_claude_timeout(),
-            session_agent=review_session_agent,
+            session_agent=AGENT_PR_REVIEWER,
+            resume_session_id=item.session_ids.get(AGENT_PR_REVIEWER),
             sandbox="read-only",
             # The normal $athena:pr-review skill is read-only, but its
             # declared workflow uses local Bash helpers and review subagents.
@@ -607,10 +607,8 @@ class PrReviewStage(Stage):
             prompt_builder=get_review_validation_prompt,
             cwd=_worktree_path(item, ctx),
             timeout_s=pr_reviewer_claude_timeout(),
-            session_agent=str(
-                item.payload.get("review_session_agent")
-                or reviewer_agent(AGENT_PR_REVIEWER, item.payload.get("pr_review_round", 0))
-            ),
+            session_agent=AGENT_PR_REVIEWER,
+            resume_session_id=item.session_ids.get(AGENT_PR_REVIEWER),
             sandbox="read-only",
             prompt_kwargs={
                 "pr_number": item.pr,
@@ -670,15 +668,25 @@ class PrReviewStage(Stage):
         )
         return JobRequest(git_job, on_done_state=EVAL)
 
-    def _compact_writer_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """Compact the resumable writer before the next independent review.
+    def _compact_reviewer_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Compact the reviewer before the next retry continues its session."""
+        if not item.worktree:
+            return Continue(next_state=COMPACT_WRITER_WAIT)
+        job = CompactJob(
+            repo=item.repo,
+            issue=_issue_number(item),
+            agent=agent_provider(ctx),
+            session_agent=AGENT_PR_REVIEWER,
+            model=stage_model(ctx, "reviewer", reviewer_model),
+            cwd=_worktree_path(item, ctx),
+            timeout_s=pr_reviewer_claude_timeout(),
+            session_id=item.session_ids.get(AGENT_PR_REVIEWER),
+        )
+        return JobRequest(job, on_done_state=COMPACT_WRITER_WAIT)
 
-        Reviewer sessions are intentionally per-round and therefore have no
-        transcript to carry forward.  Only the writer may be resumed after a
-        failed round, so only that session is compacted.  Codex does not
-        support multi-turn sessions and never enters this state.
-        """
-        if agent_provider(ctx) != "claude" or not item.worktree:
+    def _compact_writer_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Compact the writer before the next retry continues its session."""
+        if not item.worktree:
             return Continue(next_state=REVIEW_WAIT)
         session_agent = (
             AGENT_ADDRESS_REVIEW if item.payload.get("existing_pr") else AGENT_IMPLEMENTER
@@ -686,10 +694,12 @@ class PrReviewStage(Stage):
         job = CompactJob(
             repo=item.repo,
             issue=_issue_number(item),
+            agent=agent_provider(ctx),
             session_agent=session_agent,
             model=stage_model(ctx, "implementer", implementer_model),
             cwd=_worktree_path(item, ctx),
             timeout_s=implementer_claude_timeout(),
+            session_id=item.session_ids.get(session_agent),
         )
         return JobRequest(job, on_done_state=REVIEW_WAIT)
 
@@ -849,6 +859,7 @@ class PrReviewStage(Stage):
                 cwd=_worktree_path(item, ctx),
                 timeout_s=address_review_claude_timeout(),
                 session_agent=AGENT_ADDRESS_REVIEW,
+                resume_session_id=item.session_ids.get(AGENT_ADDRESS_REVIEW),
                 prompt_kwargs={
                     "pr_number": item.pr,
                     "issue_number": item.issue,
@@ -873,6 +884,7 @@ class PrReviewStage(Stage):
             cwd=_worktree_path(item, ctx),
             timeout_s=implementer_claude_timeout(),
             session_agent=AGENT_IMPLEMENTER,
+            resume_session_id=item.session_ids.get(AGENT_IMPLEMENTER),
             prompt_kwargs={
                 "issue_number": item.issue,
                 "prev_iteration": item.payload.get("pr_review_round", 0),
@@ -1032,9 +1044,9 @@ class PrReviewStage(Stage):
 
     @staticmethod
     def _compact_before_next_review(item: WorkItem, ctx: StageContext) -> Continue:
-        """Route a failed Claude round through writer compaction when possible."""
-        if agent_provider(ctx) == "claude" and item.worktree:
-            return Continue(next_state=COMPACT_WRITER_WAIT)
+        """Compact both persisted sessions before continuing the next review round."""
+        if item.worktree:
+            return Continue(next_state=COMPACT_REVIEWER_WAIT)
         return Continue(next_state=REVIEW_WAIT)
 
     @staticmethod

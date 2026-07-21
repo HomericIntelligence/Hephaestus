@@ -333,10 +333,10 @@ class TestPrReviewStageStep:
         assert result.job.prompt_kwargs["pr_number"] == 1001
         assert item.attempts["pr_review_iter"] == 0  # submission burns nothing
 
-    def test_review_wait_uses_a_fresh_reviewer_session_for_each_round(
+    def test_review_wait_reuses_the_reviewer_session_across_rounds(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A later review round never resumes the prior reviewer's verdict."""
+        """A later review round continues the compacted reviewer context."""
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state="REVIEW_WAIT")
@@ -346,9 +346,24 @@ class TestPrReviewStageStep:
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)
-        assert result.job.session_agent == "pr-reviewer-r2"
+        assert result.job.session_agent == "pr-reviewer"
 
-    def test_nogo_compacts_the_writer_before_the_next_review(
+    def test_review_wait_resumes_the_saved_codex_reviewer_session(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A direct provider receives the reviewer session created in round one."""
+        stage = PrReviewStage()
+        ctx = make_ctx(config=SimpleNamespace(agent="codex"))
+        item = make_work_item(issue=1, pr=1001, state="REVIEW_WAIT")
+        item.session_ids["pr-reviewer"] = "review-session-id"
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)
+        assert result.job.resume_session_id == "review-session-id"
+
+    def test_nogo_compacts_reviewer_and_writer_before_the_next_review(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
         """A Claude writer is compacted after a failed round, before re-review."""
@@ -360,34 +375,41 @@ class TestPrReviewStageStep:
 
         result = stage.step(item, ctx)
 
-        assert result == Continue(next_state="COMPACT_WRITER_WAIT")
+        assert result == Continue(next_state="COMPACT_REVIEWER_WAIT")
         item.state = result.next_state
-        compact = stage.step(item, ctx)
-        assert isinstance(compact, JobRequest)
-        assert isinstance(compact.job, CompactJob)
-        assert compact.job.session_agent == "implementer"
-        assert compact.on_done_state == "REVIEW_WAIT"
+        reviewer_compact = stage.step(item, ctx)
+        assert isinstance(reviewer_compact, JobRequest)
+        assert isinstance(reviewer_compact.job, CompactJob)
+        assert reviewer_compact.job.session_agent == "pr-reviewer"
+        assert reviewer_compact.on_done_state == "COMPACT_WRITER_WAIT"
 
-    def test_validation_continues_the_current_round_reviewer_session(
+        item.state = reviewer_compact.on_done_state
+        writer_compact = stage.step(item, ctx)
+        assert isinstance(writer_compact, JobRequest)
+        assert isinstance(writer_compact.job, CompactJob)
+        assert writer_compact.job.session_agent == "implementer"
+        assert writer_compact.on_done_state == "REVIEW_WAIT"
+
+    def test_validation_continues_the_reused_reviewer_session(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
         """Validation sees the review it validates, not an unrelated reviewer."""
         stage = PrReviewStage()
-        ctx = make_ctx()
+        ctx = make_ctx(config=SimpleNamespace(agent="codex"))
         item = make_work_item(issue=1, pr=1001, state="VALIDATE_WAIT")
-        item.payload["pr_review_round"] = 1
-        item.payload["review_session_agent"] = "pr-reviewer-r1"
+        item.session_ids["pr-reviewer"] = "review-session-id"
 
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)
-        assert result.job.session_agent == "pr-reviewer-r1"
+        assert result.job.session_agent == "pr-reviewer"
+        assert result.job.resume_session_id == "review-session-id"
 
-    def test_codex_nogo_skips_claude_session_compaction(
+    def test_codex_nogo_compacts_both_resumable_sessions(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """Codex is stateless, so an unsuccessful round re-reviews directly."""
+        """Codex follows the same compact-before-re-review lifecycle as Claude."""
         stage = PrReviewStage()
         ctx = make_ctx(
             config=SimpleNamespace(agent="codex"),
@@ -397,7 +419,7 @@ class TestPrReviewStageStep:
         item.worktree = "/tmp/review-worktree"
         item.payload["review_verdict"] = _verdict("NOGO")
 
-        assert stage.step(item, ctx) == Continue(next_state="REVIEW_WAIT")
+        assert stage.step(item, ctx) == Continue(next_state="COMPACT_REVIEWER_WAIT")
 
     def test_review_parse_posts_structured_nogo_comments_and_routes_to_remediation(
         self, make_ctx: Any, make_work_item: Any
@@ -450,7 +472,7 @@ class TestPrReviewStageStep:
         stage.on_job_done(item, JobResult(ok=True, value=True), ctx)
         item.state = "EVAL"
 
-        assert stage.step(item, ctx) == Continue(next_state="COMPACT_WRITER_WAIT")
+        assert stage.step(item, ctx) == Continue(next_state="COMPACT_REVIEWER_WAIT")
         assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
         assert events == []
 
@@ -1448,6 +1470,7 @@ class TestFullWalks:
             JobResult(ok=True, value="tier list"),  # difficulty
             JobResult(ok=True, value="addressed"),  # address
             JobResult(ok=True, value=True),  # push
+            JobResult(ok=True, value=True),  # compact reviewer before round 2
             JobResult(ok=True, value=True),  # compact writer before round 2
             JobResult(ok=True, value=_verdict("GO")),  # review round 2
             JobResult(ok=True, value='{"unaddressed": []}'),  # validate round 2
@@ -1463,6 +1486,7 @@ class TestFullWalks:
             "difficulty",
             "address",
             "push_fixes",
+            "compact_session",
             "compact_session",
             "review",
             "validate",

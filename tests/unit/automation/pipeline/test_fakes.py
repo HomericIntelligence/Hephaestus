@@ -37,6 +37,7 @@ def _jobs() -> tuple[AgentJob, BuildTestJob, GitJob, CompactJob]:
     compact = CompactJob(
         repo="test/repo",
         issue=1,
+        agent="claude",
         session_agent="implementer",
         model="claude-haiku-4-5",
         cwd=Path("/tmp"),

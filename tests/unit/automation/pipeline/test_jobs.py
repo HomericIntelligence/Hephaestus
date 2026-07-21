@@ -72,6 +72,7 @@ class TestJobDataclassesFrozen:
         job = CompactJob(
             repo="test/repo",
             issue=123,
+            agent="claude",
             session_agent="implementer",
             model="claude-haiku-4-5",
             cwd=Path("/tmp"),
