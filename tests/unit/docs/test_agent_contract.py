@@ -15,6 +15,7 @@ ALLOWED_CLAUDE_REFERENCE_PATHS = {
     Path(".github/CODEOWNERS"),
     Path("docs/adr/0001-automation-library-boundary.md"),
     Path("docs/adr/0013-backup-and-disaster-recovery-policy.md"),
+    Path("docs/adr/0014-agent-contract-canonical-location.md"),
 }
 
 

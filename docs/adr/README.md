@@ -31,3 +31,4 @@ numbered, and listed here.
 | [0016](0016-bounded-operational-merge-readiness.md) | Bounded operational merge-readiness wait | Accepted |
 | [0017](0017-frozen-legacy-agent-import-exceptions.md) | Frozen legacy agent-import exceptions | Accepted |
 | [0018](0018-reviewer-owned-thread-reconciliation.md) | Reviewer-owned PR review-thread reconciliation | Accepted |
+| [0019](0019-agent-contract-canonical-location.md) | AGENTS.md is the canonical agent contract | Accepted |
