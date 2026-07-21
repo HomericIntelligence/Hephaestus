@@ -55,8 +55,8 @@ every later call resumes it via ``--resume``. This restores prompt-cache
 reuse across loop iterations *and* across main-bumps (#841): the artifact
 being worked on is the issue/PR, not the commit at which the loop started,
 so the session must persist as long as the issue does. The UUID remains
-artifact-stable, while transcript lookup is limited to the current Git
-checkout's registered worktree family.
+artifact-stable, while transcript lookup is verified against the stable
+checkout root shared by current and historical worktrees.
 
 Human-readable name: ``<repo>_<issue>_<agent>``; the session ID is
 ``str(uuid.uuid5(NAMESPACE_DNS, <human-readable>))``. UUIDv5 is
@@ -624,13 +624,24 @@ def _recorded_transcript_cwds(transcript: Path) -> set[Path]:
     return recorded
 
 
+def _checkout_root(roots: set[Path]) -> Path | None:
+    """Return the registered root that contains this checkout's worktree family."""
+    candidates = [root for root in roots if all(path.is_relative_to(root) for path in roots)]
+    return min(candidates, key=lambda path: (len(path.parts), str(path)), default=None)
+
+
 def _transcript_belongs_to_worktree_family(transcript: Path, roots: set[Path]) -> bool:
-    """Return whether *transcript* records only cwd values in *roots*."""
+    """Return whether *transcript* belongs to this checkout's stable root."""
     recorded_cwds = _recorded_transcript_cwds(transcript)
     if not recorded_cwds:
         logger.warning("Ignoring Claude transcript without recorded cwd: %s", transcript)
         return False
-    if not recorded_cwds.issubset(roots):
+    checkout_root = _checkout_root(roots)
+    if any(
+        recorded not in roots
+        and (checkout_root is None or not recorded.is_relative_to(checkout_root))
+        for recorded in recorded_cwds
+    ):
         logger.warning(
             "Ignoring Claude transcript outside the current worktree family: %s",
             transcript,
@@ -639,17 +650,35 @@ def _transcript_belongs_to_worktree_family(transcript: Path, roots: set[Path]) -
     return True
 
 
-def resolve_session_jsonl_path(uuid_str: str, cwd: Path) -> Path | None:
-    """Resolve a verified transcript within cwd's registered worktree family.
+def _session_transcript_candidates(uuid_str: str, roots: set[Path]) -> set[Path]:
+    """Return registered and historical Claude transcript paths for a session ID."""
+    candidates = {session_jsonl_path(uuid_str, root) for root in roots}
+    projects_dir = Path.home() / ".claude" / "projects"
+    try:
+        candidates.update(projects_dir.glob(f"*/{uuid_str}.jsonl"))
+    except OSError as exc:
+        logger.warning("Unable to scan Claude transcript directory %s: %s", projects_dir, exc)
+    return candidates
 
-    Claude's transcript-directory encoding maps both dots and slashes to dashes,
-    so its path alone cannot establish which checkout created a transcript. A
-    candidate is resumable only when every recorded Claude ``cwd`` belongs to
-    the caller's registered worktree family.
+
+def resolve_session_jsonl_path(uuid_str: str, cwd: Path) -> Path | None:
+    """Resolve a verified transcript from the caller's stable checkout root.
+
+    A stage may remove a worktree before a later stage recreates it elsewhere.
+    Search the session ID across Claude's project directories, then accept only
+    transcripts whose recorded cwd belongs to the current checkout root. This
+    preserves the session across replacement while rejecting transcripts from
+    another checkout that collide under Claude's lossy cwd path encoding.
     """
     roots = set(_registered_worktree_roots(cwd))
-    candidates = {session_jsonl_path(uuid_str, root) for root in roots}
-    existing = sorted((candidate for candidate in candidates if candidate.is_file()), key=str)
+    existing = sorted(
+        (
+            candidate
+            for candidate in _session_transcript_candidates(uuid_str, roots)
+            if candidate.is_file()
+        ),
+        key=str,
+    )
     for candidate in existing:
         if _transcript_belongs_to_worktree_family(candidate, roots):
             return candidate

@@ -164,6 +164,42 @@ class TestCreateThenResume:
         assert sid in calls[0]
         assert sid in calls[1]
 
+    def test_recreated_worktree_resumes_removed_worktree_transcript(
+        self,
+        stub_run: MagicMock,
+        fake_home: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A replacement worktree resumes a transcript from its removed predecessor."""
+        repo_root = fake_home / "owner" / "Repo"
+        removed_worktree = repo_root / "build" / ".worktrees" / "issue-2284-a"
+        replacement_worktree = repo_root / "build" / ".worktrees" / "issue-2284-c"
+        removed_worktree.mkdir(parents=True)
+        replacement_worktree.mkdir(parents=True)
+        sid = session_uuid("Repo", 2284, AGENT_PLAN_REVIEWER, "sonnet")
+        _make_existing_jsonl(fake_home, removed_worktree, sid)
+        removed_worktree.rmdir()
+
+        monkeypatch.setattr(
+            agent_config,
+            "_registered_worktree_roots",
+            lambda _cwd: (repo_root.resolve(), replacement_worktree.resolve()),
+        )
+
+        invoke_claude_with_session(
+            repo="Repo",
+            issue=2284,
+            agent=AGENT_PLAN_REVIEWER,
+            prompt="resume",
+            model="sonnet",
+            cwd=replacement_worktree,
+        )
+
+        argv = _argv(stub_run.call_args)
+        assert "--resume" in argv
+        assert sid in argv
+        assert "--session-id" not in argv
+
     def test_different_models_get_different_uuids(
         self, stub_run: MagicMock, fake_home: Path
     ) -> None:
