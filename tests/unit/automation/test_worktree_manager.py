@@ -1060,6 +1060,7 @@ class TestCreateWorktreeBranchCollision:
                 "1577-auto-impl",
                 "origin/1577-auto-impl",
             ]
+        assert "conflicts detected and rebase aborted" in caplog.text
         assert "proceeding with current branch head" in caplog.text
 
     @patch("hephaestus.automation.worktree_manager.rebase_worktree_onto")

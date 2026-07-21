@@ -551,8 +551,7 @@ class WorkerPool:
 
         elif job.op == "rebase":
             result = git_utils.rebase_worktree_onto(**job.kwargs, timeout=job.timeout_s)
-            error = None if result else "mechanical rebase hit conflicts; aborted"
-            return JobResult(ok=result, value=result, error=error)
+            return JobResult(ok=result, value=result)
 
         elif job.op == "push":
             git_utils.push_current_branch_with_lease_on_divergence(
