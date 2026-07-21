@@ -38,6 +38,7 @@ A piece of work is **done** when every item below is true.
 > protection contexts (`required-checks-gate` and the two Python 3.12 matrix
 > contexts) and the direct GitHub ruleset contexts documented in
 > [`docs/ci/required-checks.md`](ci/required-checks.md) do. The aggregate gate
+> reports required workflow results; it does not authorize automatic merge.
 > Review output is audit evidence only;
 > the durable `state:implementation-go` label is the sole implementation-state
 > authority, and `merge_wait` additionally requires its current-process

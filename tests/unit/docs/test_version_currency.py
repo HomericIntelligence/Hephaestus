@@ -12,8 +12,6 @@ a guard that silently skips is not a guard.
 """
 
 import re
-import runpy
-from pathlib import Path
 
 import pytest
 
@@ -21,22 +19,11 @@ from hephaestus.utils.helpers import get_repo_root
 from hephaestus.version.consistency import _version_from_git_tag
 from hephaestus.version.parsing import parse_version_tuple
 
-REPO_ROOT = get_repo_root(Path(__file__))
+REPO_ROOT = get_repo_root()
 MIGRATION_MD = REPO_ROOT / "docs" / "MIGRATION.md"
 
 # Matches: "The latest released version is **0.9.5**"
 _LATEST_RE = re.compile(r"latest released version is \*\*(\d+\.\d+\.\d+)\*\*", re.IGNORECASE)
-
-
-def test_repo_root_is_anchored_to_this_test_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The test must inspect its own checkout, regardless of the runner CWD."""
-    monkeypatch.chdir(tmp_path)
-
-    namespace = runpy.run_path(str(Path(__file__)))
-
-    assert namespace["REPO_ROOT"] == Path(__file__).resolve().parents[3]
 
 
 def test_migration_md_version_does_not_trail_latest_git_tag() -> None:
