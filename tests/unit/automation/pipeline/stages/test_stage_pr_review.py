@@ -11,7 +11,7 @@ import pytest
 
 from hephaestus.automation.claude_invoke import ReviewVerdict
 from hephaestus.automation.pipeline.events import ZeroThreadNogoAction
-from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobResult
+from hephaestus.automation.pipeline.jobs import AgentJob, CompactJob, GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages.pr_review import (
@@ -333,6 +333,94 @@ class TestPrReviewStageStep:
         assert result.job.prompt_kwargs["pr_number"] == 1001
         assert item.attempts["pr_review_iter"] == 0  # submission burns nothing
 
+    def test_review_wait_reuses_the_reviewer_session_across_rounds(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A later review round continues the compacted reviewer context."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REVIEW_WAIT")
+        item.payload["pr_review_round"] = 2
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)
+        assert result.job.session_agent == "pr-reviewer"
+
+    def test_review_wait_resumes_the_saved_codex_reviewer_session(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A direct provider receives the reviewer session created in round one."""
+        stage = PrReviewStage()
+        ctx = make_ctx(config=SimpleNamespace(agent="codex"))
+        item = make_work_item(issue=1, pr=1001, state="REVIEW_WAIT")
+        item.session_ids["pr-reviewer"] = "review-session-id"
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)
+        assert result.job.resume_session_id == "review-session-id"
+
+    def test_nogo_compacts_reviewer_and_writer_before_the_next_review(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A Claude writer is compacted after a failed round, before re-review."""
+        stage = PrReviewStage()
+        ctx = make_ctx(github=FakeStageGitHub(unresolved=[(3, 0)]))
+        item = make_work_item(issue=1, pr=1001, state="EVAL")
+        item.worktree = "/tmp/review-worktree"
+        item.payload["review_verdict"] = _verdict("NOGO")
+
+        result = stage.step(item, ctx)
+
+        assert result == Continue(next_state="COMPACT_REVIEWER_WAIT")
+        item.state = result.next_state
+        reviewer_compact = stage.step(item, ctx)
+        assert isinstance(reviewer_compact, JobRequest)
+        assert isinstance(reviewer_compact.job, CompactJob)
+        assert reviewer_compact.job.session_agent == "pr-reviewer"
+        assert reviewer_compact.on_done_state == "COMPACT_WRITER_WAIT"
+
+        item.state = reviewer_compact.on_done_state
+        writer_compact = stage.step(item, ctx)
+        assert isinstance(writer_compact, JobRequest)
+        assert isinstance(writer_compact.job, CompactJob)
+        assert writer_compact.job.session_agent == "implementer"
+        assert writer_compact.on_done_state == "REVIEW_WAIT"
+
+    def test_validation_continues_the_reused_reviewer_session(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Validation sees the review it validates, not an unrelated reviewer."""
+        stage = PrReviewStage()
+        ctx = make_ctx(config=SimpleNamespace(agent="codex"))
+        item = make_work_item(issue=1, pr=1001, state="VALIDATE_WAIT")
+        item.session_ids["pr-reviewer"] = "review-session-id"
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)
+        assert result.job.session_agent == "pr-reviewer"
+        assert result.job.resume_session_id == "review-session-id"
+
+    def test_codex_nogo_compacts_both_resumable_sessions(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Codex follows the same compact-before-re-review lifecycle as Claude."""
+        stage = PrReviewStage()
+        ctx = make_ctx(
+            config=SimpleNamespace(agent="codex"),
+            github=FakeStageGitHub(unresolved=[(3, 0)]),
+        )
+        item = make_work_item(issue=1, pr=1001, state="EVAL")
+        item.worktree = "/tmp/review-worktree"
+        item.payload["review_verdict"] = _verdict("NOGO")
+
+        assert stage.step(item, ctx) == Continue(next_state="COMPACT_REVIEWER_WAIT")
+
     def test_review_parse_posts_structured_nogo_comments_and_routes_to_remediation(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -384,7 +472,7 @@ class TestPrReviewStageStep:
         stage.on_job_done(item, JobResult(ok=True, value=True), ctx)
         item.state = "EVAL"
 
-        assert stage.step(item, ctx) == Continue(next_state="REVIEW_WAIT")
+        assert stage.step(item, ctx) == Continue(next_state="COMPACT_REVIEWER_WAIT")
         assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
         assert events == []
 
@@ -1382,6 +1470,8 @@ class TestFullWalks:
             JobResult(ok=True, value="tier list"),  # difficulty
             JobResult(ok=True, value="addressed"),  # address
             JobResult(ok=True, value=True),  # push
+            JobResult(ok=True, value=True),  # compact reviewer before round 2
+            JobResult(ok=True, value=True),  # compact writer before round 2
             JobResult(ok=True, value=_verdict("GO")),  # review round 2
             JobResult(ok=True, value='{"unaddressed": []}'),  # validate round 2
         )
@@ -1396,6 +1486,8 @@ class TestFullWalks:
             "difficulty",
             "address",
             "push_fixes",
+            "compact_session",
+            "compact_session",
             "review",
             "validate",
         ]

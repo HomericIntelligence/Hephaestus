@@ -33,6 +33,10 @@ class AgentJob:
     cwd: Path
     timeout_s: int
     session_agent: str = ""
+    # Direct-runner providers return an opaque session id.  The coordinator
+    # stores it on the WorkItem and supplies it here on subsequent turns so
+    # review/implementation context survives across loop iterations.
+    resume_session_id: str | None = None
     prompt_kwargs: dict[str, Any] = field(default_factory=dict)
     output_format: str = "text"
     parse: Callable[[str], Any] | None = None  # e.g. claude_invoke.parse_review_verdict
@@ -90,6 +94,27 @@ class GitJob:
 
 
 @dataclass(frozen=True)
+class CompactJob:
+    """Best-effort compaction of one resumable agent session.
+
+    ``CompactJob`` is deliberately distinct from :class:`AgentJob`: it sends
+    ``/compact`` to an existing session and never runs an implementation or
+    review prompt.  Claude resolves its deterministic session id from the
+    logical ``session_agent``; direct runtimes receive the persisted id.
+    """
+
+    repo: str
+    issue: int | str
+    agent: str
+    session_agent: str
+    model: str
+    cwd: Path
+    timeout_s: int
+    session_id: str | None = None
+    descr: str = "compact_session"
+
+
+@dataclass(frozen=True)
 class JobResult:
     """Result of a completed job."""
 
@@ -101,6 +126,7 @@ class JobResult:
     interrupted: bool = False
     duration_s: float = 0.0
     worker_id: str = ""
+    session_id: str | None = None
 
 
 @dataclass(frozen=True, eq=False)
@@ -115,5 +141,5 @@ class JobHandle:
     never break hashing.
     """
 
-    job: AgentJob | BuildTestJob | GitJob
+    job: AgentJob | BuildTestJob | GitJob | CompactJob
     on_done_state: str | StageName

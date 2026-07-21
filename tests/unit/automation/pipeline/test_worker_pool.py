@@ -22,6 +22,7 @@ from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.jobs import (
     AgentJob,
     BuildTestJob,
+    CompactJob,
     GitJob,
     JobHandle,
     JobResult,
@@ -149,6 +150,38 @@ class TestWorkerPoolSubmitComplete:
         assert result.ok is True
         assert "Test output" in str(result.value)
 
+    def test_compact_job_is_best_effort_and_returns_its_result(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+    ) -> None:
+        """A failed /compact never blocks the next review round."""
+        job = CompactJob(
+            repo="test/repo",
+            issue=123,
+            agent="claude",
+            session_agent="implementer",
+            model="claude-haiku-4-5",
+            cwd=Path("/tmp"),
+            timeout_s=60,
+        )
+        with patch(f"{_WP}.compact_agent_session", return_value=False) as compact:
+            pool.submit(job, StageName.PR_REVIEW)
+            _handle, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        assert result.value is False
+        compact.assert_called_once_with(
+            repo="test/repo",
+            issue=123,
+            provider="claude",
+            session_agent="implementer",
+            cwd=Path("/tmp"),
+            timeout=60,
+            model="claude-haiku-4-5",
+            session_id=None,
+        )
+
     def test_submit_and_complete_non_claude_agent_job(
         self,
         pool: WorkerPool,
@@ -157,8 +190,7 @@ class TestWorkerPoolSubmitComplete:
         """Non-Claude agents dispatch through run_agent_session."""
         job = _agent_job(agent="codex")
 
-        session_result = MagicMock()
-        session_result.stdout = "codex output"
+        session_result = MagicMock(stdout="codex output", session_id="new-codex-session")
         with (
             patch(f"{_WP}.resolve_agent", return_value="codex") as mock_resolve,
             patch(f"{_WP}.run_agent_session", return_value=session_result) as mock_session,
@@ -178,6 +210,37 @@ class TestWorkerPoolSubmitComplete:
         )
         assert result.ok is True
         assert result.value == "codex output"
+        assert result.session_id == "new-codex-session"
+
+    def test_non_claude_agent_job_resumes_a_saved_session(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+    ) -> None:
+        """A later direct-agent turn resumes, rather than starts afresh."""
+        job = _agent_job(agent="codex", resume_session_id="saved-codex-session")
+        session_result = MagicMock(stdout="continued", session_id="saved-codex-session")
+
+        with (
+            patch(f"{_WP}.resolve_agent", return_value="codex"),
+            patch(f"{_WP}.resume_agent_session", return_value=session_result) as resume,
+            patch(f"{_WP}.run_agent_session") as run,
+        ):
+            pool.submit(job, StageName.IMPLEMENTATION)
+            _handle, result = completion_q.get(timeout=10)
+
+        resume.assert_called_once_with(
+            agent="codex",
+            session_id="saved-codex-session",
+            prompt="test prompt",
+            cwd=job.cwd,
+            timeout=job.timeout_s,
+            model=job.model,
+        )
+        run.assert_not_called()
+        assert result.ok is True
+        assert result.value == "continued"
+        assert result.session_id == "saved-codex-session"
 
     def test_read_only_agent_job_propagates_its_sandbox_to_codex(
         self,

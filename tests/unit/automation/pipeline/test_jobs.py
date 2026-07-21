@@ -11,6 +11,7 @@ from hephaestus.automation.pipeline.jobs import (
     GIT_OPS,
     AgentJob,
     BuildTestJob,
+    CompactJob,
     GitJob,
     JobHandle,
     JobResult,
@@ -64,6 +65,19 @@ class TestJobDataclassesFrozen:
 
     def test_git_job_frozen(self) -> None:
         job = GitJob(repo="test/repo", op="rebase", timeout_s=60)
+        with pytest.raises(FrozenInstanceError):
+            job.timeout_s = 120  # type: ignore[misc]
+
+    def test_compact_job_frozen(self) -> None:
+        job = CompactJob(
+            repo="test/repo",
+            issue=123,
+            agent="claude",
+            session_agent="implementer",
+            model="claude-haiku-4-5",
+            cwd=Path("/tmp"),
+            timeout_s=60,
+        )
         with pytest.raises(FrozenInstanceError):
             job.timeout_s = 120  # type: ignore[misc]
 

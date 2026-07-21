@@ -970,8 +970,9 @@ pipeline stage and act as the **sole authority** for
 **Pre-conditions.** Item has an `issue` AND a `pr` number; otherwise
 fail back to implementation via [`_fail_back_agent_error`](hephaestus/automation/pipeline/stages/pr_review.py).
 **States.** `ENTER → REVIEW_WAIT → VALIDATE_WAIT → POST →
-DIFFICULTY_WAIT → ADDRESS_WAIT → PUSH_WAIT → EVAL → (loop or
-FOLLOWUP_WAIT → PR_FINISH) or ADVANCE to`merge_wait`.
+DIFFICULTY_WAIT → ADDRESS_WAIT → PUSH_WAIT → EVAL →
+COMPACT_REVIEWER_WAIT → COMPACT_WRITER_WAIT → REVIEW_WAIT` (retry loop), or ADVANCE to
+`merge_wait`.
 
 #### on_enter [M]
 
@@ -991,6 +992,12 @@ Clear all round-scoped payload
 so a failed later round can never replay an earlier round's results.
 Submit `AgentJob` with
 [`get_pr_review_analysis_prompt`](hephaestus/automation/prompts/pr_review.py)
+
+- The reviewer has one logical `AGENT_PR_REVIEWER` session for the item's
+  review cycle. `VALIDATE_WAIT` and later review rounds continue it. Claude
+  resolves that role through its deterministic session name; direct runners
+  return an opaque id that the coordinator stores in `WorkItem.session_ids`
+  and supplies as `AgentJob.resume_session_id` on the next turn.
 
 - `parse=parse_review_verdict`. Reviewer text lands in
 `payload["review_verdict"]`; raw review text in `payload["review_text"]`.
@@ -1042,6 +1049,17 @@ delegates the durable log write to [`_persist_address_fix_log`](hephaestus/autom
 "real-commit gate" (#1575): the `value` returned flags no-commit vs.
 real-commit.
 
+#### COMPACT_REVIEWER_WAIT and COMPACT_WRITER_WAIT [W:C]
+
+On every retryable non-GO result with a worktree, the stage first submits a
+best-effort `CompactJob` for the persisted reviewer session, then one for the
+writer session before the next `REVIEW_WAIT`: the implementer for a
+pipeline-created PR, or the address-review writer for an adopted PR. Both jobs
+send `/compact` and always continue, including when no session exists or
+compaction fails. Claude uses deterministic role-based session names; Codex
+and Pi resume their persisted opaque session IDs, so neither provider starts a
+fresh review turn merely because the loop iterated.
+
 #### EVAL [M]
 
 [`PrReviewStage._eval`](hephaestus/automation/pipeline/stages/pr_review.py) implements
@@ -1071,7 +1089,8 @@ The gate logic at [`PrReviewStage._eval`](hephaestus/automation/pipeline/stages/
 3. **Real NOGO/AMBIGUOUS round** → apply
  `state:implementation-no-go` (non-fatal pair write under
  [`PostReviewManager`](hephaestus/automation/pipeline/stages/pr_review.py)),
- bump round counters, RETRY loop. cap exhaustion → `SKIP` with
+ bump round counters, compact the resumable reviewer and writer, then
+ re-review. cap exhaustion → `SKIP` with
  `state:skip` durable write.
 4. **GO round** → check the (blocking, minor, human) triple:
 
@@ -1411,6 +1430,9 @@ mutations.
 - [`AgentJob`](hephaestus/automation/pipeline/jobs.py) — Claude or
  Codex (`agent = resolve_agent(job.agent)`) with
  `prompt_builder(**prompt_kwargs)` composed in-worker.
+ `resume_session_id`, when set for a direct runner, selects its persisted
+ session instead of creating a fresh one; its returned id is carried in the
+ `JobResult` and persisted by the coordinator under the job's logical role.
  `sandbox = "workspace-write"` (default) or `"read-only"`
  (implementation review only); `expected_head_sha` — when set, the worker
  refuses to dispatch the agent unless the local `git rev-parse HEAD`
@@ -1424,6 +1446,9 @@ mutations.
 - [`GitJob`](hephaestus/automation/pipeline/jobs.py) — `op ∈ {clone,
  create_worktree, remove_worktree, rebase, push, commit_push}`,
  validated by `__post_init__`.
+- [`CompactJob`](hephaestus/automation/pipeline/jobs.py) — a best-effort
+ `/compact` turn for a persisted Claude, Codex, or Pi session; it never blocks
+ the retry lifecycle.
 
 ### Result semantics
 
@@ -1669,10 +1694,10 @@ remain as thin compatibility shims re-exporting `_resolve_model`,
  produces the underscore-joined human name; `session_uuid(...)`
  derives the deterministic UUIDv5 using `NAMESPACE_DNS`. The model
  token is appended when given so Claude Code `--resume` can never
- silently cross models. Per-iteration reviewers use
- `reviewer_agent(base, iteration)` (`plan-reviewer-r{N}`,
- `pr-reviewer-r{N}`) so a new iteration never inherits its own
- prior transcript.
+ silently cross models. Plan-review iterations use
+ `reviewer_agent(base, iteration)` (`plan-reviewer-r{N}`) where independent
+ plans need isolation. The PR-review retry loop instead retains its static
+ `pr-reviewer` role and compacts that session before continuing it.
 - **`issue_auto_impl_branch_name(issue)`** — canonical feature
  branch name (`{issue}-auto-impl`); referenced by
  [`implementation._gate`](hephaestus/automation/pipeline/stages/implementation.py).

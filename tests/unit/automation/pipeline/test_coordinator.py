@@ -1210,6 +1210,36 @@ class TestDurableEventLog:
         rendered = coordinator._metrics_registry.render_prometheus()
         assert "hephaestus_pipeline_agent_job_seconds_total 0" in rendered
 
+    def test_completion_persists_direct_agent_session_by_logical_role(self, tmp_path: Path) -> None:
+        """The next loop turn can resume the direct agent's saved context."""
+        coordinator = Coordinator(
+            PipelineConfig(org="org", repos=["repo-a"], projects_dir=tmp_path),
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        coordinator.stages[StageName.IMPLEMENTATION] = StubStage()
+        item = _issue_item(4, StageName.IMPLEMENTATION)
+        handle = JobHandle(
+            job=AgentJob(
+                repo="repo-a",
+                issue=4,
+                agent="codex",
+                model="m",
+                prompt_builder=lambda: "p",
+                cwd=Path("."),
+                timeout_s=1,
+                session_agent="implementer",
+            ),
+            on_done_state=StageName.IMPLEMENTATION,
+        )
+        coordinator.in_flight[handle] = item
+        coordinator.inflight_per_repo[item.repo] += 1
+
+        coordinator._handle_completion(handle, JobResult(ok=True, session_id="codex-session"))
+
+        assert item.session_ids == {"implementer": "codex-session"}
+
     def test_event_log_path_persists_queue_events(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
