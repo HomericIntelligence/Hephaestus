@@ -176,7 +176,8 @@ class ReviewConflictResolver:
             if not self._operations.rebase_worktree(request.worktree_path, base_branch):
                 self._log(
                     "warning",
-                    f"{pr_ref(request.pr_number)} mechanical rebase hit conflicts; aborted; "
+                    f"{pr_ref(request.pr_number)} mechanical rebase onto {base_branch} hit "
+                    "conflicts; aborted; "
                     "deferring to implementation agent",
                     request.thread_id,
                 )

@@ -140,10 +140,11 @@ def test_agent_fallback_runs_only_after_mechanical_resolution_fails() -> None:
     fakes.commit.assert_called_once()
     fakes.push_rebased.assert_not_called()
     fakes.push_agent.assert_called_once_with("7-auto-impl", Path("/worktree"))
-    assert any(
-        "mechanical rebase hit conflicts; aborted; deferring to implementation agent"
-        in str(call.args[1])
-        for call in fakes.log.call_args_list
+    fakes.log.assert_any_call(
+        "warning",
+        "Hephaestus#12 mechanical rebase onto main hit conflicts; aborted; "
+        "deferring to implementation agent",
+        9,
     )
 
 
