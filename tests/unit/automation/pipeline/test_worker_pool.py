@@ -1002,14 +1002,21 @@ class TestGitOps:
         )
         assert result.ok is True
 
-    @pytest.mark.parametrize("rebase_clean", [True, False])
-    def test_rebase_dispatch_propagates_bool(
+    @pytest.mark.parametrize(
+        ("rebase_clean", "expected_error"),
+        [
+            (True, None),
+            (False, "mechanical rebase hit conflicts; aborted"),
+        ],
+    )
+    def test_rebase_dispatch_propagates_result(
         self,
         pool: WorkerPool,
         completion_q: CompletionQueue,
         rebase_clean: bool,
+        expected_error: str | None,
     ) -> None:
-        """Rebase forwards to rebase_worktree_onto; its bool is ok AND value."""
+        """Rebase propagates its status and explains an aborted conflict."""
         job = GitJob(
             repo="test/repo",
             op="rebase",
@@ -1030,6 +1037,7 @@ class TestGitOps:
         )
         assert result.ok is rebase_clean
         assert result.value is rebase_clean
+        assert result.error == expected_error
 
     def test_push_dispatch(
         self,
