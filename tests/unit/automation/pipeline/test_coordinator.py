@@ -1011,6 +1011,43 @@ class TestImplementationAdmission:
         # Each issue is scoped to the repo of ITS OWN WorkItem, not the ambient CWD.
         assert seen_repo_of == {21: ("org", "repo-a"), 22: ("org", "repo-b")}
 
+    def test_topo_order_ignores_out_of_queue_dependencies_before_aging(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Aging cannot overtake an in-queue prerequisite (#2309)."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        run_order: list[int] = []
+
+        class RecordingStage(StubStage):
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                run_order.append(item.issue or 0)
+                return StageOutcome(Disposition.SKIP, "recorded")
+
+        coordinator.stages[StageName.IMPLEMENTATION] = RecordingStage()
+        dependent = _issue_item(21, StageName.IMPLEMENTATION)
+        dependent.payload["dependencies"] = [22, 999]
+        dependent.payload["file_overlap_deferrals"] = 100
+        prerequisite = _issue_item(22, StageName.IMPLEMENTATION)
+        coordinator._push_item(dependent, StageName.IMPLEMENTATION, enter=True)
+        coordinator._push_item(prerequisite, StageName.IMPLEMENTATION, enter=True)
+        seen_order: list[int] = []
+
+        def _fake_select(
+            issues: list[int], repo_of: dict[int, tuple[str, str]] | None = None
+        ) -> tuple[list[int], list[int]]:
+            seen_order.extend(issues)
+            return issues, []
+
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.admission._select_non_overlapping",
+            _fake_select,
+        )
+
+        coordinator._drain_implementation()
+
+        assert seen_order == [22, 21]
+        assert run_order == [22, 21]
+
     def test_file_overlap_aging_dispatches_starved_issue(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

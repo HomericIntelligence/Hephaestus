@@ -793,15 +793,19 @@ without re-implementing.
  ([`_admit`](hephaestus/automation/pipeline/coordinator.py));
 2. Cross-issue dependency topologic order via
  [`order_for_implementation`](hephaestus/automation/pipeline/admission.py)
- (Kahn's algorithm over `DependencyResolver`, fail-open on cycle);
-3. Greedy first-fit file-overlap serialization via
+ (Kahn's algorithm over `DependencyResolver`, considering only dependencies
+ present in the current queue and fail-open on cycle);
+3. Stable deferral aging among dependency-ready issues: consecutive
+ file-overlap deferrals are priority inputs only after topological ordering;
+ an issue's age clears only once it is admitted for dispatch;
+4. Greedy first-fit file-overlap serialization via
  [`_select_non_overlapping`](hephaestus/automation/pipeline/admission.py)
  — parses backticked repo-relative paths in the plan comment's
  `## Files to Modify` / `## Files to Create` sections
  ([`_PLAN_FILE_RE`](hephaestus/automation/pipeline/admission.py),
  skip when `serialize_file_overlap=False` or `max_workers == 1` or
  `len(ordered) <= 1`);
-4. Transient duplicate drop via
+5. Transient duplicate drop via
  [`_dedup_implementation_items`](hephaestus/automation/pipeline/coordinator.py)
  keyed on `(repo, issue)` (#2057).
 **States.** `ENTER → GATE → WORKTREE_WAIT → DIRTY_DECISION_WAIT →

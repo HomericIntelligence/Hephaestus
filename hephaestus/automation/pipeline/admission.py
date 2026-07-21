@@ -33,12 +33,11 @@ from hephaestus.automation.github_api import (
     is_issue_closed,
     prefetch_issue_states,
 )
+from hephaestus.automation.models import IssueInfo
 from hephaestus.automation.protocol import PLAN_COMMENT_MARKER
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
-
-    from hephaestus.automation.models import IssueInfo
 
 LOG = logging.getLogger(__name__)
 
@@ -178,13 +177,20 @@ def order_for_implementation(issue_infos: Sequence[IssueInfo]) -> list[int]:
 
     """
     in_set = {info.number for info in issue_infos}
+    queued_infos = [
+        IssueInfo(
+            number=info.number,
+            title=info.title,
+            dependencies=[dep for dep in info.dependencies if dep in in_set],
+        )
+        for info in issue_infos
+    ]
     resolver = DependencyResolver(skip_closed=False)
-    for info in issue_infos:
+    for info in queued_infos:
         resolver.add_issue(info)
-    for info in issue_infos:
+    for info in queued_infos:
         for dep in info.dependencies:
-            if dep in in_set:
-                resolver.add_dependency(info.number, dep)
+            resolver.add_dependency(info.number, dep)
     try:
         return resolver.topological_sort()
     except CyclicDependencyError:
