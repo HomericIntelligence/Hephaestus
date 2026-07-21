@@ -1027,8 +1027,9 @@ class Coordinator:
             )
             for number, item in issue_items.items()
         ]
-        # Stable sorting makes age a priority only among dependency-ready peers;
-        # order_for_implementation still enforces every in-queue dependency edge.
+        # Stable sorting gives age its input priority. The priority-ready topo
+        # traversal preserves it whenever a dependent becomes ready, while still
+        # enforcing every in-queue dependency edge.
         infos.sort(
             key=lambda info: int(
                 issue_items[info.number].payload.get(_FILE_OVERLAP_DEFERRALS_KEY, 0)

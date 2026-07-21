@@ -327,6 +327,11 @@ class TestOrderForImplementation:
         )
         assert order == [3, 2, 1]
 
+    def test_ready_dependent_reclaims_input_priority(self) -> None:
+        """A newly ready high-priority dependent precedes lower-priority work."""
+        order = order_for_implementation([_info(1, dependencies=[2]), _info(2), _info(3)])
+        assert order == [2, 1, 3]
+
     def test_cycle_falls_open_to_input_order(self, caplog: pytest.LogCaptureFixture) -> None:
         """A dependency cycle keeps input order and warns (never wedges the queue)."""
         infos = [_info(1, dependencies=[2]), _info(2, dependencies=[1]), _info(3)]

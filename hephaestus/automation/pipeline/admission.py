@@ -160,9 +160,9 @@ def order_for_implementation(issue_infos: Sequence[IssueInfo]) -> list[int]:
     builds a graph over exactly the given issues, keeping only dependency
     edges whose target is ALSO in the set — an edge to an issue outside the
     implementation queue cannot be ordered here and is dropped (fail-open;
-    that dependency's own classification decides when it runs). Kahn's
-    algorithm preserves the input order among issues at equal depth, so the
-    result is deterministic.
+    that dependency's own classification decides when it runs). Its
+    priority-ready Kahn queue retains input priority whenever an issue becomes
+    dependency-ready, so the result is deterministic.
 
     On a dependency cycle the original order is returned unchanged with a
     warning (fail-open: never wedge the queue over bad metadata).

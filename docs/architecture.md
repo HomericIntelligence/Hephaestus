@@ -795,9 +795,10 @@ without re-implementing.
  [`order_for_implementation`](hephaestus/automation/pipeline/admission.py)
  (Kahn's algorithm over `DependencyResolver`, considering only dependencies
  present in the current queue and fail-open on cycle);
-3. Stable deferral aging among dependency-ready issues: consecutive
- file-overlap deferrals are priority inputs only after topological ordering;
- an issue's age clears only once it is admitted for dispatch;
+3. Stable deferral aging is a topological dispatch priority: consecutive
+ file-overlap deferrals rank the priority-ready Kahn queue, so a newly-ready
+ older dependent precedes lower-priority ready peers; an issue's age clears
+ only once it is admitted for dispatch;
 4. Greedy first-fit file-overlap serialization via
  [`_select_non_overlapping`](hephaestus/automation/pipeline/admission.py)
  — parses backticked repo-relative paths in the plan comment's

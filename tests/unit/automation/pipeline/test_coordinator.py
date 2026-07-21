@@ -1048,6 +1048,35 @@ class TestImplementationAdmission:
         assert seen_order == [22, 21]
         assert run_order == [22, 21]
 
+    def test_aged_dependent_precedes_younger_ready_peer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An aged issue reclaims priority as soon as its prerequisite runs (#2309)."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        dependent = _issue_item(21, StageName.IMPLEMENTATION)
+        dependent.payload["dependencies"] = [22]
+        dependent.payload["file_overlap_deferrals"] = 100
+        prerequisite = _issue_item(22, StageName.IMPLEMENTATION)
+        younger_peer = _issue_item(23, StageName.IMPLEMENTATION)
+        for item in (dependent, prerequisite, younger_peer):
+            coordinator._push_item(item, StageName.IMPLEMENTATION, enter=True)
+        seen_order: list[int] = []
+
+        def _fake_select(
+            issues: list[int], repo_of: dict[int, tuple[str, str]] | None = None
+        ) -> tuple[list[int], list[int]]:
+            seen_order.extend(issues)
+            return issues, []
+
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.admission._select_non_overlapping",
+            _fake_select,
+        )
+
+        coordinator._drain_implementation()
+
+        assert seen_order == [22, 21, 23]
+
     def test_file_overlap_aging_dispatches_starved_issue(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
