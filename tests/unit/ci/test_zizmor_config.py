@@ -1,14 +1,15 @@
 """Tests for the UV-managed zizmor GitHub Actions SAST configuration.
 
 zizmor is the workflow-surface complement to bandit (Python) and ShellCheck
-(shell); see issue #2151 and SECURITY.md. These guards freeze the two
-enforcement surfaces (pre-commit + required CI job) and the offline/online flag
-split so the scanner cannot silently stop gating or drift out of alignment.
+(shell); see issue #2151 and SECURITY.md. These guards cover the managed
+development dependency and deterministic local pre-commit invocation. Workflow
+CI configuration is reviewed directly rather than snapshotted from this tree.
 """
 
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 import yaml
 
@@ -20,7 +21,7 @@ else:
     import tomli as tomllib  # type: ignore[no-redef, unused-ignore]
 
 
-REPO_ROOT = get_repo_root()
+REPO_ROOT = get_repo_root(Path(__file__))
 
 # Offline scanner flags required by the local pre-commit hook.
 OFFLINE_FLAGS = ("--no-online-audits", "--min-severity", "medium")

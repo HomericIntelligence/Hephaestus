@@ -96,8 +96,8 @@ repos:
         pass_filenames: false
 
   # Security: GitHub Actions workflow SAST (issue #2151). Offline + medium
-  # threshold matches the required security/workflow-scan CI job; keep the two
-  # flag sets identical (drift-guarded by tests/unit/ci/test_zizmor_config.py).
+  # threshold supports deterministic local scanning. CI adds its own workflow
+  # security checks; this hook's flags are guarded by tests/unit/ci/test_zizmor_config.py.
   - repo: local
     hooks:
       - id: zizmor

@@ -30,8 +30,8 @@ job:
    success/failure even when heavy jobs skip on label / auto-merge events.
 
 `docs/ci/required-checks.md` is the operational source of truth for the gate;
-this ADR records the *why*. Workflow changes are reviewed directly and
-validated by the repository's YAML/schema tooling.
+this ADR records the *why*. The membership of the `needs:` list is itself
+guarded by `tests/unit/ci/test_required_checks_gate.py`.
 
 ## Alternatives considered
 
@@ -46,3 +46,7 @@ validated by the repository's YAML/schema tooling.
 
 - Adding a new gating job means adding it to the `required-checks-gate`
   `needs:` list — protection keeps working with no GitHub-side change.
+- The advisory `auto-merge-policy` job is intentionally **excluded** from the
+  `needs:` list; it must not gate merges.
+- The gate's job list is kept honest by
+  `tests/unit/ci/test_required_checks_gate.py`.

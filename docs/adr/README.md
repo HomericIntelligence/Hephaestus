@@ -30,3 +30,4 @@ numbered, and listed here.
 | [0015](0015-bounded-conditional-merge-retries.md) | Bounded conditional merge retries | Accepted (historical; superseded by 0016) |
 | [0016](0016-bounded-operational-merge-readiness.md) | Bounded operational merge-readiness wait | Accepted |
 | [0017](0017-frozen-legacy-agent-import-exceptions.md) | Frozen legacy agent-import exceptions | Accepted |
+| [0018](0018-fixture-based-workflow-validator-tests.md) | Fixture-based workflow validator tests | Accepted |

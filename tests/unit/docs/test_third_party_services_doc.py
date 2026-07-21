@@ -7,7 +7,7 @@ from pathlib import Path
 
 from hephaestus.utils.helpers import get_repo_root
 
-REPO_ROOT = get_repo_root()
+REPO_ROOT = get_repo_root(Path(__file__))
 DOC = REPO_ROOT / "docs" / "third-party-services.md"
 INDEX = REPO_ROOT / "docs" / "index.md"
 REQUIRED_SERVICES = (
