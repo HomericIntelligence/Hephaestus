@@ -62,6 +62,9 @@ may change incompatibly in a minor release.
 The console scripts registered in `[project.scripts]` are classified into one
 of three tiers:
 
+Hephaestus installs 49 console scripts via `[project.scripts]` in
+`pyproject.toml`.
+
 - **Stable** — covered by the [deprecation policy](#deprecation-policy). CLI
   name, flags, exit codes, and JSON output schema (when `--json` is passed)
   are versioned API. Currently: none. Promotion criteria: dispatches to a
