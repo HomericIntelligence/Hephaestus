@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 
+from hephaestus.automation import state_labels
 from hephaestus.automation.state_labels import (
     ALL_IMPLEMENTATION_STATE_LABELS,
     ALL_STATE_LABELS,
@@ -35,14 +36,20 @@ from hephaestus.automation.state_labels import (
 class TestLabelVocabulary:
     """The three state-label names + the ALL tuple are stable identifiers."""
 
-    def test_three_distinct_state_labels(self) -> None:
-        assert len({STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO}) == 3
+    def test_four_distinct_state_labels(self) -> None:
+        assert (
+            len(
+                {STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO, state_labels.STATE_PLAN_BLOCKED}
+            )
+            == 4
+        )
 
     def test_all_state_labels_covers_each(self) -> None:
         assert set(ALL_STATE_LABELS) == {
             STATE_NEEDS_PLAN,
             STATE_PLAN_NO_GO,
             STATE_PLAN_GO,
+            state_labels.STATE_PLAN_BLOCKED,
         }
 
     def test_state_prefix(self) -> None:
@@ -153,6 +160,9 @@ class TestNeedsPlan:
         """A NOGO issue has a plan; it's just being re-iterated. Not needs-plan."""
         assert needs_plan([STATE_PLAN_NO_GO]) is False
 
+    def test_plan_blocked_does_not_need_plan(self) -> None:
+        assert needs_plan([state_labels.STATE_PLAN_BLOCKED]) is False
+
     @pytest.mark.parametrize(
         "labels",
         [
@@ -242,12 +252,20 @@ class TestApplyPlanVerdict:
     def test_go_verdict_adds_go_removes_others(self) -> None:
         add, remove = apply_plan_verdict(is_go=True)
         assert add == STATE_PLAN_GO
-        assert set(remove) == {STATE_PLAN_NO_GO, STATE_NEEDS_PLAN}
+        assert set(remove) == {
+            STATE_PLAN_NO_GO,
+            state_labels.STATE_PLAN_BLOCKED,
+            STATE_NEEDS_PLAN,
+        }
 
     def test_nogo_verdict_adds_nogo_removes_others(self) -> None:
         add, remove = apply_plan_verdict(is_go=False)
         assert add == STATE_PLAN_NO_GO
-        assert set(remove) == {STATE_PLAN_GO, STATE_NEEDS_PLAN}
+        assert set(remove) == {
+            STATE_PLAN_GO,
+            state_labels.STATE_PLAN_BLOCKED,
+            STATE_NEEDS_PLAN,
+        }
 
 
 class TestPartitionEpics:

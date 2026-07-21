@@ -42,6 +42,11 @@ def get_review_output_format() -> str:
     return _fragment("review_output_format")
 
 
+def get_plan_review_output_format() -> str:
+    """Return the exact state-label contract used by plan reviewers."""
+    return _fragment("plan_review_output_format")
+
+
 def get_plan_review_rubric() -> str:
     """Return the plan-review rubric."""
     return _fragment("plan")
@@ -95,6 +100,7 @@ __all__ = [
     "get_full_sweep_suffix",
     "get_implementation_loop_review_rubric",
     "get_plan_loop_review_rubric",
+    "get_plan_review_output_format",
     "get_plan_review_rubric",
     "get_pr_review_rubric",
     "get_review_output_format",

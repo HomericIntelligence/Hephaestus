@@ -40,8 +40,9 @@ from .claude_invoke import invoke_claude_with_session, parse_review_verdict, sca
 from .claude_models import reviewer_model
 from .git_utils import get_repo_info, get_repo_root, get_repo_slug, issue_ref
 from .github_api import _gh_call, gh_issue_json, gh_issue_upsert_comment
-from .models import PLAN_COMMENT_MARKER, PlanReviewerOptions, WorkerResult
+from .models import PlanReviewerOptions, WorkerResult
 from .prompts import get_plan_review_prompt
+from .review_journal import is_plan_comment
 from .review_state import (
     PLAN_REVIEW_PREFIX as _REVIEW_PREFIX_SHARED,
     is_plan_review_go,
@@ -376,7 +377,7 @@ class PlanReviewer:
                 continue  # never treat a review comment as the plan
             # Match the single canonical marker ONLY at the start of the body
             # (anchored), never as a free substring.
-            if stripped.startswith(PLAN_COMMENT_MARKER):
+            if is_plan_comment(stripped):
                 logger.debug("Found plan comment for issue #%s", issue_number)
                 return body
 

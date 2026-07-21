@@ -22,23 +22,21 @@ Optimization"), file paths are repo-relative.
 4. [WorkItem and the durable journal](#4-workitem-and-the-durable-journal)
 5. [The seven queue stages](#5-the-seven-queue-stages)
 
-- [5.1 `repo` — discover and classify](#51-repo)
-- [5.2 `planning` — advise and produce a plan](#52-planning)
-- [5.3 `plan_review` — strict plan review, amend, learn](#53-plan_review)
-- [5.4 `implementation` — gate, worktree, implement, test, PR](#54-implementation)
-- [5.5 `pr_review` — review, validate, address, severity-aware GO gate](#55-pr_review)
-- [5.6 `merge_wait` — sole automatic armer](#56-merge_wait)
-- [5.7 `finished` — terminal ledger and worktree cleanup/preservation](#57-finished)
+- [5.1 Repo intake](#51-repo-intake)
+- [5.2 Planning](#52-planning)
+- [5.3 Plan review](#53-plan-review)
+- [5.4 Implementation](#54-implementation)
+- [5.5 PR review](#55-pr-review)
+- [5.6 Merge wait](#56-merge-wait)
+- [5.7 Finished](#57-finished)
 
 1. [The ROUTES table — single source of truth](#6-the-routes-table)
 2. [Seeding and restart reconstruction](#7-seeding-and-restart-reconstruction)
 3. [The worker pool and job contract](#8-the-worker-pool-and-job-contract)
 4. [Thin CLI scope wrappers and rollout controls](#9-thin-cli-scope-wrappers)
 5. [Observability, dry-run and rate-budget gate](#10-observability-dry-run-and-rate-budget-gate)
-6. [Key subsystems and cross-cutting modules](#11-key-subsystems-and-cross-cutting-modules)
-7. [Interrupt semantics and exit codes](#12-interrupt-semantics-and-exit-codes)
-8. [Glossary](#13-glossary)
-9. [Provenance audit checklist](#14-provenance-audit-checklist)
+6. [Interrupt semantics and exit codes](#12-interrupt-semantics-and-exit-codes)
+7. [Glossary](#13-glossary)
 
 ---
 
@@ -86,16 +84,15 @@ in §5.1, which tags `state:skip` on epics before any other durable mutation.
  marketplaces, NATS JetStream and HTTP REST remain the maintained
  integration contracts ([ADR-0011](adr/0011-mcp-integration-posture.md)).
 
-### Design principles (inherited from ProjectOdyssey)
+### Design principles
 
 - **KISS / YAGNI.** Each stage owns one responsibility. The deferred
  `AgentProtocol` and `resilience` wiring into the GitHub call path
  (issues #468, #469) are intentionally NOT built yet.
 - **DRY / one-way dependency.** `automation → library` only — library
  subpackages may not import from
- [`hephaestus.automation`](hephaestus/automation/). The fence is enforced
- by [`tests/unit/validation/test_automation_boundary.py`](tests/unit/validation/test_automation_boundary.py)
- and [`ADR-0001`](adr/0001-automation-library-boundary.md).
+ [`hephaestus.automation`](hephaestus/automation/), as defined by
+ [`ADR-0001`](adr/0001-automation-library-boundary.md).
 - **SOLID / substitutable providers.** [`hephaestus.agents.runtime`](hephaestus/agents/runtime.py)
  abstracts over Claude Code and Codex behind a uniform `--agent` flag.
 - **POLA. Least privilege, least astonishment.** Per-call
@@ -117,30 +114,22 @@ The coordinator owns **seven in-memory stage queues** and dispatches
 agent / build-test / git-network jobs to a single `WorkerPool`. Each agent
 job runs Claude or Codex, chosen by `--agent` (default Claude).
 
-#### Mermaid
+#### Seven-stage queue block diagram
 
 ```mermaid
 flowchart LR
- repo --> planning --> plan_review --> implementation --> pr_review --> merge_wait --> finished
- plan_review -. "nogo (iter 3 / plan_cycles 2)".-> planning
- implementation -. "agent_error".-> implementation
- pr_review -. "agent_error".-> implementation
- implementation -. "already_implementation_go_pr".-> merge_wait
- merge_wait -. "arm_confirm_failed".-> merge_wait (retry)
-```
+    repo["1. Repo"] --> planning["2. Planning"]
+    planning --> plan_review["3. Plan review"]
+    plan_review --> implementation["4. Implementation"]
+    implementation --> pr_review["5. PR review"]
+    pr_review --> merge_wait["6. Merge wait"]
+    merge_wait --> finished["7. Finished"]
 
-#### ASCII
-
-```
-repo → planning → plan_review → implementation → pr_review → merge_wait → finished
- ↑ │ ↑ ↑ │
- └─── NOGO ────┘ │ └─ agent err ─────┘
- (iter 3 / cycles 2) └─── implementation-GO → merge_wait
- │
- arm_confirm_failed
- │
- ▼
- merge_wait (retry)
+    plan_review -. "nogo (iter 3 / plan_cycles 2)" .-> planning
+    implementation -. "agent_error" .-> implementation
+    pr_review -. "agent_error" .-> implementation
+    implementation -. "already_implementation_go_pr" .-> merge_wait
+    merge_wait -. "arm_confirm_failed" .-> merge_wait
 ```
 
 Every back-edge in the diagram is **named** in
@@ -229,18 +218,8 @@ breached it on nearly every multi-repo run, burying real stalls in noise
 
 [`hephaestus.automation`](hephaestus/automation/) is the product layer. The
 base import surface (`import hephaestus`) MUST NOT pull `curses`, `fcntl`,
-`pydantic` or any `hephaestus.automation.*` module. The fence is:
-
-- [`tests/unit/validation/test_import_surface.py`](tests/unit/validation/test_import_surface.py)
- (subprocess-based).
-- [`tests/unit/validation/test_automation_boundary.py`](tests/unit/validation/test_automation_boundary.py)
- (static grep — no `import hephaestus.automation` from any library
- subpackage).
-A small set of orchestration modules are excluded from coverage via
-`[tool.coverage.run].omit`; the omit list is frozen by
-[`tests/unit/validation/test_omit_allowlist.py`](tests/unit/validation/test_omit_allowlist.py)
-and every omitted module has a backing test suite enforced by
-[`tests/unit/validation/test_omit_justification.py`](tests/unit/validation/test_omit_justification.py).
+`pydantic` or any `hephaestus.automation.*` module. Library subpackages
+therefore cannot import `hephaestus.automation`.
 
 ---
 
@@ -310,7 +289,8 @@ The summary uses `latest_logical_items(self.items)` from
 [`summary.py`](hephaestus/automation/pipeline/summary.py) so a re-seeded
 item's superseded attempts are collapsed before per-row / exit-code /
 preserved-worktree calculation. The current item's own failed, skipped or blocked result still counts; an old failed attempt that was superseded
-by a later passing attempt does not.
+by a later passing attempt does not. Pull requests already merged/closed are
+terminalized before summary collapse so stale attempts cannot re-enter the queue.
 
 ### Rate-budget gate
 
@@ -321,8 +301,7 @@ chokepoint ([`_submit`](hephaestus/automation/pipeline/coordinator.py)):
 [`hephaestus.automation.pipeline_github.rate_budget_ok`](hephaestus/automation/pipeline_github.py)
 and timer-parks an `AgentJob` until the upstream reset when the GraphQL
 budget is low. Git/build jobs are unaffected. No `time.sleep` lives in any
-stage module — enforced by
-[`tests/unit/automation/pipeline/test_pipeline_architecture.py`](tests/unit/automation/pipeline/test_pipeline_architecture.py).
+stage module.
 
 ### Dry-run
 
@@ -471,6 +450,7 @@ two pairs:
 | `state:needs-plan` | planner-scope| [`planning.on_enter`](hephaestus/automation/pipeline/stages/planning.py) |
 | `state:plan-no-go` | planner-scope| [`plan_review._eval`](hephaestus/automation/pipeline/stages/plan_review.py) |
 | `state:plan-go` | planner-scope| [`plan_review._eval`](hephaestus/automation/pipeline/stages/plan_review.py) |
+| `state:plan-blocked` | planner-scope| [`plan_review._eval`](hephaestus/automation/pipeline/stages/plan_review.py) |
 | `state:implementation-no-go` | review-scope | [`pr_review._eval`](hephaestus/automation/pipeline/stages/pr_review.py) |
 | `state:implementation-go` | review-scope | [`pr_review._eval`](hephaestus/automation/pipeline/stages/pr_review.py) — **sole authority** |
 | `state:skip` | absolute | operator / exhaustion in [`pr_review`](hephaestus/automation/pipeline/stages/pr_review.py) / [`implementation`](hephaestus/automation/pipeline/stages/implementation.py) |
@@ -521,771 +501,389 @@ Non-fatal pair (each write wrapped independently) — see
 
 ## 5. The seven queue stages
 
-Each stage implements
-[`Stage.on_enter / step / on_job_done`](hephaestus/automation/pipeline/stages/base.py).
-Legend:
-
-- `[M]` — coordinator main-thread step (kept short, <15 s in practice).
-- `[W:A]` — worker AgentJob (Claude or Codex).
-- `[W:B]` — worker BuildTestJob (subprocess argv).
-- `[W:G]` — worker GitJob (in-process + cross-process flock).
-Every durable GitHub mutation precedes the `StageOutcome` that causes a
-queue push. Sources are pinned per-action.
-
-### 5.1 `repo`
->
-> Source: [`pipeline/stages/repo.py`](hephaestus/automation/pipeline/stages/repo.py)
-> (the only stage that mutates the gate
-> [`ctx.github.skip_epics`](hephaestus/automation/pipeline/stages/base.py)).
-> Binding contract: §6 (ROUTES table) + §7 (Seeding and restart reconstruction).
-**Objective.** Per-repo, discover open issues, dedup, partition epics,
-durably tag every epic **`state:skip`** BEFORE exclusion, classify each
-kept issue via the seeded classifier and push the resulting products to
-their entry queues. The repo item itself is terminal — it advances to
-`finished(pass, seeded:N)` once seeding completes.
-**Pre-conditions.** A repo entry exists. (One repo seed per `--repos`
-CLI arg or one per repo discovered by `--org`.)
-**States.** `ENTER → CLONE_WAIT → DISCOVER → SEEDED`.
-
-#### ENTER
-
-- `[M]` [`on_enter`](hephaestus/automation/pipeline/stages/repo.py) →
- [`ctx.github.ensure_state_labels()`](hephaestus/automation/pipeline/stages/repo.py)
- (idempotent label vocabulary setup; coordinator maps to
- [`github_api._ensure_labels_exist`](hephaestus/automation/github_api.py))
- → `Continue(CLONE_WAIT)`.
-
-#### CLONE_WAIT [W:G]
-
-- Submit a `GitJob(op="clone")` if the checkout is missing at
- `_repo_checkout_path(item, ctx)`
- ([`_repo_checkout_path`](hephaestus/automation/pipeline/stages/repo.py)).
- Dry-run / already-cloned both `Continue(DISCOVER)`.
-- `on_job_done` records `payload["clone_failed"]` on failure
- ([`on_job_done`](hephaestus/automation/pipeline/stages/repo.py)).
-- Budget consumption: `attempts["clone"]` on completion (success or hard
- failure alike; see "house `on_job_done` pattern"). `clone` budget = 2
- ([`ROUTES[REPO]`](hephaestus/automation/pipeline/routing.py)).
- Exhaustion → `FINISH_FAIL("clone exhausted after N attempts")`.
-
-#### DISCOVER [M]
-
-- [`_list_open_issue_meta`](hephaestus/automation/loop_repo_manager.py)
- read; dedup by `number` (preserve listing order).
-- **Epic tagging is the ONE sanctioned seeding write.** Issue metadata is
- partitioned by [`partition_epics`](hephaestus/automation/state_labels.py)
- (label match **OR** title-leading-token match per [`is_epic`](hephaestus/automation/state_labels.py),
- #2251). Every epic is durably tagged via
- [`_tag_epics`](hephaestus/automation/pipeline/stages/repo.py) BEFORE
- the exclusion — guarded by `EpicSkipTagObligation` in
- [`seeding.py`](hephaestus/automation/pipeline/seeding.py) so the
- pipeline's mutator fence can discharge the write programmatically.
-- Each kept issue becomes a product
- `{kind: "issue", number, stage, reason, pr, labels, title, body}`
- via [`seed_issue_from_github`](hephaestus/automation/pipeline/seeding.py)
-
-- [`classify_issue`](hephaestus/automation/pipeline/seeding.py).
- The classifier is the canonical at-or-past comparison.
-- `--drive-green-all`: orphan PRs (open PRs whose issue is not in `kept`
- and which pass the bot/author scope filter) are added as
- `kind: "pr", stage: PR_REVIEW` products
- ([`_drive_green_pr_is_in_scope`](hephaestus/automation/pipeline/stages/repo.py)).
-- Continues to `SEEDED`.
-
-#### SEEDED [M]
-
-- `FINISH_PASS(f"seeded:{N}")`. The coordinator's
- [`_seed_products`](hephaestus/automation/pipeline/coordinator.py)
- pops `payload["products"]` and pushes a
- [`product_to_work_item`](hephaestus/automation/pipeline/stages/repo.py)
- per non-excluded product, fanning them out into their classified
- entry queues. Excluded products (epics) are only logged.
-**Durable writes**: `ensure_state_labels`; `skip_epics` (for epics
-only — the ONE seeding write); PR-related writes are downstream
-stages' responsibility.
-**Owned labels**: none. Epics receive `state:skip` but that is
-_seed_-side: it bypasses this stage's labels section because
-epics are excluded before any other durable mutation.
-**Verdicts**: terminal — the repo item always advances to
-`finished(pass)` once seeding completes; `clone` exhaustion → `finished(fail)`.
-**Fail routes**: `*` → `FINISHED`
-([`ROUTES[REPO]`](hephaestus/automation/pipeline/routing.py)).
-
-### 5.2 `planning`
->
-> Source: [`pipeline/stages/planning.py`](hephaestus/automation/pipeline/stages/planning.py).
-> Binding contract: §5.2 of this document.
-**Objective.** Decide whether the issue already has an approvable plan,
-else run advise + plan + verify to produce one and durably journal it
-as the single `PLAN_COMMENT_MARKER` plan comment.
-**Pre-conditions.** Item has an `issue` number. (Direct PR inputs
-terminalize at the seed boundary; repo discovery issues are pushed
-here by [`classify_issue`](hephaestus/automation/pipeline/seeding.py).)
-**States.** `ENTER → ADVISE_WAIT → PLAN_WAIT → VERIFY`.
-
-#### on_enter [M]
-
-[`PlanningStage.on_enter`](hephaestus/automation/pipeline/stages/planning.py)
-runs an ordered series of fast-forward checks:
-
-1. `[`is_skipped(labels)`](hephaestus/automation/state_labels.py) →`SKIP`. Skip wins over
- everything (#1835) — even a contradictory`state:plan-go`, which emits
- a`WARN`.
-2. `[`is_plan_go(labels)`](hephaestus/automation/state_labels.py) →`ADVANCE` (zero jobs).
-3. `[`github.find_merged_closing_pr(issue)`](hephaestus/automation/pipeline/stages/base.py)
- → close issue as covered (via
- [`close_issue_as_covered`](hephaestus/automation/pipeline/stages/base.py))
- →`SKIP`.
-4. `[`github.find_pr_for_issue(issue)`](hephaestus/automation/pipeline/stages/base.py)
- → SKIP with reason (PR already covers implementation).
-5. Entry-label normalization via
- [`enter_planning_transition`](hephaestus/automation/state_labels.py)
- on plan_review fail-back (`state:plan-no-go` carry-over needs an
- atomic swap, #1857).
-6. Owned-label write: `state:needs-plan` is added idempotently on every
- entry that does not already carry the label.
-7. Restart fast-forward: if a plan comment already exists, set
- `item.state = "VERIFY"` so re-entry never redoes advise + plan.
-
-#### ENTER / ADVISE_WAIT [W:A]
-
-When `ctx.config.enable_advise` is False, skip directly to `PLAN_WAIT`.
-Otherwise submit an `AgentJob` with
-[`get_advise_prompt_builder`](hephaestus/automation/prompts/advise.py).
-Result lands in `payload["advise_findings"]`.
-
-#### PLAN_WAIT [W:A]
-
-Submit the `AgentJob` with `build_plan_prompt`
-([`build_plan_prompt`](hephaestus/automation/pipeline/stages/planning.py))
-which composes `get_plan_prompt` with fenced issue + advise-findings
-blocks. Result lands in `payload["plan_text"]`. The planner session
-resumes via `session_agent=AGENT_PLANNER`.
-
-#### VERIFY [M]
-
-- If `payload["plan_text"]` exists AND
- [`has_existing_plan`](hephaestus/automation/pipeline/stages/base.py)
- is False, DURABLY
- [`upsert_plan_comment(issue, _normalize_plan_comment(plan))`](hephaestus/automation/pipeline/stages/planning.py)
- before the ADVANCE decision. `_normalize_plan_comment` strips leading
- whitespace and prefixes the body with `PLAN_COMMENT_MARKER` so the
- upsert dedupe key matches even if the planner returned trailing-rich
- text (#700).
-- If a plan comment exists OR `posted_plan` is True → `ADVANCE`.
-- Else: bump `attempts["plan"]`. Below budget (`plan = 2` from
- [`ROUTES[PLANNING]`](hephaestus/automation/pipeline/routing.py)) → set
- `item.state = "PLAN_WAIT"` and return `RETRY("plan not found, retry N/M")`.
- Failure to install the plan comment after the cap → `FINISH_FAIL`.
-**Durable writes**: `close_issue_as_covered` (merged-PR skip), label
-add/remove/edit for entry normalization, `upsert_plan_comment`.
-**Owned label**: `state:needs-plan` (idempotent, on entry) [durable].
-**Verdicts**: `ADVANCE` (plan posted or pre-existing), `SKIP`, `RETRY`
-within `plan` budget, `FINISH_FAIL` on exhaustion.
-**Fail routes**: `*` → `FINISHED`
-([`ROUTES[PLANNING]`](hephaestus/automation/pipeline/routing.py)).
-**Prompt functions (imported, never re-authored)**:
-[`get_advise_prompt_builder`](hephaestus/automation/prompts/advise.py),
-[`get_plan_prompt`](hephaestus/automation/prompts/planning.py).
-
-### 5.3 `plan_review`
->
-> Source: [`pipeline/stages/plan_review.py`](hephaestus/automation/pipeline/stages/plan_review.py).
-> Binding contract: §5.3 of this document.
-**Objective.** Apply the strict plan-review loop: review → evaluate →
-amend on NOGO, learn on GO. Real verdicts (GO/NOGO/AMBIGUOUS)
-increment the per-cycle and lifetime iteration counters; ERROR/missing
-verdicts never do (#911 / #1554 / #1794).
-**Pre-conditions.** Item has an `issue` number.
-**States.** `ENTER → REVIEW_WAIT → EVAL → AMEND_WAIT → (loop) →
-LEARN_WAIT → PLAN_FINISH`.
-
-#### on_enter [M]
-
-- Fast-forward at-or-past (`is_plan_go(labels)`) → `ADVANCE`
- ([`PlanReviewStage.on_enter`](hephaestus/automation/pipeline/stages/plan_review.py)).
- Otherwise: reset the cycle-relative counter when a new plan cycle
- begins; keys on `attempts["plan_cycles"]` recorded in
- `payload["review_cycle"]` so a same-cycle RETRY keeps its round
- count and a fresh cycle also resets the consecutive
- reviewer-failure streak (`payload["review_error_retries"]`, #1869).
-
-#### REVIEW_WAIT [W:A]
-
-- Clear `payload["review_verdict"]` at submission so a failed later
- round can never replay an earlier round's verdict.
-- Submit `AgentJob` with [`get_plan_loop_review_prompt`](hephaestus/automation/prompts/planning.py)
-
-- `parse=parse_review_verdict` (parses in-worker).
-
-- Result lands in `payload["review_verdict"]` (ReviewVerdict with
- verdict + raw). For NOGO, `payload["prior_review"] = verdict.raw`.
-
-#### EVAL [M]
-
-[`PlanReviewStage._eval`](hephaestus/automation/pipeline/stages/plan_review.py):
-
-- **Missing verdict** or **`verdict.is_error`** — labels untouched, NO
- iteration burned. RETRY in-stage, bounded by the CONSECUTIVE-failure
- cap [`REVIEW_ERROR_RETRY_CAP = 2`](hephaestus/automation/pipeline/stages/plan_review.py).
- At the cap → `FINISH_FAIL`, no labels written. A reviewer-infrastructure
- failure must not become a planner re-plan.
-- **Real verdict** — bump `payload["review_round"]` (cycle-relative)
- AND `attempts["plan_review_iter"]` (lifetime audit) and reset
- `payload["review_error_retries"] = 0`.
-- **GO** → apply labels via
- [`PlanReviewStage._write_verdict_labels`](hephaestus/automation/pipeline/stages/plan_review.py)
- (uses [`apply_plan_verdict(is_go=True)`](hephaestus/automation/state_labels.py)),
- pair-wrapped non-fatal — THEN either `Continue(LEARN_WAIT)` (when
- `ctx.config.enable_learn`) or `ADVANCE`.
-- **NOGO/AMBIGUOUS within budget** (`plan_review_iter = 3` from
- [`ROUTES[PLAN_REVIEW]`](hephaestus/automation/pipeline/routing.py)) →
- `Continue(AMEND_WAIT)`.
-- **NOGO/AMBIGUOUS at cap** → apply no-go labels, then
- `FAIL_BACK("nogo")` while `plan_cycles` remain or
- `FAIL_BACK("plan_cycles_exhausted")` once they are exhausted
- (`plan_cycles = 2`).
-
-#### AMEND_WAIT [W:A]
-
-- Submit `AgentJob` with [`build_amend_prompt`](hephaestus/automation/pipeline/stages/plan_review.py)
- (composes `build_plan_prompt` with the fenced `prior_review` feedback
- block from [`prompts/planning.amend_feedback.j2`](hephaestus/automation/prompts/planning/amend_feedback.j2)).
- Resume the planner session. Output lands in `payload["plan_text"]`.
-- `on_job_done` upserts the amended plan comment BEFORE looping back
- to REVIEW_WAIT (atomic write, durable).
-
-#### LEARN_WAIT [W:A]
-
-- GO only, when `ctx.config.enable_learn`. Submit `AgentJob` with
- [`build_learn_prompt`](hephaestus/automation/learn.py) and
- resume the planner session.
-
-#### PLAN_FINISH [M]
-
-- `ADVANCE("plan approved and learned")`.
-**Durable writes**: `state:plan-go` (on GO), `state:plan-no-go` (on
-exhausted NOGO). Pair-wrapped non-fatal.
-**Owned labels**: `state:plan-go`, `state:plan-no-go`
-([`ROUTES[PLAN_REVIEW]`](hephaestus/automation/pipeline/routing.py)).
-**Verdicts**: `ADVANCE`, `RETRY` (in-stage ERROR, no round burned),
-`FAIL_BACK("nogo")`, `FAIL_BACK("plan_cycles_exhausted")`,
-`FINISH_FAIL` (reviewer-error cap).
-**Fail routes** ([`ROUTES[PLAN_REVIEW]`](hephaestus/automation/pipeline/routing.py)):
-`nogo` → `PLANNING`; `plan_cycles_exhausted` → `FINISHED`; `*` →
-`PLANNING`.
-**Budgets**: `plan_review_iter = 3`, `plan_cycles = 2`.
-**Prompt functions**:
-[`get_plan_loop_review_prompt`](hephaestus/automation/prompts/planning.py),
-[`build_learn_prompt`](hephaestus/automation/learn.py).
-
-### 5.4 `implementation`
->
-> Source: [`pipeline/stages/implementation.py`](hephaestus/automation/pipeline/stages/implementation.py).
-> Binding contract: §5.4 of this document.
-**Objective.** Get to `state:plan-go` (or existing PR), cut a worktree,
-implement (with the optional pre-PR unit-test gate + one fix attempt),
-commit + push and create / persist a PR. May adopt an existing PR
-without re-implementing.
-**Admission** (per [`_drain_implementation`](hephaestus/automation/pipeline/coordinator.py)):
-
-1. Per-repo in-flight cap = `max_workers`
- ([`_admit`](hephaestus/automation/pipeline/coordinator.py));
-2. Cross-issue dependency topologic order via
- [`order_for_implementation`](hephaestus/automation/pipeline/admission.py)
- (Kahn's algorithm over `DependencyResolver`, fail-open on cycle);
-3. Greedy first-fit file-overlap serialization via
- [`_select_non_overlapping`](hephaestus/automation/pipeline/admission.py)
- — parses backticked repo-relative paths in the plan comment's
- `## Files to Modify` / `## Files to Create` sections
- ([`_PLAN_FILE_RE`](hephaestus/automation/pipeline/admission.py),
- skip when `serialize_file_overlap=False` or `max_workers == 1` or
- `len(ordered) <= 1`);
-4. Transient duplicate drop via
- [`_dedup_implementation_items`](hephaestus/automation/pipeline/coordinator.py)
- keyed on `(repo, issue)` (#2057).
-**States.** `ENTER → GATE → WORKTREE_WAIT → DIRTY_DECISION_WAIT →
-ADVISE_WAIT → IMPLEMENT_WAIT → TEST_WAIT → TESTFIX_WAIT →
-COMMIT_PUSH_WAIT → PR_CREATE`. `ADOPTED` and `ADOPTED_CI` are
-adopted-PR equivalents.
-
-#### on_enter → GATE [M]
-
-[`ImplementationStage._gate`](hephaestus/automation/pipeline/stages/implementation.py):
-
-1. **Skip gate** ([`_skip_gate`](hephaestus/automation/pipeline/stages/implementation.py)):
- `is_skipped(labels)` → `SKIP` with WARN on
- contradictory GO. Checked BEFORE either the existing-PR fast path
- or the fresh-implement plan-go gate (#1835).
-2. Pop `agent_error_failback` marker unconditionally. On adopted PR path
- the GATE consumes `implement` budget itself (M1: a
- `pr_review → implementation → ADOPTED → ADVANCE` cycle does not
- naturally consume the budget, so without this it could ping-pong
- forever).
-3. **existing-PR fast path** — `github.find_pr_for_issue(issue)`:
-
-- Terminal PR state (merged/closed) →
- [`_terminal_pr_outcome`](hephaestus/automation/pipeline/stages/base.py)
- disposition (`FINISH_PASS` for merged, `FINISH_FAIL` for closed).
-- Defer auto-merge (verify disable readback) → on failure,
- `FINISH_FAIL("auto_merge_disable_failed")`.
-- Adopt the PR's REAL head branch (never assume
- `{issue}-auto-impl`, the `_review_existing_pr` bug).
-- If `pr_has_implementation_state_label(pr).has_go` →
- [`_impl_go_route`](hephaestus/automation/pipeline/stages/implementation.py)
- (set `payload["existing_pr_impl_go"] = True`; either ADVANCE
- directly via `FAIL_BACK("already_implementation_go_pr")` when
- a propagated worktree is set or `Continue(WORKTREE_WAIT)` to
- prepare one).
-- If not impl-go: adopt and `Continue(WORKTREE_WAIT)` with
- `sync_to_remote=True` (anti-clobber reset of
- `_prepare_worktree_for_existing_pr`).
-
-1. **At-or-past plan gate**: requires
- [`is_plan_go(labels)`](hephaestus/automation/state_labels.py) OR
- [`is_implementation_go(labels)`](hephaestus/automation/state_labels.py).
- Otherwise → `FAIL_BACK("plan_not_go")` (routes back to `plan_review`).
-2. Compute `item.branch = issue_auto_impl_branch_name(issue)`.
-
-#### WORKTREE_WAIT [W:G]
-
-[`_worktree_wait`](hephaestus/automation/pipeline/stages/implementation.py):
-`GitJob(op="create_worktree", kwargs={…, refresh_base=not adopted,
-sync_to_remote=adopted, pr_number=adopted?})`
-([`_worktree_wait`](hephaestus/automation/pipeline/stages/implementation.py)).
-`on_job_done` records path/dirty/status/diff on success or
-`payload["git_error"] = True` on failure.
-
-#### DIRTY_DECISION_WAIT [W:A] (optional)
-
-If the adopted worktree is dirty, submit an `AgentJob` with
-[`get_dirty_reused_worktree_decision_prompt`](hephaestus/automation/prompts/implementation.py)
-to salvage commit/stash; the worker acts on the verdict in
-`payload["dirty_decision"]`. If `git_error`, RETRY up to
-[`GIT_ERROR_RETRY_CAP = 2`](hephaestus/automation/pipeline/stages/implementation.py)
-without burning `implement` budget (M5).
-
-#### ADVISE_WAIT [W:A] (optional)
-
-Submit an `AgentJob` with
-[`get_advise_prompt_builder`](hephaestus/automation/prompts/advise.py)
-when `ctx.config.enable_advise`. Skipped otherwise.
-
-#### IMPLEMENT_WAIT [W:A]
-
-[`_implement_wait`](hephaestus/automation/pipeline/stages/implementation.py)
-checks `attempts["implement"] < budget` (`implement = 2` from
-[`ROUTES[IMPLEMENTATION]`](hephaestus/automation/pipeline/routing.py))
-then submits the `AgentJob` with
-[`build_implementation_prompt`](hephaestus/automation/pipeline/stages/implementation.py)
-(composes the base [`get_implementation_prompt`](hephaestus/automation/prompts/implementation.py)
-with `advise_findings` block.
-`on_job_done` increments `attempts["implement"]` on completion
-(success OR hard failure alike — `agent_error` consumes the budget).
-Result lands in `payload["implement_summary"]`.
-On test-fail or implement-fail routing, control returns to
-IMPLEMENT_WAIT with `payload["implement_error"]` cleared. Implement cap
-exhaustion → `FINISH_FAIL("implement_exhausted")`.
-When the previous `pr_review → implementation` re-entry set
-`agent_error_failback`, the adopted-path GATE already counted the
-attempt; impressions that cannot yield an actual implementation job
-finish fail (`agent_error_exhausted`).
-
-#### TEST_WAIT [W:B] (optional)
-
-Only when `ctx.config.run_pre_pr_tests`. Submit `BuildTestJob` with
-`argv = pre_pr_test_argv`
-([`PRE_PR_TEST_ARGV = ("uv","run","pytest","tests/unit","-q","--tb=short")`](hephaestus/automation/pipeline/stages/implementation.py)).
-`argv` MUST NOT carry untrusted strings; only the coordinator may
-construct this from vetted templates
-([`BuildTestJob`](hephaestus/automation/pipeline/jobs.py) docstring).
-On test failure → `Continue(TESTFIX_WAIT)`.
-
-#### TESTFIX_WAIT [W:A]
-
-Submit `AgentJob` with
-[`build_test_fix_prompt`](hephaestus/automation/pipeline/stages/implementation.py).
-Budget `test_fix = 1` from
-[`ROUTES[IMPLEMENTATION]`](hephaestus/automation/pipeline/routing.py).
-Cap exhaustion → `FINISH_FAIL("tests_red")`.
-
-#### COMMIT_PUSH_WAIT [W:G]
-
-`GitJob(op="commit_push")` carries the implementer agent's sign-off /
-message. The worker's `commit_push` returns `value=False` BOTH for
-"worktree clean" AND for "commit attempted but failed"
-([`_git_commit_push`](hephaestus/automation/pipeline/worker_pool.py)).
-`on_job_done` records `payload["no_commits"]` on `value=False` or
-`payload["git_error"]` on hard failure and bumps the consecutive
-git-failure counter (`GIT_ERROR_RETRY_CAP`).
-
-#### PR_CREATE [M]
-
-[`_create_pr`](hephaestus/automation/pipeline/stages/implementation.py):
-
-1. `payload["no_commits"]` → `write_skip_label(issue, ctx)`
- (legacy "no commits vs base" handler) → `SKIP`.
-2. `payload["git_error"]` → `RETRY` up to `GIT_ERROR_RETRY_CAP`.
-3. `github.create_pr(issue, branch, title, body)` with a body composed by
- [`get_pr_description`](hephaestus/automation/prompts/pr_review.py)
- (PR creation is the stage's journal entry — durable). **The pipeline
- does NOT guarantee signed commits or DCO trailers**: that policy is
- enforced by the GitHub `pr-policy` required check
- ([`AGENTS.md`](../AGENTS.md) §"PR policy"); the implementer session
- writes signed commits through
- [`worker_pool._git_commit_push`](hephaestus/automation/pipeline/worker_pool.py)
- → [`git_utils.commit_if_changes`](hephaestus/automation/git_utils.py).
-4. `github.defer_auto_merge(pr)` immediately after creation (preceded when needed by [`_git_retry(item, "commit_push failed")`](hephaestus/automation/pipeline/stages/implementation.py) on a transient prior push; only hard failures consume `implement`; #2274) —
- load-bearing legacy runner order: auto-merge must stay disabled and
- `state:implementation-go` does NOT create merge eligibility by
- itself.
-5. Disable-verify read-back failure → `FINISH_FAIL("auto_merge_disable_failed")`.
-6. `ADVANCE("PR #N ready for review")`.
-**Durable writes**: PR creation (idempotent), `defer_auto_merge`
-verify readback, optional `state:skip` on no-commits.
-**Owned labels**: none (PR create is the journal entry).
-**Verdicts**: `ADVANCE`, `RETRY("agent_error")`,
-`RETRY(git transient, bounded by GIT_ERROR_RETRY_CAP)`, `SKIP`,
-`FAIL_BACK("plan_not_go")`,
-`FAIL_BACK("already_implementation_go_pr")`,
-`FINISH_FAIL`.
-**Fail routes** ([`ROUTES[IMPLEMENTATION]`](hephaestus/automation/pipeline/routing.py)):
-`plan_not_go` → `plan_review`;
-`already_implementation_go_pr` → `merge_wait`; `*` → `finished`.
-**Budgets**: `implement = 2`, `test_fix = 1`.
-**Prompt functions**:
-[`get_dirty_reused_worktree_decision_prompt`](hephaestus/automation/prompts/implementation.py),
-[`get_implementation_prompt`](hephaestus/automation/prompts/implementation.py),
-[`get_pr_description`](hephaestus/automation/prompts/pr_review.py).
-
-### 5.5 `pr_review`
->
-> Source: [`pipeline/stages/pr_review.py`](hephaestus/automation/pipeline/stages/pr_review.py).
-> Binding contract: §5.5 of this document.
-**Objective.** Re-house the fused implementation-review loop as a
-pipeline stage and act as the **sole authority** for
-`state:implementation-go`.
-`pr_review` writes the label on a clean GO and advances to
-`merge_wait`; merge authorization remains with `merge_wait`.
-**Pre-conditions.** Item has an `issue` AND a `pr` number; otherwise
-fail back to implementation via [`_fail_back_agent_error`](hephaestus/automation/pipeline/stages/pr_review.py).
-**States.** `ENTER → REVIEW_WAIT → VALIDATE_WAIT → POST →
-DIFFICULTY_WAIT → ADDRESS_WAIT → PUSH_WAIT → EVAL →
-COMPACT_REVIEWER_WAIT → COMPACT_WRITER_WAIT → REVIEW_WAIT` (retry loop), or ADVANCE to
-`merge_wait`.
-
-#### on_enter [M]
-
-[`PrReviewStage.on_enter`](hephaestus/automation/pipeline/stages/pr_review.py):
-
-1. Contain an earlier arm: `github.defer_auto_merge(pr)` and verify
- disable readback. Failure → `FINISH_FAIL("auto_merge_disable_failed")`.
-2. Reset the cycle-relative counter keyed on `attempts["implement"]`
- (skip path: same-cycle re-entry keeps its round count; fresh
- implementation cycle resets BOTH the cycle counter AND the
- consecutive reviewer-failure streak).
-
-#### REVIEW_WAIT [W:A]
-
-Clear all round-scoped payload
-([`_ROUND_PAYLOAD_KEYS`](hephaestus/automation/pipeline/stages/pr_review.py))
-so a failed later round can never replay an earlier round's results.
-Submit `AgentJob` with
-[`get_pr_review_analysis_prompt`](hephaestus/automation/prompts/pr_review.py)
-
-- The reviewer has one logical `AGENT_PR_REVIEWER` session for the item's
-  review cycle. `VALIDATE_WAIT` and later review rounds continue it. Claude
-  resolves that role through its deterministic session name; direct runners
-  return an opaque id that the coordinator stores in `WorkItem.session_ids`
-  and supplies as `AgentJob.resume_session_id` on the next turn.
-
-- `parse=parse_review_verdict`. Reviewer text lands in
-`payload["review_verdict"]`; raw review text in `payload["review_text"]`.
-
-#### VALIDATE_WAIT [W:A]
-
-If the review job failed (`payload["review_failed"]`), skip → `EVAL`.
-Else submit `AgentJob` with
-[`get_review_validation_prompt`](hephaestus/automation/prompts/pr_review.py).
-Output is JSON, parsed last-block-wins tolerantly by
-[`_parse_validation_result`](hephaestus/automation/pipeline/stages/pr_review.py).
-
-#### POST [M]
-
-[`_post`](hephaestus/automation/pipeline/stages/pr_review.py):
-[`post_review_threads`](hephaestus/automation/pipeline/stages/base.py)
-filters round threads through [`_surviving_threads`](hephaestus/automation/pipeline/stages/pr_review.py):
-
-- `wont_fix` entries are accepted → dropped (#1329 legacy
- recurrence-acceptance).
-- `unaddressed` entries are RE-OPENED as new postable threads
- unless the reviewer already re-raised the same thread id this round.
-- Fail-open: missing/unparseable validator output filters nothing.
-After posting, refresh the unresolved counts via
-[`count_unresolved_threads_by_severity`](hephaestus/automation/pipeline/stages/base.py)
-which returns `(blocking_automation, minor_automation, human)`.
-
-#### DIFFICULTY_WAIT [W:A]
-
-Submit `AgentJob` with
-[`get_comment_difficulty_prompt`](hephaestus/automation/prompts/pr_review.py).
-
-#### ADDRESS_WAIT [W:A]
-
-Fresh-PR path: [`build_implementation_prompt`](hephaestus/automation/pipeline/stages/implementation.py)
-composed with `get_impl_resume_feedback_prompt` (resumes the
-implementer session).
-Existing-PR path: `get_address_review_prompt` from
-[`prompts/address_review.py`](hephaestus/automation/prompts/address_review.py).
-The full session is decomposed into [`_invoke_address_fix_session`](hephaestus/automation/address_review_core.py)
-(sub-agent runner), [`_parse_address_fix_session_output`](hephaestus/automation/address_review_core.py)
-(result parsing), and [`resolve_addressed_threads`](hephaestus/automation/address_review_core.py)
-post-pass; the public entry [`run_address_fix_session`](hephaestus/automation/address_review.py)
-delegates the durable log write to [`_persist_address_fix_log`](hephaestus/automation/address_review_core.py) (#2210).
-
-#### PUSH_WAIT [W:G]
-
-`GitJob(op="commit_push")` for the addressing changes. The
-"real-commit gate" (#1575): the `value` returned flags no-commit vs.
-real-commit.
-
-#### COMPACT_REVIEWER_WAIT and COMPACT_WRITER_WAIT [W:C]
-
-On every retryable non-GO result with a worktree, the stage first submits a
-best-effort `CompactJob` for the persisted reviewer session, then one for the
-writer session before the next `REVIEW_WAIT`: the implementer for a
-pipeline-created PR, or the address-review writer for an adopted PR. Both jobs
-send `/compact` and always continue, including when no session exists or
-compaction fails. Claude uses deterministic role-based session names; Codex
-and Pi resume their persisted opaque session IDs, so neither provider starts a
-fresh review turn merely because the loop iterated.
-
-#### EVAL [M]
-
-[`PrReviewStage._eval`](hephaestus/automation/pipeline/stages/pr_review.py) implements
-the severity-aware GO gate from
-[`pipeline_github.py count_unresolved_threads_by_severity`](hephaestus/automation/pipeline_github.py).
-The reviewer is bound by the falsification-first [`REVIEW POSTURE`](hephaestus/prompts/templates/default/review_rubrics/reviewer.j2) rubric prefix and the anti-inflation grading rules (#2302): the reviewer must attempt to falsify the work, and any dimension not actively falsified caps at `C`.
-
-A `<!-- hephaestus-severity: X -->` marker (`X` in
-`critical|major|minor|nitpick`) is prepended to every posted comment
-([`prompts/pr_review.py`](hephaestus/automation/prompts/pr_review.py):
-`BLOCKING_SEVERITIES = {"critical","major"}`, `VALID_SEVERITIES`,
-`SEVERITY_MARKER_PREFIX`). [`_thread_severity_is_blocking`](hephaestus/automation/pipeline_github.py)
-uses line-prefix anchoring to avoid substring false positives
-(`stripped.startswith(prefix) and stripped.endswith("-->")`) and
-defaults an unmarked or unparseable thread to blocking (fail-safe).
-The gate logic at [`PrReviewStage._eval`](hephaestus/automation/pipeline/stages/pr_review.py):
-
-1. **Missing/ERROR verdict** → `RETRY` (no round burned), bounded by
- `REVIEW_ERROR_RETRY_CAP = 2`. Cap → `_fail_back_agent_error` →
- `FAIL_BACK("agent_error")` (routed to implementation by
- [`ROUTES[PR_REVIEW]`](hephaestus/automation/pipeline/routing.py)).
-2. **`review_threads == 0 AND`raw NOGO`** →
- `_handle_zero_thread_nogo`→ retries fresh reviewer invocation
- in-stage; on cap exhaustion → ESCALATE_SKIP
- (state:skip applied, never bounced to implementation; #2079).
- Emits a [`PrReviewZeroThreadNogoEvent`](hephaestus/automation/pipeline/events.py).
-3. **Real NOGO/AMBIGUOUS round** → apply
- `state:implementation-no-go` (non-fatal pair write under
- [`PostReviewManager`](hephaestus/automation/pipeline/stages/pr_review.py)),
- bump round counters, compact the resumable reviewer and writer, then
- re-review. cap exhaustion → `SKIP` with
- `state:skip` durable write.
-4. **GO round** → check the (blocking, minor, human) triple:
-
-- `human > 0` → apply `HUMAN_BLOCKED`, post explanatory comment,
- `FINISH_FAIL("blocked:human_blocked")` — the human must act;
- automation may never resolve human threads.
-- `blocking_automation > 0` → downgraded to NOGO; runs the
- address leg on the NEXT round (DELIBERATE 1-round cost over
- legacy so the budget/extension gate stays a single chokepoint).
-- `blocking == 0, minor > 0` →
-[`resolve_automation_threads`](hephaestus/automation/pipeline_github.py)
-inside [`_handle_clean_go`](hephaestus/automation/pipeline/stages/pr_review.py)
-before [`_write_go`](hephaestus/automation/pipeline/stages/pr_review.py) writes
-`state:implementation-go`, so `required_review_thread_resolution` does not
-re-block at merge.
-- Clean GO → verify `defer_auto_merge` is still disabled, apply
- `state:implementation-go` (the **sole** stage that writes this label) and ADVANCE to `merge_wait`. **NEVER** arms auto-merge —
- that is exclusively `merge_wait`'s job.
-**Durable writes**: review-thread posts, severity markers, `post_pr_comment`
-on `HUMAN_BLOCKED`, `state:implementation-no-go` (every real NOGO),
-`state:skip` (cap exhaustions; with companion [`format_skip_reason_comment`](hephaestus/automation/state_labels.py) comment per #2264),
-`resolve_automation_threads` (advisory waved threads).
-**Owned labels**: `state:implementation-no-go` (NOGO verdict, before
-retry/regress) [durable], `state:skip` (exhaustion) [durable]
-([`ROUTES[PR_REVIEW]`](hephaestus/automation/pipeline/routing.py)).
-**Verdicts**: `ADVANCE` (clean GO), `RETRY` (in-stage ERROR/missing),
-`FAIL_BACK("agent_error")`, `SKIP` (zero-thread cap or `pr_review_hard`
-exhaustion), `FINISH_FAIL("human_blocked")`,
-`FINISH_FAIL("auto_merge_disable_failed")`.
-**Fail routes** ([`ROUTES[PR_REVIEW]`](hephaestus/automation/pipeline/routing.py)):
-`agent_error` → `IMPLEMENTATION`; `human_blocked` → `FINISHED`;
-`exhaustion` → `FINISHED`; `*` → `PR_REVIEW` (RETRY).
-**Budgets**: `pr_review_iter = 3` (soft cap),
-`pr_review_hard = 6` (hard cap; rounds 4–6 admitted only while
-unresolved-thread count strictly decreases — the #1554 progress-aware
-extension, mirrors legacy
-`_review_thread_count_decreased`).
-**Prompt functions**:
-[`get_pr_review_analysis_prompt`](hephaestus/automation/prompts/pr_review.py),
-[`get_review_validation_prompt`](hephaestus/automation/prompts/pr_review.py),
-[`get_comment_difficulty_prompt`](hephaestus/automation/prompts/pr_review.py),
-[`get_impl_resume_feedback_prompt`](hephaestus/automation/prompts/implementation.py),
-[`get_address_review_prompt`](hephaestus/automation/prompts/address_review.py),
-[`get_follow_up_prompt`](hephaestus/automation/prompts/follow_up.py).
-
-### 5.6 `merge_wait`
->
-> Source: [`pipeline/stages/merge_wait.py`](hephaestus/automation/pipeline/stages/merge_wait.py).
-> Binding contract: §5.6 of this document.
-**Objective.** Consume the loop-owned `state:implementation-go` label
-written by `pr_review`, ask GitHub to arm auto-merge for the live head,
-and then poll only the arm this run created. This stage deliberately
-does not recover, confirm, retry, or take over an arm created by
-another process or run: those operational states are warned about and
-left for an operator.
-**Pre-conditions.** Item has a `pr` number and an `issue` number
-(requirements context). The PR should carry
-`state:implementation-go` (written by `pr_review._eval` on a clean GO);
-if absent the stage fails back to `pr_review`.
-**States.** `ENTER → ARM → POLL → LEARN_WAIT → MW_FINISH`.
-
-#### on_enter [M]
-
-[`MergeWaitStage.on_enter`](hephaestus/automation/pipeline/stages/merge_wait.py):
-Rejects a PR with no requirements context (`item.issue is None`) as a
-`merge_wait_orphan` — the operator must act because automation has no
-requirements to evaluate. Otherwise initializes `item.state = ENTER`.
-
-#### ARM [M]
-
-[`_arm`](hephaestus/automation/pipeline/stages/merge_wait.py):
-
-1. Read `gh_pr_state(pr)`. Terminal PR state → `_route_merged` (deduped
- `/learn`) for merged; `FINISH_FAIL("closed")` for closed.
-2. If `pr_state` is None → `FINISH_FAIL("pr_state_unavailable")`.
-3. If `pr_state["autoMergeRequest"]` is already set (the PR is already
- armed by some external process) → `FINISH_PASS("auto_merge_already_armed")`
- — leave the existing arm to the operator, never take it over.
-4. Check `pr_has_implementation_state_label(pr).has_go`. If False →
- `FAIL_BACK("not_implementation_go")` (routes back to `pr_review` for
- a fresh review pass; the label may have been revoked or never
- written).
-5. Capture `head_sha = pr_state["headRefOid"]`. If empty →
- `FINISH_FAIL("missing_pr_head")`.
-6. [`arm_auto_merge(pr, head_sha)`](hephaestus/automation/pipeline/stages/base.py)
- — the conditional `--match-head-commit` arm RPC. On exception →
- `FINISH_FAIL("auto_merge_arm_failed")` (terminal — operator action
- required).
-7. Set `item.armed = True` → `Continue(POLL)`.
-
-#### POLL [M]
-
-[`_poll`](hephaestus/automation/pipeline/stages/merge_wait.py):
-
-1. Read `gh_pr_state(pr)`. Terminal → `_route_merged` (merged) or
- `FINISH_FAIL("closed")` (closed).
-2. If `pr_state` is None → `FINISH_FAIL("pr_state_unavailable")`.
-3. Re-check `pr_has_implementation_state_label(pr).has_go`. If False →
- `FINISH_FAIL("not_implementation_go")` — the approval disappeared;
- operator action required.
-4. If `pr_state["autoMergeRequest"]` is no longer set →
- `FINISH_FAIL("auto_merge_no_longer_armed")` — the arm was lost;
- operator action required.
-5. If `not item.armed` (the arm was created by another process) →
- `FINISH_PASS("auto_merge_already_armed")` — leave it to the operator.
-6. Still open and armed by this run: set
- `payload["retry_delay_s"] = 30` and return `RETRY("merge_pending")` —
- the coordinator timer-parks the item; GitHub owns the merge from here.
-
-#### LEARN_WAIT [W:A]
-
-`_route_merged` first:
-
-- `item.issue is None` OR `ctx.config.enable_learn` False →
- `FINISH_PASS("merged")`.
-- [`drive_green_learn_terminal(issue)`](hephaestus/automation/pipeline/stages/base.py)
- True → `FINISH_PASS("merged")` (deduped — learn already ran).
-- [`drive_green_learn_inflight(issue)`](hephaestus/automation/pipeline/stages/base.py)
- True → `FINISH_FAIL("learn_outcome_unknown")` (refuse to replay
- an externally-visible `/learn` whose outcome is not yet known).
-Otherwise: [`claim_drive_green_learn(issue, pr)`](hephaestus/automation/pipeline/stages/base.py)
-(durable claim, read back so a restart cannot replay), then dispatch
-`AgentJob` with
-[`build_drive_green_learn_prompt`](hephaestus/automation/pipeline/stages/merge_wait.py)
-(composes `build_learn_prompt` with the drive-green context block).
-`on_job_done` persists the result via
-[`mark_drive_green_learn_result`](hephaestus/automation/pipeline/stages/base.py);
-failure to persist sets `payload["learn_result_persistence_failed"]`.
-
-#### MW_FINISH [M]
-
-If `payload["learn_result_persistence_failed"]` → `FINISH_FAIL`.
-Otherwise `FINISH_PASS("merged")`.
-**Durable writes**: `arm_auto_merge` (GitHub lane),
-`claim_drive_green_learn`, `mark_drive_green_learn_result`
-(post-merge learn), `_terminal_pr_outcome` terminal capture.
-**Owned labels**: none (merge state is PR state; the GO label is
-owned by `pr_review`).
-**Verdicts**: `RETRY("merge_pending")`, `FINISH_PASS("merged")`,
-`FINISH_PASS("auto_merge_already_armed")`,
-`FINISH_FAIL("closed" | "pr_state_unavailable" | "missing_pr_head" |
-"auto_merge_arm_failed" | "auto_merge_no_longer_armed" |
-"not_implementation_go" | "learn_outcome_unknown" |
-"learn_claim_failed" | "learn_result_persistence_failed" |
-"missing_learn_scope" | "merge_wait_orphan")`,
-`FAIL_BACK("not_implementation_go")`.
-**Fail routes** ([`ROUTES[MERGE_WAIT]`](hephaestus/automation/pipeline/routing.py)):
-`not_implementation_go` → `PR_REVIEW`; `closed` → `FINISHED`;
-`*` → `FINISHED` (containment/ambiguity terminal).
-**Budgets**: none (no stage-owned counters; the stage arms at most
-once per run and polls at a fixed 30 s interval).
-**Prompt functions**:
-[`build_drive_green_learn_prompt`](hephaestus/automation/pipeline/stages/merge_wait.py)
-(post-merge), backed by
-[`build_learn_prompt`](hephaestus/automation/learn.py).
+The seven stages are architectural responsibilities, not implementation
+modules. This section describes boundaries, durable state, and transitions.
+Worker types, helper functions, payload fields, and source-code structure are
+intentionally omitted.
+
+### Queue block diagram
+
+```mermaid
+flowchart LR
+    GH["GitHub issue or PR"] --> R["1. Repo intake"]
+    R --> P["2. Planning"]
+    P --> V["3. Plan review"]
+    V --> I["4. Implementation"]
+    I --> Q["5. PR review"]
+    Q --> M["6. Merge wait"]
+    M --> F["7. Finished"]
+
+    V -. "revision needed" .-> P
+    V -. "external feedback needed" .-> H["Human or dependency"]
+    H -. "feedback supplied" .-> P
+    Q -. "changes needed" .-> I
+    M -. "approval invalidated" .-> Q
+```
+
+GitHub is the durable journal. After a restart, labels, issue comments, pull
+request reviews, review threads, and merge state reconstruct where work should
+resume.
+
+### 5.1 Repo intake
+
+Repo intake discovers candidate work, records exclusions, and routes each
+eligible issue or pull request to the stage implied by its durable state.
+
+#### Boundary diagram
+
+```mermaid
+flowchart LR
+    Repository --> Discover --> Classify
+    Classify -->|"eligible"| WorkItems["Routed work items"]
+    Classify -->|"excluded"| DurableSkip["Durable skip state"]
+    WorkItems --> Queues["Downstream queues"]
+    DurableSkip --> Complete
+```
+
+#### State machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> Prepare
+    Prepare --> Discover: repository available
+    Prepare --> Prepare: transient failure
+    Prepare --> Failed: retry limit reached
+    Discover --> Classify: candidates loaded
+    Discover --> Failed: discovery failed
+    Classify --> RecordExclusions: exclusions found
+    Classify --> Dispatch: no exclusions
+    RecordExclusions --> Dispatch: exclusions durable
+    Dispatch --> Complete: eligible items routed
+    Complete --> [*]
+    Failed --> [*]
+```
+
+Architectural contract:
+
+- Exclusions become durable before excluded work leaves the queue.
+- Discovery never writes planning, review, implementation, or merge verdicts.
+- Failure of the repository item does not fabricate outcomes for its issues.
+
+### 5.2 Planning
+
+Planning produces one canonical implementation plan from the issue and its
+durable chronological journal. The GitHub journal remains complete; agent
+prompts receive the complete sequence while it fits the context budget, then
+an ordered revision index plus the latest complete plan and review. A blocked
+plan resumes only after trusted maintainer feedback is recorded after the
+blocked review.
+
+#### Boundary diagram
+
+```mermaid
+flowchart LR
+    Issue["Issue text"] --> Context
+    History["Plan and review history"] --> Context
+    Feedback["External feedback"] --> Context
+    Context --> Planner --> Canonical["Canonical plan comment"]
+    Canonical --> PlanReview["Plan review"]
+```
+
+#### State machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> Eligibility
+    Eligibility --> Skipped: excluded or already implemented
+    Eligibility --> Ready: approved plan exists
+    Eligibility --> AwaitFeedback: blocked with no later response
+    Eligibility --> BuildContext: plan needed or feedback supplied
+    AwaitFeedback --> BuildContext: response recorded
+    BuildContext --> Draft
+    Draft --> Verify: candidate produced
+    Draft --> Draft: recoverable failure
+    Verify --> Publish: candidate complete
+    Verify --> Draft: candidate unusable
+    Verify --> Failed: retry limit reached
+    Publish --> Ready: canonical plan updated
+    Ready --> [*]
+    Skipped --> [*]
+    Failed --> [*]
+```
+
+Architectural contract:
+
+- The first automation journal role is the canonical implementation plan,
+  identified by an opaque marker and updated only by its owning GitHub actor.
+- Every iteration receives the ordered issue → plan → review → revision
+  sequence, with a bounded index projection only when the complete journal is
+  too large for an agent prompt.
+- Historical revision comments are actor-owned, append-once, and never edited
+  or deleted.
+- Planning maintains planning state but does not issue review verdicts.
+
+### 5.3 Plan review
+
+Plan review decides whether the canonical plan is ready, can improve through a
+bounded revision, or needs external intervention. The only machine-readable
+verdicts are `state:plan-go`, `state:plan-no-go`, and
+`state:plan-blocked`.
+
+#### Boundary diagram
+
+```mermaid
+flowchart LR
+    Plan["Canonical plan"] --> Review
+    History["Ordered plan/review history"] --> Review
+    Review --> CanonicalReview["Canonical review comment"]
+    Review -->|"go"| Implementation
+    Review -->|"nogo"| Archive["Archive prior plan and review"]
+    Archive --> Planning
+    Review -->|"blocked + reason"| External["Human or dependency"]
+```
+
+#### State machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> ReconcileJournal
+    ReconcileJournal --> LoadHistory: journal complete
+    ReconcileJournal --> ReconcileJournal: interrupted archive recovered
+    ReconcileJournal --> Failed: conflicting or foreign journal marker
+    LoadHistory --> Review: context available
+    LoadHistory --> Failed: context unavailable
+    Review --> RetryReview: no valid state label
+    RetryReview --> Review: retry available
+    RetryReview --> Failed: reviewer failures exhausted
+    Review --> Approved: state:plan-go
+    Review --> AssessRevision: state:plan-no-go
+    Review --> Blocked: state:plan-blocked
+    AssessRevision --> ArchiveRevision: improvement remains possible
+    AssessRevision --> Blocked: no improvement and planning is stuck
+    AssessRevision --> Blocked: feedback or dependency required
+    AssessRevision --> Failed: revision limit reached
+    ArchiveRevision --> Amend: prior plan archived with recovery payload
+    Amend --> PublishRevision: revised plan produced
+    PublishRevision --> Review: canonical comments updated
+    Approved --> [*]
+    Blocked --> [*]
+    Failed --> [*]
+```
+
+Architectural contract:
+
+- The second automation journal role is the canonical plan review, identified
+  by an opaque marker and updated only by its owning GitHub actor.
+- Before canonical comments change, the previous plan and its review are
+  appended as immutable chronological comments.
+- The plan archive contains the next-plan recovery payload. On restart, a
+  missing review archive or canonical update is completed idempotently before
+  another agent runs.
+- A blocked verdict states exactly what feedback, decision, or dependency is
+  required.
+- No-improvement detection exits early as blocked instead of spending further
+  planning iterations.
+- Invalid reviewer output retries review without consuming a plan revision.
+
+### 5.4 Implementation
+
+Implementation converts an approved plan into a published pull request. It may
+adopt an existing pull request, but it cannot approve its own work or authorize
+a merge.
+
+#### Boundary diagram
+
+```mermaid
+flowchart LR
+    Plan["Approved plan"] --> Implement
+    ExistingPR["Existing PR"] --> Adopt
+    Adopt --> Workspace
+    Implement --> Workspace
+    Workspace --> Changes --> Publish["Branch and PR"]
+    Publish --> PRReview["PR review"]
+```
+
+#### State machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> Admission
+    Admission --> Skipped: issue excluded
+    Admission --> PlanReview: approval missing or revoked
+    Admission --> InspectPR: eligible
+    InspectPR --> Prepare: no open PR
+    InspectPR --> Adopt: open PR exists
+    InspectPR --> Complete: already merged
+    InspectPR --> Failed: closed without merge
+    Adopt --> Prepare: safe to continue
+    Adopt --> Failed: unsafe adoption
+    Prepare --> Implement: workspace ready
+    Prepare --> Failed: workspace unavailable
+    Implement --> Publish: changes complete
+    Implement --> Implement: recoverable failure
+    Implement --> Failed: retry limit reached
+    Publish --> ReviewReady: branch and PR durable
+    Publish --> Publish: transient publication failure
+    Publish --> Failed: publication failed
+    ReviewReady --> [*]
+    PlanReview --> [*]
+    Complete --> [*]
+    Skipped --> [*]
+    Failed --> [*]
+```
+
+Architectural contract:
+
+- One issue maps to one active implementation pull request.
+- Auto-merge remains disabled while review is pending.
+- Implementation never writes `state:implementation-go`.
+- Missing approval returns to plan review; unsafe or exhausted work terminates
+  without approval.
+
+### 5.5 PR review
+
+PR review is the sole authority for implementation approval. Reviews and
+findings are recorded on the GitHub pull request so their history survives
+local process or agent-session loss.
+
+#### Boundary diagram
+
+```mermaid
+flowchart LR
+    PR["PR diff and requirements"] --> Review
+    Review --> GitHub["GitHub review and inline threads"]
+    GitHub --> Gate{"Blocking findings?"}
+    Gate -->|"automation-owned"| Address --> PublishFix --> Review
+    Gate -->|"human-owned"| Human["Human action"]
+    Gate -->|"none"| Approve["state:implementation-go"]
+    Approve --> MergeWait
+```
+
+#### State machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> ContainMerge
+    ContainMerge --> Review: auto-merge disabled
+    ContainMerge --> Failed: merge control unavailable
+    Review --> Validate: review produced
+    Review --> RetryReview: invalid output
+    RetryReview --> Review: retry available
+    RetryReview --> Implementation: fresh implementation context required
+    Validate --> Post: findings normalized
+    Post --> Evaluate: GitHub review recorded
+    Evaluate --> HumanBlocked: human-owned finding
+    Evaluate --> Address: blocking automation finding
+    Evaluate --> ResolveMinor: advisory findings only
+    Evaluate --> Approve: no unresolved findings
+    Evaluate --> Skipped: no progress or review limit reached
+    Address --> PublishFix: changes produced
+    PublishFix --> Review: fixes published
+    ResolveMinor --> Approve
+    Approve --> MergeReady: implementation-go durable
+    MergeReady --> [*]
+    HumanBlocked --> [*]
+    Implementation --> [*]
+    Skipped --> [*]
+    Failed --> [*]
+```
+
+Architectural contract:
+
+- Every implementation review is posted to the pull request.
+- Actionable findings use durable inline threads and severity.
+- Prior rounds remain visible in the PR timeline.
+- Blocking findings produce `state:implementation-nogo`; only a clean review
+  produces `state:implementation-go`.
+- Human-owned findings stop automation with an explanatory PR comment.
+- This stage never arms auto-merge.
+
+### 5.6 Merge wait
+
+Merge wait turns a still-valid implementation approval into a head-bound
+auto-merge request and observes only the request it created. It does not take
+ownership of merge requests created by another actor.
+
+#### Boundary diagram
+
+```mermaid
+flowchart LR
+    Approved["Approved PR head"] --> Verify --> Arm["Head-bound auto-merge"]
+    Arm --> Observe
+    Observe --> Merged
+    Observe --> Operator["External or ambiguous ownership"]
+    Merged --> Learn["Optional learning"] --> Finished
+```
+
+#### State machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> Inspect
+    Inspect --> Complete: already merged
+    Inspect --> Failed: closed or unavailable
+    Inspect --> OperatorOwned: externally armed
+    Inspect --> PRReview: approval missing
+    Inspect --> Arm: approval and head valid
+    Arm --> Poll: armed by this run
+    Arm --> Failed: arm rejected or head changed
+    Poll --> Poll: open and still armed
+    Poll --> Learn: merged
+    Poll --> Failed: closed, approval revoked, or arm lost
+    Poll --> OperatorOwned: ownership ambiguous
+    Learn --> Complete: disabled or recorded
+    Learn --> Failed: durable outcome ambiguous
+    Complete --> [*]
+    PRReview --> [*]
+    OperatorOwned --> [*]
+    Failed --> [*]
+```
+
+Architectural contract:
+
+- Merge authorization is bound to the reviewed head commit.
+- Existing external merge ownership is preserved.
+- Revoked approval returns to PR review before a new arm.
+- Ambiguous merge or learning state stops for operator inspection.
+- Polling is timer-driven and consumes no review or implementation revision.
 
 ### 5.7 `finished`
->
-> Source: [`pipeline/stages/finished.py`](hephaestus/automation/pipeline/stages/finished.py).
-> Binding contract: §"9. finished" of
-> this document.
-**Objective.** Record the item's `ItemResult` and either remove the
-worktree (pass) or preserve it for debugging (fail).
-**Pre-conditions.** A coordinator-set `ItemResult` on the item.
-**States.** `ENTER → RECORD → CLEANUP → DONE`.
 
-#### on_enter [M]
+Finished records the final outcome exactly once and applies workspace retention
+policy. It does not change issue, review, or merge verdicts.
 
-Always `None` — the sink is terminal.
+States: `ENTER → RECORD → CLEANUP → DONE`.
 
-#### RECORD [M]
+#### Boundary diagram
 
-[`FinishedStage.step`](hephaestus/automation/pipeline/stages/finished.py):
-Guard-`"recorded"`-once idempotent. Append `item.result` to the
-coordinator-injected `self._ledger` (a list the coordinator owns).
+```mermaid
+flowchart LR
+    Outcome --> Record --> Decision{"Passed?"}
+    Decision -->|"yes"| Cleanup
+    Decision -->|"no"| Preserve
+    Cleanup --> Done
+    Preserve --> Done
+```
 
-#### CLEANUP [W:G or NOP]
+#### State machine
 
-- No worktree — `Continue(DONE)`.
-- `passed=False` → append `(repo, issue or pr or 0, worktree)` to
- `self._preserved` (coordinator-owned) and `Continue(DONE)`.
-- `passed=True` and dry-run → log `[dry-run] would remove worktree`.
-- Otherwise submit `GitJob(op="remove_worktree", kwargs={worktree_path,
- repo_root, force=True})` → `DONE`.
-- Failure to remove is non-fatal (`on_job_done` only logs).
+```mermaid
+stateDiagram-v2
+    [*] --> ENTER
+    ENTER --> RECORD
+    RECORD --> CLEANUP: result recorded
+    CLEANUP --> DONE: remove passed workspace
+    CLEANUP --> DONE: preserve failed workspace
+    CLEANUP --> DONE: no workspace
+    DONE --> [*]
+```
 
-#### DONE [M]
+Architectural contract:
 
-`FINISH_PASS("done")`. The coordinator's
-[`_route`](hephaestus/automation/pipeline/coordinator.py) sees
-`item.stage == FINISHED` and records a `done` event without re-pushing.
-**Durable writes**: ledger append, optionally `preserve` add.
-**Owned labels**: none.
-**Verdicts**: always terminal. The coordinator never re-pushes a sink
-item.
+- A terminal result is recorded once.
+- Failed workspaces are preserved for diagnosis.
+- Successful temporary workspaces are removed when safe.
+- Cleanup failure never rewrites the underlying result.
 
 ---
 
@@ -1294,8 +892,7 @@ item.
 [`ROUTES`](hephaestus/automation/pipeline/routing.py) (and its mirror in
 [`docs/architecture.md`](architecture.md))
 is the **single source of truth** for next-stage targets and per-stage
-budgets. Every `routes.py` row and every doc row MUST agree — enforced
-by [`tests/unit/automation/pipeline/test_routing.py`](tests/unit/automation/pipeline/test_routing.py).
+budgets. Every `routes.py` row and every doc row MUST agree.
 
 | Stage | `next` (success) | Fail reasons → target | Budgets |
 |-------------------|------------------|-------------------------------------------------------------|----------------------------|
@@ -1375,11 +972,12 @@ PR-probe failure cannot misclassify toward IMPLEMENTATION).
 | Open PR, neither impl label | `PR_REVIEW` |
 | No PR, at-or-past `state:plan-go` | `IMPLEMENTATION` |
 | No PR, `state:plan-no-go` | `PLANNING` (amend path) |
+| No PR, `state:plan-blocked`, no later trusted feedback | excluded while awaiting external input |
+| No PR, `state:plan-blocked`, later trusted maintainer feedback | `PLANNING`; the stage atomically restores `state:needs-plan` |
 | No state label / `state:needs-plan` | `PLANNING` |
 
-Epic tagging is the **ONE sanctioned seeding write** — the pipeline
-mutator fence ([`tests/unit/automation/pipeline/test_pipeline_architecture.py`](tests/unit/automation/pipeline/test_pipeline_architecture.py))
-forbids GitHub mutations in `seeding.py`, so
+Epic tagging is the **ONE sanctioned seeding write**. GitHub mutations are
+forbidden in `seeding.py`, so
 [`EpicSkipTagObligation`](hephaestus/automation/pipeline/seeding.py)
 is discharged by the coordinator through
 [`ctx.github.skip_epics`](hephaestus/automation/pipeline/stages/base.py)
@@ -1654,265 +1252,34 @@ Dry-run also overrides two retry semantics that would otherwise stall:
 
 ---
 
-## 11. Key subsystems and cross-cutting modules
+## Legacy compatibility inventory and retirement gates
 
-Some modules of the automation layer sit OUTSIDE the queue pipeline but
-are invoked from it. They are part of the producer-side support contract;
-the queue itself (the nine stages in §5) calls them through named entry
-points and never reaches into their internals.
+Compatibility paths accept durable GitHub state written before the current
+head-bound review workflow. They remain contained until their observable
+retirement conditions are satisfied.
 
-### [`agent_config.py`](hephaestus/automation/agent_config.py)
-
-Centralises per-agent model, timeout and session naming (RFC #1441:
-`claude_models.py`, `claude_timeouts.py` and `session_naming.py`
-remain as thin compatibility shims re-exporting `_resolve_model`,
-`read_timeout_env` and `session_name` / `session_uuid` /
-`reviewer_agent` from this module).
-
-- **Model selection** — phase-aware defaults: `planner_model()` →
- [`OPUS_48`](hephaestus/automation/agent_config.py); `implementer_model()`
- → `HAIKU_45` (long mechanical tool-use loop); `reviewer_model()` →
- `SONNET_46`; `advise_model()` → `HAIKU_45`. Each honors
- `HEPH_<PHASE>_MODEL` (with one-time warning on unknown IDs so
- typo'd env vars stay visible). The same model id is also kept
- in `session_name` so a session created under one model never
- resumes under another (#1166: `claude --resume` is locked to the
- creating model).
-- **Subprocess timeouts** — `agent_default_timeout` =
- `DEFAULT_AGENT_TIMEOUT = 7200`; per-phase overrides via
- `HEPH_AGENT_<PHASE>_TIMEOUT` (planner=1200, implement=1800,
- review=1200, learn=1200, advise=7200, ci_driver=7200,
- follow_up=7200, address_review=7200); `ci_poll_max_wait()` feeds
- the CI stage's wall-clock budget.
-- **Codex reasoning-effort overrides** — `--planner-reasoning-effort`,
- `--implementer-reasoning-effort`, `--reviewer-reasoning-effort` accept
- `default|low|medium|high|xhigh` (clamped). When `--agent=codex` is
- selected, [`stage_model`](hephaestus/automation/pipeline/stages/base.py)
- re-cuts the model id with `:effort` only for Codex; Claude and Pi
- model IDs are untouched.
-- **Session naming** — [`session_name(repo, issue, agent, model)`](hephaestus/automation/agent_config.py)
- produces the underscore-joined human name; `session_uuid(...)`
- derives the deterministic UUIDv5 using `NAMESPACE_DNS`. The model
- token is appended when given so Claude Code `--resume` can never
- silently cross models. Plan-review iterations use
- `reviewer_agent(base, iteration)` (`plan-reviewer-r{N}`) where independent
- plans need isolation. The PR-review retry loop instead retains its static
- `pr-reviewer` role and compacts that session before continuing it.
-- **`issue_auto_impl_branch_name(issue)`** — canonical feature
- branch name (`{issue}-auto-impl`); referenced by
- [`implementation._gate`](hephaestus/automation/pipeline/stages/implementation.py).
-
-### [`routing.py`](hephaestus/automation/pipeline/routing.py)
-
-The single source of truth for pipeline stage transitions, fail
-routes, and per-stage budgets — every §5 stage section and the §6
-ROUTES table cite this file for the canonical numbers. Declares:
-
-- [`StageName`](hephaestus/automation/pipeline/routing.py) — the
- `str`-flavored 7-stage enum (`REPO → PLANNING → PLAN_REVIEW →
- IMPLEMENTATION → PR_REVIEW → MERGE_WAIT → FINISHED`); declaration
- order matches [`PIPELINE_ORDER`](hephaestus/automation/pipeline/routing.py)
- and the reversed
- [`_DRAIN_ORDER`](hephaestus/automation/pipeline/coordinator.py).
-- [`Disposition`](hephaestus/automation/pipeline/routing.py)
- — the routing-outcome enum (`ADVANCE`, `RETRY`, `FAIL_BACK`,
- `SKIP`, `BLOCKED`, `FINISH_PASS`, `FINISH_FAIL`); the disposition
- funnel is exhaustive — a new value is a static `TypeError`, not a
- silent miss.
-- [`ROUTES`](hephaestus/automation/pipeline/routing.py) — the
- typed `dict[StageName, Route]` table. Each row binds a stage to
- its `next`, `fail_routes` and per-key budgets; the canonical
- numbers are cited inline in each §5.x block and listed centrally
- in §6. Stage code never re-defines these numbers — the table is
- the single source of truth. Schema / table consistency is
- enforced by
- [`tests/unit/automation/pipeline/test_routing.py`](tests/unit/automation/pipeline/test_routing.py);
- runtime cross-stage budget guards are
- [`_route_fail_back`](hephaestus/automation/pipeline/coordinator.py)
- plus the safety cap
- [`_FAIL_BACK_CAP`](hephaestus/automation/pipeline/coordinator.py)
- (the sum of every per-key budget — guarantees forward progress
- even under a per-stage budget-bookkeeping bug).
-
-### [`prompts/`](hephaestus/automation/prompts/)
-
-Each stage section in §5 lists the prompt function(s) it imports; this
-module is the only place those builders live. **Stages never re-author
-prompts.** The module contract is enforced by test coverage:
-
-- [`prompts/_shared.py`](hephaestus/automation/prompts/_shared.py) —
- `fence_content()` factory + `_fence_untrusted(label, content, nonce)`
- nonce-fenced wrappers. **All untrusted GitHub content (issue
- bodies, PR diffs, reviewer comments, plan text) is wrapped with
- `_fence_untrusted` using random nonces and accompanied by an
- `_UNTRUSTED_NOTICE`** — preventing a hostile issue body from forging
- a verdict line or injecting instructions that bypass the strict
- review loop. Builders that do not fence user content are flagged
- in test regressions.
-- [`prompts/catalog.py`](hephaestus/prompts/catalog.py) (top-level; re-exported as [`automation/prompts/catalog.py`](hephaestus/automation/prompts/catalog.py)) —
- the [`PromptCatalog`](hephaestus/prompts/catalog.py) registry; builds a [`jinja2.Environment`](hephaestus/prompts/catalog.py) over a [`FileSystemLoader`](hephaestus/prompts/catalog.py) resolved from `__file__`-relative paths (deliberately NOT `PackageLoader`, to avoid importlib editable-install staleness, #2308).
- Every prompt path passes through
- `PromptCatalog.current().render(name.j2, **kwargs)` so the same
- prompt rendered in different roles (planner, planner-amend,
- implementer, CI-fix, etc.) can be A/B-tested or shadow-rendered by
- swapping a single catalog entry (CLI-only override path).
- **The Jinja templates live under `prompts/<role>/...`** —
- `planning/context.j2`, `planning/amend_feedback.j2`,
- `implementation/advise_append.j2`,
- `implementation/strict_remediation.j2`,
- `implementation/test_failure_review.j2`,
- `learn/drive_green_context.j2` and per-role context/role J2 files
- for each role.
-- Per-role builders (not exhaustive):
- [`prompts/advise.py`](hephaestus/automation/prompts/advise.py) —
- [`get_advise_prompt_builder`](hephaestus/automation/prompts/advise.py)
- is called by `planning.on_enter`'s ADVISE_WAIT and (optionally) by
- implementation's ADVISE_WAIT.
- [`prompts/planning.py`](hephaestus/automation/prompts/planning.py) —
- `get_plan_prompt`, `get_plan_loop_review_prompt`.
- [`prompts/implementation.py`](hephaestus/automation/prompts/implementation.py) —
- `get_implementation_prompt`, `get_impl_resume_feedback_prompt`,
- `get_dirty_reused_worktree_decision_prompt`.
- [`prompts/pr_review.py`](hephaestus/automation/prompts/pr_review.py) —
- `get_pr_review_analysis_prompt`, `get_review_validation_prompt`,
- `get_comment_difficulty_prompt`, `get_pr_description` (also used
- on implementation PR_CREATE).
- [`prompts/address_review.py`](hephaestus/automation/prompts/address_review.py) —
- `get_address_review_prompt` (existing-PR path in pr_review).
- [`prompts/follow_up.py`](hephaestus/automation/prompts/follow_up.py) —
- legacy FOLLOWUP_WAIT persistence hook.
-
-### [`pipeline_github.py`](hephaestus/automation/pipeline_github.py) — the canonical `StageGitHub` implementation
-
-The [`StageGitHub`](hephaestus/automation/pipeline/stages/base.py)
-protocol defines the orchestrator's read/write verbs;
-[`pipeline_github.py`](hephaestus/automation/pipeline_github.py) is its
-concrete adapter and the only path through which stages touch GitHub.
-Tests pin the contract via the test fakes in
-[`tests/unit/automation/pipeline/test_fakes.py`](tests/unit/automation/pipeline/test_fakes.py).
-**Read surface** (mirror-of-helper-names; the coordinator's
-[`_ctx_for`](hephaestus/automation/pipeline/coordinator.py) injects a
-per-repo-scoped accessor factory):
-`gh_issue_json`, `gh_pr_state`, `pr_checks`,
-`find_pr_for_issue`, `find_merged_closing_pr`,
-`find_merged_pr_for_issue`, `has_existing_plan`,
-`pr_has_implementation_state_label`,
-`count_unresolved_threads`, `count_unresolved_threads_by_severity`
-(`pipeline_github.py` — severity-aware counter used by
-[§5.5's gate](#55-pr_review)),
-`failing_required_check_names`, `pending_required_check_names`,
-`pr_is_genuinely_stuck`, `drive_green_learn_terminal`,
-`drive_green_learn_inflight`, `drive_green_arm_confirmed`,
-`pending_drive_green_arms`,
-`rate_budget_ok` (`pipeline_github.py` — called by the
-coordinator's `_rate_budget_ok`),
-`arm_auto_merge` (called ONLY by `merge_wait`),
-`claim_drive_green_learn`, `mark_drive_green_learn_result`
-(post-merge learn dedup), `drive_green_learn_terminal`,
-`drive_green_learn_inflight`.
-**Mutator surface** (the orchestrator maps these onto GraphQL/REST
-chokepoints; dry-run log-and-skips here):
-`add_labels`, `remove_labels`, `edit_labels` (atomic add+remove in
-ONE `gh issue edit` call — the only way a state:* swap should ever be
-written), `close_issue_as_covered`, `upsert_plan_comment` (the
-durable plan-comment channel keyed on
-[`PLAN_COMMENT_MARKER`](hephaestus/automation/protocol.py)),
-`create_pr` (idempotent, re-creates `find_pr_for_issue` if missing),
-`defer_auto_merge` (verify disable + readback), `post_pr_comment`,
-`upsert_pr_comment`, `mark_pr_implementation_no_go` /
-`mark_pr_implementation_go`, `arm_auto_merge` (called ONLY by
-`merge_wait`), `post_review_threads`, `skip_epics`,
-`ensure_state_labels`.
-
-### Stage-specific session/decoration runners
-
-Stateless per invocation, not state machines. The queue imports them
-and treats them as prompt-builder factories:
-
-- [`advise_runner.py`](hephaestus/automation/advise_runner.py) —
- [`run_advise`](hephaestus/automation/advise_runner.py): a one-shot
- advise job that reads the issue body, queries the Mnemosyne
- marketplace and returns a selected skills list as the planner's
- extra context. The marketplace path is seeded into
- `item.payload["marketplace_path"]` by the coordinator, keeping
- advise a thin pass-through.
-- [`learn.py`](hephaestus/automation/learn.py) —
- [`build_learn_prompt`](hephaestus/automation/learn.py) returns a
- context-bound post-merge learning prompt. The actual session
- runs in `merge_wait.LEARN_WAIT`
- ([build_drive_green_learn_prompt](hephaestus/automation/pipeline/stages/merge_wait.py))
- through the same prompt catalog with the
- `learn/drive_green_context.j2` block.
-- [`follow_up.py`](hephaestus/automation/follow_up.py) — `get_follow_up_prompt`
- is the entry the legacy `FOLLOWUP_WAIT` persistence hook called.
- It is still imported but no stage currently routes to FOLLOWUP_WAIT.
-- [`post_merge_processor.py`](hephaestus/automation/post_merge_processor.py) —
- the durable learn-result write (`mark_drive_green_learn_result`,
- called via [`ctx.github`](hephaestus/automation/pipeline/stages/base.py))
- that gates `/learn` from ever replaying. Invoked from
- [`MergeWaitStage.on_job_done`](hephaestus/automation/pipeline/stages/merge_wait.py)
- after a learn job completes (success or failure alike).
-
-### [`worktree_manager.py`](hephaestus/automation/worktree_manager.py)
-
-[`WorkerPool._git_create_worktree`](hephaestus/automation/pipeline/worker_pool.py)
-hands every `op="create_worktree"` job to `WorktreeManager`:
-
-- Fresh branch path (`kwargs["refresh_base"]=True`) — creates the
- issue worktree off a freshly refreshed trunk; `kwargs["pr_number"]`
- is unused.
-- Adopt-PR path (`kwargs["refresh_base"]=False,
- kwargs["sync_to_remote"]=True, kwargs["pr_number"]=N`) — antifobber
- reset: cuts a worktree off the PR's remote head branch without
- resetting to trunk, so pushed commits are never discarded (the
- re-entry safety) — the anti-clobber contract of
- `_prepare_worktree_for_existing_pr` mirrored in
- [`implementation.py:_worktree_wait`](hephaestus/automation/pipeline/stages/implementation.py).
-`op="remove_worktree"` is the cleanup counterpart used by
-[`finished._cleanup`](hephaestus/automation/pipeline/stages/finished.py)
-on pass (`force=True`); on fail it logs and reflects in the
-preserved list used by the end-of-run summary.
-
-### Legacy compatibility inventory and retirement gates
-
-"Compatibility" here means accepting durable GitHub state written before the
-head-bound strict-review pipeline. Comments that cite legacy behavior only as
-algorithm provenance are not compatibility branches.
-
-| Compatibility family | Current containment | Removal gate |
-|---|---|---|
-| `legacy_issue_impl_go_fallback` in `pipeline/seeding.py` | An issue-level implementation-GO on an open PR is treated as a legacy fallback and routes the PR back to `pr_review` only when the PR does not carry authoritative implementation-NOGO. Each use emits the named warning marker. | After #2055 is deployed, a complete supported-repository seed pass must report zero fallback observations; then remove the issue-label branch and its classifier tests. |
-| `already_implementation_go_pr` and `not_implementation_go` across `routing.py` and `implementation.py` | Legacy-GO PRs may receive bounded maintenance, but every entry verifies auto-merge is disabled and `merge_wait` stops at `strict_gate_unavailable`. | Remove only after #2055 reconstructs eligibility from head-bound strict-review proof and the supported repositories contain zero open legacy implementation-GO PRs. Remove both route reasons, their stage branches, architecture rows, and tests together. |
-
-The former `pr_review` follow-up mini-states were removed by #2140: queue
-mini-states are not persisted, no current transition produced those states,
-and future post-strict-review follow-up behavior must be introduced as an
-explicit transition owned by the strict-review design.
+| Compatibility path | Retirement gate |
+|---|---|
+| `legacy_issue_impl_go_fallback` | After #2055 is deployed, a complete supported-repository seed pass reports zero fallback observations. |
+| `already_implementation_go_pr` and `not_implementation_go` | After #2055 reconstructs eligibility from head-bound review proof and supported repositories contain zero open legacy implementation-GO PRs. |
 
 ---
 
 ## 12. Interrupt semantics and exit codes
 
-[`Coordinator.run`](hephaestus/automation/pipeline/coordinator.py) handles
-`SIGINT` / `SIGTERM` / `SIGHUP`. The first signal sets `shutdown`,
-starts a graceful drain. The second signal — or an expired grace window
-— tears the pool down immediately and synthesizes interrupted results
-for remaining in-flight jobs.
-Items touched by an interrupt report
-`ItemResult(passed=False, reason="resumable at <stage>", …)`. They
-never count as failed ([`_exit_code`](hephaestus/automation/pipeline/coordinator.py)).
+The coordinator handles SIGINT, SIGTERM, SIGHUP as a two-step shutdown. The
+first signal stops new admissions and drains active work into a resumable
+state. A second signal, or expiry of the grace window, stops immediately.
+Interrupted items record `resumable at <stage>` so durable GitHub state can
+reconstruct their queue position on the next run.
 
-### Exit codes
+Exit-code priority is:
 
-| Code | When |
-|-------|---------------------------------------------------|
-| `0` | Clean run — every effective item passed |
-| `1` | Any effective item failed/skipped/blocked, OR fatal coordinator error |
-| `130` | Interrupted run (always wins over code 1) |
-
-`hephaestus-ensure-state-labels`, `hephaestus-automation-loop` and
-the thin CLI wrappers all surface 130 / 1 / 0 directly so shells and
-CI can react consistently.
+| Priority | Code | Meaning |
+|---|---:|---|
+| 1 | `130` | The run was interrupted; this takes priority over other outcomes. |
+| 2 | `1` | At least one effective item failed, skipped, or blocked. |
+| 3 | `0` | Every effective item completed successfully. |
 
 ---
 
@@ -1962,61 +1329,3 @@ CI can react consistently.
  matrix.**
 
 ---
-
-## 14. Provenance audit checklist
-
-Every claim in this document is grounded in the source it cites. The
-following audit pass confirms each section is traceable. The ADR-by-ADR
-binding record lives under [`docs/adr/`](adr/); this checklist
-cross-cites the modules each ADR binds, rather than re-listing each
-ADR — ADRs are the bind-points and historical record (per §1), this
-checklist is the source-grounded index.
-
-- §1 → [`AGENTS.md`](../AGENTS.md) §"Agents the codebase orchestrates",
- [`state_labels.py`](hephaestus/automation/state_labels.py),
- [`routing.py`](hephaestus/automation/pipeline/routing.py),
- [`coordinator.py`](hephaestus/automation/pipeline/coordinator.py);
- design principles from [`AGENTS.md`](../AGENTS.md).
-- §2 → [`coordinator.py`](hephaestus/automation/pipeline/coordinator.py)
- (`_DRAIN_ORDER`, `run`, `_step_with_watchdog`,
- `_default_stages`…)
-- §3 → invariants drawn from module docstrings
- ([`coordinator.py`](hephaestus/automation/pipeline/coordinator.py),
- [`stages/base.py`](hephaestus/automation/pipeline/stages/base.py),
- [`events.py`](hephaestus/automation/pipeline/events.py),
- [`routing.py`](hephaestus/automation/pipeline/routing.py)).
-- §4 → [`work_item.py`](hephaestus/automation/pipeline/work_item.py),
- [`routing.py`](hephaestus/automation/pipeline/routing.py),
- [`state_labels.py`](hephaestus/automation/state_labels.py).
-- §5 → per-stage deep dives:
- [`repo.py`](hephaestus/automation/pipeline/stages/repo.py),
- [`planning.py`](hephaestus/automation/pipeline/stages/planning.py),
- [`plan_review.py`](hephaestus/automation/pipeline/stages/plan_review.py),
- [`implementation.py`](hephaestus/automation/pipeline/stages/implementation.py),
- [`pr_review.py`](hephaestus/automation/pipeline/stages/pr_review.py),
- [`merge_wait.py`](hephaestus/automation/pipeline/stages/merge_wait.py),
- [`finished.py`](hephaestus/automation/pipeline/stages/finished.py);
- each cites the same `ROUTES[row]` for fail routes & budgets.
-- §6 → [`routing.py`](hephaestus/automation/pipeline/routing.py);
- budget provenance to
- [`_review_phase.py`](hephaestus/automation/_review_phase.py),
- [`review_thread_resolver.py`](hephaestus/automation/review_thread_resolver.py),
- [`loop_runner.py`](hephaestus/automation/loop_runner.py).
-- §7 → [`seeding.py`](hephaestus/automation/pipeline/seeding.py),
- [`coordinator._seed_pass`](hephaestus/automation/pipeline/coordinator.py),
- [`stage_merge_wait._arm`](hephaestus/automation/pipeline/stages/merge_wait.py).
-- §8 → [`worker_pool.py`](hephaestus/automation/pipeline/worker_pool.py),
- [`jobs.py`](hephaestus/automation/pipeline/jobs.py),
- [`resilience`](hephaestus/resilience/__init__.py),
- [`agent_config.py`](hephaestus/automation/agent_config.py).
-- §9 → [`loop_runner.py`](hephaestus/automation/loop_runner.py),
- console-script registration in
- [`pyproject.toml`](pyproject.toml).
-- §10 → [`coordinator._emit_observability_tick`](hephaestus/automation/pipeline/coordinator.py),
- `hephaestus.observability.*`.
-- §11 → [`coordinator.run`](hephaestus/automation/pipeline/coordinator.py),
- [`_exit_code`](hephaestus/automation/pipeline/coordinator.py).
-- §12 → cross-references to all of the above.
-If any future edit adds a claim without a `[module path](...)` link,
-that claim must back-link before merge, so this audit remains the
-single point of "did we ground every detail?".

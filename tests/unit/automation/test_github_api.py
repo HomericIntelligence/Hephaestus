@@ -2577,6 +2577,40 @@ class TestFetchIssueCommentIdsRepoScoping:
         mock_repo_info.assert_called_once()
 
 
+class TestFetchCompleteIssueCommentJournal:
+    """The durable journal read is paginated, chronological, and fail-closed."""
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_flattens_rest_pages_and_normalizes_database_ids(self, mock_gh_call: Any) -> None:
+        """Every REST page is retained in API creation order."""
+        mock_gh_call.return_value = Mock(
+            stdout=json.dumps(
+                [
+                    [{"id": 1, "body": "one"}],
+                    [{"id": 2, "body": "two"}],
+                ]
+            )
+        )
+
+        comments = _github_api_module.fetch_issue_comments_metadata(
+            42,
+            repo=("HomericIntelligence", "Hephaestus"),
+        )
+
+        assert [comment["body"] for comment in comments] == ["one", "two"]
+        assert [comment["databaseId"] for comment in comments] == [1, 2]
+        assert "--paginate" in mock_gh_call.call_args[0][0]
+
+    @patch("hephaestus.automation.github_api.get_repo_info", return_value=("o", "r"))
+    @patch("hephaestus.automation.github_api._gh_call", side_effect=RuntimeError("offline"))
+    def test_fetch_failure_is_not_confused_with_empty_journal(
+        self, _mock_gh_call: Any, _mock_repo: Any
+    ) -> None:
+        """Journal mutation callers must stop when GitHub cannot be read."""
+        with pytest.raises(RuntimeError, match="complete comment journal"):
+            _github_api_module.fetch_issue_comments_metadata(42)
+
+
 class TestUpsertAndDeleteComment:
     """Idempotent plan/review comment lifecycle (one comment per role)."""
 

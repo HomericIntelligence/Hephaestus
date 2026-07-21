@@ -228,7 +228,7 @@ class TestIsPlanReviewGoWithComments:
         is_plan_review_go(123, comments=comments)
         log_text = caplog.text
         # #615: malformed verdict emits a WARNING with first line + URL.
-        assert "no parseable Verdict: GO/NOGO line" in log_text
+        assert "no parseable plan-state token" in log_text
         assert "https://github.com/o/r/issues/123#comment-2" in log_text
 
 

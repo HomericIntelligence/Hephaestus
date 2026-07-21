@@ -57,6 +57,7 @@ from pathlib import Path
 from typing import Any, Protocol, TypeAlias, runtime_checkable
 
 from hephaestus.agents.runtime import DEFAULT_AGENT
+from hephaestus.automation.review_journal import IssueComment
 from hephaestus.automation.state_labels import (
     SKIP_REASON_MARKER,
     STATE_SKIP,
@@ -156,6 +157,10 @@ class StageGitHub(Protocol):
         """
         ...
 
+    def issue_comments(self, issue_number: int) -> list[IssueComment]:
+        """Return issue comments with ownership metadata in creation order."""
+        pass
+
     def add_labels(self, issue_number: int, labels: list[str]) -> None:
         """Durably add labels (coordinator maps to ``gh_issue_add_labels``)."""
         ...
@@ -179,18 +184,29 @@ class StageGitHub(Protocol):
         """Close the issue as covered by a merged PR (``_review_utils``)."""
         ...
 
-    def upsert_issue_comment(self, issue_number: int, marker: str, body: str) -> None:
-        """Upsert the single issue comment keyed on ``marker`` (#2256)."""
-        ...
+    def upsert_issue_comment(
+        self,
+        issue_number: int,
+        marker: str,
+        body: str,
+        *,
+        legacy_marker: str | None = None,
+    ) -> None:
+        """Upsert an automation-owned canonical comment keyed on ``marker``."""
+        pass
+
+    def append_issue_comment(self, issue_number: int, marker: str, body: str) -> None:
+        """Append one immutable, replay-safe automation-owned journal comment."""
+        pass
 
     def upsert_plan_comment(self, issue_number: int, body: str) -> None:
-        """Upsert the single plan comment, keyed on ``PLAN_COMMENT_MARKER``.
+        """Upsert the actor-owned plan comment using its opaque canonical marker.
 
         Durable plan-comment channel (doc section 2: "plan comment = durable
         artifact"). The coordinator maps this onto
-        ``gh_issue_upsert_comment(issue_number, PLAN_COMMENT_MARKER, body)``
-        so the issue holds exactly one plan comment, updated in place.
-        Callers pass a body already normalized to start with the marker.
+        The human-readable heading remains for display and legacy migration,
+        but only a comment proved to be authored by the authenticated actor is
+        mutable. Callers pass a body normalized with the opaque marker.
         """
         ...
 

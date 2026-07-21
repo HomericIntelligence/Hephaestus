@@ -141,7 +141,7 @@ def gh_issue_comment(issue_number: int, body: str, repo: tuple[str, str] | None 
 def _fetch_issue_comment_ids(
     issue_number: int, repo: tuple[str, str] | None = None
 ) -> list[dict[str, Any]]:
-    """Return up to 100 most-recent issue comments as ``{databaseId, body}`` dicts.
+    """Return recent issue comments with ids, ownership, and author metadata.
 
     Unlike :func:`_fetch_issue_comments_graphql` in ``review_state`` (which
     fetches ``body``/``url`` for verdict parsing), this also requests
@@ -169,7 +169,8 @@ def _fetch_issue_comment_ids(
         "  repository(owner:$owner,name:$name){"
         "    issue(number:$number){"
         "      comments(last: 100, orderBy: {field: UPDATED_AT, direction: DESC}){"
-        "        nodes{ databaseId body }"
+        "        nodes{ databaseId body createdAt url viewerDidAuthor "
+        "authorAssociation author{login} }"
         "      }"
         "    }"
         "  }"
@@ -202,6 +203,45 @@ def _fetch_issue_comment_ids(
     except Exception as exc:
         _api.logger.warning("Failed to fetch comment ids for issue #%s: %s", issue_number, exc)
         return []
+
+
+def fetch_issue_comments_metadata(
+    issue_number: int,
+    repo: tuple[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Return every issue comment in creation order with ownership metadata.
+
+    This strict journal read uses the paginated REST issue-comment channel.
+    Unlike the legacy best-effort GraphQL helper above, errors propagate and
+    the result is not capped at 100 comments. Durable journal reconciliation
+    must distinguish "there are no comments" from "GitHub could not be read".
+    """
+    owner, name = repo if repo is not None else _api.get_repo_info()
+    try:
+        result = _api._gh_call(
+            [
+                "api",
+                f"/repos/{owner}/{name}/issues/{int(issue_number)}/comments",
+                "--paginate",
+                "--slurp",
+            ]
+        )
+        data = json.loads(result.stdout or "[]")
+    except Exception as exc:
+        raise RuntimeError(f"Failed to fetch complete comment journal for #{issue_number}") from exc
+
+    pages = data if isinstance(data, list) else []
+    comments: list[dict[str, Any]] = []
+    for page in pages:
+        page_comments = page if isinstance(page, list) else [page]
+        for comment in page_comments:
+            if not isinstance(comment, dict):
+                continue
+            normalized = dict(comment)
+            if normalized.get("databaseId") is None and normalized.get("id") is not None:
+                normalized["databaseId"] = normalized["id"]
+            comments.append(normalized)
+    return comments
 
 
 def gh_issue_delete_comment(comment_id: int) -> None:

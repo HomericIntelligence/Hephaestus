@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from hephaestus.automation import state_labels
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.seeding import (
     EpicSkipTagObligation,
@@ -48,6 +49,7 @@ def _facts(
     pr_is_merged: bool = False,
     pr_has_implementation_go: bool = False,
     pr_has_implementation_no_go: bool = False,
+    blocked_feedback_received: bool = False,
 ) -> IssueFacts:
     """Build IssueFacts with defaults for classifier-matrix tests."""
     return IssueFacts(
@@ -60,6 +62,7 @@ def _facts(
         pr_is_merged=pr_is_merged,
         pr_has_implementation_go=pr_has_implementation_go,
         pr_has_implementation_no_go=pr_has_implementation_no_go,
+        blocked_feedback_received=blocked_feedback_received,
         body=body,
     )
 
@@ -98,6 +101,23 @@ class TestClassifyIssue:
         stage, reason = classify_issue(_facts(labels={STATE_SKIP, STATE_PLAN_GO}))
         assert stage is None
         assert STATE_SKIP in reason
+
+    def test_plan_blocked_is_excluded_until_external_input_arrives(self) -> None:
+        stage, reason = classify_issue(_facts(labels={state_labels.STATE_PLAN_BLOCKED}))
+
+        assert stage is None
+        assert state_labels.STATE_PLAN_BLOCKED in reason
+
+    def test_plan_blocked_with_maintainer_feedback_reenters_planning(self) -> None:
+        stage, reason = classify_issue(
+            _facts(
+                labels={state_labels.STATE_PLAN_BLOCKED},
+                blocked_feedback_received=True,
+            )
+        )
+
+        assert stage is StageName.PLANNING
+        assert "maintainer feedback" in reason
 
     def test_pr_merged_finished(self) -> None:
         """Merged PR is genuinely finished (pass, idempotent) — NOT an exclusion."""

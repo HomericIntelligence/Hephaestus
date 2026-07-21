@@ -30,12 +30,12 @@ re-pointed at the pipeline (#1820):
   failure is not fixed by replanning, so failing back to planning would
   only spend ``plan_cycles`` on more doomed reviews; labels stay untouched
   on the whole ERROR path.
-- Owned labels: ``state:plan-go`` (GO) [durable], ``state:plan-no-go``
-  (exhausted) [durable] — both computed by the shared pure
-  ``state_labels.apply_plan_verdict`` so this stage and the legacy loop
-  apply identical transitions; the paired add/remove writes are non-fatal
-  (independent try/except-warn per write).
-- Verdict parsed IN-WORKER by ``claude_invoke.parse_review_verdict``
+- Owned labels: ``state:plan-go`` (GO), ``state:plan-no-go`` (exhausted),
+  and ``state:plan-blocked`` (external input required) [durable]. GO/NOGO are
+  computed by the shared pure ``state_labels.apply_plan_verdict`` and applied
+  through one fail-closed, mutually-exclusive label transition.
+- Verdict parsed IN-WORKER by :func:`parse_plan_review_verdict` from one exact
+  final state-label token
   (carried as the review job's ``parse`` callable). REVIEW_WAIT clears any
   stale ``payload["review_verdict"]`` at submission so a failed later round
   can never replay an earlier round's verdict.
@@ -45,11 +45,17 @@ re-pointed at the pipeline (#1820):
   feedback block by :func:`build_amend_prompt` for amends, then
   upserted as the durable plan comment before the next review), and
   ``learn.py build_learn_prompt`` (GO only).
+- Current plan and review comments are actor-owned canonical records. Replaced
+  revisions are append-once GitHub comments, and their plan record carries the
+  next-plan recovery payload so restart can finish an interrupted journal
+  transition before another agent runs.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
+from dataclasses import replace
 
 from hephaestus.automation.agent_config import (
     learn_claude_timeout,
@@ -64,10 +70,30 @@ from hephaestus.automation.prompts._shared import fence_content
 from hephaestus.automation.prompts.planning import (
     get_plan_loop_review_prompt,
 )
+from hephaestus.automation.protocol import (
+    PLAN_REVIEW_CANONICAL_MARKER,
+    PLAN_REVIEW_PREFIX,
+)
+from hephaestus.automation.review_journal import (
+    IssueComment,
+    history_projection,
+    journal_snapshot,
+    render_current_review,
+    review_state,
+)
+from hephaestus.automation.review_types import ReviewVerdict
 from hephaestus.automation.session_naming import AGENT_PLAN_REVIEWER, AGENT_PLANNER
-from hephaestus.automation.state_labels import apply_plan_verdict, is_plan_go
+from hephaestus.automation.state_labels import (
+    STATE_NEEDS_PLAN,
+    STATE_PLAN_BLOCKED,
+    STATE_PLAN_GO,
+    STATE_PLAN_NO_GO,
+    apply_plan_verdict,
+    is_plan_go,
+)
 from hephaestus.prompts import PromptCatalog
 
+from ..plan_journal import publish_plan_revision, reconcile_plan_journal
 from .base import (
     AgentJob,
     Continue,
@@ -83,7 +109,7 @@ from .base import (
     agent_provider,
     stage_model,
 )
-from .planning import _normalize_plan_comment, build_plan_prompt
+from .planning import build_plan_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +128,45 @@ FINISH = PLAN_FINISH
 #: or stamping labels (#911). Reset whenever a real verdict arrives.
 REVIEW_ERROR_RETRY_CAP = 2
 
+_PLAN_REVIEW_LABELS = {
+    STATE_PLAN_GO: "GO",
+    STATE_PLAN_NO_GO: "NOGO",
+    STATE_PLAN_BLOCKED: "BLOCKED",
+}
+
+
+def parse_plan_review_verdict(text: str) -> ReviewVerdict:
+    """Parse the one exact state label that terminates a plan review."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    matches = [line for line in lines if line in _PLAN_REVIEW_LABELS]
+    parsed = parse_review_verdict(text)
+    if len(matches) != 1 or not lines or lines[-1] != matches[0]:
+        return replace(parsed, grade=None, verdict="ERROR", raw=text)
+    if matches[0] == STATE_PLAN_BLOCKED:
+        explanation = [
+            line
+            for line in lines[:-1]
+            if not line.startswith(("#", "<!--")) and line not in _PLAN_REVIEW_LABELS
+        ]
+        if not explanation:
+            return replace(parsed, grade=None, verdict="ERROR", raw=text)
+    return replace(parsed, grade=None, verdict=_PLAN_REVIEW_LABELS[matches[0]], raw=text)
+
+
+def _normalize_review_comment(review: str, *, revision: int | None = None) -> str:
+    """Normalize reviewer output for the canonical issue comment."""
+    return render_current_review(review, revision=revision or 1)
+
+
+def _current_revision(comments: Sequence[IssueComment | str]) -> int:
+    """Recover the current plan revision from durable issue comments."""
+    return journal_snapshot(comments).revision
+
+
+def _plan_history(comments: Sequence[IssueComment | str]) -> str:
+    """Render tracked comments in logical revision order for the next agent."""
+    return history_projection(comments)
+
 
 def build_amend_prompt(
     issue_number: int,
@@ -109,6 +174,7 @@ def build_amend_prompt(
     issue_title: str = "",
     issue_body: str = "",
     advise_findings: str = "",
+    plan_history: str = "",
 ) -> str:
     """Compose the amend prompt: task-aware plan prompt + reviewer feedback block.
 
@@ -136,6 +202,9 @@ def build_amend_prompt(
         "planning/amend_feedback.j2",
         untrusted_notice=fenced.untrusted_notice,
         prior_review_block=fenced.fence("PRIOR_REVIEW", prior_review),
+        plan_history_block=(
+            fenced.fence("PLAN_HISTORY", plan_history) if plan_history else "_(first revision)_"
+        ),
     )
     return prompt + feedback
 
@@ -151,14 +220,15 @@ class PlanReviewStage(Stage):
       review counter when a new plan cycle begins, then route to
       REVIEW_WAIT.
     - REVIEW_WAIT: clear any stale verdict, then submit the reviewer job;
-      the verdict is parsed in-worker by ``parse_review_verdict`` and lands
+      the verdict is parsed in-worker by ``parse_plan_review_verdict`` and lands
       in ``item.payload["review_verdict"]``.
-    - EVAL [M]: real verdicts (GO/NOGO/AMBIGUOUS) advance both iteration
+    - EVAL [M]: real verdicts (GO/NOGO/BLOCKED) advance both iteration
       counters; ERROR/missing verdicts never do. GO -> durably apply
       ``state:plan-go`` (write BEFORE the advancing outcome) then learn
       step or ADVANCE; NOGO within the cycle-relative iteration budget ->
       AMEND_WAIT; NOGO/AMBIGUOUS at the cap -> durably apply
-      ``state:plan-no-go``, then FAIL_BACK("nogo") while plan_cycles remain
+      ``state:plan-no-go``, then FAIL_BACK("nogo") while plan_cycles remain;
+      BLOCKED publishes its explanation, applies ``state:plan-blocked``, and stops
       or FAIL_BACK("plan_cycles_exhausted") once exhausted; ERROR/missing
       verdict -> labels untouched, RETRY (bounded by
       ``REVIEW_ERROR_RETRY_CAP`` consecutive failures, then FINISH_FAIL).
@@ -209,6 +279,18 @@ class PlanReviewStage(Stage):
                 logger.info("plan_review:%d: already plan-go; advancing", item.issue)
                 return StageOutcome(Disposition.ADVANCE, "plan already approved")
 
+            comments = reconcile_plan_journal(item.issue, ctx.github)
+            snapshot = journal_snapshot(comments)
+            if snapshot.current_plan:
+                item.payload["plan_text"] = snapshot.current_plan
+                item.payload["plan_revision"] = snapshot.revision
+            if (
+                snapshot.current_review
+                and snapshot.current_review_revision == snapshot.revision
+                and review_state(snapshot.current_review) != "unparseable"
+            ):
+                item.payload["prior_review"] = snapshot.current_review
+
         cycle = item.attempts.get("plan_cycles", 0)
         if item.payload.get("review_cycle") != cycle:
             item.payload["review_cycle"] = cycle
@@ -238,6 +320,29 @@ class PlanReviewStage(Stage):
             return Continue(next_state="REVIEW_WAIT")
 
         if item.state == "REVIEW_WAIT":
+            no_progress_reason = str(item.payload.get("no_progress_reason") or "")
+            if no_progress_reason:
+                raw_review = (
+                    "Planning is stuck and needs external feedback. "
+                    f"{no_progress_reason}\n\n{STATE_PLAN_BLOCKED}"
+                )
+                revision = int(item.payload.get("plan_revision") or 1)
+                ctx.github.upsert_issue_comment(
+                    item.issue,
+                    PLAN_REVIEW_CANONICAL_MARKER,
+                    render_current_review(raw_review, revision=revision),
+                    legacy_marker=PLAN_REVIEW_PREFIX,
+                )
+                ctx.github.edit_labels(
+                    item.issue,
+                    add=[STATE_PLAN_BLOCKED],
+                    remove=[STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO],
+                )
+                return StageOutcome(
+                    Disposition.BLOCKED,
+                    "planning made no progress; external feedback required",
+                )
+
             # Counters advance in EVAL, and only for real verdicts — a
             # submission is not an iteration (#1554/#1794). The 0-based
             # prompt iteration is the cycle-relative round count.
@@ -245,6 +350,7 @@ class PlanReviewStage(Stage):
             # Clear any stale verdict at submission so a failed later round
             # can never replay an earlier round's verdict in EVAL.
             item.payload.pop("review_verdict", None)
+            item.payload.pop("review_comment_published", None)
             logger.info("plan_review:%d: requesting review job (round %d)", item.issue, round_index)
             job = AgentJob(
                 repo=item.repo,
@@ -270,8 +376,9 @@ class PlanReviewStage(Stage):
                     "iteration": round_index,
                     "prior_review": item.payload.get("prior_review") or None,
                     "advise_findings": item.payload.get("advise_findings", ""),
+                    "plan_history": _plan_history(ctx.github.issue_comments(item.issue)),
                 },
-                parse=parse_review_verdict,  # verdict parsed in-worker
+                parse=parse_plan_review_verdict,  # verdict parsed in-worker
                 descr="review",
             )
             return JobRequest(job, on_done_state="EVAL")
@@ -300,6 +407,7 @@ class PlanReviewStage(Stage):
                     "issue_body": item.payload.get("issue_body", ""),
                     "advise_findings": item.payload.get("advise_findings", ""),
                     "prior_review": item.payload.get("prior_review", ""),
+                    "plan_history": _plan_history(ctx.github.issue_comments(item.issue)),
                 },
                 descr="amend",
             )
@@ -379,6 +487,30 @@ class PlanReviewStage(Stage):
         item.payload["review_round"] = round_done
         item.attempts["plan_review_iter"] = item.attempts.get("plan_review_iter", 0) + 1
 
+        # The issue comment is the durable review journal. Publish it before
+        # any label transition or advancing outcome; retries safely upsert the
+        # same canonical marker.
+        if not item.payload.get("review_comment_published"):
+            revision = int(
+                item.payload.get("plan_revision")
+                or _current_revision(ctx.github.issue_comments(item.issue))
+            )
+            ctx.github.upsert_issue_comment(
+                item.issue,
+                PLAN_REVIEW_CANONICAL_MARKER,
+                _normalize_review_comment(verdict.raw, revision=revision),
+                legacy_marker=PLAN_REVIEW_PREFIX,
+            )
+            item.payload["review_comment_published"] = True
+
+        if verdict.verdict == "BLOCKED":
+            ctx.github.edit_labels(
+                item.issue,
+                add=[STATE_PLAN_BLOCKED],
+                remove=[STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO],
+            )
+            return StageOutcome(Disposition.BLOCKED, "plan requires external feedback")
+
         if verdict.is_go:
             logger.info("plan_review:%d: GO verdict; applying label and advancing", item.issue)
             self._write_verdict_labels(item.issue, ctx, is_go=True)
@@ -425,11 +557,7 @@ class PlanReviewStage(Stage):
 
     @staticmethod
     def _write_verdict_labels(issue_number: int, ctx: StageContext, *, is_go: bool) -> None:
-        """Apply the verdict's label pair, each write non-fatal.
-
-        The add and the remove are wrapped independently so an exception
-        between the pair never propagates half-applied — the reviewer's
-        verdict comment remains the ultimate fallback for the backfill path.
+        """Apply one mutually-exclusive verdict transition atomically.
 
         Args:
             issue_number: GitHub issue number.
@@ -438,24 +566,11 @@ class PlanReviewStage(Stage):
 
         """
         label_to_add, labels_to_remove = apply_plan_verdict(is_go=is_go)
-        try:
-            ctx.github.add_labels(issue_number, [label_to_add])
-        except Exception as e:
-            logger.warning(
-                "plan_review:%d: failed to add label %r (non-fatal): %s",
-                issue_number,
-                label_to_add,
-                e,
-            )
-        try:
-            ctx.github.remove_labels(issue_number, labels_to_remove)
-        except Exception as e:
-            logger.warning(
-                "plan_review:%d: failed to remove labels %s (non-fatal): %s",
-                issue_number,
-                labels_to_remove,
-                e,
-            )
+        ctx.github.edit_labels(
+            issue_number,
+            add=[label_to_add],
+            remove=labels_to_remove,
+        )
 
     def on_job_done(self, item: WorkItem, result: JobResult, ctx: StageContext) -> None:
         """Store job results on the item payload (state is still the WAIT state).
@@ -482,12 +597,19 @@ class PlanReviewStage(Stage):
                     item.payload["prior_review"] = raw_review
             elif item.state == "AMEND_WAIT":
                 plan_text = result.value
-                item.payload["plan_text"] = plan_text
                 if item.issue is not None and isinstance(plan_text, str):
-                    ctx.github.upsert_plan_comment(
+                    publication = publish_plan_revision(
                         item.issue,
-                        _normalize_plan_comment(plan_text),
+                        plan_text,
+                        ctx.github,
+                        require_change=True,
                     )
+                    item.payload["plan_text"] = publication.plan
+                    item.payload["plan_revision"] = publication.revision
+                    if publication.is_stuck:
+                        item.payload["no_progress_reason"] = publication.no_progress_reason
+                        return
+                    item.payload.pop("no_progress_reason", None)
             # LEARN_WAIT intentionally has no branch: the learn job's output
             # is a side effect for the Mnemosyne skill store, not a payload
             # value any later state consumes.

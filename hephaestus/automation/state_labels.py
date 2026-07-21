@@ -1,6 +1,6 @@
 """GitHub issue/PR state-label vocabulary for the automation pipeline.
 
-The automation pipeline uses three mutually-exclusive ``state:*`` labels as the
+The automation pipeline uses four mutually-exclusive ``state:*`` labels as the
 single source of truth for an issue's plan-review status. This module is the
 authoritative definition of those labels, the PR-scoped implementation-review
 labels, and the small helpers that interpret them; the reviewer, planner,
@@ -15,6 +15,8 @@ State machine
         │
         ▼
     state:needs-plan ──(planner+reviewer run)──▶ state:plan-no-go ─┐
+            │                         └────────▶ state:plan-blocked
+            │                                      (external input required)
                                                      ▲             │
                                                      │             │ (next iteration GO)
                                                      └────(NOGO)───┘
@@ -25,8 +27,8 @@ State machine
                                                              this exclusively; never
                                                              re-plans or re-reviews)
 
-At most one of the three labels should be present on an issue at any time;
-each apply-state helper removes the other two as it sets its own.
+At most one of the four labels should be present on an issue at any time;
+each state transition removes every sibling as it sets its own.
 """
 
 from __future__ import annotations
@@ -35,15 +37,16 @@ import re
 from collections.abc import Iterable, Sequence
 from typing import Any
 
-# Single source of truth for the three plan-state labels. All label-aware code
+# Single source of truth for the four plan-state labels. All label-aware code
 # in the pipeline imports these constants; do not hard-code the names.
 STATE_NEEDS_PLAN = "state:needs-plan"
 STATE_PLAN_NO_GO = "state:plan-no-go"
 STATE_PLAN_GO = "state:plan-go"
+STATE_PLAN_BLOCKED = "state:plan-blocked"
 
-#: All three state labels in one tuple — useful for "ensure none of these are
+#: All four state labels in one tuple — useful for "ensure none of these are
 #: present" / "remove all of these" operations.
-ALL_STATE_LABELS = (STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO)
+ALL_STATE_LABELS = (STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO, STATE_PLAN_BLOCKED)
 
 # PR-scoped implementation-review state labels. These deliberately live outside
 # ALL_STATE_LABELS so issue-level plan state remains independent from PR review
@@ -113,6 +116,10 @@ STATE_LABEL_SPECS: dict[str, dict[str, str]] = {
     STATE_PLAN_GO: {
         "color": "0e8a16",  # green — approved
         "description": "Plan approved by reviewer; implementer may proceed.",
+    },
+    STATE_PLAN_BLOCKED: {
+        "color": "5319e7",
+        "description": "Planning requires human feedback or an external dependency.",
     },
     STATE_IMPLEMENTATION_NO_GO: {
         "color": "d93f0b",  # red — blocked
@@ -255,13 +262,13 @@ def needs_plan(labels: Iterable[str]) -> bool:
     workflow tags freshly-opened issues with ``state:needs-plan``, and the
     absence of any state label is functionally equivalent (planner runs).
 
-    Terminal states win: if ``state:plan-go`` or ``state:plan-no-go`` is also
+    Terminal states win: if GO, NO-GO, or BLOCKED is also
     present (e.g. mid label-churn during the reviewer's apply/remove sequence),
     the issue is NOT in the needs-plan state regardless of whether
     ``state:needs-plan`` was already removed.
     """
     label_set = set(labels)
-    return STATE_PLAN_GO not in label_set and STATE_PLAN_NO_GO not in label_set
+    return not label_set.intersection({STATE_PLAN_GO, STATE_PLAN_NO_GO, STATE_PLAN_BLOCKED})
 
 
 def apply_plan_verdict(*, is_go: bool) -> tuple[str, list[str]]:
@@ -271,8 +278,7 @@ def apply_plan_verdict(*, is_go: bool) -> tuple[str, list[str]]:
     GitHub writes and any logging. Shared (#1814) so the plan_review stage and
     seeding compute the transition identically.
 
-    On GO   → add state:plan-go,    remove [state:plan-no-go, state:needs-plan].
-    On NOGO → add state:plan-no-go, remove [state:plan-go,     state:needs-plan].
+    GO and NOGO each add their verdict label and remove every sibling plan-state label.
 
     Args:
         is_go: ``True`` when the reviewer's verdict is GO; ``False`` for NOGO.
@@ -284,8 +290,8 @@ def apply_plan_verdict(*, is_go: bool) -> tuple[str, list[str]]:
 
     """
     if is_go:
-        return STATE_PLAN_GO, [STATE_PLAN_NO_GO, STATE_NEEDS_PLAN]
-    return STATE_PLAN_NO_GO, [STATE_PLAN_GO, STATE_NEEDS_PLAN]
+        return STATE_PLAN_GO, [STATE_PLAN_NO_GO, STATE_PLAN_BLOCKED, STATE_NEEDS_PLAN]
+    return STATE_PLAN_NO_GO, [STATE_PLAN_GO, STATE_PLAN_BLOCKED, STATE_NEEDS_PLAN]
 
 
 def enter_planning_transition() -> tuple[list[str], list[str]]:
@@ -302,11 +308,11 @@ def enter_planning_transition() -> tuple[list[str], list[str]]:
 
     Restores the documented state-machine edge
     ``state:plan-no-go ──re-plan──▶ needs-plan`` (module docstring lifecycle
-    diagram): add [state:needs-plan]; remove [state:plan-no-go, state:plan-go].
+    diagram): add ``state:needs-plan`` and remove NO-GO, GO, and BLOCKED.
 
     Returns:
         A tuple (labels_to_add, labels_to_remove): ``[STATE_NEEDS_PLAN]`` and
         the two sibling labels to clear.
 
     """
-    return [STATE_NEEDS_PLAN], [STATE_PLAN_NO_GO, STATE_PLAN_GO]
+    return [STATE_NEEDS_PLAN], [STATE_PLAN_NO_GO, STATE_PLAN_GO, STATE_PLAN_BLOCKED]

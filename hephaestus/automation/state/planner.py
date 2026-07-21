@@ -21,10 +21,9 @@ from typing import TYPE_CHECKING, Any
 
 from ..git_utils import issue_ref
 from ..github_api import _gh_call, prefetch_issue_states, skip_epics
-from ..models import PLAN_COMMENT_MARKER
+from ..review_journal import is_plan_comment, is_plan_review_comment
 from ..state_labels import STATE_PLAN_GO, is_epic
 from .review import (
-    PLAN_REVIEW_PREFIX,
     fetch_all_issue_comments_graphql,
     fetch_all_issue_labels_graphql,
     fetch_all_issue_titles_graphql,
@@ -47,9 +46,9 @@ def _comments_contain_plan(comments: list[dict[str, Any]]) -> bool:
     """
     for comment in comments:
         stripped = comment.get("body", "").lstrip()
-        if stripped.startswith(PLAN_REVIEW_PREFIX):
+        if is_plan_review_comment(stripped):
             continue
-        if stripped.startswith(PLAN_COMMENT_MARKER):
+        if is_plan_comment(stripped):
             return True
     return False
 

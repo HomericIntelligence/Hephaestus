@@ -1,22 +1,20 @@
 """Shared plan-review verdict gate for the automation pipeline.
 
 The implementer needs to know whether a GitHub issue's *latest* plan-review
-comment is a **GO** before it implements the plan. The whole pipeline uses a
-single binary verdict vocabulary — ``Verdict: GO`` / ``Verdict: NOGO`` — so the
-verdict line is purely a machine-readable gate; the review prose above it
-explains *why*.
-
-(Earlier the gate spoke a three-way ``APPROVED/REVISE/BLOCK`` vocabulary. REVISE
-and BLOCK never had distinct runtime behavior — the gate only ever asked "is it
-the pass verdict" — so the vocabulary was collapsed to a single GO/NOGO flag.)
+comment is a **GO** before it implements the plan. Current reviews end with
+exactly one of ``state:plan-go``, ``state:plan-no-go``, or
+``state:plan-blocked``; the prose above that token explains the decision and,
+for BLOCKED, what external input is required.
 
 Two parsers, deliberately: the in-loop reviewer uses
 :func:`~hephaestus.automation.claude_invoke.parse_review_verdict` (first match;
 its prompt contract is "exactly one verdict line") to decide loop termination.
-This module's gate (:func:`latest_verdict`) scans a *posted* review comment for
-the LAST verdict line — a persisted comment is longer-lived and may accumulate
-discussion, and the reviewer's final word must win (failing toward NOGO is
-safe; failing toward GO would implement an unreviewed plan).
+This module's migration gate (:func:`latest_verdict`) scans a *posted* review
+comment for the LAST recognized state token, while continuing to read legacy
+``Verdict:`` lines already stored in GitHub. The current reviewer only emits
+state labels. A persisted comment is longer-lived and may accumulate
+discussion, so the reviewer's final word must win (failing toward NOGO is safe;
+failing toward GO would implement an unreviewed plan).
 
 The module deliberately accepts either an ``issue_number`` (in which case it
 does the GraphQL fetch itself, with ``last: 100`` pagination matching the
@@ -34,6 +32,7 @@ from typing import Any
 from ..git_utils import get_repo_info, get_repo_root, issue_ref
 from ..github_api import _gh_call, gh_issue_add_labels, gh_issue_json
 from ..protocol import PLAN_REVIEW_PREFIX as PLAN_REVIEW_PREFIX
+from ..review_journal import is_plan_review_comment
 from ..state_labels import STATE_PLAN_GO, STATE_PLAN_NO_GO, is_plan_go as labels_are_plan_go
 
 logger = logging.getLogger(__name__)
@@ -53,10 +52,12 @@ logger = logging.getLogger(__name__)
 # is intentionally STRICTER than the loop's first-match ``parse_review_verdict``
 # (whose contract is "exactly one verdict line"): the persisted comment is
 # longer-lived and may accumulate discussion, so the gate must be robust to it.
-# Matches the same surface as ``parse_review_verdict._VERDICT_RE``: optional
-# bold, line-anchored, ``GO`` / ``NOGO`` / ``NO-GO`` / ``NO GO``, case-insensitive.
+# During migration it accepts both the historical ``Verdict:`` vocabulary and
+# the exact state-token vocabulary now persisted by the pipeline. One combined
+# regex preserves textual ordering, so the LAST recognized line still wins.
 _GATE_VERDICT_RE = re.compile(
-    r"^\s*\**\s*Verdict\s*:\s*\**\s*(GO|NO[\s-]?GO)\b",
+    r"^\s*(?:\**\s*Verdict\s*:\s*\**\s*(?P<legacy>GO|NO[\s-]?GO)\b.*"
+    r"|(?P<state>state:plan-(?:go|no-go|blocked)))\s*$",
     re.MULTILINE | re.IGNORECASE,
 )
 
@@ -73,8 +74,9 @@ MAX_UNPARSEABLE_VERDICT_PASSES: int = 3
 def latest_verdict(review_body: str) -> str | None:
     """Return the LAST verdict token in a posted plan-review body.
 
-    Scans for every well-formed ``Verdict: GO|NOGO`` line and returns the LAST
-    one's normalized token. Taking the *last* line (not the first) means a
+    Scans for every well-formed historical ``Verdict: GO|NOGO`` or current
+    ``state:plan-*`` line and returns the LAST one's normalized token. Taking the
+    *last* line (not the first) means a
     review that discussed an earlier verdict before settling resolves to the
     reviewer's final word — and a malformed/absent verdict resolves to ``None``,
     which every gate treats as not-GO (fail safe).
@@ -84,16 +86,23 @@ def latest_verdict(review_body: str) -> str | None:
             :data:`PLAN_REVIEW_PREFIX`).
 
     Returns:
-        ``"GO"`` or ``"NOGO"`` (last matching line), or ``None`` when no verdict
-        line is present (callers like :func:`count_unparseable_verdict_passes`
-        treat ``None`` as "unparseable").
+        ``"GO"``, ``"NOGO"``, or ``"BLOCKED"`` (last matching line), or
+        ``None`` when no verdict line is present.
 
     """
-    matches = _GATE_VERDICT_RE.findall(review_body)
+    matches = list(_GATE_VERDICT_RE.finditer(review_body))
     if not matches:
         return None
-    raw = re.sub(r"[\s-]", "", matches[-1].upper())
-    return "GO" if raw == "GO" else "NOGO"
+    match = matches[-1]
+    state = match.group("state")
+    if state:
+        return {
+            "state:plan-go": "GO",
+            "state:plan-no-go": "NOGO",
+            "state:plan-blocked": "BLOCKED",
+        }[state.lower()]
+    legacy = re.sub(r"[\s-]", "", (match.group("legacy") or "").upper())
+    return "GO" if legacy == "GO" else "NOGO"
 
 
 def _extract_verdict_context(review_body: str) -> str:
@@ -113,9 +122,9 @@ def _extract_verdict_context(review_body: str) -> str:
     """
     lines = review_body.split("\n")
 
-    # Look for a line containing "Verdict:" (any case variation)
+    # Look for a machine-readable verdict line (historical or current).
     for line in reversed(lines):
-        if "Verdict:" in line:
+        if "Verdict:" in line or line.strip().lower().startswith("state:plan-"):
             preview = line.strip()
             if preview:
                 return preview[:_VERDICT_LOG_PREVIEW_CHARS]
@@ -123,7 +132,7 @@ def _extract_verdict_context(review_body: str) -> str:
     # Fall back to first non-prefix content line
     for line in lines:
         stripped = line.strip()
-        if stripped and not stripped.startswith(PLAN_REVIEW_PREFIX):
+        if stripped and not stripped.startswith((PLAN_REVIEW_PREFIX, "<!-- hephaestus-")):
             return stripped[:_VERDICT_LOG_PREVIEW_CHARS]
 
     return ""
@@ -136,7 +145,7 @@ def count_unparseable_verdict_passes(comments: list[dict[str, Any]]) -> int:
     :data:`PLAN_REVIEW_PREFIX`) in chronological order and counts the ones
     where :func:`latest_verdict` returns ``None``.  This is the number of
     passes in which a reviewer posted a comment but :func:`parse_review_verdict`
-    could not find a ``Verdict: GO/NOGO`` line (returned ``AMBIGUOUS``).
+    could not find a plan-state token (or a legacy ``Verdict:`` line).
 
     A non-zero count indicates the reviewer is producing malformed output.
     When the count reaches :data:`MAX_UNPARSEABLE_VERDICT_PASSES` the
@@ -155,7 +164,7 @@ def count_unparseable_verdict_passes(comments: list[dict[str, Any]]) -> int:
     count = 0
     for comment in comments:
         body: str = comment.get("body", "")
-        if body.startswith(PLAN_REVIEW_PREFIX) and latest_verdict(body) is None:
+        if is_plan_review_comment(body) and latest_verdict(body) is None:
             count += 1
     return count
 
@@ -518,7 +527,7 @@ def is_plan_review_go(  # noqa: C901  # validation: labels-first gate with comme
     function trusts the label as the single source of truth. The
     comment-scan path remains as a one-time **backfill** for issues whose
     plan reached GO before the labels rollout — when no state label is set
-    but the latest plan-review comment parses to ``Verdict: GO``, this
+    but the latest plan-review comment parses to GO, this
     function also applies ``state:plan-go`` to the issue so subsequent
     runs short-circuit on the label.
 
@@ -579,7 +588,7 @@ def is_plan_review_go(  # noqa: C901  # validation: labels-first gate with comme
     latest_review_url: str | None = None
     for comment in comments:
         body: str = comment.get("body", "")
-        if body.startswith(PLAN_REVIEW_PREFIX):
+        if is_plan_review_comment(body):
             latest_review_body = body
             latest_review_url = comment.get("url")
 
@@ -610,7 +619,7 @@ def is_plan_review_go(  # noqa: C901  # validation: labels-first gate with comme
         first_line = latest_review_body.split("\n", 1)[0].strip()
         url_part = latest_review_url or "<no url>"
         logger.warning(
-            "Issue %s: plan-review comment has no parseable Verdict: GO/NOGO line "
+            "Issue %s: plan-review comment has no parseable plan-state token "
             "— first line: %r | url: %s",
             issue_ref(issue_number),
             first_line[:_VERDICT_LOG_PREVIEW_CHARS],

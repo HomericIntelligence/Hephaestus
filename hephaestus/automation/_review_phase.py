@@ -76,13 +76,14 @@ from .github_api import (
     gh_issue_upsert_comment,
     gh_pr_list_unresolved_threads,
 )
-from .models import PLAN_COMMENT_MARKER, ImplementationState
+from .models import ImplementationState
 from .pr_manager import (
     ensure_pr_auto_merge_deferred,
     mark_pr_implementation_no_go,
 )
 from .pr_reviewer import gather_impl_review_context, review_pr_inline
 from .prompts import get_impl_loop_review_prompt, get_impl_resume_feedback_prompt
+from .review_journal import is_plan_comment
 from .review_validator import validate_prior_comments_addressed
 from .session_naming import AGENT_IMPLEMENTER, current_trunk_githash  # noqa: F401
 from .state import review as review_state
@@ -1327,7 +1328,7 @@ class ReviewPhase(StageMixin):
                 stripped = body.lstrip()
                 if stripped.startswith(review_state.PLAN_REVIEW_PREFIX):
                     plan_review_text = body
-                elif stripped.startswith(PLAN_COMMENT_MARKER):
+                elif is_plan_comment(stripped):
                     plan_text = body
         except Exception as e:
             logger.warning("#%s: failed to fetch PLAN/PLAN_REVIEW context: %s", issue_number, e)

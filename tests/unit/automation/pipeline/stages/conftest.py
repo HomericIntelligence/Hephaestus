@@ -22,7 +22,8 @@ from hephaestus.automation.pipeline.stages import (
 )
 from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARGV
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
-from hephaestus.automation.protocol import PLAN_COMMENT_MARKER
+from hephaestus.automation.protocol import PLAN_CANONICAL_MARKER, PLAN_COMMENT_MARKER
+from hephaestus.automation.review_journal import IssueComment
 from tests.unit.automation.pipeline.conftest import FakeGitHub
 
 
@@ -154,6 +155,19 @@ class FakeStageGitHub(FakeGitHub):
         """Mirror PlannerStateManager.has_existing_plan (plan comment check)."""
         return self._has_plan
 
+    def issue_comments(self, issue_number: int) -> list[IssueComment]:
+        """Return fake issue comments in their append order with ownership metadata."""
+        return [
+            comment
+            if isinstance(comment, IssueComment)
+            else IssueComment(
+                body=comment,
+                author_login="hephaestus[bot]",
+                viewer_did_author=True,
+            )
+            for comment in self.comments.get(issue_number, [])
+        ]
+
     def get_pr_head_branch(self, pr_number: int) -> str | None:
         """Mirror _review_utils.get_pr_head_branch (canned answer)."""
         return self._pr_head_branch
@@ -216,9 +230,52 @@ class FakeStageGitHub(FakeGitHub):
         labels.difference_update(remove)
         self._log("edit_labels", issue_number, tuple(add), tuple(remove))
 
-    def upsert_issue_comment(self, issue_number: int, marker: str, body: str) -> None:
+    def upsert_issue_comment(
+        self,
+        issue_number: int,
+        marker: str,
+        body: str,
+        *,
+        legacy_marker: str | None = None,
+    ) -> None:
         """Mirror the generic marker-keyed comment upsert (#2256)."""
-        self.gh_issue_upsert_comment(issue_number, marker, body)
+        comments = self.comments.setdefault(issue_number, [])
+        matches = [
+            index
+            for index, comment in enumerate(comments)
+            if (comment.body if isinstance(comment, IssueComment) else comment)
+            .lstrip()
+            .startswith(marker)
+        ]
+        if not matches and legacy_marker is not None:
+            matches = [
+                index
+                for index, comment in enumerate(comments)
+                if (comment.body if isinstance(comment, IssueComment) else comment)
+                .lstrip()
+                .startswith(legacy_marker)
+            ]
+        if matches:
+            comments[matches[-1]] = body
+        else:
+            comments.append(body)
+        self._log("gh_issue_upsert_comment", issue_number, marker)
+
+    def append_issue_comment(self, issue_number: int, marker: str, body: str) -> None:
+        """Mirror the immutable replay-safe journal append."""
+        comments = self.comments.setdefault(issue_number, [])
+        matching = [
+            comment.body if isinstance(comment, IssueComment) else comment
+            for comment in comments
+            if (comment.body if isinstance(comment, IssueComment) else comment)
+            .lstrip()
+            .startswith(marker)
+        ]
+        if matching and any(existing != body for existing in matching):
+            raise RuntimeError(f"immutable journal conflict for marker {marker!r}")
+        if not matching:
+            comments.append(body)
+            self._log("append_issue_comment", issue_number, marker)
 
     def upsert_plan_comment(self, issue_number: int, body: str) -> None:
         """Mirror the coordinator plan-comment upsert (PLAN_COMMENT_MARKER-keyed).
@@ -229,7 +286,12 @@ class FakeStageGitHub(FakeGitHub):
         durable plan artifact the verify step reads back.
         """
         self._has_plan = True
-        self.gh_issue_upsert_comment(issue_number, PLAN_COMMENT_MARKER, body)
+        self.upsert_issue_comment(
+            issue_number,
+            PLAN_CANONICAL_MARKER,
+            body,
+            legacy_marker=PLAN_COMMENT_MARKER,
+        )
 
     def create_pr(self, issue_number: int, branch: str, title: str, body: str) -> int:
         """Mirror the coordinator PR-ensure (delegates to gh_pr_create)."""
