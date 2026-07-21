@@ -1,7 +1,7 @@
 """Guard: every automation commit-CREATING path carries the DCO ``-s`` flag.
 
 Executable-convention guard (issue #1606, follow-up to #1516). pr-policy
-Check 3 (scripts/check_dco_signoff.py) fails any PR commit lacking a
+Check 4 (scripts/check_dco_signoff.py) fails any PR commit lacking a
 ``Signed-off-by`` trailer, produced only by ``git commit -s``. This test
 converts the scattered per-path assertions into one invariant: no
 commit-creating ``git commit`` / ``git cherry-pick`` / ``commit --amend``
