@@ -17,7 +17,7 @@ numbered, and listed here.
 | [0002](0002-pep562-lazy-imports.md) | PEP 562 lazy imports back the library/product boundary | Accepted |
 | [0003](0003-dependabot-renovate-split.md) | Dependabot owns pip+actions; Renovate owns pixi/conda | Accepted (historical; superseded by 0008) |
 | [0004](0004-single-aggregator-required-checks.md) | Single aggregated required-checks gate | Accepted |
-| [0005](0005-multi-agent-runtime-abstraction.md) | Multi-agent (Claude/Codex/Pi) runtime abstraction | Accepted |
+| [0005](0005-multi-agent-runtime-abstraction.md) | Multi-agent (Claude/Codex/Pi) runtime abstraction | Accepted (direct-import prohibition superseded by 0017) |
 | [0006](0006-queue-based-in-process-automation-pipeline.md) | Queue-based in-process automation pipeline | Accepted |
 | [0007](0007-dual-surface-required-checks.md) | Dual-surface required checks | Accepted |
 | [0008](0008-uv-only-development-environment.md) | uv is the sole development environment manager | Accepted |
@@ -29,3 +29,4 @@ numbered, and listed here.
 | [0014](0014-conditional-normal-merge.md) | Conditional normal merge after loop-owned review | Accepted (historical; superseded by 0015) |
 | [0015](0015-bounded-conditional-merge-retries.md) | Bounded conditional merge retries | Accepted (historical; superseded by 0016) |
 | [0016](0016-bounded-operational-merge-readiness.md) | Bounded operational merge-readiness wait | Accepted |
+| [0017](0017-frozen-legacy-agent-import-exceptions.md) | Frozen legacy agent-import exceptions | Accepted |
