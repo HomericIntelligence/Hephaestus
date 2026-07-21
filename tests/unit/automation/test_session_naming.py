@@ -7,9 +7,11 @@ import subprocess
 import sys
 import uuid
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from hephaestus.automation import agent_config
 from hephaestus.automation.session_naming import (
     AGENT_ADDRESS_REVIEW,
     AGENT_ADVISE,
@@ -20,6 +22,7 @@ from hephaestus.automation.session_naming import (
     AGENT_PLANNER,
     AGENT_PR_REVIEWER,
     current_trunk_githash,
+    resolve_session_jsonl_path,
     reviewer_agent,
     session_jsonl_path,
     session_name,
@@ -289,6 +292,119 @@ class TestSessionJsonlPath:
         p = session_jsonl_path("u", target)
         assert "v1-2-3" in p.parent.name
         assert "v1.2.3" not in p.parent.name
+
+
+class TestSessionTranscriptResolver:
+    """Checkout-family lookup for Claude's cwd-encoded transcript paths."""
+
+    @pytest.mark.parametrize("created_in", ["repo_root", "worktree"])
+    def test_registered_family_cwds_resolve_same_existing_transcript(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        created_in: str,
+    ) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        repo_root = tmp_path / "owner-a" / "Repo"
+        worktree = repo_root / "build" / ".worktrees" / "issue-2284"
+        worktree.mkdir(parents=True)
+        sid = session_uuid("Repo", 2284, AGENT_PLAN_REVIEWER, "fable")
+
+        source = repo_root if created_in == "repo_root" else worktree
+        transcript = session_jsonl_path(sid, source)
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text("{}\n", encoding="utf-8")
+
+        with patch.object(
+            agent_config,
+            "_registered_worktree_roots",
+            return_value=(repo_root.resolve(), worktree.resolve()),
+        ):
+            assert resolve_session_jsonl_path(sid, repo_root) == transcript
+            assert resolve_session_jsonl_path(sid, worktree) == transcript
+
+    def test_unrelated_checkout_transcript_is_ignored(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        local = tmp_path / "owner-a" / "Repo"
+        local_worktree = local / "build" / ".worktrees" / "issue-2284"
+        unrelated = tmp_path / "owner-b" / "Repo"
+        local_worktree.mkdir(parents=True)
+        unrelated.mkdir(parents=True)
+        sid = session_uuid("Repo", 2284, AGENT_PLAN_REVIEWER, "fable")
+
+        foreign_transcript = session_jsonl_path(sid, unrelated)
+        foreign_transcript.parent.mkdir(parents=True, exist_ok=True)
+        foreign_transcript.write_text("{}\n", encoding="utf-8")
+
+        with patch.object(
+            agent_config,
+            "_registered_worktree_roots",
+            return_value=(local.resolve(), local_worktree.resolve()),
+        ):
+            resolved = resolve_session_jsonl_path(sid, local_worktree)
+
+        assert resolved == session_jsonl_path(sid, local_worktree)
+        assert resolved != foreign_transcript
+        assert not resolved.exists()
+
+    def test_registered_worktree_discovery_uses_explicit_cwd_and_scrubbed_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo_root = tmp_path / "Repo"
+        worktree = repo_root / "build" / ".worktrees" / "issue-2284"
+        worktree.mkdir(parents=True)
+        monkeypatch.setenv("GIT_DIR", "/foreign/.git")
+        result = MagicMock(
+            stdout=f"worktree {worktree}\0HEAD deadbeef\0\0worktree {repo_root}\0"
+        )
+
+        with patch.object(agent_config.subprocess, "run", return_value=result) as run:
+            roots = agent_config._registered_worktree_roots(worktree)
+
+        assert roots == tuple(sorted((repo_root.resolve(), worktree.resolve()), key=str))
+        argv = run.call_args.args[0]
+        assert argv[:3] == ["git", "-C", str(worktree.resolve())]
+        assert argv[3:] == ["worktree", "list", "--porcelain", "-z"]
+        assert "GIT_DIR" not in run.call_args.kwargs["env"]
+        assert run.call_args.kwargs["timeout"] == 5
+
+    def test_git_discovery_failure_uses_exact_cwd_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        cwd = tmp_path / "not-a-repository"
+        cwd.mkdir()
+
+        with patch.object(agent_config.subprocess, "run", side_effect=FileNotFoundError):
+            resolved = resolve_session_jsonl_path("session-id", cwd)
+
+        assert resolved == session_jsonl_path("session-id", cwd)
+
+    def test_duplicate_transcripts_choose_lexicographically_first_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        repo_root = tmp_path / "Repo"
+        worktree = repo_root / "build" / ".worktrees" / "issue-2284"
+        worktree.mkdir(parents=True)
+        paths = [
+            session_jsonl_path("session-id", repo_root),
+            session_jsonl_path("session-id", worktree),
+        ]
+        for path in paths:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{}\n", encoding="utf-8")
+
+        with patch.object(
+            agent_config,
+            "_registered_worktree_roots",
+            return_value=(repo_root.resolve(), worktree.resolve()),
+        ):
+            resolved = resolve_session_jsonl_path("session-id", worktree)
+
+        assert resolved == min(paths, key=str)
 
 
 @pytest.mark.requires_posix

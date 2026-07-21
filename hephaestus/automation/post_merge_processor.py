@@ -132,19 +132,17 @@ class PostMergeProcessor:
         self._last_learn_evidence = mnemosyne_update_evidence("")
         try:
             repo_slug = get_repo_slug(repo_root)
-            # Best-effort: try to resume in the original worktree (so the
-            # AGENT_CI_DRIVER transcript is found by ``session_jsonl_path``).
-            # In the post-merge code path (#840) the PR's head branch may be
-            # gone from the remote, so ``_get_worktree_path`` could fail. In
-            # that case fall back to ``repo_root`` cwd — the prompt is
-            # self-contained, and a fresh ``--session-id`` create still
-            # captures the lesson.
+            # Prefer the original worktree for agent tool context. If it is
+            # unavailable, repo_root remains safe: checkout-family transcript
+            # resolution can resume a transcript from any still-registered
+            # worktree, otherwise it creates under repo_root without searching
+            # unrelated repositories.
             try:
                 cwd = self._get_worktree_path(issue_number, pr_number)
             except Exception as wt_err:
                 logger.info(
                     "Issue #%s: no worktree available for /learn (%s); "
-                    "falling back to repo root for a fresh session",
+                    "falling back to repo root",
                     issue_number,
                     wt_err,
                 )
@@ -197,10 +195,10 @@ class PostMergeProcessor:
     def run_drive_green_compact(self, issue_number: int, pr_number: int) -> bool:
         """Compact the AGENT_CI_DRIVER session transcript after /learn (#842).
 
-        Mirrors the cwd-derivation of ``run_drive_green_learnings``: try the
-        worktree first so the deterministic JSONL probe in ``session_jsonl_path``
-        finds the transcript, fall back to ``repo_root`` when the branch is
-        already gone post-merge. Non-fatal.
+        Mirrors the cwd-derivation of ``run_drive_green_learnings``: prefer the
+        worktree, then fall back to ``repo_root`` when the branch is already
+        gone post-merge. Checkout-family transcript resolution may still resume
+        a transcript from a registered worktree. Non-fatal.
 
         Args:
             issue_number: GitHub issue number.

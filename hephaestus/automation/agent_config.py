@@ -54,7 +54,9 @@ the SAME Claude CLI session — first call creates it via ``--session-id``,
 every later call resumes it via ``--resume``. This restores prompt-cache
 reuse across loop iterations *and* across main-bumps (#841): the artifact
 being worked on is the issue/PR, not the commit at which the loop started,
-so the session must persist as long as the issue does.
+so the session must persist as long as the issue does. The UUID remains
+artifact-stable, while transcript lookup is limited to the current Git
+checkout's registered worktree family.
 
 Human-readable name: ``<repo>_<issue>_<agent>``; the session ID is
 ``str(uuid.uuid5(NAMESPACE_DNS, <human-readable>))``. UUIDv5 is
@@ -553,6 +555,47 @@ def session_jsonl_path(uuid_str: str, cwd: Path) -> Path:
     return Path.home() / ".claude" / "projects" / encoded / f"{uuid_str}.jsonl"
 
 
+def _registered_worktree_roots(cwd: Path) -> tuple[Path, ...]:
+    """Return worktree roots registered to cwd's exact Git repository."""
+    resolved_cwd = cwd.resolve()
+    roots = {resolved_cwd}
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(resolved_cwd),
+                "worktree",
+                "list",
+                "--porcelain",
+                "-z",
+            ],
+            check=True,
+            capture_output=True,
+            env=_repo_scoped_git_env(),
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return (resolved_cwd,)
+
+    for field in result.stdout.split("\0"):
+        if field.startswith("worktree "):
+            roots.add(Path(field.removeprefix("worktree ")).resolve())
+    return tuple(sorted(roots, key=str))
+
+
+def resolve_session_jsonl_path(uuid_str: str, cwd: Path) -> Path:
+    """Resolve an existing transcript within cwd's registered worktree family."""
+    expected = session_jsonl_path(uuid_str, cwd)
+    candidates = {
+        expected,
+        *(session_jsonl_path(uuid_str, root) for root in _registered_worktree_roots(cwd)),
+    }
+    existing = sorted((candidate for candidate in candidates if candidate.is_file()), key=str)
+    return existing[0] if existing else expected
+
+
 __all__ = [
     # Session naming
     "AGENT_ADDRESS_REVIEW",
@@ -615,6 +658,7 @@ __all__ = [
     "planner_model",
     "pr_reviewer_claude_timeout",
     "read_timeout_env",
+    "resolve_session_jsonl_path",
     "reviewer_agent",
     "reviewer_model",
     "session_jsonl_path",
