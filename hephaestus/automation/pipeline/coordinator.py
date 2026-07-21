@@ -85,6 +85,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, TypeAlias
 
+from jinja2 import TemplateNotFound
+
 from hephaestus.automation.models import IssueInfo
 from hephaestus.automation.pipeline import admission as _admission, seeding as _seeding
 from hephaestus.automation.pipeline.events import StageEvent, encode_stage_event
@@ -123,6 +125,7 @@ from hephaestus.automation.pipeline.work_item import (
     WorkItem,
 )
 from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_GO
+from hephaestus.prompts import PromptCatalog
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +157,9 @@ _FAIL_BACK_CAP = sum(sum(route.budgets.values()) for route in ROUTES.values())
 
 _WAKE_HANDLE = object()
 
+_PROMPT_PREFLIGHT_TEMPLATE = "shared/untrusted_notice.j2"
+_PROMPT_PREFLIGHT_ERROR = "ERROR: Prompt templates missing or unreadable — reinstall: `uv sync`."
+
 #: Downstream-first drain order: finish work before admitting new (epic
 #: #1809 "drain queues downstream-first (merge_wait -> ... -> repo)"; the
 #: finished sink drains first of all so results are recorded promptly).
@@ -176,6 +182,14 @@ def _budget_lookup(name: str) -> int:
         if name in route.budgets:
             return route.budgets[name]
     return 1
+
+
+def _preflight_prompt_catalog() -> None:
+    """Fail before pipeline startup when packaged prompts cannot be loaded."""
+    try:
+        PromptCatalog.current().render(_PROMPT_PREFLIGHT_TEMPLATE)
+    except (OSError, TemplateNotFound, ValueError) as exc:
+        raise SystemExit(f"{_PROMPT_PREFLIGHT_ERROR}\nCause: {exc}") from exc
 
 
 def _json_safe(value: Any) -> Any:
@@ -1801,6 +1815,8 @@ def run_pipeline(config: PipelineConfig) -> int:
         Exit code: 130 interrupt, 1 any fail/skip/blocked, 0 clean.
 
     """
+    _preflight_prompt_catalog()
+
     # Imported here: pipeline_github maps the accessor onto the real gh
     # helpers and must stay out of the pure pipeline import surface.
     from hephaestus.automation.pipeline_github import PipelineGitHub
