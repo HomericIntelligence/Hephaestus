@@ -59,8 +59,8 @@ may change incompatibly in a minor release.
 
 ## Console-Script Stability Tiers
 
-Hephaestus installs 48 console scripts via `[project.scripts]` in
-`pyproject.toml`. Each is classified into one of three tiers:
+The console scripts registered in `[project.scripts]` are classified into one
+of three tiers:
 
 - **Stable** — covered by the [deprecation policy](#deprecation-policy). CLI
   name, flags, exit codes, and JSON output schema (when `--json` is passed)
@@ -91,6 +91,7 @@ bypass a misfiring hook locally use
 | `hephaestus-implement-issues` | Provisional | Issue-implementation stage |
 | `hephaestus-review-prs` | Provisional | PR-review stage |
 | `hephaestus-audit-prs` | Provisional | PR-audit stage; validates prior review comments were addressed |
+| `hephaestus-drive-prs-green` | Provisional | PR-review and merge-wait stage slice; CI remains independent branch protection |
 | `hephaestus-agent-stage` | Provisional | Single-stage agent runner |
 | `hephaestus-ensure-state-labels` | Internal | Used by this repo's CI label bootstrap |
 | `hephaestus-gh` | Provisional | Shell-facing wrapper around the shared `gh_call` adapter |

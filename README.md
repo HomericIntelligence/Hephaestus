@@ -281,11 +281,7 @@ config = merge_with_env({}, convert_bools=True)
 
 ## CLI Commands
 
-<!-- CLI table generated from pyproject.toml [project.scripts]. Keep in sync via
-     `python3 -m hephaestus.scripts_lib.check_cli_table_sync` (also enforced in pre-commit). -->
-
-48 console scripts are installed when you install the package.  Run any command
-with `--help` to see full usage.
+Run any command with `--help` to see full usage.
 
 ### Automation
 
@@ -298,6 +294,7 @@ with `--help` to see full usage.
 | `hephaestus-agent-stage` | Run one Claude or Codex automation stage with prompt and skill context |
 | `hephaestus-ensure-state-labels` | Idempotently provision `state:needs-plan` / `state:plan-no-go` / `state:plan-go` labels on one or more repos |
 | `hephaestus-audit-prs` | Audit ALL open PRs in one coordinator agent invocation |
+| `hephaestus-drive-prs-green` | Review open PRs and wait for their required branch-protection checks through the pr_review/merge_wait pipeline slice |
 
 #### Private Pi provider setup
 
