@@ -86,7 +86,7 @@ from .prompts import get_impl_loop_review_prompt, get_impl_resume_feedback_promp
 from .review_journal import is_plan_comment, is_plan_review_comment
 from .review_validator import validate_prior_comments_addressed
 from .session_naming import AGENT_IMPLEMENTER, current_trunk_githash  # noqa: F401
-from .state import review as review_state
+from .state.review import _fetch_issue_comments_graphql
 from .state_labels import SKIP_REASON_MARKER, STATE_SKIP, format_skip_reason_comment
 
 if TYPE_CHECKING:
@@ -1313,16 +1313,13 @@ class ReviewPhase(StageMixin):
         The PLAN comment is identified the same way
         :func:`planner_state._comments_contain_plan` does — prefix-anchored on
         :data:`PLAN_COMMENT_MARKER`, skipping comments whose body starts with
-        :data:`review_state.PLAN_REVIEW_PREFIX`. The PLAN_REVIEW comment is
-        the one whose body starts with ``review_state.PLAN_REVIEW_PREFIX``.
-        Best-effort: any fetch failure yields empty strings. ``review_state``
-        is imported top-level so tests patch its internals at
-        ``hephaestus.automation._review_phase.review_state``.
+        the shared plan-review predicate. Best-effort: any fetch failure yields
+        empty strings.
         """
         plan_text = ""
         plan_review_text = ""
         try:
-            comments = review_state._fetch_issue_comments_graphql(issue_number)
+            comments = _fetch_issue_comments_graphql(issue_number)
             for comment in comments:
                 body = comment.get("body", "")
                 stripped = body.lstrip()

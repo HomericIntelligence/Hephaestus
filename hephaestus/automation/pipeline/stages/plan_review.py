@@ -438,6 +438,7 @@ class PlanReviewStage(Stage):
         """
         if item.issue is None:  # guarded by step(); kept for type narrowing
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
+        issue_number = item.issue
         verdict = item.payload.get("review_verdict")
 
         # ERROR verdict or missing verdict (the review job failed, so
@@ -483,10 +484,10 @@ class PlanReviewStage(Stage):
                 return
             revision = int(
                 item.payload.get("plan_revision")
-                or _current_revision(ctx.github.issue_comments(item.issue))
+                or _current_revision(ctx.github.issue_comments(issue_number))
             )
             ctx.github.upsert_issue_comment(
-                item.issue,
+                issue_number,
                 PLAN_REVIEW_CANONICAL_MARKER,
                 _normalize_review_comment(verdict.raw, revision=revision),
                 legacy_marker=PLAN_REVIEW_PREFIX,

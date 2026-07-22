@@ -327,6 +327,7 @@ class TestPlanningStageEnter:
         item.state = "PLAN_WAIT"
         request = stage.step(item, ctx)
         assert isinstance(request, JobRequest)
+        assert isinstance(request.job, AgentJob)
         assert request.job.prompt_kwargs["issue_history"] == history
 
     def test_replan_entry_ignores_existing_rejected_plan_comment(

@@ -173,7 +173,7 @@ def test_fetch_plan_and_review_accepts_opaque_canonical_review_marker(tmp_path: 
     ]
 
     with mock.patch.object(
-        _review_phase.review_state,
+        _review_phase,
         "_fetch_issue_comments_graphql",
         return_value=comments,
     ):
