@@ -15,8 +15,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from hephaestus.automation import state_labels
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.seeding import (
+    _LABEL_RANK,
     EpicSkipTagObligation,
     IssueFacts,
     SeedEntry,
@@ -25,11 +27,13 @@ from hephaestus.automation.pipeline.seeding import (
     seed_entry_from_facts,
     seed_from_cli,
     seed_issue,
+    seed_issue_from_github,
 )
 from hephaestus.automation.state_labels import (
     STATE_IMPLEMENTATION_GO,
     STATE_IMPLEMENTATION_NO_GO,
     STATE_NEEDS_PLAN,
+    STATE_PLAN_BLOCKED,
     STATE_PLAN_GO,
     STATE_PLAN_NO_GO,
     STATE_SKIP,
@@ -98,6 +102,18 @@ class TestClassifyIssue:
         stage, reason = classify_issue(_facts(labels={STATE_SKIP, STATE_PLAN_GO}))
         assert stage is None
         assert STATE_SKIP in reason
+
+    def test_plan_blocked_is_excluded_until_external_input_arrives(self) -> None:
+        stage, reason = classify_issue(_facts(labels={state_labels.STATE_PLAN_BLOCKED}))
+
+        assert stage is None
+        assert state_labels.STATE_PLAN_BLOCKED in reason
+
+    def test_plan_blocked_cannot_be_revived_by_comment_text(self) -> None:
+        stage, reason = classify_issue(_facts(labels={state_labels.STATE_PLAN_BLOCKED}))
+
+        assert stage is None
+        assert "external intervention" in reason
 
     def test_pr_merged_finished(self) -> None:
         """Merged PR is genuinely finished (pass, idempotent) — NOT an exclusion."""
@@ -210,14 +226,12 @@ class TestClassifyIssue:
         stage, _reason = classify_issue(_facts())
         assert stage is StageName.PLANNING
 
-    def test_contradictory_labels_warn_and_use_highest_rank(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """Contradictory state labels → warning + deterministic highest-rank routing."""
+    def test_contradictory_labels_fail_closed(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Target presence cannot route while a mutually exclusive sibling remains."""
         with caplog.at_level(logging.WARNING, logger="hephaestus.automation.pipeline.seeding"):
-            stage, _reason = classify_issue(_facts(labels={STATE_NEEDS_PLAN, STATE_PLAN_GO}))
-        # Highest rank wins: plan-go (2) beats needs-plan (0) → implementation.
-        assert stage is StageName.IMPLEMENTATION
+            stage, reason = classify_issue(_facts(labels={STATE_NEEDS_PLAN, STATE_PLAN_GO}))
+        assert stage is None
+        assert "contradictory" in reason
         assert any("contradictory state labels" in record.message for record in caplog.records)
 
     def test_unknown_state_labels_are_ignored_and_logged(
@@ -279,12 +293,13 @@ class TestClassificationIsStageNameSSOT:
         assert stage is None or stage in set(StageName), f"non-StageName output: {stage!r}"
         assert isinstance(reason, str) and reason
 
-    def test_excluded_only_for_skip_or_epic(self) -> None:
-        """stage=None (exclusion) occurs ONLY for state:skip / epic inputs."""
+    def test_excluded_for_skip_or_contradictory_state(self) -> None:
+        """Conflicting durable state labels fail closed alongside explicit skips."""
         for labels in _STATE_LABEL_SETS:
             for pr_state in _PR_STATES:
                 stage, _ = classify_issue(_facts(labels=set(labels), **pr_state))
-                if STATE_SKIP in labels:
+                known = {label for label in labels if label in _LABEL_RANK}
+                if STATE_SKIP in labels or len(known) > 1:
                     assert stage is None
                 else:
                     assert stage is not None
@@ -430,6 +445,26 @@ class TestSeedIssueFetchLayer:
         facts = self._seed(101, [STATE_PLAN_GO, "other-label"], [])
         assert facts.number == 101
         assert {STATE_PLAN_GO, "other-label"} <= facts.labels
+
+    def test_blocked_comment_without_blocked_label_cannot_control_restart(self) -> None:
+        """Seeding never infers BLOCKED from review prose after a label-write failure."""
+        github = MagicMock()
+        github.gh_issue_json.return_value = {
+            "number": 102,
+            "title": "A task",
+            "body": "",
+            "labels": [{"name": STATE_NEEDS_PLAN}],
+        }
+        github.issue_comments.side_effect = AssertionError("comments are not state authority")
+        github.find_pr_for_issue.return_value = None
+        github.find_merged_pr_for_issue.return_value = None
+
+        facts = seed_issue_from_github(102, github)
+        stage, _ = classify_issue(facts)
+
+        assert stage is StageName.PLANNING
+        assert STATE_PLAN_BLOCKED not in facts.labels
+        github.issue_comments.assert_not_called()
 
 
 class TestSeedIssueEpicDetection:

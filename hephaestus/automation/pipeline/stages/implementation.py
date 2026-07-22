@@ -87,6 +87,7 @@ from hephaestus.automation.session_naming import (
 )
 from hephaestus.automation.state_labels import (
     STATE_IMPLEMENTATION_GO,
+    STATE_PLAN_BLOCKED,
     STATE_PLAN_GO,
     STATE_SKIP,
     is_implementation_go,
@@ -109,7 +110,7 @@ from .base import (
     StageOutcome,
     StepResult,
     WorkItem,
-    _issue_labels,
+    _require_issue_labels,
     _terminal_pr_outcome,
     _worktree_path,
     agent_provider,
@@ -717,7 +718,11 @@ class ImplementationStage(Stage):
         return None
 
     @staticmethod
-    def _impl_go_route(item: WorkItem, ctx: StageContext, existing_pr: int) -> StepResult | None:
+    def _impl_go_route(
+        item: WorkItem,
+        existing_pr: int,
+        pr_implementation_state: tuple[bool, bool],
+    ) -> StepResult | None:
         """Route an adopted PR that already carries ``state:implementation-go``.
 
         Split out of :meth:`_gate` for the same readability reason as
@@ -727,16 +732,16 @@ class ImplementationStage(Stage):
         Args:
             item: The work item under evaluation (``item.pr``/``item.branch``
                 are already set by the caller).
-            ctx: Stage context (unused; kept for signature symmetry with the
-                other extracted gate helpers).
             existing_pr: The adopted PR's number.
+            pr_implementation_state: Fresh ``(GO, NOGO)`` PR-label state
+                already read by the admission gate.
 
         Returns:
             A routing result when the PR already carries
             ``state:implementation-go``, else None (not this PR's route).
 
         """
-        has_go, _has_no_go = ctx.github.pr_has_implementation_state_label(existing_pr)
+        has_go, _has_no_go = pr_implementation_state
         if not has_go:
             return None
         logger.info(
@@ -773,6 +778,7 @@ class ImplementationStage(Stage):
         existing_pr: int,
         *,
         agent_error_reentry: bool,
+        pr_implementation_state: tuple[bool, bool],
     ) -> StepResult:
         """Validate and adopt an existing writable PR for normal review."""
         item.pr = existing_pr
@@ -785,7 +791,7 @@ class ImplementationStage(Stage):
         head_branch = ctx.github.get_pr_head_branch(existing_pr)
         if head_branch:
             item.branch = head_branch
-        impl_go_route = self._impl_go_route(item, ctx, existing_pr)
+        impl_go_route = self._impl_go_route(item, existing_pr, pr_implementation_state)
         if impl_go_route is not None:
             return impl_go_route
         writable_head = self._writable_head_guard(item, ctx, existing_pr)
@@ -843,10 +849,15 @@ class ImplementationStage(Stage):
         # label read at all; closes the reachable gap even though the 11
         # incidents that raised #1835 were all confirmed skip-after-PR races,
         # not this chokepoint).
-        gate_labels = _issue_labels(item, ctx)
+        gate_labels = _require_issue_labels(item, ctx)
         skip_outcome = self._skip_gate(item.issue, gate_labels)
         if skip_outcome is not None:
             return skip_outcome
+        if STATE_PLAN_BLOCKED in gate_labels:
+            return StageOutcome(
+                Disposition.BLOCKED,
+                "plan is blocked pending external intervention",
+            )
 
         # Pop the fail-back marker unconditionally: on the fresh-implement
         # path below the budget is consumed by the implement job itself, so
@@ -855,11 +866,30 @@ class ImplementationStage(Stage):
 
         existing_pr = item.pr or ctx.github.find_pr_for_issue(item.issue)
         if existing_pr:
+            terminal = _terminal_pr_outcome(ctx.github.gh_pr_state(existing_pr), existing_pr)
+            if terminal is not None:
+                return terminal
+            pr_implementation_state = ctx.github.pr_has_implementation_state_label(existing_pr)
+            has_impl_go, has_impl_no_go = pr_implementation_state
+            if has_impl_go and has_impl_no_go:
+                return StageOutcome(
+                    Disposition.FINISH_FAIL,
+                    "contradictory_implementation_state",
+                )
+            if not (is_plan_go(gate_labels) or has_impl_go or has_impl_no_go):
+                logger.info(
+                    "implementation:%d: existing PR #%d lacks an authoritative "
+                    "plan/implementation label; failing back",
+                    item.issue,
+                    existing_pr,
+                )
+                return StageOutcome(Disposition.FAIL_BACK, "plan_not_go")
             return self._adopt_existing_pr(
                 item,
                 ctx,
                 existing_pr,
                 agent_error_reentry=agent_error_reentry,
+                pr_implementation_state=pr_implementation_state,
             )
 
         # At-or-past (never equality): plan-go OR already implementation-go

@@ -10,7 +10,6 @@ Provides:
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import subprocess
 import threading
@@ -36,17 +35,38 @@ from hephaestus.github.rate_limit import wait_until
 from hephaestus.utils.terminal import terminal_guard
 
 from .agent_config import DEFAULT_AGENT_TIMEOUT
-from .claude_invoke import invoke_claude_with_session, parse_review_verdict, scan_quota_reset
+from .claude_invoke import invoke_claude_with_session, scan_quota_reset
 from .claude_models import reviewer_model
-from .git_utils import get_repo_info, get_repo_root, get_repo_slug, issue_ref
-from .github_api import _gh_call, gh_issue_json, gh_issue_upsert_comment
-from .models import PLAN_COMMENT_MARKER, PlanReviewerOptions, WorkerResult
+from .git_utils import get_repo_root, get_repo_slug, issue_ref
+from .github_api import (
+    fetch_issue_comments_metadata,
+    gh_current_login,
+    gh_issue_edit_labels,
+    gh_issue_json,
+    gh_issue_upsert_owned_comment,
+)
+from .models import PlanReviewerOptions, WorkerResult
 from .prompts import get_plan_review_prompt
+from .protocol import PLAN_REVIEW_CANONICAL_MARKER
+from .review_journal import (
+    IssueComment,
+    blocked_audit_recovery_body,
+    comment_revision,
+    is_plan_comment,
+    parse_plan_review_state,
+    render_current_review,
+)
 from .review_state import (
     PLAN_REVIEW_PREFIX as _REVIEW_PREFIX_SHARED,
-    is_plan_review_go,
 )
 from .session_naming import AGENT_PLAN_REVIEWER
+from .state_labels import (
+    ALL_STATE_LABELS,
+    STATE_PLAN_BLOCKED,
+    STATE_PLAN_GO,
+    apply_plan_state,
+    is_exclusive_plan_state,
+)
 from .status_tracker import StatusTracker
 
 logger = logging.getLogger(__name__)
@@ -67,16 +87,9 @@ logger = logging.getLogger(__name__)
 # (see :mod:`hephaestus.automation.review_state` and issue #551).
 _REVIEW_PREFIX = _REVIEW_PREFIX_SHARED
 
-# Plan review verdict contract (see PLAN_REVIEW_PROMPT in prompts/planning.py):
-# Claude ends its response with exactly one of ``Verdict: GO`` /
-# ``Verdict: NOGO``. The review prose explains *why*; this line is the binary
-# gate, parsed by :func:`parse_review_verdict`.
-
-# Fallback marker appended by _post_review when Claude's output omits the
-# verdict line entirely (defence-in-depth — keeps the short-circuit gate
-# parseable even if the model misformats). NOGO is the safe default
-# because it triggers re-review on the next loop.
-_FALLBACK_VERDICT_LINE = "Verdict: NOGO"
+# Plan reviews terminate with exactly one supported ``state:plan-*`` token.
+# The corresponding GitHub label is the only durable workflow authority;
+# comment text remains an explanatory audit record and is never a gate.
 
 
 class PlanReviewer:
@@ -182,13 +195,26 @@ class PlanReviewer:
 
                 # --- Read-only checks (safe in dry-run) ---
 
-                # Skip only when the LATEST plan review is a GO. A NOGO verdict, or
-                # any older convention without a parseable verdict, re-runs the
-                # reviewer so an amended plan gets a fresh evaluation. (Previously
-                # this short-circuited on any prior `## 🔍 Plan Review` comment,
-                # which locked an issue out of re-review forever after the first
-                # interim verdict.)
-                if self._latest_review_is_final(issue_number):
+                # One strict admission read controls the standalone path.
+                # BLOCKED is an operator latch, contradictory labels fail
+                # closed, and only exclusive GO short-circuits as approved.
+                labels = self._read_plan_state_labels(issue_number)
+                active_states = set(labels).intersection(ALL_STATE_LABELS)
+                if STATE_PLAN_BLOCKED in active_states:
+                    if not self.options.dry_run:
+                        self._ensure_blocked_audit(issue_number)
+                    logger.info(
+                        "Issue %s: plan is BLOCKED; awaiting external intervention",
+                        issue_ref(issue_number),
+                    )
+                    return WorkerResult(
+                        issue_number=issue_number,
+                        success=True,
+                        already_reviewed=True,
+                    )
+                if len(active_states) > 1:
+                    raise RuntimeError(f"contradictory plan-state labels: {sorted(active_states)}")
+                if is_exclusive_plan_state(labels, STATE_PLAN_GO):
                     logger.info(
                         "Issue %s: latest plan review is APPROVED, skipping",
                         issue_ref(issue_number),
@@ -264,7 +290,7 @@ class PlanReviewer:
                 )
 
     def _fetch_issue_comments(self, issue_number: int) -> list[dict[str, Any]]:
-        """Fetch all comments for an issue, caching the result per instance.
+        """Fetch the complete bounded issue journal, caching it per instance.
 
         Both ``_latest_review_is_final`` and ``_get_latest_plan`` call this
         helper so the ``gh issue view --comments`` API is hit only once per
@@ -274,73 +300,26 @@ class PlanReviewer:
             issue_number: GitHub issue number.
 
         Returns:
-            List of comment dicts (may be empty on error).
+            Chronological comment dictionaries with normalized ownership.
+
+        Raises:
+            RuntimeError: GitHub cannot provide the complete bounded journal or
+                the authenticated actor identity cannot be established.
 
         """
         if issue_number in self._comments_cache:
             return self._comments_cache[issue_number]
 
-        # Why GraphQL instead of ``gh issue view --comments``: the CLI's
-        # ``--comments`` JSON field paginates the underlying GraphQL query
-        # at a default cap (≤100 comments) and the CLI does NOT auto-paginate
-        # for ``--json`` output. On a long-running issue with >100 comments
-        # the older ``gh issue view`` call silently truncated the head of
-        # the list, so the "latest plan review" gate could see a stale
-        # GO instead of the real most-recent NOGO. We now ask
-        # GraphQL directly for the *last 100* comments in descending update
-        # order — equivalent to "latest first" — and take the first matching
-        # ``## 🔍 Plan Review`` body in iteration order. Bounded to one API
-        # call. See issue #553. If an issue legitimately accumulates more
-        # than 100 plan-review comments in its history, a follow-up issue
-        # will be needed to add real pagination; in practice plans are
-        # revised a handful of times, not 100+.
-        # get_repo_slug returns only the short repo name (e.g. "AchaeanFleet");
-        # GraphQL needs the (owner, name) pair, which get_repo_info supplies.
-        # Earlier code tried `get_repo_slug(...).split("/", 1)` and crashed on
-        # every issue with "not enough values to unpack" (#574).
-        owner, name = get_repo_info(get_repo_root())
-        query = (
-            "query($owner:String!,$name:String!,$number:Int!){"
-            "  repository(owner:$owner,name:$name){"
-            "    issue(number:$number){"
-            "      comments(last: 100, orderBy: {field: UPDATED_AT, direction: DESC}){"
-            "        nodes{ body updatedAt }"
-            "      }"
-            "    }"
-            "  }"
-            "}"
-        )
-        try:
-            result = _gh_call(
-                [
-                    "api",
-                    "graphql",
-                    "-f",
-                    f"query={query}",
-                    "-F",
-                    f"owner={owner}",
-                    "-F",
-                    f"name={name}",
-                    "-F",
-                    f"number={issue_number}",
-                ],
-            )
-            data = json.loads(result.stdout)
-            nodes = (
-                data.get("data", {})
-                .get("repository", {})
-                .get("issue", {})
-                .get("comments", {})
-                .get("nodes", [])
-            )
-            # GraphQL returned newest-first (DESC by UPDATED_AT). Reverse to
-            # chronological order so downstream iteration semantics ("walk
-            # forward, last match wins") match the previous ``gh issue view``
-            # behaviour. Bounded to ≤100 entries by the page-size cap above.
-            comments: list[dict[str, Any]] = list(reversed(nodes))
-        except Exception as e:
-            logger.warning("Failed to fetch comments for issue %s: %s", issue_ref(issue_number), e)
-            comments = []
+        comments = fetch_issue_comments_metadata(issue_number)
+        viewer_login = (gh_current_login() or "").lower()
+        if not viewer_login:
+            raise RuntimeError("cannot verify GitHub comment ownership: viewer login unavailable")
+        for comment in comments:
+            if "viewerDidAuthor" in comment:
+                continue
+            author = comment.get("user") or comment.get("author") or {}
+            login = author.get("login") if isinstance(author, dict) else ""
+            comment["viewerDidAuthor"] = bool(login) and str(login).lower() == viewer_login
 
         self._comments_cache[issue_number] = comments
         return comments
@@ -370,38 +349,68 @@ class PlanReviewer:
 
         # Walk in reverse to find the *last* genuine plan comment.
         for comment in reversed(comments):
+            if not bool(comment.get("viewerDidAuthor")):
+                continue
             body: str = comment.get("body", "")
             stripped = body.lstrip()
             if stripped.startswith(_REVIEW_PREFIX):
                 continue  # never treat a review comment as the plan
             # Match the single canonical marker ONLY at the start of the body
             # (anchored), never as a free substring.
-            if stripped.startswith(PLAN_COMMENT_MARKER):
+            if is_plan_comment(stripped):
                 logger.debug("Found plan comment for issue #%s", issue_number)
                 return body
 
         return None
 
-    def _latest_review_is_final(self, issue_number: int) -> bool:
-        """Return True iff the LATEST plan review on the issue is a GO.
+    def _ensure_blocked_audit(self, issue_number: int) -> None:
+        """Repair an interrupted BLOCKED explanation without invoking an agent."""
+        comments = [
+            IssueComment(
+                body=str(comment.get("body", "")),
+                author_login=str(
+                    (comment.get("user") or comment.get("author") or {}).get("login", "")
+                ),
+                viewer_did_author=bool(comment.get("viewerDidAuthor")),
+                created_at=str(comment.get("createdAt") or comment.get("created_at") or ""),
+                updated_at=str(comment.get("updatedAt") or comment.get("updated_at") or ""),
+            )
+            for comment in self._fetch_issue_comments(issue_number)
+        ]
+        body = blocked_audit_recovery_body(comments)
+        if body is None:
+            return
+        gh_issue_upsert_owned_comment(
+            issue_number,
+            PLAN_REVIEW_CANONICAL_MARKER,
+            body,
+            legacy_marker=_REVIEW_PREFIX,
+        )
 
-        Thin delegate over
-        :func:`hephaestus.automation.review_state.is_plan_review_go`,
-        which is the single source of truth for this gate (also called by
-        the implementer — see #551). The comments fetched by
-        :meth:`_fetch_issue_comments` are forwarded so the API call is
-        shared with :meth:`_get_latest_plan` and the per-instance cache is
-        respected.
+    def _latest_review_is_final(self, issue_number: int) -> bool:
+        """Return True iff GitHub carries the authoritative plan-GO label.
 
         Args:
             issue_number: GitHub issue number.
 
         Returns:
-            True if the latest plan review carries the GO verdict.
+            True if GitHub currently carries ``state:plan-go``.
 
         """
-        comments = self._fetch_issue_comments(issue_number)
-        return is_plan_review_go(issue_number, comments=comments)
+        return is_exclusive_plan_state(
+            self._read_plan_state_labels(issue_number),
+            STATE_PLAN_GO,
+        )
+
+    @staticmethod
+    def _read_plan_state_labels(issue_number: int) -> list[str]:
+        """Strictly read the live plan-state labels for an authorization gate."""
+        issue_data = gh_issue_json(issue_number)
+        return [
+            str(label.get("name")) if isinstance(label, dict) else str(label)
+            for label in issue_data.get("labels", [])
+            if isinstance(label, (dict, str))
+        ]
 
     def _run_claude_analysis(
         self,
@@ -554,34 +563,79 @@ class PlanReviewer:
             return None
 
     def _post_review(self, issue_number: int, review_text: str) -> None:
-        """Upsert the plan review as the issue's single review comment.
+        """Persist one canonical review and its authoritative state label.
 
-        Updates the one ``## 🔍 Plan Review`` comment in place (via
-        :func:`gh_issue_upsert_comment`) rather than appending a new one, so
-        even when this standalone phase runs it converges to a single review
-        comment per issue instead of accumulating duplicates (#455/#468/#484).
-
-        Defence-in-depth: if Claude's output omits a parseable verdict line
-        (model misformat), append `_FALLBACK_VERDICT_LINE` (= NOGO) so the
-        next-loop short-circuit gate always has a parseable marker. NOGO is
-        the safe default — it re-runs the reviewer rather than silently
-        skipping a possibly-incomplete review. Detection uses the same
-        :func:`parse_review_verdict` as the gate, so it tracks the GO/NOGO
-        contract rather than a brittle substring check.
+        Legacy ``Verdict:`` output and ambiguous responses are rejected before
+        any write. The explanatory audit record is published first for every
+        outcome; only the subsequent GitHub label write changes durable state.
+        A label-write failure therefore leaves the prior label authoritative,
+        and the next standalone run may safely retry.
 
         Args:
             issue_number: GitHub issue number.
             review_text: Review body text from Claude.
 
         """
-        if parse_review_verdict(review_text).verdict == "AMBIGUOUS":
-            logger.warning(
-                "Issue %s: review body missing parseable verdict line; appending fallback NOGO",
-                issue_ref(issue_number),
+        state = parse_plan_review_state(review_text)
+        if state is None:
+            raise ValueError(
+                "plan review must end with exactly one state:plan-go, "
+                "state:plan-no-go, or explained state:plan-blocked token"
             )
-            review_text = f"{review_text.rstrip()}\n\n{_FALLBACK_VERDICT_LINE}\n"
-        comment_body = f"{_REVIEW_PREFIX}\n\n{review_text}"
-        gh_issue_upsert_comment(issue_number, _REVIEW_PREFIX, comment_body)
+        live_labels = self._read_plan_state_labels(issue_number)
+        if STATE_PLAN_BLOCKED in live_labels and state != STATE_PLAN_BLOCKED:
+            raise RuntimeError(
+                "plan is blocked pending external intervention; automation cannot replace it"
+            )
+        active_states = set(live_labels).intersection(ALL_STATE_LABELS)
+        if len(active_states) > 1 and STATE_PLAN_BLOCKED not in active_states:
+            raise RuntimeError(f"contradictory plan-state labels: {sorted(active_states)}")
+        revision = 1
+        for comment in reversed(self._fetch_issue_comments(issue_number)):
+            if not bool(comment.get("viewerDidAuthor")):
+                continue
+            body = str(comment.get("body", ""))
+            if is_plan_comment(body):
+                revision = comment_revision(body) or 1
+                break
+        comment_body = render_current_review(review_text, revision=revision)
+        label_to_add, labels_to_remove = apply_plan_state(state)
+        # BLOCKED is a safety latch, so make it durable before the fallible
+        # audit write. GO/NOGO keep audit-first ordering. In every case only
+        # a fresh exclusive label confirmation authorizes routing.
+        if state == STATE_PLAN_BLOCKED:
+            gh_issue_edit_labels(
+                issue_number,
+                add=[label_to_add],
+                remove=labels_to_remove,
+            )
+        else:
+            gh_issue_upsert_owned_comment(
+                issue_number,
+                PLAN_REVIEW_CANONICAL_MARKER,
+                comment_body,
+                legacy_marker=_REVIEW_PREFIX,
+            )
+            gh_issue_edit_labels(
+                issue_number,
+                add=[label_to_add],
+                remove=labels_to_remove,
+            )
+        issue_data = gh_issue_json(issue_number)
+        labels = [
+            str(label.get("name")) if isinstance(label, dict) else str(label)
+            for label in issue_data.get("labels", [])
+            if isinstance(label, (dict, str))
+        ]
+        if not is_exclusive_plan_state(labels, state):
+            raise RuntimeError(f"plan state label {state} was not confirmed exclusively")
+        if state == STATE_PLAN_BLOCKED:
+            gh_issue_upsert_owned_comment(
+                issue_number,
+                PLAN_REVIEW_CANONICAL_MARKER,
+                comment_body,
+                legacy_marker=_REVIEW_PREFIX,
+            )
         logger.info("Posted plan review to issue #%s", issue_number)
 
     def _print_summary(self, results: dict[int, WorkerResult]) -> None:

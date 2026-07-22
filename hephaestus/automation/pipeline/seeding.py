@@ -16,6 +16,8 @@ Entry routing (the binding contract is the classification table in
 - Open PR, no impl-GO → pr_review (existing-PR path)
 - No PR, at-or-past ``state:plan-go`` → implementation
 - No PR, ``state:plan-no-go`` → planning (amend path)
+- No PR, ``state:plan-blocked`` → excluded until an external operator resolves
+  the block and replaces the label with exactly one eligible plan state
 - ``state:needs-plan`` / no state label → planning
 
 Write-path boundary (epic tagging)
@@ -36,12 +38,17 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from hephaestus.automation._review_utils import find_merged_pr_for_issue, find_pr_for_issue
-from hephaestus.automation.github_api import fetch_issue_info, gh_pr_label_names, gh_pr_state
+from hephaestus.automation.github_api import (
+    fetch_issue_info,
+    gh_pr_label_names,
+    gh_pr_state,
+)
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.state_labels import (
     STATE_IMPLEMENTATION_GO,
     STATE_IMPLEMENTATION_NO_GO,
     STATE_NEEDS_PLAN,
+    STATE_PLAN_BLOCKED,
     STATE_PLAN_GO,
     STATE_PLAN_NO_GO,
     STATE_SKIP,
@@ -159,17 +166,15 @@ class SeedEntry:
 def _get_state_label(labels: set[str]) -> str | None:
     """Extract the single active known ``state:*`` label, or None when absent.
 
-    Contradictory combinations (multiple known ``state:*`` labels) resolve
-    deterministically to the HIGHEST-rank (latest-stage) label and emit a
-    warning. Unknown ``state:*`` labels are ignored after warning because they
-    have no rank in the automation state machine.
+    Contradictory combinations are rejected by :func:`classify_issue` before
+    this helper is called. Unknown ``state:*`` labels are ignored after warning
+    because they have no rank in the automation state machine.
 
     Args:
         labels: Set of label names on an issue.
 
     Returns:
-        The known state label; the highest-rank one when contradictory; None
-        only when no known ``state:*`` label is present.
+        The known state label, or None when no known label is present.
 
     """
     state_labels = sorted(lbl for lbl in labels if lbl.startswith("state:"))
@@ -185,12 +190,7 @@ def _get_state_label(labels: set[str]) -> str | None:
         return None
 
     if len(known_state_labels) > 1:
-        LOG.warning(
-            "Issue has contradictory state labels: %s (using highest rank)",
-            known_state_labels,
-        )
-        # Return the highest-rank (latest-stage) label when contradictory.
-        return max(known_state_labels, key=_LABEL_RANK.__getitem__)
+        raise ValueError(f"contradictory state labels: {known_state_labels}")
     return known_state_labels[0]
 
 
@@ -246,9 +246,19 @@ def classify_issue(facts: IssueFacts) -> Classification:
         reason = f"#{facts.number} tagged {STATE_SKIP}"
         LOG.info("issue excluded: %s", reason)
         return None, reason
+    if STATE_PLAN_BLOCKED in facts.labels:
+        reason = f"#{facts.number} tagged {STATE_PLAN_BLOCKED} awaiting external intervention"
+        LOG.info("issue excluded: %s", reason)
+        return None, reason
     if facts.is_epic:
         reason = f"#{facts.number} is an epic tracking issue"
         LOG.info("issue excluded: %s", reason)
+        return None, reason
+
+    active_states = sorted(label for label in facts.labels if label in _LABEL_RANK)
+    if len(active_states) > 1:
+        reason = f"#{facts.number} has contradictory state labels: {active_states}"
+        LOG.warning("issue excluded: %s", reason)
         return None, reason
 
     # Terminal state: merged PR
@@ -333,7 +343,6 @@ def seed_issue(issue_number: int) -> IssueFacts:
     """
     issue_info = fetch_issue_info(issue_number)
     labels = set(issue_info.labels)
-
     # Epic detection: label (epic/roadmap) OR title marker, per #1669.
     epic = is_epic(issue_info.labels, issue_info.title)
 
@@ -405,7 +414,6 @@ def seed_issue_from_github(issue_number: int, github: Any) -> IssueFacts:
     title = str(issue_data.get("title") or "") if isinstance(issue_data, dict) else ""
     body = str(issue_data.get("body") or "") if isinstance(issue_data, dict) else ""
     epic = is_epic(sorted(labels), title)
-
     pr_is_open = False
     pr_is_merged = False
     pr_has_implementation_go = False

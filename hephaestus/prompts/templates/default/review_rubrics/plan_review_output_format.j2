@@ -1,0 +1,14 @@
+**Required output format (plan-state contract — MANDATORY):**
+
+End the response with EXACTLY ONE of these labels on its own line and emit
+nothing after it:
+
+```
+state:plan-go
+state:plan-no-go
+state:plan-blocked
+```
+
+Use `state:plan-blocked` only when planning cannot proceed without human
+feedback or an external dependency. The prose before the final label must say
+why it is blocked, identify any blocking issue, and state what unblocks it.

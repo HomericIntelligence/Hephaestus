@@ -1,18 +1,15 @@
 """Canonical comment-body markers used across the automation pipeline.
 
-The planner, plan reviewer, and implementer all locate their comments on a
-GitHub issue by ``body.startswith(...)`` against one of two markers:
+The planner, plan reviewer, and implementer locate automation-owned comments
+on a GitHub issue through opaque canonical markers:
 
-- :data:`PLAN_COMMENT_MARKER` — the heading the planner writes at the top of
-  the single plan comment. ``gh_issue_upsert_comment`` keys off this marker
-  to find-and-replace the existing plan rather than appending a new one.
-- :data:`PLAN_REVIEW_PREFIX` — the heading the plan reviewer writes at the top
-  of each review comment; the verdict gate (:mod:`review_state`) iterates
-  comments matching this prefix in chronological order.
+- :data:`PLAN_CANONICAL_MARKER` keys the editable current plan.
+- :data:`PLAN_REVIEW_CANONICAL_MARKER` keys the editable current review.
 
-Both strings are part of the pipeline's *wire protocol* — changing either
-breaks the upsert key and causes duplicate comments. They live here together
-so they cannot drift apart.
+The human-readable :data:`PLAN_COMMENT_MARKER` and
+:data:`PLAN_REVIEW_PREFIX` headings remain part of the display and migration
+format. All four strings are wire protocol: changing them without a migration
+breaks journal reconstruction.
 
 Originally split across ``models.py`` and ``review_state.py``; consolidated
 here per issue #801 (tracking #708).
@@ -23,10 +20,16 @@ from __future__ import annotations
 from typing import Any, Final, Protocol, runtime_checkable
 
 PLAN_COMMENT_MARKER: Final[str] = "# Implementation Plan"
-"""Heading the planner writes at the top of the single plan comment."""
+"""Human-readable heading in the planner's canonical plan comment."""
+
+PLAN_CANONICAL_MARKER: Final[str] = "<!-- hephaestus-plan:canonical -->"
+"""Opaque ownership/deduplication marker for the editable current plan."""
 
 PLAN_REVIEW_PREFIX: Final[str] = "## 🔍 Plan Review"
 """Heading the plan reviewer writes at the top of each review comment."""
+
+PLAN_REVIEW_CANONICAL_MARKER: Final[str] = "<!-- hephaestus-plan-review:canonical -->"
+"""Opaque ownership/deduplication marker for the editable current review."""
 
 WONT_FIX_MARKER: Final[str] = "WONT-FIX: intentional design"
 """Prefix the validator (or a human) replies with to dismiss a review finding as
@@ -51,4 +54,11 @@ class ReviewerProtocol(Protocol):
         """Execute the reviewer and return its result."""
 
 
-__all__ = ["PLAN_COMMENT_MARKER", "PLAN_REVIEW_PREFIX", "WONT_FIX_MARKER", "ReviewerProtocol"]
+__all__ = [
+    "PLAN_CANONICAL_MARKER",
+    "PLAN_COMMENT_MARKER",
+    "PLAN_REVIEW_CANONICAL_MARKER",
+    "PLAN_REVIEW_PREFIX",
+    "WONT_FIX_MARKER",
+    "ReviewerProtocol",
+]

@@ -14,8 +14,8 @@ only issue-planning implementation:
   durable artifact"). VERIFY upserts ``item.payload["plan_text"]`` via
   ``ctx.github.upsert_plan_comment`` BEFORE the verify/ADVANCE decision
   (journal order: durable write precedes the queue push). The body is
-  normalized to begin at ``PLAN_COMMENT_MARKER`` by
-  :func:`_normalize_plan_comment`. (The legacy content-missing banner and
+  normalized with an opaque canonical marker by :func:`_normalize_plan_comment`.
+  (The legacy content-missing banner and
   "Changes from review" enrichment were dropped with the legacy loop in
   #1820; the pipeline does not apply them.)
 - Prompt functions (imported, never re-authored):
@@ -27,6 +27,7 @@ only issue-planning implementation:
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 
 from hephaestus.automation.agent_config import (
     advise_claude_timeout,
@@ -37,18 +38,30 @@ from hephaestus.automation.agent_config import (
 from hephaestus.automation.prompts._shared import fence_content
 from hephaestus.automation.prompts.advise import get_advise_prompt_builder
 from hephaestus.automation.prompts.planning import get_plan_prompt
-from hephaestus.automation.protocol import PLAN_COMMENT_MARKER
+from hephaestus.automation.protocol import PLAN_REVIEW_CANONICAL_MARKER, PLAN_REVIEW_PREFIX
+from hephaestus.automation.review_journal import (
+    IssueComment,
+    JournalSnapshot,
+    history_projection,
+    is_pending_review,
+    journal_snapshot,
+    render_current_plan,
+    render_current_review,
+)
 from hephaestus.automation.session_naming import AGENT_ADVISE, AGENT_PLANNER
 from hephaestus.automation.state_labels import (
     STATE_NEEDS_PLAN,
+    STATE_PLAN_BLOCKED,
     STATE_PLAN_GO,
     STATE_PLAN_NO_GO,
     enter_planning_transition,
+    is_exclusive_plan_state,
     is_plan_go,
     is_skipped,
 )
 from hephaestus.prompts import PromptCatalog
 
+from ..plan_journal import publish_plan_revision, reconcile_plan_journal
 from .base import (
     AgentJob,
     Continue,
@@ -60,7 +73,7 @@ from .base import (
     StageOutcome,
     StepResult,
     WorkItem,
-    _issue_labels,
+    _require_issue_labels,
     agent_provider,
     stage_model,
 )
@@ -73,6 +86,7 @@ def build_plan_prompt(
     issue_title: str = "",
     issue_body: str = "",
     advise_findings: str = "",
+    issue_history: str = "",
 ) -> str:
     """Compose the plan prompt with the issue TASK and advise-findings block.
 
@@ -104,36 +118,268 @@ def build_plan_prompt(
         advise_findings_block=(
             fenced.fence("ADVISE_FINDINGS", advise_findings) if advise_findings else ""
         ),
+        issue_history_block=(fenced.fence("ISSUE_HISTORY", issue_history) if issue_history else ""),
         plan_prompt=get_plan_prompt(issue_number),
     )
 
 
-def _normalize_plan_comment(plan: str) -> str:
-    """Normalize plan text so the body begins exactly at the plan marker.
+def _planning_history(comments: Sequence[IssueComment | str]) -> str:
+    """Return every ordered plan/review journal iteration."""
+    return history_projection(comments)
 
-    The marker prefix is the upsert dedupe key for
-    ``ctx.github.upsert_plan_comment``: the GitHub adapter updates the latest
-    existing plan comment whose body starts with ``PLAN_COMMENT_MARKER``.
-    ``plan.lstrip()`` is load-bearing because a plan arriving with leading
-    whitespace would otherwise keep it and break that dedupe match (#700).
 
-    This normalization is separate from the PlanningStage VERIFY ADVANCE gate.
-    VERIFY advances only after this step posts a plan comment or
-    ``ctx.github.has_existing_plan(item.issue)`` reports an existing plan or
-    approved plan-review gate. Do not read this function as the ADVANCE
-    decision.
+def _normalize_plan_comment(plan: str, *, revision: int | None = None) -> str:
+    """Render the canonical plan comment with its opaque ownership marker."""
+    return render_current_plan(plan, revision=revision or 1)
 
-    Args:
-        plan: Raw plan text from the planner agent.
 
-    Returns:
-        The plan body, guaranteed to start with ``PLAN_COMMENT_MARKER``.
+def _is_replan_entry(
+    labels: Sequence[str],
+    *,
+    revision_already_published: bool,
+) -> bool:
+    """Read replan authorization from labels, never from review prose."""
+    return STATE_PLAN_NO_GO in labels and not revision_already_published
 
-    """
-    stripped = plan.lstrip()
-    if stripped.startswith(PLAN_COMMENT_MARKER):
-        return stripped
-    return f"{PLAN_COMMENT_MARKER}\n\n{stripped}"
+
+def _load_planning_journal(
+    item: WorkItem,
+    ctx: StageContext,
+    labels: Sequence[str],
+) -> tuple[list[IssueComment], JournalSnapshot, bool, bool]:
+    """Reconcile GitHub, hydrate the work item, and recover replan intent."""
+    assert item.issue is not None  # noqa: S101 - on_enter validates the work item first
+    comments = reconcile_plan_journal(item.issue, ctx.github)
+    snapshot = journal_snapshot(comments)
+    if snapshot.current_plan:
+        item.payload["plan_text"] = snapshot.current_plan
+        item.payload["plan_revision"] = snapshot.revision
+    revision_already_published = bool(
+        snapshot.current_plan
+        and snapshot.current_review_revision == snapshot.revision
+        and is_pending_review(snapshot.current_review, revision=snapshot.revision)
+    )
+    is_replan_entry = _is_replan_entry(
+        labels,
+        revision_already_published=revision_already_published,
+    )
+    return (
+        comments,
+        snapshot,
+        is_replan_entry,
+        revision_already_published,
+    )
+
+
+def _plan_is_ready_for_verify(
+    issue_number: int,
+    ctx: StageContext,
+    *,
+    is_replan_entry: bool,
+) -> bool:
+    """Return whether restart may verify the canonical plan without another agent."""
+    if is_replan_entry:
+        return False
+    return ctx.github.has_existing_plan(issue_number)
+
+
+def _write_planning_entry_labels(
+    issue_number: int,
+    ctx: StageContext,
+    labels: Sequence[str],
+    *,
+    is_replan_entry: bool,
+    revision_already_published: bool,
+) -> bool:
+    """Durably establish the mutually-exclusive planning entry label."""
+    if STATE_PLAN_NO_GO in labels and revision_already_published:
+        add, remove = enter_planning_transition()
+        logger.info("planning:%d: entry swap; add %s, remove %s", issue_number, add, remove)
+        ctx.github.edit_labels(issue_number, add=add, remove=remove)
+    elif is_replan_entry:
+        # Keep state:plan-no-go authoritative until a revised canonical plan
+        # has actually been published. This removes the crash window where a
+        # needs-plan label plus stale rejected plan could be mistaken for a
+        # fresh initial planning entry.
+        return is_exclusive_plan_state(
+            _require_issue_labels_for_transition(issue_number, ctx), STATE_PLAN_NO_GO
+        )
+    elif STATE_NEEDS_PLAN not in labels:
+        logger.info("planning:%d: adding %s label", issue_number, STATE_NEEDS_PLAN)
+        ctx.github.add_labels(issue_number, [STATE_NEEDS_PLAN])
+    return is_exclusive_plan_state(
+        _require_issue_labels_for_transition(issue_number, ctx),
+        STATE_NEEDS_PLAN,
+    )
+
+
+def _require_issue_labels_for_transition(issue_number: int, ctx: StageContext) -> list[str]:
+    """Read fresh label names when confirming a durable state transition."""
+    data = ctx.github.gh_issue_json(issue_number)
+    return [
+        str(label.get("name")) if isinstance(label, dict) else str(label)
+        for label in data.get("labels", [])
+        if isinstance(label, (dict, str))
+    ]
+
+
+def _mark_published_plan_pending_review(
+    issue_number: int,
+    ctx: StageContext,
+    *,
+    was_revision: bool,
+) -> bool:
+    """Transition a rejected plan only after its replacement is durable."""
+    if was_revision:
+        add, remove = enter_planning_transition()
+        ctx.github.edit_labels(issue_number, add=add, remove=remove)
+    return is_exclusive_plan_state(
+        _require_issue_labels_for_transition(issue_number, ctx),
+        STATE_NEEDS_PLAN,
+    )
+
+
+def _publish_plan_blocked(
+    issue_number: int,
+    ctx: StageContext,
+    *,
+    raw_review: str,
+    revision: int,
+) -> bool:
+    """Latch BLOCKED before publishing its required explanatory audit data."""
+    ctx.github.edit_labels(
+        issue_number,
+        add=[STATE_PLAN_BLOCKED],
+        remove=[STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO],
+    )
+    confirmed = is_exclusive_plan_state(
+        _require_issue_labels_for_transition(issue_number, ctx),
+        STATE_PLAN_BLOCKED,
+    )
+    if not confirmed:
+        return False
+    ctx.github.upsert_issue_comment(
+        issue_number,
+        PLAN_REVIEW_CANONICAL_MARKER,
+        render_current_review(raw_review, revision=revision),
+        legacy_marker=PLAN_REVIEW_PREFIX,
+    )
+    return True
+
+
+def _no_progress_outcome(
+    item: WorkItem,
+    ctx: StageContext,
+    *,
+    reason: str,
+    revision: int,
+) -> StageOutcome:
+    """Persist one no-progress explanation and route solely from its label."""
+    assert item.issue is not None  # noqa: S101 - caller narrows the issue
+    raw_review = f"Planning is stuck and needs external feedback. {reason}\n\n{STATE_PLAN_BLOCKED}"
+    if not _publish_plan_blocked(
+        item.issue,
+        ctx,
+        raw_review=raw_review,
+        revision=revision,
+    ):
+        return StageOutcome(Disposition.RETRY, "blocked label was not confirmed")
+    return StageOutcome(
+        Disposition.BLOCKED,
+        "planning made no progress; external feedback required",
+    )
+
+
+def _publish_candidate_plan(
+    item: WorkItem,
+    ctx: StageContext,
+    *,
+    requires_revision: bool,
+) -> StageOutcome | None:
+    """Publish one plan transaction and confirm its pending-review label state."""
+    assert item.issue is not None  # noqa: S101 - caller validates the issue
+    live_labels = _require_issue_labels_for_transition(item.issue, ctx)
+    if STATE_PLAN_BLOCKED in live_labels:
+        return StageOutcome(
+            Disposition.BLOCKED,
+            "plan was blocked externally while planning was in flight",
+        )
+    publication = publish_plan_revision(
+        item.issue,
+        str(item.payload["plan_text"]),
+        ctx.github,
+        require_change=requires_revision,
+    )
+    item.payload["plan_text"] = publication.plan
+    item.payload["plan_revision"] = publication.revision
+    if publication.is_stuck:
+        return _no_progress_outcome(
+            item,
+            ctx,
+            reason=publication.no_progress_reason,
+            revision=publication.revision,
+        )
+    if not _mark_published_plan_pending_review(
+        item.issue,
+        ctx,
+        was_revision=requires_revision,
+    ):
+        return StageOutcome(
+            Disposition.RETRY,
+            "exclusive needs-plan label was not confirmed",
+        )
+    item.payload.pop("requires_plan_revision", None)
+    return None
+
+
+def _verify_plan(item: WorkItem, ctx: StageContext) -> StageOutcome:
+    """Publish or recover the candidate plan, then authorize advancement by label."""
+    assert item.issue is not None  # noqa: S101 - stage validates the issue
+    plan_text = item.payload.get("plan_text")
+    posted_plan = False
+    if plan_text is not None:
+        requires_revision = bool(item.payload.get("requires_plan_revision"))
+        has_existing_plan = ctx.github.has_existing_plan(item.issue)
+        if requires_revision or not has_existing_plan:
+            logger.info("planning:%d: publishing plan revision", item.issue)
+            publication_outcome = _publish_candidate_plan(
+                item,
+                ctx,
+                requires_revision=requires_revision,
+            )
+            if publication_outcome is not None:
+                return publication_outcome
+            posted_plan = True
+
+    if posted_plan or ctx.github.has_existing_plan(item.issue):
+        labels = _require_issue_labels_for_transition(item.issue, ctx)
+        if STATE_PLAN_BLOCKED in labels:
+            return StageOutcome(
+                Disposition.BLOCKED,
+                "plan was blocked externally before verification",
+            )
+        if not is_exclusive_plan_state(labels, STATE_NEEDS_PLAN):
+            return StageOutcome(
+                Disposition.RETRY,
+                "exclusive needs-plan label was not confirmed",
+            )
+        logger.info("planning:%d: plan verified; advancing", item.issue)
+        return StageOutcome(Disposition.ADVANCE, "plan generated and verified")
+
+    attempt = item.attempts.get("plan", 0) + 1
+    item.attempts["plan"] = attempt
+    budget = ctx.budget("plan")
+    if attempt < budget:
+        logger.warning(
+            "planning:%d: plan comment not found; retry %d/%d",
+            item.issue,
+            attempt,
+            budget,
+        )
+        item.state = "PLAN_WAIT"
+        return StageOutcome(Disposition.RETRY, f"plan not found, retry {attempt}/{budget}")
+    logger.error("planning:%d: plan not found after %d attempts; exhausted", item.issue, budget)
+    return StageOutcome(Disposition.FINISH_FAIL, f"plan not found after {budget} attempts")
 
 
 class PlanningStage(Stage):
@@ -185,7 +431,7 @@ class PlanningStage(Stage):
             logger.warning("planning: work item has no issue number")
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
 
-        labels = _issue_labels(item, ctx)
+        labels = _require_issue_labels(item, ctx)
 
         # Operator override: state:skip -> SKIP. Checked BEFORE the
         # plan-go fast-forward — skip wins over everything (#1835), matching
@@ -201,8 +447,17 @@ class PlanningStage(Stage):
             logger.info("planning:%d: state:skip; skipping", item.issue)
             return StageOutcome(Disposition.SKIP, "state:skip")
 
-        # Fast-forward (at-or-past, never equality): already plan-go -> ADVANCE
-        if is_plan_go(labels):
+        # BLOCKED is an operator-owned hold. Automation never clears or
+        # replaces it, even when later comments supply the missing decision.
+        # An external actor must resolve the dependency and set exactly one
+        # next state label before the issue becomes eligible again.
+        if STATE_PLAN_BLOCKED in labels:
+            ctx.github.ensure_blocked_audit(item.issue)
+            return StageOutcome(Disposition.BLOCKED, "plan requires external intervention")
+
+        # Fast-forward only from the sole confirmed plan state. A stale sibling
+        # makes the label set contradictory and must never authorize work.
+        if is_exclusive_plan_state(labels, STATE_PLAN_GO):
             logger.info("planning:%d: already plan-go; advancing", item.issue)
             return StageOutcome(Disposition.ADVANCE, "plan already approved")
 
@@ -227,20 +482,38 @@ class PlanningStage(Stage):
         # has_existing_plan gate stuck-False so VERIFY can never ADVANCE
         # (#1857). Swap atomically: add needs-plan, remove both siblings, in
         # ONE gh issue edit. Restores state:plan-no-go ──re-plan──▶ needs-plan.
-        is_replan_entry = STATE_PLAN_NO_GO in labels
-        if is_replan_entry or STATE_PLAN_GO in labels:
-            add, remove = enter_planning_transition()
-            logger.info("planning:%d: entry swap; add %s, remove %s", item.issue, add, remove)
-            ctx.github.edit_labels(item.issue, add=add, remove=remove)
-        # Owned label: state:needs-plan, idempotent durable add before proceeding.
-        elif STATE_NEEDS_PLAN not in labels:
-            logger.info("planning:%d: adding %s label", item.issue, STATE_NEEDS_PLAN)
-            ctx.github.add_labels(item.issue, [STATE_NEEDS_PLAN])
+        (
+            comments,
+            _snapshot,
+            is_replan_entry,
+            revision_already_published,
+        ) = _load_planning_journal(item, ctx, labels)
+        if is_replan_entry:
+            item.payload["requires_plan_revision"] = True
+        if not _write_planning_entry_labels(
+            item.issue,
+            ctx,
+            labels,
+            is_replan_entry=is_replan_entry,
+            revision_already_published=revision_already_published,
+        ):
+            return StageOutcome(
+                Disposition.RETRY,
+                "exclusive planning entry label was not confirmed",
+            )
+
+        history = _planning_history(comments)
+        if history:
+            item.payload["issue_history"] = history
 
         # Restart fast-forward: a plan comment already exists (real has-plan
         # semantics via ctx.github), so re-entry must not redo advise + plan.
         # Jump straight to VERIFY; idempotent on repeated on_enter calls.
-        if not is_replan_entry and ctx.github.has_existing_plan(item.issue):
+        if _plan_is_ready_for_verify(
+            item.issue,
+            ctx,
+            is_replan_entry=is_replan_entry,
+        ):
             logger.info(
                 "planning:%d: plan comment already exists; fast-forward to VERIFY", item.issue
             )
@@ -312,48 +585,14 @@ class PlanningStage(Stage):
                     "issue_title": item.payload.get("issue_title", ""),
                     "issue_body": item.payload.get("issue_body", ""),
                     "advise_findings": item.payload.get("advise_findings", ""),
+                    "issue_history": item.payload.get("issue_history", ""),
                 },
                 descr="plan",
             )
             return JobRequest(job, on_done_state="VERIFY")
 
         if item.state == "VERIFY":
-            # Doc step 4 [M], part 1: the pipeline POSTS the plan comment
-            # (doc section 2: "plan comment = durable artifact"). The upsert
-            # is the durable write and happens BEFORE the verify/ADVANCE
-            # decision (journal order). Guarded by has_existing_plan so
-            # re-entry never double-posts.
-            plan_text = item.payload.get("plan_text")
-            posted_plan = False
-            if plan_text and not ctx.github.has_existing_plan(item.issue):
-                logger.info("planning:%d: upserting plan comment", item.issue)
-                ctx.github.upsert_plan_comment(item.issue, _normalize_plan_comment(plan_text))
-                posted_plan = True
-
-            # Doc step 4 [M], part 2: verify the plan comment exists (the
-            # PlannerStateManager.has_existing_plan read, via ctx.github).
-            if posted_plan or ctx.github.has_existing_plan(item.issue):
-                logger.info("planning:%d: plan verified; advancing", item.issue)
-                return StageOutcome(Disposition.ADVANCE, "plan generated and verified")
-
-            attempt = item.attempts.get("plan", 0) + 1
-            item.attempts["plan"] = attempt
-            budget = ctx.budget("plan")
-            if attempt < budget:
-                logger.warning(
-                    "planning:%d: plan comment not found; retry %d/%d",
-                    item.issue,
-                    attempt,
-                    budget,
-                )
-                # RETRY requeues this stage without calling on_enter(), so the
-                # next step must request a fresh planner job rather than VERIFY again.
-                item.state = "PLAN_WAIT"
-                return StageOutcome(Disposition.RETRY, f"plan not found, retry {attempt}/{budget}")
-            logger.error(
-                "planning:%d: plan not found after %d attempts; exhausted", item.issue, budget
-            )
-            return StageOutcome(Disposition.FINISH_FAIL, f"plan not found after {budget} attempts")
+            return _verify_plan(item, ctx)
 
         logger.warning("planning:%d: unknown state %r", item.issue, item.state)
         return StageOutcome(Disposition.FINISH_FAIL, f"unknown state: {item.state}")
@@ -371,7 +610,7 @@ class PlanningStage(Stage):
             logger.warning("planning:%s: job failed: %s", item.issue, result.error)
             return
 
-        if result.value:
+        if result.value is not None:
             if item.state == "ADVISE_WAIT":
                 item.payload["advise_findings"] = result.value
             elif item.state == "PLAN_WAIT":

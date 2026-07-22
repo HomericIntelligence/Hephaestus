@@ -294,7 +294,7 @@ The package currently installs 49 console scripts from `[project.scripts]`.
 | `hephaestus-implement-issues` | Bulk issue implementation using Claude Code or Codex in parallel worktrees |
 | `hephaestus-review-prs` | Read-only PR review automation using Claude Code or Codex in parallel worktrees |
 | `hephaestus-agent-stage` | Run one Claude or Codex automation stage with prompt and skill context |
-| `hephaestus-ensure-state-labels` | Idempotently provision `state:needs-plan` / `state:plan-no-go` / `state:plan-go` labels on one or more repos |
+| `hephaestus-ensure-state-labels` | Idempotently provision the planning labels (`state:needs-plan`, `state:plan-no-go`, `state:plan-go`, and `state:plan-blocked`) on one or more repos |
 | `hephaestus-audit-prs` | Audit ALL open PRs in one coordinator agent invocation |
 | `hephaestus-drive-prs-green` | Review open PRs and wait for their required branch-protection checks through the pr_review/merge_wait pipeline slice |
 
