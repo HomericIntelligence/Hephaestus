@@ -8,12 +8,13 @@ from hephaestus.automation.review_journal import (
     IssueComment,
     archive_plan_body,
     archive_review_body,
+    blocked_audit_recovery_body,
     history_projection,
     journal_snapshot,
+    plan_fingerprint,
     render_current_plan,
     render_current_review,
     review_state,
-    trusted_feedback_after_block,
 )
 
 
@@ -98,6 +99,54 @@ def test_projection_bounds_prompt_without_truncating_github_journal() -> None:
     assert len(comments) == 19
 
 
+def test_projection_compacts_many_revision_reasons_without_raising() -> None:
+    """The metadata index is bounded even after many verbose review rounds."""
+    comments = [_owned(render_current_plan("Current plan " + "x" * 50_000, revision=81))]
+    for revision in range(1, 81):
+        comments.extend(
+            [
+                _owned(archive_plan_body(revision, f"Plan {revision}", f"Plan {revision + 1}")),
+                _owned(
+                    archive_review_body(
+                        revision,
+                        f"Review {revision}: {'reason ' * 200}\n\nstate:plan-no-go",
+                    )
+                ),
+            ]
+        )
+
+    projection = history_projection(comments)
+
+    assert len(projection) <= MAX_AGENT_HISTORY_CHARS
+    assert "Revision 1" in projection
+    assert "Revision 80" in projection
+    assert "Current plan excerpt" in projection
+
+
+def test_projection_indexes_the_plan_belonging_to_each_revision() -> None:
+    """Revision N fingerprints its superseded plan, not revision N+1's recovery payload."""
+    comments = [
+        _owned(archive_plan_body(1, "Plan one", "Plan two")),
+        _owned(archive_review_body(1, "Needs work.\n\nstate:plan-no-go")),
+        _owned(render_current_plan("Plan two " + "x" * 2_000, revision=2)),
+    ]
+
+    projection = history_projection(comments, max_chars=1_000)
+
+    revision_one = next(line for line in projection.splitlines() if "Revision 1:" in line)
+    assert f"plan_sha={plan_fingerprint('Plan one')}" in revision_one
+
+
+def test_projection_respects_tiny_explicit_budget() -> None:
+    """Even an operator-supplied tiny budget returns a bounded projection."""
+    projection = history_projection(
+        [_owned(render_current_plan("x" * 2_000, revision=1))],
+        max_chars=64,
+    )
+
+    assert len(projection) <= 64
+
+
 def test_oversized_current_plan_keeps_index_fingerprint_and_explicit_excerpt() -> None:
     """A single oversized current artifact cannot tail-slice away its index."""
     comments = [_owned(render_current_plan("x" * 50_000, revision=7))]
@@ -111,33 +160,34 @@ def test_oversized_current_plan_keeps_index_fingerprint_and_explicit_excerpt() -
     assert "Current plan excerpt" in projection
 
 
-def test_only_trusted_human_feedback_resumes_a_blocked_plan() -> None:
-    """Bots and outsiders cannot satisfy the blocked-plan feedback gate."""
-    blocked = _owned(
-        render_current_review(
-            "Need an API decision.\n\nstate:plan-blocked",
-            revision=1,
-        )
-    )
-    bot = IssueComment(
-        body="automated status",
-        author_login="ci[bot]",
-        author_association="MEMBER",
-    )
-    outsider = IssueComment(body="untrusted suggestion", author_login="stranger")
-    maintainer = IssueComment(
-        body="Use REST.",
-        author_login="maintainer",
-        author_association="MEMBER",
-    )
-
-    assert trusted_feedback_after_block([blocked, bot, outsider]) == ()
-    assert trusted_feedback_after_block([blocked, bot, outsider, maintainer]) == (maintainer,)
-
-
 def test_history_markers_are_revision_and_kind_specific() -> None:
     """One revision's plan and review use distinct append-once keys."""
     assert HISTORY_MARKER.format(revision=4, kind="plan") != HISTORY_MARKER.format(
         revision=4,
         kind="review",
     )
+
+
+def test_blocked_audit_recovery_repairs_missing_current_explanation() -> None:
+    """A durable BLOCKED label can recover audit context without agent output."""
+    body = blocked_audit_recovery_body([_owned(render_current_plan("Plan", revision=3))])
+
+    assert body is not None
+    assert "revision: 3" in body
+    assert "interrupted audit write" in body
+    assert body.endswith("state:plan-blocked")
+
+
+def test_blocked_audit_recovery_preserves_existing_detailed_explanation() -> None:
+    """Recovery never overwrites an already valid actor-owned BLOCKED review."""
+    comments = [
+        _owned(render_current_plan("Plan", revision=3)),
+        _owned(
+            render_current_review(
+                "Waiting for the API owner to choose REST or GraphQL.\n\nstate:plan-blocked",
+                revision=3,
+            )
+        ),
+    ]
+
+    assert blocked_audit_recovery_body(comments) is None

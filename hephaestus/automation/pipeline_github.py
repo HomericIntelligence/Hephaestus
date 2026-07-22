@@ -49,9 +49,12 @@ from hephaestus.automation.prompts.pr_review import (
 from hephaestus.automation.protocol import (
     PLAN_CANONICAL_MARKER,
     PLAN_COMMENT_MARKER,
+    PLAN_REVIEW_CANONICAL_MARKER,
+    PLAN_REVIEW_PREFIX,
 )
 from hephaestus.automation.review_journal import (
     IssueComment,
+    blocked_audit_recovery_body,
     is_plan_comment,
     is_plan_review_comment,
 )
@@ -298,12 +301,19 @@ class PipelineGitHub:
                 names.append(str(label["name"]))
         return names
 
-    @staticmethod
-    def _comments_have_plan(comments: Any) -> bool:
+    def _comments_have_plan(self, comments: Any) -> bool:
+        """Return whether an actor-owned canonical plan artifact is present.
+
+        Comment markers locate data; they never establish state.  Requiring
+        GitHub's ownership proof prevents a foreign comment from impersonating
+        the pipeline's canonical plan and influencing stage orchestration.
+        """
         if not isinstance(comments, list):
             return False
         for comment in comments:
             if not isinstance(comment, dict):
+                continue
+            if not self._comment_owned_by_viewer(comment):
                 continue
             body = comment.get("body")
             if not isinstance(body, str):
@@ -501,31 +511,16 @@ class PipelineGitHub:
         return threads
 
     def _repo_issue_comments(self, issue_number: int) -> list[dict[str, Any]]:
-        """Strictly fetch the complete chronological issue-comment journal."""
+        """Strictly fetch the bounded chronological issue-comment journal."""
         owner, name = (
             self._owner_name() if self._repo_slug is not None else github_api.get_repo_info()
         )
-        result = gh_call(
-            [
-                "api",
-                f"/repos/{owner}/{name}/issues/{int(issue_number)}/comments",
-                "--paginate",
-                "--slurp",
-            ]
+        return github_api._fetch_issue_comments_paginated(
+            issue_number,
+            owner=owner,
+            name=name,
+            call=gh_call,
         )
-        data = json.loads(result.stdout or "[]")
-        pages = data if isinstance(data, list) else []
-        nodes: list[dict[str, Any]] = []
-        for page in pages:
-            page_nodes = page if isinstance(page, list) else [page]
-            for node in page_nodes:
-                if not isinstance(node, dict):
-                    continue
-                normalized = dict(node)
-                if normalized.get("databaseId") is None and normalized.get("id") is not None:
-                    normalized["databaseId"] = normalized["id"]
-                nodes.append(normalized)
-        return nodes
 
     def issue_comments(self, issue_number: int) -> list[IssueComment]:
         """Return structured issue comments in GitHub creation order."""
@@ -540,6 +535,7 @@ class PipelineGitHub:
                     comment.get("author_association") or comment.get("authorAssociation") or ""
                 ),
                 created_at=str(comment.get("created_at") or comment.get("createdAt") or ""),
+                updated_at=str(comment.get("updated_at") or comment.get("updatedAt") or ""),
                 viewer_did_author=self._comment_owned_by_viewer(comment),
                 database_id=(
                     int(comment["databaseId"]) if comment.get("databaseId") is not None else None
@@ -548,6 +544,18 @@ class PipelineGitHub:
             )
             for comment in comments
         ]
+
+    def ensure_blocked_audit(self, issue_number: int) -> None:
+        """Repair an interrupted BLOCKED explanation without touching its label."""
+        body = blocked_audit_recovery_body(self.issue_comments(issue_number))
+        if body is None:
+            return
+        self.upsert_issue_comment(
+            issue_number,
+            PLAN_REVIEW_CANONICAL_MARKER,
+            body,
+            legacy_marker=PLAN_REVIEW_PREFIX,
+        )
 
     def _repo_review_threads_for_review(self, pr_number: int, review_id: str) -> list[str]:
         """Return unresolved review-thread ids created by one REST review.
@@ -951,9 +959,9 @@ class PipelineGitHub:
     ) -> None:
         """Upsert one actor-owned canonical comment keyed on an opaque marker.
 
-        Human-authored marker collisions are never patched or deleted. A legacy
-        human-readable marker may be supplied only as a migration candidate;
-        it is updated solely when the current authenticated actor authored it.
+        Human-authored marker collisions are inert: they are neither trusted,
+        patched, deleted, nor allowed to deny service. A legacy human-readable
+        marker may be supplied only as an actor-owned migration candidate.
         """
         if self._skip(f"upsert {marker!r} comment on #{issue_number}"):
             return
@@ -961,9 +969,6 @@ class PipelineGitHub:
             raise ValueError(f"canonical comment body must start with marker {marker!r}")
         comments = self._repo_issue_comments(issue_number)
         exact = [c for c in comments if str(c.get("body", "")).lstrip().startswith(marker)]
-        foreign = [comment for comment in exact if not self._comment_owned_by_viewer(comment)]
-        if foreign:
-            raise RuntimeError(f"refusing to mutate foreign comment using marker {marker!r}")
         owned = [comment for comment in exact if self._comment_owned_by_viewer(comment)]
         if not owned and legacy_marker is not None:
             owned = [
@@ -973,12 +978,18 @@ class PipelineGitHub:
                 and self._comment_owned_by_viewer(comment)
             ]
         if not owned:
-            if self._repo_slug is not None:
-                with github_api._body_file(body) as path:
-                    self._gh(["issue", "comment", str(issue_number), "--body-file", path])
-            else:
-                github_api.gh_issue_comment(issue_number, body)
-            return
+            self._post_issue_comment(issue_number, body)
+            comments = self._repo_issue_comments(issue_number)
+            owned = [
+                comment
+                for comment in comments
+                if str(comment.get("body", "")).lstrip().startswith(marker)
+                and self._comment_owned_by_viewer(comment)
+            ]
+            if not owned:
+                # GitHub may be briefly read-after-write stale. The next
+                # idempotent pass will discover and converge the new pointer.
+                return
 
         target_id = owned[-1].get("databaseId")
         if target_id is None:
@@ -986,17 +997,41 @@ class PipelineGitHub:
         owner, name = (
             self._owner_name() if self._repo_slug is not None else github_api.get_repo_info()
         )
-        with github_api._body_file(body) as path:
-            gh_call(
-                [
-                    "api",
-                    "--method",
-                    "PATCH",
-                    f"/repos/{owner}/{name}/issues/comments/{int(target_id)}",
-                    "-F",
-                    f"body=@{path}",
-                ]
-            )
+        if str(owned[-1].get("body", "")) != body:
+            with github_api._body_file(body) as path:
+                gh_call(
+                    [
+                        "api",
+                        "--method",
+                        "PATCH",
+                        f"/repos/{owner}/{name}/issues/comments/{int(target_id)}",
+                        "-F",
+                        f"body=@{path}",
+                    ]
+                )
+        for duplicate in owned[:-1]:
+            duplicate_id = duplicate.get("databaseId")
+            if duplicate_id is not None:
+                self._delete_issue_comment(int(duplicate_id))
+
+    def _post_issue_comment(self, issue_number: int, body: str) -> None:
+        """Post one issue comment in the adapter's configured repository."""
+        if self._repo_slug is not None:
+            with github_api._body_file(body) as path:
+                self._gh(["issue", "comment", str(issue_number), "--body-file", path])
+            return
+        github_api.gh_issue_comment(issue_number, body)
+
+    def _delete_issue_comment(self, comment_id: int) -> None:
+        """Delete one duplicate actor-owned comment in the configured repository."""
+        owner, name = (
+            self._owner_name() if self._repo_slug is not None else github_api.get_repo_info()
+        )
+        github_api.gh_issue_delete_comment(
+            comment_id,
+            repo=(owner, name),
+            missing_ok=True,
+        )
 
     def append_issue_comment(self, issue_number: int, marker: str, body: str) -> None:
         """Append an immutable actor-owned artifact once, failing on mismatched replay."""
@@ -1009,18 +1044,25 @@ class PipelineGitHub:
             comment
             for comment in comments
             if str(comment.get("body", "")).lstrip().startswith(marker)
+            and self._comment_owned_by_viewer(comment)
         ]
-        if any(not self._comment_owned_by_viewer(comment) for comment in matching):
-            raise RuntimeError(f"immutable marker {marker!r} is owned by another actor")
         if matching:
             if any(str(comment.get("body", "")) != body for comment in matching):
                 raise RuntimeError(f"immutable journal conflict for marker {marker!r}")
+            # Immutable history is append-only. Identical actor-owned copies
+            # can arise from a create race; tolerate them without rewriting or
+            # deleting the durable audit trail.
             return
-        if self._repo_slug is not None:
-            with github_api._body_file(body) as path:
-                self._gh(["issue", "comment", str(issue_number), "--body-file", path])
-        else:
-            github_api.gh_issue_comment(issue_number, body)
+        self._post_issue_comment(issue_number, body)
+        comments = self._repo_issue_comments(issue_number)
+        matching = [
+            comment
+            for comment in comments
+            if str(comment.get("body", "")).lstrip().startswith(marker)
+            and self._comment_owned_by_viewer(comment)
+        ]
+        if any(str(comment.get("body", "")) != body for comment in matching):
+            raise RuntimeError(f"immutable journal conflict for marker {marker!r}")
 
     def create_pr(self, issue_number: int, branch: str, title: str, body: str) -> int:
         """Durably ensure the PR exists and return its number (idempotent).

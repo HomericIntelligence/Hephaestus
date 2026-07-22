@@ -32,6 +32,7 @@ from hephaestus.automation.review_journal import (
 )
 from hephaestus.automation.state_labels import (
     STATE_NEEDS_PLAN,
+    STATE_PLAN_BLOCKED,
     STATE_PLAN_GO,
     STATE_PLAN_NO_GO,
 )
@@ -421,11 +422,108 @@ class TestPlanReviewStageStep:
             ("gh_issue_upsert_comment", (2, PLAN_REVIEW_CANONICAL_MARKER)),
             (
                 "edit_labels",
-                (2, (STATE_PLAN_GO,), (STATE_PLAN_NO_GO, "state:plan-blocked", STATE_NEEDS_PLAN)),
+                (2, (STATE_PLAN_GO,), (STATE_PLAN_NO_GO, STATE_NEEDS_PLAN)),
             ),
         ]
         assert item.attempts["plan_review_iter"] == 1  # real verdict counted
         assert item.payload["review_round"] == 1
+
+    def test_eval_cannot_advance_when_label_write_is_not_observable(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A GO response is only a proposal until GitHub confirms state:plan-go."""
+
+        class DroppedLabelGitHub(FakeStageGitHub):
+            def edit_labels(self, issue_number: int, *, add: list[str], remove: list[str]) -> None:
+                self._log("edit_labels", issue_number, tuple(add), tuple(remove))
+
+        stage = PlanReviewStage()
+        github = DroppedLabelGitHub(labels=[STATE_NEEDS_PLAN])
+        ctx = make_ctx(github=github)
+        ctx.config.enable_learn = False
+        item = make_work_item(issue=202, state="EVAL")
+        item.payload["review_verdict"] = _verdict("GO")
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.RETRY
+        assert github.labels[202] == {STATE_NEEDS_PLAN}
+
+    def test_eval_cannot_advance_with_target_and_stale_sibling(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Target presence alone is insufficient; the state must be exclusive."""
+
+        class PartialLabelGitHub(FakeStageGitHub):
+            def edit_labels(self, issue_number: int, *, add: list[str], remove: list[str]) -> None:
+                self._issue_labels(issue_number).update(add)
+                self._log("edit_labels", issue_number, tuple(add), tuple(remove))
+
+        stage = PlanReviewStage()
+        github = PartialLabelGitHub(labels=[STATE_PLAN_NO_GO])
+        ctx = make_ctx(github=github)
+        ctx.config.enable_learn = False
+        item = make_work_item(issue=203, state="EVAL")
+        item.payload["review_verdict"] = _verdict("GO")
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.RETRY
+        assert github.labels[203] == {STATE_PLAN_GO, STATE_PLAN_NO_GO}
+
+    def test_inflight_go_cannot_clear_operator_blocked_latch(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A BLOCKED label added during review stops before audit or label writes."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub(labels=[STATE_PLAN_BLOCKED])
+        ctx = make_ctx(github=github)
+        ctx.config.enable_learn = False
+        item = make_work_item(issue=204, state="EVAL")
+        item.payload["review_verdict"] = _verdict("GO")
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.BLOCKED
+        assert github.labels[204] == {STATE_PLAN_BLOCKED}
+        assert github.mutation_log == []
+
+    @pytest.mark.parametrize(
+        ("verdict", "initial_label", "target_label"),
+        [
+            ("NOGO", STATE_PLAN_GO, STATE_PLAN_NO_GO),
+            ("BLOCKED", STATE_PLAN_NO_GO, STATE_PLAN_BLOCKED),
+        ],
+    )
+    def test_eval_rejects_partial_nogo_and_blocked_transitions(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        verdict: str,
+        initial_label: str,
+        target_label: str,
+    ) -> None:
+        """Every verdict branch requires target present and every sibling absent."""
+
+        class PartialLabelGitHub(FakeStageGitHub):
+            def edit_labels(self, issue_number: int, *, add: list[str], remove: list[str]) -> None:
+                self._issue_labels(issue_number).update(add)
+                self._log("edit_labels", issue_number, tuple(add), tuple(remove))
+
+        stage = PlanReviewStage()
+        github = PartialLabelGitHub(labels=[initial_label])
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=205, state="EVAL")
+        item.payload["review_verdict"] = _verdict(verdict)
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.RETRY
+        assert github.labels[205] == {initial_label, target_label}
 
     def test_eval_go_with_learn_continues_to_learn(
         self, make_ctx: Any, make_work_item: Any
@@ -461,7 +559,7 @@ class TestPlanReviewStageStep:
             ("gh_issue_upsert_comment", (4, PLAN_REVIEW_CANONICAL_MARKER)),
             (
                 "edit_labels",
-                (4, (STATE_PLAN_NO_GO,), (STATE_PLAN_GO, "state:plan-blocked", STATE_NEEDS_PLAN)),
+                (4, (STATE_PLAN_NO_GO,), (STATE_PLAN_GO, STATE_NEEDS_PLAN)),
             ),
         ]
         assert item.payload["review_round"] == 1  # round counted in EVAL
@@ -513,7 +611,7 @@ class TestPlanReviewStageStep:
             ("gh_issue_upsert_comment", (5, PLAN_REVIEW_CANONICAL_MARKER)),
             (
                 "edit_labels",
-                (5, (STATE_PLAN_NO_GO,), (STATE_PLAN_GO, "state:plan-blocked", STATE_NEEDS_PLAN)),
+                (5, (STATE_PLAN_NO_GO,), (STATE_PLAN_GO, STATE_NEEDS_PLAN)),
             ),
         ]
 
@@ -631,15 +729,44 @@ class TestPlanReviewStageStep:
         assert result.job.prompt_kwargs == {"context": "# My Plan\n..."}
 
     def test_finish_advances(self, make_ctx: Any, make_work_item: Any) -> None:
-        """PLAN_FINISH advances to the next stage."""
+        """PLAN_FINISH advances only while the live GO label remains exclusive."""
         stage = PlanReviewStage()
-        ctx = make_ctx()
+        ctx = make_ctx(github=FakeStageGitHub(labels=[STATE_PLAN_GO]))
         item = make_work_item(issue=12, state=PLAN_FINISH)
 
         result = stage.step(item, ctx)
 
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.ADVANCE
+
+    def test_finish_stops_if_operator_blocks_during_learn(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A BLOCKED label applied after GO prevents the final stage transition."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub(labels=[STATE_PLAN_BLOCKED])
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=120, state=PLAN_FINISH)
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.BLOCKED
+        assert github.labels[120] == {STATE_PLAN_BLOCKED}
+
+    def test_finish_cannot_advance_without_exclusive_live_go(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Cached or historical GO is insufficient after the learn job."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub(labels=[STATE_PLAN_GO, STATE_PLAN_NO_GO])
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=121, state=PLAN_FINISH)
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.RETRY
 
     def test_unknown_state_fails(self, make_ctx: Any, make_work_item: Any) -> None:
         """An unknown state finishes failed instead of looping silently."""
@@ -753,7 +880,7 @@ class TestPlanReviewStageOnJobDone:
             ("gh_issue_upsert_comment", (2, PLAN_REVIEW_CANONICAL_MARKER)),
             (
                 "edit_labels",
-                (2, (STATE_NEEDS_PLAN,), (STATE_PLAN_NO_GO, STATE_PLAN_GO, "state:plan-blocked")),
+                (2, (STATE_NEEDS_PLAN,), (STATE_PLAN_NO_GO, STATE_PLAN_GO)),
             ),
         ]
 
@@ -785,6 +912,55 @@ class TestPlanReviewStageOnJobDone:
         assert comments[3].startswith("<!-- hephaestus-plan-history:revision=1:kind=review -->")
         assert "review text (NOGO)" in comments[3]
 
+    def test_revised_plan_waits_for_exclusive_needs_plan_confirmation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A partial amendment transition cannot launch the next reviewer job."""
+
+        class PartialLabelGitHub(FakeStageGitHub):
+            def edit_labels(self, issue_number: int, *, add: list[str], remove: list[str]) -> None:
+                self._issue_labels(issue_number).update(add)
+                self._log("edit_labels", issue_number, tuple(add), tuple(remove))
+
+        stage = PlanReviewStage()
+        github = PartialLabelGitHub(labels=[STATE_PLAN_NO_GO])
+        github.comments[206] = [
+            render_current_plan("Plan v1", revision=1),
+            render_current_review("Missing rollback.", revision=1),
+        ]
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=206, state="AMEND_WAIT")
+
+        stage.on_job_done(item, JobResult(ok=True, value="Plan v2 with rollback"), ctx)
+        item.state = "REVIEW_WAIT"
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.RETRY
+        assert github.labels[206] == {STATE_NEEDS_PLAN, STATE_PLAN_NO_GO}
+
+    def test_operator_blocked_latch_stops_after_amendment_job(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A BLOCKED label arriving after amendment publication is never removed."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub(labels=[STATE_PLAN_NO_GO])
+        github.comments[207] = [
+            render_current_plan("Plan v1", revision=1),
+            render_current_review("Missing rollback.", revision=1),
+        ]
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=207, state="AMEND_WAIT")
+
+        stage.on_job_done(item, JobResult(ok=True, value="Plan v2 with rollback"), ctx)
+        github.labels[207].add(STATE_PLAN_BLOCKED)
+        item.state = "REVIEW_WAIT"
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.BLOCKED
+        assert STATE_PLAN_BLOCKED in github.labels[207]
+
     def test_unchanged_amendment_blocks_without_another_agent_job(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -800,6 +976,8 @@ class TestPlanReviewStageOnJobDone:
         stage.on_job_done(item, JobResult(ok=True, value="Plan 1"), ctx)
 
         assert "no_progress_reason" in item.payload
+        assert github.labels[4] == {"state:plan-blocked"}
+        assert github.comments[4][1].endswith("state:plan-blocked")
         assert len(github.comments[4]) == 2
         item.state = "REVIEW_WAIT"
         outcome = stage.step(item, ctx)
@@ -807,10 +985,26 @@ class TestPlanReviewStageOnJobDone:
         assert outcome.disposition == Disposition.BLOCKED
         assert github.comments[4][1].endswith("state:plan-blocked")
         assert github.mutation_log[-2][0] == "edit_labels"
-        assert github.mutation_log[-1] == (
-            "gh_issue_upsert_comment",
-            (4, PLAN_REVIEW_CANONICAL_MARKER),
-        )
+        assert github.mutation_log[-1][0] == "gh_issue_upsert_comment"
+
+    def test_empty_amendment_blocks_durably_in_job_callback(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An empty successful amendment cannot be discarded by a truthiness guard."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub(labels=[STATE_PLAN_NO_GO])
+        github.comments[401] = [
+            render_current_plan("Plan 1", revision=1),
+            render_current_review("Missing decision.", revision=1),
+        ]
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=401, state="AMEND_WAIT")
+
+        stage.on_job_done(item, JobResult(ok=True, value=""), ctx)
+
+        assert "empty" in item.payload["no_progress_reason"].lower()
+        assert github.labels[401] == {"state:plan-blocked"}
+        assert github.comments[401][1].endswith("state:plan-blocked")
 
     def test_next_review_receives_complete_durable_history(
         self, make_ctx: Any, make_work_item: Any
@@ -883,10 +1077,10 @@ class TestDurableWriteOrdering:
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.FAIL_BACK
 
-    def test_blocked_label_survives_review_comment_write_failure(
+    def test_blocked_comment_failure_leaves_blocked_latch_authoritative(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A crash after the BLOCKED label cannot restart autonomous planning."""
+        """A failed explanatory write cannot prevent the safety latch."""
 
         class FailingCommentGitHub(FakeStageGitHub):
             def upsert_issue_comment(self, *args: Any, **kwargs: Any) -> None:
@@ -894,6 +1088,7 @@ class TestDurableWriteOrdering:
 
         stage = PlanReviewStage()
         github = FailingCommentGitHub(labels=[STATE_NEEDS_PLAN])
+        github.gh_issue_json(13)
         ctx = make_ctx(github=github)
         item = make_work_item(issue=13, state="EVAL")
         item.payload["review_verdict"] = _verdict("BLOCKED")
@@ -901,13 +1096,48 @@ class TestDurableWriteOrdering:
         with pytest.raises(RuntimeError, match="comment write failed"):
             stage.step(item, ctx)
 
-        assert github.labels[13] == {"state:plan-blocked"}
+        assert github.labels[13] == {STATE_PLAN_BLOCKED}
         assert github.mutation_log == [
             (
                 "edit_labels",
-                (13, ("state:plan-blocked",), (STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO)),
+                (13, (STATE_PLAN_BLOCKED,), (STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO)),
             )
         ]
+
+    def test_restart_repairs_explanation_after_blocked_label_wins_crash_window(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Restart repairs the audit without clearing BLOCKED or running an agent."""
+
+        class FailOnceCommentGitHub(FakeStageGitHub):
+            fail_once = True
+
+            def upsert_issue_comment(self, *args: Any, **kwargs: Any) -> None:
+                if self.fail_once:
+                    self.fail_once = False
+                    raise RuntimeError("comment write failed")
+                super().upsert_issue_comment(*args, **kwargs)
+
+        stage = PlanReviewStage()
+        github = FailOnceCommentGitHub(labels=[STATE_NEEDS_PLAN])
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=130, state="EVAL")
+        item.payload["review_verdict"] = _verdict("BLOCKED")
+
+        with pytest.raises(RuntimeError, match="comment write failed"):
+            stage.step(item, ctx)
+        assert github.labels[130] == {STATE_PLAN_BLOCKED}
+
+        restarted = make_work_item(issue=130, state="ENTER")
+        outcome = stage.on_enter(restarted, ctx)
+
+        assert outcome == StageOutcome(
+            Disposition.BLOCKED,
+            "plan requires external intervention",
+        )
+        assert github.labels[130] == {STATE_PLAN_BLOCKED}
+        assert github.comments[130][0].endswith(STATE_PLAN_BLOCKED)
+        assert "interrupted audit write" in github.comments[130][0]
 
 
 class TestStaleVerdictAndErrorAccounting:
@@ -954,13 +1184,13 @@ class TestStaleVerdictAndErrorAccounting:
             ("gh_issue_upsert_comment", (30, PLAN_REVIEW_CANONICAL_MARKER)),
             (
                 "edit_labels",
-                (30, (STATE_PLAN_NO_GO,), (STATE_PLAN_GO, "state:plan-blocked", STATE_NEEDS_PLAN)),
+                (30, (STATE_PLAN_NO_GO,), (STATE_PLAN_GO, STATE_NEEDS_PLAN)),
             ),
             ("gh_issue_upsert_comment", (30, PLAN_CANONICAL_MARKER)),
             ("gh_issue_upsert_comment", (30, PLAN_REVIEW_CANONICAL_MARKER)),
             (
                 "edit_labels",
-                (30, (STATE_NEEDS_PLAN,), (STATE_PLAN_NO_GO, STATE_PLAN_GO, "state:plan-blocked")),
+                (30, (STATE_NEEDS_PLAN,), (STATE_PLAN_NO_GO, STATE_PLAN_GO)),
             ),
         ]  # NOGO and amended-plan states persist; ERROR adds no mutation
 
@@ -994,7 +1224,7 @@ class TestStaleVerdictAndErrorAccounting:
             ("gh_issue_upsert_comment", (31, PLAN_REVIEW_CANONICAL_MARKER)),
             (
                 "edit_labels",
-                (31, (STATE_PLAN_NO_GO,), (STATE_PLAN_GO, "state:plan-blocked", STATE_NEEDS_PLAN)),
+                (31, (STATE_PLAN_NO_GO,), (STATE_PLAN_GO, STATE_NEEDS_PLAN)),
             ),
         ]  # prior NOGO is durable; ERROR adds no mutation
 
@@ -1008,11 +1238,11 @@ class TestStaleVerdictAndErrorAccounting:
             ("gh_issue_upsert_comment", (31, PLAN_REVIEW_CANONICAL_MARKER)),
             (
                 "edit_labels",
-                (31, (STATE_PLAN_NO_GO,), (STATE_PLAN_GO, "state:plan-blocked", STATE_NEEDS_PLAN)),
+                (31, (STATE_PLAN_NO_GO,), (STATE_PLAN_GO, STATE_NEEDS_PLAN)),
             ),
             (
                 "edit_labels",
-                (31, (STATE_PLAN_NO_GO,), (STATE_PLAN_GO, "state:plan-blocked", STATE_NEEDS_PLAN)),
+                (31, (STATE_PLAN_NO_GO,), (STATE_PLAN_GO, STATE_NEEDS_PLAN)),
             ),
         ]
 
@@ -1171,7 +1401,7 @@ class TestAtomicLabelWrites:
             ("gh_issue_upsert_comment", (35, PLAN_REVIEW_CANONICAL_MARKER)),
             (
                 "edit_labels",
-                (35, (STATE_PLAN_NO_GO,), (STATE_PLAN_GO, "state:plan-blocked", STATE_NEEDS_PLAN)),
+                (35, (STATE_PLAN_NO_GO,), (STATE_PLAN_GO, STATE_NEEDS_PLAN)),
             ),
         ]
 
@@ -1264,7 +1494,7 @@ class TestReviewFlowWithFakePool:
             ("gh_issue_upsert_comment", (21, PLAN_REVIEW_CANONICAL_MARKER)),
             (
                 "edit_labels",
-                (21, (STATE_PLAN_NO_GO,), (STATE_PLAN_GO, "state:plan-blocked", STATE_NEEDS_PLAN)),
+                (21, (STATE_PLAN_NO_GO,), (STATE_PLAN_GO, STATE_NEEDS_PLAN)),
             ),
             (
                 "append_issue_comment",
@@ -1278,11 +1508,11 @@ class TestReviewFlowWithFakePool:
             ("gh_issue_upsert_comment", (21, PLAN_REVIEW_CANONICAL_MARKER)),
             (
                 "edit_labels",
-                (21, (STATE_NEEDS_PLAN,), (STATE_PLAN_NO_GO, STATE_PLAN_GO, "state:plan-blocked")),
+                (21, (STATE_NEEDS_PLAN,), (STATE_PLAN_NO_GO, STATE_PLAN_GO)),
             ),
             ("gh_issue_upsert_comment", (21, PLAN_REVIEW_CANONICAL_MARKER)),
             (
                 "edit_labels",
-                (21, (STATE_PLAN_GO,), (STATE_PLAN_NO_GO, "state:plan-blocked", STATE_NEEDS_PLAN)),
+                (21, (STATE_PLAN_GO,), (STATE_PLAN_NO_GO, STATE_NEEDS_PLAN)),
             ),
         ]

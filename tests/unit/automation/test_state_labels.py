@@ -24,6 +24,7 @@ from hephaestus.automation.state_labels import (
     apply_plan_verdict,
     has_label,
     is_epic,
+    is_exclusive_plan_state,
     is_implementation_go,
     is_plan_go,
     is_plan_no_go,
@@ -95,6 +96,7 @@ class TestLabelVocabulary:
     def test_is_implementation_go(self) -> None:
         assert is_implementation_go([STATE_IMPLEMENTATION_GO]) is True
         assert is_implementation_go([STATE_IMPLEMENTATION_NO_GO]) is False
+        assert is_implementation_go([STATE_IMPLEMENTATION_GO, STATE_IMPLEMENTATION_NO_GO]) is False
         assert is_implementation_go([]) is False
 
 
@@ -111,11 +113,34 @@ class TestHasLabel:
         assert has_label([], STATE_PLAN_GO) is False
 
 
+class TestExclusivePlanState:
+    """Transition confirmation requires one target and no plan-state sibling."""
+
+    def test_accepts_exact_target_with_unrelated_labels(self) -> None:
+        assert is_exclusive_plan_state([STATE_PLAN_GO, "bug"], STATE_PLAN_GO)
+
+    def test_rejects_missing_target(self) -> None:
+        assert not is_exclusive_plan_state(["bug"], STATE_PLAN_GO)
+
+    def test_rejects_target_with_stale_sibling(self) -> None:
+        assert not is_exclusive_plan_state(
+            [STATE_PLAN_GO, STATE_PLAN_NO_GO],
+            STATE_PLAN_GO,
+        )
+
+    def test_rejects_unknown_expected_state(self) -> None:
+        with pytest.raises(ValueError, match="unsupported plan state"):
+            is_exclusive_plan_state(["state:unknown"], "state:unknown")
+
+
 class TestIsPlanGo:
     """``state:plan-go`` is the terminal-approved state."""
 
     def test_label_present_returns_true(self) -> None:
         assert is_plan_go([STATE_PLAN_GO, "bug"]) is True
+
+    def test_stale_sibling_prevents_authorization(self) -> None:
+        assert is_plan_go([STATE_PLAN_GO, STATE_PLAN_NO_GO]) is False
 
     def test_label_absent_returns_false(self) -> None:
         assert is_plan_go(["bug", "enhancement"]) is False
@@ -254,7 +279,6 @@ class TestApplyPlanVerdict:
         assert add == STATE_PLAN_GO
         assert set(remove) == {
             STATE_PLAN_NO_GO,
-            state_labels.STATE_PLAN_BLOCKED,
             STATE_NEEDS_PLAN,
         }
 
@@ -263,7 +287,6 @@ class TestApplyPlanVerdict:
         assert add == STATE_PLAN_NO_GO
         assert set(remove) == {
             STATE_PLAN_GO,
-            state_labels.STATE_PLAN_BLOCKED,
             STATE_NEEDS_PLAN,
         }
 

@@ -153,6 +153,10 @@ class StageGitHub(Protocol):
         """Return issue comments with ownership metadata in creation order."""
         pass
 
+    def ensure_blocked_audit(self, issue_number: int) -> None:
+        """Repair a missing canonical BLOCKED explanation without changing labels."""
+        pass
+
     def add_labels(self, issue_number: int, labels: list[str]) -> None:
         """Durably add labels (coordinator maps to ``gh_issue_add_labels``)."""
         ...
@@ -516,6 +520,22 @@ def _issue_labels(item: WorkItem, ctx: StageContext) -> list[str]:
     except Exception as e:  # transient gh failure: fall back to cache
         logger.warning("pipeline:%d: label refresh failed (using cache): %s", item.issue, e)
         return list(item.labels_cache)
+    raw = data.get("labels", []) if isinstance(data, dict) else []
+    labels = [entry["name"] if isinstance(entry, dict) else str(entry) for entry in raw]
+    item.labels_cache = dict.fromkeys(labels, True)
+    return labels
+
+
+def _require_issue_labels(item: WorkItem, ctx: StageContext) -> list[str]:
+    """Return a fresh label read or propagate failure for authoritative gates.
+
+    Cached labels are useful diagnostic context but cannot authorize a stage
+    transition. Planning, plan-review, and implementation gates use this strict
+    variant so a stale cache can never advance work after a GitHub read failure.
+    """
+    if item.issue is None:
+        return []
+    data = ctx.github.gh_issue_json(item.issue)
     raw = data.get("labels", []) if isinstance(data, dict) else []
     labels = [entry["name"] if isinstance(entry, dict) else str(entry) for entry in raw]
     item.labels_cache = dict.fromkeys(labels, True)

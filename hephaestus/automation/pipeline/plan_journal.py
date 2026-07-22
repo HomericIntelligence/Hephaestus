@@ -21,13 +21,14 @@ from hephaestus.automation.review_journal import (
     archive_review_body,
     archived_new_plan,
     archived_old_plan,
+    is_pending_review,
     journal_snapshot,
     normalized_plan,
     plan_fingerprint,
     render_current_plan,
     render_pending_review,
-    review_state,
 )
+from hephaestus.automation.state_labels import STATE_PLAN_NO_GO, is_exclusive_plan_state
 
 
 class PlanJournalGitHub(Protocol):
@@ -35,6 +36,10 @@ class PlanJournalGitHub(Protocol):
 
     def issue_comments(self, issue_number: int) -> list[IssueComment]:
         """Return every issue comment in creation order."""
+        pass
+
+    def gh_issue_json(self, issue_number: int) -> dict[str, object]:
+        """Return live issue metadata including the authoritative labels."""
         pass
 
     def append_issue_comment(self, issue_number: int, marker: str, body: str) -> None:
@@ -68,6 +73,26 @@ def _upsert_pending_review(
         render_pending_review(revision=revision),
         legacy_marker=PLAN_REVIEW_PREFIX,
     )
+
+
+def _confirm_publication(
+    issue_number: int,
+    expected_plan: str,
+    expected_revision: int,
+    github: PlanJournalGitHub,
+) -> None:
+    """Fail closed when a concurrent writer replaced the just-published pointer."""
+    snapshot = journal_snapshot(github.issue_comments(issue_number))
+    if (
+        snapshot.revision != expected_revision
+        or plan_fingerprint(snapshot.current_plan) != plan_fingerprint(expected_plan)
+        or snapshot.current_review_revision != expected_revision
+        or not is_pending_review(snapshot.current_review, revision=expected_revision)
+    ):
+        raise RuntimeError(
+            f"concurrent plan journal write detected for revision {expected_revision}; "
+            "manual recovery is required"
+        )
 
 
 @dataclass(frozen=True)
@@ -188,8 +213,8 @@ def publish_plan_revision(
             changed=False,
             no_progress_reason=(
                 "The proposed plan is empty; another automated planning iteration would not "
-                "make progress. Comment with the missing decision, requirement, or dependency "
-                "status to resume."
+                "make progress. An external actor must resolve the missing decision, "
+                "requirement, or dependency and replace the blocked label to resume."
             ),
         )
 
@@ -207,8 +232,8 @@ def publish_plan_revision(
             no_progress_reason=(
                 "The proposed plan is identical to the current plan "
                 f"(fingerprint {candidate_fingerprint}); another automated planning iteration "
-                "would repeat. Comment with the missing decision, requirement, or dependency "
-                "status to resume."
+                "would repeat. An external actor must resolve the missing decision, "
+                "requirement, or dependency and replace the blocked label to resume."
             ),
         )
 
@@ -220,8 +245,8 @@ def publish_plan_revision(
             no_progress_reason=(
                 "The proposed plan repeats a previous plan "
                 f"(fingerprint {candidate_fingerprint}); another automated planning iteration "
-                "would oscillate. Comment with the missing decision, requirement, or dependency "
-                "status to resume."
+                "would oscillate. An external actor must resolve the missing decision, "
+                "requirement, or dependency and replace the blocked label to resume."
             ),
         )
 
@@ -231,20 +256,31 @@ def publish_plan_revision(
             render_current_plan(candidate_plan, revision=snapshot.revision),
         )
         _upsert_pending_review(issue_number, snapshot.revision, github)
+        _confirm_publication(
+            issue_number,
+            candidate_plan,
+            snapshot.revision,
+            github,
+        )
         return PlanPublication(
             revision=snapshot.revision,
             plan=candidate_plan,
             changed=True,
         )
 
-    current_review_state = review_state(snapshot.current_review)
-    if snapshot.current_review_revision != snapshot.revision or current_review_state not in {
-        "state:plan-no-go",
-        "state:plan-blocked",
-    }:
+    issue_data = github.gh_issue_json(issue_number)
+    raw_labels = issue_data.get("labels", [])
+    if not isinstance(raw_labels, list):
+        raw_labels = []
+    labels = {
+        str(label.get("name")) if isinstance(label, dict) else str(label)
+        for label in raw_labels
+        if isinstance(label, (dict, str))
+    }
+    if not is_exclusive_plan_state(labels, STATE_PLAN_NO_GO):
         raise RuntimeError(
-            f"cannot supersede plan revision {snapshot.revision} without its canonical "
-            "NOGO or BLOCKED review"
+            f"cannot supersede plan revision {snapshot.revision} without an authoritative "
+            f"exclusive {STATE_PLAN_NO_GO} label"
         )
 
     plan_marker = HISTORY_MARKER.format(revision=snapshot.revision, kind="plan")
@@ -265,4 +301,5 @@ def publish_plan_revision(
         render_current_plan(candidate_plan, revision=next_revision),
     )
     _upsert_pending_review(issue_number, next_revision, github)
+    _confirm_publication(issue_number, candidate_plan, next_revision, github)
     return PlanPublication(revision=next_revision, plan=candidate_plan, changed=True)

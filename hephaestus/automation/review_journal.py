@@ -35,7 +35,6 @@ PLAN_REVIEW_STATES: Final[frozenset[str]] = frozenset(
 
 MAX_AGENT_HISTORY_CHARS: Final[int] = 48_000
 MAX_REVIEW_SUMMARY_CHARS: Final[int] = 800
-MAX_FEEDBACK_CHARS: Final[int] = 8_000
 
 _OLD_PLAN_PAYLOAD = "<!-- hephaestus-plan-history:old-plan -->"
 _NEW_PLAN_PAYLOAD = "<!-- hephaestus-plan-history:new-plan -->"
@@ -55,6 +54,7 @@ class IssueComment:
     author_login: str = ""
     author_association: str = ""
     created_at: str = ""
+    updated_at: str = ""
     viewer_did_author: bool = False
     database_id: int | None = None
     url: str = ""
@@ -184,6 +184,31 @@ def render_pending_review(*, revision: int) -> str:
     )
 
 
+def blocked_audit_recovery_body(
+    comments: Sequence[IssueComment | str],
+) -> str | None:
+    """Return an actionable repair body when BLOCKED lacks a current explanation.
+
+    The label remains the sole state authority. This helper only repairs the
+    audit half of an interrupted label-first BLOCKED transaction and never
+    infers eligibility or removes the latch.
+    """
+    snapshot = journal_snapshot(comments)
+    if (
+        snapshot.current_review_revision == snapshot.revision
+        and parse_plan_review_state(snapshot.current_review) == "state:plan-blocked"
+    ):
+        return None
+    return render_current_review(
+        "Automation confirmed `state:plan-blocked`, but an interrupted audit write "
+        "left the original detailed explanation unavailable. An external operator "
+        "must inspect the issue or automation logs, document and resolve the missing "
+        "decision or dependency, then replace the blocked label with exactly one next "
+        "plan-state label.\n\nstate:plan-blocked",
+        revision=snapshot.revision,
+    )
+
+
 def is_pending_review(review: str, *, revision: int) -> bool:
     """Return whether canonical review content is the exact pending sentinel."""
     return extract_current_review(review) == (
@@ -279,6 +304,11 @@ def archived_old_plan(body: str) -> str:
     if not marker:
         return ""
     old_plan, _new_marker, _new_plan = payload.partition(_NEW_PLAN_PAYLOAD)
+    old_plan = re.sub(
+        r"\n\n### Recovery Payload for Plan \d+\s*$",
+        "",
+        old_plan,
+    )
     return old_plan.strip()
 
 
@@ -290,16 +320,25 @@ def journal_snapshot(comments: Sequence[IssueComment | str]) -> JournalSnapshot:
     """Reconstruct the current plan/review and ordered immutable history."""
     owned = _owned_comments(comments)
     history: list[HistoryArtifact] = []
+    history_bodies: dict[tuple[int, str], str] = {}
     current_plan_body = ""
     current_review_body = ""
     for comment in owned:
         body = comment.body.lstrip()
         match = HISTORY_RE.match(body)
         if match:
+            identity = (int(match.group("revision")), match.group("kind"))
+            prior_body = history_bodies.get(identity)
+            if prior_body is not None and prior_body != body:
+                raise RuntimeError(
+                    "conflicting immutable plan journal artifacts for "
+                    f"revision {identity[0]} {identity[1]}; manual recovery is required"
+                )
+            history_bodies[identity] = body
             history.append(
                 HistoryArtifact(
-                    revision=int(match.group("revision")),
-                    kind=match.group("kind"),
+                    revision=identity[0],
+                    kind=identity[1],
                     body=body,
                 )
             )
@@ -340,8 +379,10 @@ def _review_reason(review: str) -> str:
     return f"{text[:MAX_REVIEW_SUMMARY_CHARS].rstrip()}…"
 
 
-def _history_index(snapshot: JournalSnapshot) -> str:
-    """Render a compact index for superseded artifacts and the current revision."""
+def _history_index(snapshot: JournalSnapshot, *, max_chars: int) -> str:
+    """Render a compact, bounded index for superseded and current revisions."""
+    if max_chars <= 0:
+        return ""
     lines = ["## Ordered revision index"]
     by_revision: dict[int, dict[str, HistoryArtifact]] = {}
     for artifact in snapshot.history:
@@ -350,13 +391,14 @@ def _history_index(snapshot: JournalSnapshot) -> str:
         pair = by_revision[revision]
         plan = pair.get("plan")
         review = pair.get("review")
-        new_plan = archived_new_plan(plan.body) if plan else ""
+        old_plan = archived_old_plan(plan.body) if plan else ""
         review_payload = extract_current_review(review.body) if review else ""
-        next_fingerprint = plan_fingerprint(new_plan) if new_plan else "missing"
+        fingerprint = plan_fingerprint(old_plan) if old_plan else "missing"
         review_reason = _review_reason(review_payload) or "none"
         lines.append(
-            f"- Revision {revision}: plan_sha={next_fingerprint}; "
-            f"review={review_state(review_payload)}; reason={review_reason}"
+            f"- Revision {revision}: plan_sha={fingerprint}; "
+            f"review={review_state(review_payload)}; "
+            f"reason={_bounded_excerpt(review_reason, 120)}"
         )
     if snapshot.current_plan:
         current_review = (
@@ -371,7 +413,7 @@ def _history_index(snapshot: JournalSnapshot) -> str:
             f"plan_sha={plan_fingerprint(snapshot.current_plan)}; "
             f"review={review_state(current_review)}; reason={current_reason}"
         )
-    return "\n".join(lines)
+    return _bounded_excerpt("\n".join(lines), max_chars)
 
 
 def _bounded_excerpt(text: str, max_chars: int) -> str:
@@ -393,6 +435,8 @@ def history_projection(
     comments: Sequence[IssueComment | str], *, max_chars: int = MAX_AGENT_HISTORY_CHARS
 ) -> str:
     """Return chronological agent context while keeping the complete GitHub journal intact."""
+    if max_chars <= 0:
+        return ""
     snapshot = journal_snapshot(comments)
     full_parts = [artifact.body for artifact in snapshot.history]
     if snapshot.current_plan:
@@ -428,13 +472,16 @@ def history_projection(
                 render_current_review(snapshot.current_review, revision=snapshot.revision),
             )
         )
-    index = _history_index(snapshot)
-    prefix = f"{_TRUNCATION_NOTICE}\n\n{index}"
+    if max_chars <= len(_TRUNCATION_NOTICE):
+        return _bounded_excerpt(_TRUNCATION_NOTICE, max_chars)
+    index_budget = max_chars // 2
+    index = _history_index(snapshot, max_chars=index_budget)
+    prefix = f"{_TRUNCATION_NOTICE}\n\n{index}" if index else _TRUNCATION_NOTICE
     separator = "\n\n---\n\n"
     headings_size = sum(len(separator) + len(heading) + 2 for heading, _ in current_parts)
     available = max_chars - len(prefix) - headings_size
     if available < 0:
-        raise ValueError("history metadata exceeds the configured agent-history budget")
+        return _bounded_excerpt(prefix, max_chars)
 
     rendered = prefix
     remaining = available
@@ -445,42 +492,3 @@ def history_projection(
         rendered += f"{separator}{heading}\n\n{excerpt}"
         remaining -= len(excerpt)
     return rendered
-
-
-def trusted_feedback_after_block(
-    comments: Sequence[IssueComment | str],
-) -> tuple[IssueComment, ...]:
-    """Return trusted maintainer feedback after the newest BLOCKED canonical review."""
-    structured = [as_issue_comment(comment) for comment in comments]
-    blocked_index: int | None = None
-    for index, comment in enumerate(structured):
-        if (
-            comment.viewer_did_author
-            and is_plan_review_comment(comment.body)
-            and review_state(extract_current_review(comment.body)) == "state:plan-blocked"
-        ):
-            blocked_index = index
-    if blocked_index is None:
-        return ()
-    return tuple(
-        comment
-        for comment in structured[blocked_index + 1 :]
-        if comment.is_trusted_human and not is_journal_comment(comment.body)
-    )
-
-
-def feedback_projection(comments: Sequence[IssueComment | str]) -> str:
-    """Return bounded chronological journal context plus qualifying human feedback."""
-    feedback = trusted_feedback_after_block(comments)
-    if not feedback:
-        return ""
-    feedback_text = "\n\n---\n\n".join(comment.body for comment in feedback)
-    truncated = len(feedback_text) > MAX_FEEDBACK_CHARS
-    if truncated:
-        feedback_text = feedback_text[-MAX_FEEDBACK_CHARS:]
-    heading = "## Trusted human feedback (truncated)" if truncated else "## Trusted human feedback"
-    suffix = f"{heading}\n\n{feedback_text}"
-    separator = "\n\n---\n\n"
-    base_budget = max(0, MAX_AGENT_HISTORY_CHARS - len(separator) - len(suffix))
-    base = history_projection(comments, max_chars=base_budget)
-    return f"{base}{separator if base else ''}{suffix}"

@@ -14,21 +14,23 @@ State machine
     [issue opened]
         │
         ▼
-    state:needs-plan ──(planner+reviewer run)──▶ state:plan-no-go ─┐
-            │                         └────────▶ state:plan-blocked
-            │                                      (external input required)
-                                                     ▲             │
-                                                     │             │ (next iteration GO)
-                                                     └────(NOGO)───┘
-                                                                   │
-                                                                   ▼
+    state:needs-plan ──(planner+reviewer run)──▶ state:plan-no-go ──┐
+            │                         └────────▶ state:plan-blocked │
+            │                                   (automation hold; │
+            │                                    external actor   │
+            │                                    must replace it) │
+            │                                                      │
+            └──────────────────────────────────────────────────────▼
                                                             state:plan-go
                                                             (terminal — implementer trusts
                                                              this exclusively; never
                                                              re-plans or re-reviews)
 
-At most one of the four labels should be present on an issue at any time;
-each state transition removes every sibling as it sets its own.
+At most one of the four labels should be present on an issue at any time.
+Automation removes ordinary siblings while changing state, but it never
+removes ``state:plan-blocked``. If that operator-owned latch appears during a
+concurrent transition, exclusive-state confirmation fails and automation
+stops until an external actor resolves the block and replaces the label.
 """
 
 from __future__ import annotations
@@ -119,7 +121,10 @@ STATE_LABEL_SPECS: dict[str, dict[str, str]] = {
     },
     STATE_PLAN_BLOCKED: {
         "color": "5319e7",
-        "description": "Planning requires human feedback or an external dependency.",
+        "description": (
+            "Automation is stopped; an external actor must resolve the block "
+            "and replace this label."
+        ),
     },
     STATE_IMPLEMENTATION_NO_GO: {
         "color": "d93f0b",  # red — blocked
@@ -147,13 +152,26 @@ def has_label(labels: Iterable[str], target: str) -> bool:
     return target in set(labels)
 
 
+def is_exclusive_plan_state(labels: Iterable[str], expected: str) -> bool:
+    """Return whether *expected* is the issue's one active plan-state label.
+
+    Transition confirmation must validate both halves of an atomic label
+    mutation: the target is present and every mutually-exclusive sibling is
+    absent. Unrelated labels do not affect the result.
+    """
+    if expected not in ALL_STATE_LABELS:
+        raise ValueError(f"unsupported plan state: {expected}")
+    active = set(labels).intersection(ALL_STATE_LABELS)
+    return active == {expected}
+
+
 def is_plan_go(labels: Iterable[str]) -> bool:
-    """Return ``True`` iff the issue is in the terminal ``state:plan-go`` state.
+    """Return ``True`` iff GO is the issue's sole plan-state label.
 
     This is the gate the implementer trusts: once GO, no further planning or
     review iterations are performed.
     """
-    return has_label(labels, STATE_PLAN_GO)
+    return is_exclusive_plan_state(labels, STATE_PLAN_GO)
 
 
 def is_plan_no_go(labels: Iterable[str]) -> bool:
@@ -167,8 +185,9 @@ def is_plan_no_go(labels: Iterable[str]) -> bool:
 
 
 def is_implementation_go(labels: Iterable[str]) -> bool:
-    """Return ``True`` iff a PR carries the implementation-review GO label."""
-    return has_label(labels, STATE_IMPLEMENTATION_GO)
+    """Return ``True`` iff GO is the PR's sole implementation-state label."""
+    active = set(labels).intersection(ALL_IMPLEMENTATION_STATE_LABELS)
+    return active == {STATE_IMPLEMENTATION_GO}
 
 
 def is_skipped(labels: Iterable[str]) -> bool:
@@ -278,7 +297,8 @@ def apply_plan_verdict(*, is_go: bool) -> tuple[str, list[str]]:
     GitHub writes and any logging. Shared (#1814) so the plan_review stage and
     seeding compute the transition identically.
 
-    GO and NOGO each add their verdict label and remove every sibling plan-state label.
+    GO and NOGO add their verdict label and remove ordinary sibling states.
+    They deliberately never remove BLOCKED, which is an external-actor latch.
 
     Args:
         is_go: ``True`` when the reviewer's verdict is GO; ``False`` for NOGO.
@@ -293,10 +313,10 @@ def apply_plan_verdict(*, is_go: bool) -> tuple[str, list[str]]:
 
 
 def apply_plan_state(state_label: str) -> tuple[str, list[str]]:
-    """Compute one mutually-exclusive transition for a plan-state decision."""
+    """Compute a plan-state write that never clears an existing BLOCKED latch."""
     removals = {
-        STATE_PLAN_GO: [STATE_PLAN_NO_GO, STATE_PLAN_BLOCKED, STATE_NEEDS_PLAN],
-        STATE_PLAN_NO_GO: [STATE_PLAN_GO, STATE_PLAN_BLOCKED, STATE_NEEDS_PLAN],
+        STATE_PLAN_GO: [STATE_PLAN_NO_GO, STATE_NEEDS_PLAN],
+        STATE_PLAN_NO_GO: [STATE_PLAN_GO, STATE_NEEDS_PLAN],
         STATE_PLAN_BLOCKED: [STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO],
     }
     try:
@@ -319,11 +339,13 @@ def enter_planning_transition() -> tuple[list[str], list[str]]:
 
     Restores the documented state-machine edge
     ``state:plan-no-go ──re-plan──▶ needs-plan`` (module docstring lifecycle
-    diagram): add ``state:needs-plan`` and remove NO-GO, GO, and BLOCKED.
+    diagram): add ``state:needs-plan`` and remove NO-GO and GO. BLOCKED is
+    never removed by automation; if it appears in flight, exclusive label
+    confirmation fails until an external actor replaces it.
 
     Returns:
         A tuple (labels_to_add, labels_to_remove): ``[STATE_NEEDS_PLAN]`` and
         the two sibling labels to clear.
 
     """
-    return [STATE_NEEDS_PLAN], [STATE_PLAN_NO_GO, STATE_PLAN_GO, STATE_PLAN_BLOCKED]
+    return [STATE_NEEDS_PLAN], [STATE_PLAN_NO_GO, STATE_PLAN_GO]

@@ -16,8 +16,8 @@ Entry routing (the binding contract is the classification table in
 - Open PR, no impl-GO → pr_review (existing-PR path)
 - No PR, at-or-past ``state:plan-go`` → implementation
 - No PR, ``state:plan-no-go`` → planning (amend path)
-- No PR, ``state:plan-blocked`` → excluded until a trusted maintainer comment
-  appears after the blocked review, then planning (feedback path)
+- No PR, ``state:plan-blocked`` → excluded until an external operator resolves
+  the block and replaces the label with exactly one eligible plan state
 - ``state:needs-plan`` / no state label → planning
 
 Write-path boundary (epic tagging)
@@ -39,14 +39,11 @@ from typing import Any, Literal
 
 from hephaestus.automation._review_utils import find_merged_pr_for_issue, find_pr_for_issue
 from hephaestus.automation.github_api import (
-    fetch_issue_comments_metadata,
     fetch_issue_info,
-    gh_current_login,
     gh_pr_label_names,
     gh_pr_state,
 )
 from hephaestus.automation.pipeline.routing import StageName
-from hephaestus.automation.review_journal import IssueComment, trusted_feedback_after_block
 from hephaestus.automation.state_labels import (
     STATE_IMPLEMENTATION_GO,
     STATE_IMPLEMENTATION_NO_GO,
@@ -117,7 +114,6 @@ class IssueFacts:
     pr_has_implementation_go: bool = False
     pr_has_implementation_no_go: bool = False
     body: str = ""
-    blocked_feedback_received: bool = False
 
 
 @dataclass(frozen=True)
@@ -170,17 +166,15 @@ class SeedEntry:
 def _get_state_label(labels: set[str]) -> str | None:
     """Extract the single active known ``state:*`` label, or None when absent.
 
-    Contradictory combinations (multiple known ``state:*`` labels) resolve
-    deterministically to the HIGHEST-rank (latest-stage) label and emit a
-    warning. Unknown ``state:*`` labels are ignored after warning because they
-    have no rank in the automation state machine.
+    Contradictory combinations are rejected by :func:`classify_issue` before
+    this helper is called. Unknown ``state:*`` labels are ignored after warning
+    because they have no rank in the automation state machine.
 
     Args:
         labels: Set of label names on an issue.
 
     Returns:
-        The known state label; the highest-rank one when contradictory; None
-        only when no known ``state:*`` label is present.
+        The known state label, or None when no known label is present.
 
     """
     state_labels = sorted(lbl for lbl in labels if lbl.startswith("state:"))
@@ -196,12 +190,7 @@ def _get_state_label(labels: set[str]) -> str | None:
         return None
 
     if len(known_state_labels) > 1:
-        LOG.warning(
-            "Issue has contradictory state labels: %s (using highest rank)",
-            known_state_labels,
-        )
-        # Return the highest-rank (latest-stage) label when contradictory.
-        return max(known_state_labels, key=_LABEL_RANK.__getitem__)
+        raise ValueError(f"contradictory state labels: {known_state_labels}")
     return known_state_labels[0]
 
 
@@ -258,17 +247,18 @@ def classify_issue(facts: IssueFacts) -> Classification:
         LOG.info("issue excluded: %s", reason)
         return None, reason
     if STATE_PLAN_BLOCKED in facts.labels:
-        if facts.blocked_feedback_received:
-            return (
-                StageName.PLANNING,
-                f"#{facts.number} {STATE_PLAN_BLOCKED} with new maintainer feedback",
-            )
-        reason = f"#{facts.number} tagged {STATE_PLAN_BLOCKED} awaiting external input"
+        reason = f"#{facts.number} tagged {STATE_PLAN_BLOCKED} awaiting external intervention"
         LOG.info("issue excluded: %s", reason)
         return None, reason
     if facts.is_epic:
         reason = f"#{facts.number} is an epic tracking issue"
         LOG.info("issue excluded: %s", reason)
+        return None, reason
+
+    active_states = sorted(label for label in facts.labels if label in _LABEL_RANK)
+    if len(active_states) > 1:
+        reason = f"#{facts.number} has contradictory state labels: {active_states}"
+        LOG.warning("issue excluded: %s", reason)
         return None, reason
 
     # Terminal state: merged PR
@@ -353,38 +343,6 @@ def seed_issue(issue_number: int) -> IssueFacts:
     """
     issue_info = fetch_issue_info(issue_number)
     labels = set(issue_info.labels)
-    blocked_feedback_received = False
-    if STATE_PLAN_BLOCKED in labels:
-        raw_comments = fetch_issue_comments_metadata(issue_number)
-        viewer_login = (gh_current_login() or "").lower()
-        comments = [
-            IssueComment(
-                body=str(comment.get("body", "")),
-                author_login=str(
-                    (comment.get("user") or comment.get("author") or {}).get("login") or ""
-                ),
-                author_association=str(
-                    comment.get("author_association") or comment.get("authorAssociation") or ""
-                ),
-                created_at=str(comment.get("created_at") or comment.get("createdAt") or ""),
-                viewer_did_author=(
-                    bool(comment.get("viewerDidAuthor"))
-                    or bool(comment.get("viewer_did_author"))
-                    or (
-                        bool(viewer_login)
-                        and str(
-                            (comment.get("user") or comment.get("author") or {}).get("login") or ""
-                        ).lower()
-                        == viewer_login
-                    )
-                ),
-                database_id=comment.get("databaseId"),
-                url=str(comment.get("html_url") or comment.get("url") or ""),
-            )
-            for comment in raw_comments
-        ]
-        blocked_feedback_received = bool(trusted_feedback_after_block(comments))
-
     # Epic detection: label (epic/roadmap) OR title marker, per #1669.
     epic = is_epic(issue_info.labels, issue_info.title)
 
@@ -416,7 +374,6 @@ def seed_issue(issue_number: int) -> IssueFacts:
         pr_is_merged=pr_is_merged,
         pr_has_implementation_go=pr_has_implementation_go,
         pr_has_implementation_no_go=pr_has_implementation_no_go,
-        blocked_feedback_received=blocked_feedback_received,
     )
 
 
@@ -457,12 +414,6 @@ def seed_issue_from_github(issue_number: int, github: Any) -> IssueFacts:
     title = str(issue_data.get("title") or "") if isinstance(issue_data, dict) else ""
     body = str(issue_data.get("body") or "") if isinstance(issue_data, dict) else ""
     epic = is_epic(sorted(labels), title)
-    blocked_feedback_received = False
-    if STATE_PLAN_BLOCKED in labels:
-        blocked_feedback_received = bool(
-            trusted_feedback_after_block(github.issue_comments(issue_number))
-        )
-
     pr_is_open = False
     pr_is_merged = False
     pr_has_implementation_go = False
@@ -489,7 +440,6 @@ def seed_issue_from_github(issue_number: int, github: Any) -> IssueFacts:
         pr_is_merged=pr_is_merged,
         pr_has_implementation_go=pr_has_implementation_go,
         pr_has_implementation_no_go=pr_has_implementation_no_go,
-        blocked_feedback_received=blocked_feedback_received,
     )
 
 

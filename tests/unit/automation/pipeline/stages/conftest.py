@@ -22,8 +22,13 @@ from hephaestus.automation.pipeline.stages import (
 )
 from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARGV
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
-from hephaestus.automation.protocol import PLAN_CANONICAL_MARKER, PLAN_COMMENT_MARKER
-from hephaestus.automation.review_journal import IssueComment
+from hephaestus.automation.protocol import (
+    PLAN_CANONICAL_MARKER,
+    PLAN_COMMENT_MARKER,
+    PLAN_REVIEW_CANONICAL_MARKER,
+    PLAN_REVIEW_PREFIX,
+)
+from hephaestus.automation.review_journal import IssueComment, blocked_audit_recovery_body
 from tests.unit.automation.pipeline.conftest import FakeGitHub
 
 
@@ -167,6 +172,17 @@ class FakeStageGitHub(FakeGitHub):
             )
             for comment in self.comments.get(issue_number, [])
         ]
+
+    def ensure_blocked_audit(self, issue_number: int) -> None:
+        """Mirror recovery of a missing actor-owned BLOCKED explanation."""
+        body = blocked_audit_recovery_body(self.issue_comments(issue_number))
+        if body is not None:
+            self.upsert_issue_comment(
+                issue_number,
+                PLAN_REVIEW_CANONICAL_MARKER,
+                body,
+                legacy_marker=PLAN_REVIEW_PREFIX,
+            )
 
     def get_pr_head_branch(self, pr_number: int) -> str | None:
         """Mirror _review_utils.get_pr_head_branch (canned answer)."""

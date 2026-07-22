@@ -15,7 +15,7 @@ from ..git_utils import get_repo_info, get_repo_root, issue_ref
 from ..github_api import _gh_call, gh_issue_json
 from ..protocol import PLAN_REVIEW_PREFIX as PLAN_REVIEW_PREFIX
 from ..review_journal import is_plan_review_comment
-from ..state_labels import is_plan_go as labels_are_plan_go
+from ..state_labels import STATE_PLAN_GO, is_exclusive_plan_state
 
 logger = logging.getLogger(__name__)
 
@@ -34,10 +34,9 @@ _STATE_RESULTS = {
 # Maximum length for verdict context preview in logs (e.g., first verdict line or content).
 _VERDICT_LOG_PREVIEW_CHARS = 200
 
-# Maximum number of passes an issue may go through where a plan-review comment
-# exists but its verdict cannot be parsed.  After this many unparseable-verdict
-# passes the caller should surface the issue for human attention rather than
-# requesting yet another review cycle.  See #615.
+# Legacy diagnostic threshold retained for compatibility and telemetry only.
+# It must never authorize or block a pipeline transition; live GitHub labels
+# are the sole durable state source.
 MAX_UNPARSEABLE_VERDICT_PASSES: int = 3
 
 
@@ -102,10 +101,8 @@ def count_unparseable_verdict_passes(comments: list[dict[str, Any]]) -> int:
     passes in which a reviewer posted a comment but :func:`parse_review_verdict`
     could not find a plan-state token.
 
-    A non-zero count indicates the reviewer is producing malformed output.
-    When the count reaches :data:`MAX_UNPARSEABLE_VERDICT_PASSES` the
-    pipeline should stop re-triggering reviews and surface the issue for human
-    attention (see :func:`exceeds_unparseable_verdict_cap`).
+    A non-zero count indicates malformed historical reviewer output. This is
+    diagnostic information only and must never drive pipeline routing.
 
     Args:
         comments: Chronological list of comment dicts (each with at least a
@@ -130,9 +127,8 @@ def exceeds_unparseable_verdict_cap(
 ) -> bool:
     """Return True when an issue has exceeded the unparseable-verdict retry cap.
 
-    Callers that would normally re-request a plan review should check this
-    first.  If it returns ``True``, the caller should skip the re-review and
-    surface the issue for human attention instead of looping indefinitely.
+    This compatibility helper is diagnostic only. Its result must never drive
+    pipeline routing; live GitHub labels are the sole durable state authority.
 
     Args:
         comments: Chronological list of comment dicts.  Same list used by
@@ -492,8 +488,8 @@ def is_plan_review_go(
             per-issue load) should pass them to avoid an extra round-trip.
 
     Returns:
-        ``True`` iff ``state:plan-go`` is present on the issue; otherwise
-        ``False``, including label-fetch failures.
+        ``True`` iff ``state:plan-go`` is the issue's only plan-state label;
+        otherwise ``False``, including contradictory labels and fetch failures.
 
     """
     del comments
@@ -510,7 +506,7 @@ def is_plan_review_go(
                 e,
             )
             return False
-    is_go = labels_are_plan_go(issue_labels)
+    is_go = is_exclusive_plan_state(issue_labels, STATE_PLAN_GO)
     logger.debug(
         "Issue %s: authoritative plan label is %s",
         issue_ref(issue_number),

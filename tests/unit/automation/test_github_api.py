@@ -25,6 +25,7 @@ from hephaestus.automation.github_api import (
     gh_issue_json,
     gh_issue_remove_labels,
     gh_issue_upsert_comment,
+    gh_issue_upsert_owned_comment,
     gh_list_labels,
     gh_list_open_issues,
     gh_pr_checks,
@@ -2610,23 +2611,61 @@ class TestFetchCompleteIssueCommentJournal:
     @patch("hephaestus.automation.github_api._gh_call")
     def test_flattens_rest_pages_and_normalizes_database_ids(self, mock_gh_call: Any) -> None:
         """Every REST page is retained in API creation order."""
-        mock_gh_call.return_value = Mock(
-            stdout=json.dumps(
-                [
-                    [{"id": 1, "body": "one"}],
-                    [{"id": 2, "body": "two"}],
-                ]
-            )
-        )
+        first_page = [{"id": index, "body": f"comment {index}"} for index in range(1, 101)]
+        mock_gh_call.side_effect = [
+            Mock(stdout=json.dumps(first_page)),
+            Mock(stdout=json.dumps([{"id": 101, "body": "comment 101"}])),
+        ]
 
         comments = _github_api_module.fetch_issue_comments_metadata(
             42,
             repo=("HomericIntelligence", "Hephaestus"),
         )
 
-        assert [comment["body"] for comment in comments] == ["one", "two"]
-        assert [comment["databaseId"] for comment in comments] == [1, 2]
-        assert "--paginate" in mock_gh_call.call_args[0][0]
+        assert [comment["databaseId"] for comment in comments] == list(range(1, 102))
+        urls = [call.args[0][1] for call in mock_gh_call.call_args_list]
+        assert urls == [
+            "/repos/HomericIntelligence/Hephaestus/issues/42/comments?per_page=100&page=1",
+            "/repos/HomericIntelligence/Hephaestus/issues/42/comments?per_page=100&page=2",
+        ]
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_comment_ingest_fails_bounded_when_manual_recovery_is_required(
+        self, mock_gh_call: Any
+    ) -> None:
+        """Public comment spam cannot force unbounded journal allocation."""
+        mock_gh_call.return_value = Mock(
+            stdout=json.dumps([{"id": 1, "body": "one"}, {"id": 2, "body": "two"}])
+        )
+
+        with (
+            patch(
+                "hephaestus.automation.github_api.issues.MAX_ISSUE_JOURNAL_COMMENTS",
+                1,
+            ),
+            pytest.raises(RuntimeError, match="manual recovery"),
+        ):
+            _github_api_module.fetch_issue_comments_metadata(
+                42,
+                repo=("HomericIntelligence", "Hephaestus"),
+            )
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_comment_ingest_has_a_body_byte_budget(self, mock_gh_call: Any) -> None:
+        """Few maximum-sized comments cannot bypass the allocation bound."""
+        mock_gh_call.return_value = Mock(stdout=json.dumps([{"id": 1, "body": "abcdef"}]))
+
+        with (
+            patch(
+                "hephaestus.automation.github_api.issues.MAX_ISSUE_JOURNAL_BODY_BYTES",
+                5,
+            ),
+            pytest.raises(RuntimeError, match=r"body bytes.*manual recovery"),
+        ):
+            _github_api_module.fetch_issue_comments_metadata(
+                42,
+                repo=("HomericIntelligence", "Hephaestus"),
+            )
 
     @patch("hephaestus.automation.github_api.get_repo_info", return_value=("o", "r"))
     @patch("hephaestus.automation.github_api._gh_call", side_effect=RuntimeError("offline"))
@@ -2650,6 +2689,189 @@ class TestUpsertAndDeleteComment:
         rv = gh_issue_upsert_comment(5, "# Implementation Plan", "# Implementation Plan\nbody")
         mock_create.assert_called_once_with(5, "# Implementation Plan\nbody", repo=None)
         assert rv is None  # fresh create: id not parsed
+
+    @patch("hephaestus.automation.github_api.gh_current_login", return_value="hephaestus-bot")
+    @patch("hephaestus.automation.github_api.fetch_issue_comments_metadata")
+    @patch("hephaestus.automation.github_api.gh_issue_comment")
+    def test_owned_upsert_ignores_foreign_marker_and_creates_shadow(
+        self, mock_create: Any, mock_fetch: Any, _mock_login: Any
+    ) -> None:
+        """Foreign marker text is never selected or allowed to deny service."""
+        marker = "<!-- hephaestus-plan-review:canonical -->"
+        body = f"{marker}\nowned review"
+        foreign = {
+            "databaseId": 9,
+            "body": f"{marker}\nforeign review",
+            "user": {"login": "someone-else"},
+        }
+        owned = {
+            "databaseId": 10,
+            "body": body,
+            "user": {"login": "hephaestus-bot"},
+        }
+        mock_fetch.side_effect = [[foreign], [foreign, owned]]
+
+        result = gh_issue_upsert_owned_comment(5, marker, body)
+
+        assert result == 10
+        mock_create.assert_called_once_with(5, body, repo=None)
+
+    @patch("hephaestus.automation.github_api.gh_current_login", return_value="hephaestus-bot")
+    @patch("hephaestus.automation.github_api.fetch_issue_comments_metadata")
+    @patch("hephaestus.automation.github_api.gh_issue_delete_comment")
+    @patch("hephaestus.automation.github_api.gh_issue_comment")
+    def test_owned_upsert_converges_concurrent_creates_in_explicit_repo(
+        self,
+        mock_create: Any,
+        mock_delete: Any,
+        mock_fetch: Any,
+        _mock_login: Any,
+    ) -> None:
+        """Post-create re-read keeps one actor-owned canonical in the target repo."""
+        repo = ("other-owner", "other-repo")
+        marker = "<!-- hephaestus-plan-review:canonical -->"
+        body = f"{marker}\nreview"
+        mock_fetch.side_effect = [
+            [],
+            [
+                {"databaseId": 10, "body": body, "user": {"login": "hephaestus-bot"}},
+                {"databaseId": 11, "body": body, "user": {"login": "hephaestus-bot"}},
+            ],
+        ]
+
+        result = gh_issue_upsert_owned_comment(5, marker, body, repo=repo)
+
+        assert result == 11
+        mock_create.assert_called_once_with(5, body, repo=repo)
+        mock_delete.assert_called_once_with(10, repo=repo, missing_ok=True)
+
+    def test_owned_upsert_barrier_race_converges_after_duplicate_delete_404(self) -> None:
+        """Two real upsert calls tolerate racing to delete the same duplicate."""
+        repo = ("other-owner", "other-repo")
+        marker = "<!-- hephaestus-plan-review:canonical -->"
+        body = f"{marker}\nreview"
+        initial_reads = threading.Barrier(2, timeout=5)
+        creates = threading.Barrier(2, timeout=5)
+        reconciliation_reads = threading.Barrier(2, timeout=5)
+        lock = threading.Lock()
+        comments: list[dict[str, Any]] = []
+        read_count: dict[int, int] = {}
+        errors: list[BaseException] = []
+
+        def fetch(_issue: int, _repo: tuple[str, str]) -> list[dict[str, Any]]:
+            thread_id = threading.get_ident()
+            with lock:
+                count = read_count.get(thread_id, 0)
+                read_count[thread_id] = count + 1
+            if count == 0:
+                initial_reads.wait()
+                return []
+            with lock:
+                snapshot = [dict(comment) for comment in comments]
+            reconciliation_reads.wait()
+            return snapshot
+
+        def create(_issue: int, payload: str, *, repo: tuple[str, str]) -> None:
+            with lock:
+                comments.append(
+                    {
+                        "databaseId": 10 + len(comments),
+                        "body": payload,
+                        "user": {"login": "hephaestus-bot"},
+                    }
+                )
+            creates.wait()
+
+        def gh_call(args: list[str], *_args: Any, **_kwargs: Any) -> Mock:
+            if "DELETE" in args:
+                comment_id = int(args[-1].rsplit("/", 1)[-1])
+                with lock:
+                    matching = [c for c in comments if c["databaseId"] == comment_id]
+                    if not matching:
+                        raise subprocess.CalledProcessError(
+                            1,
+                            args,
+                            stderr="gh: Not Found (HTTP 404)",
+                        )
+                    comments.remove(matching[0])
+            return Mock(stdout="")
+
+        def run() -> None:
+            try:
+                gh_issue_upsert_owned_comment(5, marker, body, repo=repo)
+            except BaseException as exc:
+                errors.append(exc)
+
+        with (
+            patch(
+                "hephaestus.automation.github_api.gh_current_login",
+                return_value="hephaestus-bot",
+            ),
+            patch(
+                "hephaestus.automation.github_api.fetch_issue_comments_metadata",
+                side_effect=fetch,
+            ),
+            patch("hephaestus.automation.github_api.gh_issue_comment", side_effect=create),
+            patch("hephaestus.automation.github_api._gh_call", side_effect=gh_call),
+        ):
+            threads = [threading.Thread(target=run) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=5)
+
+        assert all(not thread.is_alive() for thread in threads)
+        assert errors == []
+        assert [comment["body"] for comment in comments] == [body]
+
+    @patch("hephaestus.automation.github_api.fetch_issue_comments_metadata")
+    @patch("hephaestus.automation.github_api.gh_issue_comment")
+    def test_owned_upsert_propagates_journal_read_failure(
+        self, mock_create: Any, mock_fetch: Any
+    ) -> None:
+        """A failed strict read cannot be mistaken for an absent canonical comment."""
+        mock_fetch.side_effect = RuntimeError("complete comment journal unavailable")
+
+        with pytest.raises(RuntimeError, match="complete comment journal"):
+            gh_issue_upsert_owned_comment(
+                5,
+                "<!-- hephaestus-plan-review:canonical -->",
+                "<!-- hephaestus-plan-review:canonical -->\nreview",
+            )
+
+        mock_create.assert_not_called()
+
+    @patch("hephaestus.automation.github_api.gh_current_login", return_value="hephaestus-bot")
+    @patch("hephaestus.automation.github_api.fetch_issue_comments_metadata")
+    @patch("hephaestus.automation.github_api.gh_issue_comment")
+    def test_owned_upsert_finds_owned_canonical_beyond_first_hundred(
+        self, mock_create: Any, mock_fetch: Any, _mock_login: Any
+    ) -> None:
+        """Strict complete ingestion finds an older actor-owned canonical pointer."""
+        marker = "<!-- hephaestus-plan-review:canonical -->"
+        body = f"{marker}\nnew review"
+        mock_fetch.return_value = [
+            {
+                "databaseId": 1,
+                "body": f"{marker}\nold review",
+                "user": {"login": "hephaestus-bot"},
+            },
+            *[
+                {
+                    "databaseId": index + 2,
+                    "body": f"ordinary comment {index}",
+                    "user": {"login": "someone-else"},
+                }
+                for index in range(100)
+            ],
+        ]
+
+        with patch("hephaestus.automation.github_api._gh_call") as mock_gh_call:
+            result = gh_issue_upsert_owned_comment(5, marker, body)
+
+        assert result == 1
+        mock_create.assert_not_called()
+        assert any("PATCH" in str(call) for call in mock_gh_call.call_args_list)
 
     @patch("hephaestus.automation.github_api.get_repo_info", return_value=("o", "r"))
     @patch("hephaestus.automation.github_api._gh_call")

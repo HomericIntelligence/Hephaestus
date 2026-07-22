@@ -12,7 +12,6 @@ from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages.planning import (
     PlanningStage,
-    _normalize_plan_comment,
     build_plan_prompt,
 )
 from hephaestus.automation.prompts._shared import get_untrusted_notice
@@ -196,10 +195,10 @@ class TestPlanningStageEnter:
         assert STATE_NEEDS_PLAN in item.labels_cache
         assert "stale:label" not in item.labels_cache
 
-    def test_label_refresh_failure_falls_back_to_cache(
+    def test_label_refresh_failure_cannot_advance_from_cache(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A failing label read falls back to the cached labels."""
+        """Cached label text cannot authorize a stage transition."""
 
         class BrokenGitHub(FakeStageGitHub):
             def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
@@ -210,10 +209,8 @@ class TestPlanningStageEnter:
         ctx = make_ctx(github=github)
         item = make_work_item(issue=8, labels=[STATE_PLAN_GO])
 
-        outcome = stage.on_enter(item, ctx)
-
-        assert outcome is not None
-        assert outcome.disposition == Disposition.ADVANCE  # cached plan-go honored
+        with pytest.raises(RuntimeError, match="gh unavailable"):
+            stage.on_enter(item, ctx)
 
     def test_no_issue_number_fails(self, make_ctx: Any, make_work_item: Any) -> None:
         """A work item without an issue number finishes failed."""
@@ -244,32 +241,76 @@ class TestPlanningStageEnter:
         assert item.state == "VERIFY"  # ...straight to verification
         assert github.mutation_log == []  # no rewrites on re-entry
 
-    def test_human_feedback_after_blocked_review_resumes_planner_with_history(
+    def test_blocked_label_stops_planning_even_after_human_feedback(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
+        """Comments cannot clear an operator-owned BLOCKED hold."""
         stage = PlanningStage()
         github = FakeStageGitHub(labels=["state:plan-blocked"], has_plan=True)
         github.comments[14] = [
             f"{PLAN_COMMENT_MARKER}\n\nPlan awaiting a decision.",
-            "## 🔍 Plan Review\n\nNeed the API choice.\n\nstate:plan-blocked",
+            IssueComment(
+                body="## 🔍 Plan Review\n\nNeed the API choice.",
+                viewer_did_author=True,
+                created_at="2026-01-01T00:00:00Z",
+                updated_at="2026-01-01T00:10:00Z",
+            ),
             IssueComment(
                 body="Use the existing REST endpoint; do not add GraphQL.",
                 author_login="maintainer",
                 author_association="MEMBER",
+                created_at="2026-01-01T00:11:00Z",
             ),
         ]
         ctx = make_ctx(github=github)
         item = make_work_item(issue=14, state="ENTER")
 
-        assert stage.on_enter(item, ctx) is None
-        assert item.state == "ENTER"
-        assert "Use the existing REST endpoint" in item.payload["issue_history"]
+        outcome = stage.on_enter(item, ctx)
 
-        item.state = "PLAN_WAIT"
-        result = stage.step(item, ctx)
-        assert isinstance(result, JobRequest)
-        assert isinstance(result.job, AgentJob)
-        assert "Use the existing REST endpoint" in result.job.prompt_kwargs["issue_history"]
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.BLOCKED
+        assert "issue_history" not in item.payload
+        assert github.labels[14] == {STATE_PLAN_BLOCKED}
+        assert github.mutation_log == [
+            ("gh_issue_upsert_comment", (14, PLAN_REVIEW_CANONICAL_MARKER))
+        ]
+
+    def test_blocked_restart_never_completes_an_interrupted_label_swap(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Even a pending newer revision cannot make automation clear BLOCKED."""
+        stage = PlanningStage()
+        github = FakeStageGitHub(labels=[STATE_PLAN_BLOCKED], has_plan=True)
+        github.comments[141] = [
+            render_current_plan("Plan v2 using REST.", revision=2),
+            IssueComment(
+                body=render_current_review(
+                    "Review pending for implementation plan revision 2.",
+                    revision=2,
+                ),
+                viewer_did_author=True,
+                created_at="2026-01-01T00:00:00Z",
+                updated_at="2026-01-01T00:12:00Z",
+            ),
+            IssueComment(
+                body="Use REST.",
+                author_login="maintainer",
+                author_association="MEMBER",
+                created_at="2026-01-01T00:11:00Z",
+            ),
+        ]
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=141, state="ENTER")
+
+        outcome = stage.on_enter(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.BLOCKED
+        assert item.state == "ENTER"
+        assert github.labels[141] == {STATE_PLAN_BLOCKED}
+        assert github.mutation_log == [
+            ("gh_issue_upsert_comment", (141, PLAN_REVIEW_CANONICAL_MARKER))
+        ]
 
     def test_double_on_enter_is_idempotent(self, make_ctx: Any, make_work_item: Any) -> None:
         """A literal double on_enter produces no extra mutations or moves."""
@@ -518,7 +559,7 @@ class TestPlanningStageStep:
     def test_verify_with_plan_advances(self, make_ctx: Any, make_work_item: Any) -> None:
         """VERIFY with an existing plan comment advances without re-posting."""
         stage = PlanningStage()
-        github = FakeStageGitHub(has_plan=True)
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN], has_plan=True)
         ctx = make_ctx(github=github)
         item = make_work_item(issue=5, state="VERIFY")
         item.payload["plan_text"] = "# Implementation Plan\n\nAlready posted."
@@ -538,7 +579,7 @@ class TestPlanningStageStep:
         decision (journal order).
         """
         stage = PlanningStage()
-        github = FakeStageGitHub(has_plan=False)
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN], has_plan=False)
         ctx = make_ctx(github=github)
         item = make_work_item(issue=11, state="VERIFY")
         item.payload["plan_text"] = "# Implementation Plan\n\nDo the thing."
@@ -567,7 +608,7 @@ class TestPlanningStageStep:
                 return False
 
         stage = PlanningStage()
-        github = StaleNoGoGitHub(has_plan=False)
+        github = StaleNoGoGitHub(labels=[STATE_NEEDS_PLAN], has_plan=False)
         ctx = make_ctx(github=github)
         item = make_work_item(issue=24, state="VERIFY")
         item.payload["plan_text"] = "# Implementation Plan\n\nRevised plan."
@@ -614,6 +655,92 @@ class TestPlanningStageStep:
             "edit_labels",
         ]
 
+    def test_revised_plan_cannot_advance_with_needs_plan_and_stale_sibling(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Replacement publication waits for an exclusive confirmed label state."""
+
+        class PartialLabelGitHub(FakeStageGitHub):
+            def edit_labels(self, issue_number: int, *, add: list[str], remove: list[str]) -> None:
+                self._issue_labels(issue_number).update(add)
+                self._log("edit_labels", issue_number, tuple(add), tuple(remove))
+
+        stage = PlanningStage()
+        github = PartialLabelGitHub(labels=[STATE_PLAN_NO_GO], has_plan=False)
+        github.comments[272] = [
+            render_current_plan("Plan v1", revision=1),
+            render_current_review("Missing rollback.", revision=1),
+        ]
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=272, state="ENTER")
+
+        assert stage.on_enter(item, ctx) is None
+        item.state = "VERIFY"
+        item.payload["plan_text"] = "Plan v2 with rollback"
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.RETRY
+        assert github.labels[272] == {STATE_NEEDS_PLAN, STATE_PLAN_NO_GO}
+
+    def test_operator_blocked_latch_stops_inflight_planner_before_publish(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A BLOCKED label arriving during the planner job prevents all publication."""
+        stage = PlanningStage()
+        github = FakeStageGitHub(labels=[STATE_PLAN_BLOCKED], has_plan=False)
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=273, state="VERIFY")
+        item.payload["plan_text"] = "A newly generated plan"
+
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.BLOCKED
+        assert github.labels[273] == {STATE_PLAN_BLOCKED}
+        assert github.mutation_log == []
+
+    def test_no_go_label_authorizes_revision_without_review_state_text(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Only the GitHub label, not a token in review prose, authorizes superseding."""
+        stage = PlanningStage()
+        github = FakeStageGitHub(labels=[STATE_PLAN_NO_GO], has_plan=False)
+        github.comments[270] = [
+            render_current_plan("Plan v1", revision=1),
+            render_current_review("Missing rollback details.", revision=1),
+        ]
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=270, state="ENTER")
+
+        assert stage.on_enter(item, ctx) is None
+        item.state = "VERIFY"
+        item.payload["plan_text"] = "Plan v2 with rollback"
+
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.ADVANCE
+        assert "<!-- revision: 2 -->" in github.comments[270][0]
+
+    def test_review_text_cannot_authorize_revision_without_no_go_or_blocked_label(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A no-go-looking comment remains inert while the issue says needs-plan."""
+        stage = PlanningStage()
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN], has_plan=False)
+        github.comments[271] = [
+            render_current_plan("Plan v1", revision=1),
+            render_current_review("Missing rollback.\n\nstate:plan-no-go", revision=1),
+        ]
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=271, state="VERIFY")
+        item.payload["plan_text"] = "Plan v2 with rollback"
+        item.payload["requires_plan_revision"] = True
+
+        with pytest.raises(RuntimeError, match="label"):
+            stage.step(item, ctx)
+
     def test_replan_without_change_publishes_blocked_review_and_stops(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -644,10 +771,10 @@ class TestPlanningStageStep:
             ("gh_issue_upsert_comment", (28, PLAN_REVIEW_CANONICAL_MARKER)),
         ]
 
-    def test_replan_without_change_keeps_blocked_label_if_comment_write_fails(
+    def test_replan_without_change_latches_blocked_if_comment_write_fails(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """The sole durable BLOCKED authority is written before explanatory prose."""
+        """A failed audit write cannot prevent the durable BLOCKED safety latch."""
 
         class FailingReviewCommentGitHub(FakeStageGitHub):
             def upsert_issue_comment(self, *args: Any, **kwargs: Any) -> None:
@@ -676,13 +803,31 @@ class TestPlanningStageStep:
             (30, (STATE_PLAN_BLOCKED,), (STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO)),
         )
 
+    def test_empty_initial_plan_blocks_instead_of_retrying_planner(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An empty successful planner result is a durable no-progress outcome."""
+        stage = PlanningStage()
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN], has_plan=False)
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=301, state="PLAN_WAIT")
+
+        stage.on_job_done(item, JobResult(ok=True, value=""), ctx)
+        item.state = "VERIFY"
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.BLOCKED
+        assert github.labels[301] == {STATE_PLAN_BLOCKED}
+        assert github.comments[301][-1].endswith(STATE_PLAN_BLOCKED)
+
     def test_verify_posts_exactly_once_on_reentry(self, make_ctx: Any, make_work_item: Any) -> None:
         """Re-entering VERIFY never double-posts.
 
         The upsert is guarded by has_existing_plan (idempotent on re-entry).
         """
         stage = PlanningStage()
-        github = FakeStageGitHub(has_plan=False)
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN], has_plan=False)
         ctx = make_ctx(github=github)
         item = make_work_item(issue=12, state="VERIFY")
         item.payload["plan_text"] = "# Implementation Plan\n\nOnce only."
@@ -722,14 +867,6 @@ class TestPlanningStageStep:
             f"{PLAN_CANONICAL_MARKER}\n{PLAN_COMMENT_MARKER}\n"
             "<!-- revision: 1 -->\n\nSome plan without the heading."
         )
-
-    def test_normalize_plan_comment_docstring_distinguishes_marker_from_advance_gate(
-        self,
-    ) -> None:
-        """Docstring identifies the opaque ownership marker."""
-        doc = _normalize_plan_comment.__doc__ or ""
-
-        assert "opaque ownership marker" in doc
 
     def test_verify_without_plan_retries_by_requesting_fresh_plan(
         self, make_ctx: Any, make_work_item: Any

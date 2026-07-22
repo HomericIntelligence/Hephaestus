@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 from ..git_utils import issue_ref
 from ..github_api import _gh_call, prefetch_issue_states, skip_epics
 from ..review_journal import is_plan_comment, is_plan_review_comment
-from ..state_labels import STATE_PLAN_GO, is_epic
+from ..state_labels import STATE_PLAN_GO, is_epic, is_exclusive_plan_state
 from .review import (
     fetch_all_issue_comments_graphql,
     fetch_all_issue_labels_graphql,
@@ -134,7 +134,7 @@ class PlannerStateManager:
             if (
                 not self.options.force
                 and self._labels_cache.get(issue_num) is not None
-                and STATE_PLAN_GO in labels
+                and is_exclusive_plan_state(labels, STATE_PLAN_GO)
             ):
                 logger.info("Issue #%s already has a plan (state:plan-go), skipping", issue_num)
                 continue

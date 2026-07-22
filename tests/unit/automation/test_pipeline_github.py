@@ -14,7 +14,7 @@ from pathlib import Path
 from time import sleep
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -25,9 +25,14 @@ from hephaestus.automation.pipeline.stages.base import StageGitHub
 from hephaestus.automation.protocol import (
     PLAN_CANONICAL_MARKER,
     PLAN_COMMENT_MARKER,
+    PLAN_REVIEW_CANONICAL_MARKER,
     PLAN_REVIEW_PREFIX,
 )
-from hephaestus.automation.review_journal import IssueComment, render_current_plan
+from hephaestus.automation.review_journal import (
+    IssueComment,
+    render_current_plan,
+    render_current_review,
+)
 from hephaestus.utils.file_lock import LockUnavailableError
 
 
@@ -161,32 +166,184 @@ class TestMutatorMapping:
 
         adapter.upsert_plan_comment(5, body)
 
-        fetch.assert_called_once_with(5)
+        assert fetch.call_args_list == [call(5), call(5)]
         post.assert_called_once_with(5, body)
 
-    def test_upsert_refuses_foreign_canonical_marker(
+    def test_upsert_ignores_foreign_canonical_marker_and_creates_owned_comment(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A human-authored marker collision is never patched or deleted."""
+        """Foreign marker text is inert and cannot deny service to the journal."""
+        body = render_current_plan("safe plan")
+        fetch = MagicMock(
+            side_effect=[
+                [
+                    {
+                        "body": f"{PLAN_CANONICAL_MARKER}\nforeign",
+                        "databaseId": 99,
+                        "viewerDidAuthor": False,
+                    }
+                ],
+                [
+                    {
+                        "body": f"{PLAN_CANONICAL_MARKER}\nforeign",
+                        "databaseId": 99,
+                        "viewerDidAuthor": False,
+                    },
+                    {
+                        "body": body,
+                        "databaseId": 100,
+                        "viewerDidAuthor": True,
+                    },
+                ],
+            ]
+        )
+        monkeypatch.setattr(adapter, "_repo_issue_comments", fetch)
+        post = MagicMock()
+        monkeypatch.setattr(github_api_mod, "gh_issue_comment", post)
+
+        adapter.upsert_plan_comment(5, body)
+
+        post.assert_called_once_with(5, body)
+        assert fetch.call_count == 2
+
+    def test_canonical_create_converges_owned_race_duplicates(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A post-create reconciliation leaves one actor-owned canonical pointer."""
         body = render_current_plan("safe plan")
         monkeypatch.setattr(
             adapter,
             "_repo_issue_comments",
-            lambda issue: [
-                {
-                    "body": f"{PLAN_CANONICAL_MARKER}\nforeign",
-                    "databaseId": 99,
-                    "viewerDidAuthor": False,
-                }
-            ],
+            MagicMock(
+                side_effect=[
+                    [],
+                    [
+                        {"body": body, "databaseId": 100, "viewerDidAuthor": True},
+                        {"body": body, "databaseId": 101, "viewerDidAuthor": True},
+                    ],
+                ]
+            ),
         )
+        monkeypatch.setattr(github_api_mod, "gh_issue_comment", MagicMock())
+        delete = MagicMock()
+        monkeypatch.setattr(adapter, "_delete_issue_comment", delete)
+
+        adapter.upsert_plan_comment(5, body)
+
+        delete.assert_called_once_with(100)
+
+    def test_ensure_blocked_audit_repairs_missing_explanation_without_label_write(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Restart repair writes only the canonical audit record."""
+        monkeypatch.setattr(
+            adapter,
+            "issue_comments",
+            MagicMock(
+                return_value=[
+                    IssueComment(body=render_current_plan("Plan"), viewer_did_author=True)
+                ]
+            ),
+        )
+        upsert = MagicMock()
+        monkeypatch.setattr(adapter, "upsert_issue_comment", upsert)
+
+        adapter.ensure_blocked_audit(5)
+
+        assert upsert.call_args.args[:2] == (5, PLAN_REVIEW_CANONICAL_MARKER)
+        assert upsert.call_args.args[2].endswith("state:plan-blocked")
+        assert upsert.call_args.kwargs == {"legacy_marker": PLAN_REVIEW_PREFIX}
+
+    def test_ensure_blocked_audit_preserves_existing_detailed_review(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A valid BLOCKED explanation is never replaced by the recovery text."""
+        monkeypatch.setattr(
+            adapter,
+            "issue_comments",
+            MagicMock(
+                return_value=[
+                    IssueComment(body=render_current_plan("Plan"), viewer_did_author=True),
+                    IssueComment(
+                        body=render_current_review(
+                            "Waiting for API ownership.\n\nstate:plan-blocked",
+                            revision=1,
+                        ),
+                        viewer_did_author=True,
+                    ),
+                ]
+            ),
+        )
+        upsert = MagicMock()
+        monkeypatch.setattr(adapter, "upsert_issue_comment", upsert)
+
+        adapter.ensure_blocked_audit(5)
+
+        upsert.assert_not_called()
+
+    def test_dry_run_blocked_audit_repair_is_read_only(
+        self,
+        dry_adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Dry-run may inspect a missing audit but cannot mutate comments or labels."""
+        read = MagicMock(
+            return_value=[IssueComment(body=render_current_plan("Plan"), viewer_did_author=True)]
+        )
+        monkeypatch.setattr(dry_adapter, "issue_comments", read)
+        post = MagicMock()
+        delete = MagicMock()
+        edit_labels = MagicMock()
+        gh = MagicMock()
+        monkeypatch.setattr(dry_adapter, "_post_issue_comment", post)
+        monkeypatch.setattr(dry_adapter, "_delete_issue_comment", delete)
+        monkeypatch.setattr(dry_adapter, "edit_labels", edit_labels)
+        monkeypatch.setattr(dry_adapter, "_gh", gh)
+
+        with caplog.at_level("INFO"):
+            dry_adapter.ensure_blocked_audit(5)
+
+        read.assert_called_once_with(5)
+        post.assert_not_called()
+        delete.assert_not_called()
+        edit_labels.assert_not_called()
+        gh.assert_not_called()
+        assert any("[dry-run] would upsert" in record.message for record in caplog.records)
+
+    def test_immutable_append_ignores_foreign_collision(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A foreign immutable marker does not establish replay identity or block append."""
+        marker = "<!-- hephaestus-plan-history:revision=1:kind=plan -->"
+        body = f"{marker}\narchive"
+        fetch = MagicMock(
+            side_effect=[
+                [
+                    {
+                        "body": f"{marker}\nforeign",
+                        "databaseId": 99,
+                        "viewerDidAuthor": False,
+                    }
+                ],
+                [
+                    {
+                        "body": f"{marker}\nforeign",
+                        "databaseId": 99,
+                        "viewerDidAuthor": False,
+                    },
+                    {"body": body, "databaseId": 100, "viewerDidAuthor": True},
+                ],
+            ]
+        )
+        monkeypatch.setattr(adapter, "_repo_issue_comments", fetch)
         post = MagicMock()
         monkeypatch.setattr(github_api_mod, "gh_issue_comment", post)
 
-        with pytest.raises(RuntimeError, match="foreign comment"):
-            adapter.upsert_plan_comment(5, body)
+        adapter.append_issue_comment(5, marker, body)
 
-        post.assert_not_called()
+        post.assert_called_once_with(5, body)
+        assert fetch.call_count == 2
 
     def test_immutable_append_is_replay_safe_and_conflict_detecting(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
@@ -206,6 +363,30 @@ class TestMutatorMapping:
             adapter.append_issue_comment(5, marker, f"{marker}\ndifferent")
 
         post.assert_not_called()
+
+    def test_immutable_append_never_deletes_identical_owned_duplicates(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Append-only history remains immutable even after a create race."""
+        marker = "<!-- hephaestus-plan-history:revision=1:kind=plan -->"
+        body = f"{marker}\narchive"
+        monkeypatch.setattr(
+            adapter,
+            "_repo_issue_comments",
+            lambda issue: [
+                {"body": body, "databaseId": 41, "viewerDidAuthor": True},
+                {"body": body, "databaseId": 42, "viewerDidAuthor": True},
+            ],
+        )
+        post = MagicMock()
+        delete = MagicMock()
+        monkeypatch.setattr(github_api_mod, "gh_issue_comment", post)
+        monkeypatch.setattr(adapter, "_delete_issue_comment", delete)
+
+        adapter.append_issue_comment(5, marker, body)
+
+        post.assert_not_called()
+        delete.assert_not_called()
 
 
 class TestRepoScoping:
@@ -346,7 +527,12 @@ class TestRepoScoping:
             calls.append(argv)
             if argv[:2] == ["issue", "view"]:
                 payload = {
-                    "comments": [{"body": f"{PLAN_REVIEW_PREFIX}\n\nstate:plan-go"}],
+                    "comments": [
+                        {
+                            "body": f"{PLAN_REVIEW_PREFIX}\n\nstate:plan-go",
+                            "viewerDidAuthor": True,
+                        }
+                    ],
                 }
                 return SimpleNamespace(stdout=json.dumps(payload))
             return SimpleNamespace(stdout="")
@@ -375,8 +561,11 @@ class TestRepoScoping:
 
         def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
             calls.append(argv)
-            if argv == ["api", "/repos/org/repo-a/issues/1001/comments", "--paginate", "--slurp"]:
-                payload = [[{"id": 42, "body": "<!-- marker -->\nstale"}]]
+            if argv == [
+                "api",
+                "/repos/org/repo-a/issues/1001/comments?per_page=100&page=1",
+            ]:
+                payload = [{"id": 42, "body": "<!-- marker -->\nstale"}]
                 return SimpleNamespace(stdout=json.dumps(payload))
             return SimpleNamespace(stdout="")
 
@@ -388,9 +577,7 @@ class TestRepoScoping:
 
         assert calls[0] == [
             "api",
-            "/repos/org/repo-a/issues/1001/comments",
-            "--paginate",
-            "--slurp",
+            "/repos/org/repo-a/issues/1001/comments?per_page=100&page=1",
         ]
         assert all("graphql" not in call for call in calls)
 
@@ -401,7 +588,12 @@ class TestRepoScoping:
             if argv[:2] == ["issue", "view"]:
                 payload = {
                     "labels": [],
-                    "comments": [{"body": f"{PLAN_COMMENT_MARKER}\n\nDo the thing."}],
+                    "comments": [
+                        {
+                            "body": f"{PLAN_COMMENT_MARKER}\n\nDo the thing.",
+                            "viewerDidAuthor": True,
+                        }
+                    ],
                 }
                 return SimpleNamespace(stdout=json.dumps(payload))
             return SimpleNamespace(stdout="")
@@ -409,6 +601,28 @@ class TestRepoScoping:
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
 
         assert pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).has_existing_plan(5)
+
+    def test_repo_scoped_has_existing_plan_ignores_foreign_plan_marker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Foreign marker text is inert and cannot impersonate the plan artifact."""
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            if argv[:2] == ["issue", "view"]:
+                payload = {
+                    "comments": [
+                        {
+                            "body": f"{PLAN_COMMENT_MARKER}\n\nSpoofed plan.",
+                            "viewerDidAuthor": False,
+                        }
+                    ],
+                }
+                return SimpleNamespace(stdout=json.dumps(payload))
+            return SimpleNamespace(stdout="")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        assert not pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).has_existing_plan(5)
 
     def test_repo_scoped_has_existing_plan_ignores_review_state_text(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -420,8 +634,14 @@ class TestRepoScoping:
                 payload = {
                     "labels": [],
                     "comments": [
-                        {"body": f"{PLAN_COMMENT_MARKER}\n\nOld rejected plan."},
-                        {"body": f"{PLAN_REVIEW_PREFIX}\n\nstate:plan-no-go"},
+                        {
+                            "body": f"{PLAN_COMMENT_MARKER}\n\nOld rejected plan.",
+                            "viewerDidAuthor": True,
+                        },
+                        {
+                            "body": f"{PLAN_REVIEW_PREFIX}\n\nstate:plan-no-go",
+                            "viewerDidAuthor": True,
+                        },
                     ],
                 }
                 return SimpleNamespace(stdout=json.dumps(payload))
@@ -747,15 +967,16 @@ class TestRepoScoping:
 
         def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
             calls.append(argv)
-            if argv == ["api", "/repos/org/repo-a/issues/5/comments", "--paginate", "--slurp"]:
+            if argv == [
+                "api",
+                "/repos/org/repo-a/issues/5/comments?per_page=100&page=1",
+            ]:
                 payload = [
-                    [
-                        {
-                            "id": 9,
-                            "body": f"{PLAN_COMMENT_MARKER}\nold",
-                            "viewerDidAuthor": True,
-                        }
-                    ]
+                    {
+                        "id": 9,
+                        "body": f"{PLAN_COMMENT_MARKER}\nold",
+                        "viewerDidAuthor": True,
+                    }
                 ]
                 return SimpleNamespace(stdout=json.dumps(payload))
             return SimpleNamespace(stdout="")
@@ -778,8 +999,11 @@ class TestRepoScoping:
 
         def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
             calls.append(argv)
-            if argv == ["api", "/repos/org/repo-a/issues/7/comments", "--paginate", "--slurp"]:
-                payload = [[{"id": 12, "body": f"{marker}\nold"}]]
+            if argv == [
+                "api",
+                "/repos/org/repo-a/issues/7/comments?per_page=100&page=1",
+            ]:
+                payload = [{"id": 12, "body": f"{marker}\nold"}]
                 return SimpleNamespace(stdout=json.dumps(payload))
             return SimpleNamespace(stdout="")
 
@@ -1279,7 +1503,16 @@ class TestReadSurface:
             pg,
             "gh_call",
             lambda argv, **kwargs: SimpleNamespace(
-                stdout=json.dumps({"comments": [{"body": f"{PLAN_COMMENT_MARKER}\nPlan"}]})
+                stdout=json.dumps(
+                    {
+                        "comments": [
+                            {
+                                "body": f"{PLAN_COMMENT_MARKER}\nPlan",
+                                "viewerDidAuthor": True,
+                            }
+                        ]
+                    }
+                )
             ),
         )
 

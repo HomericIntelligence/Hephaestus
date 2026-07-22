@@ -1,6 +1,5 @@
 """Tests for the PlanReviewer automation."""
 
-import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -34,39 +33,9 @@ def reviewer(mock_options: PlanReviewerOptions) -> PlanReviewer:
     return PlanReviewer(mock_options)
 
 
-def _make_gh_result(payload: Any) -> MagicMock:
-    """Return a mock CompletedProcess emulating the GraphQL response shape.
-
-    The legacy ``{"comments": [...]}`` payload (from ``gh issue view --comments``)
-    is automatically translated into the new GraphQL envelope
-    ``{"data": {"repository": {"issue": {"comments": {"nodes": [...]}}}}}``
-    with ``nodes`` in descending order (newest first) to match real GraphQL
-    output (see ``orderBy: {field: UPDATED_AT, direction: DESC}`` in
-    ``_fetch_issue_comments``). Production code reverses ``nodes`` back to
-    chronological order, so test inputs continue to be authored in
-    chronological order — the helper hides the reversal.
-
-    Tests that want to drive the raw GraphQL envelope can pass it directly
-    (any payload not matching ``{"comments": [...]}`` is forwarded as-is).
-    """
-    mock = MagicMock()
-    if isinstance(payload, dict) and set(payload.keys()) == {"comments"}:
-        nodes = list(reversed(payload["comments"]))
-        graphql_payload = {"data": {"repository": {"issue": {"comments": {"nodes": nodes}}}}}
-        mock.stdout = json.dumps(graphql_payload)
-    else:
-        mock.stdout = json.dumps(payload)
-    return mock
-
-
 @pytest.fixture(autouse=True)
 def _patch_repo_helpers() -> Any:
-    """Stub repo discovery helpers used by the GraphQL fetch.
-
-    ``_fetch_issue_comments`` calls ``get_repo_info`` for the GraphQL query
-    (#574). ``get_repo_slug`` is still patched for any code path that asks
-    for the short slug (logger prefixes, etc.).
-    """
+    """Stub repository discovery and authenticated ownership."""
     with (
         patch(
             "hephaestus.automation.plan_reviewer.get_repo_root",
@@ -76,10 +45,7 @@ def _patch_repo_helpers() -> Any:
             "hephaestus.automation.plan_reviewer.get_repo_slug",
             return_value="name",
         ),
-        patch(
-            "hephaestus.automation.plan_reviewer.get_repo_info",
-            return_value=("owner", "name"),
-        ),
+        patch("hephaestus.automation.plan_reviewer.gh_current_login", return_value="bot"),
     ):
         yield
 
@@ -93,8 +59,10 @@ class TestGetLatestPlan:
             {"body": "Some other comment"},
             {"body": "# Implementation Plan\n\nStep 1: Do something\nStep 2: Do more"},
         ]
-        with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
-            mock_gh.return_value = _make_gh_result({"comments": comments})
+        with patch(
+            "hephaestus.automation.plan_reviewer.fetch_issue_comments_metadata",
+            return_value=[{"viewerDidAuthor": True, **comment} for comment in comments],
+        ):
             result = reviewer._get_latest_plan(123)
 
         assert result is not None
@@ -106,12 +74,62 @@ class TestGetLatestPlan:
             {"body": "# Implementation Plan\n\nFirst plan"},
             {"body": "# Implementation Plan\n\nSecond plan (updated)"},
         ]
-        with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
-            mock_gh.return_value = _make_gh_result({"comments": comments})
+        with patch(
+            "hephaestus.automation.plan_reviewer.fetch_issue_comments_metadata",
+            return_value=[{"viewerDidAuthor": True, **comment} for comment in comments],
+        ):
             result = reviewer._get_latest_plan(123)
 
         assert result is not None
         assert "Second plan (updated)" in result
+
+    def test_get_latest_plan_is_not_hidden_by_one_hundred_newer_comments(
+        self, reviewer: PlanReviewer
+    ) -> None:
+        """Complete journal ingestion preserves an older actor-owned canonical plan."""
+        comments = [
+            {
+                "body": "# Implementation Plan\n\nOwned plan",
+                "user": {"login": "bot"},
+            },
+            *[
+                {
+                    "body": f"ordinary comment {index}",
+                    "user": {"login": "someone-else"},
+                }
+                for index in range(100)
+            ],
+        ]
+        with patch(
+            "hephaestus.automation.plan_reviewer.fetch_issue_comments_metadata",
+            return_value=comments,
+        ):
+            result = reviewer._get_latest_plan(123)
+
+        assert result is not None
+        assert "Owned plan" in result
+
+    def test_get_latest_plan_ignores_foreign_marker_comment(self, reviewer: PlanReviewer) -> None:
+        """Only the authenticated actor's canonical plan can be reviewed."""
+        comments = [
+            {
+                "body": "# Implementation Plan\n\nOwned plan",
+                "viewerDidAuthor": True,
+            },
+            {
+                "body": "# Implementation Plan\n\nForeign spoof",
+                "viewerDidAuthor": False,
+            },
+        ]
+        with patch(
+            "hephaestus.automation.plan_reviewer.fetch_issue_comments_metadata",
+            return_value=comments,
+        ):
+            result = reviewer._get_latest_plan(123)
+
+        assert result is not None
+        assert "Owned plan" in result
+        assert "Foreign spoof" not in result
 
     def test_get_latest_plan_returns_none_when_no_plan(self, reviewer: PlanReviewer) -> None:
         """_get_latest_plan returns None when no plan comment exists."""
@@ -119,19 +137,24 @@ class TestGetLatestPlan:
             {"body": "Just a regular comment"},
             {"body": "Another comment"},
         ]
-        with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
-            mock_gh.return_value = _make_gh_result({"comments": comments})
+        with patch(
+            "hephaestus.automation.plan_reviewer.fetch_issue_comments_metadata",
+            return_value=[{"viewerDidAuthor": True, **comment} for comment in comments],
+        ):
             result = reviewer._get_latest_plan(123)
 
         assert result is None
 
-    def test_get_latest_plan_returns_none_on_gh_error(self, reviewer: PlanReviewer) -> None:
-        """_get_latest_plan returns None when gh call fails."""
-        with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
-            mock_gh.side_effect = RuntimeError("gh failed")
-            result = reviewer._get_latest_plan(123)
-
-        assert result is None
+    def test_get_latest_plan_propagates_github_error(self, reviewer: PlanReviewer) -> None:
+        """A failed complete-journal read cannot be mistaken for no plan."""
+        with (
+            patch(
+                "hephaestus.automation.plan_reviewer.fetch_issue_comments_metadata",
+                side_effect=RuntimeError("gh failed"),
+            ),
+            pytest.raises(RuntimeError, match="gh failed"),
+        ):
+            reviewer._get_latest_plan(123)
 
     def test_get_latest_plan_ignores_review_comment(self, reviewer: PlanReviewer) -> None:
         """A review comment that quotes the plan must never be picked as the plan.
@@ -150,8 +173,10 @@ class TestGetLatestPlan:
                 )
             },
         ]
-        with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
-            mock_gh.return_value = _make_gh_result({"comments": comments})
+        with patch(
+            "hephaestus.automation.plan_reviewer.fetch_issue_comments_metadata",
+            return_value=[{"viewerDidAuthor": True, **comment} for comment in comments],
+        ):
             result = reviewer._get_latest_plan(123)
 
         assert result is not None
@@ -164,8 +189,10 @@ class TestGetLatestPlan:
         comments = [
             {"body": "## 🔍 Plan Review\n\nDiscusses a ## Plan.\n\nstate:plan-no-go"},
         ]
-        with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
-            mock_gh.return_value = _make_gh_result({"comments": comments})
+        with patch(
+            "hephaestus.automation.plan_reviewer.fetch_issue_comments_metadata",
+            return_value=[{"viewerDidAuthor": True, **comment} for comment in comments],
+        ):
             result = reviewer._get_latest_plan(123)
 
         assert result is None
@@ -180,12 +207,12 @@ class TestPostReviewStateLabels:
             (
                 STATE_PLAN_GO,
                 STATE_PLAN_GO,
-                [STATE_PLAN_NO_GO, STATE_PLAN_BLOCKED, STATE_NEEDS_PLAN],
+                [STATE_PLAN_NO_GO, STATE_NEEDS_PLAN],
             ),
             (
                 STATE_PLAN_NO_GO,
                 STATE_PLAN_NO_GO,
-                [STATE_PLAN_GO, STATE_PLAN_BLOCKED, STATE_NEEDS_PLAN],
+                [STATE_PLAN_GO, STATE_NEEDS_PLAN],
             ),
             (
                 STATE_PLAN_BLOCKED,
@@ -204,8 +231,19 @@ class TestPostReviewStateLabels:
         review = f"Concrete review explanation.\n\n{token}"
         with (
             patch.object(reviewer, "_fetch_issue_comments", return_value=[]),
-            patch("hephaestus.automation.plan_reviewer.gh_issue_upsert_comment") as upsert,
+            patch(
+                "hephaestus.automation.plan_reviewer.gh_issue_upsert_owned_comment",
+                create=True,
+            ) as upsert,
+            patch(
+                "hephaestus.automation.plan_reviewer.gh_issue_upsert_comment",
+                create=True,
+            ) as legacy_upsert,
             patch("hephaestus.automation.plan_reviewer.gh_issue_edit_labels") as edit_labels,
+            patch(
+                "hephaestus.automation.plan_reviewer.gh_issue_json",
+                return_value={"labels": [{"name": expected_add}]},
+            ),
         ):
             reviewer._post_review(123, review)
 
@@ -213,30 +251,53 @@ class TestPostReviewStateLabels:
         assert "Verdict:" not in posted_body
         assert posted_body.rstrip().endswith(token)
         edit_labels.assert_called_once_with(123, add=[expected_add], remove=expected_remove)
+        legacy_upsert.assert_not_called()
 
     def test_legacy_verdict_is_rejected_without_any_github_write(
         self, reviewer: PlanReviewer
     ) -> None:
         with (
             patch.object(reviewer, "_fetch_issue_comments", return_value=[]),
-            patch("hephaestus.automation.plan_reviewer.gh_issue_upsert_comment") as upsert,
+            patch(
+                "hephaestus.automation.plan_reviewer.gh_issue_upsert_owned_comment",
+                create=True,
+            ) as upsert,
+            patch(
+                "hephaestus.automation.plan_reviewer.gh_issue_upsert_comment",
+                create=True,
+            ) as legacy_upsert,
             patch("hephaestus.automation.plan_reviewer.gh_issue_edit_labels") as edit_labels,
             pytest.raises(ValueError, match="state:plan"),
         ):
             reviewer._post_review(123, "Looks good.\n\nVerdict: GO")
 
         upsert.assert_not_called()
+        legacy_upsert.assert_not_called()
         edit_labels.assert_not_called()
 
-    def test_blocked_label_is_written_before_comment_failure(self, reviewer: PlanReviewer) -> None:
-        """Standalone restart remains blocked if explanatory persistence fails."""
+    def test_blocked_comment_failure_preserves_authoritative_blocked_latch(
+        self, reviewer: PlanReviewer
+    ) -> None:
+        """Audit failure cannot prevent an externally-owned BLOCKED latch."""
         with (
             patch.object(reviewer, "_fetch_issue_comments", return_value=[]),
             patch(
-                "hephaestus.automation.plan_reviewer.gh_issue_upsert_comment",
+                "hephaestus.automation.plan_reviewer.gh_issue_upsert_owned_comment",
                 side_effect=RuntimeError("comment write failed"),
+                create=True,
             ),
+            patch(
+                "hephaestus.automation.plan_reviewer.gh_issue_upsert_comment",
+                create=True,
+            ) as legacy_upsert,
             patch("hephaestus.automation.plan_reviewer.gh_issue_edit_labels") as edit_labels,
+            patch(
+                "hephaestus.automation.plan_reviewer.gh_issue_json",
+                side_effect=[
+                    {"labels": [{"name": STATE_NEEDS_PLAN}]},
+                    {"labels": [{"name": STATE_PLAN_BLOCKED}]},
+                ],
+            ),
             pytest.raises(RuntimeError, match="comment write failed"),
         ):
             reviewer._post_review(
@@ -249,6 +310,53 @@ class TestPostReviewStateLabels:
             add=[STATE_PLAN_BLOCKED],
             remove=[STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO],
         )
+        legacy_upsert.assert_not_called()
+
+    def test_state_transition_rejects_target_with_stale_sibling(
+        self, reviewer: PlanReviewer
+    ) -> None:
+        """Standalone success requires the full mutually-exclusive label state."""
+        with (
+            patch.object(reviewer, "_fetch_issue_comments", return_value=[]),
+            patch(
+                "hephaestus.automation.plan_reviewer.gh_issue_upsert_owned_comment",
+                create=True,
+            ),
+            patch("hephaestus.automation.plan_reviewer.gh_issue_edit_labels"),
+            patch(
+                "hephaestus.automation.plan_reviewer.gh_issue_json",
+                side_effect=[
+                    {"labels": [{"name": STATE_NEEDS_PLAN}]},
+                    {
+                        "labels": [
+                            {"name": STATE_PLAN_GO},
+                            {"name": STATE_PLAN_NO_GO},
+                        ]
+                    },
+                ],
+            ),
+            pytest.raises(RuntimeError, match="not confirmed"),
+        ):
+            reviewer._post_review(123, "Concrete review.\n\nstate:plan-go")
+
+    def test_nonblocked_review_cannot_replace_live_blocked_latch(
+        self, reviewer: PlanReviewer
+    ) -> None:
+        """A BLOCKED label appearing in flight stops writes from a stale verdict."""
+        with (
+            patch.object(reviewer, "_fetch_issue_comments", return_value=[]),
+            patch(
+                "hephaestus.automation.plan_reviewer.gh_issue_json",
+                return_value={"labels": [{"name": STATE_PLAN_BLOCKED}]},
+            ),
+            patch("hephaestus.automation.plan_reviewer.gh_issue_upsert_owned_comment") as upsert,
+            patch("hephaestus.automation.plan_reviewer.gh_issue_edit_labels") as edit_labels,
+            pytest.raises(RuntimeError, match="blocked pending external intervention"),
+        ):
+            reviewer._post_review(123, "Concrete review.\n\nstate:plan-go")
+
+        upsert.assert_not_called()
+        edit_labels.assert_not_called()
 
 
 class TestLatestReviewUsesAuthoritativeLabel:
@@ -262,7 +370,7 @@ class TestLatestReviewUsesAuthoritativeLabel:
         self, reviewer: PlanReviewer, labels: list[str], expected: bool
     ) -> None:
         with patch(
-            "hephaestus.automation.state.review.gh_issue_json",
+            "hephaestus.automation.plan_reviewer.gh_issue_json",
             return_value={"labels": [{"name": label} for label in labels]},
         ):
             assert reviewer._latest_review_is_final(123) is expected
@@ -272,7 +380,7 @@ class TestLatestReviewUsesAuthoritativeLabel:
             {"body": "## 🔍 Plan Review\n\nVerdict: GO"},
         ]
         with patch(
-            "hephaestus.automation.state.review.gh_issue_json",
+            "hephaestus.automation.plan_reviewer.gh_issue_json",
             return_value={"labels": []},
         ):
             assert reviewer._latest_review_is_final(123) is False
@@ -383,9 +491,11 @@ class TestReviewIssue:
     def test_review_skipped_if_no_plan(self, reviewer: PlanReviewer) -> None:
         """When issue has no plan comment, _review_issue returns success with no post."""
         with (
-            patch.object(reviewer, "_latest_review_is_final", return_value=False),
+            patch.object(reviewer, "_read_plan_state_labels", return_value=[STATE_NEEDS_PLAN]),
             patch.object(reviewer, "_get_latest_plan", return_value=None),
-            patch("hephaestus.automation.plan_reviewer.gh_issue_upsert_comment") as mock_upsert,
+            patch(
+                "hephaestus.automation.plan_reviewer.gh_issue_upsert_owned_comment"
+            ) as mock_upsert,
         ):
             result = reviewer._review_issue(123, 0)
 
@@ -395,13 +505,62 @@ class TestReviewIssue:
     def test_review_skipped_if_latest_review_is_final(self, reviewer: PlanReviewer) -> None:
         """When the latest plan review is GO, skip posting."""
         with (
-            patch.object(reviewer, "_latest_review_is_final", return_value=True),
-            patch("hephaestus.automation.plan_reviewer.gh_issue_upsert_comment") as mock_upsert,
+            patch.object(reviewer, "_read_plan_state_labels", return_value=[STATE_PLAN_GO]),
+            patch(
+                "hephaestus.automation.plan_reviewer.gh_issue_upsert_owned_comment"
+            ) as mock_upsert,
         ):
             result = reviewer._review_issue(123, 0)
 
         assert result.success is True
         mock_upsert.assert_not_called()
+
+    def test_review_skipped_when_plan_is_blocked(self, reviewer: PlanReviewer) -> None:
+        """Standalone admission never invokes an agent for an operator-blocked issue."""
+        with (
+            patch.object(reviewer, "_read_plan_state_labels", return_value=[STATE_PLAN_BLOCKED]),
+            patch.object(reviewer, "_ensure_blocked_audit") as ensure_audit,
+            patch.object(reviewer, "_get_latest_plan") as get_plan,
+            patch.object(reviewer, "_run_claude_analysis") as run_review,
+        ):
+            result = reviewer._review_issue(123, 0)
+
+        assert result.success is True
+        assert result.already_reviewed is True
+        ensure_audit.assert_called_once_with(123)
+        get_plan.assert_not_called()
+        run_review.assert_not_called()
+
+    def test_dry_run_blocked_issue_does_not_repair_audit(self, reviewer: PlanReviewer) -> None:
+        """Dry-run observes the operator latch without making audit writes."""
+        reviewer.options.dry_run = True
+        with (
+            patch.object(reviewer, "_read_plan_state_labels", return_value=[STATE_PLAN_BLOCKED]),
+            patch.object(reviewer, "_ensure_blocked_audit") as ensure_audit,
+            patch.object(reviewer, "_run_claude_analysis") as run_review,
+        ):
+            result = reviewer._review_issue(123, 0)
+
+        assert result.success is True
+        assert result.already_reviewed is True
+        ensure_audit.assert_not_called()
+        run_review.assert_not_called()
+
+    def test_admission_label_read_failure_fails_closed(self, reviewer: PlanReviewer) -> None:
+        """GitHub unavailability is not equivalent to an eligible review state."""
+        with (
+            patch.object(
+                reviewer,
+                "_read_plan_state_labels",
+                side_effect=RuntimeError("labels unavailable"),
+            ),
+            patch.object(reviewer, "_get_latest_plan") as get_plan,
+        ):
+            result = reviewer._review_issue(123, 0)
+
+        assert result.success is False
+        assert "labels unavailable" in str(result.error)
+        get_plan.assert_not_called()
 
     @pytest.mark.parametrize(
         "token",
@@ -412,7 +571,6 @@ class TestReviewIssue:
     ) -> None:
         """The standalone path persists each supported state end to end."""
         with (
-            patch.object(reviewer, "_latest_review_is_final", return_value=False),
             patch.object(
                 reviewer, "_get_latest_plan", return_value="## Implementation Plan\n\nDo stuff"
             ),
@@ -423,10 +581,17 @@ class TestReviewIssue:
                 return_value=f"Concrete review explanation.\n\n{token}",
             ),
             patch.object(reviewer, "_fetch_issue_comments", return_value=[]),
-            patch("hephaestus.automation.plan_reviewer.gh_issue_upsert_comment") as mock_upsert,
+            patch(
+                "hephaestus.automation.plan_reviewer.gh_issue_upsert_owned_comment"
+            ) as mock_upsert,
             patch("hephaestus.automation.plan_reviewer.gh_issue_edit_labels") as mock_edit_labels,
         ):
-            mock_gh_json.return_value = {"title": "Test Issue", "body": "Issue body"}
+            mock_gh_json.side_effect = [
+                {"labels": [{"name": STATE_NEEDS_PLAN}]},
+                {"title": "Test Issue", "body": "Issue body"},
+                {"labels": [{"name": STATE_NEEDS_PLAN}]},
+                {"labels": [{"name": token}]},
+            ]
             result = reviewer._review_issue(123, 0)
 
         assert result.success is True
@@ -445,7 +610,6 @@ class TestReviewIssue:
         reviewer = PlanReviewer(mock_options)
 
         with (
-            patch.object(reviewer, "_latest_review_is_final", return_value=False),
             patch.object(
                 reviewer, "_get_latest_plan", return_value="## Implementation Plan\n\nDo stuff"
             ),
@@ -455,9 +619,14 @@ class TestReviewIssue:
                 "_run_claude_analysis",
                 return_value="Review text\n\nstate:plan-no-go",
             ),
-            patch("hephaestus.automation.plan_reviewer.gh_issue_upsert_comment") as mock_upsert,
+            patch(
+                "hephaestus.automation.plan_reviewer.gh_issue_upsert_owned_comment"
+            ) as mock_upsert,
         ):
-            mock_gh_json.return_value = {"title": "Test Issue", "body": "Issue body"}
+            mock_gh_json.side_effect = [
+                {"labels": [{"name": STATE_NEEDS_PLAN}]},
+                {"title": "Test Issue", "body": "Issue body"},
+            ]
             result = reviewer._review_issue(123, 0)
 
         assert result.success is True
@@ -466,14 +635,16 @@ class TestReviewIssue:
     def test_returns_failure_when_claude_returns_none(self, reviewer: PlanReviewer) -> None:
         """Returns failed WorkerResult when Claude analysis returns None."""
         with (
-            patch.object(reviewer, "_latest_review_is_final", return_value=False),
             patch.object(
                 reviewer, "_get_latest_plan", return_value="## Implementation Plan\n\nDo stuff"
             ),
             patch("hephaestus.automation.plan_reviewer.gh_issue_json") as mock_gh_json,
             patch.object(reviewer, "_run_claude_analysis", return_value=None),
         ):
-            mock_gh_json.return_value = {"title": "Test Issue", "body": "Issue body"}
+            mock_gh_json.side_effect = [
+                {"labels": [{"name": STATE_NEEDS_PLAN}]},
+                {"title": "Test Issue", "body": "Issue body"},
+            ]
             result = reviewer._review_issue(123, 0)
 
         assert result.success is False
@@ -488,14 +659,22 @@ class TestFetchIssueCommentsCache:
         comments = [
             {"body": "## Implementation Plan\n\nDo stuff"},
         ]
-        with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
-            mock_gh.return_value = _make_gh_result({"comments": comments})
-
+        with (
+            patch(
+                "hephaestus.automation.plan_reviewer.fetch_issue_comments_metadata",
+                return_value=[{"viewerDidAuthor": True, **comment} for comment in comments],
+            ) as mock_fetch,
+            patch.object(
+                reviewer,
+                "_read_plan_state_labels",
+                return_value=[STATE_NEEDS_PLAN],
+            ),
+        ):
             # Call both methods that internally use _fetch_issue_comments
             reviewer._latest_review_is_final(123)
             reviewer._get_latest_plan(123)
 
-        assert mock_gh.call_count == 1, "Expected single API call due to caching"
+        assert mock_fetch.call_count == 1, "Expected single API call due to caching"
 
     def test_api_called_once_per_issue(self, reviewer: PlanReviewer) -> None:
         """Different issue numbers each get their own API call."""
@@ -504,14 +683,16 @@ class TestFetchIssueCommentsCache:
 
         call_count = 0
 
-        def _side_effect(args: Any, **kw: Any) -> MagicMock:
+        def _side_effect(issue_number: int) -> list[dict[str, str | bool]]:
             nonlocal call_count
             call_count += 1
-            if "123" in args:
-                return _make_gh_result({"comments": comments_123})
-            return _make_gh_result({"comments": comments_456})
+            selected = comments_123 if issue_number == 123 else comments_456
+            return [{"viewerDidAuthor": True, **comment} for comment in selected]
 
-        with patch("hephaestus.automation.plan_reviewer._gh_call", side_effect=_side_effect):
+        with patch(
+            "hephaestus.automation.plan_reviewer.fetch_issue_comments_metadata",
+            side_effect=_side_effect,
+        ):
             reviewer._get_latest_plan(123)
             reviewer._get_latest_plan(123)  # should use cache
             reviewer._get_latest_plan(456)  # new issue → new API call
@@ -519,43 +700,26 @@ class TestFetchIssueCommentsCache:
 
         assert call_count == 2
 
-    def test_api_error_returns_empty_list(self, reviewer: PlanReviewer) -> None:
-        """API failure → _fetch_issue_comments returns empty list, not exception."""
-        with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
-            mock_gh.side_effect = RuntimeError("network error")
-            result = reviewer._fetch_issue_comments(999)
-
-        assert result == []
-
-    def test_uses_owner_repo_tuple_from_get_repo_info(self, reviewer: PlanReviewer) -> None:
-        """Regression test for #574 — derive owner+name from get_repo_info.
-
-        ``_fetch_issue_comments`` must obtain ``owner`` and ``name`` from
-        ``get_repo_info`` (which returns a tuple) rather than calling
-        ``get_repo_slug(...).split('/', 1)`` (which crashes with "not enough
-        values to unpack" because the slug is just the repo name with no
-        owner prefix).
-
-        We assert the GraphQL call receives the owner and name as SEPARATE
-        ``-F`` flags, derived from ``get_repo_info``'s tuple, not from a
-        string-split of the slug.
-        """
-        reviewer._comments_cache.clear()
+    def test_api_error_propagates(self, reviewer: PlanReviewer) -> None:
+        """API failure cannot be treated as an empty durable journal."""
         with (
             patch(
-                "hephaestus.automation.plan_reviewer.get_repo_info",
-                return_value=("HomericIntelligence", "Mnemosyne"),
-            ) as mock_info,
-            patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh,
+                "hephaestus.automation.plan_reviewer.fetch_issue_comments_metadata",
+                side_effect=RuntimeError("network error"),
+            ),
+            pytest.raises(RuntimeError, match="network error"),
         ):
-            mock_gh.return_value = _make_gh_result({"comments": []})
-            reviewer._fetch_issue_comments(1928)
+            reviewer._fetch_issue_comments(999)
 
-        mock_info.assert_called_once()
-        gh_args = mock_gh.call_args[0][0]
-        joined = " ".join(gh_args)
-        assert "owner=HomericIntelligence" in joined
-        assert "name=Mnemosyne" in joined
+    def test_actor_ownership_is_normalized_from_rest_author(self, reviewer: PlanReviewer) -> None:
+        """REST metadata identifies actor-owned comments without GraphQL flags."""
+        with patch(
+            "hephaestus.automation.plan_reviewer.fetch_issue_comments_metadata",
+            return_value=[{"body": "plan", "user": {"login": "bot"}}],
+        ):
+            comments = reviewer._fetch_issue_comments(1928)
+
+        assert comments[0]["viewerDidAuthor"] is True
 
 
 class TestMain:
@@ -760,7 +924,7 @@ class TestPlanReviewerAlreadyReviewedFlag:
     def test_skip_already_approved_sets_flag(self) -> None:
         """A latest-GO plan short-circuits with success=True, already_reviewed=True."""
         reviewer = self._reviewer()
-        with patch.object(reviewer, "_latest_review_is_final", return_value=True):
+        with patch.object(reviewer, "_read_plan_state_labels", return_value=[STATE_PLAN_GO]):
             result = reviewer._review_issue(123, slot_id=0)
 
         assert result.success is True
@@ -770,7 +934,7 @@ class TestPlanReviewerAlreadyReviewedFlag:
         """No plan comment short-circuits with success=True, already_reviewed=True."""
         reviewer = self._reviewer()
         with (
-            patch.object(reviewer, "_latest_review_is_final", return_value=False),
+            patch.object(reviewer, "_read_plan_state_labels", return_value=[STATE_NEEDS_PLAN]),
             patch.object(reviewer, "_get_latest_plan", return_value=None),
         ):
             result = reviewer._review_issue(123, slot_id=0)
@@ -782,7 +946,7 @@ class TestPlanReviewerAlreadyReviewedFlag:
         """A real review pass leaves already_reviewed=False."""
         reviewer = self._reviewer()
         with (
-            patch.object(reviewer, "_latest_review_is_final", return_value=False),
+            patch.object(reviewer, "_read_plan_state_labels", return_value=[STATE_NEEDS_PLAN]),
             patch.object(reviewer, "_get_latest_plan", return_value="# Implementation Plan\nDo it"),
             patch(
                 "hephaestus.automation.plan_reviewer.gh_issue_json",

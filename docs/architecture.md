@@ -393,8 +393,9 @@ Key fields:
 - `history` — `deque[HistoryEvent]` capped at
  [`HISTORY_CAP = 200`](hephaestus/automation/pipeline/work_item.py).
 - `session_ids` — `dict[str, str]`, populated by agent invocations.
-- `labels_cache` — last-known label set, fallback on transient API blips
- ([`_issue_labels`](hephaestus/automation/pipeline/stages/base.py)).
+- `labels_cache` — last-known diagnostic label set. Planning and plan-review
+ transition gates require a fresh GitHub read; cached labels never authorize
+ advancement.
 - `payload` — `dict[str, Any]`. The stage-local scratchpad for cross-step
  handoff (`retry_delay_s`, `*_verdict`, base-captured `base_branch`,
  reviewer text, etc.).
@@ -492,7 +493,9 @@ A label alone never authorizes merge. `merge_wait` revalidates the
 after arming and revokes on drift.
 
 Plan-review labels are the sole durable authority. Review comments explain and
-audit a decision but never authorize a transition or backfill a missing label.
+audit a decision but never authorize a transition, block a stage, or backfill a
+missing label. Comment markers locate actor-owned journal artifacts only;
+foreign marker text is ignored.
 
 ---
 
@@ -516,8 +519,8 @@ flowchart LR
     M --> F["7. Finished"]
 
     V -. "revision needed" .-> P
-    V -. "external feedback needed" .-> H["Human or dependency"]
-    H -. "feedback supplied" .-> P
+    V -. "external intervention needed" .-> H["Operator or dependency"]
+    H -. "operator replaces blocked label" .-> P
     Q -. "changes needed" .-> I
     M -. "approval invalidated" .-> Q
 ```
@@ -572,8 +575,8 @@ Planning produces one canonical implementation plan from the issue and its
 durable chronological journal. The GitHub journal remains complete; agent
 prompts receive the complete sequence while it fits the context budget, then
 an ordered revision index plus the latest complete plan and review. A blocked
-plan resumes only after trusted maintainer feedback is recorded after the
-blocked review.
+plan is an automation stop: only an external actor may resolve the dependency
+and replace `state:plan-blocked` with exactly one next plan-state label.
 
 #### Boundary diagram
 
@@ -581,7 +584,6 @@ blocked review.
 flowchart LR
     Issue["Issue text"] --> Context
     History["Plan and review history"] --> Context
-    Feedback["External feedback"] --> Context
     Context --> Planner --> Canonical["Canonical plan comment"]
     Canonical --> PlanReview["Plan review"]
 ```
@@ -593,16 +595,16 @@ stateDiagram-v2
     [*] --> Eligibility
     Eligibility --> Skipped: excluded or already implemented
     Eligibility --> Ready: approved plan exists
-    Eligibility --> AwaitFeedback: blocked with no later response
-    Eligibility --> BuildContext: plan needed or feedback supplied
-    AwaitFeedback --> BuildContext: response recorded
+    Eligibility --> AwaitOperator: state:plan-blocked present
+    Eligibility --> BuildContext: eligible plan-state label
+    AwaitOperator --> Eligibility: external actor replaces blocked label
     BuildContext --> Draft
     Draft --> Verify: candidate produced
     Draft --> Draft: recoverable failure
     Verify --> Publish: candidate complete
     Verify --> Draft: candidate unusable
     Verify --> Failed: retry limit reached
-    Publish --> Ready: canonical plan updated
+    Publish --> Ready: canonical plan updated; label transition confirmed
     Ready --> [*]
     Skipped --> [*]
     Failed --> [*]
@@ -615,18 +617,27 @@ Architectural contract:
 - Every iteration receives the ordered issue → plan → review → revision
   sequence, with a bounded index projection only when the complete journal is
   too large for an agent prompt.
+- Journal ingestion is bounded by both comment count and body bytes. If either
+  limit is exceeded, automation stops with an explicit manual-recovery error
+  instead of silently dropping old plan/review revisions.
 - Historical revision comments are actor-owned, append-once, and never edited
   or deleted.
 - Each durable state transition is published with its corresponding canonical
   artifact, and restart routing reads the label rather than comment prose.
+- `state:plan-blocked` is never removed or replaced by automation. Comments do
+  not revive it. After resolving the dependency, an external actor sets exactly
+  one next state: ordinarily `state:plan-no-go` to request amendment,
+  `state:plan-go` to approve, or `state:needs-plan` only when no canonical plan
+  should be reused.
 
 ### 5.3 Plan review
 
 Plan review decides whether the canonical plan is ready, can improve through a
 bounded revision, or needs external intervention. The GitHub issue label is the
 sole durable authority: `state:plan-go`, `state:plan-no-go`, or
-`state:plan-blocked`. The matching final token in the canonical review is an
-audit record, not an authorization fallback.
+`state:plan-blocked`. Reviewer output proposes one of those labels, but routing
+occurs only after GitHub confirms the label write. The canonical review remains
+an audit record and context source, never an authorization fallback.
 
 #### Boundary diagram
 
@@ -634,11 +645,14 @@ audit record, not an authorization fallback.
 flowchart LR
     Plan["Canonical plan"] --> Review
     History["Ordered plan/review history"] --> Review
-    Review --> CanonicalReview["Canonical review comment"]
-    Review -->|"go"| Implementation
-    Review -->|"nogo"| Archive["Archive prior plan and review"]
+    Review -->|"plan-go / plan-no-go"| CanonicalReview["Canonical review comment"]
+    CanonicalReview --> Label["Confirmed GitHub plan-state label"]
+    Review -->|"plan-blocked"| BlockLatch["Confirmed blocked label"]
+    BlockLatch --> BlockAudit["Canonical blocked explanation"]
+    Label -->|"plan-go"| Implementation
+    Label -->|"plan-no-go"| Archive["Archive prior plan and review"]
     Archive --> Planning
-    Review -->|"blocked + reason"| External["Human or dependency"]
+    BlockAudit --> External["Human or dependency"]
 ```
 
 #### State machine
@@ -648,18 +662,24 @@ stateDiagram-v2
     [*] --> ReconcileJournal
     ReconcileJournal --> LoadHistory: journal complete
     ReconcileJournal --> ReconcileJournal: interrupted archive recovered
-    ReconcileJournal --> Failed: conflicting or foreign journal marker
+    ReconcileJournal --> Failed: conflicting actor-owned immutable artifact
     LoadHistory --> Review: context available
     LoadHistory --> Failed: context unavailable
-    Review --> RetryReview: no valid state label
+    Review --> RetryReview: invalid reviewer response
     RetryReview --> Review: retry available
     RetryReview --> Failed: reviewer failures exhausted
-    Review --> Approved: state:plan-go
-    Review --> AssessRevision: state:plan-no-go
-    Review --> Blocked: state:plan-blocked
+    Review --> PublishAudit: plan-go or plan-no-go proposal
+    Review --> ApplyBlocked: plan-blocked proposal
+    ApplyBlocked --> RetryReview: blocked label write or confirmation failed
+    ApplyBlocked --> PublishBlockedAudit: state:plan-blocked confirmed
+    PublishBlockedAudit --> Blocked: explanation stored; latch remains on audit failure
+    PublishAudit --> ApplyLabel: review comment stored
+    ApplyLabel --> RetryReview: label write or confirmation failed
+    ApplyLabel --> Approved: state:plan-go confirmed
+    ApplyLabel --> AssessRevision: state:plan-no-go confirmed
     AssessRevision --> ArchiveRevision: improvement remains possible
     AssessRevision --> Blocked: no improvement and planning is stuck
-    AssessRevision --> Blocked: feedback or dependency required
+    AssessRevision --> Blocked: external decision or dependency required
     AssessRevision --> Failed: revision limit reached
     ArchiveRevision --> Amend: prior plan archived with recovery payload
     Amend --> PublishRevision: revised plan produced
@@ -673,13 +693,22 @@ Architectural contract:
 
 - The second automation journal role is the canonical plan review, identified
   by an opaque marker and updated only by its owning GitHub actor.
+- Marker collisions authored by other actors are inert. They cannot become
+  canonical artifacts, establish replay identity, or stop an owned write.
 - Before canonical comments change, the previous plan and its review are
   appended as immutable chronological comments.
 - The plan archive contains the next-plan recovery payload. On restart, a
   missing review archive or canonical update is completed idempotently before
   another agent runs.
-- A blocked verdict states exactly what feedback, decision, or dependency is
-  required.
+- A blocked verdict states exactly what decision or dependency is required.
+  Because BLOCKED is the safety latch, its label is confirmed before the
+  fallible explanatory write; an audit-write failure can never leave the item
+  eligible for autonomous work.
+  On restart, automation may repair a missing explanation with a generic,
+  actionable audit comment, but it does not change the blocked label or invoke
+  a planning agent.
+  Automation remains stopped until an external actor resolves it and replaces
+  the blocked label; a comment by itself has no routing effect.
 - No-improvement detection exits early as blocked instead of spending further
   planning iterations.
 - Invalid reviewer output retries review without consuming a plan revision.
@@ -971,8 +1000,7 @@ PR-probe failure cannot misclassify toward IMPLEMENTATION).
 | Open PR, neither impl label | `PR_REVIEW` |
 | No PR, at-or-past `state:plan-go` | `IMPLEMENTATION` |
 | No PR, `state:plan-no-go` | `PLANNING` (amend path) |
-| No PR, `state:plan-blocked`, no later trusted feedback | excluded while awaiting external input |
-| No PR, `state:plan-blocked`, later trusted maintainer feedback | `PLANNING`; the stage atomically restores `state:needs-plan` |
+| No PR, `state:plan-blocked` | excluded until an external actor resolves the block and replaces the label; comments alone are inert |
 | No state label / `state:needs-plan` | `PLANNING` |
 
 Epic tagging is the **ONE sanctioned seeding write**. GitHub mutations are
