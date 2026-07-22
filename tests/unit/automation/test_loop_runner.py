@@ -329,6 +329,29 @@ def test_resolve_org_and_repos_org_named() -> None:
     mock_detect.assert_not_called()
 
 
+def test_resolve_org_and_repos_dry_run_never_tags_discovered_epics() -> None:
+    """Organization discovery stays read-only when the loop is a dry run."""
+    args = loop_runner._parse_args(["--org", "ExplicitOrg", "--dry-run"])
+    epic = {"number": 81, "title": "Epic: roadmap", "labels": ["epic"]}
+    with (
+        patch(
+            "hephaestus.automation.loop_runner._gh_list_repos",
+            return_value=["Proteus"],
+        ),
+        patch(
+            "hephaestus.automation.loop_repo_manager._list_open_issue_meta",
+            return_value=[epic],
+        ),
+        patch("hephaestus.automation.loop_repo_manager.skip_epics") as mock_skip,
+    ):
+        org, repos, err = loop_runner._resolve_org_and_repos(args)
+
+    assert err is None
+    assert org == "ExplicitOrg"
+    assert repos == ["Proteus"]
+    mock_skip.assert_not_called()
+
+
 def test_resolve_org_and_repos_repos_flag_uses_cwd_org() -> None:
     """``--repos foo,bar`` uses cwd-detected org without enumerating."""
     args = loop_runner._parse_args(["--repos", "foo,bar"])
