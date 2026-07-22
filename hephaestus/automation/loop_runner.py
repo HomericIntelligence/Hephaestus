@@ -607,7 +607,11 @@ def _resolve_org_and_repos(
         if not candidates:
             return (org, [], "No repos returned from gh repo list — possible rate limit.")
         LOG.info("Sorting %d repos by open-issue count ...", len(candidates))
-        return (org, _sort_repos_by_open_count(org, candidates), None)
+        if args.dry_run:
+            repos = _sort_repos_by_open_count(org, candidates, dry_run=True)
+        else:
+            repos = _sort_repos_by_open_count(org, candidates)
+        return (org, repos, None)
 
     # Branch 4: no flags — default to cwd repo
     detected_org, detected_repo = _detect_cwd_repo()
