@@ -2756,7 +2756,7 @@ class TestUpsertAndDeleteComment:
         lock = threading.Lock()
         comments: list[dict[str, Any]] = []
         read_count: dict[int, int] = {}
-        errors: list[BaseException] = []
+        errors: list[Exception] = []
 
         def fetch(_issue: int, _repo: tuple[str, str]) -> list[dict[str, Any]]:
             thread_id = threading.get_ident()
@@ -2799,7 +2799,7 @@ class TestUpsertAndDeleteComment:
         def run() -> None:
             try:
                 gh_issue_upsert_owned_comment(5, marker, body, repo=repo)
-            except BaseException as exc:
+            except Exception as exc:
                 errors.append(exc)
 
         with (
