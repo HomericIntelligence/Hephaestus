@@ -211,7 +211,7 @@ def _list_open_pr_meta(org: str, repo: str) -> list[dict[str, Any]]:
     return sorted(pulls, key=lambda pr: pr["number"])
 
 
-def _list_open_issue_numbers(org: str, repo: str) -> list[int]:
+def _list_open_issue_numbers(org: str, repo: str, *, dry_run: bool = False) -> list[int]:
     """Return open NON-epic issue numbers in ``org/repo``, sorted ascending.
 
     This is the loop's single canonical issue-discovery call: the result is
@@ -225,7 +225,8 @@ def _list_open_issue_numbers(org: str, repo: str) -> list[int]:
     of child work, not code tasks, so the loop must never plan/implement them.
     Each excluded epic is tagged ``state:skip`` (best-effort) via
     :func:`skip_epics` so dashboards see it as intentionally bypassed; that
-    tagging never raises and never affects the returned list. Detection uses
+    tagging never raises and never affects the returned list. In dry-run mode,
+    the prospective write is logged but never sent to GitHub. Detection uses
     label names + title because native GitHub issue types are not exposed by the
     installed ``gh`` — see :func:`~hephaestus.automation.state_labels.is_epic`.
 
@@ -248,15 +249,20 @@ def _list_open_issue_numbers(org: str, repo: str) -> list[int]:
         # The owning repo is passed explicitly — this runs in the multi-repo
         # parent process, where ambient cwd resolution wrote other repos'
         # epic numbers onto the launch-directory repo (#2245).
-        try:
-            skip_epics(epic_labels, repo=(org, repo))
-        except Exception as exc:  # pragma: no cover - defensive
-            LOG.warning("[%s] could not tag excluded epics state:skip: %s", repo, exc)
+        if dry_run:
+            LOG.info("[dry-run] [%s] would tag excluded epics state:skip", repo)
+        else:
+            try:
+                skip_epics(epic_labels, repo=(org, repo))
+            except Exception as exc:  # pragma: no cover - defensive
+                LOG.warning("[%s] could not tag excluded epics state:skip: %s", repo, exc)
     return kept
 
 
-def _count_open_issues(org: str, repo: str) -> int:
+def _count_open_issues(org: str, repo: str, *, dry_run: bool = False) -> int:
     """Return count of open issues in ``org/repo``."""
+    if dry_run:
+        return len(_list_open_issue_numbers(org, repo, dry_run=True))
     return len(_list_open_issue_numbers(org, repo))
 
 
@@ -301,11 +307,15 @@ def _count_failing_prs(org: str, repo: str) -> int:
     return sum(1 for pr in pulls if not pr.get("isDraft") and pr.get("state", "OPEN") == "OPEN")
 
 
-def _sort_repos_by_open_count(org: str, repos: list[str]) -> list[str]:
+def _sort_repos_by_open_count(org: str, repos: list[str], *, dry_run: bool = False) -> list[str]:
     """Order repos ascending by open-issue count (smallest backlog first)."""
     counted: list[tuple[int, int, str]] = []
     for idx, repo in enumerate(repos):
-        counted.append((_count_open_issues(org, repo), idx, repo))
+        if dry_run:
+            count = _count_open_issues(org, repo, dry_run=True)
+        else:
+            count = _count_open_issues(org, repo)
+        counted.append((count, idx, repo))
     counted.sort()
     return [name for _, _, name in counted]
 
