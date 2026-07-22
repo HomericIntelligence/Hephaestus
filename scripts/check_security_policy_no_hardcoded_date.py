@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Reject hard-coded ``As of YYYY-MM-DD`` stamps in SECURITY.md.
 
-The supported-versions table is keyed by the current release series (e.g.
-``0.9.x``). Hard-coded absolute dates in the header rot — see issue #730 —
-because nothing forces them to be re-stamped. This check fails the
-pre-commit hook whenever such a stamp reappears.
+Hard-coded absolute dates in a rolling security policy rot — see issue #730 —
+because nothing forces them to be re-stamped. This check fails the pre-commit
+hook whenever such a stamp reappears.
 
 Usage:
     python scripts/check_security_policy_no_hardcoded_date.py
@@ -53,8 +52,8 @@ def main() -> int:
         for lineno, line in hits:
             print(f"  SECURITY.md:{lineno}: {line.strip()}")
         print(
-            "\nReplace with a coarse formulation tied to the supported release "
-            "series (e.g. 'As of the 0.9.x release line.'). See issue #730."
+            "\nReplace the date with rolling policy language that remains true "
+            "across releases. See issue #730."
         )
         return 1
     return 0

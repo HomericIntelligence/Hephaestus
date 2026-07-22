@@ -2,14 +2,14 @@
 
 ## Supported Versions
 
-Hephaestus supports **Python 3.10–3.13** (`requires-python = ">=3.10"` in
-`pyproject.toml`; CI exercises 3.10, 3.11, 3.12, and 3.13). See
-[COMPATIBILITY.md](COMPATIBILITY.md) for the full compatibility policy.
+Runtime and API compatibility are defined by `pyproject.toml` and
+[COMPATIBILITY.md](COMPATIBILITY.md), which are the authoritative sources for
+the current compatibility policy.
 
-| Version | Supported       |
-|---------|-----------------|
-| 0.10.x  | ✅ Supported    |
-| < 0.10  | ❌ End of life  |
+Security fixes are made against the current default branch and released in the
+latest available package version. Older releases are not maintained as
+separate security-support lines. Users should reproduce issues on and upgrade
+to the latest release before reporting a vulnerability.
 
 ## Reporting a Vulnerability
 
