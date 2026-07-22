@@ -2824,10 +2824,11 @@ class TestUpsertAndDeleteComment:
         assert errors == []
         assert [comment["body"] for comment in comments] == [body]
 
+    @patch("hephaestus.automation.github_api.gh_current_login", return_value="hephaestus-bot")
     @patch("hephaestus.automation.github_api.fetch_issue_comments_metadata")
     @patch("hephaestus.automation.github_api.gh_issue_comment")
     def test_owned_upsert_propagates_journal_read_failure(
-        self, mock_create: Any, mock_fetch: Any
+        self, mock_create: Any, mock_fetch: Any, _mock_login: Any
     ) -> None:
         """A failed strict read cannot be mistaken for an absent canonical comment."""
         mock_fetch.side_effect = RuntimeError("complete comment journal unavailable")
