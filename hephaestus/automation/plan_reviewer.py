@@ -36,18 +36,25 @@ from hephaestus.github.rate_limit import wait_until
 from hephaestus.utils.terminal import terminal_guard
 
 from .agent_config import DEFAULT_AGENT_TIMEOUT
-from .claude_invoke import invoke_claude_with_session, parse_review_verdict, scan_quota_reset
+from .claude_invoke import invoke_claude_with_session, scan_quota_reset
 from .claude_models import reviewer_model
 from .git_utils import get_repo_info, get_repo_root, get_repo_slug, issue_ref
-from .github_api import _gh_call, gh_issue_json, gh_issue_upsert_comment
+from .github_api import _gh_call, gh_issue_edit_labels, gh_issue_json, gh_issue_upsert_comment
 from .models import PlanReviewerOptions, WorkerResult
 from .prompts import get_plan_review_prompt
-from .review_journal import is_plan_comment
+from .protocol import PLAN_REVIEW_CANONICAL_MARKER
+from .review_journal import (
+    comment_revision,
+    is_plan_comment,
+    parse_plan_review_state,
+    render_current_review,
+)
 from .review_state import (
     PLAN_REVIEW_PREFIX as _REVIEW_PREFIX_SHARED,
     is_plan_review_go,
 )
 from .session_naming import AGENT_PLAN_REVIEWER
+from .state_labels import apply_plan_state
 from .status_tracker import StatusTracker
 
 logger = logging.getLogger(__name__)
@@ -68,16 +75,9 @@ logger = logging.getLogger(__name__)
 # (see :mod:`hephaestus.automation.review_state` and issue #551).
 _REVIEW_PREFIX = _REVIEW_PREFIX_SHARED
 
-# Plan review verdict contract (see PLAN_REVIEW_PROMPT in prompts/planning.py):
-# Claude ends its response with exactly one of ``Verdict: GO`` /
-# ``Verdict: NOGO``. The review prose explains *why*; this line is the binary
-# gate, parsed by :func:`parse_review_verdict`.
-
-# Fallback marker appended by _post_review when Claude's output omits the
-# verdict line entirely (defence-in-depth — keeps the short-circuit gate
-# parseable even if the model misformats). NOGO is the safe default
-# because it triggers re-review on the next loop.
-_FALLBACK_VERDICT_LINE = "Verdict: NOGO"
+# Plan reviews terminate with exactly one supported ``state:plan-*`` token.
+# The corresponding GitHub label is the only durable workflow authority;
+# comment text remains an explanatory audit record and is never a gate.
 
 
 class PlanReviewer:
@@ -384,15 +384,7 @@ class PlanReviewer:
         return None
 
     def _latest_review_is_final(self, issue_number: int) -> bool:
-        """Return True iff the LATEST plan review on the issue is a GO.
-
-        Thin delegate over
-        :func:`hephaestus.automation.review_state.is_plan_review_go`,
-        which is the single source of truth for this gate (also called by
-        the implementer — see #551). The comments fetched by
-        :meth:`_fetch_issue_comments` are forwarded so the API call is
-        shared with :meth:`_get_latest_plan` and the per-instance cache is
-        respected.
+        """Return True iff GitHub carries the authoritative plan-GO label.
 
         Args:
             issue_number: GitHub issue number.
@@ -401,8 +393,7 @@ class PlanReviewer:
             True if the latest plan review carries the GO verdict.
 
         """
-        comments = self._fetch_issue_comments(issue_number)
-        return is_plan_review_go(issue_number, comments=comments)
+        return is_plan_review_go(issue_number)
 
     def _run_claude_analysis(
         self,
@@ -555,34 +546,47 @@ class PlanReviewer:
             return None
 
     def _post_review(self, issue_number: int, review_text: str) -> None:
-        """Upsert the plan review as the issue's single review comment.
+        """Persist one canonical review and its authoritative state label.
 
-        Updates the one ``## 🔍 Plan Review`` comment in place (via
-        :func:`gh_issue_upsert_comment`) rather than appending a new one, so
-        even when this standalone phase runs it converges to a single review
-        comment per issue instead of accumulating duplicates (#455/#468/#484).
-
-        Defence-in-depth: if Claude's output omits a parseable verdict line
-        (model misformat), append `_FALLBACK_VERDICT_LINE` (= NOGO) so the
-        next-loop short-circuit gate always has a parseable marker. NOGO is
-        the safe default — it re-runs the reviewer rather than silently
-        skipping a possibly-incomplete review. Detection uses the same
-        :func:`parse_review_verdict` as the gate, so it tracks the GO/NOGO
-        contract rather than a brittle substring check.
+        Legacy ``Verdict:`` output and ambiguous responses are rejected before
+        any write. BLOCKED applies its label before the explanatory comment so
+        a comment-write failure cannot leave the issue runnable. GO and NOGO
+        publish the audit record first; a label-write failure then remains
+        fail-closed and the next standalone run may safely retry.
 
         Args:
             issue_number: GitHub issue number.
             review_text: Review body text from Claude.
 
         """
-        if parse_review_verdict(review_text).verdict == "AMBIGUOUS":
-            logger.warning(
-                "Issue %s: review body missing parseable verdict line; appending fallback NOGO",
-                issue_ref(issue_number),
+        state = parse_plan_review_state(review_text)
+        if state is None:
+            raise ValueError(
+                "plan review must end with exactly one state:plan-go, "
+                "state:plan-no-go, or explained state:plan-blocked token"
             )
-            review_text = f"{review_text.rstrip()}\n\n{_FALLBACK_VERDICT_LINE}\n"
-        comment_body = f"{_REVIEW_PREFIX}\n\n{review_text}"
-        gh_issue_upsert_comment(issue_number, _REVIEW_PREFIX, comment_body)
+        revision = 1
+        for comment in reversed(self._fetch_issue_comments(issue_number)):
+            body = str(comment.get("body", ""))
+            if is_plan_comment(body):
+                revision = comment_revision(body) or 1
+                break
+        comment_body = render_current_review(review_text, revision=revision)
+        label_to_add, labels_to_remove = apply_plan_state(state)
+        if state == "state:plan-blocked":
+            gh_issue_edit_labels(
+                issue_number,
+                add=[label_to_add],
+                remove=labels_to_remove,
+            )
+            gh_issue_upsert_comment(issue_number, PLAN_REVIEW_CANONICAL_MARKER, comment_body)
+        else:
+            gh_issue_upsert_comment(issue_number, PLAN_REVIEW_CANONICAL_MARKER, comment_body)
+            gh_issue_edit_labels(
+                issue_number,
+                add=[label_to_add],
+                remove=labels_to_remove,
+            )
         logger.info("Posted plan review to issue #%s", issue_number)
 
     def _print_summary(self, results: dict[int, WorkerResult]) -> None:

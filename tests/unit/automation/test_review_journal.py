@@ -17,10 +17,10 @@ from hephaestus.automation.review_journal import (
 )
 
 
-def test_review_state_translates_legacy_github_verdicts() -> None:
-    """Existing issue journals remain readable after switching to state labels."""
-    assert review_state("analysis\n\nVerdict: GO") == "state:plan-go"
-    assert review_state("analysis\n\n**Verdict: NO-GO** — revise") == "state:plan-no-go"
+def test_review_state_rejects_legacy_github_verdicts() -> None:
+    """Legacy free-text verdicts cannot influence the label-backed workflow."""
+    assert review_state("analysis\n\nVerdict: GO") == "unparseable"
+    assert review_state("analysis\n\n**Verdict: NO-GO** — revise") == "unparseable"
 
 
 def _owned(body: str) -> IssueComment:
@@ -93,9 +93,22 @@ def test_projection_bounds_prompt_without_truncating_github_journal() -> None:
 
     assert len(projection) <= MAX_AGENT_HISTORY_CHARS
     assert "hephaestus-history-projection:truncated" in projection
-    assert "Ordered superseded revision index" in projection
+    assert "Ordered revision index" in projection
     assert "Current actionable plan" in projection
     assert len(comments) == 19
+
+
+def test_oversized_current_plan_keeps_index_fingerprint_and_explicit_excerpt() -> None:
+    """A single oversized current artifact cannot tail-slice away its index."""
+    comments = [_owned(render_current_plan("x" * 50_000, revision=7))]
+
+    projection = history_projection(comments)
+
+    assert len(projection) <= MAX_AGENT_HISTORY_CHARS
+    assert "Ordered revision index" in projection
+    assert "Revision 7" in projection
+    assert "plan_sha=" in projection
+    assert "Current plan excerpt" in projection
 
 
 def test_only_trusted_human_feedback_resumes_a_blocked_plan() -> None:

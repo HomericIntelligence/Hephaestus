@@ -1,39 +1,21 @@
-"""Shared plan-review verdict gate for the automation pipeline.
+"""Shared plan-review state helpers for the automation pipeline.
 
-The implementer needs to know whether a GitHub issue's *latest* plan-review
-comment is a **GO** before it implements the plan. Current reviews end with
-exactly one of ``state:plan-go``, ``state:plan-no-go``, or
-``state:plan-blocked``; the prose above that token explains the decision and,
-for BLOCKED, what external input is required.
-
-Two parsers, deliberately: the in-loop reviewer uses
-:func:`~hephaestus.automation.claude_invoke.parse_review_verdict` (first match;
-its prompt contract is "exactly one verdict line") to decide loop termination.
-This module's migration gate (:func:`latest_verdict`) scans a *posted* review
-comment for the LAST recognized state token, while continuing to read legacy
-``Verdict:`` lines already stored in GitHub. The current reviewer only emits
-state labels. A persisted comment is longer-lived and may accumulate
-discussion, so the reviewer's final word must win (failing toward NOGO is safe;
-failing toward GO would implement an unreviewed plan).
-
-The module deliberately accepts either an ``issue_number`` (in which case it
-does the GraphQL fetch itself, with ``last: 100`` pagination matching the
-reviewer) or a pre-fetched list of comment dicts (so callers can re-use a
-per-instance cache).
+The GitHub issue label is the sole durable authorization gate. Plan-review
+comments carry an exact final state token for audit and diagnostics, but their
+prose cannot grant approval or repair labels.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import Any
 
 from ..git_utils import get_repo_info, get_repo_root, issue_ref
-from ..github_api import _gh_call, gh_issue_add_labels, gh_issue_json
+from ..github_api import _gh_call, gh_issue_json
 from ..protocol import PLAN_REVIEW_PREFIX as PLAN_REVIEW_PREFIX
 from ..review_journal import is_plan_review_comment
-from ..state_labels import STATE_PLAN_GO, STATE_PLAN_NO_GO, is_plan_go as labels_are_plan_go
+from ..state_labels import is_plan_go as labels_are_plan_go
 
 logger = logging.getLogger(__name__)
 
@@ -43,23 +25,11 @@ logger = logging.getLogger(__name__)
 # :mod:`hephaestus.automation.protocol`; re-exported here for backward
 # compatibility with the historical import path.
 
-# Verdict line in a *posted* plan-review comment. The gate scans for ALL
-# matching lines and takes the LAST one (see ``latest_verdict``): a stored
-# review may contain a reviewer's earlier draft verdict before the final one
-# (e.g. "Verdict: GO … on reflection … Verdict: NOGO"), and the reviewer's
-# FINAL word must win — failing toward NOGO is safe (re-review), failing toward
-# GO would implement an unreviewed plan (the #455/#468/#484 class of bug). This
-# is intentionally STRICTER than the loop's first-match ``parse_review_verdict``
-# (whose contract is "exactly one verdict line"): the persisted comment is
-# longer-lived and may accumulate discussion, so the gate must be robust to it.
-# During migration it accepts both the historical ``Verdict:`` vocabulary and
-# the exact state-token vocabulary now persisted by the pipeline. One combined
-# regex preserves textual ordering, so the LAST recognized line still wins.
-_GATE_VERDICT_RE = re.compile(
-    r"^\s*(?:\**\s*Verdict\s*:\s*\**\s*(?P<legacy>GO|NO[\s-]?GO)\b.*"
-    r"|(?P<state>state:plan-(?:go|no-go|blocked)))\s*$",
-    re.MULTILINE | re.IGNORECASE,
-)
+_STATE_RESULTS = {
+    "state:plan-go": "GO",
+    "state:plan-no-go": "NOGO",
+    "state:plan-blocked": "BLOCKED",
+}
 
 # Maximum length for verdict context preview in logs (e.g., first verdict line or content).
 _VERDICT_LOG_PREVIEW_CHARS = 200
@@ -72,14 +42,10 @@ MAX_UNPARSEABLE_VERDICT_PASSES: int = 3
 
 
 def latest_verdict(review_body: str) -> str | None:
-    """Return the LAST verdict token in a posted plan-review body.
+    """Return the last exact state token in a posted plan-review body.
 
-    Scans for every well-formed historical ``Verdict: GO|NOGO`` or current
-    ``state:plan-*`` line and returns the LAST one's normalized token. Taking the
-    *last* line (not the first) means a
-    review that discussed an earlier verdict before settling resolves to the
-    reviewer's final word — and a malformed/absent verdict resolves to ``None``,
-    which every gate treats as not-GO (fail safe).
+    This diagnostic parser accepts only ``state:plan-*`` lines. It is never an
+    authorization source; :func:`is_plan_review_go` reads issue labels only.
 
     Args:
         review_body: Full text of a plan-review comment (starting with
@@ -90,28 +56,17 @@ def latest_verdict(review_body: str) -> str | None:
         ``None`` when no verdict line is present.
 
     """
-    matches = list(_GATE_VERDICT_RE.finditer(review_body))
-    if not matches:
-        return None
-    match = matches[-1]
-    state = match.group("state")
-    if state:
-        return {
-            "state:plan-go": "GO",
-            "state:plan-no-go": "NOGO",
-            "state:plan-blocked": "BLOCKED",
-        }[state.lower()]
-    legacy = re.sub(r"[\s-]", "", (match.group("legacy") or "").upper())
-    return "GO" if legacy == "GO" else "NOGO"
+    for line in reversed(review_body.splitlines()):
+        if result := _STATE_RESULTS.get(line.strip().lower()):
+            return result
+    return None
 
 
 def _extract_verdict_context(review_body: str) -> str:
     """Extract a human-readable context line from a review body.
 
-    Returns the last line containing 'Verdict:' if present, else the first
-    non-empty line that doesn't start with PLAN_REVIEW_PREFIX. Truncated to
-    _VERDICT_LOG_PREVIEW_CHARS for logging. Useful for diagnosing missing or
-    unexpected verdicts by showing actual content rather than just the token.
+    Returns the last plan-state token if present, else the first non-empty
+    non-marker line. The result is truncated for safe logging.
 
     Args:
         review_body: Full text of a plan-review comment.
@@ -122,9 +77,9 @@ def _extract_verdict_context(review_body: str) -> str:
     """
     lines = review_body.split("\n")
 
-    # Look for a machine-readable verdict line (historical or current).
+    # Look for the current machine-readable state token.
     for line in reversed(lines):
-        if "Verdict:" in line or line.strip().lower().startswith("state:plan-"):
+        if line.strip().lower().startswith("state:plan-"):
             preview = line.strip()
             if preview:
                 return preview[:_VERDICT_LOG_PREVIEW_CHARS]
@@ -145,7 +100,7 @@ def count_unparseable_verdict_passes(comments: list[dict[str, Any]]) -> int:
     :data:`PLAN_REVIEW_PREFIX`) in chronological order and counts the ones
     where :func:`latest_verdict` returns ``None``.  This is the number of
     passes in which a reviewer posted a comment but :func:`parse_review_verdict`
-    could not find a plan-state token (or a legacy ``Verdict:`` line).
+    could not find a plan-state token.
 
     A non-zero count indicates the reviewer is producing malformed output.
     When the count reaches :data:`MAX_UNPARSEABLE_VERDICT_PASSES` the
@@ -515,124 +470,50 @@ def fetch_all_issue_titles_graphql(
     return result_map
 
 
-def is_plan_review_go(  # noqa: C901  # validation: labels-first gate with comment-scan backfill; many independent rule checks
+def is_plan_review_go(
     issue_number: int,
     comments: list[dict[str, Any]] | None = None,
     issue_labels: list[str] | None = None,
 ) -> bool:
-    """Return True iff the issue's plan is approved (``state:plan-go``).
+    """Return True iff the issue carries the authoritative ``state:plan-go`` label.
 
-    Labels-first gate (#704). The reviewer applies ``state:plan-go`` on the
-    first unambiguous GO verdict (and ``state:plan-no-go`` on NOGO); this
-    function trusts the label as the single source of truth. The
-    comment-scan path remains as a one-time **backfill** for issues whose
-    plan reached GO before the labels rollout — when no state label is set
-    but the latest plan-review comment parses to GO, this
-    function also applies ``state:plan-go`` to the issue so subsequent
-    runs short-circuit on the label.
+    ``comments`` remains in the compatibility signature but is deliberately
+    ignored. Historical review prose and state-looking comment text cannot
+    grant approval or backfill labels.
 
     Args:
-        issue_number: GitHub issue number. Used for logging, lazy label
-            fetch (when ``issue_labels`` is ``None``), and the backfill
-            ``gh_issue_add_labels`` call.
-        comments: Pre-fetched list of issue comment dicts in chronological
-            order, or ``None`` to fetch via GraphQL. Each dict must expose
-            ``body``. Only consulted on the backfill path.
+        issue_number: GitHub issue number. Used for logging and lazy label
+            fetch when ``issue_labels`` is ``None``.
+        comments: Ignored compatibility argument. Comment text is not an
+            authorization source.
         issue_labels: Pre-fetched list of label names currently on the issue,
             or ``None`` to fetch lazily via :func:`gh_issue_json`. Callers
             that already have the labels in hand (e.g. the implementer's
             per-issue load) should pass them to avoid an extra round-trip.
 
     Returns:
-        ``True`` iff ``state:plan-go`` is present on the issue (or the
-        backfill scan promotes it). ``False`` when ``state:plan-no-go`` is
-        present, when neither state label is set and no GO is found in the
-        comments, or when label/comment fetch fails.
+        ``True`` iff ``state:plan-go`` is present on the issue; otherwise
+        ``False``, including label-fetch failures.
 
     """
-    # ── Labels-first short-circuit ────────────────────────────────────────
-    # Only fetch labels when the caller passed NEITHER labels nor comments.
-    # Callers that already have comments in hand (e.g. legacy tests, the
-    # plan_reviewer's per-instance comment cache) intentionally exercise the
-    # comment-scan path and need not trigger an extra round-trip.
-    if issue_labels is None and comments is None:
+    del comments
+    if issue_labels is None:
         try:
             issue_data = gh_issue_json(issue_number)
             issue_labels = [
                 label.get("name", "") for label in issue_data.get("labels", []) if label.get("name")
             ]
         except Exception as e:
-            logger.debug(
-                "Issue %s: could not fetch labels for plan-go gate (%s); "
-                "falling back to comment scan",
+            logger.warning(
+                "Issue %s: could not fetch labels for plan-go gate (%s)",
                 issue_ref(issue_number),
                 e,
-            )
-            issue_labels = []
-    if issue_labels is not None:
-        if labels_are_plan_go(issue_labels):
-            logger.debug("Issue %s: state:plan-go label present — GO", issue_ref(issue_number))
-            return True
-        if STATE_PLAN_NO_GO in set(issue_labels):
-            logger.debug(
-                "Issue %s: state:plan-no-go label present — NOGO",
-                issue_ref(issue_number),
             )
             return False
-
-    # ── Backfill path: no state label yet; scan comments for a GO verdict ─
-    if comments is None:
-        comments = _fetch_issue_comments_graphql(issue_number)
-
-    latest_review_body: str | None = None
-    latest_review_url: str | None = None
-    for comment in comments:
-        body: str = comment.get("body", "")
-        if is_plan_review_comment(body):
-            latest_review_body = body
-            latest_review_url = comment.get("url")
-
-    if latest_review_body is None:
-        logger.debug("Issue %s: no plan-review comment found", issue_ref(issue_number))
-        return False
-
-    # Last-verdict-wins (see latest_verdict): the reviewer's FINAL word gates.
-    verdict = latest_verdict(latest_review_body)
-    if verdict == "GO":
-        logger.info(
-            "Issue %s: backfilling state:plan-go label from existing GO review",
-            issue_ref(issue_number),
-        )
-        try:
-            gh_issue_add_labels(issue_number, [STATE_PLAN_GO])
-        except Exception as e:
-            logger.warning(
-                "Issue %s: failed to backfill state:plan-go label (%s); "
-                "GO gate still True via comment scan",
-                issue_ref(issue_number),
-                e,
-            )
-        return True
-    if verdict is None:
-        # No parseable verdict line — log WARNING with the first line of the
-        # offending body and its URL (root cause of #615).
-        first_line = latest_review_body.split("\n", 1)[0].strip()
-        url_part = latest_review_url or "<no url>"
-        logger.warning(
-            "Issue %s: plan-review comment has no parseable plan-state token "
-            "— first line: %r | url: %s",
-            issue_ref(issue_number),
-            first_line[:_VERDICT_LOG_PREVIEW_CHARS],
-            url_part,
-        )
-    else:
-        context = _extract_verdict_context(latest_review_body)
-        url_part = f" {latest_review_url}" if latest_review_url else " <no url>"
-        logger.debug(
-            "Issue %s: latest plan review verdict is %s (not GO) | %s%s",
-            issue_ref(issue_number),
-            verdict,
-            context,
-            url_part,
-        )
-    return False
+    is_go = labels_are_plan_go(issue_labels)
+    logger.debug(
+        "Issue %s: authoritative plan label is %s",
+        issue_ref(issue_number),
+        "GO" if is_go else "not GO",
+    )
+    return is_go

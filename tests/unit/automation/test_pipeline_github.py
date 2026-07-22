@@ -28,7 +28,6 @@ from hephaestus.automation.protocol import (
     PLAN_REVIEW_PREFIX,
 )
 from hephaestus.automation.review_journal import IssueComment, render_current_plan
-from hephaestus.automation.state_labels import STATE_PLAN_GO
 from hephaestus.utils.file_lock import LockUnavailableError
 
 
@@ -338,7 +337,7 @@ class TestRepoScoping:
             "org/repo-a",
         ]
 
-    def test_plan_gate_backfills_repo_scoped_go_comment(
+    def test_plan_presence_does_not_backfill_from_review_comment(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         calls: list[list[str]] = []
@@ -347,17 +346,14 @@ class TestRepoScoping:
             calls.append(argv)
             if argv[:2] == ["issue", "view"]:
                 payload = {
-                    "labels": [],
-                    "comments": [{"body": f"{PLAN_REVIEW_PREFIX}\n\nVerdict: GO"}],
+                    "comments": [{"body": f"{PLAN_REVIEW_PREFIX}\n\nstate:plan-go"}],
                 }
                 return SimpleNamespace(stdout=json.dumps(payload))
-            if argv[:2] == ["label", "list"]:
-                return SimpleNamespace(stdout=json.dumps([{"name": STATE_PLAN_GO}]))
             return SimpleNamespace(stdout="")
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
 
-        assert pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).has_existing_plan(5)
+        assert not pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).has_existing_plan(5)
 
         assert calls == [
             [
@@ -365,17 +361,7 @@ class TestRepoScoping:
                 "view",
                 "5",
                 "--json",
-                "labels,comments",
-                "--repo",
-                "org/repo-a",
-            ],
-            ["label", "list", "--json", "name", "--limit", "200", "--repo", "org/repo-a"],
-            [
-                "issue",
-                "edit",
-                "5",
-                "--add-label",
-                STATE_PLAN_GO,
+                "comments",
                 "--repo",
                 "org/repo-a",
             ],
@@ -424,10 +410,10 @@ class TestRepoScoping:
 
         assert pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).has_existing_plan(5)
 
-    def test_repo_scoped_has_existing_plan_rejects_plan_comment_after_latest_nogo(
+    def test_repo_scoped_has_existing_plan_ignores_review_state_text(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A stale plan comment is not valid after the latest plan review is NOGO."""
+        """Artifact presence is independent from the authoritative state label."""
 
         def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
             if argv[:2] == ["issue", "view"]:
@@ -435,7 +421,7 @@ class TestRepoScoping:
                     "labels": [],
                     "comments": [
                         {"body": f"{PLAN_COMMENT_MARKER}\n\nOld rejected plan."},
-                        {"body": f"{PLAN_REVIEW_PREFIX}\n\nVerdict: NOGO"},
+                        {"body": f"{PLAN_REVIEW_PREFIX}\n\nstate:plan-no-go"},
                     ],
                 }
                 return SimpleNamespace(stdout=json.dumps(payload))
@@ -443,10 +429,7 @@ class TestRepoScoping:
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
 
-        assert (
-            pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).has_existing_plan(5)
-            is False
-        )
+        assert pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).has_existing_plan(5)
 
     def test_repo_scoped_pr_lookup_raises_on_gh_failure(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1292,7 +1275,13 @@ class TestReadSurface:
         monkeypatch.setattr(pg, "find_merged_closing_pr", lambda n: 1)
         monkeypatch.setattr(adapter, "_find_pr_for_issue", lambda n, state: 2)
         monkeypatch.setattr(pg, "get_pr_head_branch", lambda n: "head")
-        monkeypatch.setattr(pg, "is_plan_review_go", lambda n: True)
+        monkeypatch.setattr(
+            pg,
+            "gh_call",
+            lambda argv, **kwargs: SimpleNamespace(
+                stdout=json.dumps({"comments": [{"body": f"{PLAN_COMMENT_MARKER}\nPlan"}]})
+            ),
+        )
 
         assert adapter.find_merged_closing_pr(9) == 1
         assert adapter.find_pr_for_issue(9) == 2

@@ -26,11 +26,13 @@ from hephaestus.automation.pipeline.seeding import (
     seed_entry_from_facts,
     seed_from_cli,
     seed_issue,
+    seed_issue_from_github,
 )
 from hephaestus.automation.state_labels import (
     STATE_IMPLEMENTATION_GO,
     STATE_IMPLEMENTATION_NO_GO,
     STATE_NEEDS_PLAN,
+    STATE_PLAN_BLOCKED,
     STATE_PLAN_GO,
     STATE_PLAN_NO_GO,
     STATE_SKIP,
@@ -450,6 +452,26 @@ class TestSeedIssueFetchLayer:
         facts = self._seed(101, [STATE_PLAN_GO, "other-label"], [])
         assert facts.number == 101
         assert {STATE_PLAN_GO, "other-label"} <= facts.labels
+
+    def test_blocked_comment_without_blocked_label_cannot_control_restart(self) -> None:
+        """Seeding never infers BLOCKED from review prose after a label-write failure."""
+        github = MagicMock()
+        github.gh_issue_json.return_value = {
+            "number": 102,
+            "title": "A task",
+            "body": "",
+            "labels": [{"name": STATE_NEEDS_PLAN}],
+        }
+        github.issue_comments.side_effect = AssertionError("comments are not state authority")
+        github.find_pr_for_issue.return_value = None
+        github.find_merged_pr_for_issue.return_value = None
+
+        facts = seed_issue_from_github(102, github)
+        stage, _ = classify_issue(facts)
+
+        assert stage is StageName.PLANNING
+        assert STATE_PLAN_BLOCKED not in facts.labels
+        github.issue_comments.assert_not_called()
 
 
 class TestSeedIssueEpicDetection:

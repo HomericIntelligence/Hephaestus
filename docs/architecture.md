@@ -442,10 +442,11 @@ value would be a static `TypeError` and a safe routing table edit.
 ### State-label vocabulary
 
 Defined in [`state_labels.py`](hephaestus/automation/state_labels.py) and
-imported throughout the pipeline. Six labels, four mutually exclusive in
-two pairs:
+imported throughout the pipeline. Seven labels: four mutually exclusive
+planning states, two mutually exclusive implementation-review states, and one
+absolute operator state:
 
-| Label | Pair | Authoritative stage |
+| Label | Group | Authoritative stage |
 |--------------------------------|--------------|---------------------------------|
 | `state:needs-plan` | planner-scope| [`planning.on_enter`](hephaestus/automation/pipeline/stages/planning.py) |
 | `state:plan-no-go` | planner-scope| [`plan_review._eval`](hephaestus/automation/pipeline/stages/plan_review.py) |
@@ -490,12 +491,8 @@ A label alone never authorizes merge. `merge_wait` revalidates the
 `state:implementation-go` label and the PR head immediately before and
 after arming and revokes on drift.
 
-#### [`apply_plan_verdict(is_go)`](hephaestus/automation/state_labels.py)
-
-Returns `(label_to_add, labels_to_remove)`. Pure — both the plan_review
-stage and the legacy loop apply identical transitions through this helper.
-Non-fatal pair (each write wrapped independently) — see
-[`PlanReviewStage._write_verdict_labels`](hephaestus/automation/pipeline/stages/plan_review.py).
+Plan-review labels are the sole durable authority. Review comments explain and
+audit a decision but never authorize a transition or backfill a missing label.
 
 ---
 
@@ -620,14 +617,16 @@ Architectural contract:
   too large for an agent prompt.
 - Historical revision comments are actor-owned, append-once, and never edited
   or deleted.
-- Planning maintains planning state but does not issue review verdicts.
+- Each durable state transition is published with its corresponding canonical
+  artifact, and restart routing reads the label rather than comment prose.
 
 ### 5.3 Plan review
 
 Plan review decides whether the canonical plan is ready, can improve through a
-bounded revision, or needs external intervention. The only machine-readable
-verdicts are `state:plan-go`, `state:plan-no-go`, and
-`state:plan-blocked`.
+bounded revision, or needs external intervention. The GitHub issue label is the
+sole durable authority: `state:plan-go`, `state:plan-no-go`, or
+`state:plan-blocked`. The matching final token in the canonical review is an
+audit record, not an authorization fallback.
 
 #### Boundary diagram
 

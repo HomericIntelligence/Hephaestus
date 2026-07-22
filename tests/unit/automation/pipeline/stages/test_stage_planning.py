@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+import pytest
+
 from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
@@ -286,10 +288,10 @@ class TestPlanningStageEnter:
         assert item.state == "VERIFY"
         assert github.mutation_log == log_after_first  # nothing new written
 
-    def test_replan_entry_swaps_no_go_for_needs_plan_atomically(
+    def test_replan_entry_keeps_no_go_until_revised_plan_is_published(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A state:plan-no-go fail-back entry swaps to needs-plan in ONE write."""
+        """A rejected plan remains authoritative while the replacement is generated."""
         stage = PlanningStage()
         github = FakeStageGitHub(labels=[STATE_PLAN_NO_GO])
         ctx = make_ctx(github=github)
@@ -299,16 +301,33 @@ class TestPlanningStageEnter:
 
         assert outcome is None  # proceed to re-plan, not fast-forward
         assert item.state == "ENTER"  # no premature VERIFY fast-forward
-        # Exactly one atomic edit — invariant never transiently broken.
-        assert github.mutation_log == [
-            (
-                "edit_labels",
-                (20, (STATE_NEEDS_PLAN,), (STATE_PLAN_NO_GO, STATE_PLAN_GO, "state:plan-blocked")),
-            ),
-        ]
-        assert STATE_PLAN_NO_GO not in github.labels[20]
+        assert item.payload["requires_plan_revision"] is True
+        assert github.mutation_log == []
+        assert STATE_PLAN_NO_GO in github.labels[20]
         assert STATE_PLAN_GO not in github.labels[20]
-        assert STATE_NEEDS_PLAN in github.labels[20]
+        assert STATE_NEEDS_PLAN not in github.labels[20]
+
+    def test_normal_no_go_replan_receives_complete_ordered_history(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Every rejected-plan iteration gets plan then review context, without human feedback."""
+        stage = PlanningStage()
+        github = FakeStageGitHub(labels=[STATE_PLAN_NO_GO], has_plan=True)
+        github.comments[29] = [
+            render_current_plan("Plan v1", revision=1),
+            render_current_review("Missing rollback.\n\nstate:plan-no-go", revision=1),
+        ]
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=29, state="ENTER")
+
+        assert stage.on_enter(item, ctx) is None
+
+        history = item.payload["issue_history"]
+        assert history.index("Plan v1") < history.index("Missing rollback")
+        item.state = "PLAN_WAIT"
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        assert request.job.prompt_kwargs["issue_history"] == history
 
     def test_replan_entry_ignores_existing_rejected_plan_comment(
         self, make_ctx: Any, make_work_item: Any
@@ -323,12 +342,8 @@ class TestPlanningStageEnter:
 
         assert outcome is None
         assert item.state == "ENTER"
-        assert github.mutation_log == [
-            (
-                "edit_labels",
-                (23, (STATE_NEEDS_PLAN,), (STATE_PLAN_NO_GO, STATE_PLAN_GO, "state:plan-blocked")),
-            ),
-        ]
+        assert item.payload["requires_plan_revision"] is True
+        assert github.mutation_log == []
 
     def test_plan_go_on_entry_fast_forwards_without_swap(
         self, make_ctx: Any, make_work_item: Any
@@ -362,12 +377,12 @@ class TestPlanningStageEnter:
         # No add triggered (STATE_NEEDS_PLAN already present).
         assert github.mutation_log == []
 
-    def test_restart_after_label_swap_still_recognizes_replan(
+    def test_needs_plan_label_does_not_infer_replan_from_review_comment(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """The canonical NOGO recovers replan intent after the label swap commits."""
+        """A comment token cannot override the authoritative needs-plan label."""
         stage = PlanningStage()
-        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN], has_plan=True)
         github.comments[25] = [
             render_current_plan("Plan v1", revision=1),
             render_current_review("Missing rollback.\n\nstate:plan-no-go", revision=1),
@@ -377,14 +392,9 @@ class TestPlanningStageEnter:
 
         assert stage.on_enter(item, ctx) is None
 
-        assert item.payload["requires_plan_revision"] is True
-        assert item.state == "ENTER"
-        assert github.mutation_log == [
-            (
-                "edit_labels",
-                (25, (STATE_NEEDS_PLAN,), (STATE_PLAN_NO_GO, STATE_PLAN_GO, STATE_PLAN_BLOCKED)),
-            )
-        ]
+        assert "requires_plan_revision" not in item.payload
+        assert item.state == "VERIFY"
+        assert github.mutation_log == []
 
     def test_blocked_without_new_feedback_exits_before_planning(
         self, make_ctx: Any, make_work_item: Any
@@ -596,11 +606,11 @@ class TestPlanningStageStep:
         assert comments[2].startswith("<!-- hephaestus-plan-history:revision=1:kind=plan -->")
         assert comments[3].startswith("<!-- hephaestus-plan-history:revision=1:kind=review -->")
         assert [entry[0] for entry in github.mutation_log] == [
+            "append_issue_comment",
+            "append_issue_comment",
+            "gh_issue_upsert_comment",
+            "gh_issue_upsert_comment",
             "edit_labels",
-            "append_issue_comment",
-            "append_issue_comment",
-            "gh_issue_upsert_comment",
-            "gh_issue_upsert_comment",
         ]
 
     def test_replan_without_change_publishes_blocked_review_and_stops(
@@ -625,9 +635,44 @@ class TestPlanningStageStep:
         assert outcome.disposition == Disposition.BLOCKED
         assert len(github.comments[28]) == 2
         assert github.comments[28][1].endswith(STATE_PLAN_BLOCKED)
+        assert github.mutation_log[-2:] == [
+            (
+                "edit_labels",
+                (28, (STATE_PLAN_BLOCKED,), (STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO)),
+            ),
+            ("gh_issue_upsert_comment", (28, PLAN_REVIEW_CANONICAL_MARKER)),
+        ]
+
+    def test_replan_without_change_keeps_blocked_label_if_comment_write_fails(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The sole durable BLOCKED authority is written before explanatory prose."""
+
+        class FailingReviewCommentGitHub(FakeStageGitHub):
+            def upsert_issue_comment(self, *args: Any, **kwargs: Any) -> None:
+                if len(args) > 1 and args[1] == PLAN_REVIEW_CANONICAL_MARKER:
+                    raise RuntimeError("comment write failed")
+                super().upsert_issue_comment(*args, **kwargs)
+
+        stage = PlanningStage()
+        github = FailingReviewCommentGitHub(labels=[STATE_PLAN_NO_GO], has_plan=False)
+        github.comments[30] = [
+            render_current_plan("Plan v1", revision=1),
+            render_current_review("Missing rollback.\n\nstate:plan-no-go", revision=1),
+        ]
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=30, state="ENTER")
+
+        assert stage.on_enter(item, ctx) is None
+        item.state = "VERIFY"
+        item.payload["plan_text"] = "Plan v1"
+        with pytest.raises(RuntimeError, match="comment write failed"):
+            stage.step(item, ctx)
+
+        assert github.labels[30] == {STATE_PLAN_BLOCKED}
         assert github.mutation_log[-1] == (
             "edit_labels",
-            (28, (STATE_PLAN_BLOCKED,), (STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO)),
+            (30, (STATE_PLAN_BLOCKED,), (STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO)),
         )
 
     def test_verify_posts_exactly_once_on_reentry(self, make_ctx: Any, make_work_item: Any) -> None:

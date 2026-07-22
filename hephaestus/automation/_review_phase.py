@@ -83,7 +83,7 @@ from .pr_manager import (
 )
 from .pr_reviewer import gather_impl_review_context, review_pr_inline
 from .prompts import get_impl_loop_review_prompt, get_impl_resume_feedback_prompt
-from .review_journal import is_plan_comment
+from .review_journal import is_plan_comment, is_plan_review_comment
 from .review_validator import validate_prior_comments_addressed
 from .session_naming import AGENT_IMPLEMENTER, current_trunk_githash  # noqa: F401
 from .state import review as review_state
@@ -1326,7 +1326,7 @@ class ReviewPhase(StageMixin):
             for comment in comments:
                 body = comment.get("body", "")
                 stripped = body.lstrip()
-                if stripped.startswith(review_state.PLAN_REVIEW_PREFIX):
+                if is_plan_review_comment(stripped):
                     plan_review_text = body
                 elif is_plan_comment(stripped):
                     plan_text = body

@@ -55,10 +55,6 @@ from hephaestus.automation.review_journal import (
     is_plan_comment,
     is_plan_review_comment,
 )
-from hephaestus.automation.review_state import (
-    is_plan_review_go,
-    latest_verdict,
-)
 from hephaestus.automation.state_labels import (
     ALL_IMPLEMENTATION_STATE_LABELS,
     ALL_STATE_LABELS,
@@ -66,13 +62,10 @@ from hephaestus.automation.state_labels import (
     STATE_IMPLEMENTATION_GO,
     STATE_IMPLEMENTATION_NO_GO,
     STATE_LABEL_SPECS,
-    STATE_PLAN_GO,
-    STATE_PLAN_NO_GO,
     STATE_SKIP,
     format_skip_reason_comment,
     has_label,
     is_implementation_go,
-    is_plan_go,
 )
 from hephaestus.constants import read_timeout_env
 from hephaestus.github.auto_merge import defer_auto_merge, defer_auto_merge_batch
@@ -306,19 +299,6 @@ class PipelineGitHub:
         return names
 
     @staticmethod
-    def _latest_plan_review_body(comments: Any) -> str | None:
-        if not isinstance(comments, list):
-            return None
-        latest_review_body: str | None = None
-        for comment in comments:
-            if not isinstance(comment, dict):
-                continue
-            body = comment.get("body")
-            if isinstance(body, str) and is_plan_review_comment(body):
-                latest_review_body = body
-        return latest_review_body
-
-    @staticmethod
     def _comments_have_plan(comments: Any) -> bool:
         if not isinstance(comments, list):
             return False
@@ -334,21 +314,6 @@ class PipelineGitHub:
             if is_plan_comment(stripped):
                 return True
         return False
-
-    def _backfill_plan_go(self, issue_number: int) -> None:
-        if self.dry_run:
-            logger.info("[dry-run] would backfill %s on #%d", STATE_PLAN_GO, issue_number)
-            return
-        try:
-            self._add_labels(issue_number, [STATE_PLAN_GO])
-        except Exception as exc:
-            logger.warning(
-                "Issue #%d: failed to backfill %s in %s: %s",
-                issue_number,
-                STATE_PLAN_GO,
-                self._repo_slug,
-                exc,
-            )
 
     def _contain_open_prs_for_branch(self, branch_name: str) -> list[tuple[int, str]]:
         """Contain every open PR on ``branch_name`` before selecting any one of them."""
@@ -716,35 +681,24 @@ class PipelineGitHub:
         }
 
     def has_existing_plan(self, issue_number: int) -> bool:
-        """Labels-first plan gate incl. comment-scan backfill (``is_plan_review_go``)."""
-        if self._repo_slug is not None:
-            try:
-                result = self._gh(
-                    ["issue", "view", str(issue_number), "--json", "labels,comments"],
+        """Return whether the canonical plan artifact exists.
+
+        This is an artifact-presence query, not an approval gate. Plan approval
+        is read exclusively from GitHub labels by stage entry checks.
+        """
+        try:
+            result = (
+                self._gh(
+                    ["issue", "view", str(issue_number), "--json", "comments"],
                     check=False,
                 )
-                data = json.loads(result.stdout or "{}")
-            except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError):
-                return False
-            if not isinstance(data, dict):
-                return False
-
-            labels = self._label_names_from_payload(data)
-            if is_plan_go(labels):
-                return True
-            if has_label(labels, STATE_PLAN_NO_GO):
-                return False
-
-            comments = data.get("comments")
-            latest_review_body = self._latest_plan_review_body(comments)
-            if latest_review_body is not None:
-                if latest_verdict(latest_review_body) != "GO":
-                    return False
-                self._backfill_plan_go(issue_number)
-                return True
-
-            return bool(self._comments_have_plan(comments))
-        return bool(is_plan_review_go(issue_number))
+                if self._repo_slug is not None
+                else gh_call(["issue", "view", str(issue_number), "--json", "comments"])
+            )
+            data = json.loads(result.stdout or "{}")
+        except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError):
+            return False
+        return isinstance(data, dict) and self._comments_have_plan(data.get("comments"))
 
     def get_pr_head_branch(self, pr_number: int) -> str | None:
         """Return the PR's head branch (``_review_utils.get_pr_head_branch``)."""

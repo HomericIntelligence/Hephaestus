@@ -445,7 +445,7 @@ class TestPlanReviewStageStep:
         assert STATE_PLAN_GO in github.labels[3]
 
     def test_eval_nogo_within_budget_amends(self, make_ctx: Any, make_work_item: Any) -> None:
-        """NOGO within the cycle budget continues to AMEND_WAIT, no writes."""
+        """NOGO within budget is labeled before the amendment is requested."""
         stage = PlanReviewStage()
         github = FakeStageGitHub()
         ctx = make_ctx(github=github)
@@ -459,6 +459,10 @@ class TestPlanReviewStageStep:
         assert result.next_state == "AMEND_WAIT"
         assert github.mutation_log == [
             ("gh_issue_upsert_comment", (4, PLAN_REVIEW_CANONICAL_MARKER)),
+            (
+                "edit_labels",
+                (4, (STATE_PLAN_NO_GO,), (STATE_PLAN_GO, "state:plan-blocked", STATE_NEEDS_PLAN)),
+            ),
         ]
         assert item.payload["review_round"] == 1  # round counted in EVAL
         assert item.attempts["plan_review_iter"] == 1  # lifetime audit trail
@@ -482,10 +486,13 @@ class TestPlanReviewStageStep:
         assert result.disposition == Disposition.BLOCKED
         assert github.comments[44][0].startswith(PLAN_REVIEW_CANONICAL_MARKER)
         assert "Waiting for the API decision in #41." in github.comments[44][0]
-        assert github.mutation_log[-1] == (
-            "edit_labels",
-            (44, ("state:plan-blocked",), (STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO)),
-        )
+        assert github.mutation_log == [
+            (
+                "edit_labels",
+                (44, ("state:plan-blocked",), (STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO)),
+            ),
+            ("gh_issue_upsert_comment", (44, PLAN_REVIEW_CANONICAL_MARKER)),
+        ]
 
     def test_eval_nogo_exhausted_fails_back_nogo(self, make_ctx: Any, make_work_item: Any) -> None:
         """NOGO at the iteration cap applies no-go and fails back ("nogo")."""
@@ -528,10 +535,10 @@ class TestPlanReviewStageStep:
         assert item.attempts["plan_cycles"] == 2
         assert STATE_PLAN_NO_GO in github.labels[6]  # label still written first
 
-    def test_eval_ambiguous_at_cap_treated_as_nogo(
+    def test_eval_ambiguous_is_rejected_without_state_change(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """AMBIGUOUS at the iteration cap takes the no-go exhaustion path."""
+        """Only the three exact plan states may alter durable state."""
         stage = PlanReviewStage()
         github = FakeStageGitHub()
         ctx = make_ctx(github=github)
@@ -542,8 +549,9 @@ class TestPlanReviewStageStep:
         result = stage.step(item, ctx)
 
         assert isinstance(result, StageOutcome)
-        assert result.disposition == Disposition.FAIL_BACK
-        assert STATE_PLAN_NO_GO in github.labels[7]
+        assert result.disposition == Disposition.RETRY
+        assert github.mutation_log == []
+        assert item.attempts["plan_review_iter"] == 0
 
     def test_eval_error_leaves_labels_untouched(self, make_ctx: Any, make_work_item: Any) -> None:
         """ERROR retries with zero label writes and burns no iteration.
@@ -743,6 +751,10 @@ class TestPlanReviewStageOnJobDone:
         assert github.mutation_log == [
             ("gh_issue_upsert_comment", (2, PLAN_CANONICAL_MARKER)),
             ("gh_issue_upsert_comment", (2, PLAN_REVIEW_CANONICAL_MARKER)),
+            (
+                "edit_labels",
+                (2, (STATE_NEEDS_PLAN,), (STATE_PLAN_NO_GO, STATE_PLAN_GO, "state:plan-blocked")),
+            ),
         ]
 
     def test_amend_archives_previous_plan_and_review_before_replacing_canonical(
@@ -794,7 +806,11 @@ class TestPlanReviewStageOnJobDone:
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition == Disposition.BLOCKED
         assert github.comments[4][1].endswith("state:plan-blocked")
-        assert github.mutation_log[-1][0] == "edit_labels"
+        assert github.mutation_log[-2][0] == "edit_labels"
+        assert github.mutation_log[-1] == (
+            "gh_issue_upsert_comment",
+            (4, PLAN_REVIEW_CANONICAL_MARKER),
+        )
 
     def test_next_review_receives_complete_durable_history(
         self, make_ctx: Any, make_work_item: Any
@@ -867,6 +883,32 @@ class TestDurableWriteOrdering:
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.FAIL_BACK
 
+    def test_blocked_label_survives_review_comment_write_failure(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A crash after the BLOCKED label cannot restart autonomous planning."""
+
+        class FailingCommentGitHub(FakeStageGitHub):
+            def upsert_issue_comment(self, *args: Any, **kwargs: Any) -> None:
+                raise RuntimeError("comment write failed")
+
+        stage = PlanReviewStage()
+        github = FailingCommentGitHub(labels=[STATE_NEEDS_PLAN])
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=13, state="EVAL")
+        item.payload["review_verdict"] = _verdict("BLOCKED")
+
+        with pytest.raises(RuntimeError, match="comment write failed"):
+            stage.step(item, ctx)
+
+        assert github.labels[13] == {"state:plan-blocked"}
+        assert github.mutation_log == [
+            (
+                "edit_labels",
+                (13, ("state:plan-blocked",), (STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO)),
+            )
+        ]
+
 
 class TestStaleVerdictAndErrorAccounting:
     """M3 (no stale-verdict replay) + M4 (ERROR burns nothing, bounded)."""
@@ -910,9 +952,17 @@ class TestStaleVerdictAndErrorAccounting:
         assert item.payload["review_round"] == round_before
         assert github.mutation_log == [
             ("gh_issue_upsert_comment", (30, PLAN_REVIEW_CANONICAL_MARKER)),
+            (
+                "edit_labels",
+                (30, (STATE_PLAN_NO_GO,), (STATE_PLAN_GO, "state:plan-blocked", STATE_NEEDS_PLAN)),
+            ),
             ("gh_issue_upsert_comment", (30, PLAN_CANONICAL_MARKER)),
             ("gh_issue_upsert_comment", (30, PLAN_REVIEW_CANONICAL_MARKER)),
-        ]  # amended plan persisted, no labels on the error path
+            (
+                "edit_labels",
+                (30, (STATE_NEEDS_PLAN,), (STATE_PLAN_NO_GO, STATE_PLAN_GO, "state:plan-blocked")),
+            ),
+        ]  # NOGO and amended-plan states persist; ERROR adds no mutation
 
     def test_error_round_burns_nothing_and_nogo_still_amendable(
         self, make_ctx: Any, make_work_item: Any
@@ -942,7 +992,11 @@ class TestStaleVerdictAndErrorAccounting:
         assert item.payload["review_round"] == 1
         assert github.mutation_log == [
             ("gh_issue_upsert_comment", (31, PLAN_REVIEW_CANONICAL_MARKER)),
-        ]  # review is durable; no labels on ERROR
+            (
+                "edit_labels",
+                (31, (STATE_PLAN_NO_GO,), (STATE_PLAN_GO, "state:plan-blocked", STATE_NEEDS_PLAN)),
+            ),
+        ]  # prior NOGO is durable; ERROR adds no mutation
 
         # Round 2 rerun: a real NOGO — the cycle still has amends left.
         item.payload["review_verdict"] = _verdict("NOGO")
@@ -952,6 +1006,14 @@ class TestStaleVerdictAndErrorAccounting:
         assert item.payload["review_error_retries"] == 0  # reset on real verdict
         assert github.mutation_log == [
             ("gh_issue_upsert_comment", (31, PLAN_REVIEW_CANONICAL_MARKER)),
+            (
+                "edit_labels",
+                (31, (STATE_PLAN_NO_GO,), (STATE_PLAN_GO, "state:plan-blocked", STATE_NEEDS_PLAN)),
+            ),
+            (
+                "edit_labels",
+                (31, (STATE_PLAN_NO_GO,), (STATE_PLAN_GO, "state:plan-blocked", STATE_NEEDS_PLAN)),
+            ),
         ]
 
     def test_error_retry_cap_trips(self, make_ctx: Any, make_work_item: Any) -> None:
@@ -1201,6 +1263,10 @@ class TestReviewFlowWithFakePool:
             ("gh_issue_upsert_comment", (21, PLAN_REVIEW_CANONICAL_MARKER)),
             ("gh_issue_upsert_comment", (21, PLAN_REVIEW_CANONICAL_MARKER)),
             (
+                "edit_labels",
+                (21, (STATE_PLAN_NO_GO,), (STATE_PLAN_GO, "state:plan-blocked", STATE_NEEDS_PLAN)),
+            ),
+            (
                 "append_issue_comment",
                 (21, "<!-- hephaestus-plan-history:revision=1:kind=plan -->"),
             ),
@@ -1210,6 +1276,10 @@ class TestReviewFlowWithFakePool:
             ),
             ("gh_issue_upsert_comment", (21, PLAN_CANONICAL_MARKER)),
             ("gh_issue_upsert_comment", (21, PLAN_REVIEW_CANONICAL_MARKER)),
+            (
+                "edit_labels",
+                (21, (STATE_NEEDS_PLAN,), (STATE_PLAN_NO_GO, STATE_PLAN_GO, "state:plan-blocked")),
+            ),
             ("gh_issue_upsert_comment", (21, PLAN_REVIEW_CANONICAL_MARKER)),
             (
                 "edit_labels",

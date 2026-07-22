@@ -289,9 +289,20 @@ def apply_plan_verdict(*, is_go: bool) -> tuple[str, list[str]]:
         remove.
 
     """
-    if is_go:
-        return STATE_PLAN_GO, [STATE_PLAN_NO_GO, STATE_PLAN_BLOCKED, STATE_NEEDS_PLAN]
-    return STATE_PLAN_NO_GO, [STATE_PLAN_GO, STATE_PLAN_BLOCKED, STATE_NEEDS_PLAN]
+    return apply_plan_state(STATE_PLAN_GO if is_go else STATE_PLAN_NO_GO)
+
+
+def apply_plan_state(state_label: str) -> tuple[str, list[str]]:
+    """Compute one mutually-exclusive transition for a plan-state decision."""
+    removals = {
+        STATE_PLAN_GO: [STATE_PLAN_NO_GO, STATE_PLAN_BLOCKED, STATE_NEEDS_PLAN],
+        STATE_PLAN_NO_GO: [STATE_PLAN_GO, STATE_PLAN_BLOCKED, STATE_NEEDS_PLAN],
+        STATE_PLAN_BLOCKED: [STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO],
+    }
+    try:
+        return state_label, removals[state_label]
+    except KeyError as exc:
+        raise ValueError(f"unsupported plan-review state: {state_label}") from exc
 
 
 def enter_planning_transition() -> tuple[list[str], list[str]]:

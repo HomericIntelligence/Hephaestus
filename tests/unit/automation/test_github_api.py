@@ -21,6 +21,7 @@ from hephaestus.automation.github_api import (
     gh_issue_comment,
     gh_issue_create,
     gh_issue_delete_comment,
+    gh_issue_edit_labels,
     gh_issue_json,
     gh_issue_remove_labels,
     gh_issue_upsert_comment,
@@ -1330,6 +1331,32 @@ class TestGhIssueAddLabels:
         assert args.count("--add-label") == 2
         assert "state:plan-go" in args
         assert "state:plan-no-go" in args
+
+
+class TestGhIssueEditLabels:
+    """A state transition is one add/remove GitHub mutation."""
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    @patch(
+        "hephaestus.automation.github_api.gh_list_labels",
+        return_value={"state:plan-go", "state:plan-no-go", "state:needs-plan"},
+    )
+    @patch("hephaestus.automation.github_api.gh_create_label")
+    def test_add_and_remove_share_one_issue_edit(
+        self, mock_create: Any, _mock_list: Any, mock_gh_call: Any
+    ) -> None:
+        gh_issue_edit_labels(
+            42,
+            add=["state:plan-go"],
+            remove=["state:plan-no-go", "state:needs-plan"],
+        )
+
+        mock_create.assert_not_called()
+        mock_gh_call.assert_called_once()
+        args = mock_gh_call.call_args.args[0]
+        assert args[:3] == ["issue", "edit", "42"]
+        assert args.count("--add-label") == 1
+        assert args.count("--remove-label") == 2
 
 
 class TestSkipEpics:

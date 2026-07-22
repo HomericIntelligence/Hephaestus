@@ -29,9 +29,8 @@ HISTORY_RE: Final[re.Pattern[str]] = re.compile(
     r"kind=(?P<kind>plan|review) -->"
 )
 REVISION_RE: Final[re.Pattern[str]] = re.compile(r"<!-- revision: (?P<revision>\d+) -->")
-LEGACY_REVIEW_STATE_RE: Final[re.Pattern[str]] = re.compile(
-    r"^\**\s*verdict\s*:\s*\**\s*(?P<verdict>go|no[\s-]?go)\b",
-    re.IGNORECASE,
+PLAN_REVIEW_STATES: Final[frozenset[str]] = frozenset(
+    {"state:plan-go", "state:plan-no-go", "state:plan-blocked"}
 )
 
 MAX_AGENT_HISTORY_CHARS: Final[int] = 48_000
@@ -185,6 +184,37 @@ def render_pending_review(*, revision: int) -> str:
     )
 
 
+def is_pending_review(review: str, *, revision: int) -> bool:
+    """Return whether canonical review content is the exact pending sentinel."""
+    return extract_current_review(review) == (
+        f"Review pending for implementation plan revision {revision}."
+    )
+
+
+def parse_plan_review_state(review: str) -> str | None:
+    """Parse the sole final state token from a newly produced plan review.
+
+    This parser intentionally does not recognize the historical ``Verdict:``
+    vocabulary. Reviewer output selects a GitHub label only when exactly one
+    supported state token is present as the final non-empty line. BLOCKED also
+    requires explanatory prose so the canonical comment tells maintainers what
+    input or dependency is missing.
+    """
+    lines = [line.strip() for line in review.splitlines() if line.strip()]
+    matches = [line for line in lines if line in PLAN_REVIEW_STATES]
+    if len(matches) != 1 or not lines or lines[-1] != matches[0]:
+        return None
+    if matches[0] == "state:plan-blocked":
+        explanation = [
+            line
+            for line in lines[:-1]
+            if not line.startswith(("#", "<!--")) and line not in PLAN_REVIEW_STATES
+        ]
+        if not explanation:
+            return None
+    return matches[0]
+
+
 def comment_revision(body: str) -> int | None:
     """Read a canonical artifact's explicit revision, if present."""
     match = REVISION_RE.search(body)
@@ -294,15 +324,8 @@ def journal_snapshot(comments: Sequence[IssueComment | str]) -> JournalSnapshot:
 
 
 def review_state(review: str) -> str:
-    """Return the final state token, translating legacy stored verdict lines."""
-    for line in reversed(review.splitlines()):
-        token = line.strip().lower()
-        if token in {"state:plan-go", "state:plan-no-go", "state:plan-blocked"}:
-            return token
-        if match := LEGACY_REVIEW_STATE_RE.match(token):
-            legacy = re.sub(r"[\s-]", "", match.group("verdict").lower())
-            return "state:plan-go" if legacy == "go" else "state:plan-no-go"
-    return "unparseable"
+    """Return the final plan-state token without legacy free-text fallback."""
+    return parse_plan_review_state(review) or "unparseable"
 
 
 def _review_reason(review: str) -> str:
@@ -318,7 +341,8 @@ def _review_reason(review: str) -> str:
 
 
 def _history_index(snapshot: JournalSnapshot) -> str:
-    lines = ["## Ordered superseded revision index"]
+    """Render a compact index for superseded artifacts and the current revision."""
+    lines = ["## Ordered revision index"]
     by_revision: dict[int, dict[str, HistoryArtifact]] = {}
     for artifact in snapshot.history:
         by_revision.setdefault(artifact.revision, {})[artifact.kind] = artifact
@@ -334,7 +358,35 @@ def _history_index(snapshot: JournalSnapshot) -> str:
             f"- Revision {revision}: plan_sha={next_fingerprint}; "
             f"review={review_state(review_payload)}; reason={review_reason}"
         )
+    if snapshot.current_plan:
+        current_review = (
+            snapshot.current_review
+            if snapshot.current_review_revision is not None
+            and snapshot.current_review_revision >= snapshot.revision
+            else ""
+        )
+        current_reason = _review_reason(current_review) or "none"
+        lines.append(
+            f"- Revision {snapshot.revision} (current): "
+            f"plan_sha={plan_fingerprint(snapshot.current_plan)}; "
+            f"review={review_state(current_review)}; reason={current_reason}"
+        )
     return "\n".join(lines)
+
+
+def _bounded_excerpt(text: str, max_chars: int) -> str:
+    """Return a deterministic head/tail excerpt that fits *max_chars*."""
+    if max_chars <= 0:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    marker = "\n\n_[artifact excerpt truncated]_\n\n"
+    if max_chars <= len(marker):
+        return marker[:max_chars]
+    remaining = max_chars - len(marker)
+    head = (remaining + 1) // 2
+    tail = remaining - head
+    return f"{text[:head]}{marker}{text[-tail:] if tail else ''}"
 
 
 def history_projection(
@@ -357,27 +409,42 @@ def history_projection(
     if len(full) <= max_chars:
         return full
 
-    current_parts: list[str] = []
+    current_parts: list[tuple[str, str]] = []
     if snapshot.current_plan:
-        current_parts.append(render_current_plan(snapshot.current_plan, revision=snapshot.revision))
+        current_parts.append(
+            (
+                "## Current plan excerpt",
+                render_current_plan(snapshot.current_plan, revision=snapshot.revision),
+            )
+        )
     if (
         snapshot.current_review
         and snapshot.current_review_revision is not None
         and snapshot.current_review_revision >= snapshot.revision
     ):
         current_parts.append(
-            render_current_review(snapshot.current_review, revision=snapshot.revision)
+            (
+                "## Current review excerpt",
+                render_current_review(snapshot.current_review, revision=snapshot.revision),
+            )
         )
-    current = "\n\n---\n\n".join(current_parts)
     index = _history_index(snapshot)
-    projected = f"{_TRUNCATION_NOTICE}\n\n{index}\n\n---\n\n{current}"
-    if len(projected) <= max_chars:
-        return projected
+    prefix = f"{_TRUNCATION_NOTICE}\n\n{index}"
+    separator = "\n\n---\n\n"
+    headings_size = sum(len(separator) + len(heading) + 2 for heading, _ in current_parts)
+    available = max_chars - len(prefix) - headings_size
+    if available < 0:
+        raise ValueError("history metadata exceeds the configured agent-history budget")
 
-    keep = max(0, max_chars - len(_TRUNCATION_NOTICE) - 10)
-    if not keep:
-        return _TRUNCATION_NOTICE[:max_chars]
-    return f"{_TRUNCATION_NOTICE}\n\n{projected[-keep:]}"
+    rendered = prefix
+    remaining = available
+    for index_in_parts, (heading, artifact) in enumerate(current_parts):
+        parts_left = len(current_parts) - index_in_parts
+        excerpt_budget = remaining // parts_left
+        excerpt = _bounded_excerpt(artifact, excerpt_budget)
+        rendered += f"{separator}{heading}\n\n{excerpt}"
+        remaining -= len(excerpt)
+    return rendered
 
 
 def trusted_feedback_after_block(
@@ -416,5 +483,4 @@ def feedback_projection(comments: Sequence[IssueComment | str]) -> str:
     separator = "\n\n---\n\n"
     base_budget = max(0, MAX_AGENT_HISTORY_CHARS - len(separator) - len(suffix))
     base = history_projection(comments, max_chars=base_budget)
-    combined = f"{base}{separator if base else ''}{suffix}"
-    return combined[-MAX_AGENT_HISTORY_CHARS:]
+    return f"{base}{separator if base else ''}{suffix}"

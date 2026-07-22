@@ -19,7 +19,7 @@ re-pointed at the pipeline (#1820):
   ``get_plan_loop_review_prompt`` always sees a 0-based iteration in
   ``0..plan_review_iter-1``; ``plan_cycles`` bounds the number of cycles.
 - Both counters advance in EVAL and ONLY for real verdicts
-  (GO/NOGO/AMBIGUOUS). ERROR and missing verdicts never burn an iteration
+  (GO/NOGO/BLOCKED). ERROR, unsupported, and missing verdicts never burn an iteration
   (claude_invoke ``ReviewVerdict`` doctrine: "the reviewer never ran" must
   not be mistaken for a judgement, #911/#1554/#1794); they RETRY with
   labels untouched, bounded in-stage by
@@ -30,7 +30,7 @@ re-pointed at the pipeline (#1820):
   failure is not fixed by replanning, so failing back to planning would
   only spend ``plan_cycles`` on more doomed reviews; labels stay untouched
   on the whole ERROR path.
-- Owned labels: ``state:plan-go`` (GO), ``state:plan-no-go`` (exhausted),
+- Owned labels: ``state:plan-go`` (GO), ``state:plan-no-go`` (NOGO),
   and ``state:plan-blocked`` (external input required) [durable]. GO/NOGO are
   computed by the shared pure ``state_labels.apply_plan_verdict`` and applied
   through one fail-closed, mutually-exclusive label transition.
@@ -55,7 +55,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from dataclasses import replace
 
 from hephaestus.automation.agent_config import (
     learn_claude_timeout,
@@ -64,7 +63,6 @@ from hephaestus.automation.agent_config import (
     planner_model,
     reviewer_model,
 )
-from hephaestus.automation.claude_invoke import parse_review_verdict
 from hephaestus.automation.learn import build_learn_prompt
 from hephaestus.automation.prompts._shared import fence_content
 from hephaestus.automation.prompts.planning import (
@@ -78,6 +76,7 @@ from hephaestus.automation.review_journal import (
     IssueComment,
     history_projection,
     journal_snapshot,
+    parse_plan_review_state,
     render_current_review,
     review_state,
 )
@@ -89,6 +88,7 @@ from hephaestus.automation.state_labels import (
     STATE_PLAN_GO,
     STATE_PLAN_NO_GO,
     apply_plan_verdict,
+    enter_planning_transition,
     is_plan_go,
 )
 from hephaestus.prompts import PromptCatalog
@@ -137,20 +137,10 @@ _PLAN_REVIEW_LABELS = {
 
 def parse_plan_review_verdict(text: str) -> ReviewVerdict:
     """Parse the one exact state label that terminates a plan review."""
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    matches = [line for line in lines if line in _PLAN_REVIEW_LABELS]
-    parsed = parse_review_verdict(text)
-    if len(matches) != 1 or not lines or lines[-1] != matches[0]:
-        return replace(parsed, grade=None, verdict="ERROR", raw=text)
-    if matches[0] == STATE_PLAN_BLOCKED:
-        explanation = [
-            line
-            for line in lines[:-1]
-            if not line.startswith(("#", "<!--")) and line not in _PLAN_REVIEW_LABELS
-        ]
-        if not explanation:
-            return replace(parsed, grade=None, verdict="ERROR", raw=text)
-    return replace(parsed, grade=None, verdict=_PLAN_REVIEW_LABELS[matches[0]], raw=text)
+    state = parse_plan_review_state(text)
+    if state is None:
+        return ReviewVerdict(grade=None, verdict="ERROR", raw=text)
+    return ReviewVerdict(grade=None, verdict=_PLAN_REVIEW_LABELS[state], raw=text)
 
 
 def _normalize_review_comment(review: str, *, revision: int | None = None) -> str:
@@ -226,8 +216,8 @@ class PlanReviewStage(Stage):
       counters; ERROR/missing verdicts never do. GO -> durably apply
       ``state:plan-go`` (write BEFORE the advancing outcome) then learn
       step or ADVANCE; NOGO within the cycle-relative iteration budget ->
-      AMEND_WAIT; NOGO/AMBIGUOUS at the cap -> durably apply
-      ``state:plan-no-go``, then FAIL_BACK("nogo") while plan_cycles remain;
+      durably apply ``state:plan-no-go`` and enter AMEND_WAIT within budget,
+      or FAIL_BACK("nogo") while plan cycles remain;
       BLOCKED publishes its explanation, applies ``state:plan-blocked``, and stops
       or FAIL_BACK("plan_cycles_exhausted") once exhausted; ERROR/missing
       verdict -> labels untouched, RETRY (bounded by
@@ -327,16 +317,16 @@ class PlanReviewStage(Stage):
                     f"{no_progress_reason}\n\n{STATE_PLAN_BLOCKED}"
                 )
                 revision = int(item.payload.get("plan_revision") or 1)
+                ctx.github.edit_labels(
+                    item.issue,
+                    add=[STATE_PLAN_BLOCKED],
+                    remove=[STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO],
+                )
                 ctx.github.upsert_issue_comment(
                     item.issue,
                     PLAN_REVIEW_CANONICAL_MARKER,
                     render_current_review(raw_review, revision=revision),
                     legacy_marker=PLAN_REVIEW_PREFIX,
-                )
-                ctx.github.edit_labels(
-                    item.issue,
-                    add=[STATE_PLAN_BLOCKED],
-                    remove=[STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO],
                 )
                 return StageOutcome(
                     Disposition.BLOCKED,
@@ -454,7 +444,7 @@ class PlanReviewStage(Stage):
         # on_job_done stored nothing) = reviewer-infrastructure failure:
         # labels untouched, no iteration burned, RETRY — bounded by the
         # consecutive-failure cap so the retry loop cannot spin forever.
-        if verdict is None or verdict.is_error:
+        if verdict is None or verdict.verdict not in {"GO", "NOGO", "BLOCKED"}:
             reason = "no verdict found" if verdict is None else "reviewer error"
             retries = item.payload.get("review_error_retries", 0) + 1
             item.payload["review_error_retries"] = retries
@@ -487,10 +477,10 @@ class PlanReviewStage(Stage):
         item.payload["review_round"] = round_done
         item.attempts["plan_review_iter"] = item.attempts.get("plan_review_iter", 0) + 1
 
-        # The issue comment is the durable review journal. Publish it before
-        # any label transition or advancing outcome; retries safely upsert the
-        # same canonical marker.
-        if not item.payload.get("review_comment_published"):
+        def publish_review_comment() -> None:
+            """Idempotently update the explanatory journal after safe state ordering."""
+            if item.payload.get("review_comment_published"):
+                return
             revision = int(
                 item.payload.get("plan_revision")
                 or _current_revision(ctx.github.issue_comments(item.issue))
@@ -504,12 +494,21 @@ class PlanReviewStage(Stage):
             item.payload["review_comment_published"] = True
 
         if verdict.verdict == "BLOCKED":
+            # BLOCKED is fail-closed: establish the sole authoritative gate
+            # before publishing its explanatory comment. A comment-write crash
+            # can then lose detail temporarily, but can never resume planning.
             ctx.github.edit_labels(
                 item.issue,
                 add=[STATE_PLAN_BLOCKED],
                 remove=[STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO],
             )
+            publish_review_comment()
             return StageOutcome(Disposition.BLOCKED, "plan requires external feedback")
+
+        # GO/NOGO comments are safe to publish before their label. A failure
+        # before the label leaves the prior authoritative state in place and
+        # the review can be retried without trusting the comment.
+        publish_review_comment()
 
         if verdict.is_go:
             logger.info("plan_review:%d: GO verdict; applying label and advancing", item.issue)
@@ -518,8 +517,12 @@ class PlanReviewStage(Stage):
                 return Continue(next_state="LEARN_WAIT")
             return StageOutcome(Disposition.ADVANCE, "plan approved (learn disabled)")
 
-        # NOGO (or AMBIGUOUS, treated as not-GO): amend within the
-        # cycle-relative budget.
+        # Every NOGO is durable control state, including rounds that can still
+        # amend. The replacement plan publication transitions back to
+        # state:needs-plan only after both canonical comments are updated.
+        self._write_verdict_labels(item.issue, ctx, is_go=False)
+
+        # NOGO: amend within the cycle-relative budget.
         budget_iter = ctx.budget("plan_review_iter")
         if round_done < budget_iter:
             logger.info(
@@ -531,7 +534,7 @@ class PlanReviewStage(Stage):
             )
             return Continue(next_state="AMEND_WAIT")
 
-        # Iteration cap: durably apply state:plan-no-go, then fail back —
+        # Iteration cap: fail back with state:plan-no-go already durable —
         # "nogo" while plan_cycles remain, "plan_cycles_exhausted" once the
         # cycle budget is consumed (routes to finished(fail) via ROUTES).
         logger.warning(
@@ -541,8 +544,6 @@ class PlanReviewStage(Stage):
             round_done,
             budget_iter,
         )
-        self._write_verdict_labels(item.issue, ctx, is_go=False)
-
         cycles = item.attempts.get("plan_cycles", 0) + 1
         item.attempts["plan_cycles"] = cycles
         if cycles >= ctx.budget("plan_cycles"):
@@ -609,6 +610,8 @@ class PlanReviewStage(Stage):
                     if publication.is_stuck:
                         item.payload["no_progress_reason"] = publication.no_progress_reason
                         return
+                    add, remove = enter_planning_transition()
+                    ctx.github.edit_labels(item.issue, add=add, remove=remove)
                     item.payload.pop("no_progress_reason", None)
             # LEARN_WAIT intentionally has no branch: the learn job's output
             # is a side effect for the Mnemosyne skill store, not a payload

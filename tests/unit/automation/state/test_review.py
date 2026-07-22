@@ -1,13 +1,8 @@
 """Unit tests for ``hephaestus.automation.state.review``.
 
-The shared GO-plan-review gate is load-bearing — both
-``plan_reviewer._latest_review_is_final`` (skip-on-GO) and
-``implementer._implement_issue`` (gate-on-GO) read from it, so it needs
-explicit coverage independent of either caller. See #551.
-
-Planning (and PR review) use a single binary ``Verdict: GO | NOGO`` vocabulary
-parsed by ``claude_invoke.parse_review_verdict``; this module's helpers delegate
-to it so the gate and the in-loop reviewer never diverge.
+The shared GO-plan-review gate is load-bearing: the standalone reviewer and
+implementation admission both use it. GitHub labels are the sole durable
+authority; comment state tokens are diagnostic data only.
 """
 
 from __future__ import annotations
@@ -37,20 +32,19 @@ from hephaestus.automation.state.review import (
 
 
 class TestLatestVerdict:
-    """latest_verdict: GO/NOGO/None, LAST verdict line wins."""
+    """latest_verdict recognizes state tokens only."""
 
     def test_returns_go_when_only_verdict(self) -> None:
-        body = f"{PLAN_REVIEW_PREFIX}\n\nLooks great.\n\nVerdict: GO\n"
+        body = f"{PLAN_REVIEW_PREFIX}\n\nLooks great.\n\nstate:plan-go\n"
         assert latest_verdict(body) == "GO"
 
     def test_returns_nogo_when_only_verdict(self) -> None:
-        body = f"{PLAN_REVIEW_PREFIX}\n\nNeeds work.\n\nVerdict: NOGO\n"
+        body = f"{PLAN_REVIEW_PREFIX}\n\nNeeds work.\n\nstate:plan-no-go\n"
         assert latest_verdict(body) == "NOGO"
 
-    def test_accepts_bold_verdict_line(self) -> None:
-        # The matcher tolerates the optional bold form too.
+    def test_rejects_bold_legacy_verdict_line(self) -> None:
         body = f"{PLAN_REVIEW_PREFIX}\n\nLooks great.\n\n**Verdict: GO**\n"
-        assert latest_verdict(body) == "GO"
+        assert latest_verdict(body) is None
 
     def test_returns_none_when_no_verdict(self) -> None:
         body = f"{PLAN_REVIEW_PREFIX}\n\nNo verdict line at all.\n"
@@ -60,32 +54,30 @@ class TestLatestVerdict:
         # A posted review may discuss an earlier verdict before settling; the
         # reviewer's FINAL word wins. GO then NOGO → NOGO (fail safe: re-review).
         body = (
-            f"{PLAN_REVIEW_PREFIX}\n\nInitial impression: sound.\n\nVerdict: GO\n\n"
-            "On reflection a fatal bug surfaced.\n\nVerdict: NOGO\n"
+            f"{PLAN_REVIEW_PREFIX}\n\nInitial impression: sound.\n\nstate:plan-go\n\n"
+            "On reflection a fatal bug surfaced.\n\nstate:plan-no-go\n"
         )
         assert latest_verdict(body) == "NOGO"
 
     def test_picks_last_verdict_nogo_then_go(self) -> None:
         # NOGO then GO → GO (the reviewer withdrew the concern).
         body = (
-            f"{PLAN_REVIEW_PREFIX}\n\nFirst-pass concern.\n\nVerdict: NOGO\n\n"
-            "After re-reading, concern unfounded.\n\nVerdict: GO\n"
+            f"{PLAN_REVIEW_PREFIX}\n\nFirst-pass concern.\n\nstate:plan-no-go\n\n"
+            "After re-reading, concern unfounded.\n\nstate:plan-go\n"
         )
         assert latest_verdict(body) == "GO"
 
     def test_ignores_inline_marker_in_prose(self) -> None:
-        # The verdict regex anchors to the start of a line (optional bold), so a
-        # mid-sentence mention like "we did not pick Verdict: GO" does NOT match;
-        # only the real trailing verdict line counts.
+        # Inline prose is not an exact state-token line.
         body = (
-            f"{PLAN_REVIEW_PREFIX}\nWe did not pick Verdict: GO because of issues.\nVerdict: NOGO\n"
+            f"{PLAN_REVIEW_PREFIX}\nWe did not pick state:plan-go because of issues.\n"
+            "state:plan-no-go\n"
         )
         assert latest_verdict(body) == "NOGO"
 
-    def test_nogo_dash_and_space_forms_normalize(self) -> None:
-        # NO-GO / NO GO normalize to NOGO.
-        assert latest_verdict(f"{PLAN_REVIEW_PREFIX}\n\nVerdict: NO-GO\n") == "NOGO"
-        assert latest_verdict(f"{PLAN_REVIEW_PREFIX}\n\nVerdict: NO GO\n") == "NOGO"
+    def test_legacy_nogo_forms_are_not_recognized(self) -> None:
+        assert latest_verdict(f"{PLAN_REVIEW_PREFIX}\n\nVerdict: NO-GO\n") is None
+        assert latest_verdict(f"{PLAN_REVIEW_PREFIX}\n\nVerdict: NO GO\n") is None
 
 
 # ---------------------------------------------------------------------------
@@ -97,9 +89,9 @@ class TestExtractVerdictContext:
     """Context extraction for not-GO logs."""
 
     def test_extracts_verdict_line_when_present(self) -> None:
-        body = f"{PLAN_REVIEW_PREFIX}\n\nReview text.\n\nVerdict: NOGO\n"
+        body = f"{PLAN_REVIEW_PREFIX}\n\nReview text.\n\nstate:plan-no-go\n"
         context = _extract_verdict_context(body)
-        assert "Verdict: NOGO" in context
+        assert "state:plan-no-go" in context
 
     def test_returns_first_non_prefix_line_when_no_verdict(self) -> None:
         body = f"{PLAN_REVIEW_PREFIX}\n\nThis is the main content.\nMore details.\n"
@@ -107,9 +99,9 @@ class TestExtractVerdictContext:
         assert context == "This is the main content."
 
     def test_prefers_verdict_line_over_first_content_line(self) -> None:
-        body = f"{PLAN_REVIEW_PREFIX}\n\nFirst line of content.\nMore details.\nVerdict: NOGO\n"
+        body = f"{PLAN_REVIEW_PREFIX}\n\nFirst line of content.\nMore details.\nstate:plan-no-go\n"
         context = _extract_verdict_context(body)
-        assert "Verdict: NOGO" in context
+        assert "state:plan-no-go" in context
 
     def test_returns_empty_string_when_body_is_empty(self) -> None:
         body = ""
@@ -138,7 +130,12 @@ def _review_comment(verdict: str | None, url: str | None = None) -> dict[str, An
     if verdict is None:
         body = f"{PLAN_REVIEW_PREFIX}\n\nMalformed review with no verdict line.\n"
     else:
-        body = f"{PLAN_REVIEW_PREFIX}\n\nBody.\n\nVerdict: {verdict}\n"
+        token = {
+            "GO": "state:plan-go",
+            "NOGO": "state:plan-no-go",
+            "BLOCKED": "state:plan-blocked",
+        }[verdict]
+        body = f"{PLAN_REVIEW_PREFIX}\n\nBody.\n\n{token}\n"
     comment = {"body": body}
     if url is not None:
         comment["url"] = url
@@ -154,19 +151,19 @@ class TestIsPlanReviewGoWithComments:
 
     def test_go_returns_true(self) -> None:
         comments = [_plan_comment(), _review_comment("GO")]
-        assert is_plan_review_go(123, comments=comments) is True
+        assert is_plan_review_go(123, comments=comments, issue_labels=["state:plan-go"]) is True
 
     def test_nogo_returns_false(self) -> None:
         comments = [_plan_comment(), _review_comment("NOGO")]
-        assert is_plan_review_go(123, comments=comments) is False
+        assert is_plan_review_go(123, comments=comments, issue_labels=["state:plan-no-go"]) is False
 
     def test_no_review_returns_false(self) -> None:
         # Plan exists but no plan-review comment yet.
         comments = [_plan_comment()]
-        assert is_plan_review_go(123, comments=comments) is False
+        assert is_plan_review_go(123, comments=comments, issue_labels=[]) is False
 
     def test_empty_comments_returns_false(self) -> None:
-        assert is_plan_review_go(123, comments=[]) is False
+        assert is_plan_review_go(123, comments=[], issue_labels=[]) is False
 
     def test_takes_latest_review_when_multiple_newer_nogo(self) -> None:
         # Older GO, newer NOGO → newer wins (gate is False).
@@ -175,7 +172,7 @@ class TestIsPlanReviewGoWithComments:
             _review_comment("GO"),
             _review_comment("NOGO"),
         ]
-        assert is_plan_review_go(123, comments=comments) is False
+        assert is_plan_review_go(123, comments=comments, issue_labels=["state:plan-no-go"]) is False
 
     def test_takes_latest_review_when_multiple_newer_go(self) -> None:
         # Older NOGO, planner amended, newer GO → GO wins (gate is True).
@@ -184,12 +181,12 @@ class TestIsPlanReviewGoWithComments:
             _review_comment("NOGO"),
             _review_comment("GO"),
         ]
-        assert is_plan_review_go(123, comments=comments) is True
+        assert is_plan_review_go(123, comments=comments, issue_labels=["state:plan-go"]) is True
 
     def test_malformed_review_returns_false(self) -> None:
         # Review comment exists with the right prefix but no verdict line.
         comments = [_plan_comment(), _review_comment(None)]
-        assert is_plan_review_go(123, comments=comments) is False
+        assert is_plan_review_go(123, comments=comments, issue_labels=[]) is False
 
     def test_enriched_logging_includes_verdict_context_and_url(self, caplog: Any) -> None:
         """Not-GO logs should include verdict context and URL."""
@@ -200,10 +197,10 @@ class TestIsPlanReviewGoWithComments:
             _plan_comment(),
             _review_comment("NOGO", url="https://github.com/o/r/issues/123#comment-1"),
         ]
-        is_plan_review_go(123, comments=comments)
+        is_plan_review_go(123, comments=comments, issue_labels=["state:plan-no-go"])
         log_text = caplog.text
-        assert "NOGO" in log_text
-        assert "https://github.com/o/r/issues/123#comment-1" in log_text
+        assert "not GO" in log_text
+        assert "https://github.com/o/r/issues/123#comment-1" not in log_text
 
     def test_enriched_logging_fallback_no_url(self, caplog: Any) -> None:
         """Not-GO logs should show <no url> when URL is missing."""
@@ -211,10 +208,10 @@ class TestIsPlanReviewGoWithComments:
 
         caplog.set_level(logging.DEBUG)
         comments = [_plan_comment(), _review_comment("NOGO")]
-        is_plan_review_go(123, comments=comments)
+        is_plan_review_go(123, comments=comments, issue_labels=["state:plan-no-go"])
         log_text = caplog.text
-        assert "NOGO" in log_text
-        assert "<no url>" in log_text
+        assert "not GO" in log_text
+        assert "<no url>" not in log_text
 
     def test_enriched_logging_missing_verdict(self, caplog: Any) -> None:
         """Malformed-verdict logs at WARNING with first line of comment + URL."""
@@ -225,11 +222,10 @@ class TestIsPlanReviewGoWithComments:
             _plan_comment(),
             _review_comment(None, url="https://github.com/o/r/issues/123#comment-2"),
         ]
-        is_plan_review_go(123, comments=comments)
+        is_plan_review_go(123, comments=comments, issue_labels=[])
         log_text = caplog.text
-        # #615: malformed verdict emits a WARNING with first line + URL.
-        assert "no parseable plan-state token" in log_text
-        assert "https://github.com/o/r/issues/123#comment-2" in log_text
+        assert "not GO" in log_text
+        assert "https://github.com/o/r/issues/123#comment-2" not in log_text
 
 
 # ---------------------------------------------------------------------------
@@ -270,10 +266,10 @@ class TestIsPlanReviewGoWithFetch:
             yield
 
     def test_fetches_and_returns_true_for_go(self) -> None:
-        go_body = _review_comment("GO")["body"]
-        mock_result = MagicMock()
-        mock_result.stdout = _graphql_payload(["# Implementation Plan\n", go_body])
-        with patch("hephaestus.automation.state.review._gh_call", return_value=mock_result):
+        with patch(
+            "hephaestus.automation.state.review.gh_issue_json",
+            return_value={"labels": [{"name": "state:plan-go"}]},
+        ):
             assert is_plan_review_go(123) is True
 
     def test_fetches_and_returns_false_for_nogo(self) -> None:
@@ -312,7 +308,7 @@ class TestIsPlanReviewGoWithFetch:
                 return_value=mock_result,
             ) as mock_gh,
         ):
-            is_plan_review_go(1928)
+            _fetch_issue_comments_graphql(1928)
 
         mock_info.assert_called_once()
         gh_args = mock_gh.call_args[0][0]
@@ -649,17 +645,15 @@ class TestLatestVerdictProperties:
 
     @given(st.text())
     def test_never_raises_returns_go_nogo_or_none(self, body: str) -> None:
-        assert latest_verdict(body) in {"GO", "NOGO", None}
+        assert latest_verdict(body) in {"GO", "NOGO", "BLOCKED", None}
 
     @given(st.text())
     def test_no_verdict_line_is_none(self, body: str) -> None:
-        if "verdict" not in body.lower():
+        if "state:plan-" not in body.lower():
             assert latest_verdict(body) is None
 
-    @given(st.lists(st.sampled_from(["GO", "NOGO", "NO-GO"]), min_size=1, max_size=6))
+    @given(st.lists(st.sampled_from(["go", "no-go", "blocked"]), min_size=1, max_size=6))
     def test_last_matching_line_wins(self, tokens: list[str]) -> None:
-        # Contract: a body with several Verdict lines resolves to the LAST one
-        # (review_state.py:92 — _GATE_VERDICT_RE.findall(...)[-1]).
-        body = "\n".join(f"Verdict: {t}" for t in tokens) + "\n"
-        last = tokens[-1].replace("-", "")
-        assert latest_verdict(body) == ("GO" if last == "GO" else "NOGO")
+        body = "\n".join(f"state:plan-{token}" for token in tokens) + "\n"
+        expected = {"go": "GO", "no-go": "NOGO", "blocked": "BLOCKED"}[tokens[-1]]
+        assert latest_verdict(body) == expected

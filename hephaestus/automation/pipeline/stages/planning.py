@@ -43,6 +43,8 @@ from hephaestus.automation.review_journal import (
     IssueComment,
     JournalSnapshot,
     feedback_projection,
+    history_projection,
+    is_pending_review,
     journal_snapshot,
     render_current_plan,
     render_current_review,
@@ -123,9 +125,9 @@ def build_plan_prompt(
     )
 
 
-def _feedback_history(comments: Sequence[IssueComment | str]) -> str:
-    """Return the journal when a human responded after a blocked review."""
-    return feedback_projection(comments)
+def _planning_history(comments: Sequence[IssueComment | str]) -> str:
+    """Return every ordered journal iteration, plus qualifying human feedback."""
+    return feedback_projection(comments) or history_projection(comments)
 
 
 def _normalize_plan_comment(plan: str, *, revision: int | None = None) -> str:
@@ -136,16 +138,12 @@ def _normalize_plan_comment(plan: str, *, revision: int | None = None) -> str:
 def _is_replan_entry(
     labels: Sequence[str],
     *,
-    current_review_state: str,
     has_feedback: bool,
+    revision_already_published: bool,
 ) -> bool:
-    """Recover replan intent from durable labels and the canonical review."""
-    rejected = current_review_state == STATE_PLAN_NO_GO
-    feedback_unblocked = current_review_state == STATE_PLAN_BLOCKED and has_feedback
-    return (
-        STATE_PLAN_NO_GO in labels
-        or (STATE_PLAN_BLOCKED in labels and has_feedback)
-        or (STATE_NEEDS_PLAN in labels and (rejected or feedback_unblocked))
+    """Read replan authorization from labels, never from review prose."""
+    return (STATE_PLAN_NO_GO in labels and not revision_already_published) or (
+        STATE_PLAN_BLOCKED in labels and has_feedback
     )
 
 
@@ -153,7 +151,7 @@ def _load_planning_journal(
     item: WorkItem,
     ctx: StageContext,
     labels: Sequence[str],
-) -> tuple[list[IssueComment], JournalSnapshot, bool, str, bool]:
+) -> tuple[list[IssueComment], JournalSnapshot, bool, str, bool, bool]:
     """Reconcile GitHub, hydrate the work item, and recover replan intent."""
     assert item.issue is not None  # noqa: S101 - on_enter validates the work item first
     comments = reconcile_plan_journal(item.issue, ctx.github)
@@ -167,12 +165,24 @@ def _load_planning_journal(
         if snapshot.current_review_revision == snapshot.revision
         else ""
     )
+    revision_already_published = bool(
+        snapshot.current_plan
+        and snapshot.current_review_revision == snapshot.revision
+        and is_pending_review(snapshot.current_review, revision=snapshot.revision)
+    )
     is_replan_entry = _is_replan_entry(
         labels,
-        current_review_state=current_review_state,
         has_feedback=has_feedback,
+        revision_already_published=revision_already_published,
     )
-    return comments, snapshot, has_feedback, current_review_state, is_replan_entry
+    return (
+        comments,
+        snapshot,
+        has_feedback,
+        current_review_state,
+        is_replan_entry,
+        revision_already_published,
+    )
 
 
 def _plan_is_ready_for_verify(
@@ -182,10 +192,9 @@ def _plan_is_ready_for_verify(
     snapshot: JournalSnapshot,
     current_review_state: str,
     is_replan_entry: bool,
-    history: str,
 ) -> bool:
     """Return whether restart may verify the canonical plan without another agent."""
-    if is_replan_entry or history:
+    if is_replan_entry:
         return False
     if snapshot.current_plan and current_review_state == "unparseable":
         return True
@@ -198,15 +207,36 @@ def _write_planning_entry_labels(
     labels: Sequence[str],
     *,
     is_replan_entry: bool,
+    revision_already_published: bool,
 ) -> None:
     """Durably establish the mutually-exclusive planning entry label."""
-    if is_replan_entry or STATE_PLAN_GO in labels:
+    if (STATE_PLAN_NO_GO in labels and revision_already_published) or (
+        is_replan_entry and STATE_PLAN_BLOCKED in labels
+    ):
         add, remove = enter_planning_transition()
         logger.info("planning:%d: entry swap; add %s, remove %s", issue_number, add, remove)
         ctx.github.edit_labels(issue_number, add=add, remove=remove)
+    elif is_replan_entry:
+        # Keep state:plan-no-go authoritative until a revised canonical plan
+        # has actually been published. This removes the crash window where a
+        # needs-plan label plus stale rejected plan could be mistaken for a
+        # fresh initial planning entry.
+        return
     elif STATE_NEEDS_PLAN not in labels:
         logger.info("planning:%d: adding %s label", issue_number, STATE_NEEDS_PLAN)
         ctx.github.add_labels(issue_number, [STATE_NEEDS_PLAN])
+
+
+def _mark_published_plan_pending_review(
+    issue_number: int,
+    ctx: StageContext,
+    *,
+    was_revision: bool,
+) -> None:
+    """Transition a rejected plan only after its replacement is durable."""
+    if was_revision:
+        add, remove = enter_planning_transition()
+        ctx.github.edit_labels(issue_number, add=add, remove=remove)
 
 
 class PlanningStage(Stage):
@@ -300,9 +330,14 @@ class PlanningStage(Stage):
         # has_existing_plan gate stuck-False so VERIFY can never ADVANCE
         # (#1857). Swap atomically: add needs-plan, remove both siblings, in
         # ONE gh issue edit. Restores state:plan-no-go ──re-plan──▶ needs-plan.
-        comments, snapshot, has_feedback, current_review_state, is_replan_entry = (
-            _load_planning_journal(item, ctx, labels)
-        )
+        (
+            comments,
+            snapshot,
+            has_feedback,
+            current_review_state,
+            is_replan_entry,
+            revision_already_published,
+        ) = _load_planning_journal(item, ctx, labels)
         if STATE_PLAN_BLOCKED in labels and not has_feedback:
             return StageOutcome(Disposition.BLOCKED, "plan requires external feedback")
         if is_replan_entry:
@@ -312,9 +347,10 @@ class PlanningStage(Stage):
             ctx,
             labels,
             is_replan_entry=is_replan_entry,
+            revision_already_published=revision_already_published,
         )
 
-        history = _feedback_history(comments)
+        history = _planning_history(comments)
         if history:
             item.payload["issue_history"] = history
 
@@ -327,7 +363,6 @@ class PlanningStage(Stage):
             snapshot=snapshot,
             current_review_state=current_review_state,
             is_replan_entry=is_replan_entry,
-            history=history,
         ):
             logger.info(
                 "planning:%d: plan comment already exists; fast-forward to VERIFY", item.issue
@@ -432,21 +467,26 @@ class PlanningStage(Stage):
                             "Planning is stuck and needs external feedback. "
                             f"{publication.no_progress_reason}\n\n{STATE_PLAN_BLOCKED}"
                         )
+                        ctx.github.edit_labels(
+                            item.issue,
+                            add=[STATE_PLAN_BLOCKED],
+                            remove=[STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO],
+                        )
                         ctx.github.upsert_issue_comment(
                             item.issue,
                             PLAN_REVIEW_CANONICAL_MARKER,
                             render_current_review(raw_review, revision=publication.revision),
                             legacy_marker=PLAN_REVIEW_PREFIX,
                         )
-                        ctx.github.edit_labels(
-                            item.issue,
-                            add=[STATE_PLAN_BLOCKED],
-                            remove=[STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO],
-                        )
                         return StageOutcome(
                             Disposition.BLOCKED,
                             "planning made no progress; external feedback required",
                         )
+                    _mark_published_plan_pending_review(
+                        item.issue,
+                        ctx,
+                        was_revision=requires_revision,
+                    )
                     posted_plan = True
                     item.payload.pop("requires_plan_revision", None)
 

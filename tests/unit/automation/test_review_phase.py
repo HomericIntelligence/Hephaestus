@@ -20,6 +20,10 @@ import pytest
 from hephaestus.automation import _review_phase
 from hephaestus.automation._review_phase import ReviewPhase
 from hephaestus.automation._stage_context import StageContext
+from hephaestus.automation.protocol import (
+    PLAN_CANONICAL_MARKER,
+    PLAN_REVIEW_CANONICAL_MARKER,
+)
 
 
 class TestHandleReviewerQuotaOrOverload:
@@ -154,6 +158,30 @@ def _make_ctx(tmp_path: Path) -> StageContext:
         SimpleNamespace(_fetch_plan_and_review=lambda *a, **k: ("plan", "plan review")),
     )
     return StageContext(impl=impl, runner=runner)
+
+
+def test_fetch_plan_and_review_accepts_opaque_canonical_review_marker(tmp_path: Path) -> None:
+    """Implementation review receives the canonical plan-review comment."""
+    phase = ReviewPhase(_make_ctx(tmp_path))
+    comments = [
+        {"body": f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\n\nPlan body"},
+        {
+            "body": (
+                f"{PLAN_REVIEW_CANONICAL_MARKER}\n## 🔍 Plan Review\n\nReview body\n\nstate:plan-go"
+            )
+        },
+    ]
+
+    with mock.patch.object(
+        _review_phase.review_state,
+        "_fetch_issue_comments_graphql",
+        return_value=comments,
+    ):
+        plan, review = phase._fetch_plan_and_review(42)
+
+    assert "Plan body" in plan
+    assert review.startswith(PLAN_REVIEW_CANONICAL_MARKER)
+    assert "state:plan-go" in review
 
 
 class TestRunImplReviewStepPromptTooLong:

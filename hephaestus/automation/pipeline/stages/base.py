@@ -146,15 +146,7 @@ class StageGitHub(Protocol):
         ...
 
     def has_existing_plan(self, issue_number: int) -> bool:
-        """Return True when the issue already counts as planned.
-
-        Contract for the real implementation (#1817): this must reuse the
-        labels-first ``is_plan_review_go`` semantics INCLUDING its one-time
-        comment-scan backfill for issues that converged before the labels
-        rollout (reference: ``planner.py`` ``Planner._has_existing_plan``,
-        which delegates to ``state.review.is_plan_review_go``). A pure
-        label-equality check is NOT sufficient.
-        """
+        """Return True when a canonical plan artifact exists for the issue."""
         ...
 
     def issue_comments(self, issue_number: int) -> list[IssueComment]:
