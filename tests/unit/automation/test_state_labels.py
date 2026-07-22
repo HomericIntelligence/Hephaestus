@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 
+from hephaestus.automation import state_labels
 from hephaestus.automation.state_labels import (
     ALL_IMPLEMENTATION_STATE_LABELS,
     ALL_STATE_LABELS,
@@ -23,6 +24,7 @@ from hephaestus.automation.state_labels import (
     apply_plan_verdict,
     has_label,
     is_epic,
+    is_exclusive_plan_state,
     is_implementation_go,
     is_plan_go,
     is_plan_no_go,
@@ -35,14 +37,20 @@ from hephaestus.automation.state_labels import (
 class TestLabelVocabulary:
     """The three state-label names + the ALL tuple are stable identifiers."""
 
-    def test_three_distinct_state_labels(self) -> None:
-        assert len({STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO}) == 3
+    def test_four_distinct_state_labels(self) -> None:
+        assert (
+            len(
+                {STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO, state_labels.STATE_PLAN_BLOCKED}
+            )
+            == 4
+        )
 
     def test_all_state_labels_covers_each(self) -> None:
         assert set(ALL_STATE_LABELS) == {
             STATE_NEEDS_PLAN,
             STATE_PLAN_NO_GO,
             STATE_PLAN_GO,
+            state_labels.STATE_PLAN_BLOCKED,
         }
 
     def test_state_prefix(self) -> None:
@@ -88,6 +96,7 @@ class TestLabelVocabulary:
     def test_is_implementation_go(self) -> None:
         assert is_implementation_go([STATE_IMPLEMENTATION_GO]) is True
         assert is_implementation_go([STATE_IMPLEMENTATION_NO_GO]) is False
+        assert is_implementation_go([STATE_IMPLEMENTATION_GO, STATE_IMPLEMENTATION_NO_GO]) is False
         assert is_implementation_go([]) is False
 
 
@@ -104,11 +113,34 @@ class TestHasLabel:
         assert has_label([], STATE_PLAN_GO) is False
 
 
+class TestExclusivePlanState:
+    """Transition confirmation requires one target and no plan-state sibling."""
+
+    def test_accepts_exact_target_with_unrelated_labels(self) -> None:
+        assert is_exclusive_plan_state([STATE_PLAN_GO, "bug"], STATE_PLAN_GO)
+
+    def test_rejects_missing_target(self) -> None:
+        assert not is_exclusive_plan_state(["bug"], STATE_PLAN_GO)
+
+    def test_rejects_target_with_stale_sibling(self) -> None:
+        assert not is_exclusive_plan_state(
+            [STATE_PLAN_GO, STATE_PLAN_NO_GO],
+            STATE_PLAN_GO,
+        )
+
+    def test_rejects_unknown_expected_state(self) -> None:
+        with pytest.raises(ValueError, match="unsupported plan state"):
+            is_exclusive_plan_state(["state:unknown"], "state:unknown")
+
+
 class TestIsPlanGo:
     """``state:plan-go`` is the terminal-approved state."""
 
     def test_label_present_returns_true(self) -> None:
         assert is_plan_go([STATE_PLAN_GO, "bug"]) is True
+
+    def test_stale_sibling_prevents_authorization(self) -> None:
+        assert is_plan_go([STATE_PLAN_GO, STATE_PLAN_NO_GO]) is False
 
     def test_label_absent_returns_false(self) -> None:
         assert is_plan_go(["bug", "enhancement"]) is False
@@ -152,6 +184,9 @@ class TestNeedsPlan:
     def test_plan_no_go_does_not_need_plan(self) -> None:
         """A NOGO issue has a plan; it's just being re-iterated. Not needs-plan."""
         assert needs_plan([STATE_PLAN_NO_GO]) is False
+
+    def test_plan_blocked_does_not_need_plan(self) -> None:
+        assert needs_plan([state_labels.STATE_PLAN_BLOCKED]) is False
 
     @pytest.mark.parametrize(
         "labels",
@@ -242,12 +277,18 @@ class TestApplyPlanVerdict:
     def test_go_verdict_adds_go_removes_others(self) -> None:
         add, remove = apply_plan_verdict(is_go=True)
         assert add == STATE_PLAN_GO
-        assert set(remove) == {STATE_PLAN_NO_GO, STATE_NEEDS_PLAN}
+        assert set(remove) == {
+            STATE_PLAN_NO_GO,
+            STATE_NEEDS_PLAN,
+        }
 
     def test_nogo_verdict_adds_nogo_removes_others(self) -> None:
         add, remove = apply_plan_verdict(is_go=False)
         assert add == STATE_PLAN_NO_GO
-        assert set(remove) == {STATE_PLAN_GO, STATE_NEEDS_PLAN}
+        assert set(remove) == {
+            STATE_PLAN_GO,
+            STATE_NEEDS_PLAN,
+        }
 
 
 class TestPartitionEpics:

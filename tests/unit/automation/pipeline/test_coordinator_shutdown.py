@@ -404,7 +404,10 @@ class TestCrashMatrixJournal:
         outcome = stage.step(item, ctx)
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition.value == "advance"
-        assert ("gh_issue_add_labels", (issue, (STATE_PLAN_GO,))) in gh.mutation_log
+        assert any(
+            operation == "edit_labels" and args[1] == (STATE_PLAN_GO,)
+            for operation, args in gh.mutation_log
+        )
 
     def test_crash_after_needs_plan_label_reenters_planning(self) -> None:
         """S1: crash right after planning's entry-label write -> planning again."""

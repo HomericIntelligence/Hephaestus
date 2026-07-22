@@ -19,6 +19,7 @@ from hephaestus.automation.pipeline.routing import ROUTES, Disposition, StageNam
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages.implementation import ImplementationStage
 from hephaestus.automation.pipeline.stages.pr_review import PrReviewStage
+from hephaestus.automation.state_labels import STATE_PLAN_GO
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
@@ -93,7 +94,9 @@ class TestAgentErrorPingPongTerminates:
         """
         impl_stage = ImplementationStage()
         pr_stage = PrReviewStage()
-        github = FakeStageGitHub(open_pr=1001, pr_head_branch="1-real-branch")
+        github = FakeStageGitHub(
+            labels=[STATE_PLAN_GO], open_pr=1001, pr_head_branch="1-real-branch"
+        )
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, pr=1001, state="ENTER")
         item.branch = "1-real-branch"
@@ -139,7 +142,9 @@ class TestAgentErrorPingPongTerminates:
         """The address-failure fail-back consumes the same GATE budget."""
         impl_stage = ImplementationStage()
         pr_stage = PrReviewStage()
-        github = FakeStageGitHub(open_pr=1001, pr_head_branch="1-real-branch")
+        github = FakeStageGitHub(
+            labels=[STATE_PLAN_GO], open_pr=1001, pr_head_branch="1-real-branch"
+        )
         ctx = make_ctx(github=github)
         item = make_work_item(issue=2, pr=1001, state="EVAL")
         item.branch = "1-real-branch"

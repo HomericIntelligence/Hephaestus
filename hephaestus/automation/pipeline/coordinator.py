@@ -124,7 +124,7 @@ from hephaestus.automation.pipeline.work_item import (
     PreservedWorktree,
     WorkItem,
 )
-from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_GO
+from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_GO, STATE_PLAN_BLOCKED
 from hephaestus.prompts import PromptCatalog
 
 logger = logging.getLogger(__name__)
@@ -1551,6 +1551,8 @@ class Coordinator:
             issue_numbers = _admission._filter_open_issues(repo, issue_numbers)
         for issue in issue_numbers:
             facts = _seeding.seed_issue_from_github(issue, github)
+            if STATE_PLAN_BLOCKED in facts.labels:
+                github.ensure_blocked_audit(issue)
             entry = _seeding.seed_entry_from_facts(facts)
             stage, reason = entry.stage, entry.reason
             stage, reason, passed = self._scope_seed_decision(issue, stage, reason, scope_stages)

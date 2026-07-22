@@ -155,7 +155,7 @@ class FakeGitHub:
         """Initialize empty GitHub state."""
         self.labels: dict[int, set[str]] = {}
         self.defined_labels: dict[str, dict[str, str]] = {}
-        self.comments: dict[int, list[str]] = {}
+        self.comments: dict[int, list[Any]] = {}
         self.issues: dict[int, dict[str, Any]] = {}
         self.prs: dict[int, dict[str, Any]] = {}
         self.reviews: dict[int, list[dict[str, Any]]] = {}

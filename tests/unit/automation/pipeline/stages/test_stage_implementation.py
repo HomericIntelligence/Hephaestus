@@ -6,6 +6,8 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from hephaestus.automation.pipeline.jobs import AgentJob, BuildTestJob, GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import (
@@ -21,7 +23,13 @@ from hephaestus.automation.pipeline.stages.implementation import (
     build_implementation_prompt,
     build_test_fix_prompt,
 )
-from hephaestus.automation.state_labels import STATE_PLAN_GO, STATE_SKIP
+from hephaestus.automation.state_labels import (
+    STATE_NEEDS_PLAN,
+    STATE_PLAN_BLOCKED,
+    STATE_PLAN_GO,
+    STATE_PLAN_NO_GO,
+    STATE_SKIP,
+)
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
@@ -165,6 +173,86 @@ class TestGate:
         assert result.next_state == "WORKTREE_WAIT"
         assert item.branch == "7-auto-impl"
 
+    def test_gate_live_label_failure_cannot_authorize_from_cached_go(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A stale cached GO is diagnostic only when the authoritative read fails."""
+
+        class LabelReadFailsGitHub(FakeStageGitHub):
+            def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
+                raise RuntimeError("labels unavailable")
+
+        stage = ImplementationStage()
+        ctx = make_ctx(github=LabelReadFailsGitHub())
+        item = make_work_item(issue=7, state="GATE")
+        item.labels_cache = {STATE_PLAN_GO: True}
+
+        with pytest.raises(RuntimeError, match="labels unavailable"):
+            stage.step(item, ctx)
+
+        assert item.branch == ""
+
+    def test_gate_blocked_stops_before_existing_pr_adoption(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The operator latch wins even when an implementation PR already exists."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub(labels=[STATE_PLAN_BLOCKED], open_pr=1001)
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=7, state="GATE")
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(
+            Disposition.BLOCKED,
+            "plan is blocked pending external intervention",
+        )
+        assert github.mutation_log == []
+
+    @pytest.mark.parametrize(
+        "labels",
+        [[], [STATE_NEEDS_PLAN], [STATE_PLAN_NO_GO], [STATE_PLAN_GO, STATE_PLAN_NO_GO]],
+    )
+    def test_gate_existing_pr_requires_exclusive_authorizing_state(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        labels: list[str],
+    ) -> None:
+        """PR existence cannot replace an exclusive plan/implementation label."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub(labels=labels, open_pr=1001, pr_head_branch="1-real")
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, state="GATE")
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FAIL_BACK, "plan_not_go")
+        assert item.pr is None
+        assert github.mutation_log == []
+
+    def test_gate_existing_pr_rejects_contradictory_pr_state(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Conflicting PR review labels fail closed before adoption writes."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub(
+            open_pr=1001,
+            pr_impl_state=(True, True),
+            pr_head_branch="1-real",
+        )
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, state="GATE")
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "contradictory_implementation_state",
+        )
+        assert item.pr is None
+        assert github.mutation_log == []
+
     def test_gate_is_at_or_past_not_equality(self, make_ctx: Any, make_work_item: Any) -> None:
         """Already implementation-go (past plan-go) also satisfies the gate."""
         stage = ImplementationStage()
@@ -304,7 +392,11 @@ class TestGate:
         worktree on the ADOPTED branch (never the shared checkout).
         """
         stage = ImplementationStage()
-        github = FakeStageGitHub(open_pr=1001, pr_head_branch="1-some-real-branch")
+        github = FakeStageGitHub(
+            labels=[STATE_PLAN_GO],
+            open_pr=1001,
+            pr_head_branch="1-some-real-branch",
+        )
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, state="GATE")
 
@@ -327,7 +419,7 @@ class TestGate:
                 raise RuntimeError(f"PR #{pr_number} remains armed")
 
         stage = ImplementationStage()
-        ctx = make_ctx(github=DeferFailsGitHub(open_pr=1001))
+        ctx = make_ctx(github=DeferFailsGitHub(labels=[STATE_PLAN_GO], open_pr=1001))
         item = make_work_item(issue=1, state="GATE")
 
         assert stage.step(item, ctx) == StageOutcome(
@@ -340,6 +432,7 @@ class TestGate:
         """Fork heads cannot be addressed by pushing a base-origin branch."""
         stage = ImplementationStage()
         github = FakeStageGitHub(
+            labels=[STATE_PLAN_GO],
             open_pr=1001,
             pr_head_branch="fork-feature",
             pr_head_writable=False,
@@ -462,7 +555,7 @@ class TestAgentErrorPingPongBound:
     ) -> None:
         """A flagged re-entry that adopts a PR consumes attempts["implement"]."""
         stage = ImplementationStage()
-        github = FakeStageGitHub(open_pr=1001, pr_head_branch="1-real")
+        github = FakeStageGitHub(labels=[STATE_PLAN_GO], open_pr=1001, pr_head_branch="1-real")
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, state="GATE")
         item.payload["agent_error_failback"] = True
@@ -474,12 +567,12 @@ class TestAgentErrorPingPongBound:
         assert item.attempts["implement"] == 1  # the bound moved
         assert "agent_error_failback" not in item.payload  # flag consumed
 
-    def test_reentry_exhaustion_finishes_failed_without_labels(
+    def test_reentry_exhaustion_finishes_failed_with_plan_go(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
         """At the implement budget the re-adoption terminates, labels untouched."""
         stage = ImplementationStage()
-        github = FakeStageGitHub(open_pr=1001, pr_head_branch="1-real")
+        github = FakeStageGitHub(labels=[STATE_PLAN_GO], open_pr=1001, pr_head_branch="1-real")
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, state="GATE")
         item.attempts["implement"] = 1  # one fail-back round trip already

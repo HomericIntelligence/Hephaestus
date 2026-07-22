@@ -31,7 +31,6 @@ import re
 import signal
 import subprocess
 import uuid
-from dataclasses import dataclass
 from pathlib import Path
 
 from hephaestus.automation import subprocess_registry
@@ -44,6 +43,8 @@ from hephaestus.automation.agent_config import (
 from hephaestus.github.client import ClaudeUsageCapError, PromptTooLongError
 from hephaestus.github.rate_limit import resolve_quota_reset_epoch
 from hephaestus.utils.helpers import strip_null_bytes
+
+from .review_types import ReviewVerdict as ReviewVerdict
 
 logger = logging.getLogger(__name__)
 
@@ -607,39 +608,6 @@ def detect_model_usage_cap(*texts: str) -> bool:
         if _MODEL_USAGE_CAP_RE.search(text):
             return True
     return False
-
-
-@dataclass(frozen=True)
-class ReviewVerdict:
-    """Parsed verdict from a review response.
-
-    Attributes:
-        grade: Letter grade extracted from ``Grade: <X>`` line. ``None`` if absent.
-        verdict: One of ``"GO"``, ``"NOGO"``, ``"AMBIGUOUS"``, or ``"ERROR"``.
-        raw: Full review text (kept for downstream prompts and logs).
-
-    ``"ERROR"`` is reserved for **reviewer-infrastructure failures** (the
-    reviewer subprocess raised — API 400, timeout, crash, empty output). It is
-    deliberately distinct from ``"NOGO"`` so the loop does not mistake "the
-    reviewer never ran" for "the reviewer judged the code not ready": an ERROR
-    must not burn toward ``state:skip`` exhaustion and must not stamp a
-    go/no-go label (#911 / PR #1069).
-
-    """
-
-    grade: str | None
-    verdict: str
-    raw: str
-
-    @property
-    def is_go(self) -> bool:
-        """True only on an unambiguous GO."""
-        return self.verdict == "GO"
-
-    @property
-    def is_error(self) -> bool:
-        """True when the verdict is a reviewer-infrastructure failure sentinel."""
-        return self.verdict == "ERROR"
 
 
 _VERDICT_RE = re.compile(

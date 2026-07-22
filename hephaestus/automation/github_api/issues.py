@@ -8,7 +8,7 @@ import os
 import re
 import subprocess
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, cast
 
@@ -16,6 +16,10 @@ import hephaestus.automation.github_api as _api
 from hephaestus.utils.helpers import strip_null_bytes
 
 from ..models import IssueInfo, IssueState
+
+MAX_ISSUE_JOURNAL_COMMENTS = 2_000
+MAX_ISSUE_JOURNAL_BODY_BYTES = 16 * 1024 * 1024
+_ISSUE_COMMENT_PAGE_SIZE = 100
 
 
 @contextlib.contextmanager
@@ -141,7 +145,7 @@ def gh_issue_comment(issue_number: int, body: str, repo: tuple[str, str] | None 
 def _fetch_issue_comment_ids(
     issue_number: int, repo: tuple[str, str] | None = None
 ) -> list[dict[str, Any]]:
-    """Return up to 100 most-recent issue comments as ``{databaseId, body}`` dicts.
+    """Return recent issue comments with ids, ownership, and author metadata.
 
     Unlike :func:`_fetch_issue_comments_graphql` in ``review_state`` (which
     fetches ``body``/``url`` for verdict parsing), this also requests
@@ -169,7 +173,8 @@ def _fetch_issue_comment_ids(
         "  repository(owner:$owner,name:$name){"
         "    issue(number:$number){"
         "      comments(last: 100, orderBy: {field: UPDATED_AT, direction: DESC}){"
-        "        nodes{ databaseId body }"
+        "        nodes{ databaseId body createdAt url viewerDidAuthor "
+        "authorAssociation author{login} }"
         "      }"
         "    }"
         "  }"
@@ -204,17 +209,97 @@ def _fetch_issue_comment_ids(
         return []
 
 
-def gh_issue_delete_comment(comment_id: int) -> None:
+def fetch_issue_comments_metadata(
+    issue_number: int,
+    repo: tuple[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Return every issue comment in creation order with ownership metadata.
+
+    This strict journal read uses the paginated REST issue-comment channel.
+    Unlike the legacy best-effort GraphQL helper above, errors propagate and
+    the result is not capped at 100 comments. Durable journal reconciliation
+    must distinguish "there are no comments" from "GitHub could not be read".
+    """
+    owner, name = repo if repo is not None else _api.get_repo_info()
+    return _fetch_issue_comments_paginated(
+        issue_number,
+        owner=owner,
+        name=name,
+        call=_api._gh_call,
+    )
+
+
+def _fetch_issue_comments_paginated(
+    issue_number: int,
+    *,
+    owner: str,
+    name: str,
+    call: Callable[[list[str]], Any],
+) -> list[dict[str, Any]]:
+    """Fetch a complete chronological journal within an explicit ingest cap."""
+    comments: list[dict[str, Any]] = []
+    body_bytes = 0
+    page_number = 1
+    while True:
+        endpoint = (
+            f"/repos/{owner}/{name}/issues/{int(issue_number)}/comments"
+            f"?per_page={_ISSUE_COMMENT_PAGE_SIZE}&page={page_number}"
+        )
+        try:
+            result = call(["api", endpoint])
+            page = json.loads(result.stdout or "[]")
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to fetch complete comment journal for #{issue_number}: {exc}"
+            ) from exc
+        if not isinstance(page, list):
+            raise RuntimeError(
+                f"Failed to fetch complete comment journal for #{issue_number}: "
+                "GitHub returned a non-list comment page"
+            )
+        if len(comments) + len(page) > MAX_ISSUE_JOURNAL_COMMENTS:
+            raise RuntimeError(
+                f"Issue #{issue_number} comment journal exceeds "
+                f"{MAX_ISSUE_JOURNAL_COMMENTS} entries; manual recovery is required"
+            )
+        for comment in page:
+            if not isinstance(comment, dict):
+                continue
+            normalized = dict(comment)
+            if normalized.get("databaseId") is None and normalized.get("id") is not None:
+                normalized["databaseId"] = normalized["id"]
+            body_bytes += len(str(normalized.get("body", "")).encode("utf-8"))
+            if body_bytes > MAX_ISSUE_JOURNAL_BODY_BYTES:
+                raise RuntimeError(
+                    f"Issue #{issue_number} comment journal exceeds "
+                    f"{MAX_ISSUE_JOURNAL_BODY_BYTES} body bytes; manual recovery is required"
+                )
+            comments.append(normalized)
+        if len(page) < _ISSUE_COMMENT_PAGE_SIZE:
+            return comments
+        page_number += 1
+
+
+def gh_issue_delete_comment(
+    comment_id: int,
+    repo: tuple[str, str] | None = None,
+    *,
+    missing_ok: bool = False,
+) -> None:
     """Delete a single issue comment by its REST database id.
 
     Args:
         comment_id: The integer ``databaseId`` of the issue comment.
+        repo: Repository owning the comment; ambient repository when omitted.
+        missing_ok: Treat a confirmed GitHub HTTP 404 as success. Canonical
+            comment convergence uses this when concurrent writers may both
+            select the same obsolete duplicate for deletion.
 
     Raises:
         RuntimeError: If the delete call fails.
 
     """
-    owner, name = _api.get_repo_info()
+    owner, name = repo if repo is not None else _api.get_repo_info()
     try:
         _api._gh_call(
             [
@@ -226,6 +311,13 @@ def gh_issue_delete_comment(comment_id: int) -> None:
         )
         _api.logger.info("Deleted issue comment %s", comment_id)
     except subprocess.CalledProcessError as e:
+        error_text = " ".join(
+            value.decode(errors="replace") if isinstance(value, bytes) else str(value or "")
+            for value in (e.stderr, e.stdout)
+        )
+        if missing_ok and "404" in error_text and "not found" in error_text.lower():
+            _api.logger.info("Issue comment %s was already deleted", comment_id)
+            return
         raise RuntimeError(f"Failed to delete issue comment {comment_id}: {e}") from e
 
 
@@ -282,7 +374,7 @@ def gh_issue_upsert_comment(
     for dup in matching[:-1]:
         dup_id = dup.get("databaseId")
         if dup_id is not None:
-            _api.gh_issue_delete_comment(int(dup_id))
+            _api.gh_issue_delete_comment(int(dup_id), repo=repo)
 
     try:
         with _body_file(body) as path:
@@ -301,6 +393,77 @@ def gh_issue_upsert_comment(
         raise RuntimeError(
             f"Failed to update issue comment {target_id} on #{issue_number}: {e}"
         ) from e
+    return target_id
+
+
+def gh_issue_upsert_owned_comment(
+    issue_number: int,
+    marker_prefix: str,
+    body: str,
+    repo: tuple[str, str] | None = None,
+    *,
+    legacy_marker: str | None = None,
+) -> int | None:
+    """Upsert only the authenticated actor's canonical comment.
+
+    Foreign marker-bearing comments are inert: they are never selected,
+    mutated, deleted, or treated as replay identity. This helper is the
+    standalone automation equivalent of ``PipelineGitHub.upsert_issue_comment``.
+    """
+    viewer_login = (_api.gh_current_login() or "").lower()
+    if not viewer_login:
+        raise RuntimeError("cannot verify GitHub comment ownership: viewer login unavailable")
+
+    def is_owned(comment: dict[str, Any]) -> bool:
+        if "viewerDidAuthor" in comment:
+            return bool(comment.get("viewerDidAuthor"))
+        user = comment.get("user") or comment.get("author")
+        login = user.get("login") if isinstance(user, dict) else ""
+        return bool(login) and str(login).lower() == viewer_login
+
+    def owned_with(comments: list[dict[str, Any]], prefix: str) -> list[dict[str, Any]]:
+        return [
+            comment
+            for comment in comments
+            if is_owned(comment)
+            and str(comment.get("body", "")).lstrip().startswith(prefix)
+            and comment.get("databaseId") is not None
+        ]
+
+    comments = _api.fetch_issue_comments_metadata(issue_number, repo)
+    owned = owned_with(comments, marker_prefix)
+    if not owned and legacy_marker is not None:
+        owned = owned_with(comments, legacy_marker)
+    if not owned:
+        _api.gh_issue_comment(issue_number, body, repo=repo)
+        # Re-read after create. This closes the concurrent-create window and
+        # proves that the authenticated actor owns the canonical pointer.
+        comments = _api.fetch_issue_comments_metadata(issue_number, repo)
+        owned = owned_with(comments, marker_prefix)
+        if not owned:
+            raise RuntimeError(
+                f"created canonical comment on #{issue_number} was not observable as actor-owned"
+            )
+
+    target = owned[-1]
+    target_id = int(target["databaseId"])
+    owner, name = repo if repo is not None else _api.get_repo_info()
+    for duplicate in owned[:-1]:
+        duplicate_id = duplicate.get("databaseId")
+        if duplicate_id is not None:
+            _api.gh_issue_delete_comment(int(duplicate_id), repo=repo, missing_ok=True)
+    if str(target.get("body", "")) != body:
+        with _body_file(body) as path:
+            _api._gh_call(
+                [
+                    "api",
+                    "--method",
+                    "PATCH",
+                    f"/repos/{owner}/{name}/issues/comments/{target_id}",
+                    "-F",
+                    f"body=@{path}",
+                ]
+            )
     return target_id
 
 

@@ -290,25 +290,21 @@ class TestPlanReviewContextAndVerdict:
         # It must say a prior review is not the artifact under review.
         assert "never treat a prior review" in out.lower() or "self-review" in out.lower()
 
-    def test_standalone_verdict_contract_has_both_tokens(self) -> None:
-        """Both GO/NOGO verdict tokens must appear and exactly-one-line is required."""
+    def test_standalone_verdict_contract_has_all_plan_states(self) -> None:
+        """Standalone review uses the same exact three-state contract as the loop."""
         out = self._render_standalone()
-        for token in ("Verdict: GO", "Verdict: NOGO"):
-            assert token in out, f"missing verdict token: {token}"
-        # The contract must demand exactly one verdict line and flag omission.
+        for token in ("state:plan-go", "state:plan-no-go", "state:plan-blocked"):
+            assert token in out, f"missing plan-state token: {token}"
         assert "EXACTLY ONE" in out
-        assert "CONTRACT VIOLATION" in out
+        assert "nothing after it" in out
 
     def test_loop_review_verdict_contract_preserved(self) -> None:
-        """The GO/NOGO Grade/Verdict block (parser contract) must be intact."""
+        """The loop reviewer emits exactly one state label and no grade contract."""
         out = self._render_loop(0)
-        assert "Grade: <A|B|C|D|F>" in out
-        assert "Verdict: <GO|NOGO>" in out
-        # Both GO and NOGO tokens must be named in the contract text.
-        assert "Verdict: GO" in out
-        assert "Verdict: NOGO" in out
-        # The strengthened contract flags omission as a violation.
-        assert "CONTRACT VIOLATION" in out
+        for label in ("state:plan-go", "state:plan-no-go", "state:plan-blocked"):
+            assert label in out
+        assert "Grade: <A|B|C|D|F>" not in out
+        assert "Verdict: <GO|NOGO>" not in out
 
 
 class TestAdvisePrompt:
@@ -726,11 +722,14 @@ class TestPlanReviewRubric:
         # The shared anti-inflation block must also be embedded.
         assert "DEFAULT IS F" in out
 
-    def test_plan_review_prompt_preserves_verdict_format(self) -> None:
-        """The trailing Verdict: GO/NOGO lines the regex parser depends on."""
+    def test_plan_review_prompt_uses_only_plan_state_labels(self) -> None:
+        """Standalone and loop plan reviewers share the three-state contract."""
         out = self._render()
-        assert "Verdict: GO" in out
-        assert "Verdict: NOGO" in out
+        assert "state:plan-go" in out
+        assert "state:plan-no-go" in out
+        assert "state:plan-blocked" in out
+        assert "Verdict: GO" not in out
+        assert "Verdict: NOGO" not in out
 
     def test_plan_review_prompt_contains_stage_dimensions(self) -> None:
         """The plan-specific stage dimensions must be enumerated in the prompt."""
@@ -794,11 +793,12 @@ class TestPlanLoopReviewRubric:
         assert "verify previous-iteration's findings" in out
 
     def test_plan_loop_prompt_preserves_verdict_format(self) -> None:
-        """The trailing Grade/Verdict output format must remain intact (parser contract)."""
+        """The trailing plan-state label format remains intact."""
         for iteration in (0, 1, 2):
             out = self._build(iteration)
-            assert "Grade: <A|B|C|D|F>" in out
-            assert "Verdict: <GO|NOGO>" in out
+            assert "state:plan-go" in out
+            assert "state:plan-no-go" in out
+            assert "state:plan-blocked" in out
 
     def test_full_sweep_suffix_constant_exposes_module_level_name(self) -> None:
         """Site 3 (#580) reuses _FULL_SWEEP_SUFFIX — guard against accidental rename."""

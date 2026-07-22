@@ -148,6 +148,47 @@ def gh_issue_add_labels(
     _api.logger.info("Added labels %s to issue #%s", labels, issue_number)
 
 
+def gh_issue_edit_labels(
+    issue_number: int,
+    *,
+    add: list[str],
+    remove: list[str],
+    repo: tuple[str, str] | None = None,
+) -> None:
+    """Atomically add and remove labels with one ``gh issue edit`` call.
+
+    Labels being added are provisioned first. Removal names that do not exist
+    in the repository are omitted so GitHub cannot reject an otherwise valid
+    state transition. The issue mutation itself is always a single call.
+    """
+    if not add and not remove:
+        return
+    try:
+        existing = _api.gh_list_labels(raise_on_error=True, repo=repo)
+    except RuntimeError:
+        existing = set()
+        remove_existing = list(remove)
+    else:
+        remove_existing = [label for label in remove if label in existing]
+    for label in add:
+        if label not in existing:
+            _api.gh_create_label(label, repo=repo)
+            existing.add(label)
+
+    cmd = ["issue", "edit", str(issue_number)]
+    for label in add:
+        cmd.extend(["--add-label", label])
+    for label in remove_existing:
+        cmd.extend(["--remove-label", label])
+    _api._gh_call(_with_repo(cmd, repo))
+    _api.logger.info(
+        "Edited labels on issue #%s: add=%s remove=%s",
+        issue_number,
+        add,
+        remove_existing,
+    )
+
+
 def skip_epics(epics_labels: dict[int, list[str]], repo: tuple[str, str] | None = None) -> None:
     """Tag excluded epic/roadmap issues with ``state:skip``, idempotently.
 

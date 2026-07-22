@@ -33,7 +33,7 @@ from hephaestus.automation.github_api import (
     is_issue_closed,
     prefetch_issue_states,
 )
-from hephaestus.automation.protocol import PLAN_COMMENT_MARKER
+from hephaestus.automation.review_journal import is_plan_comment
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -104,7 +104,7 @@ def _fetch_planned_files(issue: int, repo: tuple[str, str] | None = None) -> set
     """
     for comment in _fetch_issue_comment_ids(issue, repo=repo):
         body = str(comment.get("body", ""))
-        if body.startswith(PLAN_COMMENT_MARKER):
+        if is_plan_comment(body):
             return _parse_planned_files(body)
     return None
 

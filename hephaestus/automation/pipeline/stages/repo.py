@@ -36,7 +36,7 @@ from typing import Any
 
 from hephaestus.automation import loop_repo_manager as _repo_manager, pr_discovery as _pr_discovery
 from hephaestus.automation.pipeline import seeding as _seeding
-from hephaestus.automation.state_labels import partition_epics
+from hephaestus.automation.state_labels import STATE_PLAN_BLOCKED, partition_epics
 
 from .base import (
     GIT_JOB_TIMEOUT_S,
@@ -109,6 +109,12 @@ def _partition_and_tag_epics(
     }
     _tag_epics(repo, ctx, epics_labels)
     return kept, epics
+
+
+def _repair_blocked_audit(facts: _seeding.IssueFacts, ctx: StageContext) -> None:
+    """Repair an interrupted BLOCKED explanation before excluding the issue."""
+    if STATE_PLAN_BLOCKED in facts.labels:
+        ctx.github.ensure_blocked_audit(facts.number)
 
 
 class RepoStage(Stage):
@@ -241,6 +247,7 @@ class RepoStage(Stage):
         covered_prs: set[int] = set()
         for num in kept:
             facts = _seeding.seed_issue_from_github(num, ctx.github)
+            _repair_blocked_audit(facts, ctx)
             stage, reason = _seeding.classify_issue(facts)
             if facts.pr_number is not None:
                 covered_prs.add(facts.pr_number)

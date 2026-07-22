@@ -7,8 +7,8 @@ the iteration-aware plan-loop review prompt.
 from ._review_rubric import (
     get_full_sweep_suffix,
     get_plan_loop_review_rubric,
+    get_plan_review_output_format,
     get_plan_review_rubric,
-    get_review_output_format,
 )
 from ._shared import (
     _iteration_guidance,
@@ -56,6 +56,7 @@ def get_plan_review_prompt(
         plan_text_block=fenced.fence("PLAN_TEXT", plan_text),
         untrusted_notice=fenced.untrusted_notice,
         review_rubric=get_plan_review_rubric().strip(),
+        output_format=get_plan_review_output_format().strip(),
         terse_output_directive=get_terse_output_directive(),
     )
 
@@ -70,6 +71,7 @@ def get_plan_loop_review_prompt(
     iteration: int,
     prior_review: str | None,
     advise_findings: str = "",
+    plan_history: str = "",
 ) -> str:
     """Build the iteration-aware plan-loop review prompt.
 
@@ -106,8 +108,11 @@ def get_plan_loop_review_prompt(
         plan_text_block=fenced.fence("PLAN_TEXT", plan_text),
         learnings=learnings or "_(no learnings captured this iteration)_",
         prior_review_block=_prior_review_block(prior_review, fenced),
+        plan_history_block=(
+            fenced.fence("PLAN_HISTORY", plan_history) if plan_history else "_(first revision)_"
+        ),
         full_sweep_suffix=full_sweep_suffix,
-        output_format=get_review_output_format().strip(),
+        output_format=get_plan_review_output_format().strip(),
         untrusted_notice=fenced.untrusted_notice,
         terse_output_directive=get_terse_output_directive(),
     )
