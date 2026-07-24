@@ -157,12 +157,6 @@ class MergeWaitStage(Stage):
                 "merge_wait: PR #%d state unavailable; operator action required", item.pr
             )
             return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unavailable")
-        has_go, _has_no_go = ctx.github.pr_has_implementation_state_label(item.pr)
-        if not has_go:
-            logger.warning(
-                "merge_wait: PR #%d approval disappeared; operator action required", item.pr
-            )
-            return StageOutcome(Disposition.FINISH_FAIL, "not_implementation_go")
         if not pr_state.get("autoMergeRequest"):
             logger.warning(
                 "merge_wait: PR #%d is no longer armed; operator action required", item.pr
@@ -173,6 +167,21 @@ class MergeWaitStage(Stage):
                 "merge_wait: PR #%d was armed outside this run; leaving it to the operator", item.pr
             )
             return StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
+        has_go, _has_no_go = ctx.github.pr_has_implementation_state_label(item.pr)
+        if not has_go:
+            try:
+                ctx.github.defer_auto_merge(item.pr)
+            except Exception as exc:
+                logger.warning(
+                    "merge_wait: could not defer PR #%d after approval disappeared (%s); "
+                    "operator action required",
+                    item.pr,
+                    exc,
+                )
+                return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_defer_failed")
+            item.armed = False
+            logger.warning("merge_wait: PR #%d approval disappeared; returning to review", item.pr)
+            return StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
         attempt = item.attempts.get("merge", 0) + 1
         item.attempts["merge"] = attempt
         budget = ctx.budget("merge")
