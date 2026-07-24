@@ -1069,7 +1069,7 @@ mutations.
  coordinator constructs them from vetted templates
  (`PRE_PR_TEST_ARGV` for the pre-PR test gate).
 - [`GitJob`](hephaestus/automation/pipeline/jobs.py) — `op ∈ {clone,
- create_worktree, remove_worktree, rebase, push, commit_push}`,
+ sync_checkout, create_worktree, remove_worktree, rebase, push, commit_push}`,
  validated by `__post_init__`.
 - [`CompactJob`](hephaestus/automation/pipeline/jobs.py) — a best-effort
  `/compact` turn for a persisted Claude, Codex, or Pi session; it never blocks

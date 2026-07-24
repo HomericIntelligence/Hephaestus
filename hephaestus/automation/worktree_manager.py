@@ -44,6 +44,7 @@ _AUTOMATION_PROMPT_PREFIXES = (
     ".claude-prompt-",
     ".claude-followup-",
 )
+_GIT_METADATA_LOCK_NAME = ".hephaestus-git-metadata.lock"
 
 
 def _timeout_kw(timeout: int | None) -> dict[str, Any]:
@@ -124,9 +125,39 @@ class WorktreeManager:
 
         logger.debug("Initialized WorktreeManager at %s", self.base_dir)
 
+    @staticmethod
+    def git_metadata_lock_path(repo_root: Path) -> Path:
+        """Return the cross-process lock guarding ``repo_root``'s Git metadata.
+
+        The sentinel belongs in ``.git`` so acquiring it never creates an
+        untracked file in a reusable checkout's worktree.  Linked worktrees
+        use a ``.git`` *file*, so resolve their ``commondir`` and share the
+        sentinel with the primary checkout.
+        """
+        git_entry = repo_root / ".git"
+        if not git_entry.is_file():
+            return git_entry / _GIT_METADATA_LOCK_NAME
+
+        gitdir_line = git_entry.read_text(encoding="utf-8").strip()
+        prefix = "gitdir: "
+        if not gitdir_line.startswith(prefix):
+            raise RuntimeError(f"Invalid Git directory reference: {git_entry}")
+        git_dir = Path(gitdir_line.removeprefix(prefix))
+        if not git_dir.is_absolute():
+            git_dir = repo_root / git_dir
+        git_dir = git_dir.resolve()
+
+        common_dir_file = git_dir / "commondir"
+        if common_dir_file.is_file():
+            common_dir = Path(common_dir_file.read_text(encoding="utf-8").strip())
+            if not common_dir.is_absolute():
+                common_dir = git_dir / common_dir
+            return common_dir.resolve() / _GIT_METADATA_LOCK_NAME
+        return git_dir / _GIT_METADATA_LOCK_NAME
+
     def _git_metadata_lock_path(self) -> Path:
         """Return the cross-process lock guarding shared git worktree metadata."""
-        return self.base_dir / ".git-metadata.lock"
+        return self.git_metadata_lock_path(self.repo_root)
 
     @property
     def base_branch(self) -> str:

@@ -8,6 +8,7 @@ perform GitHub API mutations (enforced by test_pipeline_architecture.py).
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import threading
 import time
@@ -50,6 +51,26 @@ logger = logging.getLogger(__name__)
 _TAIL = 4000  # chars of stdout/stderr retained in a JobResult
 _ERR_MAX = 500  # chars of error detail retained in a JobResult
 _GIT_LOCK_WAIT_POLL_S = 0.1
+_FETCH_ENV_BLOCKLIST = frozenset(
+    {
+        "GIT_ASKPASS",
+        "GIT_SSH",
+        "GIT_SSH_COMMAND",
+        "SSH_ASKPASS",
+    }
+)
+
+
+def _controlled_fetch_env() -> dict[str, str]:
+    """Return a fetch environment that cannot inject local Git executables."""
+    env = os.environ.copy()
+    for key in _FETCH_ENV_BLOCKLIST:
+        env.pop(key, None)
+    for key in tuple(env):
+        if key == "GIT_CONFIG_COUNT" or key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")):
+            env.pop(key)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
 
 
 def _repo_lock_path(repo: str, lock_dir: Path | None = None) -> Path:
@@ -611,9 +632,169 @@ class WorkerPool:
             git_utils.run(["gh", "repo", "clone", repo, dest], cwd=None, timeout=job.timeout_s)
             return JobResult(ok=True)
 
+        elif job.op == "sync_checkout":
+            return self._git_sync_checkout(job)
+
         else:
             # Should be impossible due to GitJob.__post_init__ validation
             return JobResult(ok=False, error=f"unknown op {job.op!r}")
+
+    def _git_sync_checkout(self, job: GitJob) -> JobResult:
+        """Validate and fast-forward a reusable checkout without discarding local work."""
+        expected_repo = str(job.kwargs.get("repo") or "")
+        dest = str(job.kwargs.get("dest") or "")
+        if not expected_repo or not dest:
+            return JobResult(
+                ok=False,
+                error="sync_checkout requires non-empty 'repo' and 'dest' kwargs",
+            )
+
+        checkout = Path(dest)
+        if not checkout.is_dir():
+            return JobResult(ok=False, error=f"checkout does not exist: {checkout}")
+
+        origin = git_utils.run(
+            ["git", "remote", "get-url", "origin"], cwd=checkout, timeout=job.timeout_s
+        ).stdout.strip()
+        normalized_origin = origin.rstrip("/").removesuffix(".git")
+        expected_origins = {
+            f"https://github.com/{expected_repo}",
+            f"ssh://git@github.com/{expected_repo}",
+            f"git@github.com:{expected_repo}",
+        }
+        if normalized_origin not in expected_origins:
+            return JobResult(
+                ok=False,
+                error=f"checkout has unexpected origin; expected origin {expected_repo}",
+            )
+
+        status = git_utils.run(
+            ["git", "status", "--porcelain"], cwd=checkout, timeout=job.timeout_s
+        )
+        if status.stdout.strip():
+            return JobResult(ok=False, error=f"checkout is dirty: {checkout}")
+
+        branch_result = git_utils.run(
+            ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+            cwd=checkout,
+            check=False,
+            log_errors=False,
+            timeout=job.timeout_s,
+        )
+        branch = branch_result.stdout.strip()
+        if branch_result.returncode != 0 or not branch:
+            return JobResult(ok=False, error=f"checkout is detached: {checkout}")
+
+        default_branch = git_utils.run(
+            ["gh", "api", f"repos/{expected_repo}", "--jq", ".default_branch"],
+            cwd=checkout,
+            timeout=job.timeout_s,
+        ).stdout.strip()
+        if not default_branch:
+            return JobResult(ok=False, error=f"repository has no default branch: {expected_repo}")
+        if branch != default_branch:
+            return JobResult(
+                ok=False,
+                error=(
+                    f"checkout is not on its default branch {default_branch}: "
+                    f"currently on {branch or 'detached HEAD'}"
+                ),
+            )
+
+        metadata_lock = WorktreeManager.git_metadata_lock_path(checkout)
+        with _interruptible_file_lock(
+            metadata_lock,
+            shutdown=self._shutdown,
+            timeout_s=job.timeout_s,
+        ):
+            return self._fast_forward_checkout(
+                checkout=checkout,
+                origin=origin,
+                default_branch=default_branch,
+                timeout_s=job.timeout_s,
+            )
+
+    @staticmethod
+    def _fast_forward_checkout(
+        *,
+        checkout: Path,
+        origin: str,
+        default_branch: str,
+        timeout_s: int,
+    ) -> JobResult:
+        """Fetch and fast-forward a validated checkout while its metadata is locked."""
+        hooks_disabled = f"core.hooksPath={os.devnull}"
+        fetch_config = [
+            "-c",
+            hooks_disabled,
+            "-c",
+            "core.sshCommand=ssh",
+            "-c",
+            "credential.helper=",
+            "-c",
+            "credential.helper=!gh auth git-credential",
+            "-c",
+            "core.askPass=",
+        ]
+        git_utils.run(
+            [
+                "git",
+                *fetch_config,
+                "fetch",
+                "--no-tags",
+                origin,
+                f"+refs/heads/{default_branch}:refs/remotes/origin/{default_branch}",
+            ],
+            cwd=checkout,
+            timeout=timeout_s,
+            env=_controlled_fetch_env(),
+        )
+        relation = git_utils.run(
+            [
+                "git",
+                "rev-list",
+                "--left-right",
+                "--count",
+                f"HEAD...origin/{default_branch}",
+            ],
+            cwd=checkout,
+            timeout=timeout_s,
+        ).stdout.split()
+        if len(relation) != 2:
+            return JobResult(ok=False, error=f"could not compare checkout history: {checkout}")
+        try:
+            ahead, _behind = (int(count) for count in relation)
+        except ValueError:
+            return JobResult(ok=False, error=f"could not compare checkout history: {checkout}")
+        if ahead:
+            return JobResult(
+                ok=False,
+                error=f"checkout has local commits beyond origin/{default_branch}: {checkout}",
+            )
+
+        merge = git_utils.run(
+            ["git", "-c", hooks_disabled, "merge", "--ff-only", f"origin/{default_branch}"],
+            cwd=checkout,
+            check=False,
+            log_errors=False,
+            timeout=timeout_s,
+        )
+        if merge.returncode != 0:
+            return JobResult(
+                ok=False,
+                error=(f"checkout cannot fast-forward {default_branch} to origin/{default_branch}"),
+            )
+        synced_heads = git_utils.run(
+            ["git", "rev-parse", "HEAD", f"origin/{default_branch}"],
+            cwd=checkout,
+            timeout=timeout_s,
+        ).stdout.split()
+        if len(synced_heads) != 2 or synced_heads[0] != synced_heads[1]:
+            return JobResult(
+                ok=False,
+                error=f"checkout did not reach origin/{default_branch}: {checkout}",
+            )
+        return JobResult(ok=True)
 
     def _git_create_worktree(self, job: GitJob) -> JobResult:
         """Create a worktree and optionally sync an adopted PR branch."""

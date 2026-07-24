@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 
 from hephaestus.automation.worktree_manager import WorktreeDirtyError, WorktreeManager
+from hephaestus.utils.file_lock import file_lock
 
 
 @pytest.fixture(autouse=True)
@@ -20,6 +21,71 @@ def _clear_loop_trunk_githash(monkeypatch: pytest.MonkeyPatch) -> None:
 
 class TestWorktreeManager:
     """Tests for WorktreeManager class."""
+
+    def test_git_metadata_lock_does_not_dirty_checkout(self, tmp_path: Path) -> None:
+        """The shared metadata sentinel remains invisible to ``git status``."""
+        checkout = tmp_path / "checkout"
+        subprocess.run(["git", "init", str(checkout)], check=True, capture_output=True, text=True)
+
+        with file_lock(WorktreeManager.git_metadata_lock_path(checkout)):
+            pass
+
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert status.stdout == ""
+
+    def test_git_metadata_lock_uses_common_dir_for_linked_worktree(self, tmp_path: Path) -> None:
+        """Base and linked worktrees share a status-safe Git-metadata sentinel."""
+        checkout = tmp_path / "checkout"
+        linked = tmp_path / "linked"
+        subprocess.run(
+            ["git", "init", "--initial-branch", "main", str(checkout)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        for key, value in (("user.name", "Test User"), ("user.email", "test@example.com")):
+            subprocess.run(
+                ["git", "config", key, value],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m", "initial"],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "worktree", "add", "-b", "linked", str(linked)],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        base_lock = WorktreeManager.git_metadata_lock_path(checkout)
+        assert WorktreeManager.git_metadata_lock_path(linked) == base_lock
+        with file_lock(base_lock):
+            pass
+
+        for worktree in (checkout, linked):
+            status = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=worktree,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            assert status.stdout == ""
 
     def test_initialization_default_base_dir(self, worktree_mocks: Any, tmp_path: Any) -> None:
         """Test initialization with default base directory."""
@@ -97,7 +163,7 @@ class TestWorktreeManager:
         ):
             manager.create_worktree(123, "123-feature")
 
-        assert lock_paths == [manager.base_dir / ".git-metadata.lock"]
+        assert lock_paths == [manager.repo_root / ".git" / ".hephaestus-git-metadata.lock"]
 
     def test_create_worktree_default_branch_name(self, worktree_mocks: Any, tmp_path: Any) -> None:
         """Test worktree creation with default branch name."""
