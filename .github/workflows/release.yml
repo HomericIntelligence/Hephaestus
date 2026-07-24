@@ -7,9 +7,13 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release (leave blank to use latest tag)"
+        description: "Tag to release"
+        required: true
+      docs_only:
+        description: "Deploy documentation for an existing published release without publishing."
         required: false
-        default: ""
+        default: false
+        type: boolean
 
 # Least-privilege permissions are declared per job below (zizmor
 # excessive-permissions, issue #2151): the workflow-level default is
@@ -19,12 +23,11 @@ permissions:
 
 # Serialize per-tag: this workflow builds, publishes to PyPI, and creates a
 # GitHub release — none idempotent. Two runs for the SAME tag must not race
-# (double-publish); different tags proceed independently. Key on the resolved
-# tag: dispatched runs group on the explicit `tag` input (previously they all
-# shared the branch ref's group), tag-push runs group on the tag ref. Never
-# cancel a publish in flight, hence cancel-in-progress: false.
+# (double-publish); different tags proceed independently. A tag push exposes
+# its short tag name through github.ref_name, matching the explicit dispatch
+# input. Never cancel a publish in flight, hence cancel-in-progress: false.
 concurrency:
-  group: release-${{ inputs.tag || github.ref }}
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -32,10 +35,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
+      actions: read
       contents: read
+      deployments: read
     outputs:
       tag: ${{ steps.resolve.outputs.tag }}
       sha: ${{ steps.resolve.outputs.sha }}
+      completed_release_exists: ${{ steps.resolve.outputs.completed_release_exists }}
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
@@ -50,23 +56,20 @@ jobs:
         env:
           INPUT_TAG: ${{ inputs.tag }}
           EVENT_REF: ${{ github.ref }}
+          DOCS_ONLY: ${{ inputs.docs_only }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
 
-          if [ -n "$INPUT_TAG" ]; then
-            TAG="$INPUT_TAG"
-          elif [[ "$EVENT_REF" == refs/tags/* ]]; then
+          if [[ "$EVENT_REF" == refs/tags/* ]]; then
             TAG="${EVENT_REF#refs/tags/}"
           else
-            TAG="$(git for-each-ref \
-              --count=1 \
-              --sort=-version:refname \
-              --format='%(refname:short)' \
-              'refs/tags/v*')"
+            TAG="$INPUT_TAG"
           fi
 
           if [ -z "$TAG" ]; then
-            echo "::error::No release tag could be resolved" >&2
+            echo "::error::An explicit release tag is required" >&2
             exit 1
           fi
 
@@ -79,9 +82,137 @@ jobs:
           echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
           echo "Resolved release tag ${TAG} to immutable commit ${SHA}"
 
+          RELEASE_EXISTS=false
+          DRAFT=""
+          RELEASE_RESPONSE=""
+          if RELEASE_RESPONSE="$(
+            gh api --include "repos/${REPOSITORY}/releases/tags/${TAG}" 2>&1
+          )"; then
+            RELEASE_EXISTS=true
+            RELEASE_JSON="$(
+              printf '%s\n' "$RELEASE_RESPONSE" | awk '
+                /^[[:space:]]*$/ { body = 1; next }
+                body { print }
+              '
+            )"
+            DRAFT="$(printf '%s\n' "$RELEASE_JSON" | jq -r '.draft')"
+            IMMUTABLE="$(printf '%s\n' "$RELEASE_JSON" | jq -r '.immutable')"
+            RELEASE_BODY="$(printf '%s\n' "$RELEASE_JSON" | jq -r '.body')"
+          elif printf '%s\n' "$RELEASE_RESPONSE" | grep -qE '^HTTP/[0-9.]+ 404 '; then
+            echo "Release ${TAG} does not exist yet."
+          else
+            echo "::error::Could not inspect existing GitHub Release for ${TAG}" >&2
+            exit 1
+          fi
+
+          if [ "$DOCS_ONLY" = "true" ] && [ "$RELEASE_EXISTS" = "true" ] \
+            && [ "$DRAFT" != "false" ]; then
+            echo "::error::Docs-only recovery requires a published GitHub Release for ${TAG}" >&2
+            exit 1
+          fi
+
+          SOURCE_PROVENANCE_MATCHES=false
+          SOURCE_PROVENANCE_MARKER="<!-- hephaestus-source-sha:${SHA} -->"
+          if [ "$RELEASE_EXISTS" = "true" ] && [ "$IMMUTABLE" = "true" ]; then
+            if printf '%s\n' "$RELEASE_BODY" | grep -Fqx "$SOURCE_PROVENANCE_MARKER"; then
+              SOURCE_PROVENANCE_MATCHES=true
+            # v0.10.0 predates the marker. Its immutable release, signed tag,
+            # successful PyPI deployment, and release job were independently
+            # audited when this one-time recovery path was added.
+            elif [ "$TAG" = "v0.10.0" ] \
+              && [ "$SHA" = "99a5437fc351fd7737fc85e7d4d76504d88a00d1" ]; then
+              SOURCE_PROVENANCE_MATCHES=true
+            fi
+          fi
+
+          if [ "$DOCS_ONLY" != "true" ] && [ "$RELEASE_EXISTS" = "true" ] \
+            && [ "$DRAFT" = "false" ] && [ "$SOURCE_PROVENANCE_MATCHES" != "true" ]; then
+            echo "::error::Existing published release ${TAG} lacks immutable source provenance; refusing an unsafe retry" >&2
+            exit 1
+          fi
+
+          COMPLETED_RELEASE_EXISTS=false
+          if [ "$RELEASE_EXISTS" = "true" ] && [ "$SOURCE_PROVENANCE_MATCHES" = "true" ]; then
+            if ! DEPLOYMENT_IDS="$(
+              gh api "repos/${REPOSITORY}/deployments?environment=pypi&sha=${SHA}" --jq '.[].id'
+            )"; then
+              echo "::error::Could not inspect PyPI deployments for ${SHA}" >&2
+              exit 1
+            fi
+            for DEPLOYMENT_ID in $DEPLOYMENT_IDS; do
+              if ! DEPLOYMENT_STATUS="$({
+                gh api "repos/${REPOSITORY}/deployments/${DEPLOYMENT_ID}/statuses?per_page=1" \
+                  --jq '[.[0].state, .[0].target_url] | @tsv'
+              })"; then
+                echo "::error::Could not inspect PyPI deployment ${DEPLOYMENT_ID}" >&2
+                exit 1
+              fi
+              IFS=$'\t' read -r DEPLOYMENT_STATE DEPLOYMENT_URL <<< "$DEPLOYMENT_STATUS"
+              if [ "$DEPLOYMENT_STATE" = "success" ]; then
+                JOB_URL_PREFIX="https://github.com/${REPOSITORY}/actions/runs/"
+                case "$DEPLOYMENT_URL" in
+                  "${JOB_URL_PREFIX}"*/job/*)
+                    RUN_AND_JOB="${DEPLOYMENT_URL#"${JOB_URL_PREFIX}"}"
+                    RUN_ID="${RUN_AND_JOB%%/job/*}"
+                    JOB_ID="${RUN_AND_JOB#*/job/}"
+                    if ! RUN_STATUS="$(
+                      gh api "repos/${REPOSITORY}/actions/runs/${RUN_ID}" \
+                        --jq '[.name, .path, .head_sha] | @tsv'
+                    )"; then
+                      echo "::error::Could not inspect release workflow run ${RUN_ID}" >&2
+                      exit 1
+                    fi
+                    IFS=$'\t' read -r WORKFLOW_NAME WORKFLOW_PATH RUN_HEAD_SHA <<< "$RUN_STATUS"
+                    if [ "$WORKFLOW_NAME" != "Release" ] \
+                      || [ "$WORKFLOW_PATH" != ".github/workflows/release.yml" ] \
+                      || [ "$RUN_HEAD_SHA" != "$SHA" ]; then
+                      continue
+                    fi
+                    if ! JOB_STATUS="$(
+                      gh api "repos/${REPOSITORY}/actions/jobs/${JOB_ID}" \
+                        --jq '[
+                          .run_id,
+                          .head_sha,
+                          .name,
+                          ([.steps[] | select(.name == "Publish to PyPI") | .conclusion][0] // ""),
+                          ([.steps[] | select(.name == "Create GitHub Release") | .conclusion][0] // ""),
+                          ([.steps[] | select(.name == "Publish existing draft release") | .conclusion][0] // "")
+                        ] | @tsv'
+                    )"; then
+                      echo "::error::Could not inspect release job ${JOB_ID}" >&2
+                      exit 1
+                    fi
+                    IFS=$'\t' read -r JOB_RUN_ID JOB_HEAD_SHA JOB_NAME PUBLISH_PYPI_CONCLUSION \
+                      CREATE_RELEASE_CONCLUSION FINALIZE_DRAFT_CONCLUSION <<< "$JOB_STATUS"
+                    if [ "$JOB_RUN_ID" = "$RUN_ID" ] \
+                      && [ "$JOB_HEAD_SHA" = "$SHA" ] \
+                      && [ "$JOB_NAME" = "build-and-publish" ] \
+                      && [ "$PUBLISH_PYPI_CONCLUSION" = "success" ] \
+                      && { [ "$CREATE_RELEASE_CONCLUSION" = "success" ] \
+                        || [ "$FINALIZE_DRAFT_CONCLUSION" = "success" ]; }; then
+                      COMPLETED_RELEASE_EXISTS=true
+                      break
+                    fi
+                    ;;
+                esac
+              fi
+            done
+          fi
+          echo "completed_release_exists=${COMPLETED_RELEASE_EXISTS}" >> "$GITHUB_OUTPUT"
+
+          if [ "$DOCS_ONLY" = "true" ] && [ "$RELEASE_EXISTS" != "true" ]; then
+            echo "::error::Docs-only recovery requires an existing GitHub Release for ${TAG}" >&2
+            exit 1
+          fi
+          if [ "$DOCS_ONLY" = "true" ] && [ "$COMPLETED_RELEASE_EXISTS" != "true" ]; then
+            echo "::error::Docs-only recovery requires a successful PyPI publish and GitHub Release creation from the same release workflow run for ${SHA}" >&2
+            exit 1
+          fi
+
   test:
     runs-on: ubuntu-24.04
     needs: resolve-release
+    if: ${{ !inputs.docs_only && needs.resolve-release.outputs.completed_release_exists != 'true' }}
     # Unit + integration suites run here; the uv env is cached and dev-install
     # already ran, so both finish well under this budget. 20 min (vs the prior
     # 15) is free insurance so a first-run integration slowdown never aborts a
@@ -122,6 +253,7 @@ jobs:
   type-check:
     runs-on: ubuntu-24.04
     needs: resolve-release
+    if: ${{ !inputs.docs_only && needs.resolve-release.outputs.completed_release_exists != 'true' }}
     timeout-minutes: 10
 
     steps:
@@ -147,6 +279,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     needs: [resolve-release, test, type-check]
+    if: ${{ !inputs.docs_only && needs.resolve-release.outputs.completed_release_exists != 'true' }}
     environment: pypi
     permissions:
       contents: write  # Create GitHub Release / upload assets
@@ -216,11 +349,17 @@ jobs:
           # workflow. GitHub marks releases immutable, and an immutable
           # release cannot be updated or have assets added — so the
           # create/update action below must be skipped when one exists.
-          if gh release view "$TAG" --json isImmutable -q .isImmutable >/dev/null 2>&1; then
+          if gh release view "$TAG" --json isImmutable,isDraft -q .isImmutable >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
+            if gh release view "$TAG" --json isDraft -q .isDraft | grep -qx true; then
+              echo "draft=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "draft=false" >> "$GITHUB_OUTPUT"
+            fi
             echo "Release $TAG already exists — skipping creation."
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "draft=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Create GitHub Release
@@ -228,6 +367,7 @@ jobs:
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228  # v3.0.2
         with:
           tag_name: ${{ needs.resolve-release.outputs.tag }}
+          body: "<!-- hephaestus-source-sha:${{ needs.resolve-release.outputs.sha }} -->"
           generate_release_notes: true
           files: dist/*
         env:
@@ -249,10 +389,29 @@ jobs:
             echo "::notice::Release $TAG is immutable — build artifacts not attached. The package is published to PyPI."
           fi
 
+      - name: Publish existing draft release
+        if: steps.existing.outputs.exists == 'true' && steps.existing.outputs.draft == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ needs.resolve-release.outputs.sha }}
+          TAG: ${{ needs.resolve-release.outputs.tag }}
+        run: |
+          MARKER="<!-- hephaestus-source-sha:${SHA} -->"
+          RELEASE_BODY="$(gh release view "$TAG" --json body -q .body)"
+          if printf '%s\n' "$RELEASE_BODY" | grep -Fqx "$MARKER"; then
+            gh release edit "$TAG" --draft=false
+          else
+            gh release edit "$TAG" --draft=false --notes "${RELEASE_BODY}
+
+          ${MARKER}"
+          fi
+
   deploy-docs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    needs: [resolve-release, build-and-publish]
+    needs: [resolve-release, test, type-check, build-and-publish]
+    if: ${{ always() && needs.resolve-release.result == 'success' && (inputs.docs_only || (needs.test.result == 'success' && needs.type-check.result == 'success' && needs.build-and-publish.result == 'success' && needs.resolve-release.outputs.completed_release_exists != 'true')) }}
     # Publish the pdoc API reference to GitHub Pages only after the package
     # release succeeds, so the online docs always match a version on PyPI.
     permissions:
