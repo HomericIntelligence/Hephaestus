@@ -140,6 +140,26 @@ def test_poll_external_auto_merge_is_blocked_without_consuming_merge_budget(
     assert "armed outside this run" in caplog.text
 
 
+def test_poll_external_auto_merge_without_approval_remains_blocked(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """An external arm remains operator-owned even after its approval changes."""
+    github = _ArmingGitHub(labels=(False, False))
+    github._pr_state = {
+        "state": "OPEN",
+        "headRefOid": "a" * 40,
+        "autoMergeRequest": {"enabledAt": "elsewhere"},
+    }
+    item = make_work_item(stage=StageName.MERGE_WAIT, pr=12, state=POLL)
+
+    result = MergeWaitStage().step(item, make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
+    assert github.mutation_log == []
+    assert item.attempts["merge"] == 0
+    assert "retry_delay_s" not in item.payload
+
+
 def test_own_arm_poll_stops_at_the_configured_merge_budget(
     make_ctx: Any, make_work_item: Any
 ) -> None:
@@ -194,6 +214,54 @@ def test_missing_implementation_go_returns_to_review(make_ctx: Any, make_work_it
     result = MergeWaitStage().step(item, make_ctx(github=_ArmingGitHub(labels=(False, False))))
 
     assert result == StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
+
+
+def test_own_arm_without_approval_returns_to_review(make_ctx: Any, make_work_item: Any) -> None:
+    """A lost approval on this run's arm is remediated by a fresh PR review."""
+    github = _ArmingGitHub(labels=(False, False))
+    github._pr_state = {
+        "state": "OPEN",
+        "headRefOid": "a" * 40,
+        "autoMergeRequest": {"enabledAt": "this-run"},
+    }
+    item = make_work_item(stage=StageName.MERGE_WAIT, pr=12, state=POLL)
+    item.armed = True
+
+    result = MergeWaitStage().step(item, make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
+    assert github.mutation_log == [("defer_auto_merge", (12,))]
+    assert item.armed is False
+    assert item.attempts["merge"] == 0
+    assert "retry_delay_s" not in item.payload
+
+
+def test_own_arm_without_approval_stops_when_defer_fails(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """Review must not re-enter while this run's auto-merge arm remains live."""
+
+    class _FailingDeferGitHub(_ArmingGitHub):
+        def defer_auto_merge(self, pr_number: int) -> None:
+            self._log("defer_auto_merge", pr_number)
+            raise RuntimeError("transport failure")
+
+    github = _FailingDeferGitHub(labels=(False, False))
+    github._pr_state = {
+        "state": "OPEN",
+        "headRefOid": "a" * 40,
+        "autoMergeRequest": {"enabledAt": "this-run"},
+    }
+    item = make_work_item(stage=StageName.MERGE_WAIT, pr=12, state=POLL)
+    item.armed = True
+
+    result = MergeWaitStage().step(item, make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.FINISH_FAIL, "auto_merge_defer_failed")
+    assert github.mutation_log == [("defer_auto_merge", (12,))]
+    assert item.armed is True
+    assert item.attempts["merge"] == 0
+    assert "retry_delay_s" not in item.payload
 
 
 def test_orphan_pr_finishes_without_mutating_an_operator_owned_arm(
