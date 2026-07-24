@@ -129,8 +129,17 @@ def _prior_review_block(
 # no-early-exit clause is bounded to *transient* external state so agents do
 # NOT spin on permanent failures (auth, 4xx) — see
 # swarm-agents-quit-early-on-polling.md.
-def get_terse_output_directive() -> str:
-    """Render the shared terse-output directive from the active catalog."""
+def get_terse_output_directive(*, terminal_output_contract: str | None = None) -> str:
+    """Render the shared terse-output directive from the active catalog.
+
+    Most agent prompts retain the historical terse ``Verdict:`` line.  Plan
+    review is different: its state token is the only decision contract and is
+    confirmed through the GitHub label.  Callers can therefore supply a
+    terminal-output contract without duplicating the rest of this directive.
+    """
     from .catalog import PromptCatalog
 
-    return PromptCatalog.current().render("shared/terse_output_directive.j2")
+    return PromptCatalog.current().render(
+        "shared/terse_output_directive.j2",
+        terminal_output_contract=terminal_output_contract,
+    )
