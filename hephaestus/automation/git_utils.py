@@ -68,14 +68,10 @@ def run(
         subprocess.TimeoutExpired: If timeout is exceeded
 
     """
-    # Command arguments may contain repository URLs or credential-helper
-    # configuration.  Preserve diagnostic value without ever serializing an
-    # argument value into application logs.
-    logger.debug(
-        "Running command %s with %d argument(s)",
-        cmd[0] if cmd else "<empty>",
-        max(len(cmd) - 1, 0),
-    )
+    # Command elements may contain repository URLs or credential-helper
+    # configuration.  Keep a stable lifecycle trace without serializing any
+    # value derived from the command into application logs.
+    logger.debug("Running subprocess")
     try:
         if cmd and cmd[0] == "git":
             return _shared_run_git(
@@ -97,15 +93,11 @@ def run(
         )
     except subprocess.TimeoutExpired:
         if log_errors:
-            logger.error("Command %s timed out after %ds", cmd[0] if cmd else "<empty>", timeout)
+            logger.error("Subprocess timed out")
         raise
     except subprocess.CalledProcessError as error:
         if log_errors:
-            logger.error(
-                "Command %s failed with exit code %s",
-                cmd[0] if cmd else "<empty>",
-                error.returncode,
-            )
+            logger.error("Subprocess failed with exit code %s", error.returncode)
         raise
 
 
