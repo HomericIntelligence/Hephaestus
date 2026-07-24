@@ -1032,9 +1032,10 @@ continues.
 ### Merge-wait restart semantics
 
 The queue is in-memory: a restart re-seeds normally through the ordinary
-classifier and does not recover per-run merge-wait ownership. Other-run
-auto-merge arms are never adopted, mutated, or re-armed by the restarted
-run; they require operator handling.
+[`classifier`](hephaestus/automation/pipeline/seeding.py) and does not recover
+per-run merge-wait ownership. Other-run auto-merge arms are
+[blocked without adoption, mutation, or re-arming](hephaestus/automation/pipeline/stages/merge_wait.py)
+by the restarted run; they require operator handling.
 
 ---
 
