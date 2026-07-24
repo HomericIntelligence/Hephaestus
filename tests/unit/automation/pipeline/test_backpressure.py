@@ -66,6 +66,7 @@ def _coordinator(
     event_log_path: Path | None = None,
     max_workers: int = 1,
     parallel_repos: int = 1,
+    stage_queue_capacity: int | None = None,
 ) -> Coordinator:
     """Build a coordinator with an explicitly matched bounded worker channel."""
     capacity = max(1, max_workers * parallel_repos)
@@ -77,6 +78,8 @@ def _coordinator(
         projects_dir=tmp_path,
         event_log_path=event_log_path,
     )
+    if stage_queue_capacity is not None:
+        config = replace(config, stage_queue_capacity=stage_queue_capacity)
     if pool is None:
         pool = FakeWorkerPool(size=capacity, completion_q=CompletionQueue(capacity=capacity))
     monkeypatch.setattr(
@@ -96,12 +99,15 @@ def _coordinator(
 def test_work_window_bounds_all_pipeline_queues(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Every stage and completion queue shares the worker-window capacity proof."""
+    """Completion capacity follows workers while stage capacity stays independent."""
     coordinator = _coordinator(tmp_path, monkeypatch, max_workers=2, parallel_repos=3)
 
     assert coordinator._work_window == 6
     assert coordinator.completion_q.capacity == 6
-    assert {queue.capacity for queue in coordinator.queues.values()} == {6}
+    assert {queue.capacity for queue in coordinator.queues.values()} == {
+        coordinator.config.stage_queue_capacity
+    }
+    assert coordinator.config.stage_queue_capacity != coordinator._work_window
 
     coordinator.in_flight.update(
         {
@@ -114,39 +120,46 @@ def test_work_window_bounds_all_pipeline_queues(
     assert coordinator._admit(WorkItem(repo="repo-a", kind=ItemKind.REPO)) is False
 
 
-def test_stage_burst_rejection_tracks_new_work_and_requests_recovery(
+def test_stage_burst_is_deferred_until_queue_drains(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A rejected seed is resumable and cannot produce a false clean exit."""
+    """A full stage queue defers new work without stopping the coordinator."""
     event_log = tmp_path / "events.jsonl"
-    coordinator = _coordinator(tmp_path, monkeypatch, event_log_path=event_log)
+    coordinator = _coordinator(
+        tmp_path,
+        monkeypatch,
+        event_log_path=event_log,
+        stage_queue_capacity=1,
+    )
     first = WorkItem(repo="repo-a", kind=ItemKind.REPO, stage=StageName.REPO)
     second = WorkItem(repo="repo-a", kind=ItemKind.REPO, stage=StageName.REPO)
 
     assert coordinator._push_item(first, StageName.REPO, enter=True)
-    assert coordinator._push_item(second, StageName.REPO, enter=True) is False
+    assert coordinator._push_item(second, StageName.REPO, enter=True)
 
     assert coordinator.queues[StageName.REPO].snapshot() == [first]
     assert second in coordinator.items
-    assert second.result is not None
-    assert second.result.reason == "resumable at repo: stage enqueue rejected"
-    assert coordinator.shutdown.is_set()
-    assert coordinator._exit_code() == 130
-    assert any(event[0] == "queue_saturated" for event in coordinator.event_log)
+    assert second.result is None
+    assert coordinator._pending_admissions
+    assert not coordinator.shutdown.is_set()
+    assert coordinator._exit_code() == 0
+    assert any(event[0] == "queue_deferred" for event in coordinator.event_log)
+    assert not any(event[0] == "queue_saturated" for event in coordinator.event_log)
     records = [json.loads(line) for line in event_log.read_text().splitlines()]
-    assert any(record["event"] == "queue_saturated" for record in records)
+    assert any(record["event"] == "queue_deferred" for record in records)
 
 
-def test_c_plus_one_seed_has_resumable_non_successful_shutdown(
+def test_c_plus_one_seed_drains_and_recovery_reuses_the_same_seed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A capacity-one run accounts for both seeds instead of returning zero."""
+    """A capacity-one run admits C+1 work and a fresh run accepts that seed again."""
     event_log = tmp_path / "c-plus-one-events.jsonl"
     config = PipelineConfig(
         org="org",
         repos=["repo-a"],
         max_workers=1,
         parallel_repos=1,
+        stage_queue_capacity=1,
         projects_dir=tmp_path,
         event_log_path=event_log,
     )
@@ -166,12 +179,50 @@ def test_c_plus_one_seed_has_resumable_non_successful_shutdown(
         pool=FakeWorkerPool(size=1, completion_q=CompletionQueue(capacity=1)),
         install_signals=False,
     )
+    coordinator.stages[StageName.PLANNING] = _RecoveringStage()
 
-    assert coordinator.run() == 130
+    assert coordinator.run() == 0
     assert {item.issue for item in coordinator.items} == {1, 2}
-    assert all(item.result is not None for item in coordinator.items)
+    assert all(item.result is not None and item.result.passed for item in coordinator.items)
     records = [json.loads(line) for line in event_log.read_text().splitlines()]
-    assert any(record["event"] == "queue_saturated" for record in records)
+    assert any(record["event"] == "queue_deferred" for record in records)
+    assert not any(record["event"] == "queue_saturated" for record in records)
+
+    retry = Coordinator(
+        config,
+        github=FakeStageGitHub(),
+        pool=FakeWorkerPool(size=1, completion_q=CompletionQueue(capacity=1)),
+        install_signals=False,
+    )
+    retry.stages[StageName.PLANNING] = _RecoveringStage()
+
+    assert retry.run() == 0
+    assert {item.issue for item in retry.items} == {1, 2}
+    assert all(item.result is not None and item.result.passed for item in retry.items)
+
+
+def test_c_plus_one_products_wait_for_stage_slots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Repo discovery products use the same resumable admission spool as seeds."""
+    coordinator = _coordinator(tmp_path, monkeypatch, stage_queue_capacity=1)
+    repo_item = WorkItem(repo="repo-a", kind=ItemKind.REPO, stage=StageName.REPO)
+    repo_item.payload["products"] = [
+        {"kind": "issue", "number": 1, "stage": StageName.PLANNING},
+        {"kind": "issue", "number": 2, "stage": StageName.PLANNING},
+    ]
+
+    coordinator._seed_products(repo_item)
+
+    queued = coordinator.queues[StageName.PLANNING].snapshot()
+    assert [item.issue for item in queued] == [1]
+    assert [item.issue for item, _stage, _enter in coordinator._pending_admissions] == [2]
+    assert not coordinator.shutdown.is_set()
+
+    coordinator.queues[StageName.PLANNING].pop()
+    coordinator._drain_pending_admissions()
+    assert [item.issue for item in coordinator.queues[StageName.PLANNING].snapshot()] == [2]
+    assert not coordinator._pending_admissions
 
 
 def test_repeated_wakes_do_not_consume_completion_capacity(
@@ -193,8 +244,8 @@ def test_snapshot_exports_capacity_depth_and_rejection_totals(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Runtime observability exposes bounded depth and durable rejection counters."""
-    base = _coordinator(tmp_path, monkeypatch)
-    config = replace(base.config, metrics_port=9123)
+    base = _coordinator(tmp_path, monkeypatch, stage_queue_capacity=1)
+    config = replace(base.config, metrics_port=9123, stage_queue_capacity=1)
     coordinator = Coordinator(
         config,
         github=FakeStageGitHub(),
@@ -204,7 +255,13 @@ def test_snapshot_exports_capacity_depth_and_rejection_totals(
     item = WorkItem(repo="repo-a", kind=ItemKind.REPO, stage=StageName.REPO)
     rejected = WorkItem(repo="repo-a", kind=ItemKind.REPO, stage=StageName.REPO)
     assert coordinator._push_item(item, StageName.REPO, enter=True)
-    assert coordinator._push_item(rejected, StageName.REPO, enter=True) is False
+    assert coordinator._push_item(rejected, StageName.REPO, enter=True)
+    coordinator._record_queue_saturation(
+        queue=StageName.REPO.value,
+        capacity=1,
+        item=rejected,
+        source="test_rejection",
+    )
 
     snapshot = coordinator._observability_snapshot()
     assert snapshot["queue_capacities"][StageName.REPO.value] == 1
@@ -217,6 +274,27 @@ def test_snapshot_exports_capacity_depth_and_rejection_totals(
     rendered = coordinator._metrics_registry.render_prometheus()
     assert 'hephaestus_pipeline_queue_capacity{stage="repo"} 1' in rendered
     assert "hephaestus_pipeline_queue_rejections_total" in rendered
+
+
+def test_saturation_journal_append_failure_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A saturation event cannot continue when its configured journal is unwritable."""
+    event_log = tmp_path / "events.jsonl"
+    event_log.mkdir()
+    coordinator = _coordinator(tmp_path, monkeypatch, event_log_path=event_log)
+
+    coordinator._record_queue_saturation(
+        queue="completion",
+        capacity=1,
+        source="completion_publish_rejected",
+    )
+
+    assert coordinator._event_log_disabled is True
+    assert coordinator._journal_failure is True
+    assert coordinator._fatal is True
+    assert coordinator.shutdown.is_set()
+    assert coordinator._exit_code() == 1
 
 
 class _OverflowingPool(FakeWorkerPool):
