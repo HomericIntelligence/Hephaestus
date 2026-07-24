@@ -561,7 +561,7 @@ class TestCreatePR:
             "_gh_call",
             side_effect=lambda *_args, **_kwargs: next(responses),
         ):
-            with pytest.raises(RuntimeError, match="only MergeWaitStage may arm"):
+            with pytest.raises(RuntimeError, match="queue auto-merge handling is unavailable"):
                 pr_manager.enable_auto_merge_after_implementation_go(42)
 
     def test_invokes_gh_pr_create(self) -> None:

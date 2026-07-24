@@ -31,12 +31,12 @@ it belongs in that stage rather than in GitHub Actions.
    publishes a GitHub artifact nor changes CI/CD state; normal review may
    collect CI/CD evidence and incorporate it into its binary verdict, but CI
    never independently authorizes the loop.
-3. `merge_wait` is the sole automatic armer and consumes the loop-owned label.
-   Each invocation reads the live PR head only to make one conditional arm
-   request. An existing, changed, or lost arm is warned about and left for an
-   operator; it is never reclaimed, retried, or used as an additional
-   authorization requirement. Normal GitHub branch protection and explicit
-   operator authority remain independent of this loop decision.
+3. `merge_wait` consumes the loop-owned label only with the current process's
+   reviewed-head proof. Pending the separately reviewed #2419 conditional
+   merge path, it verifies a confirmed-unarmed live PR and stands by rather
+   than mutating auto-merge. An existing or ambiguous request is external and
+   left untouched. Normal GitHub branch protection and explicit operator
+   authority remain independent of this loop decision.
 
 ## Alternatives considered
 
@@ -49,8 +49,9 @@ it belongs in that stage rather than in GitHub Actions.
 
 ## Consequences
 
-- A restart before the label is applied reruns review; a restart after the
-  label is applied resumes through merge-wait without an external proof.
+- A restart has no durable reviewed-head proof, so merge-wait safely revokes
+  the stale label only after confirming the PR is unarmed and returns it to
+  review.
 - CI/CD continues to validate code and protect branches. Normal review may
   collect its evidence and incorporate it into its binary verdict, but the
   automation loop does not change CI/CD and it never independently authorizes

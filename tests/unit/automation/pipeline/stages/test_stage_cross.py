@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from hephaestus.automation.pipeline.jobs import JobResult
+from hephaestus.automation.pipeline.jobs import GitJob, JobResult
 from hephaestus.automation.pipeline.routing import ROUTES, Disposition, StageName
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages.implementation import ImplementationStage
@@ -47,6 +47,14 @@ def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int
             item.state = result.next_state
             continue
         if isinstance(result, JobRequest):
+            if isinstance(result.job, GitJob) and result.job.op == "verify_pr_review_checkout":
+                stage.on_job_done(
+                    item,
+                    JobResult(ok=True, value={"ready": True, "diff": "checkout diff"}),
+                    ctx,
+                )
+                item.state = result.on_done_state
+                continue
             pool.submit(result.job, result.on_done_state)  # type: ignore[arg-type]
             _handle, job_result = pool.completion_q.get_nowait()
             stage.on_job_done(item, job_result, ctx)

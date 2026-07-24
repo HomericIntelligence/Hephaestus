@@ -3,9 +3,10 @@
 > **Status (as of 2026-07-17):** The latest released version is **0.10.0** (tag-driven
 > via hatch-vcs). **1.0 has not been released yet** — the section below is the
 > *forthcoming* 1.0 migration guidance, published ahead of the cut so consumers can
-> prepare. 0.10.0's headline change is the queue pipeline's head-bound strict-review
-> merge gate (#2055): `state:implementation-go` is produced only by the strict_review
-> stage and `merge_wait` is the sole automatic armer. There are **no breaking changes
+> prepare. 0.10.0's headline change is the queue pipeline's reviewed-head review
+> interlock: `pr_review` writes `state:implementation-go` only for the current
+> process's reviewed head, and `merge_wait` revalidates that proof before standing by
+> on a confirmed-unarmed PR. No queue stage arms auto-merge pending #2419. There are **no breaking changes
 > to the documented public API** from 0.9.x: upgrading requires no code changes for
 > code that uses only the documented public API in
 > [`COMPATIBILITY.md`](../COMPATIBILITY.md). Operators of the automation loop should

@@ -7,7 +7,7 @@
 #   # After a human-approved manual merge decision:
 #   gh pr merge "$PR" "$MERGE_FLAG" --repo HomericIntelligence/ProjectMnemosyne
 # Legacy consumers choose a permitted manual merge strategy with this helper.
-# Automatic arming is reserved exclusively for the queue's merge_wait gate.
+# Queue automatic-merge handling is unavailable pending #2419.
 #
 # Preference order: rebase (linear history) -> squash -> merge commit.
 # Exit codes:

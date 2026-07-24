@@ -385,11 +385,10 @@ class TestGate:
     def test_gate_existing_pr_without_impl_go_adopts_via_worktree(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """An existing non-GO PR is adopted: real head branch, deferral, worktree.
+        """An existing non-GO unarmed PR is adopted without mutation.
 
-        Adoption re-ensures the auto-merge deferral [durable] and routes
-        through WORKTREE_WAIT so pr_review's address leg gets an isolated
-        worktree on the ADOPTED branch (never the shared checkout).
+        Adoption routes through WORKTREE_WAIT so pr_review's address leg gets
+        an isolated worktree on the ADOPTED branch (never the shared checkout).
         """
         stage = ImplementationStage()
         github = FakeStageGitHub(
@@ -407,24 +406,43 @@ class TestGate:
         assert item.pr == 1001
         assert item.branch == "1-some-real-branch"  # never assumed {issue}-auto-impl
         assert item.payload["existing_pr"] is True
-        assert github.mutation_log == [("defer_auto_merge", (1001,))]
+        assert github.mutation_log == []
 
-    def test_gate_existing_pr_fails_closed_when_auto_merge_deferral_cannot_be_verified(
+    def test_gate_existing_pr_stands_down_when_auto_merge_is_externally_armed(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """Existing-PR adoption stops before worktree preparation on failed containment."""
-
-        class DeferFailsGitHub(FakeStageGitHub):
-            def defer_auto_merge(self, pr_number: int) -> None:
-                raise RuntimeError(f"PR #{pr_number} remains armed")
-
+        """An external arm blocks adoption and receives zero pipeline mutation."""
         stage = ImplementationStage()
-        ctx = make_ctx(github=DeferFailsGitHub(labels=[STATE_PLAN_GO], open_pr=1001))
+        github = FakeStageGitHub(
+            labels=[STATE_PLAN_GO],
+            open_pr=1001,
+            pr_state={"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": {}},
+        )
+        ctx = make_ctx(github=github)
         item = make_work_item(issue=1, state="GATE")
 
         assert stage.step(item, ctx) == StageOutcome(
-            Disposition.FINISH_FAIL, "auto_merge_disable_failed"
+            Disposition.BLOCKED, "auto_merge_already_armed"
         )
+        assert github.mutation_log == []
+
+    def test_gate_existing_pr_rejects_a_partial_state_before_worktree_creation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A missing null auto-merge field cannot authorize existing-PR adoption."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub(
+            labels=[STATE_PLAN_GO],
+            open_pr=1001,
+            pr_state={"state": "OPEN", "headRefOid": "a" * 40},
+        )
+        item = make_work_item(issue=1, state="GATE")
+
+        result = stage.step(item, make_ctx(github=github))
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "pr_state_unverified")
+        assert item.worktree == ""
+        assert github.mutation_log == []
 
     def test_gate_existing_fork_pr_fails_closed_before_worktree_or_agent(
         self, make_ctx: Any, make_work_item: Any
@@ -443,7 +461,7 @@ class TestGate:
         result = stage.step(item, ctx)
 
         assert result == StageOutcome(Disposition.FINISH_FAIL, "pr_head_not_writable")
-        assert github.mutation_log == [("defer_auto_merge", (1001,))]
+        assert github.mutation_log == []
 
     def test_adopted_worktree_job_syncs_without_trunk_reset(
         self, make_ctx: Any, make_work_item: Any
@@ -583,7 +601,7 @@ class TestAgentErrorPingPongBound:
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.FINISH_FAIL
         assert result.note == "agent_error_exhausted"
-        assert github.mutation_log == [("defer_auto_merge", (1001,))]
+        assert github.mutation_log == []
 
     def test_flag_never_survives_the_fresh_implement_path(
         self, make_ctx: Any, make_work_item: Any
@@ -1131,14 +1149,10 @@ class TestCommitPushAndPrCreate:
 
         assert item.payload["no_commits"] is True
 
-    def test_pr_create_journals_pr_then_defers_auto_merge(
+    def test_pr_create_journals_pr_without_auto_merge_mutation(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """PR creation (the journal entry) precedes the auto-merge deferral.
-
-        Durable-order oracle: the mutation_log must show gh_pr_create BEFORE
-        defer_auto_merge (legacy runner order :623), both before ADVANCE.
-        """
+        """PR creation journals only the PR; merge authority is external."""
         stage = ImplementationStage()
         github = FakeStageGitHub()
         ctx = make_ctx(github=github)
@@ -1152,16 +1166,15 @@ class TestCommitPushAndPrCreate:
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.ADVANCE
         assert item.pr == 1001
-        assert [name for name, _ in github.mutation_log] == ["gh_pr_create", "defer_auto_merge"]
-        assert github.mutation_log[1] == ("defer_auto_merge", (1001,))
+        assert [name for name, _ in github.mutation_log] == ["gh_pr_create"]
         # The PR body is a get_pr_description body carrying the closing line.
         assert "Closes #9" in github.prs[1001]["body"]
         assert github.prs[1001]["title"] == "Add the widget"
 
-    def test_pr_create_fails_explicitly_when_auto_merge_deferral_cannot_be_verified(
+    def test_pr_create_does_not_call_the_removed_auto_merge_mutator(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """Fresh PR creation exposes a failed containment read-back to routing."""
+        """A legacy mutator override cannot affect PR creation."""
 
         class DeferFailsGitHub(FakeStageGitHub):
             def defer_auto_merge(self, pr_number: int) -> None:
@@ -1173,14 +1186,14 @@ class TestCommitPushAndPrCreate:
         item.branch = "9-auto-impl"
 
         assert stage.step(item, ctx) == StageOutcome(
-            Disposition.FINISH_FAIL, "auto_merge_disable_failed"
+            Disposition.ADVANCE, "PR #1001 ready for review"
         )
         assert item.pr == 1001
 
     def test_pr_create_is_idempotent_for_existing_pr(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """An item that already has a PR only re-ensures the deferral."""
+        """An item that already has a PR advances without a merge mutation."""
         stage = ImplementationStage()
         github = FakeStageGitHub()
         ctx = make_ctx(github=github)
@@ -1190,12 +1203,12 @@ class TestCommitPushAndPrCreate:
 
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.ADVANCE
-        assert github.mutation_log == [("defer_auto_merge", (777,))]
+        assert github.mutation_log == []
 
     def test_no_commits_applies_skip_durably_before_skip(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """The legacy "no commits vs base" error maps to a durable state:skip."""
+        """No-PR legacy no-commit handling still maps to a durable skip."""
         stage = ImplementationStage()
         github = FakeStageGitHub()
         ctx = make_ctx(github=github)
@@ -1209,6 +1222,55 @@ class TestCommitPushAndPrCreate:
 
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.SKIP
+        assert github.mutation_log == [
+            ("gh_issue_add_labels", (9, (STATE_SKIP,))),
+            ("gh_issue_upsert_comment", (9, "<!-- hephaestus-state-skip-reason -->")),
+        ]
+
+    def test_no_commits_with_externally_armed_pr_blocks_without_skip_label(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A late external arm owns the PR and forbids the skip-label mutation."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub(
+            pr_state={
+                "state": "OPEN",
+                "headRefOid": "a" * 40,
+                "autoMergeRequest": {"enabledAt": "2026-07-24T00:00:00Z"},
+            }
+        )
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=9, pr=1001, state="PR_CREATE", payload={"no_commits": True})
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.BLOCKED, "auto_merge_already_armed"
+        )
+        assert item.payload["no_commits"] is True
+        assert github.mutation_log == []
+
+    def test_no_commits_with_partial_pr_state_fails_without_skip_label(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An incomplete PR read cannot authorize the skip-label mutation."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub(pr_state={"state": "OPEN", "headRefOid": "a" * 40})
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=9, pr=1001, state="PR_CREATE", payload={"no_commits": True})
+
+        assert stage.step(item, ctx) == StageOutcome(Disposition.FINISH_FAIL, "pr_state_unverified")
+        assert item.payload["no_commits"] is True
+        assert github.mutation_log == []
+
+    def test_no_commits_with_confirmed_unarmed_pr_applies_skip_label(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A complete, unarmed retained PR still permits the no-commit skip."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=9, pr=1001, state="PR_CREATE", payload={"no_commits": True})
+
+        assert stage.step(item, ctx) == StageOutcome(Disposition.SKIP, "no commits vs base")
         assert github.mutation_log == [
             ("gh_issue_add_labels", (9, (STATE_SKIP,))),
             ("gh_issue_upsert_comment", (9, "<!-- hephaestus-state-skip-reason -->")),
@@ -1301,8 +1363,7 @@ class TestFullWalks:
     def test_happy_path_walk(self, make_ctx: Any, make_work_item: Any) -> None:
         """GATE -> worktree -> advise -> implement -> tests -> push -> PR.
 
-        Asserts the exact job order and the durable journal order
-        (gh_pr_create before defer_auto_merge, both before ADVANCE).
+        Asserts the exact job order and PR creation journal.
         """
         stage = ImplementationStage()
         github = FakeStageGitHub(labels=["state:plan-go"])
@@ -1334,7 +1395,7 @@ class TestFullWalks:
         assert item.worktree == "/tmp/wt5"
         assert item.attempts["implement"] == 1
         assert item.pr == 1001
-        assert [name for name, _ in github.mutation_log] == ["gh_pr_create", "defer_auto_merge"]
+        assert [name for name, _ in github.mutation_log] == ["gh_pr_create"]
 
     def test_walk_with_red_tests_and_one_fix(self, make_ctx: Any, make_work_item: Any) -> None:
         """A red test run earns exactly one test_fix attempt, then converges."""

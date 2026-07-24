@@ -142,7 +142,7 @@ class StageGitHub(Protocol):
         pass
 
     def pr_review_context(self, pr_number: int) -> dict[str, str] | None:
-        """Return the PR body and complete diff required for source review."""
+        """Return PR metadata; the verified checkout later derives the review diff."""
         ...
 
     def has_existing_plan(self, issue_number: int) -> bool:
@@ -287,15 +287,6 @@ class StageGitHub(Protocol):
         """
         ...
 
-    def defer_auto_merge(self, pr_number: int) -> None:
-        """Durably disable auto-merge whenever a stage must revoke eligibility.
-
-        The adapter must read back disabled state for an open PR. Implementation
-        and PR review use this containment boundary before changing or reviewing
-        a PR; merge_wait never changes an arm it did not create.
-        """
-        ...
-
     def post_review_threads(
         self, pr_number: int, threads: list[dict[str, Any]], summary: str
     ) -> list[str]:
@@ -314,18 +305,6 @@ class StageGitHub(Protocol):
         status or secondary artifact can apply it.
         """
         ...
-
-    def arm_auto_merge(self, pr_number: int, expected_head_sha: str) -> None:
-        """Atomically arm squash auto-merge for one expected PR head.
-
-        Reserved exclusively for ``MergeWaitStage`` after it has re-read the
-        loop-owned ``state:implementation-go`` label. The adapter must pass
-        the live head to GitHub's conditional arm API to make this one request
-        operationally current. If a different process/run has already changed
-        that state, merge-wait warns and leaves it for the operator; it does
-        not reconcile, retry, or revoke it. No earlier stage may call it.
-        """
-        pass
 
     # -- merge_wait surface (#1816) ------------------------------------------
 
@@ -601,6 +580,23 @@ def _terminal_pr_outcome(pr_state: dict[str, Any] | None, pr_number: int) -> Sta
         logger.info("PR #%d is already closed; terminalizing", pr_number)
         return StageOutcome(Disposition.FINISH_FAIL, "closed")
     return None
+
+
+def _is_confirmed_open_unarmed(pr_state: dict[str, Any] | None) -> bool:
+    """Return whether a complete live PR record proves it is open and unarmed.
+
+    A missing ``autoMergeRequest`` field is not equivalent to ``null``. The
+    pipeline must not mutate labels after a partial GitHub response because a
+    concurrent actor could own an omitted auto-merge request. GitHub's
+    lifecycle value is likewise intentionally exact: the CLI contract
+    supplies ``OPEN`` for a writable open pull request.
+    """
+    return bool(
+        isinstance(pr_state, dict)
+        and pr_state.get("state") == "OPEN"
+        and "autoMergeRequest" in pr_state
+        and pr_state["autoMergeRequest"] is None
+    )
 
 
 def write_skip_label(issue_number: int, ctx: StageContext, reason: str) -> None:

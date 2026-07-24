@@ -25,10 +25,11 @@ links to the full section below.
    commit (`git commit -S`), put `Closes #<issue-number>` on its own line in the
    body, and keep auto-merge disabled. After an unconditional independent
    current-head `$athena:pr-review` GO, the loop applies
-   `state:implementation-go`, then may conditionally arm the PR in
-   `merge_wait`. Normal review may collect CI/CD evidence and incorporate it
-   into its binary verdict, but the loop does not change CI/CD and CI itself
-   never independently authorizes it. Do not enable auto-merge manually.
+   `state:implementation-go`; `merge_wait` then revalidates the in-memory
+   reviewed-head proof and safely stands by without mutating auto-merge.
+   Normal review may collect CI/CD evidence and incorporate it into its binary
+   verdict, but the loop does not change CI/CD and CI itself never
+   independently authorizes it. Do not enable auto-merge manually.
 
 If anything in steps 1–2 fails, see [Platform Support](#platform-support) for
 the supported Python versions and platform-specific test behavior.
@@ -281,13 +282,16 @@ valid issue reference, signed commits, or DCO sign-offs:
 3. **Sign off every commit**: include a DCO `Signed-off-by` trailer, normally
    with `git commit -s -S`.
 
-Do not enable auto-merge manually. The queue arms it only after it has run
-`$athena:pr-review` for the PR's current head and applied
-`state:implementation-go`. `merge_wait` consumes that loop-owned label; a
-restart re-reads it with the live PR head. Normal review may collect CI/CD
-evidence and incorporate it into its binary verdict, but the loop does not
-change CI/CD and no CI check independently authorizes it; the advisory
-`auto-merge-policy` is not the authorization mechanism.
+Do not enable auto-merge manually. The queue applies
+`state:implementation-go` only after `$athena:pr-review` for the PR's current
+head. `merge_wait` consumes the loop-owned label together with its in-memory
+reviewed-head proof and safely stands by; it does not create, disable, adopt,
+or poll an auto-merge request. A restart has no proof and returns the PR to
+review only after a confirmed-unarmed read permits stale-label revocation.
+Normal review may collect CI/CD evidence and incorporate it into its binary
+verdict, but the loop does not change CI/CD and no CI check independently
+authorizes it; the advisory `auto-merge-policy` is not the authorization
+mechanism.
 
 Also: ensure tests pass locally (`uv run pytest`), keep commits to logical units with
 [conventional commit](https://www.conventionalcommits.org/) messages, and never bypass

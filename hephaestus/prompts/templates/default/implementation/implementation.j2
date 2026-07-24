@@ -94,5 +94,6 @@ After you return, the orchestrator will:
    review (or inline fallback).
 
 Missing `Closes #N` or signed-commit policy is enforced outside the automation
-loop. Only the queue's `pr_review` and `merge_wait` stages may approve and arm
-automatic merge. This policy applies to every PR — no exceptions.
+loop. Only the queue's `pr_review` stage may publish implementation approval.
+Pending #2419, no queue stage manages automatic merge. This policy applies to
+every PR — no exceptions.
