@@ -101,6 +101,17 @@ def _parse_repo_list(value: str) -> list[str]:
     return [s.strip() for s in value.split(",") if s.strip()]
 
 
+def _parse_positive_int(value: str) -> int:
+    """Parse one strictly positive integer for a bounded CLI setting."""
+    try:
+        number = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}") from exc
+    if number <= 0:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {number}")
+    return number
+
+
 def _parse_positive_int_list(value: str, label: str) -> list[int]:
     """Split a comma-separated list into positive integers."""
     numbers: list[int] = []
@@ -186,9 +197,9 @@ class LoopConfig:
     # default is ``ALL_SELECTABLE`` (set in the parser), so an operator opts
     # into the blocking drive-green by default.
     phases: tuple[str, ...] = ALL_PHASES
-    # Bound on per-issue drive-green loop iterations before the issue is
-    # tagged ``state:skip`` (#2246, previously ``max_merge_attempts`` #1560).
-    # Defaults to 5 so one transient failure no longer parks an issue.
+    # Bound on pending polls of a current-run auto-merge arm per issue.
+    # Exhaustion stops the item with a non-success outcome and never mutates
+    # labels. The default of 5 tolerates transient pending merge state.
     drive_green_loops: int = 5
     # When True (default), never dispatch two issues whose plans touch the same
     # file concurrently — defer the later one (#1623).
@@ -253,13 +264,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--loops", type=int, default=5, help="Number of loop iterations (default: 5)")
     p.add_argument(
         "--drive-green-loops",
-        type=int,
+        type=_parse_positive_int,
         default=5,
         help=(
-            "Per-issue drive-green loop iterations before the issue is tagged "
-            "state:skip and the worker moves on (default: 5; replaces "
-            "--max-merge-attempts, whose default of 1 skip-parked issues on a "
-            "single transient failure)."
+            "Maximum pending polls of a current-run auto-merge arm per issue before "
+            "merge-wait stops the item without changing labels (default: 5; replaces "
+            "--max-merge-attempts)."
         ),
     )
     p.add_argument(

@@ -138,7 +138,7 @@ ROUTES: dict[StageName, Route] = {
             "not_implementation_go": StageName.PR_REVIEW,
             "*": StageName.FINISHED,
         },
-        budgets={},
+        budgets={"merge": DEFAULT_DRIVE_GREEN_LOOPS},
     ),
     StageName.FINISHED: Route(next=StageName.FINISHED),
 }

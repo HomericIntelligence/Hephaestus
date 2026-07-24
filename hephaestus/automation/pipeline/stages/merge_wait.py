@@ -5,7 +5,7 @@ loop-owned ``state:implementation-go`` label.  This stage consumes that
 label once, asks GitHub to arm auto-merge for the live head, and then polls
 only the arm it created.  It deliberately does not recover, confirm, retry,
 or take over an arm created by another process or run: those operational
-states are warned about and left for an operator.
+states are blocked and left for an operator.
 
 The implemented mini-state graph is:
 
@@ -118,7 +118,7 @@ class MergeWaitStage(Stage):
             logger.warning(
                 "merge_wait: PR #%d is already armed; leaving it to the operator", item.pr
             )
-            return StageOutcome(Disposition.FINISH_PASS, "auto_merge_already_armed")
+            return StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
         has_go, _has_no_go = ctx.github.pr_has_implementation_state_label(item.pr)
         if not has_go:
             return StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
@@ -172,7 +172,19 @@ class MergeWaitStage(Stage):
             logger.warning(
                 "merge_wait: PR #%d was armed outside this run; leaving it to the operator", item.pr
             )
-            return StageOutcome(Disposition.FINISH_PASS, "auto_merge_already_armed")
+            return StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
+        attempt = item.attempts.get("merge", 0) + 1
+        item.attempts["merge"] = attempt
+        budget = ctx.budget("merge")
+        if attempt >= budget:
+            logger.warning(
+                "merge_wait:%s: PR #%d remains pending after %d/%d own-arm polls; stopping",
+                item.issue,
+                item.pr,
+                attempt,
+                budget,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "merge_wait_exhausted")
         item.payload["retry_delay_s"] = 30
         return StageOutcome(Disposition.RETRY, "merge_pending")
 

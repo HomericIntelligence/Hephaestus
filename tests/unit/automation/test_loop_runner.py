@@ -138,6 +138,14 @@ def test_parse_args_accepts_drive_green_loops() -> None:
     assert loop_runner._parse_args([]).drive_green_loops == 5
 
 
+@pytest.mark.parametrize("bad", ["0", "-1"])
+def test_parse_args_rejects_non_positive_drive_green_loops(bad: str) -> None:
+    """The merge-poll budget must leave at least one current-run poll available."""
+    with pytest.raises(SystemExit) as excinfo:
+        loop_runner._parse_args(["--drive-green-loops", bad])
+    assert excinfo.value.code == 2
+
+
 def test_parse_args_accepts_issue_scope() -> None:
     """The loop runner can scope child phases to a comma-separated issue list."""
     args = loop_runner._parse_args(["--issues", "8, 13"])
