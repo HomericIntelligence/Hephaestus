@@ -8,6 +8,7 @@ perform GitHub API mutations (enforced by test_pipeline_architecture.py).
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import threading
 import time
@@ -640,7 +641,6 @@ class WorkerPool:
             f"https://github.com/{expected_repo}",
             f"ssh://git@github.com/{expected_repo}",
             f"git@github.com:{expected_repo}",
-            f"git://github.com/{expected_repo}",
         }
         if normalized_origin not in expected_origins:
             return JobResult(
@@ -657,19 +657,24 @@ class WorkerPool:
         if status.stdout.strip():
             return JobResult(ok=False, error=f"checkout is dirty: {checkout}")
 
-        branch = git_utils.run(
+        branch_result = git_utils.run(
             ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
             cwd=checkout,
+            check=False,
+            log_errors=False,
             timeout=job.timeout_s,
-        ).stdout.strip()
-        default_ref = git_utils.run(
-            ["git", "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+        )
+        branch = branch_result.stdout.strip()
+        if branch_result.returncode != 0 or not branch:
+            return JobResult(ok=False, error=f"checkout is detached: {checkout}")
+
+        default_branch = git_utils.run(
+            ["gh", "api", f"repos/{expected_repo}", "--jq", ".default_branch"],
             cwd=checkout,
             timeout=job.timeout_s,
         ).stdout.strip()
-        if not default_ref.startswith("origin/"):
-            return JobResult(ok=False, error=f"checkout has no origin default branch: {checkout}")
-        default_branch = default_ref.removeprefix("origin/")
+        if not default_branch:
+            return JobResult(ok=False, error=f"repository has no default branch: {expected_repo}")
         if branch != default_branch:
             return JobResult(
                 ok=False,
@@ -679,20 +684,86 @@ class WorkerPool:
                 ),
             )
 
+        metadata_lock = checkout / "build" / ".worktrees" / ".git-metadata.lock"
+        with _interruptible_file_lock(
+            metadata_lock,
+            shutdown=self._shutdown,
+            timeout_s=job.timeout_s,
+        ):
+            return self._fast_forward_checkout(
+                checkout=checkout,
+                origin=origin,
+                default_branch=default_branch,
+                timeout_s=job.timeout_s,
+            )
+
+    @staticmethod
+    def _fast_forward_checkout(
+        *,
+        checkout: Path,
+        origin: str,
+        default_branch: str,
+        timeout_s: int,
+    ) -> JobResult:
+        """Fetch and fast-forward a validated checkout while its metadata is locked."""
+        hooks_disabled = f"core.hooksPath={os.devnull}"
         git_utils.run(
-            ["git", "fetch", "origin", default_branch], cwd=checkout, timeout=job.timeout_s
+            [
+                "git",
+                "-c",
+                hooks_disabled,
+                "fetch",
+                "--no-tags",
+                origin,
+                f"+refs/heads/{default_branch}:refs/remotes/origin/{default_branch}",
+            ],
+            cwd=checkout,
+            timeout=timeout_s,
         )
+        relation = git_utils.run(
+            [
+                "git",
+                "rev-list",
+                "--left-right",
+                "--count",
+                f"HEAD...origin/{default_branch}",
+            ],
+            cwd=checkout,
+            timeout=timeout_s,
+        ).stdout.split()
+        if len(relation) != 2:
+            return JobResult(ok=False, error=f"could not compare checkout history: {checkout}")
+        try:
+            ahead, _behind = (int(count) for count in relation)
+        except ValueError:
+            return JobResult(ok=False, error=f"could not compare checkout history: {checkout}")
+        if ahead:
+            return JobResult(
+                ok=False,
+                error=f"checkout has local commits beyond origin/{default_branch}: {checkout}",
+            )
+
         merge = git_utils.run(
-            ["git", "merge", "--ff-only", f"origin/{default_branch}"],
+            ["git", "-c", hooks_disabled, "merge", "--ff-only", f"origin/{default_branch}"],
             cwd=checkout,
             check=False,
             log_errors=False,
-            timeout=job.timeout_s,
+            timeout=timeout_s,
         )
         if merge.returncode != 0:
             return JobResult(
                 ok=False,
-                error=f"checkout cannot fast-forward {default_branch} to origin/{default_branch}",
+                error=(f"checkout cannot fast-forward {default_branch} to origin/{default_branch}"),
+            )
+        synced_heads = git_utils.run(
+            ["git", "rev-parse", "HEAD", f"origin/{default_branch}"],
+            cwd=checkout,
+            timeout=timeout_s,
+        ).stdout.split()
+        if len(synced_heads) != 2 or synced_heads[0] != synced_heads[1]:
+            return JobResult(
+                ok=False,
+                error=f"checkout did not reach origin/{default_branch}: {checkout}",
             )
         return JobResult(ok=True)
 
