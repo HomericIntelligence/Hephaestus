@@ -19,6 +19,11 @@ from ._shared import (
 )
 from .catalog import PromptCatalog
 
+_PLAN_REVIEW_TERMINAL_OUTPUT_CONTRACT = (
+    "For plan review, do not add a separate conclusion line. Follow the "
+    "plan-state contract below; its final state label is the only decision."
+)
+
 
 def get_plan_prompt(issue_number: int, *, catalog: PromptCatalog | None = None) -> str:
     """Get the planning prompt for an issue."""
@@ -57,7 +62,9 @@ def get_plan_review_prompt(
         untrusted_notice=fenced.untrusted_notice,
         review_rubric=get_plan_review_rubric().strip(),
         output_format=get_plan_review_output_format().strip(),
-        terse_output_directive=get_terse_output_directive(),
+        terse_output_directive=get_terse_output_directive(
+            terminal_output_contract=_PLAN_REVIEW_TERMINAL_OUTPUT_CONTRACT
+        ),
     )
 
 
@@ -114,5 +121,7 @@ def get_plan_loop_review_prompt(
         full_sweep_suffix=full_sweep_suffix,
         output_format=get_plan_review_output_format().strip(),
         untrusted_notice=fenced.untrusted_notice,
-        terse_output_directive=get_terse_output_directive(),
+        terse_output_directive=get_terse_output_directive(
+            terminal_output_contract=_PLAN_REVIEW_TERMINAL_OUTPUT_CONTRACT
+        ),
     )
