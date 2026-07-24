@@ -44,7 +44,7 @@ body:
         For each acceptance criterion, provide the command, automated test, or
         manual check that proves it, plus the expected evidence.
       placeholder: |
-        - Criterion 1: `pixi run pytest ...`
+        - Criterion 1: `uv run pytest ...`
           Expected evidence: ...
     validations:
       required: true
