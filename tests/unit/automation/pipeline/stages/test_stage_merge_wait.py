@@ -155,10 +155,11 @@ def test_own_arm_poll_stops_at_the_configured_merge_budget(
     ctx = make_ctx(github=github, budget_fn=lambda name: 2 if name == "merge" else 1)
 
     first = MergeWaitStage().step(item, ctx)
+    retry_delay_s = item.payload.pop("retry_delay_s")
 
     assert first == StageOutcome(Disposition.RETRY, "merge_pending")
     assert item.attempts["merge"] == 1
-    assert item.payload.pop("retry_delay_s") == 30
+    assert retry_delay_s == 30
 
     second = MergeWaitStage().step(item, ctx)
 
