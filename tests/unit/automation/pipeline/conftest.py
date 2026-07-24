@@ -134,10 +134,11 @@ class FakeWorkerPool:
             return JobResult(ok=True, value={"ready": True, "diff": "checkout diff"})
         return JobResult(ok=True)
 
-    def shutdown(self) -> None:
-        """Match the real pool's API (sets the shutdown event; nothing to cancel)."""
+    def shutdown(self, *, mark_interrupted: bool = True) -> None:
+        """Match real-pool cancellation and ordinary-teardown semantics."""
         self.shutdown_calls += 1
-        self.shutdown_event.set()
+        if mark_interrupted:
+            self.shutdown_event.set()
 
 
 class FakeGitHub:

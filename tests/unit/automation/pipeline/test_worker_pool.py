@@ -100,6 +100,15 @@ def _agent_job(model: str = "opus-4-8", **overrides: object) -> AgentJob:
     return AgentJob(**defaults)  # type: ignore[arg-type]
 
 
+def test_shutdown_can_reap_without_marking_interrupted(
+    pool: WorkerPool, shutdown_event: threading.Event
+) -> None:
+    """Coordinator cleanup may release the pool without changing outcome state (#2431)."""
+    pool.shutdown(mark_interrupted=False)
+
+    assert not shutdown_event.is_set()
+
+
 class TestWorkerPoolSubmitComplete:
     """Tests for basic submit/complete workflow."""
 
@@ -2864,6 +2873,7 @@ class TestShutdownAndCancel:
             assert started.wait(timeout=10), "slow job never started"
             pool.submit(queued_job, StageName.PR_REVIEW)  # queued behind the busy worker
             pool.shutdown()  # sets shutdown event + cancel_futures=True
+            assert shutdown_event.is_set()
             release.set()
 
             handle, result = completion_q.get(timeout=10)

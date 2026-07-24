@@ -1788,7 +1788,11 @@ class Coordinator:
             return
         self._pool_shut_down = True
         try:
-            self.pool.shutdown()
+            # ``self.shutdown`` belongs to the coordinator's signal path. A
+            # normal ``finally`` must reap worker resources without changing
+            # its exit outcome to an interruption (#2431), while a genuine
+            # signal preserves the pool's direct cancellation semantics.
+            self.pool.shutdown(mark_interrupted=self.shutdown.is_set())
         except Exception:  # pragma: no cover - defensive
             logger.exception("pool shutdown raised")
         for item in list(self.in_flight.values()):
