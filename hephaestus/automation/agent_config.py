@@ -54,7 +54,9 @@ the SAME Claude CLI session — first call creates it via ``--session-id``,
 every later call resumes it via ``--resume``. This restores prompt-cache
 reuse across loop iterations *and* across main-bumps (#841): the artifact
 being worked on is the issue/PR, not the commit at which the loop started,
-so the session must persist as long as the issue does.
+so the session must persist as long as the issue does. The UUID remains
+artifact-stable, while transcript lookup is verified against the stable
+checkout root shared by current and historical worktrees.
 
 Human-readable name: ``<repo>_<issue>_<agent>``; the session ID is
 ``str(uuid.uuid5(NAMESPACE_DNS, <human-readable>))``. UUIDv5 is
@@ -67,6 +69,7 @@ iterations.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -553,6 +556,135 @@ def session_jsonl_path(uuid_str: str, cwd: Path) -> Path:
     return Path.home() / ".claude" / "projects" / encoded / f"{uuid_str}.jsonl"
 
 
+def _registered_worktree_roots(cwd: Path) -> tuple[Path, ...]:
+    """Return worktree roots registered to cwd's exact Git repository."""
+    resolved_cwd = cwd.resolve()
+    roots = {resolved_cwd}
+    try:
+        repository = subprocess.run(
+            ["git", "-C", str(resolved_cwd), "rev-parse", "--is-inside-work-tree"],
+            check=True,
+            capture_output=True,
+            env=_repo_scoped_git_env(),
+            text=True,
+            timeout=5,
+        )
+    except subprocess.CalledProcessError:
+        # A non-repository has no registered family; its exact cwd remains a
+        # valid transcript owner without masking a Git discovery failure.
+        return (resolved_cwd,)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"unable to determine whether {resolved_cwd} is a Git checkout") from exc
+
+    if repository.stdout.strip() != "true":
+        return (resolved_cwd,)
+
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(resolved_cwd),
+                "worktree",
+                "list",
+                "--porcelain",
+                "-z",
+            ],
+            check=True,
+            capture_output=True,
+            env=_repo_scoped_git_env(),
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(
+            f"unable to discover registered Git worktrees for {resolved_cwd}"
+        ) from exc
+
+    for field in result.stdout.split("\0"):
+        if field.startswith("worktree "):
+            roots.add(Path(field.removeprefix("worktree ")).resolve())
+    return tuple(sorted(roots, key=str))
+
+
+def _recorded_transcript_cwds(transcript: Path) -> set[Path]:
+    """Return normalized cwd values recorded in a Claude transcript."""
+    recorded: set[Path] = set()
+    try:
+        with transcript.open(encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(entry, dict) and isinstance(entry.get("cwd"), str):
+                    recorded.add(Path(entry["cwd"]).resolve())
+    except OSError as exc:
+        logger.warning("Unable to read Claude transcript %s: %s", transcript, exc)
+    return recorded
+
+
+def _checkout_root(roots: set[Path]) -> Path | None:
+    """Return the registered root that contains this checkout's worktree family."""
+    candidates = [root for root in roots if all(path.is_relative_to(root) for path in roots)]
+    return min(candidates, key=lambda path: (len(path.parts), str(path)), default=None)
+
+
+def _transcript_belongs_to_worktree_family(transcript: Path, roots: set[Path]) -> bool:
+    """Return whether *transcript* belongs to this checkout's stable root."""
+    recorded_cwds = _recorded_transcript_cwds(transcript)
+    if not recorded_cwds:
+        logger.warning("Ignoring Claude transcript without recorded cwd: %s", transcript)
+        return False
+    checkout_root = _checkout_root(roots)
+    if any(
+        recorded not in roots
+        and (checkout_root is None or not recorded.is_relative_to(checkout_root))
+        for recorded in recorded_cwds
+    ):
+        logger.warning(
+            "Ignoring Claude transcript outside the current worktree family: %s",
+            transcript,
+        )
+        return False
+    return True
+
+
+def _session_transcript_candidates(uuid_str: str, roots: set[Path]) -> set[Path]:
+    """Return registered and historical Claude transcript paths for a session ID."""
+    candidates = {session_jsonl_path(uuid_str, root) for root in roots}
+    projects_dir = Path.home() / ".claude" / "projects"
+    try:
+        candidates.update(projects_dir.glob(f"*/{uuid_str}.jsonl"))
+    except OSError as exc:
+        logger.warning("Unable to scan Claude transcript directory %s: %s", projects_dir, exc)
+    return candidates
+
+
+def resolve_session_jsonl_path(uuid_str: str, cwd: Path) -> Path | None:
+    """Resolve a verified transcript from the caller's stable checkout root.
+
+    A stage may remove a worktree before a later stage recreates it elsewhere.
+    Search the session ID across Claude's project directories, then accept only
+    transcripts whose recorded cwd belongs to the current checkout root. This
+    preserves the session across replacement while rejecting transcripts from
+    another checkout that collide under Claude's lossy cwd path encoding.
+    """
+    roots = set(_registered_worktree_roots(cwd))
+    existing = sorted(
+        (
+            candidate
+            for candidate in _session_transcript_candidates(uuid_str, roots)
+            if candidate.is_file()
+        ),
+        key=str,
+    )
+    for candidate in existing:
+        if _transcript_belongs_to_worktree_family(candidate, roots):
+            return candidate
+    return None
+
+
 __all__ = [
     # Session naming
     "AGENT_ADDRESS_REVIEW",
@@ -615,6 +747,7 @@ __all__ = [
     "planner_model",
     "pr_reviewer_claude_timeout",
     "read_timeout_env",
+    "resolve_session_jsonl_path",
     "reviewer_agent",
     "reviewer_model",
     "session_jsonl_path",

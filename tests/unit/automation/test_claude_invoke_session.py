@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hephaestus.automation import claude_invoke
+from hephaestus.automation import agent_config, claude_invoke
 from hephaestus.automation.agent_config import OPUS_48
 from hephaestus.automation.claude_invoke import (
     _session_expired,
@@ -57,7 +57,7 @@ def _make_existing_jsonl(home: Path, cwd: Path, sid: str) -> None:
     del home
     target = session_jsonl_path(sid, cwd)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("{}\n")
+    target.write_text(f'{{"cwd": "{cwd.resolve()}"}}\n')
 
 
 class TestCreateThenResume:
@@ -113,6 +113,92 @@ class TestCreateThenResume:
         assert sid in argv
         assert "--session-id" not in argv
         assert "--name" not in argv
+
+    def test_registered_worktree_resumes_repo_root_transcript(
+        self,
+        fake_home: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A stage worktree resumes the same checkout family's root session."""
+        repo_root = fake_home / "owner" / "Repo"
+        worktree = repo_root / "build" / ".worktrees" / "issue-2284"
+        worktree.mkdir(parents=True)
+        sid = session_uuid("Repo", 2284, AGENT_PLAN_REVIEWER, "sonnet")
+        calls: list[list[str]] = []
+
+        def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
+            calls.append(argv)
+            if len(calls) == 1:
+                transcript = session_jsonl_path(sid, repo_root)
+                transcript.parent.mkdir(parents=True, exist_ok=True)
+                transcript.write_text(f'{{"cwd": "{repo_root.resolve()}"}}\n', encoding="utf-8")
+            return MagicMock(stdout="ok", stderr="", returncode=0)
+
+        monkeypatch.setattr(
+            agent_config,
+            "_registered_worktree_roots",
+            lambda _cwd: (repo_root.resolve(), worktree.resolve()),
+        )
+        with patch("hephaestus.automation.claude_invoke._run_tracked", side_effect=fake_run):
+            invoke_claude_with_session(
+                repo="Repo",
+                issue=2284,
+                agent=AGENT_PLAN_REVIEWER,
+                prompt="first",
+                model="sonnet",
+                cwd=repo_root,
+            )
+            invoke_claude_with_session(
+                repo="Repo",
+                issue=2284,
+                agent=AGENT_PLAN_REVIEWER,
+                prompt="second",
+                model="sonnet",
+                cwd=worktree,
+            )
+
+        assert "--session-id" in calls[0]
+        assert "--resume" not in calls[0]
+        assert "--resume" in calls[1]
+        assert "--session-id" not in calls[1]
+        assert sid in calls[0]
+        assert sid in calls[1]
+
+    def test_recreated_worktree_resumes_removed_worktree_transcript(
+        self,
+        stub_run: MagicMock,
+        fake_home: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A replacement worktree resumes a transcript from its removed predecessor."""
+        repo_root = fake_home / "owner" / "Repo"
+        removed_worktree = repo_root / "build" / ".worktrees" / "issue-2284-a"
+        replacement_worktree = repo_root / "build" / ".worktrees" / "issue-2284-c"
+        removed_worktree.mkdir(parents=True)
+        replacement_worktree.mkdir(parents=True)
+        sid = session_uuid("Repo", 2284, AGENT_PLAN_REVIEWER, "sonnet")
+        _make_existing_jsonl(fake_home, removed_worktree, sid)
+        removed_worktree.rmdir()
+
+        monkeypatch.setattr(
+            agent_config,
+            "_registered_worktree_roots",
+            lambda _cwd: (repo_root.resolve(), replacement_worktree.resolve()),
+        )
+
+        invoke_claude_with_session(
+            repo="Repo",
+            issue=2284,
+            agent=AGENT_PLAN_REVIEWER,
+            prompt="resume",
+            model="sonnet",
+            cwd=replacement_worktree,
+        )
+
+        argv = _argv(stub_run.call_args)
+        assert "--resume" in argv
+        assert sid in argv
+        assert "--session-id" not in argv
 
     def test_different_models_get_different_uuids(
         self, stub_run: MagicMock, fake_home: Path
