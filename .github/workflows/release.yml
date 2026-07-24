@@ -105,8 +105,9 @@ jobs:
             exit 1
           fi
 
-          if [ "$RELEASE_EXISTS" = "true" ] && [ "$DRAFT" != "false" ]; then
-            echo "::error::Release ${TAG} exists but is not published" >&2
+          if [ "$DOCS_ONLY" = "true" ] && [ "$RELEASE_EXISTS" = "true" ] \
+            && [ "$DRAFT" != "false" ]; then
+            echo "::error::Docs-only recovery requires a published GitHub Release for ${TAG}" >&2
             exit 1
           fi
 
@@ -124,15 +125,28 @@ jobs:
             fi
           fi
 
+          if [ "$DOCS_ONLY" != "true" ] && [ "$RELEASE_EXISTS" = "true" ] \
+            && [ "$DRAFT" = "false" ] && [ "$SOURCE_PROVENANCE_MATCHES" != "true" ]; then
+            echo "::error::Existing published release ${TAG} lacks immutable source provenance; refusing an unsafe retry" >&2
+            exit 1
+          fi
+
           COMPLETED_RELEASE_EXISTS=false
           if [ "$RELEASE_EXISTS" = "true" ] && [ "$SOURCE_PROVENANCE_MATCHES" = "true" ]; then
-            for DEPLOYMENT_ID in $(
+            if ! DEPLOYMENT_IDS="$(
               gh api "repos/${REPOSITORY}/deployments?environment=pypi&sha=${SHA}" --jq '.[].id'
-            ); do
-              DEPLOYMENT_STATUS="$({
+            )"; then
+              echo "::error::Could not inspect PyPI deployments for ${SHA}" >&2
+              exit 1
+            fi
+            for DEPLOYMENT_ID in $DEPLOYMENT_IDS; do
+              if ! DEPLOYMENT_STATUS="$({
                 gh api "repos/${REPOSITORY}/deployments/${DEPLOYMENT_ID}/statuses?per_page=1" \
                   --jq '[.[0].state, .[0].target_url] | @tsv'
-              })"
+              })"; then
+                echo "::error::Could not inspect PyPI deployment ${DEPLOYMENT_ID}" >&2
+                exit 1
+              fi
               IFS=$'\t' read -r DEPLOYMENT_STATE DEPLOYMENT_URL <<< "$DEPLOYMENT_STATUS"
               if [ "$DEPLOYMENT_STATE" = "success" ]; then
                 JOB_URL_PREFIX="https://github.com/${REPOSITORY}/actions/runs/"
@@ -141,27 +155,41 @@ jobs:
                     RUN_AND_JOB="${DEPLOYMENT_URL#"${JOB_URL_PREFIX}"}"
                     RUN_ID="${RUN_AND_JOB%%/job/*}"
                     JOB_ID="${RUN_AND_JOB#*/job/}"
-                    RUN_STATUS="$(
+                    if ! RUN_STATUS="$(
                       gh api "repos/${REPOSITORY}/actions/runs/${RUN_ID}" \
-                        --jq '[.name, .head_sha] | @tsv'
-                    )"
-                    IFS=$'\t' read -r WORKFLOW_NAME RUN_HEAD_SHA <<< "$RUN_STATUS"
-                    if [ "$WORKFLOW_NAME" != "Release" ] || [ "$RUN_HEAD_SHA" != "$SHA" ]; then
+                        --jq '[.name, .path, .head_sha] | @tsv'
+                    )"; then
+                      echo "::error::Could not inspect release workflow run ${RUN_ID}" >&2
+                      exit 1
+                    fi
+                    IFS=$'\t' read -r WORKFLOW_NAME WORKFLOW_PATH RUN_HEAD_SHA <<< "$RUN_STATUS"
+                    if [ "$WORKFLOW_NAME" != "Release" ] \
+                      || [ "$WORKFLOW_PATH" != ".github/workflows/release.yml" ] \
+                      || [ "$RUN_HEAD_SHA" != "$SHA" ]; then
                       continue
                     fi
-                    JOB_STATUS="$(
+                    if ! JOB_STATUS="$(
                       gh api "repos/${REPOSITORY}/actions/jobs/${JOB_ID}" \
                         --jq '[
+                          .run_id,
+                          .head_sha,
                           .name,
                           ([.steps[] | select(.name == "Publish to PyPI") | .conclusion][0] // ""),
-                          ([.steps[] | select(.name == "Create GitHub Release") | .conclusion][0] // "")
+                          ([.steps[] | select(.name == "Create GitHub Release") | .conclusion][0] // ""),
+                          ([.steps[] | select(.name == "Publish existing draft release") | .conclusion][0] // "")
                         ] | @tsv'
-                    )"
-                    IFS=$'\t' read -r JOB_NAME PUBLISH_PYPI_CONCLUSION CREATE_RELEASE_CONCLUSION \
-                      <<< "$JOB_STATUS"
-                    if [ "$JOB_NAME" = "build-and-publish" ] \
+                    )"; then
+                      echo "::error::Could not inspect release job ${JOB_ID}" >&2
+                      exit 1
+                    fi
+                    IFS=$'\t' read -r JOB_RUN_ID JOB_HEAD_SHA JOB_NAME PUBLISH_PYPI_CONCLUSION \
+                      CREATE_RELEASE_CONCLUSION FINALIZE_DRAFT_CONCLUSION <<< "$JOB_STATUS"
+                    if [ "$JOB_RUN_ID" = "$RUN_ID" ] \
+                      && [ "$JOB_HEAD_SHA" = "$SHA" ] \
+                      && [ "$JOB_NAME" = "build-and-publish" ] \
                       && [ "$PUBLISH_PYPI_CONCLUSION" = "success" ] \
-                      && [ "$CREATE_RELEASE_CONCLUSION" = "success" ]; then
+                      && { [ "$CREATE_RELEASE_CONCLUSION" = "success" ] \
+                        || [ "$FINALIZE_DRAFT_CONCLUSION" = "success" ]; }; then
                       COMPLETED_RELEASE_EXISTS=true
                       break
                     fi
@@ -321,11 +349,17 @@ jobs:
           # workflow. GitHub marks releases immutable, and an immutable
           # release cannot be updated or have assets added — so the
           # create/update action below must be skipped when one exists.
-          if gh release view "$TAG" --json isImmutable -q .isImmutable >/dev/null 2>&1; then
+          if gh release view "$TAG" --json isImmutable,isDraft -q .isImmutable >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
+            if gh release view "$TAG" --json isDraft -q .isDraft | grep -qx true; then
+              echo "draft=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "draft=false" >> "$GITHUB_OUTPUT"
+            fi
             echo "Release $TAG already exists — skipping creation."
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "draft=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Create GitHub Release
@@ -353,6 +387,24 @@ jobs:
             echo "Attached dist/* to release $TAG."
           else
             echo "::notice::Release $TAG is immutable — build artifacts not attached. The package is published to PyPI."
+          fi
+
+      - name: Publish existing draft release
+        if: steps.existing.outputs.exists == 'true' && steps.existing.outputs.draft == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ needs.resolve-release.outputs.sha }}
+          TAG: ${{ needs.resolve-release.outputs.tag }}
+        run: |
+          MARKER="<!-- hephaestus-source-sha:${SHA} -->"
+          RELEASE_BODY="$(gh release view "$TAG" --json body -q .body)"
+          if printf '%s\n' "$RELEASE_BODY" | grep -Fqx "$MARKER"; then
+            gh release edit "$TAG" --draft=false
+          else
+            gh release edit "$TAG" --draft=false --notes "${RELEASE_BODY}
+
+          ${MARKER}"
           fi
 
   deploy-docs:

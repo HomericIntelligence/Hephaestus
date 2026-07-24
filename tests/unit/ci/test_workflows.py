@@ -581,6 +581,17 @@ class TestAutoTagReleaseDispatch:
             "needs.resolve-release.outputs.completed_release_exists != 'true')) }}"
         )
 
+    def test_new_release_records_immutable_source_provenance(self) -> None:
+        """Every newly created release records the exact source SHA used to build it."""
+        workflow = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        steps = workflow["jobs"]["build-and-publish"]["steps"]
+        create = [step for step in steps if step.get("name") == "Create GitHub Release"]
+
+        assert len(create) == 1
+        assert create[0]["with"]["body"] == (
+            "<!-- hephaestus-source-sha:${{ needs.resolve-release.outputs.sha }} -->"
+        )
+
     def _resolve_step(self) -> dict[str, Any]:
         workflow = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
         return next(
@@ -629,6 +640,7 @@ class TestAutoTagReleaseDispatch:
             "          *) printf 'HTTP/2.0 500 Server Error\\n\\n{}\\n'; exit 1 ;;\n"
             "        esac ;;\n"
             '      *"/deployments?environment=pypi&sha=${GH_SOURCE_SHA}")\n'
+            '        [ "$GH_DEPLOYMENT_STATE" = "error" ] && exit 1\n'
             '        [ "$GH_DEPLOYMENT_STATE" = "missing" ] || echo 42 ;;\n'
             "      *'/deployments/42/statuses?per_page=1')\n"
             '        [ "$GH_DEPLOYMENT_STATE" = "published" ] && '
@@ -637,16 +649,25 @@ class TestAutoTagReleaseDispatch:
             "|| echo 'failure\\t' ;;\n"
             "      *'/actions/runs/300')\n"
             '        case "$GH_PROVENANCE_STATE" in\n'
-            "          unlinked) echo 'Release\\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' ;;\n"
-            '          wrong-workflow) echo "Other workflow\\t$GH_SOURCE_SHA" ;;\n'
-            '          *) echo "Release\\t$GH_SOURCE_SHA" ;;\n'
+            "          unlinked) echo 'Release\\t.github/workflows/release.yml\\t"
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' ;;\n"
+            '          wrong-workflow) echo "Other workflow\\t.github/workflows/release.yml'
+            '\\t$GH_SOURCE_SHA" ;;\n'
+            '          *) echo "Release\\t.github/workflows/release.yml\\t$GH_SOURCE_SHA" ;;\n'
             "        esac ;;\n"
             "      *'/actions/jobs/400')\n"
-            '        [ "$GH_PROVENANCE_STATE" = "no-release" ] '
-            "&& echo 'build-and-publish\\tsuccess\\tskipped' "
-            '|| [ "$GH_PROVENANCE_STATE" = "no-publish" ] '
-            "&& echo 'build-and-publish\\tskipped\\tsuccess' "
-            "|| echo 'build-and-publish\\tsuccess\\tsuccess' ;;\n"
+            '        case "$GH_PROVENANCE_STATE" in\n'
+            '          cross-run-job) echo "999\\t$GH_SOURCE_SHA\\tbuild-and-publish'
+            '\\tsuccess\\tsuccess\\tskipped" ;;\n'
+            '          no-release) echo "300\\t$GH_SOURCE_SHA\\tbuild-and-publish'
+            '\\tsuccess\\tskipped\\tskipped" ;;\n'
+            '          no-publish) echo "300\\t$GH_SOURCE_SHA\\tbuild-and-publish'
+            '\\tskipped\\tsuccess\\tskipped" ;;\n'
+            '          finalized) echo "300\\t$GH_SOURCE_SHA\\tbuild-and-publish'
+            '\\tsuccess\\tskipped\\tsuccess" ;;\n'
+            '          *) echo "300\\t$GH_SOURCE_SHA\\tbuild-and-publish'
+            '\\tsuccess\\tsuccess\\tskipped" ;;\n'
+            "        esac ;;\n"
             "    esac ;;\n"
             "  *) exit 2 ;;\n"
             "esac\n",
@@ -690,15 +711,28 @@ class TestAutoTagReleaseDispatch:
 
         assert result.returncode == 0
 
+    def test_docs_only_recovery_accepts_a_finalized_draft_release(self, tmp_path: Path) -> None:
+        """A normal run that publishes a pre-existing draft remains docs-recoverable."""
+        result = self._run_resolver(
+            tmp_path,
+            docs_only=True,
+            release_state="published",
+            deployment_state="published",
+            provenance_state="finalized",
+        )
+
+        assert result.returncode == 0
+
     @pytest.mark.parametrize(
         ("release_state", "deployment_state", "provenance_state", "tag", "error"),
         [
             ("missing", "published", "linked", "v0.10.0", "existing GitHub Release"),
-            ("draft", "published", "linked", "v0.10.0", "not published"),
+            ("draft", "published", "linked", "v0.10.0", "published GitHub Release"),
             ("published", "missing", "linked", "v0.10.0", "same release workflow run"),
             ("published", "failed", "linked", "v0.10.0", "same release workflow run"),
             ("published", "published", "unlinked", "v0.10.0", "same release workflow run"),
             ("published", "published", "wrong-workflow", "v0.10.0", "same release workflow run"),
+            ("published", "published", "cross-run-job", "v0.10.0", "same release workflow run"),
             ("published", "published", "no-publish", "v0.10.0", "same release workflow run"),
             ("published", "published", "no-release", "v0.10.0", "same release workflow run"),
             ("published", "published", "unmarked", "v0.10.1", "same release workflow run"),
@@ -733,6 +767,21 @@ class TestAutoTagReleaseDispatch:
         assert result.returncode == 1
         assert error in result.stderr
 
+    @pytest.mark.parametrize("docs_only", [False, True])
+    def test_deployment_list_failure_aborts_all_recovery_modes(
+        self, tmp_path: Path, docs_only: bool
+    ) -> None:
+        """Deployment API errors must never allow a duplicate publication attempt."""
+        result = self._run_resolver(
+            tmp_path,
+            docs_only=docs_only,
+            release_state="published",
+            deployment_state="error",
+        )
+
+        assert result.returncode == 1
+        assert "Could not inspect PyPI deployments" in result.stderr
+
     def test_docs_only_recovery_accepts_the_audited_v010_legacy_tuple(self, tmp_path: Path) -> None:
         """The sole pre-marker release remains recoverable only at its audited tag and SHA."""
         result = self._run_resolver(
@@ -756,6 +805,17 @@ class TestAutoTagReleaseDispatch:
         )
         assert wrong_source.returncode == 1
 
+        wrong_tag = self._run_resolver(
+            tmp_path / "wrong-tag",
+            docs_only=True,
+            release_state="published",
+            deployment_state="published",
+            provenance_state="unmarked",
+            tag="v0.10.1",
+            source_sha="99a5437fc351fd7737fc85e7d4d76504d88a00d1",
+        )
+        assert wrong_tag.returncode == 1
+
     def test_normal_release_continues_for_manual_partial_release(self, tmp_path: Path) -> None:
         """An existing manual release does not suppress a missing PyPI publication."""
         result = self._run_resolver(
@@ -769,6 +829,34 @@ class TestAutoTagReleaseDispatch:
         assert "completed_release_exists=false" in (tmp_path / "github-output").read_text(
             encoding="utf-8"
         )
+
+    def test_normal_release_allows_a_draft_to_be_completed(self, tmp_path: Path) -> None:
+        """A draft remains eligible for normal publish-and-finalize recovery."""
+        result = self._run_resolver(
+            tmp_path,
+            docs_only=False,
+            release_state="draft",
+            deployment_state="missing",
+        )
+
+        assert result.returncode == 0
+        assert "completed_release_exists=false" in (tmp_path / "github-output").read_text(
+            encoding="utf-8"
+        )
+
+    def test_normal_release_rejects_unprovenanced_published_release(self, tmp_path: Path) -> None:
+        """A published immutable release without source provenance is not safely retryable."""
+        result = self._run_resolver(
+            tmp_path,
+            docs_only=False,
+            release_state="published",
+            deployment_state="missing",
+            provenance_state="unmarked",
+            tag="v0.10.1",
+        )
+
+        assert result.returncode == 1
+        assert "lacks immutable source provenance" in result.stderr
 
     def test_normal_release_marks_linked_publication_as_duplicate(self, tmp_path: Path) -> None:
         """A queued duplicate release becomes a no-op only after the linked release completed."""
