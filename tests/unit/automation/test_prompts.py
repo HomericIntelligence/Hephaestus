@@ -253,7 +253,7 @@ class TestPlanPrompt:
 
 
 class TestPlanReviewContextAndVerdict:
-    """Plan-review prompts state their context model and a strict verdict contract."""
+    """Plan-review prompts state their context model and a strict state contract."""
 
     def _render_standalone(self) -> str:
         return prompts.get_plan_review_prompt(
@@ -305,6 +305,14 @@ class TestPlanReviewContextAndVerdict:
             assert label in out
         assert "Grade: <A|B|C|D|F>" not in out
         assert "Verdict: <GO|NOGO>" not in out
+
+    def test_plan_review_uses_only_the_final_state_label_for_its_decision(self) -> None:
+        """Plan prompts must not request a legacy textual decision line."""
+        for out in (self._render_standalone(), self._render_loop(0)):
+            assert "Verdict:" not in out
+            assert "state:plan-go" in out
+            assert "state:plan-no-go" in out
+            assert "state:plan-blocked" in out
 
 
 class TestAdvisePrompt:

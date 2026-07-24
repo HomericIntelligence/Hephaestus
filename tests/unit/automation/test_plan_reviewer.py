@@ -275,6 +275,32 @@ class TestPostReviewStateLabels:
         legacy_upsert.assert_not_called()
         edit_labels.assert_not_called()
 
+    def test_final_plan_state_overrides_conflicting_legacy_prose(
+        self, reviewer: PlanReviewer
+    ) -> None:
+        """A textual decision cannot override the final label-backed state."""
+        review = "Concrete review explanation.\n\nVerdict: GO\nstate:plan-no-go"
+        with (
+            patch.object(reviewer, "_fetch_issue_comments", return_value=[]),
+            patch(
+                "hephaestus.automation.plan_reviewer.gh_issue_upsert_owned_comment",
+                create=True,
+            ) as upsert,
+            patch("hephaestus.automation.plan_reviewer.gh_issue_edit_labels") as edit_labels,
+            patch(
+                "hephaestus.automation.plan_reviewer.gh_issue_json",
+                return_value={"labels": [{"name": STATE_PLAN_NO_GO}]},
+            ),
+        ):
+            reviewer._post_review(123, review)
+
+        assert upsert.call_args.args[2].rstrip().endswith(STATE_PLAN_NO_GO)
+        edit_labels.assert_called_once_with(
+            123,
+            add=[STATE_PLAN_NO_GO],
+            remove=[STATE_PLAN_GO, STATE_NEEDS_PLAN],
+        )
+
     def test_blocked_comment_failure_preserves_authoritative_blocked_latch(
         self, reviewer: PlanReviewer
     ) -> None:
