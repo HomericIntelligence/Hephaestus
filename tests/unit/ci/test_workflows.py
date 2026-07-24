@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -214,9 +215,47 @@ class TestPerformanceWorkflow:
             if step.get("name") == "Verify performance suite collection"
         )
 
-        assert "python -m pytest tests/performance" in collect
+        assert "uv run pytest tests/performance" in collect
         assert "--collect-only" in collect
         assert '--override-ini="addopts="' in collect
+
+    def test_lane_uses_the_locked_uv_runtime_for_both_test_commands(self) -> None:
+        """Collection and load gates must use the same locked UV environment."""
+        steps = self._load()["jobs"]["worker-pool-load"]["steps"]
+
+        uv_index, uv_step = next(
+            (index, step) for index, step in enumerate(steps) if step.get("name") == "Setup uv"
+        )
+        install_index, install_step = next(
+            (index, step)
+            for index, step in enumerate(steps)
+            if step.get("name") == "Install locked performance environment"
+        )
+        collect_index, collect_step = next(
+            (index, step)
+            for index, step in enumerate(steps)
+            if step.get("name") == "Verify performance suite collection"
+        )
+        run_index, run_step = next(
+            (index, step)
+            for index, step in enumerate(steps)
+            if step.get("name") == "Run bounded worker-pool load tests"
+        )
+
+        assert uv_step["uses"].startswith("astral-sh/setup-uv@")
+        assert uv_step["with"]["enable-cache"] == "true"
+        assert uv_step["with"]["python-version"] == "3.12"
+        assert install_step["run"] == "uv sync --all-groups --all-extras --locked"
+        assert uv_index < install_index < collect_index < run_index
+        assert collect_step["run"].startswith("uv run pytest tests/performance")
+        assert run_step["run"].startswith("uv run pytest tests/performance")
+
+        uses_steps = [str(step.get("uses", "")) for step in steps]
+        run_executables = [
+            shlex.split(str(step["run"]).lstrip())[0] for step in steps if step.get("run")
+        ]
+        assert all(not uses.startswith("actions/setup-python@") for uses in uses_steps)
+        assert run_executables == ["uv", "uv", "uv"]
 
     def test_lane_uploads_runtime_report(self) -> None:
         """The report is retained as an artifact even when a gate fails."""
