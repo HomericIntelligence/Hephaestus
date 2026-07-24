@@ -77,10 +77,10 @@ publish the same package again. After the workflow fix is merged, run the repair
 gh workflow run release.yml --ref main -f tag=vX.Y.Z -f docs_only=true
 ```
 
-The recovery checks that `vX.Y.Z` already has a published GitHub Release and a successful PyPI
-deployment recorded for the tag's immutable commit, checks out that commit to generate the API
-reference, and deploys only the Pages artifact. It performs no PyPI upload or GitHub Release
-write.
+The recovery verifies that `vX.Y.Z` already has a published GitHub Release created by the same
+successful PyPI release-workflow job for the tag's immutable commit, checks out that commit to
+generate the API reference, and deploys only the Pages artifact. It performs no PyPI upload or
+GitHub Release write.
 
 ## PyPI Trusted Publishing
 
