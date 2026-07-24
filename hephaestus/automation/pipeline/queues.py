@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from .work_item import WorkItem
 
+
 @dataclass(frozen=True)
 class CompletionRejection:
     """A completion that could not fit in the result channel."""

@@ -281,6 +281,12 @@ synthesizes interrupted results for remaining in-flight jobs.
 Completion publication rejection starts the same grace-bounded shutdown after
 the coordinator parks the exact rejected item. If the bounded rejection
 mailbox overflows, immediate teardown parks every remaining in-flight item.
+Stage-queue saturation follows the same recovery rule for existing work. A
+genuinely new seed rejected by a full stage queue is first added to the
+coordinator ledger, parked RESUMABLE, and then starts a non-successful graceful
+shutdown; it is never omitted from the run's effective items. Every production
+entrypoint supplies the durable JSONL event-log path, including when metrics
+are disabled.
 Items touched by an interrupt report
 `ItemResult(passed=False, reason="resumable at <stage>", …)` — **never** FAILED. The
 end-of-run summary lists them under `RESUMABLE at <stage>`. Resume is

@@ -466,7 +466,7 @@ def main() -> int:
     # the CLI actually runs.
     from hephaestus.utils.terminal import install_sigtstp_only
 
-    from .pipeline.coordinator import PipelineConfig, run_pipeline
+    from .pipeline.coordinator import PipelineConfig, default_event_log_path, run_pipeline
     from .pipeline.routing import PipelineScope, StageName
 
     install_sigtstp_only()
@@ -523,6 +523,7 @@ def main() -> int:
     issues = list(dict.fromkeys(issues))
     log.info("Issues to implement: %s", issues)
 
+    projects_dir = resolve_projects_dir(None, prefer_cwd_parent=True)
     config = PipelineConfig(
         org=org,
         repos=[repo],
@@ -537,7 +538,8 @@ def main() -> int:
         agent=agent,
         no_advise=args.no_advise,
         nitpick=args.nitpick,
-        projects_dir=resolve_projects_dir(None, prefer_cwd_parent=True),
+        event_log_path=default_event_log_path(projects_dir, [repo]),
+        projects_dir=projects_dir,
         json_out=args.json,
         scope=PipelineScope(
             frozenset({StageName.IMPLEMENTATION, StageName.PR_REVIEW, StageName.MERGE_WAIT})

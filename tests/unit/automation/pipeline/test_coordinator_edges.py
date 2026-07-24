@@ -143,10 +143,14 @@ class TestWiring:
             "hephaestus.automation.pipeline_github.PipelineGitHub",
             MagicMock(return_value=accessor),
         )
-        monkeypatch.setattr(coordinator_mod.Coordinator, "run", lambda self: 7)
+        coordinator_factory = MagicMock()
+        coordinator_factory.return_value.run.return_value = 7
+        monkeypatch.setattr(coordinator_mod, "Coordinator", coordinator_factory)
         config = PipelineConfig(org="org", repos=["r"], dry_run=True, projects_dir=tmp_path)
 
         assert run_pipeline(config) == 7
+        wired_config = coordinator_factory.call_args.args[0]
+        assert wired_config.event_log_path is not None
 
     @staticmethod
     def _stub_pipeline_runtime(

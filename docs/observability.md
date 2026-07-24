@@ -34,7 +34,7 @@ are constructed only when a metrics port is configured.
   top-level `status` of `ok` (running) or `stopping` (shutdown requested).
 - **Structured event log (JSONL).** When a loop runs, the coordinator writes a
   durable JSONL event log (default:
-  `build/.issue_implementer/pipeline-events-<timestamp>-<pid>.jsonl`, set via
+  `build/.issue_implementer/pipeline-events-<timestamp>-<nanoseconds>.jsonl`, set via
   `PipelineConfig.event_log_path`). Each metrics tick appends a
   `metrics_snapshot` record, and every alert transition appends an
   `alert_fired` or `alert_resolved` record carrying the alert `name`,

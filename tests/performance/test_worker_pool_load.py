@@ -383,6 +383,112 @@ def _run_load(
 
 
 @pytest.mark.performance
+def test_worker_pool_stalled_consumer_saturates_and_recovers() -> None:
+    """Concurrent completions stay bounded and all resumable work recovers.
+
+    The consumer is deliberately paused while every real worker completes at
+    once. One result fits the completion queue, one enters its bounded
+    rejection mailbox, and the remaining result triggers the bounded overflow
+    shutdown path. A fresh real pool then recovers the completion-rejected and
+    overflowed work.
+    """
+    capacity = 1
+    workers = 3
+    completion_q = CompletionQueue(capacity=capacity)
+    shutdown = threading.Event()
+    all_started = threading.Event()
+    release = threading.Event()
+    state_lock = threading.Lock()
+    started = 0
+    finished = 0
+
+    jobs = [
+        BuildTestJob(
+            repo="performance/worker-pool",
+            cwd=Path.cwd(),
+            argv=("synthetic", f"saturation-{index}"),
+            timeout_s=2,
+            descr=f"saturation-{index}",
+        )
+        for index in range(workers)
+    ]
+    pool = WorkerPool(size=workers, shutdown=shutdown, completion_q=completion_q)
+
+    def stalled_handler(_pool: WorkerPool, job: BuildTestJob) -> JobResult:
+        """Hold all workers until the test has filled the completion path."""
+        nonlocal started, finished
+        with state_lock:
+            started += 1
+            if started == workers:
+                all_started.set()
+        assert release.wait(timeout=2.0)
+        with state_lock:
+            finished += 1
+        return JobResult(ok=True, value=job.descr)
+
+    try:
+        with patch.object(WorkerPool, "_run_build_test", stalled_handler):
+            handles = [pool.submit(job, StageName.MERGE_WAIT) for job in jobs]
+            assert all_started.wait(timeout=2.0)
+            # Pause consumption until all workers publish concurrently.
+            release.set()
+            assert shutdown.wait(timeout=2.0)
+            deadline = time.monotonic() + 2.0
+            while True:
+                with state_lock:
+                    if finished == workers:
+                        break
+                assert time.monotonic() < deadline
+                time.sleep(0.005)
+
+            queued: list[tuple[JobHandle, JobResult]] = []
+            while True:
+                try:
+                    queued.append(completion_q.get_nowait())
+                except queue.Empty:
+                    break
+            rejected, overflowed = completion_q.take_rejections()
+
+            assert len(queued) == capacity
+            assert len(rejected) == capacity
+            assert overflowed is True
+            assert completion_q.qsize() <= capacity
+            assert completion_q._rejections.qsize() <= capacity
+            assert shutdown.is_set()
+
+            queued_handles = {handle for handle, _result in queued}
+            resumable_handles = set(handles) - queued_handles
+            assert len(resumable_handles) == workers - capacity
+
+        recovery_shutdown = threading.Event()
+        recovery_q = CompletionQueue(capacity=len(resumable_handles))
+        recovery_pool = WorkerPool(
+            size=len(resumable_handles),
+            shutdown=recovery_shutdown,
+            completion_q=recovery_q,
+        )
+        try:
+            with patch.object(
+                WorkerPool,
+                "_run_build_test",
+                lambda _pool, job: JobResult(ok=True, value=job.descr),
+            ):
+                recovery_handles = [
+                    recovery_pool.submit(handle.job, StageName.MERGE_WAIT)
+                    for handle in resumable_handles
+                ]
+                recovered: set[JobHandle] = set()
+                for _ in recovery_handles:
+                    recovered.add(recovery_q.get(timeout=2.0)[0])
+                assert len(recovered) == len(resumable_handles)
+                assert recovery_q.qsize() <= recovery_q.capacity
+        finally:
+            recovery_pool.shutdown(mark_interrupted=False)
+    finally:
+        pool.shutdown(mark_interrupted=True)
+
+
+@pytest.mark.performance
 def test_worker_pool_capacity_scales(load_config: LoadConfig) -> None:
     """Four workers complete fixed-delay jobs at least twice as fast as one."""
     job_count = min(_CAPACITY_JOBS, load_config.max_jobs)

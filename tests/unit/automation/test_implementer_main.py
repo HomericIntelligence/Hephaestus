@@ -79,6 +79,7 @@ def test_main_builds_implementation_scope_and_dispatches(tmp_path: Path) -> None
     assert config.repos == ["widget"]
     assert config.issues == [123]
     assert config.dry_run is True
+    assert config.event_log_path is not None
     # Scope includes implementation, review, and merge wait.
     assert config.scope is not None
     assert config.scope.stages == frozenset(

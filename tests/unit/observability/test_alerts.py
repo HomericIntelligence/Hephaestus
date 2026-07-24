@@ -89,9 +89,7 @@ def test_backlog_and_saturation_are_independent_alerts() -> None:
         "saturated_queues": [],
     }
 
-    assert [event.name for event in alerts.evaluate_alerts(full)] == [
-        "queue_depth_exceeds"
-    ]
+    assert [event.name for event in alerts.evaluate_alerts(full)] == ["queue_depth_exceeds"]
     saturated = alerts.evaluate_alerts({**full, "saturated_queues": ["planning"]})
     assert {event.name for event in saturated} == {"queue_depth_exceeds", "queue_saturated"}
 

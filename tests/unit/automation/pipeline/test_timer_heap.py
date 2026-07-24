@@ -47,9 +47,7 @@ def clocked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Coordinato
         SimpleNamespace(monotonic=clock.monotonic, time=lambda: clock.now),
     )
     monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
-    config = PipelineConfig(
-        org="org", repos=["repo-a"], projects_dir=tmp_path, parallel_repos=3
-    )
+    config = PipelineConfig(org="org", repos=["repo-a"], projects_dir=tmp_path, parallel_repos=3)
     coordinator = Coordinator(
         config,
         github=FakeStageGitHub(),

@@ -60,6 +60,7 @@ def test_main_builds_pr_review_scope_and_dispatches() -> None:
     assert config.repos == ["widget"]
     assert config.issues == [123]
     assert config.dry_run is True
+    assert config.event_log_path is not None
     # Scope is trimmed to exactly the single pr_review stage.
     assert config.scope is not None
     assert config.scope.stages == frozenset({StageName.PR_REVIEW})

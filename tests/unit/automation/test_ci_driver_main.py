@@ -78,6 +78,7 @@ def test_main_builds_review_merge_wait_scope_and_dispatches() -> None:
     assert config.repos == ["widget"]
     assert config.issues == [123]
     assert config.dry_run is True
+    assert config.event_log_path is not None
     # Direct PRs without an approval label must receive PR review first.
     assert config.scope is not None
     assert config.scope.stages == frozenset({StageName.PR_REVIEW, StageName.MERGE_WAIT})

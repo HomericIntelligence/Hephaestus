@@ -114,11 +114,12 @@ def test_work_window_bounds_all_pipeline_queues(
     assert coordinator._admit(WorkItem(repo="repo-a", kind=ItemKind.REPO)) is False
 
 
-def test_stage_burst_rejection_is_explicit_without_overflow_storage(
+def test_stage_burst_rejection_tracks_new_work_and_requests_recovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A new item rejected by a full stage is not hidden in an overflow deque."""
-    coordinator = _coordinator(tmp_path, monkeypatch)
+    """A rejected seed is resumable and cannot produce a false clean exit."""
+    event_log = tmp_path / "events.jsonl"
+    coordinator = _coordinator(tmp_path, monkeypatch, event_log_path=event_log)
     first = WorkItem(repo="repo-a", kind=ItemKind.REPO, stage=StageName.REPO)
     second = WorkItem(repo="repo-a", kind=ItemKind.REPO, stage=StageName.REPO)
 
@@ -126,8 +127,51 @@ def test_stage_burst_rejection_is_explicit_without_overflow_storage(
     assert coordinator._push_item(second, StageName.REPO, enter=True) is False
 
     assert coordinator.queues[StageName.REPO].snapshot() == [first]
-    assert second not in coordinator.items
+    assert second in coordinator.items
+    assert second.result is not None
+    assert second.result.reason == "resumable at repo: stage enqueue rejected"
+    assert coordinator.shutdown.is_set()
+    assert coordinator._exit_code() == 130
     assert any(event[0] == "queue_saturated" for event in coordinator.event_log)
+    records = [json.loads(line) for line in event_log.read_text().splitlines()]
+    assert any(record["event"] == "queue_saturated" for record in records)
+
+
+def test_c_plus_one_seed_has_resumable_non_successful_shutdown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A capacity-one run accounts for both seeds instead of returning zero."""
+    event_log = tmp_path / "c-plus-one-events.jsonl"
+    config = PipelineConfig(
+        org="org",
+        repos=["repo-a"],
+        max_workers=1,
+        parallel_repos=1,
+        projects_dir=tmp_path,
+        event_log_path=event_log,
+    )
+    monkeypatch.setattr(
+        seeding_mod,
+        "seed_from_cli",
+        lambda repos, issues, prs: [
+            seeding_mod.SeedEntry(
+                kind="issue", identifier=issue, stage=StageName.PLANNING, reason="seed"
+            )
+            for issue in (1, 2)
+        ],
+    )
+    coordinator = Coordinator(
+        config,
+        github=FakeStageGitHub(),
+        pool=FakeWorkerPool(size=1, completion_q=CompletionQueue(capacity=1)),
+        install_signals=False,
+    )
+
+    assert coordinator.run() == 130
+    assert {item.issue for item in coordinator.items} == {1, 2}
+    assert all(item.result is not None for item in coordinator.items)
+    records = [json.loads(line) for line in event_log.read_text().splitlines()]
+    assert any(record["event"] == "queue_saturated" for record in records)
 
 
 def test_repeated_wakes_do_not_consume_completion_capacity(

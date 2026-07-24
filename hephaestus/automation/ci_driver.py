@@ -212,7 +212,7 @@ def main() -> int:
     # the CLI actually runs.
     from hephaestus.utils.terminal import install_sigtstp_only
 
-    from .pipeline.coordinator import PipelineConfig, run_pipeline
+    from .pipeline.coordinator import PipelineConfig, default_event_log_path, run_pipeline
 
     install_sigtstp_only()
     args = _parse_args()
@@ -242,6 +242,7 @@ def main() -> int:
         # drive_green_all. A scoped run (issues or PRs given) stays narrow (POLA).
         drive_green_all = not issues and not prs
 
+        projects_dir = resolve_projects_dir(None, prefer_cwd_parent=True)
         config = PipelineConfig(
             org=org,
             repos=[repo],
@@ -258,7 +259,8 @@ def main() -> int:
             drive_green_all=drive_green_all,
             include_bot_prs=args.include_bot_prs,
             include_all_authors=args.include_all_authors,
-            projects_dir=resolve_projects_dir(None, prefer_cwd_parent=True),
+            event_log_path=default_event_log_path(projects_dir, [repo]),
+            projects_dir=projects_dir,
             json_out=args.json,
             scope=PipelineScope(_CI_DRIVER_SCOPE_STAGES),
         )

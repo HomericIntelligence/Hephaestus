@@ -82,12 +82,13 @@ import time
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypeAlias
 
 from jinja2 import TemplateNotFound
 
-from hephaestus.automation.models import IssueInfo
+from hephaestus.automation.models import DEFAULT_STATE_DIR, IssueInfo
 from hephaestus.automation.pipeline import admission as _admission, seeding as _seeding
 from hephaestus.automation.pipeline.events import StageEvent, encode_stage_event
 from hephaestus.automation.pipeline.jobs import AgentJob, JobHandle, JobResult
@@ -205,6 +206,18 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return str(value)
+
+
+def default_event_log_path(projects_dir: Path, repos: list[str]) -> Path:
+    """Return the process-local durable journal path for a pipeline run.
+
+    ``projects_dir`` is accepted so every production entrypoint can derive its
+    journal from the same configuration seam. The journal intentionally lives
+    in the automation state directory rather than inside a repository checkout.
+    """
+    del projects_dir, repos
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return Path(DEFAULT_STATE_DIR) / f"pipeline-events-{stamp}-{time.time_ns()}.jsonl"
 
 
 @dataclass(frozen=True)
@@ -580,9 +593,7 @@ class Coordinator:
 
         return {
             "queue_depths": {name.value: len(queue) for name, queue in self.queues.items()},
-            "queue_capacities": {
-                name.value: queue.capacity for name, queue in self.queues.items()
-            },
+            "queue_capacities": {name.value: queue.capacity for name, queue in self.queues.items()},
             "completion_depth": self.completion_q.qsize(),
             "completion_capacity": self.completion_q.capacity,
             "queue_rejection_totals": dict(self._saturation_totals),
@@ -1246,9 +1257,8 @@ class Coordinator:
 
     def _admit(self, item: WorkItem) -> bool:
         """Admission control: global work window plus per-repo cap."""
-        return (
-            len(self.in_flight) < self._work_window
-            and self.inflight_per_repo[item.repo] < max(1, self.config.max_workers)
+        return len(self.in_flight) < self._work_window and self.inflight_per_repo[item.repo] < max(
+            1, self.config.max_workers
         )
 
     # -- item execution -----------------------------------------------------
@@ -1549,9 +1559,17 @@ class Coordinator:
                 item=item,
                 source="stage_enqueue_rejected",
             )
-            if not is_new:
-                item.stage = stage
-                self._park_resumable(item, reason="stage enqueue rejected")
+            item.stage = stage
+            if is_new:
+                self._seen_item_ids.add(id(item))
+                self.items.append(item)
+                item.payload.setdefault("entry_stage", stage.value)
+            self._park_resumable(item, reason="stage enqueue rejected")
+            if is_new:
+                # A rejected seed is otherwise absent from every coordinator
+                # collection. Stop with a resumable status so callers cannot
+                # mistake an incomplete admission pass for a clean run.
+                self._begin_graceful_shutdown("stage queue saturation")
             return False
         item.stage = stage
         if enter:
@@ -1978,6 +1996,11 @@ def run_pipeline(config: PipelineConfig) -> int:
 
     """
     _preflight_prompt_catalog()
+    if config.event_log_path is None:
+        config = replace(
+            config,
+            event_log_path=default_event_log_path(config.projects_dir, config.repos),
+        )
 
     # Imported here: pipeline_github maps the accessor onto the real gh
     # helpers and must stay out of the pure pipeline import surface.
