@@ -377,17 +377,21 @@ class WorkerPool:
         future.add_done_callback(lambda f: self._on_future_done(handle, f))
         return handle
 
-    def shutdown(self) -> None:
+    def shutdown(self, *, mark_interrupted: bool = True) -> None:
         """Shut down the pool.
 
-        Sets the shutdown event, cancels pending futures, and SIGTERMs every
-        in-flight agent process group. ``executor.shutdown(cancel_futures=True)``
-        only cancels UN-STARTED futures; a job already blocked in a ``claude``
-        subprocess would keep running and pin its non-daemon worker thread
-        (holding the interpreter open at exit — the #2059 leak). Terminating the
-        tracked process groups frees those workers promptly.
+        When ``mark_interrupted`` is true, sets the shutdown event before
+        cancelling pending futures and SIGTERMing every in-flight agent process
+        group. Coordinators pass false for ordinary ``finally`` cleanup so
+        releasing pool resources cannot reclassify a completed run as a signal
+        interruption. ``executor.shutdown(cancel_futures=True)`` only cancels
+        UN-STARTED futures; a job already blocked in a ``claude`` subprocess
+        would keep running and pin its non-daemon worker thread (holding the
+        interpreter open at exit — the #2059 leak). Terminating tracked process
+        groups frees those workers promptly.
         """
-        self._shutdown.set()
+        if mark_interrupted:
+            self._shutdown.set()
         self._executor.shutdown(wait=False, cancel_futures=True)
         subprocess_registry.terminate_all()
 
