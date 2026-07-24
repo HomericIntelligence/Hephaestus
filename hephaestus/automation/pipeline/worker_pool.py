@@ -611,9 +611,90 @@ class WorkerPool:
             git_utils.run(["gh", "repo", "clone", repo, dest], cwd=None, timeout=job.timeout_s)
             return JobResult(ok=True)
 
+        elif job.op == "sync_checkout":
+            return self._git_sync_checkout(job)
+
         else:
             # Should be impossible due to GitJob.__post_init__ validation
             return JobResult(ok=False, error=f"unknown op {job.op!r}")
+
+    def _git_sync_checkout(self, job: GitJob) -> JobResult:
+        """Validate and fast-forward a reusable checkout without discarding local work."""
+        expected_repo = str(job.kwargs.get("repo") or "")
+        dest = str(job.kwargs.get("dest") or "")
+        if not expected_repo or not dest:
+            return JobResult(
+                ok=False,
+                error="sync_checkout requires non-empty 'repo' and 'dest' kwargs",
+            )
+
+        checkout = Path(dest)
+        if not checkout.is_dir():
+            return JobResult(ok=False, error=f"checkout does not exist: {checkout}")
+
+        origin = git_utils.run(
+            ["git", "remote", "get-url", "origin"], cwd=checkout, timeout=job.timeout_s
+        ).stdout.strip()
+        normalized_origin = origin.rstrip("/").removesuffix(".git")
+        expected_origins = {
+            f"https://github.com/{expected_repo}",
+            f"ssh://git@github.com/{expected_repo}",
+            f"git@github.com:{expected_repo}",
+            f"git://github.com/{expected_repo}",
+        }
+        if normalized_origin not in expected_origins:
+            return JobResult(
+                ok=False,
+                error=(
+                    f"checkout has unexpected origin; expected origin {expected_repo}, "
+                    f"found {origin}"
+                ),
+            )
+
+        status = git_utils.run(
+            ["git", "status", "--porcelain"], cwd=checkout, timeout=job.timeout_s
+        )
+        if status.stdout.strip():
+            return JobResult(ok=False, error=f"checkout is dirty: {checkout}")
+
+        branch = git_utils.run(
+            ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+            cwd=checkout,
+            timeout=job.timeout_s,
+        ).stdout.strip()
+        default_ref = git_utils.run(
+            ["git", "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+            cwd=checkout,
+            timeout=job.timeout_s,
+        ).stdout.strip()
+        if not default_ref.startswith("origin/"):
+            return JobResult(ok=False, error=f"checkout has no origin default branch: {checkout}")
+        default_branch = default_ref.removeprefix("origin/")
+        if branch != default_branch:
+            return JobResult(
+                ok=False,
+                error=(
+                    f"checkout is not on its default branch {default_branch}: "
+                    f"currently on {branch or 'detached HEAD'}"
+                ),
+            )
+
+        git_utils.run(
+            ["git", "fetch", "origin", default_branch], cwd=checkout, timeout=job.timeout_s
+        )
+        merge = git_utils.run(
+            ["git", "merge", "--ff-only", f"origin/{default_branch}"],
+            cwd=checkout,
+            check=False,
+            log_errors=False,
+            timeout=job.timeout_s,
+        )
+        if merge.returncode != 0:
+            return JobResult(
+                ok=False,
+                error=f"checkout cannot fast-forward {default_branch} to origin/{default_branch}",
+            )
+        return JobResult(ok=True)
 
     def _git_create_worktree(self, job: GitJob) -> JobResult:
         """Create a worktree and optionally sync an adopted PR branch."""

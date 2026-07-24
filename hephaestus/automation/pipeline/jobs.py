@@ -17,7 +17,15 @@ from typing import Any
 from hephaestus.automation.pipeline.routing import StageName
 
 GIT_OPS: frozenset[str] = frozenset(
-    {"clone", "create_worktree", "remove_worktree", "rebase", "push", "commit_push"}
+    {
+        "clone",
+        "sync_checkout",
+        "create_worktree",
+        "remove_worktree",
+        "rebase",
+        "push",
+        "commit_push",
+    }
 )
 
 

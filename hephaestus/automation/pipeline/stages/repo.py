@@ -8,9 +8,11 @@ Steps:
 
 1. [M] ``on_enter``: ``ctx.github.ensure_state_labels()`` — idempotent label
    vocabulary setup.
-2. [W:G] CLONE_WAIT: ``GitJob(op="clone")`` when the checkout is missing
-   (skipped when already cloned, and logged-skipped under dry-run — the
-   coordinator's ``_submit`` asserts no job is ever submitted in dry-run).
+2. [W:G] CLONE_WAIT: ``GitJob(op="clone")`` when the checkout is missing, or
+   ``GitJob(op="sync_checkout")`` when it already exists. Synchronization
+   validates the expected remote and fast-forwards only a clean default-branch
+   checkout. Both operations are logged-skipped under dry-run — the
+   coordinator's ``_submit`` asserts no job is ever submitted in dry-run.
    Budget ``clone`` = 2; exhaustion -> finished(fail).
 3. [M] DISCOVER: list issues (read-only ``_list_open_issue_meta``), dedup,
    ``partition_epics`` -> tag epics ``state:skip`` via
@@ -173,7 +175,7 @@ class RepoStage(Stage):
         return StageOutcome(Disposition.FINISH_FAIL, note=f"unknown state: {item.state}")
 
     def _clone_or_skip(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """Submit the clone GitJob, or skip when present / dry-run / exhausted."""
+        """Prepare a checkout by cloning or safely synchronizing it."""
         # Clone failure handling (budget clone=2): on_job_done recorded the
         # failure; classify it here so retry re-submits and exhaustion fails.
         if item.payload.pop("clone_failed", False):
@@ -190,12 +192,22 @@ class RepoStage(Stage):
             )
 
         dest = _repo_checkout_path(item, ctx)
-        if dest.exists():
-            logger.info("repo:%s: already cloned at %s", item.repo, dest)
-            return Continue(next_state="DISCOVER")
         if ctx.dry_run:
+            if dest.exists():
+                logger.info("[dry-run] would synchronize %s/%s at %s", ctx.org, item.repo, dest)
+                return Continue(next_state="DISCOVER")
             logger.info("[dry-run] would clone %s/%s to %s", ctx.org, item.repo, dest)
             return Continue(next_state="DISCOVER")
+
+        if dest.exists():
+            job = GitJob(
+                repo=item.repo,
+                op="sync_checkout",
+                timeout_s=GIT_JOB_TIMEOUT_S,
+                kwargs={"repo": f"{ctx.org}/{item.repo}", "dest": str(dest)},
+                descr=f"synchronize {ctx.org}/{item.repo}",
+            )
+            return JobRequest(job=job, on_done_state="DISCOVER")
 
         job = GitJob(
             repo=item.repo,
@@ -294,22 +306,22 @@ class RepoStage(Stage):
         return Continue(next_state="SEEDED")
 
     def on_job_done(self, item: WorkItem, result: JobResult, ctx: StageContext) -> None:
-        """Record clone success/failure (state still CLONE_WAIT).
+        """Record checkout preparation success/failure (state still CLONE_WAIT).
 
         Args:
             item: The repo work item.
-            result: The clone job result.
+            result: The clone or checkout-synchronization job result.
             ctx: Stage context.
 
         """
         if item.state != "CLONE_WAIT":
             return
         if result.ok:
-            logger.info("repo:%s: clone completed", item.repo)
+            logger.info("repo:%s: checkout preparation completed", item.repo)
             return
         item.attempts["clone"] = item.attempts.get("clone", 0) + 1
         item.payload["clone_failed"] = True
-        logger.warning("repo:%s: clone failed: %s", item.repo, result.error)
+        logger.warning("repo:%s: checkout preparation failed: %s", item.repo, result.error)
 
 
 def product_to_work_item(repo: str, product: dict[str, Any]) -> WorkItem | None:

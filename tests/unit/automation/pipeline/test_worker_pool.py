@@ -13,7 +13,7 @@ from collections.abc import Iterator
 from concurrent.futures import Future
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -1339,6 +1339,185 @@ class TestGitOps:
             timeout=120,
         )
         assert result.ok is True
+
+    def test_sync_checkout_fast_forwards_clean_expected_default_branch(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A reusable checkout is verified, fetched, then fast-forwarded before use."""
+        checkout = tmp_path / "checkout"
+        checkout.mkdir()
+        job = GitJob(
+            repo="test/repo",
+            op="sync_checkout",
+            timeout_s=120,
+            kwargs={"repo": "owner/name", "dest": str(checkout)},
+        )
+        with patch("hephaestus.automation.git_utils.run") as mock_run:
+            mock_run.side_effect = [
+                subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
+                subprocess.CompletedProcess([], 0, stdout=""),
+                subprocess.CompletedProcess([], 0, stdout="main\n"),
+                subprocess.CompletedProcess([], 0, stdout="origin/main\n"),
+                subprocess.CompletedProcess([], 0),
+                subprocess.CompletedProcess([], 0),
+            ]
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert mock_run.call_args_list == [
+            call(["git", "remote", "get-url", "origin"], cwd=checkout, timeout=120),
+            call(["git", "status", "--porcelain"], cwd=checkout, timeout=120),
+            call(
+                ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+                cwd=checkout,
+                timeout=120,
+            ),
+            call(
+                ["git", "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+                cwd=checkout,
+                timeout=120,
+            ),
+            call(["git", "fetch", "origin", "main"], cwd=checkout, timeout=120),
+            call(
+                ["git", "merge", "--ff-only", "origin/main"],
+                cwd=checkout,
+                check=False,
+                log_errors=False,
+                timeout=120,
+            ),
+        ]
+        assert result.ok is True
+
+    def test_sync_checkout_rejects_dirty_worktree_before_fetching(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A reused checkout with local changes is never modified by the loop."""
+        checkout = tmp_path / "checkout"
+        checkout.mkdir()
+        job = GitJob(
+            repo="test/repo",
+            op="sync_checkout",
+            timeout_s=120,
+            kwargs={"repo": "owner/name", "dest": str(checkout)},
+        )
+        with patch("hephaestus.automation.git_utils.run") as mock_run:
+            mock_run.side_effect = [
+                subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
+                subprocess.CompletedProcess([], 0, stdout=" M changed.py\n"),
+            ]
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert mock_run.call_args_list == [
+            call(["git", "remote", "get-url", "origin"], cwd=checkout, timeout=120),
+            call(["git", "status", "--porcelain"], cwd=checkout, timeout=120),
+        ]
+        assert result.ok is False
+        assert "dirty" in (result.error or "")
+
+    def test_sync_checkout_rejects_unexpected_origin(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A directory for another repository cannot be mistaken for the target checkout."""
+        checkout = tmp_path / "checkout"
+        checkout.mkdir()
+        job = GitJob(
+            repo="test/repo",
+            op="sync_checkout",
+            timeout_s=120,
+            kwargs={"repo": "owner/name", "dest": str(checkout)},
+        )
+        with patch("hephaestus.automation.git_utils.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                [], 0, stdout="https://github.com/other/project.git\n"
+            )
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        mock_run.assert_called_once_with(
+            ["git", "remote", "get-url", "origin"], cwd=checkout, timeout=120
+        )
+        assert result.ok is False
+        assert "expected origin owner/name" in (result.error or "")
+
+    def test_sync_checkout_rejects_spoofed_github_hostname(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A hostname merely containing ``github.com`` cannot pass origin validation."""
+        checkout = tmp_path / "checkout"
+        checkout.mkdir()
+        job = GitJob(
+            repo="test/repo",
+            op="sync_checkout",
+            timeout_s=120,
+            kwargs={"repo": "owner/name", "dest": str(checkout)},
+        )
+        with patch("hephaestus.automation.git_utils.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                [], 0, stdout="https://evilgithub.com/owner/name.git\n"
+            )
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        mock_run.assert_called_once_with(
+            ["git", "remote", "get-url", "origin"], cwd=checkout, timeout=120
+        )
+        assert result.ok is False
+        assert "expected origin owner/name" in (result.error or "")
+
+    def test_sync_checkout_rejects_checkout_not_on_default_branch(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A reusable feature branch is not silently advanced as though it were main."""
+        checkout = tmp_path / "checkout"
+        checkout.mkdir()
+        job = GitJob(
+            repo="test/repo",
+            op="sync_checkout",
+            timeout_s=120,
+            kwargs={"repo": "owner/name", "dest": str(checkout)},
+        )
+        with patch("hephaestus.automation.git_utils.run") as mock_run:
+            mock_run.side_effect = [
+                subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
+                subprocess.CompletedProcess([], 0, stdout=""),
+                subprocess.CompletedProcess([], 0, stdout="feature\n"),
+                subprocess.CompletedProcess([], 0, stdout="origin/main\n"),
+            ]
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert mock_run.call_args_list == [
+            call(["git", "remote", "get-url", "origin"], cwd=checkout, timeout=120),
+            call(["git", "status", "--porcelain"], cwd=checkout, timeout=120),
+            call(
+                ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+                cwd=checkout,
+                timeout=120,
+            ),
+            call(
+                ["git", "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+                cwd=checkout,
+                timeout=120,
+            ),
+        ]
+        assert result.ok is False
+        assert "not on its default branch" in (result.error or "")
 
     @pytest.mark.parametrize(
         "kwargs",
