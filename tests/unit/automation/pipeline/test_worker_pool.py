@@ -1452,7 +1452,7 @@ class TestGitOps:
                     "http.sslVerify=true",
                     "fetch",
                     "--no-tags",
-                    "https://github.com/owner/name.git",
+                    "origin",
                     "+refs/heads/main:refs/remotes/origin/main",
                 ],
                 cwd=checkout,
@@ -1671,7 +1671,9 @@ class TestGitOps:
         monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
         monkeypatch.setenv("GIT_CONFIG_KEY_0", "credential.helper")
         monkeypatch.setenv("GIT_CONFIG_VALUE_0", "!/unsafe/credential-helper")
+        monkeypatch.setenv("GIT_CONFIG", "/unsafe/git-config")
         monkeypatch.setenv("GIT_CONFIG_PARAMETERS", "credential.helper=!/unsafe/helper")
+        monkeypatch.setenv("GIT_NO_REPLACE_OBJECTS", "0")
         monkeypatch.setenv("PATH", "/unsafe/path")
         job = GitJob(
             repo="test/repo",
@@ -1718,7 +1720,7 @@ class TestGitOps:
             "http.sslVerify=true",
             "fetch",
             "--no-tags",
-            "git@github.com:owner/name.git",
+            "origin",
             "+refs/heads/main:refs/remotes/origin/main",
         ]
         fetch_env = fetch_call.kwargs["env"]
@@ -1741,12 +1743,14 @@ class TestGitOps:
             "GIT_CONFIG_COUNT",
             "GIT_CONFIG_KEY_0",
             "GIT_CONFIG_VALUE_0",
+            "GIT_CONFIG",
             "GIT_CONFIG_PARAMETERS",
         ):
             assert key not in fetch_env
         assert fetch_env["PATH"] == os.defpath
         assert fetch_env["GIT_CONFIG_GLOBAL"] == os.devnull
         assert fetch_env["GIT_CONFIG_NOSYSTEM"] == "1"
+        assert fetch_env["GIT_NO_REPLACE_OBJECTS"] == "1"
         assert mock_run.call_args_list[3] == call(
             [_trusted_gh_executable(), "api", "repos/owner/name", "--jq", ".default_branch"],
             cwd=checkout,
@@ -1756,6 +1760,7 @@ class TestGitOps:
         for git_call in (mock_run.call_args_list[index] for index in (0, 1, 2, 4, 5, 6, 7)):
             assert git_call.kwargs["env"]["GIT_TERMINAL_PROMPT"] == "0"
             assert "GIT_DIR" not in git_call.kwargs["env"]
+            assert git_call.kwargs["env"]["GIT_NO_REPLACE_OBJECTS"] == "1"
         assert result.ok is True
 
     def test_sync_checkout_rejects_executable_local_git_config(
@@ -1800,6 +1805,8 @@ class TestGitOps:
             "http.sslCAInfo\n/unsafe/ca.pem\0",
             "http.proxy\nhttp://unsafe-proxy\0",
             "url.file:///unsafe/.insteadOf\nhttps://github.com/owner/name\0",
+            "credential.https://github.com.helper\n!/unsafe/helper\0",
+            "remote.origin.uploadpack\n/unsafe/upload-pack\0",
             "core.worktree\n/unsafe/worktree\0",
         ),
         ids=(
@@ -1813,6 +1820,8 @@ class TestGitOps:
             "custom-ca",
             "http-proxy",
             "url-rewrite",
+            "url-scoped-credential-helper",
+            "remote-upload-pack",
             "core-worktree",
         ),
     )
@@ -1825,6 +1834,7 @@ class TestGitOps:
         pool: WorkerPool,
         completion_q: CompletionQueue,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Effective config scanning includes a linked worktree's config.worktree."""
         checkout = tmp_path / "checkout"
@@ -1871,6 +1881,9 @@ class TestGitOps:
             capture_output=True,
             text=True,
         )
+        benign_config = tmp_path / "benign-git-config"
+        benign_config.touch()
+        monkeypatch.setenv("GIT_CONFIG", str(benign_config))
         job = GitJob(
             repo="test/repo",
             op="sync_checkout",

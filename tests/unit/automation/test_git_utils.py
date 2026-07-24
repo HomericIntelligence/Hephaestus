@@ -1,5 +1,6 @@
 """Tests for git utility functions."""
 
+import logging
 import subprocess
 import sys
 from collections.abc import Generator
@@ -52,6 +53,17 @@ class TestRun:
 
         assert result.returncode == 0
         assert "hello" in result.stdout
+
+    def test_command_debug_log_does_not_disclose_arguments(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Command diagnostics identify the executable without logging sensitive argv values."""
+        sensitive_argument = "do-not-log-this-command-argument"
+        with caplog.at_level(logging.DEBUG, logger="hephaestus.automation.git_utils"):
+            run(["echo", sensitive_argument], check=True, capture_output=True)
+
+        assert "Running command echo with 1 argument(s)" in caplog.messages
+        assert sensitive_argument not in caplog.text
 
     def test_failed_command_with_check(self) -> None:
         """Test running a failed command with check=True."""

@@ -57,6 +57,7 @@ _FETCH_ENV_BLOCKLIST = frozenset(
     {
         "GIT_ASKPASS",
         "GIT_COMMON_DIR",
+        "GIT_CONFIG",
         "GIT_CONFIG_PARAMETERS",
         "GIT_DIR",
         "GIT_EXEC_PATH",
@@ -96,6 +97,7 @@ def _controlled_git_env() -> dict[str, str]:
             env.pop(key)
     env["GIT_CONFIG_GLOBAL"] = os.devnull
     env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
     env["PATH"] = os.defpath
     env["GIT_PAGER"] = "cat"
     env["GIT_TERMINAL_PROMPT"] = "0"
@@ -136,8 +138,13 @@ def _unsafe_local_git_config_key(config: str) -> str | None:
             "core.gitproxy",
             "core.sshcommand",
             "core.worktree",
-            "credential.helper",
         }:
+            return key
+        if normalized == "credential.helper" or (
+            normalized.startswith("credential.") and normalized.endswith(".helper")
+        ):
+            return key
+        if normalized.startswith("remote.") and normalized.endswith(".uploadpack"):
             return key
         if normalized.startswith(("include.", "includeif.")):
             return key
@@ -830,7 +837,6 @@ class WorkerPool:
         ):
             return self._fast_forward_checkout(
                 checkout=checkout,
-                origin=origin,
                 default_branch=default_branch,
                 gh_command=gh_command,
                 timeout_s=job.timeout_s,
@@ -840,7 +846,6 @@ class WorkerPool:
     def _fast_forward_checkout(
         *,
         checkout: Path,
-        origin: str,
         default_branch: str,
         gh_command: str,
         timeout_s: int,
@@ -881,7 +886,9 @@ class WorkerPool:
                 *fetch_config,
                 "fetch",
                 "--no-tags",
-                origin,
+                # The preflight validates origin before this point.  Fetch it
+                # by name so a remote URL never reaches command debug logs.
+                "origin",
                 f"+refs/heads/{default_branch}:refs/remotes/origin/{default_branch}",
             ],
             cwd=checkout,

@@ -68,7 +68,14 @@ def run(
         subprocess.TimeoutExpired: If timeout is exceeded
 
     """
-    logger.debug("Running command: %s", " ".join(cmd))
+    # Command arguments may contain repository URLs or credential-helper
+    # configuration.  Preserve diagnostic value without ever serializing an
+    # argument value into application logs.
+    logger.debug(
+        "Running command %s with %d argument(s)",
+        cmd[0] if cmd else "<empty>",
+        max(len(cmd) - 1, 0),
+    )
     if cmd and cmd[0] == "git":
         return _shared_run_git(
             cmd,
