@@ -40,9 +40,13 @@ are constructed only when a metrics port is configured.
   `alert_fired` or `alert_resolved` record carrying the alert `name`,
   `severity`, and `message`. These are the lines to cite when escalating.
 
-The alert queue-depth threshold is configurable via
-`PipelineConfig.alert_queue_depth_threshold` (default `100`); the stall
-threshold defaults to `3`, matching the coordinator's own
+The alert queue-depth threshold is configurable as a percentage via
+`PipelineConfig.alert_queue_depth_threshold` (default `100`). It is evaluated
+against each stage's measured capacity, so a full queue is a backlog warning;
+it does not imply rejected work. The critical `queue_saturated` alert fires
+only after an enqueue or completion publication is rejected. Saturation is
+also written as a `queue_saturated` JSONL event through the coordinator event
+log even when `metrics_port=0`. The stall threshold defaults to `3`, matching the coordinator's own
 `_STALL_TICKS_BEFORE_FORCE`.
 
 ## Metrics
@@ -54,6 +58,10 @@ points at the emission chokepoint in `coordinator.py`.
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
 | `hephaestus_pipeline_queue_depth` | gauge | `stage` | Queued work items waiting in each stage queue. |
+| `hephaestus_pipeline_queue_capacity` | gauge | `stage` | Configured capacity for each stage queue. |
+| `hephaestus_pipeline_completion_depth` | gauge | — | Completion results waiting for the coordinator. |
+| `hephaestus_pipeline_completion_capacity` | gauge | — | Configured completion result capacity. |
+| `hephaestus_pipeline_queue_rejections_total` | counter | `queue` | Rejected stage or completion publications. |
 | `hephaestus_pipeline_inflight_jobs` | gauge | — | Jobs currently owned by the worker pool. |
 | `hephaestus_pipeline_inflight_per_repo` | gauge | `repo` | In-flight jobs partitioned by repository. |
 | `hephaestus_pipeline_loops_total` | gauge | — | Reseed passes run by this coordinator process. |
@@ -75,7 +83,8 @@ persistent degradation never produces repeated event spam.
 | Alert | Severity | Condition | Owner | Runbook |
 | --- | --- | --- | --- | --- |
 | `circuit_breaker_open` | critical | Any circuit breaker in the snapshot reports `state == "open"`. | repository maintainer | [`docs/runbooks/automation-loop-crash.md`](runbooks/automation-loop-crash.md) |
-| `queue_depth_exceeds` | warning | Any stage queue depth exceeds `alert_queue_depth_threshold` (default `100`). | repository maintainer | [`docs/runbooks/ci-driver-stall.md`](runbooks/ci-driver-stall.md) |
+| `queue_depth_exceeds` | warning | Any non-empty stage reaches `alert_queue_depth_threshold` percent of capacity (default `100`); backlog does not prove rejection. | repository maintainer | [`docs/runbooks/ci-driver-stall.md`](runbooks/ci-driver-stall.md) |
+| `queue_saturated` | critical | A stage or completion publication is rejected. | repository maintainer | [`docs/runbooks/ci-driver-stall.md`](runbooks/ci-driver-stall.md) |
 | `pipeline_stalled` | warning | `stalled_ticks` reaches the stall threshold (default `3`) — drain ticks with no progress. | repository maintainer | [`docs/runbooks/ci-driver-stall.md`](runbooks/ci-driver-stall.md) |
 
 ## SLOs

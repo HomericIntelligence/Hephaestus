@@ -51,10 +51,9 @@ class TestFakeWorkerPool:
 
     def test_matches_real_constructor_signature(self) -> None:
         """Positional (size, shutdown, completion_q) construction works."""
-        import queue
         import threading
 
-        q: CompletionQueue = queue.Queue()
+        q = CompletionQueue(capacity=2)
         event = threading.Event()
         fake = FakeWorkerPool(2, event, q)
         assert fake.size == 2
@@ -118,7 +117,7 @@ class TestFakeWorkerPool:
 
     def test_handles_are_unique_per_submit(self) -> None:
         """Identical job specs still yield distinct, dict-keyable handles."""
-        fake = FakeWorkerPool()
+        fake = FakeWorkerPool(size=2, completion_q=CompletionQueue(capacity=2))
         _, _, git, _ = _jobs()
         h1 = fake.submit(git, StageName.PR_REVIEW)
         h2 = fake.submit(git, StageName.PR_REVIEW)

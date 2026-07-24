@@ -307,7 +307,7 @@ def _run_load(
     duration_s: float | None,
 ) -> _LoadReport:
     """Exercise the real worker-pool completion path with bounded synthetic work."""
-    completion_q: CompletionQueue = queue.Queue()
+    completion_q = CompletionQueue(capacity=config.max_in_flight)
     shutdown = threading.Event()
     tracker = _Tracker()
     pool = WorkerPool(size=config.workers, shutdown=shutdown, completion_q=completion_q)

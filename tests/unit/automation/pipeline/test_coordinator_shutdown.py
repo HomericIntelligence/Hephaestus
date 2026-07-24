@@ -269,13 +269,15 @@ class TestInterruptSemantics:
         assert coordinator.shutdown.is_set()
         assert coordinator._grace_deadline is not None
         assert coordinator._immediate is False
-        assert not coordinator.completion_q.empty()
-        coordinator._drain_completions()
+        assert coordinator._completion_wake.is_set()
         assert coordinator.completion_q.empty()
+        coordinator._drain_completions()
+        assert not coordinator._completion_wake.is_set()
 
         handler(signal_mod.SIGTERM, None)
         assert coordinator._immediate is True
-        assert not coordinator.completion_q.empty()
+        assert coordinator._completion_wake.is_set()
+        assert coordinator.completion_q.empty()
 
 
 class TestNormalTeardownExitSemantics:

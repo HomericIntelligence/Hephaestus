@@ -20,6 +20,7 @@ from hephaestus.automation.pipeline.coordinator import (
     Coordinator,
     PipelineConfig,
 )
+from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
@@ -46,9 +47,14 @@ def clocked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Coordinato
         SimpleNamespace(monotonic=clock.monotonic, time=lambda: clock.now),
     )
     monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
-    config = PipelineConfig(org="org", repos=["repo-a"], projects_dir=tmp_path)
+    config = PipelineConfig(
+        org="org", repos=["repo-a"], projects_dir=tmp_path, parallel_repos=3
+    )
     coordinator = Coordinator(
-        config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        config,
+        github=FakeStageGitHub(),
+        pool=FakeWorkerPool(size=3, completion_q=CompletionQueue(capacity=3)),
+        install_signals=False,
     )
     return coordinator, clock
 

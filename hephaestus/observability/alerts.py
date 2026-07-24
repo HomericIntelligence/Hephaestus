@@ -31,8 +31,8 @@ def evaluate_alerts(
     coordinator. Returned events describe active conditions;
     :class:`AlertTracker` turns those into fire/resolve transitions.
     """
-    if queue_depth_threshold < 0:
-        raise ValueError("queue depth threshold must be non-negative")
+    if not 0 <= queue_depth_threshold <= 100:
+        raise ValueError("queue depth threshold must be between 0 and 100")
     if stalled_ticks_threshold < 0:
         raise ValueError("stalled ticks threshold must be non-negative")
     events: list[AlertEvent] = []
@@ -54,13 +54,19 @@ def evaluate_alerts(
             )
 
     raw_depths = snapshot.get("queue_depths", {})
+    raw_capacities = snapshot.get("queue_capacities", {})
     if isinstance(raw_depths, Mapping):
         exceeded: list[str] = []
         for stage, depth in raw_depths.items():
+            capacity = raw_capacities.get(stage) if isinstance(raw_capacities, Mapping) else None
             if (
                 isinstance(depth, (int, float))
                 and not isinstance(depth, bool)
-                and depth > queue_depth_threshold
+                and isinstance(capacity, int)
+                and not isinstance(capacity, bool)
+                and capacity > 0
+                and depth > 0
+                and depth * 100 >= capacity * queue_depth_threshold
             ):
                 exceeded.append(str(stage))
         if exceeded:
@@ -69,10 +75,22 @@ def evaluate_alerts(
                     name="queue_depth_exceeds",
                     severity="warning",
                     status="fired",
-                    message=f"queue depth exceeds {queue_depth_threshold}: "
+                    message=f"queue depth reaches {queue_depth_threshold}% of capacity: "
                     f"{', '.join(sorted(exceeded))}",
                 )
             )
+
+    raw_saturated = snapshot.get("saturated_queues", [])
+    if isinstance(raw_saturated, (list, tuple, set, frozenset)) and raw_saturated:
+        saturated = sorted(str(queue_name) for queue_name in raw_saturated)
+        events.append(
+            AlertEvent(
+                name="queue_saturated",
+                severity="critical",
+                status="fired",
+                message=f"queue rejections observed: {', '.join(saturated)}",
+            )
+        )
 
     raw_stalled = snapshot.get("stalled_ticks")
     if (
@@ -98,8 +116,8 @@ class AlertTracker:
         self, *, queue_depth_threshold: int = 100, stalled_ticks_threshold: int = 3
     ) -> None:
         """Create a tracker with the coordinator's alert thresholds."""
-        if queue_depth_threshold < 0:
-            raise ValueError("queue depth threshold must be non-negative")
+        if not 0 <= queue_depth_threshold <= 100:
+            raise ValueError("queue depth threshold must be between 0 and 100")
         if stalled_ticks_threshold < 0:
             raise ValueError("stalled ticks threshold must be non-negative")
         self._queue_depth_threshold = queue_depth_threshold

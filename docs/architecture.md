@@ -173,8 +173,14 @@ thread lock, outer) **and**
 operations on the same checkout would race.
 The only cross-thread channel is
 [`CompletionQueue`](hephaestus/automation/pipeline/queues.py)
-(`queue.Queue[(JobHandle, JobResult)]`); its blocking
-`get(timeout=…)` is the loop's idle sleep
+(`queue.Queue[(JobHandle, JobResult)]`). Let
+`C = max(1, parallel_repos × max_workers)`: every stage queue and the result
+queue has capacity `C`, and global admission keeps at most `C` handles in
+flight. A completion publication never blocks a worker. When the result queue
+is full, the rejected `(JobHandle, JobResult)` enters a separate bounded
+mailbox of capacity `C` for coordinator-owned terminalization. Signal wakes
+use a coalesced out-of-band latch and consume no result capacity. The
+coordinator's bounded poll is the loop's idle sleep
 ([`_wait_for_completion`](hephaestus/automation/pipeline/coordinator.py)).
 Poll interval = [`_IDLE_POLL_S = 1.0`](hephaestus/automation/pipeline/coordinator.py).
 Pool size = `parallel_repos × max_workers`
@@ -272,6 +278,9 @@ A first signal sets `shutdown` and starts a graceful drain window
 The coordinator stops admitting new work, drains in-flight to RESUMABLE and parks touched items at their current stage. A second signal or an
 expired grace window, tears the pool down immediately and the coordinator
 synthesizes interrupted results for remaining in-flight jobs.
+Completion publication rejection starts the same grace-bounded shutdown after
+the coordinator parks the exact rejected item. If the bounded rejection
+mailbox overflows, immediate teardown parks every remaining in-flight item.
 Items touched by an interrupt report
 `ItemResult(passed=False, reason="resumable at <stage>", …)` — **never** FAILED. The
 end-of-run summary lists them under `RESUMABLE at <stage>`. Resume is
@@ -1105,8 +1114,13 @@ log; error message truncated to 500 chars.
 
 ### Completion contract
 
-Every non-cancelled `submit()` produces EXACTLY ONE
-`(JobHandle, JobResult)` tuple on the completion queue
+Every non-cancelled `submit()` produces one completion outcome: a successful
+publication places exactly one `(JobHandle, JobResult)` tuple on the bounded
+completion queue; a full queue places that tuple in the bounded rejection
+mailbox. The coordinator consumes rejected outcomes before normal results,
+records a durable `queue_saturated` event, removes the exact handle from
+`in_flight`, and parks its item RESUMABLE. If the rejection mailbox is also
+full, the coordinator parks all remaining live work immediately.
 ([`_on_future_done`](hephaestus/automation/pipeline/worker_pool.py)).
 Normal job failures are converted to error results in `_run`; anything
 that escapes `future.result()` (exception + process-control escapes
@@ -1233,6 +1247,10 @@ state-transition is rendered as zero, not as stale active work.
 | Gauge | Type | Labels | Default | Semantics |
 |-------------------------------------------|--------|-----------|---------|-----------|
 | `hephaestus_pipeline_queue_depth` | Gauge | `stage` | `0` | Item count per pipeline stage. Useful for detecting back-pressure. |
+| `hephaestus_pipeline_queue_capacity` | Gauge | `stage` | `C` | Configured capacity for each stage queue. |
+| `hephaestus_pipeline_completion_depth` | Gauge | — | `0` | Completion results waiting for the coordinator. |
+| `hephaestus_pipeline_completion_capacity` | Gauge | — | `C` | Configured result-queue capacity. |
+| `hephaestus_pipeline_queue_rejections_total` | Counter | `queue` | `0` | Rejected stage or completion publications. |
 | `hephaestus_pipeline_inflight_jobs` | Gauge | (none) | `0` | Total in-flight jobs across all worker pools. |
 | `hephaestus_pipeline_inflight_per_repo` | Gauge | `repo` | `0` | In-flight jobs by repo, capped by `max_workers`. |
 | `hephaestus_circuit_breaker_state` | Gauge | `name`,`state` | `0` | `1` for the active state, `0` for prior states (only emitted from the optional `circuit_breaker_snapshot_provider`). |
@@ -1255,9 +1273,9 @@ Emitted events drive `hephaestus_pipeline_alert_active` and a durable
 
 - **Default trigger**: queue-depth threshold is read from
  [`PipelineConfig.alert_queue_depth_threshold`](hephaestus/automation/pipeline/coordinator.py)
- (int, non-negative; the CLI tool validates this in `[tool.coverage]`-style
- pre-flight before it ever reaches the coordinator). The constructor
- fails fast on a negative input.
+ (a percentage in `[0, 100]`; the constructor fails fast outside that range).
+ It is compared with each stage's measured capacity, so the default `100`
+ fires when a non-empty stage is full.
 - **Default value**: 100. Operators tune via `--alert-queue-depth-threshold N`
  on `hephaestus-automation-loop`.
 - **Resolution events**: an alert transitions to `resolved` when the depth

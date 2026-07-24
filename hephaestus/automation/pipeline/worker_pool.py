@@ -1,8 +1,8 @@
 """Worker pool: the only place agent, build/test, git, and session work runs.
 
 The coordinator submits frozen jobs and drains ``(handle, result)`` tuples from
-the completion queue. Workers never touch WorkItems or stage queues and never
-perform GitHub API mutations (enforced by test_pipeline_architecture.py).
+the bounded completion queue. Workers never touch WorkItems or stage queues and
+never perform GitHub API mutations (enforced by test_pipeline_architecture.py).
 """
 
 from __future__ import annotations
@@ -323,6 +323,9 @@ class WorkerPool:
         )
         self._shutdown = shutdown
         self._completion_q = completion_q
+        # Public for coordinator wiring and test doubles; the private alias is
+        # retained for the worker callback's internal channel use.
+        self.completion_q = completion_q
         self._repo_locks: dict[str, _RepoLockEntry] = {}
         self._repo_locks_guard = threading.Lock()
         self._lock_dir = lock_dir
@@ -399,13 +402,15 @@ class WorkerPool:
         """Drain result to completion queue when a job future completes.
 
         If the future was cancelled, do not emit a completion (the coordinator
-        synthesizes one later). For every OTHER outcome a completion MUST be
-        queued: ``_run`` already converts normal job failures into error
+        synthesizes one later). For every OTHER outcome the callback attempts a
+        non-blocking completion publication: ``_run`` already converts normal
+        job failures into error
         results, and anything that still escapes ``future.result()`` -- any
         ``Exception`` plus the process-control escapes ``KeyboardInterrupt``,
         ``SystemExit``, and ``GeneratorExit`` -- is converted here to a
-        ``worker_crash`` result so a non-cancelled submit never silently loses
-        its completion. Process-control escapes are logged without traceback at
+        ``worker_crash`` result. A full completion queue retains a rejected
+        result in its bounded coordinator mailbox and requests shutdown without
+        blocking this worker. Process-control escapes are logged without traceback at
         warning/info severity; genuine ``Exception`` crashes keep
         ``logger.exception``. ``KeyboardInterrupt`` is intentionally NOT
         re-raised after queuing: this callback runs on an executor worker
@@ -438,7 +443,12 @@ class WorkerPool:
                 error=f"worker_crash: {type(exc).__name__}: {exc!s}"[:_ERR_MAX],
                 worker_id=worker_id,
             )
-        self._completion_q.put((handle, result))
+        if not self._completion_q.offer((handle, result)):
+            logger.critical(
+                "completion queue rejected result for %s; coordinator will park resumable work",
+                handle,
+            )
+            self._shutdown.set()
 
     def _run(
         self,

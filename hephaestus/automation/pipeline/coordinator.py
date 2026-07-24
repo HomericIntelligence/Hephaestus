@@ -155,8 +155,6 @@ _MAX_STEPS_PER_TICK = 100
 #: cycles terminate even if a stage's own bookkeeping has a bug.
 _FAIL_BACK_CAP = sum(sum(route.budgets.values()) for route in ROUTES.values())
 
-_WAKE_HANDLE = object()
-
 _PROMPT_PREFLIGHT_TEMPLATE = "shared/untrusted_notice.j2"
 _PROMPT_PREFLIGHT_ERROR = "ERROR: Prompt templates missing or unreadable — reinstall: `uv sync`."
 
@@ -249,7 +247,7 @@ class PipelineConfig:
     # validated at the CLI boundary and again by MetricsHTTPServer on use.
     metrics_port: int = 0
     # Alerts are emitted only from measured queue depths and circuit-breaker
-    # snapshots. Keep the threshold explicit and non-negative.
+    # snapshots. The queue threshold is a capacity percentage in [0, 100].
     alert_queue_depth_threshold: int = 100
     # A product-layer caller supplies the library breaker snapshot reader. The
     # coordinator remains a zero-I/O pipeline module and never imports the
@@ -349,7 +347,8 @@ class Coordinator:
         self.github = github
         self._github_factory = github_factory
         self.shutdown = threading.Event()
-        self.completion_q: CompletionQueue = queue_mod.Queue()
+        self._work_window = max(1, config.parallel_repos * config.max_workers)
+        self.completion_q = CompletionQueue(capacity=self._work_window)
         if pool is None:
             # Imported here, not module-top: WorkerPool is the pipeline's one
             # I/O-capable module and tests never need it.
@@ -362,11 +361,19 @@ class Coordinator:
             )
         else:
             # Share channels with an injected pool when it exposes them.
-            if getattr(pool, "completion_q", None) is not None:
-                self.completion_q = pool.completion_q
+            injected_queue = getattr(pool, "completion_q", None)
+            if injected_queue is None:
+                raise TypeError("injected worker pool must expose completion_q")
+            if getattr(injected_queue, "capacity", None) != self._work_window:
+                raise ValueError(
+                    "injected completion queue capacity must match coordinator work window"
+                )
+            self.completion_q = injected_queue
         self.pool: Any = pool
 
-        self.queues: dict[StageName, StageQueue] = {name: StageQueue() for name in StageName}
+        self.queues: dict[StageName, StageQueue] = {
+            name: StageQueue(capacity=self._work_window) for name in StageName
+        }
         self.timers: list[tuple[float, int, WorkItem]] = []
         self.in_flight: dict[JobHandle, WorkItem] = {}
         self.inflight_per_repo: Counter[str] = Counter()
@@ -375,6 +382,10 @@ class Coordinator:
         self.items: list[WorkItem] = []
         self.event_log: list[tuple[Any, ...]] = []
         self._event_log_disabled = False
+        self._completion_wake = threading.Event()
+        self._saturated_queues: set[str] = set()
+        self._saturation_totals: Counter[str] = Counter()
+        self._exported_saturation_totals: Counter[str] = Counter()
         # Observability is opt-in.  Keep imports and all socket setup out of
         # the default construction path so the product layer retains its
         # zero-I/O import contract.
@@ -531,6 +542,30 @@ class Coordinator:
             logger.warning("failed to write pipeline event log %s: %s", path, exc)
             self._event_log_disabled = True
 
+    def _record_queue_saturation(
+        self,
+        *,
+        queue: str,
+        capacity: int,
+        item: WorkItem | None = None,
+        source: str,
+        fatal: bool = False,
+    ) -> None:
+        """Record a bounded queue rejection in memory and the optional journal."""
+        self._saturation_totals[queue] += 1
+        self._saturated_queues.add(queue)
+        fields: dict[str, Any] = {
+            "queue": queue,
+            "capacity": capacity,
+            "source": source,
+            "rejections": self._saturation_totals[queue],
+        }
+        if item is not None:
+            fields["item"] = self._item_key(item)
+        if fatal:
+            fields["fatal"] = True
+        self._record_event("queue_saturated", fields)
+
     def _observability_snapshot(self) -> dict[str, Any]:
         """Read the coordinator lifecycle values that observability exposes."""
         circuit_breakers: dict[str, dict[str, Any]] = {}
@@ -545,6 +580,13 @@ class Coordinator:
 
         return {
             "queue_depths": {name.value: len(queue) for name, queue in self.queues.items()},
+            "queue_capacities": {
+                name.value: queue.capacity for name, queue in self.queues.items()
+            },
+            "completion_depth": self.completion_q.qsize(),
+            "completion_capacity": self.completion_q.capacity,
+            "queue_rejection_totals": dict(self._saturation_totals),
+            "saturated_queues": sorted(self._saturated_queues),
             "inflight_per_repo": dict(self.inflight_per_repo),
             "inflight_jobs": len(self.in_flight),
             "circuit_breakers": circuit_breakers,
@@ -563,6 +605,7 @@ class Coordinator:
         registry = self._metrics_registry
         tracker = self._alert_tracker
         if registry is None or tracker is None:
+            self._saturated_queues.clear()
             return
         snapshot = self._observability_snapshot()
         for stage, depth in snapshot["queue_depths"].items():
@@ -570,6 +613,29 @@ class Coordinator:
                 "hephaestus_pipeline_queue_depth",
                 "Queued pipeline work items by stage.",
             ).set(depth, labels={"stage": stage})
+        for stage, capacity in snapshot["queue_capacities"].items():
+            registry.gauge(
+                "hephaestus_pipeline_queue_capacity",
+                "Configured pipeline queue capacity by stage.",
+            ).set(capacity, labels={"stage": stage})
+        registry.gauge(
+            "hephaestus_pipeline_completion_depth",
+            "Completion results waiting for the coordinator.",
+        ).set(snapshot["completion_depth"])
+        registry.gauge(
+            "hephaestus_pipeline_completion_capacity",
+            "Configured completion queue capacity.",
+        ).set(snapshot["completion_capacity"])
+        rejection_totals = registry.counter(
+            "hephaestus_pipeline_queue_rejections_total",
+            "Rejected stage or completion queue publications by queue.",
+        )
+        for queue_name, total in snapshot["queue_rejection_totals"].items():
+            # Counter samples are cumulative, so only add the delta since the
+            # last snapshot rather than re-emitting the process total.
+            previous = self._exported_saturation_totals.get(queue_name, 0)
+            rejection_totals.inc(total - previous, labels={"queue": queue_name})
+            self._exported_saturation_totals[queue_name] = total
         registry.gauge(
             "hephaestus_pipeline_inflight_jobs",
             "Pipeline jobs currently owned by the worker pool.",
@@ -628,10 +694,11 @@ class Coordinator:
                     "message": event.message,
                 },
             )
+        self._saturated_queues.clear()
 
     def _wake_completion_wait(self) -> None:
-        """Wake the coordinator if it is blocked in completion_q.get()."""
-        self.completion_q.put((_WAKE_HANDLE, JobResult(ok=False, interrupted=True, error="wake")))
+        """Wake the coordinator without consuming a completion queue slot."""
+        self._completion_wake.set()
 
     # -- run loop ---------------------------------------------------------------
 
@@ -664,6 +731,8 @@ class Coordinator:
                 self._drain_completions()
                 self._emit_observability_tick()
                 if self.shutdown.is_set():
+                    if self._grace_deadline is None:
+                        self._begin_graceful_shutdown("external shutdown request")
                     # Graceful: stop admitting; drain in-flight to RESUMABLE.
                     if not self.in_flight:
                         break
@@ -824,26 +893,87 @@ class Coordinator:
 
     def _drain_completions(self) -> None:
         """Drain ALL ready completions without blocking."""
+        if self._drain_completion_rejections():
+            return
+        if self._completion_wake.is_set():
+            self._completion_wake.clear()
+            self._record_event("wake", "completion_q")
         while True:
+            if self._drain_completion_rejections():
+                return
             try:
                 handle, result = self.completion_q.get_nowait()
             except queue_mod.Empty:
                 return
-            if handle is _WAKE_HANDLE:
-                self._record_event("wake", "completion_q")
-                continue
             self._handle_completion(handle, result)
 
     def _wait_for_completion(self, timeout: float) -> None:
         """Block up to *timeout* for one completion; handle it if one arrives."""
-        try:
-            handle, result = self.completion_q.get(timeout=timeout)
-        except queue_mod.Empty:
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            if self._drain_completion_rejections():
+                return
+            if self._completion_wake.is_set():
+                self._completion_wake.clear()
+                self._record_event("wake", "completion_q")
+                return
+            try:
+                handle, result = self.completion_q.get_nowait()
+            except queue_mod.Empty:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return
+                # Queue.get() cannot observe the out-of-band wake latch. A
+                # short Event wait keeps signal shutdown responsive while the
+                # non-blocking queue poll handles worker completions.
+                self._completion_wake.wait(timeout=min(remaining, 0.05))
+                continue
+            self._handle_completion(handle, result)
             return
-        if handle is _WAKE_HANDLE:
-            self._record_event("wake", "completion_q")
-            return
-        self._handle_completion(handle, result)
+
+    def _drain_completion_rejections(self) -> bool:
+        """Terminalize rejected completions before normal result processing."""
+        rejected, mailbox_overflowed = self.completion_q.take_rejections()
+        for rejection in rejected:
+            item = self.in_flight.pop(rejection.handle, None)
+            if item is None:
+                continue
+            self._release_inflight(item)
+            self._record_queue_saturation(
+                queue="completion",
+                capacity=self.completion_q.capacity,
+                item=item,
+                source="completion_publish_rejected",
+            )
+            self._park_resumable(item, reason="completion publication rejected")
+        if mailbox_overflowed:
+            self._record_queue_saturation(
+                queue="completion",
+                capacity=self.completion_q.capacity,
+                source="completion_rejection_mailbox_overflow",
+                fatal=True,
+            )
+            self._teardown_immediate()
+            return True
+        if rejected:
+            self._begin_graceful_shutdown("completion queue saturation")
+        return False
+
+    def _begin_graceful_shutdown(self, reason: str) -> None:
+        """Start a grace-bounded shutdown for any externally requested stop."""
+        self.shutdown.set()
+        if self._grace_deadline is None:
+            self._grace_deadline = time.monotonic() + max(0.0, self.config.grace_s)
+            self._record_event(
+                "shutdown_requested",
+                {"reason": reason, "grace_s": max(0.0, self.config.grace_s)},
+            )
+
+    def _release_inflight(self, item: WorkItem) -> None:
+        """Release one item from the coordinator's in-flight counters."""
+        self.inflight_per_repo[item.repo] -= 1
+        if self.inflight_per_repo[item.repo] <= 0:
+            del self.inflight_per_repo[item.repo]
 
     def _handle_completion(self, handle: JobHandle, result: JobResult) -> None:
         """Route one completed job back to its item.
@@ -873,9 +1003,7 @@ class Coordinator:
                 **self._job_result_event_fields(result),
             },
         )
-        self.inflight_per_repo[item.repo] -= 1
-        if self.inflight_per_repo[item.repo] <= 0:
-            del self.inflight_per_repo[item.repo]
+        self._release_inflight(item)
         if isinstance(handle.job, AgentJob):
             self._agent_job_count += 1
             self._agent_job_time_s += result.duration_s
@@ -927,19 +1055,22 @@ class Coordinator:
             return
         self._run_item(item)
 
-    def _park_resumable(self, item: WorkItem) -> None:
+    def _park_resumable(self, item: WorkItem, *, reason: str | None = None) -> None:
         """Park *item* as RESUMABLE at its current stage (interrupt semantics).
 
         Never FAILED: durable writes precede queue pushes, so a restart's
         seeding reconstruction resumes exactly here with no shutdown
         bookkeeping.
         """
+        resumable_reason = f"resumable at {item.stage.value}"
+        if reason:
+            resumable_reason = f"{resumable_reason}: {reason}"
         item.result = ItemResult(
             passed=False,
-            reason=f"resumable at {item.stage.value}",
+            reason=resumable_reason,
             final_stage=item.stage,
         )
-        item.add_history_event(item.stage, item.state, note="interrupted; resumable")
+        item.add_history_event(item.stage, item.state, note=reason or "interrupted; resumable")
         self._record_event("resumable", self._item_key(item), item.stage.value, item.state)
         logger.info(
             "interrupt: item %s RESUMABLE at %s (never failed)",
@@ -987,7 +1118,7 @@ class Coordinator:
                     return
                 item = q.pop()
                 if not self._admit(item):
-                    q.push(item)
+                    self._push_item(item, stage_name, enter=False)
                     continue
                 self._record_event("drain", stage_name.value, self._item_key(item))
                 self._run_item(item)
@@ -1051,7 +1182,7 @@ class Coordinator:
         # Preserve original queue order for deferred / non-admitted / non-issue items.
         for it in items:
             if id(it) not in ran:
-                q.push(it)
+                self._push_item(it, StageName.IMPLEMENTATION, enter=False)
 
     def _dedup_implementation_items(self, items: list[WorkItem]) -> list[WorkItem]:
         """Drop transient duplicate work items, keyed by ``(repo, issue)`` (#2057).
@@ -1114,8 +1245,11 @@ class Coordinator:
         return issue_items, ambiguous
 
     def _admit(self, item: WorkItem) -> bool:
-        """Admission control: per-repo in-flight cap (O(1) Counter lookup)."""
-        return self.inflight_per_repo[item.repo] < max(1, self.config.max_workers)
+        """Admission control: global work window plus per-repo cap."""
+        return (
+            len(self.in_flight) < self._work_window
+            and self.inflight_per_repo[item.repo] < max(1, self.config.max_workers)
+        )
 
     # -- item execution -----------------------------------------------------
 
@@ -1361,9 +1495,12 @@ class Coordinator:
                     reason=product.get("reason", "already finished"),
                     final_stage=StageName.FINISHED,
                 )
+                self._push_item(new_item, new_item.stage, enter=True)
             elif new_item.stage is not StageName.REPO:
-                self._pass_work_count += 1
-            self._push_item(new_item, new_item.stage, enter=True)
+                if self._push_item(new_item, new_item.stage, enter=True):
+                    self._pass_work_count += 1
+            else:
+                self._push_item(new_item, new_item.stage, enter=True)
 
     def _live_issue_keys(self) -> set[tuple[str, int]]:
         """Return ``(repo, issue)`` keys currently queued (any stage) or in-flight.
@@ -1382,7 +1519,7 @@ class Coordinator:
                 keys.add((it.repo, it.issue))
         return keys
 
-    def _push_item(self, item: WorkItem, stage: StageName, enter: bool) -> None:
+    def _push_item(self, item: WorkItem, stage: StageName, enter: bool) -> bool:
         """Push *item* into *stage*'s queue (the single push chokepoint).
 
         Every durable GitHub mutation for this transition already happened
@@ -1402,18 +1539,31 @@ class Coordinator:
             and (item.repo, item.issue) in self._live_issue_keys()
         ):
             logger.info("seed skipped: #%s already queued/in-flight in %s", item.issue, item.repo)
-            return
+            return False
+        is_new = id(item) not in self._seen_item_ids
+        queue = self.queues[stage]
+        if not queue.push(item):
+            self._record_queue_saturation(
+                queue=stage.value,
+                capacity=queue.capacity,
+                item=item,
+                source="stage_enqueue_rejected",
+            )
+            if not is_new:
+                item.stage = stage
+                self._park_resumable(item, reason="stage enqueue rejected")
+            return False
         item.stage = stage
         if enter:
             item.state = "ENTER"
             item.payload["_enter_pending"] = True
             item.add_history_event(stage, item.state, note="enqueued")
-        if id(item) not in self._seen_item_ids:
+        if is_new:
             self._seen_item_ids.add(id(item))
             self.items.append(item)
             item.payload.setdefault("entry_stage", stage.value)
-        self.queues[stage].push(item)
         self._record_event("push", stage.value, self._item_key(item))
+        return True
 
     @staticmethod
     def _item_key(item: WorkItem) -> str:
@@ -1450,14 +1600,14 @@ class Coordinator:
                 logger.info("seed excluded: %s", entry.reason)
                 continue
             item = self._entry_to_item(entry, self.config.repos[0] if self.config.repos else "")
-            if item.stage not in (StageName.REPO, StageName.FINISHED):
-                self._pass_work_count += 1
             if item.stage is StageName.FINISHED and item.result is None:
                 item.result = ItemResult(
                     passed=entry.passed, reason=entry.reason, final_stage=StageName.FINISHED
                 )
-            self._push_item(item, item.stage, enter=True)
-            pushed += 1
+            if self._push_item(item, item.stage, enter=True):
+                if item.stage not in (StageName.REPO, StageName.FINISHED):
+                    self._pass_work_count += 1
+                pushed += 1
         return pushed
 
     def _clamp_seed_stage_to_scope(
@@ -1756,8 +1906,7 @@ class Coordinator:
                     signum,
                     self.config.grace_s,
                 )
-                self.shutdown.set()
-                self._grace_deadline = time.monotonic() + self.config.grace_s
+                self._begin_graceful_shutdown(f"signal {signum}")
                 self._wake_completion_wait()
 
         sigs = [signal.SIGINT, signal.SIGTERM]

@@ -13,7 +13,7 @@ import json
 import logging
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -31,6 +31,7 @@ from hephaestus.automation.pipeline.events import (
     ZeroThreadNogoAction,
 )
 from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobHandle, JobResult
+from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.routing import (
     Disposition,
     PipelineScope,
@@ -108,12 +109,17 @@ def make_coordinator(
         repos=repos if repos is not None else ["repo-a"],
         loops=loops,
         max_workers=max_workers,
+        parallel_repos=2,
         dry_run=dry_run,
         serialize_file_overlap=serialize_file_overlap,
         projects_dir=tmp_path,
     )
     gh = github or FakeStageGitHub()
-    pool = FakeWorkerPool()
+    work_window = max(1, config.parallel_repos * config.max_workers)
+    pool = FakeWorkerPool(
+        size=work_window,
+        completion_q=CompletionQueue(capacity=work_window),
+    )
     passes = deque(seed_entries or [[]])
 
     def fake_seed(repos_arg: Any, issues_arg: Any, prs_arg: Any) -> list[SeedEntry]:
@@ -1790,8 +1796,13 @@ class TestPipelineScopeWiring:
             "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
             fake_filter,
         )
-        config = self._scoped_config(tmp_path, issues=[1, 2, 3])
-        coordinator = Coordinator(config, github=gh, pool=FakeWorkerPool(), install_signals=False)
+        config = replace(self._scoped_config(tmp_path, issues=[1, 2, 3]), parallel_repos=2)
+        coordinator = Coordinator(
+            config,
+            github=gh,
+            pool=FakeWorkerPool(size=2, completion_q=CompletionQueue(capacity=2)),
+            install_signals=False,
+        )
 
         assert coordinator._seed_pass() == 2
         assert [item.issue for item in coordinator.items] == [1, 3]

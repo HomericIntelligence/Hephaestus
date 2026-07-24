@@ -109,6 +109,30 @@ def test_shutdown_can_reap_without_marking_interrupted(
     assert not shutdown_event.is_set()
 
 
+def test_full_completion_queue_never_blocks_worker_callback() -> None:
+    """A full result channel requests shutdown and retains the rejected result."""
+    shutdown = threading.Event()
+    completion_q = CompletionQueue(capacity=1)
+    pool = WorkerPool(size=1, shutdown=shutdown, completion_q=completion_q)
+    existing_handle = JobHandle(job=_agent_job(issue=1), on_done_state="VERIFY")
+    handle = JobHandle(job=_agent_job(issue=2), on_done_state="VERIFY")
+    future: Future[JobResult] = Future()
+    future.set_result(JobResult(ok=True, value="done"))
+
+    try:
+        assert completion_q.offer((existing_handle, JobResult(ok=True)))
+        started = time.monotonic()
+        pool._on_future_done(handle, future)
+        assert time.monotonic() - started < 1.0
+    finally:
+        pool.shutdown(mark_interrupted=False)
+
+    rejected, overflowed = completion_q.take_rejections()
+    assert shutdown.is_set()
+    assert [entry.handle for entry in rejected] == [handle]
+    assert overflowed is False
+
+
 class TestWorkerPoolSubmitComplete:
     """Tests for basic submit/complete workflow."""
 

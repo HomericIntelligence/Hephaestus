@@ -10,15 +10,22 @@ import pytest
 def test_alert_tracker_emits_one_fire_and_one_resolution() -> None:
     """Persistent degradation produces no repeated alert-event spam."""
     alerts = importlib.import_module("hephaestus.observability.alerts")
-    tracker = alerts.AlertTracker(queue_depth_threshold=2)
+    tracker = alerts.AlertTracker(queue_depth_threshold=100)
     unhealthy = {
         "queue_depths": {"planning": 3},
+        "queue_capacities": {"planning": 3},
         "circuit_breakers": {"github": {"state": "open"}},
     }
 
     fired = tracker.observe(unhealthy)
     repeated = tracker.observe(unhealthy)
-    resolved = tracker.observe({"queue_depths": {"planning": 0}, "circuit_breakers": {}})
+    resolved = tracker.observe(
+        {
+            "queue_depths": {"planning": 0},
+            "queue_capacities": {"planning": 3},
+            "circuit_breakers": {},
+        }
+    )
 
     assert {(event.name, event.status) for event in fired} == {
         ("circuit_breaker_open", "fired"),
@@ -71,3 +78,28 @@ def test_negative_stalled_threshold_rejected() -> None:
         alerts.evaluate_alerts({}, stalled_ticks_threshold=-1)
     with pytest.raises(ValueError):
         alerts.AlertTracker(stalled_ticks_threshold=-1)
+
+
+def test_backlog_and_saturation_are_independent_alerts() -> None:
+    """A full queue warns about backlog; only a rejection fires saturation."""
+    alerts = importlib.import_module("hephaestus.observability.alerts")
+    full = {
+        "queue_depths": {"planning": 2},
+        "queue_capacities": {"planning": 2},
+        "saturated_queues": [],
+    }
+
+    assert [event.name for event in alerts.evaluate_alerts(full)] == [
+        "queue_depth_exceeds"
+    ]
+    saturated = alerts.evaluate_alerts({**full, "saturated_queues": ["planning"]})
+    assert {event.name for event in saturated} == {"queue_depth_exceeds", "queue_saturated"}
+
+
+@pytest.mark.parametrize("threshold", [-1, 101])
+def test_queue_depth_threshold_must_be_percentage(threshold: int) -> None:
+    """Backlog thresholds outside the percentage range are rejected."""
+    alerts = importlib.import_module("hephaestus.observability.alerts")
+
+    with pytest.raises(ValueError):
+        alerts.evaluate_alerts({}, queue_depth_threshold=threshold)

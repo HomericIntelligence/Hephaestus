@@ -9,7 +9,6 @@ so later coordinator tests can swap it in without renaming call sites.
 
 from __future__ import annotations
 
-import queue
 import threading
 from collections import deque
 from pathlib import Path
@@ -63,7 +62,7 @@ class FakeWorkerPool:
         self.size = size
         self.shutdown_event = shutdown if shutdown is not None else threading.Event()
         self.completion_q: CompletionQueue = (
-            completion_q if completion_q is not None else (queue.Queue())
+            completion_q if completion_q is not None else CompletionQueue(capacity=max(1, size))
         )
         self.submitted: list[JobHandle] = []
         self.submitted_claims: list[tuple[str, str]] = []
@@ -113,7 +112,8 @@ class FakeWorkerPool:
                 ok=False,
                 error=f"{type(outcome).__name__}: {outcome!s}",
             )
-        self.completion_q.put((handle, outcome))
+        if not self.completion_q.offer((handle, outcome)):
+            raise AssertionError("FakeWorkerPool completion queue unexpectedly saturated")
         return handle
 
     @staticmethod
@@ -291,7 +291,7 @@ def fake_github() -> FakeGitHub:
 @pytest.fixture
 def completion_q() -> CompletionQueue:
     """Fresh completion queue for tests."""
-    return queue.Queue()
+    return CompletionQueue(capacity=16)
 
 
 @pytest.fixture
