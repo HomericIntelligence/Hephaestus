@@ -1110,6 +1110,12 @@ git operation in two locks:
 Both locks are held for the entire operation because worktrees share
 `.git`.
 
+`sync_checkout` additionally takes the status-safe Git-metadata lock resolved
+by [`WorktreeManager.git_metadata_lock_path`](hephaestus/automation/worktree_manager.py).
+For linked worktrees this resolves Git's common directory, so the primary
+checkout and every linked worktree serialize synchronization and worktree
+metadata mutations without leaving an untracked sentinel in the worktree.
+
 ### Resilience wiring
 
 [`hephaestus.resilience.resilient_call`](hephaestus/resilience/__init__.py)
