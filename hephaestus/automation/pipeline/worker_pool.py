@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import logging
 import os
+import shlex
+import shutil
 import subprocess
 import threading
 import time
@@ -54,23 +56,106 @@ _GIT_LOCK_WAIT_POLL_S = 0.1
 _FETCH_ENV_BLOCKLIST = frozenset(
     {
         "GIT_ASKPASS",
+        "GIT_COMMON_DIR",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_DIR",
+        "GIT_EXEC_PATH",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
         "GIT_SSH",
         "GIT_SSH_COMMAND",
+        "GIT_SSL_CAINFO",
+        "GIT_SSL_CAPATH",
+        "GIT_SSL_NO_VERIFY",
+        "GIT_WORK_TREE",
         "SSH_ASKPASS",
     }
 )
 
+# ``gh`` must not be discovered through a caller-controlled ``PATH``: the
+# checkout synchronizer executes it as the GitHub credential helper.  These
+# are the system and package-manager locations we support for the automation
+# host.  Resolving candidates also rejects a symlink that escapes its trusted
+# installation root.
+_TRUSTED_GH_CANDIDATES = (
+    Path("/opt/homebrew/bin/gh"),
+    Path("/usr/local/bin/gh"),
+    Path("/usr/bin/gh"),
+)
+_TRUSTED_GH_ROOTS = (Path("/opt/homebrew"), Path("/usr/local"), Path("/usr"))
 
-def _controlled_fetch_env() -> dict[str, str]:
-    """Return a fetch environment that cannot inject local Git executables."""
+
+def _controlled_git_env() -> dict[str, str]:
+    """Return an environment that cannot redirect or extend Git execution."""
     env = os.environ.copy()
     for key in _FETCH_ENV_BLOCKLIST:
         env.pop(key, None)
     for key in tuple(env):
         if key == "GIT_CONFIG_COUNT" or key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")):
             env.pop(key)
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["PATH"] = os.defpath
+    env["GIT_PAGER"] = "cat"
     env["GIT_TERMINAL_PROMPT"] = "0"
     return env
+
+
+def _trusted_executable(name: str, *, path: str | None = None) -> str | None:
+    """Resolve a command to an absolute path before entering a controlled env."""
+    executable = shutil.which(name, path=path)
+    return str(Path(executable).resolve()) if executable is not None else None
+
+
+def _trusted_gh_executable() -> str | None:
+    """Return a supported absolute ``gh`` binary without consulting ``PATH``."""
+    for candidate in _TRUSTED_GH_CANDIDATES:
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        if not resolved.is_file() or not os.access(resolved, os.X_OK):
+            continue
+        if any(resolved.is_relative_to(root) for root in _TRUSTED_GH_ROOTS):
+            return str(resolved)
+    return None
+
+
+def _unsafe_local_git_config_key(config: str) -> str | None:
+    """Return an unsafe repository/worktree config key, if *config* contains one."""
+    for entry in config.split("\0"):
+        if not entry:
+            continue
+        key, _separator, _value = entry.partition("\n")
+        normalized = key.lower()
+        if normalized in {
+            "core.askpass",
+            "core.attributesfile",
+            "core.fsmonitor",
+            "core.gitproxy",
+            "core.sshcommand",
+            "core.worktree",
+            "credential.helper",
+        }:
+            return key
+        if normalized.startswith(("include.", "includeif.")):
+            return key
+        if normalized.startswith("filter.") and normalized.rsplit(".", 1)[-1] in {
+            "clean",
+            "process",
+            "smudge",
+        }:
+            return key
+        if normalized.startswith("merge.") and normalized.endswith(".driver"):
+            return key
+        # A checkout-specific URL rewrite can transform the validated literal
+        # GitHub origin when it is later passed to ``git fetch``.  Any local
+        # HTTP configuration can similarly proxy traffic or override TLS
+        # verification/CA trust, including URL-scoped variants.
+        if normalized.startswith(("http.", "url.")):
+            return key
+    return None
 
 
 def _repo_lock_path(repo: str, lock_dir: Path | None = None) -> Path:
@@ -653,8 +738,29 @@ class WorkerPool:
         if not checkout.is_dir():
             return JobResult(ok=False, error=f"checkout does not exist: {checkout}")
 
+        # ``git config --list`` uses the effective repository configuration,
+        # including a linked worktree's ``config.worktree``.  It must precede
+        # origin/status because either command can observe a poisoned setting.
+        if (checkout / ".git").exists():
+            unsafe_config = _unsafe_local_git_config_key(
+                git_utils.run(
+                    ["git", "config", "--null", "--list"],
+                    cwd=checkout,
+                    timeout=job.timeout_s,
+                    env=_controlled_git_env(),
+                ).stdout
+            )
+            if unsafe_config is not None:
+                return JobResult(
+                    ok=False,
+                    error="checkout has unsafe local Git configuration",
+                )
+
         origin = git_utils.run(
-            ["git", "remote", "get-url", "origin"], cwd=checkout, timeout=job.timeout_s
+            ["git", "remote", "get-url", "origin"],
+            cwd=checkout,
+            timeout=job.timeout_s,
+            env=_controlled_git_env(),
         ).stdout.strip()
         normalized_origin = origin.rstrip("/").removesuffix(".git")
         expected_origins = {
@@ -669,7 +775,17 @@ class WorkerPool:
             )
 
         status = git_utils.run(
-            ["git", "status", "--porcelain"], cwd=checkout, timeout=job.timeout_s
+            [
+                "git",
+                "-c",
+                "core.fsmonitor=false",
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+            ],
+            cwd=checkout,
+            timeout=job.timeout_s,
+            env=_controlled_git_env(),
         )
         if status.stdout.strip():
             return JobResult(ok=False, error=f"checkout is dirty: {checkout}")
@@ -680,15 +796,20 @@ class WorkerPool:
             check=False,
             log_errors=False,
             timeout=job.timeout_s,
+            env=_controlled_git_env(),
         )
         branch = branch_result.stdout.strip()
         if branch_result.returncode != 0 or not branch:
             return JobResult(ok=False, error=f"checkout is detached: {checkout}")
 
+        gh_command = _trusted_gh_executable()
+        if gh_command is None:
+            return JobResult(ok=False, error="required GitHub executable is unavailable")
         default_branch = git_utils.run(
-            ["gh", "api", f"repos/{expected_repo}", "--jq", ".default_branch"],
+            [gh_command, "api", f"repos/{expected_repo}", "--jq", ".default_branch"],
             cwd=checkout,
             timeout=job.timeout_s,
+            env=_controlled_git_env(),
         ).stdout.strip()
         if not default_branch:
             return JobResult(ok=False, error=f"repository has no default branch: {expected_repo}")
@@ -711,6 +832,7 @@ class WorkerPool:
                 checkout=checkout,
                 origin=origin,
                 default_branch=default_branch,
+                gh_command=gh_command,
                 timeout_s=job.timeout_s,
             )
 
@@ -720,21 +842,38 @@ class WorkerPool:
         checkout: Path,
         origin: str,
         default_branch: str,
+        gh_command: str,
         timeout_s: int,
     ) -> JobResult:
         """Fetch and fast-forward a validated checkout while its metadata is locked."""
         hooks_disabled = f"core.hooksPath={os.devnull}"
+        ssh_command = _trusted_executable("ssh", path=os.defpath)
+        if ssh_command is None:
+            return JobResult(ok=False, error="required fetch executable is unavailable")
+        ssh_config = " ".join(
+            (
+                shlex.quote(ssh_command),
+                "-F",
+                shlex.quote(os.devnull),
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "StrictHostKeyChecking=yes",
+            )
+        )
         fetch_config = [
             "-c",
             hooks_disabled,
             "-c",
-            "core.sshCommand=ssh",
+            f"core.sshCommand={ssh_config}",
             "-c",
             "credential.helper=",
             "-c",
-            "credential.helper=!gh auth git-credential",
+            f"credential.helper=!{shlex.quote(gh_command)} auth git-credential",
             "-c",
             "core.askPass=",
+            "-c",
+            "http.sslVerify=true",
         ]
         git_utils.run(
             [
@@ -747,7 +886,7 @@ class WorkerPool:
             ],
             cwd=checkout,
             timeout=timeout_s,
-            env=_controlled_fetch_env(),
+            env=_controlled_git_env(),
         )
         relation = git_utils.run(
             [
@@ -759,6 +898,7 @@ class WorkerPool:
             ],
             cwd=checkout,
             timeout=timeout_s,
+            env=_controlled_git_env(),
         ).stdout.split()
         if len(relation) != 2:
             return JobResult(ok=False, error=f"could not compare checkout history: {checkout}")
@@ -773,11 +913,21 @@ class WorkerPool:
             )
 
         merge = git_utils.run(
-            ["git", "-c", hooks_disabled, "merge", "--ff-only", f"origin/{default_branch}"],
+            [
+                "git",
+                "-c",
+                hooks_disabled,
+                "-c",
+                "core.fsmonitor=false",
+                "merge",
+                "--ff-only",
+                f"origin/{default_branch}",
+            ],
             cwd=checkout,
             check=False,
             log_errors=False,
             timeout=timeout_s,
+            env=_controlled_git_env(),
         )
         if merge.returncode != 0:
             return JobResult(
@@ -788,6 +938,7 @@ class WorkerPool:
             ["git", "rev-parse", "HEAD", f"origin/{default_branch}"],
             cwd=checkout,
             timeout=timeout_s,
+            env=_controlled_git_env(),
         ).stdout.split()
         if len(synced_heads) != 2 or synced_heads[0] != synced_heads[1]:
             return JobResult(
