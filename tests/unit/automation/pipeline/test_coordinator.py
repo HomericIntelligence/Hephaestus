@@ -699,6 +699,7 @@ class TestFailBackRouting:
         )
         item = _issue_item(3, StageName.MERGE_WAIT)
         item.armed = True
+        item.payload["merge_wait_expected_head"] = "a" * 40
         item.pr = 12
         item.state = "POLL"
 
@@ -757,6 +758,7 @@ class TestFailBackRouting:
         coordinator, _, _ = make_coordinator(tmp_path, monkeypatch, github=github)
         item = _issue_item(3, StageName.MERGE_WAIT)
         item.armed = True
+        item.payload["merge_wait_expected_head"] = "a" * 40
         item.pr = 12
         item.state = "POLL"
 
@@ -768,6 +770,52 @@ class TestFailBackRouting:
         assert item.result.reason == "auto_merge_defer_failed"
         assert not coordinator.queues[StageName.PR_REVIEW]
         assert github.mutation_log == [("defer_auto_merge", (12,))]
+
+    def test_owned_merge_wait_head_drift_reenters_fresh_pr_review(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Head containment completes before a new review can reach another arm."""
+        github = FakeStageGitHub(
+            pr_impl_state=(True, False),
+            pr_state={
+                "state": "OPEN",
+                "headRefOid": "b" * 40,
+                "autoMergeRequest": {"enabledAt": "this-run"},
+            },
+        )
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch, github=github)
+
+        class FreshReviewRequired(StubStage):
+            def on_enter(self, item: WorkItem, ctx: Any) -> Any:
+                assert item.stage is StageName.PR_REVIEW
+                assert item.armed is False
+                assert "merge_wait_expected_head" not in item.payload
+                assert github.mutation_log == [
+                    ("defer_auto_merge", (12,)),
+                    ("mark_pr_implementation_no_go", (12,)),
+                ]
+                assert not any(name == "arm_auto_merge" for name, _ in github.mutation_log)
+                return super().on_enter(item, ctx)
+
+        coordinator.stages[StageName.PR_REVIEW] = FreshReviewRequired(
+            StageOutcome(Disposition.FINISH_FAIL, "fresh_review_required")
+        )
+        item = _issue_item(3, StageName.MERGE_WAIT)
+        item.armed = True
+        item.payload["merge_wait_expected_head"] = "a" * 40
+        item.pr = 12
+        item.state = "POLL"
+
+        coordinator._push_item(item, StageName.MERGE_WAIT, enter=False)
+        coordinator._drain_queues()
+
+        assert item.stage is StageName.FINISHED
+        assert item.result is not None
+        assert item.result.reason == "fresh_review_required"
+        assert github.mutation_log == [
+            ("defer_auto_merge", (12,)),
+            ("mark_pr_implementation_no_go", (12,)),
+        ]
 
     def test_named_reason_routes_to_mapped_stage(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -281,9 +281,10 @@ class StageGitHub(Protocol):
         """Durably apply ``state:implementation-no-go`` to the PR.
 
         Mirrors ``pr_manager.mark_pr_implementation_no_go`` (adds the no-go
-        label, removes any stale go label). Doc section 5 owned label:
-        written on every NOGO round, before retry/regress [durable]
-        (legacy ``_review_phase._apply_impl_review_verdict`` :248).
+        label, removes any stale go label). ``pr_review`` writes it on every
+        NOGO round before retry/regress; ``merge_wait`` may invoke the same
+        stage-owned revocation only after it has verified deferral of its own
+        head-drifted arm. No external arm may be changed through this method.
         """
         ...
 
