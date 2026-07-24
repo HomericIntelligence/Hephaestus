@@ -36,9 +36,11 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      deployments: read
     outputs:
       tag: ${{ steps.resolve.outputs.tag }}
       sha: ${{ steps.resolve.outputs.sha }}
+      release_exists: ${{ steps.resolve.outputs.release_exists }}
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
@@ -55,6 +57,7 @@ jobs:
           EVENT_REF: ${{ github.ref }}
           DOCS_ONLY: ${{ inputs.docs_only }}
           GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
 
@@ -78,13 +81,38 @@ jobs:
           echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
           echo "Resolved release tag ${TAG} to immutable commit ${SHA}"
 
+          RELEASE_EXISTS=false
+          DRAFT=""
+          if DRAFT="$(gh release view "$TAG" --json isDraft -q .isDraft)"; then
+            RELEASE_EXISTS=true
+          elif [ "$DOCS_ONLY" = "true" ]; then
+            echo "::error::Docs-only recovery requires an existing GitHub Release for ${TAG}" >&2
+            exit 1
+          fi
+
+          if [ "$RELEASE_EXISTS" = "true" ] && [ "$DRAFT" != "false" ]; then
+            echo "::error::Docs-only recovery requires a published GitHub Release for ${TAG}" >&2
+            exit 1
+          fi
+          echo "release_exists=${RELEASE_EXISTS}" >> "$GITHUB_OUTPUT"
+
           if [ "$DOCS_ONLY" = "true" ]; then
-            if ! DRAFT="$(gh release view "$TAG" --json isDraft -q .isDraft)"; then
-              echo "::error::Docs-only recovery requires an existing GitHub Release for ${TAG}" >&2
-              exit 1
-            fi
-            if [ "$DRAFT" != "false" ]; then
-              echo "::error::Docs-only recovery requires a published GitHub Release for ${TAG}" >&2
+            PUBLISHED_DEPLOYMENT=false
+            for DEPLOYMENT_ID in $(
+              gh api "repos/${REPOSITORY}/deployments?environment=pypi&sha=${SHA}" --jq '.[].id'
+            ); do
+              DEPLOYMENT_STATE="$({
+                gh api "repos/${REPOSITORY}/deployments/${DEPLOYMENT_ID}/statuses?per_page=1" \
+                  --jq '.[0].state'
+              })"
+              if [ "$DEPLOYMENT_STATE" = "success" ]; then
+                PUBLISHED_DEPLOYMENT=true
+                break
+              fi
+            done
+
+            if [ "$PUBLISHED_DEPLOYMENT" != "true" ]; then
+              echo "::error::Docs-only recovery requires a successful PyPI deployment for ${SHA}" >&2
               exit 1
             fi
           fi
@@ -92,7 +120,7 @@ jobs:
   test:
     runs-on: ubuntu-24.04
     needs: resolve-release
-    if: ${{ !inputs.docs_only }}
+    if: ${{ !inputs.docs_only && needs.resolve-release.outputs.release_exists != 'true' }}
     # Unit + integration suites run here; the uv env is cached and dev-install
     # already ran, so both finish well under this budget. 20 min (vs the prior
     # 15) is free insurance so a first-run integration slowdown never aborts a
@@ -133,7 +161,7 @@ jobs:
   type-check:
     runs-on: ubuntu-24.04
     needs: resolve-release
-    if: ${{ !inputs.docs_only }}
+    if: ${{ !inputs.docs_only && needs.resolve-release.outputs.release_exists != 'true' }}
     timeout-minutes: 10
 
     steps:
@@ -159,7 +187,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     needs: [resolve-release, test, type-check]
-    if: ${{ !inputs.docs_only }}
+    if: ${{ !inputs.docs_only && needs.resolve-release.outputs.release_exists != 'true' }}
     environment: pypi
     permissions:
       contents: write  # Create GitHub Release / upload assets
@@ -266,7 +294,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     needs: [resolve-release, test, type-check, build-and-publish]
-    if: ${{ always() && needs.resolve-release.result == 'success' && (inputs.docs_only || (needs.test.result == 'success' && needs.type-check.result == 'success' && needs.build-and-publish.result == 'success')) }}
+    if: ${{ always() && needs.resolve-release.result == 'success' && (inputs.docs_only || (needs.test.result == 'success' && needs.type-check.result == 'success' && needs.build-and-publish.result == 'success' && needs.resolve-release.outputs.release_exists != 'true')) }}
     # Publish the pdoc API reference to GitHub Pages only after the package
     # release succeeds, so the online docs always match a version on PyPI.
     permissions:

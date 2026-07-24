@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -531,13 +533,6 @@ class TestAutoTagReleaseDispatch:
         assert "### Dispatch failed after tag push" in doc
         assert "gh workflow run release.yml -f tag=vX.Y.Z" in doc
 
-    def test_releasing_doc_has_docs_only_recovery_command(self) -> None:
-        """A published release with failed docs needs a no-republish recovery command."""
-        doc = (REPO_ROOT / "docs" / "RELEASING.md").read_text(encoding="utf-8")
-
-        assert "### Docs-only recovery after publication" in doc
-        assert "gh workflow run release.yml --ref main -f tag=vX.Y.Z -f docs_only=true" in doc
-
     def test_release_concurrency_keys_on_resolved_tag(self) -> None:
         """Dispatched and tag-push release runs must serialize per tag, not per branch.
 
@@ -556,23 +551,22 @@ class TestAutoTagReleaseDispatch:
         inputs = workflow[True]["workflow_dispatch"]["inputs"]
 
         assert inputs["tag"]["required"] is True
-        assert inputs["docs_only"] == {
-            "description": (
-                "Deploy documentation for an existing published release without publishing."
-            ),
-            "required": False,
-            "default": False,
-            "type": "boolean",
-        }
+        docs_only = inputs["docs_only"]
+        assert docs_only["required"] is False
+        assert docs_only["default"] is False
+        assert docs_only["type"] == "boolean"
 
     def test_docs_only_recovery_skips_normal_release_jobs(self) -> None:
         """Docs recovery keeps tag validation but skips test, publish, and release writes."""
         workflow = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
         jobs = workflow["jobs"]
 
-        assert jobs["test"]["if"] == "${{ !inputs.docs_only }}"
-        assert jobs["type-check"]["if"] == "${{ !inputs.docs_only }}"
-        assert jobs["build-and-publish"]["if"] == "${{ !inputs.docs_only }}"
+        duplicate_guard = "needs.resolve-release.outputs.release_exists != 'true'"
+        assert jobs["test"]["if"] == f"${{{{ !inputs.docs_only && {duplicate_guard} }}}}"
+        assert jobs["type-check"]["if"] == f"${{{{ !inputs.docs_only && {duplicate_guard} }}}}"
+        assert (
+            jobs["build-and-publish"]["if"] == f"${{{{ !inputs.docs_only && {duplicate_guard} }}}}"
+        )
         assert jobs["deploy-docs"]["needs"] == [
             "resolve-release",
             "test",
@@ -583,21 +577,128 @@ class TestAutoTagReleaseDispatch:
             "${{ always() && needs.resolve-release.result == 'success' && "
             "(inputs.docs_only || (needs.test.result == 'success' && "
             "needs.type-check.result == 'success' && "
-            "needs.build-and-publish.result == 'success')) }}"
+            "needs.build-and-publish.result == 'success' && "
+            "needs.resolve-release.outputs.release_exists != 'true')) }}"
         )
 
-    def test_docs_only_recovery_requires_an_existing_release(self) -> None:
-        """A docs-only dispatch is restricted to an already-published release tag."""
+    def _resolve_step(self) -> dict[str, Any]:
         workflow = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
-        resolve_step = next(
+        return next(
             step
             for step in workflow["jobs"]["resolve-release"]["steps"]
             if step.get("id") == "resolve"
         )
 
-        assert resolve_step["env"]["DOCS_ONLY"] == "${{ inputs.docs_only }}"
-        assert resolve_step["env"]["GH_TOKEN"] == "${{ github.token }}"  # noqa: S105
-        assert 'gh release view "$TAG" --json isDraft -q .isDraft' in resolve_step["run"]
+    def _run_resolver(
+        self,
+        tmp_path: Path,
+        *,
+        docs_only: bool,
+        release_state: str,
+        deployment_state: str,
+    ) -> subprocess.CompletedProcess[str]:
+        """Execute the resolver shell with deterministic local GitHub fixtures."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "git").write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = "rev-parse" ]; then echo 0123456789012345678901234567890123456789; fi\n',
+            encoding="utf-8",
+        )
+        (bin_dir / "gh").write_text(
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            "  release)\n"
+            '    case "$GH_RELEASE_STATE" in\n'
+            "      published) echo false ;;\n"
+            "      draft) echo true ;;\n"
+            "      *) exit 1 ;;\n"
+            "    esac ;;\n"
+            "  api)\n"
+            '    case "$2" in\n'
+            "      *'/deployments?environment=pypi&sha=0123456789012345678901234567890123456789')\n"
+            '        [ "$GH_DEPLOYMENT_STATE" = "missing" ] || echo 42 ;;\n'
+            "      *'/deployments/42/statuses?per_page=1')\n"
+            '        [ "$GH_DEPLOYMENT_STATE" = "published" ] && echo success || echo failure ;;\n'
+            "    esac ;;\n"
+            "  *) exit 2 ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        for command in (bin_dir / "git", bin_dir / "gh"):
+            command.chmod(0o755)
+
+        output = tmp_path / "github-output"
+        env = {
+            **os.environ,
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "INPUT_TAG": "v0.10.0",
+            "EVENT_REF": "refs/heads/main",
+            "DOCS_ONLY": str(docs_only).lower(),
+            "GH_TOKEN": "test-token",
+            "GITHUB_REPOSITORY": "HomericIntelligence/Hephaestus",
+            "REPOSITORY": "HomericIntelligence/Hephaestus",
+            "GITHUB_OUTPUT": str(output),
+            "GH_RELEASE_STATE": release_state,
+            "GH_DEPLOYMENT_STATE": deployment_state,
+        }
+        return subprocess.run(
+            ["bash", "-c", self._resolve_step()["run"]],
+            check=False,
+            capture_output=True,
+            env=env,
+            text=True,
+        )
+
+    def test_docs_only_recovery_accepts_published_release_source(self, tmp_path: Path) -> None:
+        """Docs-only recovery accepts only source already published through PyPI."""
+        result = self._run_resolver(
+            tmp_path,
+            docs_only=True,
+            release_state="published",
+            deployment_state="published",
+        )
+
+        assert result.returncode == 0
+
+    @pytest.mark.parametrize(
+        ("release_state", "deployment_state", "error"),
+        [
+            ("missing", "published", "existing GitHub Release"),
+            ("draft", "published", "published GitHub Release"),
+            ("published", "missing", "successful PyPI deployment"),
+            ("published", "failed", "successful PyPI deployment"),
+        ],
+    )
+    def test_docs_only_recovery_rejects_unpublished_source(
+        self,
+        tmp_path: Path,
+        release_state: str,
+        deployment_state: str,
+        error: str,
+    ) -> None:
+        """Docs-only recovery must not deploy an unpublished or retargeted source."""
+        result = self._run_resolver(
+            tmp_path,
+            docs_only=True,
+            release_state=release_state,
+            deployment_state=deployment_state,
+        )
+
+        assert result.returncode == 1
+        assert error in result.stderr
+
+    def test_normal_release_marks_existing_release_as_duplicate(self, tmp_path: Path) -> None:
+        """A queued duplicate normal release becomes a no-op before privileged jobs run."""
+        result = self._run_resolver(
+            tmp_path,
+            docs_only=False,
+            release_state="published",
+            deployment_state="missing",
+        )
+
+        assert result.returncode == 0
+        assert "release_exists=true" in (tmp_path / "github-output").read_text(encoding="utf-8")
 
 
 class TestReleaseAttestations:
