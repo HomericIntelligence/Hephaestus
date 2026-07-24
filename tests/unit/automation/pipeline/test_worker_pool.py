@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import os
 import queue
+import shlex
+import shutil
 import subprocess
 import sys
 import threading
@@ -17,6 +19,7 @@ from unittest.mock import ANY, MagicMock, call, patch
 
 import pytest
 
+from hephaestus.automation import git_utils
 from hephaestus.automation._review_utils import build_automation_parser
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.jobs import (
@@ -29,7 +32,12 @@ from hephaestus.automation.pipeline.jobs import (
 )
 from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.routing import StageName
-from hephaestus.automation.pipeline.worker_pool import WorkerPool, _repo_lock_path
+from hephaestus.automation.pipeline.worker_pool import (
+    WorkerPool,
+    _repo_lock_path,
+    _trusted_gh_executable,
+    _unsafe_local_git_config_key,
+)
 from hephaestus.automation.session_naming import (
     AGENT_IMPLEMENTER,
     AGENT_PR_REVIEWER,
@@ -40,6 +48,13 @@ from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 from hephaestus.utils.helpers import get_repo_root
 
 _WP = "hephaestus.automation.pipeline.worker_pool"
+
+
+def _executable_path(name: str, *, path: str | None = None) -> str:
+    """Resolve an executable expected to be available in this test environment."""
+    executable = shutil.which(name, path=path)
+    assert executable is not None
+    return str(Path(executable).resolve())
 
 
 @pytest.fixture
@@ -1349,6 +1364,7 @@ class TestGitOps:
         """A reusable checkout is verified, fetched, then fast-forwarded before use."""
         checkout = tmp_path / "checkout"
         checkout.mkdir()
+        (checkout / ".git").mkdir()
         job = GitJob(
             repo="test/repo",
             op="sync_checkout",
@@ -1357,6 +1373,7 @@ class TestGitOps:
         )
         with patch("hephaestus.automation.git_utils.run") as mock_run:
             mock_run.side_effect = [
+                subprocess.CompletedProcess([], 0, stdout=""),
                 subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
                 subprocess.CompletedProcess([], 0, stdout=""),
                 subprocess.CompletedProcess([], 0, stdout="main\n"),
@@ -1369,20 +1386,50 @@ class TestGitOps:
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
+        ssh_command = _executable_path("ssh", path=os.defpath)
+        ssh_config = (
+            f"{shlex.quote(ssh_command)} -F {shlex.quote(os.devnull)} "
+            "-o BatchMode=yes -o StrictHostKeyChecking=yes"
+        )
         assert mock_run.call_args_list == [
-            call(["git", "remote", "get-url", "origin"], cwd=checkout, timeout=120),
-            call(["git", "status", "--porcelain"], cwd=checkout, timeout=120),
+            call(
+                ["git", "config", "--null", "--list"],
+                cwd=checkout,
+                timeout=120,
+                env=ANY,
+            ),
+            call(
+                ["git", "remote", "get-url", "origin"],
+                cwd=checkout,
+                timeout=120,
+                env=ANY,
+            ),
+            call(
+                [
+                    "git",
+                    "-c",
+                    "core.fsmonitor=false",
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=all",
+                ],
+                cwd=checkout,
+                timeout=120,
+                env=ANY,
+            ),
             call(
                 ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
                 cwd=checkout,
                 check=False,
                 log_errors=False,
                 timeout=120,
+                env=ANY,
             ),
             call(
-                ["gh", "api", "repos/owner/name", "--jq", ".default_branch"],
+                [_trusted_gh_executable(), "api", "repos/owner/name", "--jq", ".default_branch"],
                 cwd=checkout,
                 timeout=120,
+                env=ANY,
             ),
             call(
                 [
@@ -1390,13 +1437,19 @@ class TestGitOps:
                     "-c",
                     f"core.hooksPath={os.devnull}",
                     "-c",
-                    "core.sshCommand=ssh",
+                    f"core.sshCommand={ssh_config}",
                     "-c",
                     "credential.helper=",
                     "-c",
-                    "credential.helper=!gh auth git-credential",
+                    (
+                        "credential.helper=!"
+                        f"{shlex.quote(_trusted_gh_executable() or '')} "
+                        "auth git-credential"
+                    ),
                     "-c",
                     "core.askPass=",
+                    "-c",
+                    "http.sslVerify=true",
                     "fetch",
                     "--no-tags",
                     "https://github.com/owner/name.git",
@@ -1410,18 +1463,30 @@ class TestGitOps:
                 ["git", "rev-list", "--left-right", "--count", "HEAD...origin/main"],
                 cwd=checkout,
                 timeout=120,
+                env=ANY,
             ),
             call(
-                ["git", "-c", f"core.hooksPath={os.devnull}", "merge", "--ff-only", "origin/main"],
+                [
+                    "git",
+                    "-c",
+                    f"core.hooksPath={os.devnull}",
+                    "-c",
+                    "core.fsmonitor=false",
+                    "merge",
+                    "--ff-only",
+                    "origin/main",
+                ],
                 cwd=checkout,
                 check=False,
                 log_errors=False,
                 timeout=120,
+                env=ANY,
             ),
             call(
                 ["git", "rev-parse", "HEAD", "origin/main"],
                 cwd=checkout,
                 timeout=120,
+                env=ANY,
             ),
         ]
         assert (checkout / ".git" / ".hephaestus-git-metadata.lock").is_file()
@@ -1451,8 +1516,25 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         assert mock_run.call_args_list == [
-            call(["git", "remote", "get-url", "origin"], cwd=checkout, timeout=120),
-            call(["git", "status", "--porcelain"], cwd=checkout, timeout=120),
+            call(
+                ["git", "remote", "get-url", "origin"],
+                cwd=checkout,
+                timeout=120,
+                env=ANY,
+            ),
+            call(
+                [
+                    "git",
+                    "-c",
+                    "core.fsmonitor=false",
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=all",
+                ],
+                cwd=checkout,
+                timeout=120,
+                env=ANY,
+            ),
         ]
         assert result.ok is False
         assert "dirty" in (result.error or "")
@@ -1480,7 +1562,7 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         mock_run.assert_called_once_with(
-            ["git", "remote", "get-url", "origin"], cwd=checkout, timeout=120
+            ["git", "remote", "get-url", "origin"], cwd=checkout, timeout=120, env=ANY
         )
         assert result.ok is False
         assert "expected origin owner/name" in (result.error or "")
@@ -1557,7 +1639,7 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         mock_run.assert_called_once_with(
-            ["git", "remote", "get-url", "origin"], cwd=checkout, timeout=120
+            ["git", "remote", "get-url", "origin"], cwd=checkout, timeout=120, env=ANY
         )
         assert result.ok is False
         assert "expected origin owner/name" in (result.error or "")
@@ -1572,11 +1654,25 @@ class TestGitOps:
         """A valid SSH origin is fetched only with controlled Git configuration."""
         checkout = tmp_path / "checkout"
         checkout.mkdir()
+        monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/unsafe/objects")
+        monkeypatch.setenv("GIT_COMMON_DIR", "/unsafe/common-dir")
+        monkeypatch.setenv("GIT_DIR", "/unsafe/git-dir")
+        monkeypatch.setenv("GIT_EXEC_PATH", "/unsafe/git-exec-path")
+        monkeypatch.setenv("GIT_INDEX_FILE", "/unsafe/index")
+        monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/unsafe/object-dir")
+        monkeypatch.setenv("GIT_SSH", "/unsafe/ssh")
         monkeypatch.setenv("GIT_SSH_COMMAND", "/unsafe/ssh-wrapper")
         monkeypatch.setenv("GIT_ASKPASS", "/unsafe/askpass")
+        monkeypatch.setenv("SSH_ASKPASS", "/unsafe/ssh-askpass")
+        monkeypatch.setenv("GIT_SSL_NO_VERIFY", "1")
+        monkeypatch.setenv("GIT_SSL_CAINFO", "/unsafe/ca.pem")
+        monkeypatch.setenv("GIT_SSL_CAPATH", "/unsafe/ca-dir")
+        monkeypatch.setenv("GIT_WORK_TREE", "/unsafe/worktree")
         monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
         monkeypatch.setenv("GIT_CONFIG_KEY_0", "credential.helper")
         monkeypatch.setenv("GIT_CONFIG_VALUE_0", "!/unsafe/credential-helper")
+        monkeypatch.setenv("GIT_CONFIG_PARAMETERS", "credential.helper=!/unsafe/helper")
+        monkeypatch.setenv("PATH", "/unsafe/path")
         job = GitJob(
             repo="test/repo",
             op="sync_checkout",
@@ -1598,18 +1694,28 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         fetch_call = mock_run.call_args_list[4]
+        ssh_command = _executable_path("ssh", path=os.defpath)
+        ssh_config = (
+            f"{shlex.quote(ssh_command)} -F {shlex.quote(os.devnull)} "
+            "-o BatchMode=yes -o StrictHostKeyChecking=yes"
+        )
         assert fetch_call.args[0] == [
             "git",
             "-c",
             f"core.hooksPath={os.devnull}",
             "-c",
-            "core.sshCommand=ssh",
+            f"core.sshCommand={ssh_config}",
             "-c",
             "credential.helper=",
             "-c",
-            "credential.helper=!gh auth git-credential",
+            (
+                "credential.helper=!"
+                f"{shlex.quote(_trusted_gh_executable() or '')} auth git-credential"
+            ),
             "-c",
             "core.askPass=",
+            "-c",
+            "http.sslVerify=true",
             "fetch",
             "--no-tags",
             "git@github.com:owner/name.git",
@@ -1618,14 +1724,172 @@ class TestGitOps:
         fetch_env = fetch_call.kwargs["env"]
         assert fetch_env["GIT_TERMINAL_PROMPT"] == "0"
         for key in (
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_COMMON_DIR",
+            "GIT_DIR",
+            "GIT_SSH",
             "GIT_SSH_COMMAND",
             "GIT_ASKPASS",
+            "GIT_EXEC_PATH",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "SSH_ASKPASS",
+            "GIT_SSL_NO_VERIFY",
+            "GIT_SSL_CAINFO",
+            "GIT_SSL_CAPATH",
+            "GIT_WORK_TREE",
             "GIT_CONFIG_COUNT",
             "GIT_CONFIG_KEY_0",
             "GIT_CONFIG_VALUE_0",
+            "GIT_CONFIG_PARAMETERS",
         ):
             assert key not in fetch_env
+        assert fetch_env["PATH"] == os.defpath
+        assert fetch_env["GIT_CONFIG_GLOBAL"] == os.devnull
+        assert fetch_env["GIT_CONFIG_NOSYSTEM"] == "1"
+        assert mock_run.call_args_list[3] == call(
+            [_trusted_gh_executable(), "api", "repos/owner/name", "--jq", ".default_branch"],
+            cwd=checkout,
+            timeout=120,
+            env=ANY,
+        )
+        for git_call in (mock_run.call_args_list[index] for index in (0, 1, 2, 4, 5, 6, 7)):
+            assert git_call.kwargs["env"]["GIT_TERMINAL_PROMPT"] == "0"
+            assert "GIT_DIR" not in git_call.kwargs["env"]
         assert result.ok is True
+
+    def test_sync_checkout_rejects_executable_local_git_config(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """Executable checkout-local Git config is rejected before any fetch or merge."""
+        checkout = tmp_path / "checkout"
+        checkout.mkdir()
+        (checkout / ".git").mkdir()
+        job = GitJob(
+            repo="test/repo",
+            op="sync_checkout",
+            timeout_s=120,
+            kwargs={"repo": "owner/name", "dest": str(checkout)},
+        )
+        with patch("hephaestus.automation.git_utils.run") as mock_run:
+            mock_run.side_effect = [
+                subprocess.CompletedProcess(
+                    [], 0, stdout="filter.payload.process\n/unsafe/filter\0"
+                ),
+            ]
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert "unsafe local Git configuration" in (result.error or "")
+        assert all("fetch" not in call.args[0] for call in mock_run.call_args_list)
+
+    @pytest.mark.parametrize(
+        "entry",
+        (
+            "core.sshCommand\n/unsafe/ssh\0",
+            "credential.helper\n!/unsafe/credential-helper\0",
+            "include.path\n/unsafe/include\0",
+            "includeIf.gitdir:/unsafe/.path\n/unsafe/include\0",
+            "merge.payload.driver\n/unsafe/merge\0",
+            "http.sslVerify\nfalse\0",
+            "http.https://github.com/.sslVerify\nfalse\0",
+            "http.sslCAInfo\n/unsafe/ca.pem\0",
+            "http.proxy\nhttp://unsafe-proxy\0",
+            "url.file:///unsafe/.insteadOf\nhttps://github.com/owner/name\0",
+            "core.worktree\n/unsafe/worktree\0",
+        ),
+        ids=(
+            "ssh-command",
+            "credential-helper",
+            "include",
+            "conditional-include",
+            "merge-driver",
+            "disabled-tls",
+            "url-scoped-tls",
+            "custom-ca",
+            "http-proxy",
+            "url-rewrite",
+            "core-worktree",
+        ),
+    )
+    def test_checkout_config_parser_rejects_unsafe_settings(self, entry: str) -> None:
+        """Executable, routing, and TLS-affecting checkout config cannot survive scanning."""
+        assert _unsafe_local_git_config_key(entry) is not None
+
+    def test_sync_checkout_rejects_unsafe_linked_worktree_config(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """Effective config scanning includes a linked worktree's config.worktree."""
+        checkout = tmp_path / "checkout"
+        linked = tmp_path / "linked"
+        subprocess.run(
+            ["git", "init", "--initial-branch", "main", str(checkout)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        for key, value in (("user.name", "Test User"), ("user.email", "test@example.com")):
+            subprocess.run(
+                ["git", "config", key, value],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m", "initial"],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "worktree", "add", "-b", "linked", str(linked)],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "config", "extensions.worktreeConfig", "true"],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "config", "--worktree", "filter.payload.process", "/unsafe/filter"],
+            cwd=linked,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        job = GitJob(
+            repo="test/repo",
+            op="sync_checkout",
+            timeout_s=120,
+            kwargs={"repo": "owner/name", "dest": str(linked)},
+        )
+        actual_run = git_utils.run
+
+        def run_config_only(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            assert command == ["git", "config", "--null", "--list"]
+            return actual_run(command, **kwargs)
+
+        with patch("hephaestus.automation.git_utils.run", side_effect=run_config_only) as mock_run:
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        mock_run.assert_called_once()
+        assert result.ok is False
+        assert "unsafe local Git configuration" in (result.error or "")
 
     def test_sync_checkout_rejects_spoofed_github_hostname(
         self,
@@ -1650,7 +1914,7 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         mock_run.assert_called_once_with(
-            ["git", "remote", "get-url", "origin"], cwd=checkout, timeout=120
+            ["git", "remote", "get-url", "origin"], cwd=checkout, timeout=120, env=ANY
         )
         assert result.ok is False
         assert "expected origin owner/name" in (result.error or "")
@@ -1681,19 +1945,38 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         assert mock_run.call_args_list == [
-            call(["git", "remote", "get-url", "origin"], cwd=checkout, timeout=120),
-            call(["git", "status", "--porcelain"], cwd=checkout, timeout=120),
+            call(
+                ["git", "remote", "get-url", "origin"],
+                cwd=checkout,
+                timeout=120,
+                env=ANY,
+            ),
+            call(
+                [
+                    "git",
+                    "-c",
+                    "core.fsmonitor=false",
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=all",
+                ],
+                cwd=checkout,
+                timeout=120,
+                env=ANY,
+            ),
             call(
                 ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
                 cwd=checkout,
                 check=False,
                 log_errors=False,
                 timeout=120,
+                env=ANY,
             ),
             call(
-                ["gh", "api", "repos/owner/name", "--jq", ".default_branch"],
+                [_trusted_gh_executable(), "api", "repos/owner/name", "--jq", ".default_branch"],
                 cwd=checkout,
                 timeout=120,
+                env=ANY,
             ),
         ]
         assert result.ok is False
@@ -1724,14 +2007,32 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         assert mock_run.call_args_list == [
-            call(["git", "remote", "get-url", "origin"], cwd=checkout, timeout=120),
-            call(["git", "status", "--porcelain"], cwd=checkout, timeout=120),
+            call(
+                ["git", "remote", "get-url", "origin"],
+                cwd=checkout,
+                timeout=120,
+                env=ANY,
+            ),
+            call(
+                [
+                    "git",
+                    "-c",
+                    "core.fsmonitor=false",
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=all",
+                ],
+                cwd=checkout,
+                timeout=120,
+                env=ANY,
+            ),
             call(
                 ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
                 cwd=checkout,
                 check=False,
                 log_errors=False,
                 timeout=120,
+                env=ANY,
             ),
         ]
         assert result.ok is False
@@ -1758,8 +2059,10 @@ class TestGitOps:
             patch("hephaestus.automation.git_utils.run") as mock_run,
         ):
             mock_run.side_effect = [
+                subprocess.CompletedProcess([], 0, stdout=""),
                 subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
                 subprocess.CompletedProcess([], 0, stdout=""),
+                subprocess.CompletedProcess([], 0, stdout="main\n"),
                 subprocess.CompletedProcess([], 0, stdout="main\n"),
                 subprocess.CompletedProcess([], 0, stdout="main\n"),
             ]
@@ -1769,9 +2072,10 @@ class TestGitOps:
         assert result.ok is False
         assert result.error == "lock_timeout"
         assert mock_run.call_args_list[-1] == call(
-            ["gh", "api", "repos/owner/name", "--jq", ".default_branch"],
+            [_trusted_gh_executable(), "api", "repos/owner/name", "--jq", ".default_branch"],
             cwd=checkout,
             timeout=0,
+            env=ANY,
         )
 
     def test_sync_checkout_rejects_local_commits_ahead_of_remote(
@@ -1805,6 +2109,7 @@ class TestGitOps:
             ["git", "rev-list", "--left-right", "--count", "HEAD...origin/main"],
             cwd=checkout,
             timeout=120,
+            env=ANY,
         )
         assert result.ok is False
         assert "local commits" in (result.error or "")
@@ -1835,9 +2140,10 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         assert mock_run.call_args_list[-1] == call(
-            ["gh", "api", "repos/owner/name", "--jq", ".default_branch"],
+            [_trusted_gh_executable(), "api", "repos/owner/name", "--jq", ".default_branch"],
             cwd=checkout,
             timeout=120,
+            env=ANY,
         )
         assert result.ok is False
         assert "default branch" in (result.error or "")
