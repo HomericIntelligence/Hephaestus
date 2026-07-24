@@ -79,7 +79,7 @@ import queue as queue_mod
 import signal
 import threading
 import time
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -142,6 +142,10 @@ _DEFAULT_GRACE_S = 30.0
 
 #: Coordinator idle poll interval while waiting for completions (seconds).
 _IDLE_POLL_S = 1.0
+
+#: Default in-memory stage backlog bound. This is intentionally independent of
+#: the worker/completion window; excess seed products use admission spooling.
+_DEFAULT_STAGE_QUEUE_CAPACITY = 64
 
 #: Number of fully stalled idle ticks before the coordinator force-runs work.
 _STALL_TICKS_BEFORE_FORCE = 3
@@ -231,6 +235,7 @@ class PipelineConfig:
     loops: int = 1
     max_workers: int = 1
     parallel_repos: int = 1
+    stage_queue_capacity: int = _DEFAULT_STAGE_QUEUE_CAPACITY
     dry_run: bool = False
     grace_s: float = _DEFAULT_GRACE_S
     phase_timeout_s: float | None = None
@@ -361,6 +366,8 @@ class Coordinator:
         self._github_factory = github_factory
         self.shutdown = threading.Event()
         self._work_window = max(1, config.parallel_repos * config.max_workers)
+        if config.stage_queue_capacity < 1:
+            raise ValueError("stage queue capacity must be positive")
         self.completion_q = CompletionQueue(capacity=self._work_window)
         if pool is None:
             # Imported here, not module-top: WorkerPool is the pipeline's one
@@ -385,7 +392,7 @@ class Coordinator:
         self.pool: Any = pool
 
         self.queues: dict[StageName, StageQueue] = {
-            name: StageQueue(capacity=self._work_window) for name in StageName
+            name: StageQueue(capacity=config.stage_queue_capacity) for name in StageName
         }
         self.timers: list[tuple[float, int, WorkItem]] = []
         self.in_flight: dict[JobHandle, WorkItem] = {}
@@ -395,7 +402,9 @@ class Coordinator:
         self.items: list[WorkItem] = []
         self.event_log: list[tuple[Any, ...]] = []
         self._event_log_disabled = False
+        self._journal_failure = False
         self._completion_wake = threading.Event()
+        self._pending_admissions: deque[tuple[WorkItem, StageName, bool]] = deque()
         self._saturated_queues: set[str] = set()
         self._saturation_totals: Counter[str] = Counter()
         self._exported_saturation_totals: Counter[str] = Counter()
@@ -534,14 +543,14 @@ class Coordinator:
         event_name, fields = encode_stage_event(event)
         self._record_event(event_name, fields)
 
-    def _record_event(self, event: str, *fields: Any) -> None:
-        """Append an event to memory and, when configured, to JSONL on disk."""
+    def _record_event(self, event: str, *fields: Any) -> bool:
+        """Append an event to memory and report whether disk journaling worked."""
         self.event_log.append((event, *fields))
         if self._event_log_disabled:
-            return
+            return False
         path = self.config.event_log_path
         if path is None:
-            return
+            return True
         record = {
             "ts": time.time(),
             "event": event,
@@ -554,6 +563,8 @@ class Coordinator:
         except OSError as exc:
             logger.warning("failed to write pipeline event log %s: %s", path, exc)
             self._event_log_disabled = True
+            return False
+        return True
 
     def _record_queue_saturation(
         self,
@@ -577,7 +588,15 @@ class Coordinator:
             fields["item"] = self._item_key(item)
         if fatal:
             fields["fatal"] = True
-        self._record_event("queue_saturated", fields)
+        if (
+            not self._record_event("queue_saturated", fields)
+            and self.config.event_log_path is not None
+        ):
+            # Saturation is a recovery boundary. Continuing without the
+            # journal would turn resumable work into an unaccounted loss.
+            self._journal_failure = True
+            self._fatal = True
+            self._begin_graceful_shutdown("saturation journal unavailable")
 
     def _observability_snapshot(self) -> dict[str, Any]:
         """Read the coordinator lifecycle values that observability exposes."""
@@ -750,6 +769,7 @@ class Coordinator:
                     self._wait_for_completion(timeout=0.2)
                     continue
                 self._drain_queues()
+                self._drain_pending_admissions()
                 if self._all_idle():
                     if not self._reseed_if_converged():
                         break
@@ -815,6 +835,8 @@ class Coordinator:
 
     def _exit_code(self) -> int:
         """130 on interrupt; 1 on any effective fail/skip/blocked; 0 clean."""
+        if self._journal_failure:
+            return 1
         if self.shutdown.is_set():
             # Interrupt deliberately takes priority over non-passing ledger
             # entries and fatal coordinator errors: a signal means the run did
@@ -833,6 +855,7 @@ class Coordinator:
             all(len(q) == 0 for q in self.queues.values())
             and not self.timers
             and not self.in_flight
+            and not self._pending_admissions
         )
 
     def _grace_exceeded(self) -> bool:
@@ -1133,6 +1156,29 @@ class Coordinator:
                     continue
                 self._record_event("drain", stage_name.value, self._item_key(item))
                 self._run_item(item)
+
+    def _drain_pending_admissions(self) -> None:
+        """Admit deferred items as stage queue slots become available.
+
+        Stage queues are bounded independently of the worker window. A seed
+        burst may therefore have more ready items than a queue can hold in one
+        tick; those items remain in this coordinator-owned admission spool and
+        are retried after the normal downstream-first drain.
+        """
+        if self.shutdown.is_set() or not self._pending_admissions:
+            return
+        for _ in range(len(self._pending_admissions)):
+            item, stage, enter = self._pending_admissions.popleft()
+            queue = self.queues[stage]
+            if not queue.push(item):
+                self._pending_admissions.append((item, stage, enter))
+                continue
+            if enter:
+                item.state = "ENTER"
+                item.payload["_enter_pending"] = True
+                item.add_history_event(stage, item.state, note="enqueued")
+            self._record_event("push", stage.value, self._item_key(item))
+            self._progress = True
 
     def _drain_implementation(self) -> None:
         """Drain the implementation queue under topo order + file-overlap gating.
@@ -1527,6 +1573,9 @@ class Coordinator:
         for it in self.in_flight.values():
             if it.kind is ItemKind.ISSUE and it.issue is not None:
                 keys.add((it.repo, it.issue))
+        for it, _stage, _enter in self._pending_admissions:
+            if it.kind is ItemKind.ISSUE and it.issue is not None:
+                keys.add((it.repo, it.issue))
         return keys
 
     def _push_item(self, item: WorkItem, stage: StageName, enter: bool) -> bool:
@@ -1553,24 +1602,23 @@ class Coordinator:
         is_new = id(item) not in self._seen_item_ids
         queue = self.queues[stage]
         if not queue.push(item):
-            self._record_queue_saturation(
-                queue=stage.value,
-                capacity=queue.capacity,
-                item=item,
-                source="stage_enqueue_rejected",
-            )
             item.stage = stage
+            if enter:
+                item.state = "ENTER"
+                item.payload["_enter_pending"] = True
             if is_new:
                 self._seen_item_ids.add(id(item))
                 self.items.append(item)
                 item.payload.setdefault("entry_stage", stage.value)
-            self._park_resumable(item, reason="stage enqueue rejected")
-            if is_new:
-                # A rejected seed is otherwise absent from every coordinator
-                # collection. Stop with a resumable status so callers cannot
-                # mistake an incomplete admission pass for a clean run.
-                self._begin_graceful_shutdown("stage queue saturation")
-            return False
+            self._pending_admissions.append((item, stage, enter))
+            item.add_history_event(stage, item.state, note="queue deferred")
+            self._record_event(
+                "queue_deferred",
+                stage.value,
+                self._item_key(item),
+                {"capacity": queue.capacity},
+            )
+            return True
         item.stage = stage
         if enter:
             item.state = "ENTER"
@@ -1977,6 +2025,7 @@ class Coordinator:
                 continue
             leftovers.extend(q.snapshot())
         leftovers.extend(self.in_flight.values())
+        leftovers.extend(item for item, _stage, _enter in self._pending_admissions)
         for item in leftovers:
             if item.result is None:
                 self._park_resumable(item)

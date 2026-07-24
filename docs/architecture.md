@@ -174,13 +174,15 @@ operations on the same checkout would race.
 The only cross-thread channel is
 [`CompletionQueue`](hephaestus/automation/pipeline/queues.py)
 (`queue.Queue[(JobHandle, JobResult)]`). Let
-`C = max(1, parallel_repos × max_workers)`: every stage queue and the result
-queue has capacity `C`, and global admission keeps at most `C` handles in
-flight. A completion publication never blocks a worker. When the result queue
-is full, the rejected `(JobHandle, JobResult)` enters a separate bounded
-mailbox of capacity `C` for coordinator-owned terminalization. Signal wakes
-use a coalesced out-of-band latch and consume no result capacity. The
-coordinator's bounded poll is the loop's idle sleep
+`C = max(1, parallel_repos × max_workers)`: the result queue has capacity `C`,
+and global admission keeps at most `C` handles in flight. Each stage queue has
+the independent `PipelineConfig.stage_queue_capacity` bound; a full stage
+queue defers admission into the coordinator-owned spool until the next drain.
+A completion publication never blocks a worker. When the result queue is full,
+the rejected `(JobHandle, JobResult)` enters a separate bounded mailbox of
+capacity `C` for coordinator-owned terminalization. Signal wakes use a
+coalesced out-of-band latch and consume no result capacity. The coordinator's
+bounded poll is the loop's idle sleep
 ([`_wait_for_completion`](hephaestus/automation/pipeline/coordinator.py)).
 Poll interval = [`_IDLE_POLL_S = 1.0`](hephaestus/automation/pipeline/coordinator.py).
 Pool size = `parallel_repos × max_workers`
@@ -281,12 +283,13 @@ synthesizes interrupted results for remaining in-flight jobs.
 Completion publication rejection starts the same grace-bounded shutdown after
 the coordinator parks the exact rejected item. If the bounded rejection
 mailbox overflows, immediate teardown parks every remaining in-flight item.
-Stage-queue saturation follows the same recovery rule for existing work. A
-genuinely new seed rejected by a full stage queue is first added to the
-coordinator ledger, parked RESUMABLE, and then starts a non-successful graceful
-shutdown; it is never omitted from the run's effective items. Every production
-entrypoint supplies the durable JSONL event-log path, including when metrics
-are disabled.
+Stage-queue backlogs are deferred rather than treated as saturation: the
+coordinator retains the item in its admission spool and retries it after queue
+slots open, so a normal `C+1` seed burst does not shut down the run. Completion
+publication saturation still starts the same recovery rule after the exact
+rejected item is parked. Every production entrypoint supplies the durable JSONL
+event-log path, including when metrics are disabled; if that journal cannot
+record a saturation event, the coordinator fails closed with exit code `1`.
 Items touched by an interrupt report
 `ItemResult(passed=False, reason="resumable at <stage>", …)` — **never** FAILED. The
 end-of-run summary lists them under `RESUMABLE at <stage>`. Resume is

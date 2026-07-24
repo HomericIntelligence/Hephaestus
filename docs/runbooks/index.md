@@ -11,6 +11,7 @@ needs hands-on recovery.
 | [Automation loop crashed mid-issue](automation-loop-crash.md) | The `hephaestus-automation-loop` process died or a phase timed out and you need to resume safely. |
 | [Recover a corrupted worktree state](corrupted-worktree.md) | An issue's `build/.worktrees/issue-<N>` worktree is dirty, abandoned, or blocking a clean re-run. |
 | [Drive-green stall](ci-driver-stall.md) | A PR with loop-owned `state:implementation-go` remains blocked. |
+| [Queue saturation](queue-saturation.md) | A completion channel or rejection mailbox is full and the pipeline parks work for recovery. |
 | [Claude quota exhausted (429)](claude-quota-exhausted.md) | A stage emits `Verdict: ERROR` and the issue is left unlabeled because the Claude API quota / session limit was hit. |
 | [Reviving a state:skip-labeled issue](state-skip-revival.md) | An issue was labeled `state:skip` after automation already started work on it (planned or opened a PR) and you want to resume driving it. |
 | [No silent failures](no-silent-failures.md) | Policy reference: why `\|\| true`, `continue-on-error`, and advisory `::warning::` are forbidden, and how to fix a tripped hook. |
