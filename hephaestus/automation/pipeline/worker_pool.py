@@ -51,6 +51,26 @@ logger = logging.getLogger(__name__)
 _TAIL = 4000  # chars of stdout/stderr retained in a JobResult
 _ERR_MAX = 500  # chars of error detail retained in a JobResult
 _GIT_LOCK_WAIT_POLL_S = 0.1
+_FETCH_ENV_BLOCKLIST = frozenset(
+    {
+        "GIT_ASKPASS",
+        "GIT_SSH",
+        "GIT_SSH_COMMAND",
+        "SSH_ASKPASS",
+    }
+)
+
+
+def _controlled_fetch_env() -> dict[str, str]:
+    """Return a fetch environment that cannot inject local Git executables."""
+    env = os.environ.copy()
+    for key in _FETCH_ENV_BLOCKLIST:
+        env.pop(key, None)
+    for key in tuple(env):
+        if key == "GIT_CONFIG_COUNT" or key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")):
+            env.pop(key)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
 
 
 def _repo_lock_path(repo: str, lock_dir: Path | None = None) -> Path:
@@ -637,8 +657,12 @@ class WorkerPool:
             ["git", "remote", "get-url", "origin"], cwd=checkout, timeout=job.timeout_s
         ).stdout.strip()
         normalized_origin = origin.rstrip("/").removesuffix(".git")
-        expected_origin = f"https://github.com/{expected_repo}"
-        if normalized_origin != expected_origin:
+        expected_origins = {
+            f"https://github.com/{expected_repo}",
+            f"ssh://git@github.com/{expected_repo}",
+            f"git@github.com:{expected_repo}",
+        }
+        if normalized_origin not in expected_origins:
             return JobResult(
                 ok=False,
                 error=f"checkout has unexpected origin; expected origin {expected_repo}",
@@ -700,11 +724,22 @@ class WorkerPool:
     ) -> JobResult:
         """Fetch and fast-forward a validated checkout while its metadata is locked."""
         hooks_disabled = f"core.hooksPath={os.devnull}"
+        fetch_config = [
+            "-c",
+            hooks_disabled,
+            "-c",
+            "core.sshCommand=ssh",
+            "-c",
+            "credential.helper=",
+            "-c",
+            "credential.helper=!gh auth git-credential",
+            "-c",
+            "core.askPass=",
+        ]
         git_utils.run(
             [
                 "git",
-                "-c",
-                hooks_disabled,
+                *fetch_config,
                 "fetch",
                 "--no-tags",
                 origin,
@@ -712,6 +747,7 @@ class WorkerPool:
             ],
             cwd=checkout,
             timeout=timeout_s,
+            env=_controlled_fetch_env(),
         )
         relation = git_utils.run(
             [

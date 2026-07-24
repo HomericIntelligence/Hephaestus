@@ -39,6 +39,54 @@ class TestWorktreeManager:
         )
         assert status.stdout == ""
 
+    def test_git_metadata_lock_uses_common_dir_for_linked_worktree(self, tmp_path: Path) -> None:
+        """Base and linked worktrees share a status-safe Git-metadata sentinel."""
+        checkout = tmp_path / "checkout"
+        linked = tmp_path / "linked"
+        subprocess.run(
+            ["git", "init", "--initial-branch", "main", str(checkout)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        for key, value in (("user.name", "Test User"), ("user.email", "test@example.com")):
+            subprocess.run(
+                ["git", "config", key, value],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m", "initial"],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "worktree", "add", "-b", "linked", str(linked)],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        base_lock = WorktreeManager.git_metadata_lock_path(checkout)
+        assert WorktreeManager.git_metadata_lock_path(linked) == base_lock
+        with file_lock(base_lock):
+            pass
+
+        for worktree in (checkout, linked):
+            status = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=worktree,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            assert status.stdout == ""
+
     def test_initialization_default_base_dir(self, worktree_mocks: Any, tmp_path: Any) -> None:
         """Test initialization with default base directory."""
         worktree_mocks.repo_root.return_value = tmp_path

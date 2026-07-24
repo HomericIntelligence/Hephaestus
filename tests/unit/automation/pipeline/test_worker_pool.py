@@ -13,7 +13,7 @@ from collections.abc import Iterator
 from concurrent.futures import Future
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import ANY, MagicMock, call, patch
 
 import pytest
 
@@ -1389,6 +1389,14 @@ class TestGitOps:
                     "git",
                     "-c",
                     f"core.hooksPath={os.devnull}",
+                    "-c",
+                    "core.sshCommand=ssh",
+                    "-c",
+                    "credential.helper=",
+                    "-c",
+                    "credential.helper=!gh auth git-credential",
+                    "-c",
+                    "core.askPass=",
                     "fetch",
                     "--no-tags",
                     "https://github.com/owner/name.git",
@@ -1396,6 +1404,7 @@ class TestGitOps:
                 ],
                 cwd=checkout,
                 timeout=120,
+                env=ANY,
             ),
             call(
                 ["git", "rev-list", "--left-right", "--count", "HEAD...origin/main"],
@@ -1553,15 +1562,21 @@ class TestGitOps:
         assert result.ok is False
         assert "expected origin owner/name" in (result.error or "")
 
-    def test_sync_checkout_rejects_ssh_origin(
+    def test_sync_checkout_synchronizes_ssh_origin_with_controlled_transport(
         self,
         pool: WorkerPool,
         completion_q: CompletionQueue,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Synchronization accepts only HTTPS remotes with controlled transport."""
+        """A valid SSH origin is fetched only with controlled Git configuration."""
         checkout = tmp_path / "checkout"
         checkout.mkdir()
+        monkeypatch.setenv("GIT_SSH_COMMAND", "/unsafe/ssh-wrapper")
+        monkeypatch.setenv("GIT_ASKPASS", "/unsafe/askpass")
+        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+        monkeypatch.setenv("GIT_CONFIG_KEY_0", "credential.helper")
+        monkeypatch.setenv("GIT_CONFIG_VALUE_0", "!/unsafe/credential-helper")
         job = GitJob(
             repo="test/repo",
             op="sync_checkout",
@@ -1569,17 +1584,48 @@ class TestGitOps:
             kwargs={"repo": "owner/name", "dest": str(checkout)},
         )
         with patch("hephaestus.automation.git_utils.run") as mock_run:
-            mock_run.return_value = subprocess.CompletedProcess(
-                [], 0, stdout="git@github.com:owner/name.git\n"
-            )
+            mock_run.side_effect = [
+                subprocess.CompletedProcess([], 0, stdout="git@github.com:owner/name.git\n"),
+                subprocess.CompletedProcess([], 0, stdout=""),
+                subprocess.CompletedProcess([], 0, stdout="main\n"),
+                subprocess.CompletedProcess([], 0, stdout="main\n"),
+                subprocess.CompletedProcess([], 0),
+                subprocess.CompletedProcess([], 0, stdout="0\t1\n"),
+                subprocess.CompletedProcess([], 0),
+                subprocess.CompletedProcess([], 0, stdout="new-head\nnew-head\n"),
+            ]
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
-        mock_run.assert_called_once_with(
-            ["git", "remote", "get-url", "origin"], cwd=checkout, timeout=120
-        )
-        assert result.ok is False
-        assert "expected origin owner/name" in (result.error or "")
+        fetch_call = mock_run.call_args_list[4]
+        assert fetch_call.args[0] == [
+            "git",
+            "-c",
+            f"core.hooksPath={os.devnull}",
+            "-c",
+            "core.sshCommand=ssh",
+            "-c",
+            "credential.helper=",
+            "-c",
+            "credential.helper=!gh auth git-credential",
+            "-c",
+            "core.askPass=",
+            "fetch",
+            "--no-tags",
+            "git@github.com:owner/name.git",
+            "+refs/heads/main:refs/remotes/origin/main",
+        ]
+        fetch_env = fetch_call.kwargs["env"]
+        assert fetch_env["GIT_TERMINAL_PROMPT"] == "0"
+        for key in (
+            "GIT_SSH_COMMAND",
+            "GIT_ASKPASS",
+            "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_KEY_0",
+            "GIT_CONFIG_VALUE_0",
+        ):
+            assert key not in fetch_env
+        assert result.ok is True
 
     def test_sync_checkout_rejects_spoofed_github_hostname(
         self,
