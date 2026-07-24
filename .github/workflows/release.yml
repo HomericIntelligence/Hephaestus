@@ -7,9 +7,13 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release (leave blank to use latest tag)"
+        description: "Tag to release"
+        required: true
+      docs_only:
+        description: "Deploy documentation for an existing published release without publishing."
         required: false
-        default: ""
+        default: false
+        type: boolean
 
 # Least-privilege permissions are declared per job below (zizmor
 # excessive-permissions, issue #2151): the workflow-level default is
@@ -19,12 +23,11 @@ permissions:
 
 # Serialize per-tag: this workflow builds, publishes to PyPI, and creates a
 # GitHub release — none idempotent. Two runs for the SAME tag must not race
-# (double-publish); different tags proceed independently. Key on the resolved
-# tag: dispatched runs group on the explicit `tag` input (previously they all
-# shared the branch ref's group), tag-push runs group on the tag ref. Never
-# cancel a publish in flight, hence cancel-in-progress: false.
+# (double-publish); different tags proceed independently. A tag push exposes
+# its short tag name through github.ref_name, matching the explicit dispatch
+# input. Never cancel a publish in flight, hence cancel-in-progress: false.
 concurrency:
-  group: release-${{ inputs.tag || github.ref }}
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -50,23 +53,19 @@ jobs:
         env:
           INPUT_TAG: ${{ inputs.tag }}
           EVENT_REF: ${{ github.ref }}
+          DOCS_ONLY: ${{ inputs.docs_only }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
-          if [ -n "$INPUT_TAG" ]; then
-            TAG="$INPUT_TAG"
-          elif [[ "$EVENT_REF" == refs/tags/* ]]; then
+          if [[ "$EVENT_REF" == refs/tags/* ]]; then
             TAG="${EVENT_REF#refs/tags/}"
           else
-            TAG="$(git for-each-ref \
-              --count=1 \
-              --sort=-version:refname \
-              --format='%(refname:short)' \
-              'refs/tags/v*')"
+            TAG="$INPUT_TAG"
           fi
 
           if [ -z "$TAG" ]; then
-            echo "::error::No release tag could be resolved" >&2
+            echo "::error::An explicit release tag is required" >&2
             exit 1
           fi
 
@@ -79,9 +78,21 @@ jobs:
           echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
           echo "Resolved release tag ${TAG} to immutable commit ${SHA}"
 
+          if [ "$DOCS_ONLY" = "true" ]; then
+            if ! DRAFT="$(gh release view "$TAG" --json isDraft -q .isDraft)"; then
+              echo "::error::Docs-only recovery requires an existing GitHub Release for ${TAG}" >&2
+              exit 1
+            fi
+            if [ "$DRAFT" != "false" ]; then
+              echo "::error::Docs-only recovery requires a published GitHub Release for ${TAG}" >&2
+              exit 1
+            fi
+          fi
+
   test:
     runs-on: ubuntu-24.04
     needs: resolve-release
+    if: ${{ !inputs.docs_only }}
     # Unit + integration suites run here; the uv env is cached and dev-install
     # already ran, so both finish well under this budget. 20 min (vs the prior
     # 15) is free insurance so a first-run integration slowdown never aborts a
@@ -122,6 +133,7 @@ jobs:
   type-check:
     runs-on: ubuntu-24.04
     needs: resolve-release
+    if: ${{ !inputs.docs_only }}
     timeout-minutes: 10
 
     steps:
@@ -147,6 +159,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     needs: [resolve-release, test, type-check]
+    if: ${{ !inputs.docs_only }}
     environment: pypi
     permissions:
       contents: write  # Create GitHub Release / upload assets
@@ -252,7 +265,8 @@ jobs:
   deploy-docs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    needs: [resolve-release, build-and-publish]
+    needs: [resolve-release, test, type-check, build-and-publish]
+    if: ${{ always() && needs.resolve-release.result == 'success' && (inputs.docs_only || (needs.test.result == 'success' && needs.type-check.result == 'success' && needs.build-and-publish.result == 'success')) }}
     # Publish the pdoc API reference to GitHub Pages only after the package
     # release succeeds, so the online docs always match a version on PyPI.
     permissions:

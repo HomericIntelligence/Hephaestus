@@ -531,18 +531,73 @@ class TestAutoTagReleaseDispatch:
         assert "### Dispatch failed after tag push" in doc
         assert "gh workflow run release.yml -f tag=vX.Y.Z" in doc
 
+    def test_releasing_doc_has_docs_only_recovery_command(self) -> None:
+        """A published release with failed docs needs a no-republish recovery command."""
+        doc = (REPO_ROOT / "docs" / "RELEASING.md").read_text(encoding="utf-8")
+
+        assert "### Docs-only recovery after publication" in doc
+        assert "gh workflow run release.yml --ref main -f tag=vX.Y.Z -f docs_only=true" in doc
+
     def test_release_concurrency_keys_on_resolved_tag(self) -> None:
         """Dispatched and tag-push release runs must serialize per tag, not per branch.
 
-        With ``release-${{ github.ref }}`` every workflow_dispatch run grouped on
-        the branch ref, so two dispatched runs for DIFFERENT tags serialized while
-        a dispatched and a tag-push run of the SAME tag did not share a group.
-        Keying on ``inputs.tag`` first makes dispatched runs group per tag.
+        ``github.ref_name`` is the short tag name for a tag push, so it matches the
+        explicit ``tag`` dispatch input. ``github.ref`` includes ``refs/tags/`` and
+        would let a tag push and a manual dispatch for the same tag run together.
         """
         workflow = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
         concurrency = workflow["concurrency"]
-        assert concurrency["group"] == "release-${{ inputs.tag || github.ref }}"
+        assert concurrency["group"] == "release-${{ inputs.tag || github.ref_name }}"
         assert concurrency["cancel-in-progress"] is False
+
+    def test_release_dispatch_requires_a_tag_and_supports_docs_only_recovery(self) -> None:
+        """Recovery must select an explicit tag and never republish its package."""
+        workflow = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        inputs = workflow[True]["workflow_dispatch"]["inputs"]
+
+        assert inputs["tag"]["required"] is True
+        assert inputs["docs_only"] == {
+            "description": (
+                "Deploy documentation for an existing published release without publishing."
+            ),
+            "required": False,
+            "default": False,
+            "type": "boolean",
+        }
+
+    def test_docs_only_recovery_skips_normal_release_jobs(self) -> None:
+        """Docs recovery keeps tag validation but skips test, publish, and release writes."""
+        workflow = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        jobs = workflow["jobs"]
+
+        assert jobs["test"]["if"] == "${{ !inputs.docs_only }}"
+        assert jobs["type-check"]["if"] == "${{ !inputs.docs_only }}"
+        assert jobs["build-and-publish"]["if"] == "${{ !inputs.docs_only }}"
+        assert jobs["deploy-docs"]["needs"] == [
+            "resolve-release",
+            "test",
+            "type-check",
+            "build-and-publish",
+        ]
+        assert jobs["deploy-docs"]["if"] == (
+            "${{ always() && needs.resolve-release.result == 'success' && "
+            "(inputs.docs_only || (needs.test.result == 'success' && "
+            "needs.type-check.result == 'success' && "
+            "needs.build-and-publish.result == 'success')) }}"
+        )
+
+    def test_docs_only_recovery_requires_an_existing_release(self) -> None:
+        """A docs-only dispatch is restricted to an already-published release tag."""
+        workflow = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        resolve_step = next(
+            step
+            for step in workflow["jobs"]["resolve-release"]["steps"]
+            if step.get("id") == "resolve"
+        )
+
+        assert resolve_step["env"]["DOCS_ONLY"] == "${{ inputs.docs_only }}"
+        assert resolve_step["env"]["GH_TOKEN"] == "${{ github.token }}"  # noqa: S105
+        assert 'gh release view "$TAG" --json isDraft -q .isDraft' in resolve_step["run"]
 
 
 class TestReleaseAttestations:
