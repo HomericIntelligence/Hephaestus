@@ -37,7 +37,7 @@ Run the same bounded profile used by CI explicitly; the directory is excluded
 from normal pytest collection:
 
 ```bash
-pixi run pytest tests/performance --override-ini="addopts=" -v --strict-markers --load-duration-s=30 --load-max-jobs=50000 --load-workers=8 --load-max-in-flight=64 --load-service-ms=5 --load-p95-budget-ms=500 --load-report=build/performance/worker-pool.json
+uv run pytest tests/performance --override-ini="addopts=" -v --strict-markers --load-duration-s=30 --load-max-jobs=50000 --load-workers=8 --load-max-in-flight=64 --load-service-ms=5 --load-p95-budget-ms=500 --load-report=build/performance/worker-pool.json
 ```
 
 ## Runtime evidence
