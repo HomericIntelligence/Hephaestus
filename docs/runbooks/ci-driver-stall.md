@@ -4,7 +4,7 @@ Use this runbook when a PR carries loop-owned `state:implementation-go` and
 remains blocked. The current queue verifies the label only with its
 current-process reviewed-head proof, then `merge_wait` stands by; it does not
 create, disable, adopt, or poll auto-merge pending the separately reviewed
-#2419 conditional merge path. CI/CD is outside the loop.
+issue #2419 conditional merge path. CI/CD is outside the loop.
 
 ## Containment
 
