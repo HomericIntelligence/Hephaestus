@@ -168,6 +168,25 @@ def test_architecture_md_documents_effective_item_semantics() -> None:
     assert "exit-code" in normalized
 
 
+def test_architecture_md_documents_merge_wait_restart_ownership() -> None:
+    """Restart re-seeds normally without taking ownership of another run's arm."""
+    text = _arch_text()
+    normalized = " ".join(text.split()).lower()
+
+    assert "### Merge-wait restart semantics" in text
+    assert "queue is in-memory" in normalized
+    assert "restart re-seeds normally" in normalized
+    assert "other-run auto-merge arms" in normalized
+    assert "never adopted, mutated, or re-armed" in normalized
+    assert "operator handling" in normalized
+    for retired_symbol in (
+        "pending_drive_green_arms",
+        "_pending_arm_recovery_entries",
+        "merge_wait_recovery",
+    ):
+        assert retired_symbol not in text
+
+
 def test_stage_github_pr_state_docstring_describes_shared_read_contract() -> None:
     """The shared PR-state accessor must describe every pipeline consumer."""
     from hephaestus.automation.pipeline.stages.base import StageGitHub
