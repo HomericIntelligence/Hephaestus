@@ -130,6 +130,8 @@ class FakeWorkerPool:
         # rebase reports clean-rebase True, commit_push reports changed True.
         if job.op in ("rebase", "commit_push"):
             return JobResult(ok=True, value=True)
+        if job.op == "verify_pr_review_checkout":
+            return JobResult(ok=True, value={"ready": True, "diff": "checkout diff"})
         return JobResult(ok=True)
 
     def shutdown(self) -> None:

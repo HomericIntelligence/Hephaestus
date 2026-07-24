@@ -193,7 +193,7 @@ Examples:
     parser.add_argument(
         "--no-auto-merge",
         action="store_true",
-        help="(Deprecated, ignored) merge arming is owned by merge_wait",
+        help="(Deprecated, ignored) queue auto-merge handling is unavailable pending #2419",
     )
     parser.add_argument(
         "--no-learn",

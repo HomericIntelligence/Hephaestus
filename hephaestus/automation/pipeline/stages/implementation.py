@@ -1,8 +1,8 @@
 """Implementation stage: gate plan GO, cut worktree, implement, test, push, PR.
 
 Re-houses the implementation control flow from the legacy per-issue phase
-runner (dispatch, plan-ready gate, existing-PR review, and the
-``ensure_pr_auto_merge_deferred`` call) and
+runner (dispatch, plan-ready gate, existing-PR review, and the existing-PR
+ownership check) and
 ``_pr_create_phase.PRCreatePhase._finalize_pr`` (:36) as a pipeline stage
 (docs/architecture.md §5.4 "implementation" is the
 binding contract):
@@ -21,7 +21,7 @@ binding contract):
   existing-PR fast path (``_review_existing_pr`` semantics): a PR already
   carrying ``state:implementation-go`` routes to ``merge_wait``; a PR without
   it adopts the PR's
-  REAL head branch, re-ensures the auto-merge deferral [durable], cuts a
+  REAL head branch only after it confirms the PR is open and unarmed, cuts a
   worktree on the ADOPTED branch (``refresh_base=False`` +
   ``sync_to_remote`` — the anti-clobber reset of
   ``_prepare_worktree_for_existing_pr`` :649, so pushed commits are never
@@ -48,10 +48,8 @@ binding contract):
   "no commits vs base" runtime error (re-housed from the legacy phase
   runner's runtime-error handler), non-fatally.
 - PR_CREATE [M]: ``ctx.github.create_pr`` (idempotent ensure semantics)
-  with a ``prompts/pr_review.py get_pr_description`` body [durable], then
-  ``ctx.github.defer_auto_merge`` — the containment boundary: auto-merge
-  stays disabled regardless of legacy labels, and ``state:implementation-go``
-  does not create merge eligibility by itself.
+  with a ``prompts/pr_review.py get_pr_description`` body [durable]. PR
+  review owns implementation labels; this stage does not create merge eligibility.
 - Prompt functions (imported, never re-authored):
   ``prompts/implementation.py get_implementation_prompt`` (composed with
   the advise-findings block by :func:`build_implementation_prompt`),
@@ -110,6 +108,7 @@ from .base import (
     StageOutcome,
     StepResult,
     WorkItem,
+    _is_confirmed_open_unarmed,
     _require_issue_labels,
     _terminal_pr_outcome,
     _worktree_path,
@@ -688,8 +687,8 @@ class ImplementationStage(Stage):
         return StageOutcome(Disposition.SKIP, "state:skip")
 
     @staticmethod
-    def _defer_gate(issue: int, pr_number: int, ctx: StageContext) -> StageOutcome | None:
-        """Contain an adopted existing PR: verify auto-merge is disabled.
+    def _external_arm_gate(pr_number: int, ctx: StageContext) -> StageOutcome | None:
+        """Block adoption when the live PR arm is external or ambiguous.
 
         Split out of :meth:`_gate` for the same readability reason as
         :meth:`_skip_gate`. Existing PRs may have been armed by the
@@ -702,19 +701,17 @@ class ImplementationStage(Stage):
             ctx: Stage context carrying the GitHub accessor.
 
         Returns:
-            A FINISH_FAIL outcome when the disable read-back fails, else None.
+            A terminal or blocked outcome unless the read proves OPEN and
+            unarmed, else None.
 
         """
-        try:
-            ctx.github.defer_auto_merge(pr_number)
-        except Exception as e:
-            logger.error(
-                "implementation:%d: could not verify PR #%d auto-merge disabled: %s",
-                issue,
-                pr_number,
-                e,
-            )
-            return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_disable_failed")
+        pr_state = ctx.github.gh_pr_state(pr_number)
+        if pr_state is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unavailable")
+        if pr_state.get("autoMergeRequest") is not None:
+            return StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
+        if not _is_confirmed_open_unarmed(pr_state):
+            return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unverified")
         return None
 
     @staticmethod
@@ -785,9 +782,9 @@ class ImplementationStage(Stage):
         terminal = _terminal_pr_outcome(ctx.github.gh_pr_state(existing_pr), existing_pr)
         if terminal is not None:
             return terminal
-        defer_failed = self._defer_gate(_issue_number(item), existing_pr, ctx)
-        if defer_failed is not None:
-            return defer_failed
+        external_arm = self._external_arm_gate(existing_pr, ctx)
+        if external_arm is not None:
+            return external_arm
         head_branch = ctx.github.get_pr_head_branch(existing_pr)
         if head_branch:
             item.branch = head_branch
@@ -829,8 +826,7 @@ class ImplementationStage(Stage):
         """GATE [M]: existing-PR fast path, then the plan-review verdict gate.
 
         Re-houses ``_review_existing_pr`` (:750) and ``_ensure_plan_ready``
-        (:429). All checks are at-or-past reads; the only write is the
-        auto-merge deferral re-ensure on PR adoption [durable].
+        (:429). All checks are at-or-past reads; PR adoption is read-only.
 
         agent_error bound (M1): a re-entry from a pr_review ``agent_error``
         fail-back (``payload["agent_error_failback"]``) that adopts an
@@ -903,17 +899,25 @@ class ImplementationStage(Stage):
         return Continue(next_state=WORKTREE_WAIT)
 
     def _create_pr(self, item: WorkItem, ctx: StageContext) -> StageOutcome:
-        """PR_CREATE [M]: durable PR creation, then auto-merge deferral.
+        """PR_CREATE [M]: create the durable PR journal entry for review.
 
         The ``create_pr`` write is the stage's journal entry and happens
-        BEFORE the advancing outcome (durable write precedes the queue
-        push); ``defer_auto_merge`` immediately after creation preserves the
-        legacy runner order (:623).
+        BEFORE the advancing outcome (durable write precedes the queue push).
         """
         if item.issue is None:  # guarded by step(); kept for type narrowing
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
 
-        if item.payload.pop("no_commits", None):
+        if item.payload.get("no_commits"):
+            # An item can retain a PR after an interrupted or re-entered
+            # implementation attempt.  Do not add an issue-level skip label
+            # if that live PR is now externally armed (or if its state cannot
+            # be proved complete and unarmed): the label would otherwise
+            # mutate workflow state owned by another actor.
+            if item.pr is not None:
+                external_arm = self._external_arm_gate(item.pr, ctx)
+                if external_arm is not None:
+                    return external_arm
+            item.payload.pop("no_commits", None)
             logger.warning(
                 "implementation:%d: no commits vs base; applying %s", item.issue, STATE_SKIP
             )
@@ -947,18 +951,6 @@ class ImplementationStage(Stage):
             pr_number = ctx.github.create_pr(item.issue, item.branch, title, body)
             item.pr = pr_number
             logger.info("implementation:%d: created PR #%d", item.issue, pr_number)
-        # Load-bearing legacy order (runner :623): defer auto-merge right
-        # after ensuring the PR exists — never armed before implementation GO.
-        try:
-            ctx.github.defer_auto_merge(item.pr)
-        except Exception as exc:
-            logger.error(
-                "implementation:%d: could not verify PR #%d auto-merge disabled: %s",
-                item.issue,
-                item.pr,
-                exc,
-            )
-            return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_disable_failed")
         return StageOutcome(Disposition.ADVANCE, f"PR #{item.pr} ready for review")
 
     @staticmethod

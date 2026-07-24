@@ -32,6 +32,13 @@ from hephaestus.automation.review_journal import IssueComment, blocked_audit_rec
 from tests.unit.automation.pipeline.conftest import FakeGitHub
 
 
+class _DefaultPrState:
+    """Sentinel that distinguishes a default open PR from an explicit failure."""
+
+
+_DEFAULT_PR_STATE = _DefaultPrState()
+
+
 class FakeStageGitHub(FakeGitHub):
     """Canonical FakeGitHub plus the stage read queries.
 
@@ -58,7 +65,7 @@ class FakeStageGitHub(FakeGitHub):
         pr_impl_state: tuple[bool, bool] = (False, False),
         unresolved: list[tuple[int, int]] | None = None,
         by_severity: list[tuple[int, int, int]] | None = None,
-        pr_state: dict[str, Any] | None = None,
+        pr_state: dict[str, Any] | None | _DefaultPrState = _DEFAULT_PR_STATE,
         pr_review_context: dict[str, str] | None = None,
         learn_terminal: bool = False,
         resolve_count: int = 0,
@@ -110,13 +117,22 @@ class FakeStageGitHub(FakeGitHub):
             if by_severity is not None
             else [(a, 0, h) for (a, h) in self._unresolved]  # legacy: all automation = blocking
         )
-        self._pr_state = pr_state
+        self._pr_state = (
+            {
+                "state": "OPEN",
+                "headRefOid": "a" * 40,
+                "autoMergeRequest": None,
+            }
+            if isinstance(pr_state, _DefaultPrState)
+            else pr_state
+        )
         self._pr_review_context = (
             pr_review_context
             if pr_review_context is not None
             else {
                 "pr_diff": "diff --git a/a.py b/a.py\n+@@ -1 +1 @@\n-old\n+new\n",
                 "pr_description": "Closes #1",
+                "pr_head_sha": "a" * 40,
             }
         )
         self._learn_terminal = learn_terminal
@@ -313,10 +329,6 @@ class FakeStageGitHub(FakeGitHub):
         """Mirror the coordinator PR-ensure (delegates to gh_pr_create)."""
         return self.gh_pr_create(branch, title, body)
 
-    def defer_auto_merge(self, pr_number: int) -> None:
-        """Mirror pr_manager.ensure_pr_auto_merge_deferred (records mutation)."""
-        self._log("defer_auto_merge", pr_number)
-
     def post_review_threads(
         self, pr_number: int, threads: list[dict[str, Any]], summary: str
     ) -> list[str]:
@@ -344,10 +356,6 @@ class FakeStageGitHub(FakeGitHub):
         """Mirror the coordinator PR-comment upsert (delegates to issue comments)."""
         self.gh_issue_upsert_comment(pr_number, marker_prefix, body)
         return True
-
-    def arm_auto_merge(self, pr_number: int, expected_head_sha: str) -> None:
-        """Mirror pr_manager.enable_auto_merge_after_implementation_go."""
-        self._log("arm_auto_merge", pr_number, expected_head_sha)
 
     def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
         """Mirror ci_driver.CIDriver._gh_pr_state (canned answer)."""
@@ -480,6 +488,11 @@ def make_work_item() -> Callable[..., WorkItem]:
             item.labels_cache = dict.fromkeys(labels, True)
         if payload:
             item.payload = payload
+        # Direct EVAL unit tests model a review job that has already crossed
+        # the checkout barrier. Integration walks still install this proof only
+        # after the barrier completes.
+        if pr is not None and state == "EVAL":
+            item.payload.setdefault("reviewed_pr_head_sha", "a" * 40)
         return item
 
     return _make_item

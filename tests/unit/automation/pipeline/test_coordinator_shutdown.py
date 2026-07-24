@@ -483,10 +483,7 @@ class TestCrashMatrixJournal:
         assert outcome.disposition.value == "advance"
         assert item.pr is not None
         assert item.pr in gh.prs
-        assert [name for name, _ in gh.mutation_log[-2:]] == [
-            "gh_pr_create",
-            "defer_auto_merge",
-        ]
+        assert gh.mutation_log[-1][0] == "gh_pr_create"
 
         # CRASH before the push to the pr_review queue.
         entry = _classify_from_fake(gh, 4, open_pr=item.pr)

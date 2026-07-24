@@ -974,6 +974,147 @@ class TestGitOps:
         mock_sync.assert_called_once_with(review_path, "70-existing", pr_number=70, timeout=60)
         assert result.ok is True
 
+    def test_verify_pr_review_checkout_rejects_a_dirty_worktree(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A reviewer never receives a stale or locally dirty checkout."""
+        job = GitJob(
+            repo="test/repo",
+            op="verify_pr_review_checkout",
+            timeout_s=60,
+            kwargs={
+                "worktree_path": str(tmp_path),
+                "branch": "70-existing",
+                "expected_head_sha": "a" * 40,
+                "pr_number": 70,
+            },
+        )
+        with (
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=False),
+            patch(f"{_WP}.git_utils.sync_worktree_to_remote_branch") as mock_sync,
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        assert result.value == {"ready": False, "reason": "dirty"}
+        mock_sync.assert_not_called()
+
+    def test_verify_pr_review_checkout_retries_when_remote_head_drifted(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A post-sync HEAD mismatch is an explicit bounded re-review signal."""
+        job = GitJob(
+            repo="test/repo",
+            op="verify_pr_review_checkout",
+            timeout_s=60,
+            kwargs={
+                "worktree_path": str(tmp_path),
+                "branch": "70-existing",
+                "expected_head_sha": "a" * 40,
+                "pr_number": 70,
+            },
+        )
+        with (
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+            patch(f"{_WP}.git_utils.sync_worktree_to_remote_branch") as mock_sync,
+            patch(f"{_WP}.git_utils.run", return_value=MagicMock(stdout="b" * 40 + "\n")),
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        assert result.value == {"ready": False, "reason": "head_drift"}
+        mock_sync.assert_called_once_with(tmp_path, "70-existing", pr_number=70, timeout=60)
+
+    def test_verify_pr_review_checkout_returns_diff_bound_to_verified_head(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """The review diff comes from the verified checkout, not mutable GitHub output."""
+        job = GitJob(
+            repo="test/repo",
+            op="verify_pr_review_checkout",
+            timeout_s=60,
+            kwargs={
+                "worktree_path": str(tmp_path),
+                "branch": "70-existing",
+                "expected_head_sha": "a" * 40,
+                "base_branch": "main",
+                "pr_number": 70,
+            },
+        )
+        with (
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+            patch(f"{_WP}.git_utils.sync_worktree_to_remote_branch") as mock_sync,
+            patch(
+                f"{_WP}.git_utils.run",
+                side_effect=[
+                    MagicMock(stdout="a" * 40 + "\n"),
+                    MagicMock(stdout=""),
+                    MagicMock(stdout="b" * 40 + "\n"),
+                    MagicMock(stdout="checkout diff for A"),
+                ],
+            ) as mock_run,
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        assert result.value == {
+            "ready": True,
+            "head": "a" * 40,
+            "base": "b" * 40,
+            "diff": "checkout diff for A",
+        }
+        mock_sync.assert_called_once_with(tmp_path, "70-existing", pr_number=70, timeout=60)
+        assert mock_run.call_args_list[3].args[0] == [
+            "git",
+            "diff",
+            "--no-ext-diff",
+            "--binary",
+            f"{'b' * 40}...{'a' * 40}",
+        ]
+
+    def test_verify_pr_review_checkout_reports_sync_failure(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A failed sync is never converted into a stale-ready checkout."""
+        job = GitJob(
+            repo="test/repo",
+            op="verify_pr_review_checkout",
+            timeout_s=60,
+            kwargs={
+                "worktree_path": str(tmp_path),
+                "branch": "70-existing",
+                "expected_head_sha": "a" * 40,
+                "pr_number": 70,
+            },
+        )
+        with (
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+            patch(
+                f"{_WP}.git_utils.sync_worktree_to_remote_branch",
+                side_effect=RuntimeError("remote unavailable"),
+            ),
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error == "RuntimeError: remote unavailable"
+
     def test_create_worktree_defaults_repo_root_to_ambient_cwd(
         self,
         pool: WorkerPool,

@@ -145,7 +145,7 @@ class TestClassifyIssue:
     def test_open_pr_with_pr_impl_go_routes_to_merge_wait(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """PR-level loop approval routes directly to its sole armer, no legacy fallback."""
+        """PR-level loop approval routes directly to merge-wait, no legacy fallback."""
         with caplog.at_level(logging.WARNING, logger="hephaestus.automation.pipeline.seeding"):
             stage, reason = classify_issue(
                 _facts(

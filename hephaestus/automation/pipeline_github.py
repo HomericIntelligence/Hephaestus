@@ -71,7 +71,6 @@ from hephaestus.automation.state_labels import (
     is_implementation_go,
 )
 from hephaestus.constants import read_timeout_env
-from hephaestus.github.auto_merge import defer_auto_merge, defer_auto_merge_batch
 from hephaestus.github.client import gh_call
 from hephaestus.utils.file_lock import file_lock
 
@@ -325,22 +324,14 @@ class PipelineGitHub:
                 return True
         return False
 
-    def _contain_open_prs_for_branch(self, branch_name: str) -> list[tuple[int, str]]:
-        """Contain every open PR on ``branch_name`` before selecting any one of them."""
+    def _open_prs_for_branch(self, branch_name: str) -> list[tuple[int, str]]:
+        """Return open PRs on ``branch_name`` without altering auto-merge."""
         discovery_error: github_api.OpenPrDiscoveryIncompleteError | None = None
         try:
             open_prs = github_api._find_open_prs_for_head(branch_name, self._gh)
         except github_api.OpenPrDiscoveryIncompleteError as exc:
             open_prs = exc.open_prs
             discovery_error = exc
-        containment_failures = defer_auto_merge_batch(
-            (pr_number for pr_number, _base_ref_name in open_prs), self.defer_auto_merge
-        )
-        if containment_failures:
-            raise RuntimeError(
-                "could not verify auto-merge disabled for existing PR(s): "
-                + "; ".join(containment_failures)
-            )
         if discovery_error is not None:
             raise RuntimeError(
                 f"could not verify existing PR state for head {branch_name!r}"
@@ -348,8 +339,8 @@ class PipelineGitHub:
         return open_prs
 
     def _find_open_pr_for_branch(self, branch_name: str) -> int | None:
-        """Contain all open head PRs and select the unique ``main`` target."""
-        open_prs = self._contain_open_prs_for_branch(branch_name)
+        """Select the unique ``main`` target among open head PRs."""
+        open_prs = self._open_prs_for_branch(branch_name)
         return github_api._select_open_pr_for_base(open_prs, "main")
 
     def _verified_open_pr_head_branch(self, pr_number: int, issue_number: int) -> str:
@@ -437,7 +428,7 @@ class PipelineGitHub:
             if closes_pattern.search(body):
                 if state.lower() == "open":
                     head_branch = self._verified_open_pr_head_branch(number, issue_number)
-                    open_prs = self._contain_open_prs_for_branch(head_branch)
+                    open_prs = self._open_prs_for_branch(head_branch)
                     if number not in {open_pr_number for open_pr_number, _base in open_prs}:
                         raise RuntimeError(
                             f"could not verify existing PR state for issue #{issue_number}"
@@ -646,7 +637,7 @@ class PipelineGitHub:
         return find_merged_pr_for_issue(issue_number)
 
     def find_pr_for_issue(self, issue_number: int) -> int | None:
-        """Return an open PR only after containing every PR on its head branch."""
+        """Return the selected open PR for the issue's branch or exact closing line."""
         return self._find_pr_for_issue(issue_number, state="open")
 
     def find_issue_for_pr(self, pr_number: int) -> int | None:
@@ -665,27 +656,39 @@ class PipelineGitHub:
         return int(match.group(1))
 
     def pr_review_context(self, pr_number: int) -> dict[str, str] | None:
-        """Read the exact PR body and diff used by an automated review.
+        """Read the PR metadata that precedes a checkout-bound review.
 
         A direct ``--prs`` seed must not grant the only review GO/NOGO based
-        solely on a PR number.  Both reads are coordinator-owned and failures
-        are explicit so the caller can finish the item for operator triage.
+        solely on a PR number.  The diff intentionally does *not* come from
+        ``gh pr diff``: an ABA head race could otherwise pair another commit's
+        mutable remote diff with this head.  The checkout barrier derives the
+        diff locally after it proves this exact head.
         """
         try:
-            body_result = self._gh(["pr", "view", str(pr_number), "--json", "body"])
+            body_result = self._gh(
+                ["pr", "view", str(pr_number), "--json", "body,headRefOid,baseRefName"]
+            )
             body_data = json.loads(body_result.stdout or "{}")
             if not isinstance(body_data, dict):
                 return None
-            diff_result = self._gh(["pr", "diff", str(pr_number)])
         except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError) as exc:
             logger.warning("PR #%s: review context read failed: %s", pr_number, exc)
             return None
         body = body_data.get("body")
-        if not isinstance(body, str):
+        head = body_data.get("headRefOid")
+        base_branch = body_data.get("baseRefName")
+        if (
+            not isinstance(body, str)
+            or not isinstance(head, str)
+            or not head
+            or not isinstance(base_branch, str)
+            or not base_branch
+        ):
             return None
         return {
-            "pr_diff": github_api.strip_null_bytes(diff_result.stdout or ""),
             "pr_description": github_api.strip_null_bytes(body),
+            "pr_head_sha": head,
+            "pr_base_branch": base_branch,
         }
 
     def has_existing_plan(self, issue_number: int) -> bool:
@@ -817,8 +820,8 @@ class PipelineGitHub:
         """Resolve unresolved AUTOMATION-owned threads; return the count (#1856).
 
         Never resolves human threads. Used by the GO gate to clear advisory
-        minor/nitpick threads the reviewer waved so ``required_review_thread_
-        resolution`` does not re-block the armed PR at merge (merge_wait.py:427).
+        minor/nitpick threads that the reviewer waived before it writes the
+        implementation label.
         """
         if self._skip(f"resolve automation threads on PR #{pr_number}"):
             return 0
@@ -837,10 +840,12 @@ class PipelineGitHub:
         One ``gh pr view`` returns ``{state, headRefOid, mergedAt,
         baseRefName, autoMergeRequest}``; ``None`` signals a read failure.
         Seed and implementation paths use the result for terminal-state
-        checks before branch adoption or label routing, while merge_wait uses it
-        for head capture and lifecycle polling. It deliberately excludes
+        checks before branch adoption or label routing, while pr_review and
+        merge_wait use it to bind and verify a reviewed head on a confirmed,
+        unarmed PR. It deliberately excludes
         GitHub merge-readiness and check-status fields: this accessor does not
-        use CI/CD as automation-loop authorization.
+        use CI/CD as automation-loop authorization, and no queue stage uses it
+        to mutate or poll auto-merge.
         """
         try:
             result = self._gh(
@@ -1067,14 +1072,20 @@ class PipelineGitHub:
     def create_pr(self, issue_number: int, branch: str, title: str, body: str) -> int:
         """Durably ensure the PR exists and return its number (idempotent).
 
-        First contain and reuse any open PR on the supplied branch, then use
+        PR creation requires a repo-scoped accessor.  The legacy helper can
+        alter auto-merge state, so an unscoped caller must fail closed rather
+        than delegate to it.
+
+        First select and reuse an open PR on the supplied branch, then use
         ``find_pr_for_issue`` as the issue-level fallback before creating a
         PR with the *given* title/body — NOT ``pr_manager.ensure_pr_created``,
         which would discard the stage's composed body (protocol docstring).
         Dry-run returns 0 (no PR).
         """
+        if self._repo_slug is None:
+            raise RuntimeError("create PR requires a repo-scoped PipelineGitHub accessor")
         if self._repo_slug is not None:
-            open_prs = self._contain_open_prs_for_branch(branch)
+            open_prs = self._open_prs_for_branch(branch)
             existing_on_branch = github_api._select_open_pr_for_base(open_prs, "main")
             if existing_on_branch is not None:
                 return existing_on_branch
@@ -1174,57 +1185,30 @@ class PipelineGitHub:
         return target_id
 
     def mark_pr_implementation_no_go(self, pr_number: int) -> None:
-        """Apply ``state:implementation-no-go`` (``pr_manager``)."""
+        """Apply and read back exclusive ``state:implementation-no-go``."""
         if self._skip(f"mark PR #{pr_number} implementation-no-go"):
             return
         if self._repo_slug is not None:
             self._add_labels(pr_number, [STATE_IMPLEMENTATION_NO_GO])
             self._remove_labels(pr_number, [STATE_IMPLEMENTATION_GO])
-            return
-        pr_manager.mark_pr_implementation_no_go(pr_number)
+        else:
+            pr_manager.mark_pr_implementation_no_go(pr_number)
+        has_go, has_no_go = self.pr_has_implementation_state_label(pr_number)
+        if has_go or not has_no_go:
+            raise RuntimeError(f"PR #{pr_number} implementation-no-go label read-back failed")
 
     def mark_pr_implementation_go(self, pr_number: int) -> None:
-        """Apply ``state:implementation-go`` (``pr_manager``)."""
+        """Apply and read back exclusive ``state:implementation-go``."""
         if self._skip(f"mark PR #{pr_number} implementation-go"):
             return
         if self._repo_slug is not None:
             self._add_labels(pr_number, [STATE_IMPLEMENTATION_GO])
             self._remove_labels(pr_number, [STATE_IMPLEMENTATION_NO_GO])
-            return
-        pr_manager.mark_pr_implementation_go(pr_number)
-
-    def defer_auto_merge(self, pr_number: int) -> None:
-        """Disable auto-merge and verify it remains disabled while the PR is open."""
-        if self._skip(f"defer auto-merge on PR #{pr_number}"):
-            return
-        if self._repo_slug is not None:
-            if not defer_auto_merge(pr_number, lambda args: self._gh(args, check=False)):
-                raise RuntimeError(f"could not verify auto-merge disabled for PR #{pr_number}")
-            return
-        pr_manager.ensure_pr_auto_merge_deferred(pr_number)
-
-    def arm_auto_merge(self, pr_number: int, expected_head_sha: str) -> None:
-        """Request squash auto-merge for MergeWait's approved-label path.
-
-        This adapter method deliberately does not check labels: that is a
-        coordinator-stage fact revalidated in
-        ``MergeWaitStage._arm`` immediately before this sole automatic arm.
-        """
-        if re.fullmatch(r"[0-9a-fA-F]{40}", expected_head_sha) is None:
-            raise ValueError("expected_head_sha must be a 40-character hex commit SHA")
-        if self._skip(f"arm auto-merge on PR #{pr_number}"):
-            return
-        self._gh(
-            [
-                "pr",
-                "merge",
-                str(pr_number),
-                "--auto",
-                "--squash",
-                "--match-head-commit",
-                expected_head_sha,
-            ]
-        )
+        else:
+            pr_manager.mark_pr_implementation_go(pr_number)
+        has_go, has_no_go = self.pr_has_implementation_state_label(pr_number)
+        if not has_go or has_no_go:
+            raise RuntimeError(f"PR #{pr_number} implementation-go label read-back failed")
 
     def post_review_threads(
         self, pr_number: int, threads: list[dict[str, Any]], summary: str

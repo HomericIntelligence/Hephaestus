@@ -349,8 +349,9 @@ The required CI gate `pr-policy` and the PR reviewer enforce:
 
 `pr-policy` blocks PRs that fail those checks. The queue runs
 `$athena:pr-review` in its normal default profile when available, then applies
-`state:implementation-go` on GO; `merge_wait` is the sole automatic armer and
-consumes that loop-owned label.
+`state:implementation-go` on GO. `merge_wait` verifies the process-local
+reviewed-head proof and stands by pending #2419; no queue stage mutates
+auto-merge.
 Normal review may collect CI/CD evidence and incorporate it into its binary
 verdict, but the loop does not change CI/CD. CI workflows and external
 artifacts never independently grant that authority. Branch protection and
@@ -373,8 +374,9 @@ gh pr create \
   --title "[Type] Brief description" \
   --body "$(printf 'Summary of change.\n\nCloses #<issue-number>\n')"
 
-# 5. Do not use --admin or bypass branch protection. Queue-owned auto-merge,
-#    when eligible, is armed only by merge_wait after loop review applies its label.
+# 5. Do not use --admin or bypass branch protection. Queue stages do not mutate
+#    auto-merge; merge_wait verifies the reviewed-head proof and stands by
+#    pending #2419.
 ```
 
 ### Commit Message Format
@@ -536,7 +538,8 @@ fallback. It posts inline findings and a final grade/GO-NOGO review; a GO
 applies `state:implementation-go`. Normal review may collect CI/CD evidence
 and incorporate it into its binary verdict, but the loop does not change CI/CD
 and no workflow, status, artifact, or lease independently authorizes it.
-`merge_wait` is the sole automatic armer and consumes that loop-owned label.
+`merge_wait` verifies the process-local reviewed-head proof and stands by
+pending #2419; no queue stage mutates auto-merge.
 
 | Queue stage | Module | Purpose |
 |-------------|--------|---------|
@@ -545,7 +548,7 @@ and no workflow, status, artifact, or lease independently authorizes it.
 | plan_review | `hephaestus.automation.pipeline.stages.plan_review` | Strict plan review, amendment, and plan labels |
 | implementation | `hephaestus.automation.pipeline.stages.implementation` | Worktree creation, implementation, tests, commit/push, and PR creation |
 | pr_review | `hephaestus.automation.pipeline.stages.pr_review` | Inline PR review, validation, comment addressing, and implementation labels |
-| merge_wait | `hephaestus.automation.pipeline.stages.merge_wait` | Sole automatic armer for loop-approved PRs; preserves post-merge learn |
+| merge_wait | `hephaestus.automation.pipeline.stages.merge_wait` | Verifies the reviewed-head proof, stands by pending #2419, and preserves post-merge learning |
 | finished | `hephaestus.automation.pipeline.stages.finished` | Terminal ledger and worktree cleanup/preservation |
 
 Console scripts preserve their historical names. Stage-scoped wrappers are

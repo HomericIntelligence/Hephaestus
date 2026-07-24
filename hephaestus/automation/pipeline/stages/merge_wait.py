@@ -1,23 +1,24 @@
-"""Merge-wait: one in-process auto-merge request and post-merge learning.
+"""Merge-wait: reviewed-head interlock and post-merge learning.
 
 ``pr_review`` owns the only automated GO/NOGO decision and writes the
-loop-owned ``state:implementation-go`` label.  This stage consumes that
-label once, asks GitHub to arm auto-merge for the live head, and then polls
-only the arm it created.  It deliberately does not recover, confirm, retry,
-or take over an arm created by another process or run: those operational
-states are blocked and left for an operator.
+loop-owned ``state:implementation-go`` label.  It consumes an in-memory
+reviewed-head proof only when it matches the live, confirmed-unarmed PR head.
+Until #2419 supplies a separately reviewed conditional normal-merge path, a
+matching proof stands down safely: this stage never creates, disables, adopts,
+or polls an auto-merge request.
 
 The implemented mini-state graph is:
 
-- Open PR: ENTER -> ARM -> FINISH_FAIL(``strict_gate_unavailable``) after
-  auto-merge disablement is verified.
-- Already-merged PR: ENTER -> ARM -> POLL -> LEARN_WAIT -> MW_FINISH,
+- Open PR: ENTER -> ARM -> FINISH_FAIL(``merge_wait_standing_by``) after
+  reviewed-head and confirmed-unarmed checks.
+- Already-merged PR: ENTER -> ARM -> LEARN_WAIT -> MW_FINISH,
   preserving the exactly-once post-merge learning contract through
   ``ctx.github.drive_green_learn_terminal``.
 
-Dirty/blocked recovery and automatic arming are not dormant branches in this
-module. Issue #2055 must introduce those transitions explicitly behind a
-head-bound strict-review proof rather than reviving undocumented legacy state.
+The persistent approval label is deliberately insufficient after a restart or
+direct ``--prs`` seed because the reviewed-head proof is process-local.  Those
+paths revoke the stale label only after a fresh confirmed-unarmed state read
+and return to review; merge-wait-only scope consequently terminates safely.
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ from .base import (
     StageOutcome,
     StepResult,
     WorkItem,
+    _is_confirmed_open_unarmed,
     _terminal_pr_outcome,
     _worktree_path,
     agent_provider,
@@ -66,7 +68,7 @@ def build_drive_green_learn_prompt(issue_number: int, pr_number: int) -> str:
 
 
 class MergeWaitStage(Stage):
-    """Arm once from the loop-owned approval label, then observe that arm."""
+    """Verify a reviewed approval without creating persistent merge authority."""
 
     def on_enter(self, item: WorkItem, ctx: StageContext) -> StageOutcome | None:
         """Reject an unscoped PR without altering any operator-owned arm."""
@@ -98,27 +100,14 @@ class MergeWaitStage(Stage):
         return StageOutcome(Disposition.FINISH_FAIL, f"unknown state: {item.state}")
 
     def _arm(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """Issue exactly one auto-merge request for a current-run approval."""
+        """Consume only a matching current-review proof, then stand down."""
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
-        pr_state = ctx.github.gh_pr_state(item.pr)
-        terminal = _terminal_pr_outcome(pr_state, item.pr)
+        pr_state, terminal = self._read_confirmed_open_unarmed(item, ctx)
         if terminal is not None:
-            return (
-                self._route_merged(item, ctx)
-                if terminal.disposition is Disposition.FINISH_PASS
-                else terminal
-            )
+            return terminal
         if pr_state is None:
-            logger.warning(
-                "merge_wait: PR #%d state unavailable; operator action required", item.pr
-            )
             return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unavailable")
-        if pr_state.get("autoMergeRequest"):
-            logger.warning(
-                "merge_wait: PR #%d is already armed; leaving it to the operator", item.pr
-            )
-            return StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
         has_go, _has_no_go = ctx.github.pr_has_implementation_state_label(item.pr)
         if not has_go:
             return StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
@@ -128,74 +117,75 @@ class MergeWaitStage(Stage):
                 "merge_wait: PR #%d has no readable head; operator action required", item.pr
             )
             return StageOutcome(Disposition.FINISH_FAIL, "missing_pr_head")
-        try:
-            ctx.github.arm_auto_merge(item.pr, head_sha)
-        except Exception as exc:
-            logger.warning(
-                "merge_wait: auto-merge request for PR #%d failed (%s); operator action required",
-                item.pr,
-                exc,
-            )
-            return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_arm_failed")
-        item.armed = True
-        return Continue(next_state=POLL)
+        reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
+        if reviewed_head != head_sha:
+            return self._revoke_stale_reviewed_head(item, ctx, reviewed_head)
+        return StageOutcome(Disposition.FINISH_FAIL, "merge_wait_standing_by")
 
     def _poll(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """Poll only the arm created by this run; never reconcile external state."""
+        """Stand down when a live unarmed PR reaches the retired poll state."""
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        _pr_state, terminal = self._read_confirmed_open_unarmed(item, ctx)
+        if terminal is not None:
+            return terminal
+        return StageOutcome(Disposition.FINISH_FAIL, "merge_wait_standing_by")
+
+    def _read_confirmed_open_unarmed(
+        self, item: WorkItem, ctx: StageContext
+    ) -> tuple[dict[str, object] | None, StepResult | None]:
+        """Read one PR state and return it only when it is complete, open, and unarmed."""
+        if item.pr is None:
+            return None, StageOutcome(Disposition.FINISH_FAIL, "no_pr")
         pr_state = ctx.github.gh_pr_state(item.pr)
         terminal = _terminal_pr_outcome(pr_state, item.pr)
         if terminal is not None:
-            return (
+            result = (
                 self._route_merged(item, ctx)
                 if terminal.disposition is Disposition.FINISH_PASS
                 else terminal
             )
+            return None, result
         if pr_state is None:
             logger.warning(
                 "merge_wait: PR #%d state unavailable; operator action required", item.pr
             )
+            return None, StageOutcome(Disposition.FINISH_FAIL, "pr_state_unavailable")
+        if pr_state.get("autoMergeRequest") is not None:
+            logger.warning(
+                "merge_wait: PR #%d is already armed; leaving it to the operator", item.pr
+            )
+            return None, StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
+        if not _is_confirmed_open_unarmed(pr_state):
+            return None, StageOutcome(Disposition.FINISH_FAIL, "pr_state_unverified")
+        return pr_state, None
+
+    def _revoke_stale_reviewed_head(
+        self, item: WorkItem, ctx: StageContext, reviewed_head: str
+    ) -> StepResult:
+        """Re-read before revoking a stale label and return to review if still stale."""
+        if item.pr is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        current_state, terminal = self._read_confirmed_open_unarmed(item, ctx)
+        if terminal is not None:
+            return terminal
+        if current_state is None:
             return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unavailable")
-        if not pr_state.get("autoMergeRequest"):
+        current_head = str(current_state.get("headRefOid") or "")
+        if not current_head:
+            return StageOutcome(Disposition.FINISH_FAIL, "missing_pr_head")
+        if reviewed_head == current_head:
+            return StageOutcome(Disposition.FINISH_FAIL, "merge_wait_standing_by")
+        try:
+            ctx.github.mark_pr_implementation_no_go(item.pr)
+        except Exception as exc:
             logger.warning(
-                "merge_wait: PR #%d is no longer armed; operator action required", item.pr
+                "merge_wait: could not revoke stale approval on PR #%d (%s)", item.pr, exc
             )
-            return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_no_longer_armed")
-        if not item.armed:
-            logger.warning(
-                "merge_wait: PR #%d was armed outside this run; leaving it to the operator", item.pr
-            )
-            return StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
-        has_go, _has_no_go = ctx.github.pr_has_implementation_state_label(item.pr)
-        if not has_go:
-            try:
-                ctx.github.defer_auto_merge(item.pr)
-            except Exception as exc:
-                logger.warning(
-                    "merge_wait: could not defer PR #%d after approval disappeared (%s); "
-                    "operator action required",
-                    item.pr,
-                    exc,
-                )
-                return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_defer_failed")
-            item.armed = False
-            logger.warning("merge_wait: PR #%d approval disappeared; returning to review", item.pr)
-            return StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
-        attempt = item.attempts.get("merge", 0) + 1
-        item.attempts["merge"] = attempt
-        budget = ctx.budget("merge")
-        if attempt >= budget:
-            logger.warning(
-                "merge_wait:%s: PR #%d remains pending after %d/%d own-arm polls; stopping",
-                item.issue,
-                item.pr,
-                attempt,
-                budget,
-            )
-            return StageOutcome(Disposition.FINISH_FAIL, "merge_wait_exhausted")
-        item.payload["retry_delay_s"] = 30
-        return StageOutcome(Disposition.RETRY, "merge_pending")
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_no_go_label_failed")
+        if not reviewed_head:
+            return StageOutcome(Disposition.FAIL_BACK, "reviewed_head_missing")
+        return StageOutcome(Disposition.FAIL_BACK, "reviewed_head_drift")
 
     def _route_merged(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Dispatch the existing deduplicated post-merge learning step."""
