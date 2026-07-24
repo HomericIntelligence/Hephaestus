@@ -76,24 +76,37 @@ def run(
         cmd[0] if cmd else "<empty>",
         max(len(cmd) - 1, 0),
     )
-    if cmd and cmd[0] == "git":
-        return _shared_run_git(
+    try:
+        if cmd and cmd[0] == "git":
+            return _shared_run_git(
+                cmd,
+                cwd=cwd,
+                timeout=timeout,
+                check=check,
+                log_on_error=False,
+                env=env,
+                retries=0,
+            )
+        return run_subprocess(
             cmd,
-            cwd=cwd,
+            cwd=str(cwd) if cwd else None,
             timeout=timeout,
             check=check,
-            log_on_error=log_errors,
+            log_on_error=False,
             env=env,
-            retries=0,
         )
-    return run_subprocess(
-        cmd,
-        cwd=str(cwd) if cwd else None,
-        timeout=timeout,
-        check=check,
-        log_on_error=log_errors,
-        env=env,
-    )
+    except subprocess.TimeoutExpired:
+        if log_errors:
+            logger.error("Command %s timed out after %ds", cmd[0] if cmd else "<empty>", timeout)
+        raise
+    except subprocess.CalledProcessError as error:
+        if log_errors:
+            logger.error(
+                "Command %s failed with exit code %s",
+                cmd[0] if cmd else "<empty>",
+                error.returncode,
+            )
+        raise
 
 
 _repo_info_cache: ThreadSafeCache[Path | None, tuple[str, str]] = ThreadSafeCache()

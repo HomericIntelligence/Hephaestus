@@ -65,6 +65,26 @@ class TestRun:
         assert "Running command echo with 1 argument(s)" in caplog.messages
         assert sensitive_argument not in caplog.text
 
+    def test_failed_git_command_log_does_not_disclose_arguments(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Failure logs use the same redacted command summary as debug logs."""
+        sensitive_argument = "do-not-log-this-failed-command-argument"
+        failure = subprocess.CalledProcessError(
+            1,
+            ["git", "fetch", sensitive_argument],
+            stderr=sensitive_argument,
+        )
+        with (
+            caplog.at_level(logging.ERROR, logger="hephaestus.automation.git_utils"),
+            patch("hephaestus.automation.git_utils._shared_run_git", side_effect=failure),
+            pytest.raises(subprocess.CalledProcessError),
+        ):
+            run(["git", "fetch", sensitive_argument])
+
+        assert "Command git failed with exit code 1" in caplog.messages
+        assert sensitive_argument not in caplog.text
+
     def test_failed_command_with_check(self) -> None:
         """Test running a failed command with check=True."""
         with pytest.raises(subprocess.CalledProcessError):

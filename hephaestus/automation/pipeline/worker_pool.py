@@ -70,7 +70,13 @@ _FETCH_ENV_BLOCKLIST = frozenset(
         "GIT_SSL_CAPATH",
         "GIT_SSL_NO_VERIFY",
         "GIT_WORK_TREE",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
         "SSH_ASKPASS",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
     }
 )
 
@@ -144,7 +150,11 @@ def _unsafe_local_git_config_key(config: str) -> str | None:
             normalized.startswith("credential.") and normalized.endswith(".helper")
         ):
             return key
-        if normalized.startswith("remote.") and normalized.endswith(".uploadpack"):
+        if normalized.startswith("remote.") and normalized.rsplit(".", 1)[-1] in {
+            "proxy",
+            "proxyauthmethod",
+            "uploadpack",
+        }:
             return key
         if normalized.startswith(("include.", "includeif.")):
             return key
@@ -162,6 +172,36 @@ def _unsafe_local_git_config_key(config: str) -> str | None:
         # verification/CA trust, including URL-scoped variants.
         if normalized.startswith(("http.", "url.")):
             return key
+    return None
+
+
+def _checkout_preflight_error(checkout: Path, timeout_s: int) -> str | None:
+    """Return a reusable-checkout metadata safety failure before synchronization."""
+    if not (checkout / ".git").exists():
+        return None
+    unsafe_config = _unsafe_local_git_config_key(
+        git_utils.run(
+            ["git", "config", "--null", "--list"],
+            cwd=checkout,
+            timeout=timeout_s,
+            env=_controlled_git_env(),
+        ).stdout
+    )
+    if unsafe_config is not None:
+        return "checkout has unsafe local Git configuration"
+    graft_value = git_utils.run(
+        ["git", "rev-parse", "--git-path", "info/grafts"],
+        cwd=checkout,
+        timeout=timeout_s,
+        env=_controlled_git_env(),
+    ).stdout.strip()
+    if not graft_value:
+        return None
+    graft_path = Path(graft_value)
+    if not graft_path.is_absolute():
+        graft_path = checkout / graft_path
+    if graft_path.is_file():
+        return "checkout has unsafe legacy Git grafts"
     return None
 
 
@@ -748,20 +788,8 @@ class WorkerPool:
         # ``git config --list`` uses the effective repository configuration,
         # including a linked worktree's ``config.worktree``.  It must precede
         # origin/status because either command can observe a poisoned setting.
-        if (checkout / ".git").exists():
-            unsafe_config = _unsafe_local_git_config_key(
-                git_utils.run(
-                    ["git", "config", "--null", "--list"],
-                    cwd=checkout,
-                    timeout=job.timeout_s,
-                    env=_controlled_git_env(),
-                ).stdout
-            )
-            if unsafe_config is not None:
-                return JobResult(
-                    ok=False,
-                    error="checkout has unsafe local Git configuration",
-                )
+        if preflight_error := _checkout_preflight_error(checkout, job.timeout_s):
+            return JobResult(ok=False, error=preflight_error)
 
         origin = git_utils.run(
             ["git", "remote", "get-url", "origin"],

@@ -1374,6 +1374,7 @@ class TestGitOps:
         with patch("hephaestus.automation.git_utils.run") as mock_run:
             mock_run.side_effect = [
                 subprocess.CompletedProcess([], 0, stdout=""),
+                subprocess.CompletedProcess([], 0, stdout=""),
                 subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
                 subprocess.CompletedProcess([], 0, stdout=""),
                 subprocess.CompletedProcess([], 0, stdout="main\n"),
@@ -1394,6 +1395,12 @@ class TestGitOps:
         assert mock_run.call_args_list == [
             call(
                 ["git", "config", "--null", "--list"],
+                cwd=checkout,
+                timeout=120,
+                env=ANY,
+            ),
+            call(
+                ["git", "rev-parse", "--git-path", "info/grafts"],
                 cwd=checkout,
                 timeout=120,
                 env=ANY,
@@ -1675,6 +1682,15 @@ class TestGitOps:
         monkeypatch.setenv("GIT_CONFIG_PARAMETERS", "credential.helper=!/unsafe/helper")
         monkeypatch.setenv("GIT_NO_REPLACE_OBJECTS", "0")
         monkeypatch.setenv("PATH", "/unsafe/path")
+        for key in (
+            "ALL_PROXY",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "all_proxy",
+            "http_proxy",
+            "https_proxy",
+        ):
+            monkeypatch.setenv(key, "http://unsafe-proxy")
         job = GitJob(
             repo="test/repo",
             op="sync_checkout",
@@ -1745,6 +1761,12 @@ class TestGitOps:
             "GIT_CONFIG_VALUE_0",
             "GIT_CONFIG",
             "GIT_CONFIG_PARAMETERS",
+            "ALL_PROXY",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "all_proxy",
+            "http_proxy",
+            "https_proxy",
         ):
             assert key not in fetch_env
         assert fetch_env["PATH"] == os.defpath
@@ -1807,6 +1829,8 @@ class TestGitOps:
             "url.file:///unsafe/.insteadOf\nhttps://github.com/owner/name\0",
             "credential.https://github.com.helper\n!/unsafe/helper\0",
             "remote.origin.uploadpack\n/unsafe/upload-pack\0",
+            "remote.origin.proxy\nhttp://unsafe-proxy\0",
+            "remote.origin.proxyAuthMethod\nanyauth\0",
             "core.worktree\n/unsafe/worktree\0",
         ),
         ids=(
@@ -1822,6 +1846,8 @@ class TestGitOps:
             "url-rewrite",
             "url-scoped-credential-helper",
             "remote-upload-pack",
+            "remote-proxy",
+            "remote-proxy-auth",
             "core-worktree",
         ),
     )
@@ -1903,6 +1929,79 @@ class TestGitOps:
         mock_run.assert_called_once()
         assert result.ok is False
         assert "unsafe local Git configuration" in (result.error or "")
+
+    def test_sync_checkout_rejects_grafts_in_linked_worktree(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """Legacy grafts in linked-worktree metadata stop sync before ancestry checks."""
+        checkout = tmp_path / "checkout"
+        linked = tmp_path / "linked"
+        subprocess.run(
+            ["git", "init", "--initial-branch", "main", str(checkout)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        for key, value in (("user.name", "Test User"), ("user.email", "test@example.com")):
+            subprocess.run(
+                ["git", "config", key, value],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m", "initial"],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "worktree", "add", "-b", "linked", str(linked)],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        graft_path = Path(
+            subprocess.run(
+                ["git", "rev-parse", "--git-path", "info/grafts"],
+                cwd=linked,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        )
+        if not graft_path.is_absolute():
+            graft_path = linked / graft_path
+        graft_path.parent.mkdir(parents=True, exist_ok=True)
+        graft_path.write_text("# unsafe graft\n", encoding="utf-8")
+        job = GitJob(
+            repo="test/repo",
+            op="sync_checkout",
+            timeout_s=120,
+            kwargs={"repo": "owner/name", "dest": str(linked)},
+        )
+        actual_run = git_utils.run
+
+        def run_preflight(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            assert command in (
+                ["git", "config", "--null", "--list"],
+                ["git", "rev-parse", "--git-path", "info/grafts"],
+            )
+            return actual_run(command, **kwargs)
+
+        with patch("hephaestus.automation.git_utils.run", side_effect=run_preflight) as mock_run:
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert mock_run.call_count == 2
+        assert result.ok is False
+        assert "unsafe legacy Git grafts" in (result.error or "")
 
     def test_sync_checkout_rejects_spoofed_github_hostname(
         self,
@@ -2072,6 +2171,7 @@ class TestGitOps:
             patch("hephaestus.automation.git_utils.run") as mock_run,
         ):
             mock_run.side_effect = [
+                subprocess.CompletedProcess([], 0, stdout=""),
                 subprocess.CompletedProcess([], 0, stdout=""),
                 subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
                 subprocess.CompletedProcess([], 0, stdout=""),
