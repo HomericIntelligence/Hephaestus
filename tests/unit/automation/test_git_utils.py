@@ -1,5 +1,6 @@
 """Tests for git utility functions."""
 
+import logging
 import subprocess
 import sys
 from collections.abc import Generator
@@ -52,6 +53,58 @@ class TestRun:
 
         assert result.returncode == 0
         assert "hello" in result.stdout
+
+    def test_command_debug_log_does_not_disclose_arguments(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Command diagnostics do not log even a sensitive executable value."""
+        sensitive_argument = "do-not-log-this-command-argument"
+        completed = subprocess.CompletedProcess([sensitive_argument], 0, stdout="", stderr="")
+        with (
+            caplog.at_level(logging.DEBUG, logger="hephaestus.automation.git_utils"),
+            patch("hephaestus.automation.git_utils.run_subprocess", return_value=completed),
+        ):
+            result = run([sensitive_argument])
+
+        assert result is completed
+        assert "Running subprocess" in caplog.messages
+        assert sensitive_argument not in caplog.text
+
+    def test_failed_command_log_does_not_disclose_arguments(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Failure logs use the same redacted command summary as debug logs."""
+        sensitive_argument = "do-not-log-this-failed-command-argument"
+        failure = subprocess.CalledProcessError(
+            1,
+            [sensitive_argument],
+            stderr=sensitive_argument,
+        )
+        with (
+            caplog.at_level(logging.ERROR, logger="hephaestus.automation.git_utils"),
+            patch("hephaestus.automation.git_utils.run_subprocess", side_effect=failure),
+            pytest.raises(subprocess.CalledProcessError),
+        ):
+            run([sensitive_argument])
+
+        assert "Subprocess failed with exit code 1" in caplog.messages
+        assert sensitive_argument not in caplog.text
+
+    def test_timed_out_command_log_does_not_disclose_arguments(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Timeout logs do not disclose a sensitive executable value."""
+        sensitive_argument = "do-not-log-this-timed-out-command-argument"
+        timeout = subprocess.TimeoutExpired([sensitive_argument], 60)
+        with (
+            caplog.at_level(logging.ERROR, logger="hephaestus.automation.git_utils"),
+            patch("hephaestus.automation.git_utils.run_subprocess", side_effect=timeout),
+            pytest.raises(subprocess.TimeoutExpired),
+        ):
+            run([sensitive_argument], timeout=60)
+
+        assert "Subprocess timed out" in caplog.messages
+        assert sensitive_argument not in caplog.text
 
     def test_failed_command_with_check(self) -> None:
         """Test running a failed command with check=True."""

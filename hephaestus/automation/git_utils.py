@@ -68,25 +68,37 @@ def run(
         subprocess.TimeoutExpired: If timeout is exceeded
 
     """
-    logger.debug("Running command: %s", " ".join(cmd))
-    if cmd and cmd[0] == "git":
-        return _shared_run_git(
+    # Command elements may contain repository URLs or credential-helper
+    # configuration.  Keep a stable lifecycle trace without serializing any
+    # value derived from the command into application logs.
+    logger.debug("Running subprocess")
+    try:
+        if cmd and cmd[0] == "git":
+            return _shared_run_git(
+                cmd,
+                cwd=cwd,
+                timeout=timeout,
+                check=check,
+                log_on_error=False,
+                env=env,
+                retries=0,
+            )
+        return run_subprocess(
             cmd,
-            cwd=cwd,
+            cwd=str(cwd) if cwd else None,
             timeout=timeout,
             check=check,
-            log_on_error=log_errors,
+            log_on_error=False,
             env=env,
-            retries=0,
         )
-    return run_subprocess(
-        cmd,
-        cwd=str(cwd) if cwd else None,
-        timeout=timeout,
-        check=check,
-        log_on_error=log_errors,
-        env=env,
-    )
+    except subprocess.TimeoutExpired:
+        if log_errors:
+            logger.error("Subprocess timed out")
+        raise
+    except subprocess.CalledProcessError as error:
+        if log_errors:
+            logger.error("Subprocess failed with exit code %s", error.returncode)
+        raise
 
 
 _repo_info_cache: ThreadSafeCache[Path | None, tuple[str, str]] = ThreadSafeCache()
