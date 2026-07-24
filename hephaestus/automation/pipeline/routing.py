@@ -132,9 +132,11 @@ ROUTES: dict[StageName, Route] = {
         next=StageName.FINISHED,
         fail_routes={
             "closed": StageName.FINISHED,
-            # A missing loop-owned approval label needs a fresh review, not
-            # terminal abandonment. Other merge-wait failures are terminal;
-            # the stage never reconciles a state owned by another run.
+            # A missing loop-owned approval label or drifted own-arm head
+            # needs fresh review, not terminal abandonment. Other merge-wait
+            # failures are terminal; the stage never reconciles a state owned
+            # by another run.
+            "head_drift": StageName.PR_REVIEW,
             "not_implementation_go": StageName.PR_REVIEW,
             "*": StageName.FINISHED,
         },

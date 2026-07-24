@@ -2,10 +2,13 @@
 
 ``pr_review`` owns the only automated GO/NOGO decision and writes the
 loop-owned ``state:implementation-go`` label.  This stage consumes that
-label once, asks GitHub to arm auto-merge for the live head, and then polls
-only the arm it created.  It deliberately does not recover, confirm, retry,
-or take over an arm created by another process or run: those operational
-states are blocked and left for an operator.
+label once, asks GitHub to arm auto-merge for the live head, records that
+head only after the arm succeeds, and then polls only the arm it created.
+If that owned arm's live head changes (or its recorded head is unavailable),
+the stage verifies the arm is deferred, revokes the stale approval, and sends
+the item through fresh review. It deliberately does not recover, confirm,
+retry, or take over an arm created by another process or run: those
+operational states are blocked and left for an operator.
 
 The implemented mini-state graph is:
 
@@ -54,6 +57,10 @@ POLL = "POLL"
 LEARN_WAIT = "LEARN_WAIT"
 MW_FINISH = "MW_FINISH"
 FINISH = MW_FINISH
+
+# Kept only on the in-memory work item after this run's conditional arm has
+# succeeded. A restarted item has no such proof and must never adopt an arm.
+_OWNED_ARM_HEAD_KEY = "merge_wait_expected_head"
 
 
 def build_drive_green_learn_prompt(issue_number: int, pr_number: int) -> str:
@@ -138,6 +145,7 @@ class MergeWaitStage(Stage):
             )
             return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_arm_failed")
         item.armed = True
+        item.payload[_OWNED_ARM_HEAD_KEY] = head_sha
         return Continue(next_state=POLL)
 
     def _poll(self, item: WorkItem, ctx: StageContext) -> StepResult:
@@ -167,6 +175,10 @@ class MergeWaitStage(Stage):
                 "merge_wait: PR #%d was armed outside this run; leaving it to the operator", item.pr
             )
             return StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
+        expected_head = item.payload.get(_OWNED_ARM_HEAD_KEY)
+        current_head = str(pr_state.get("headRefOid") or "")
+        if not isinstance(expected_head, str) or not expected_head or current_head != expected_head:
+            return self._contain_head_drift(item, ctx)
         has_go, _has_no_go = ctx.github.pr_has_implementation_state_label(item.pr)
         if not has_go:
             try:
@@ -179,7 +191,7 @@ class MergeWaitStage(Stage):
                     exc,
                 )
                 return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_defer_failed")
-            item.armed = False
+            self._clear_owned_arm(item)
             logger.warning("merge_wait: PR #%d approval disappeared; returning to review", item.pr)
             return StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
         attempt = item.attempts.get("merge", 0) + 1
@@ -196,6 +208,45 @@ class MergeWaitStage(Stage):
             return StageOutcome(Disposition.FINISH_FAIL, "merge_wait_exhausted")
         item.payload["retry_delay_s"] = 30
         return StageOutcome(Disposition.RETRY, "merge_pending")
+
+    def _contain_head_drift(self, item: WorkItem, ctx: StageContext) -> StageOutcome:
+        """Disable an owned stale arm before revoking its obsolete approval.
+
+        A changed (or unavailable) live head means the source-review label no
+        longer describes the revision GitHub could merge. Both durable
+        containment writes must succeed before this item can re-enter review;
+        otherwise an operator must resolve the ambiguous state.
+        """
+        assert item.pr is not None  # narrowed by _poll before this helper  # noqa: S101
+        try:
+            ctx.github.defer_auto_merge(item.pr)
+        except Exception as exc:
+            logger.warning(
+                "merge_wait: could not defer PR #%d after head drift (%s); "
+                "operator action required",
+                item.pr,
+                exc,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "head_drift_defer_failed")
+        try:
+            ctx.github.mark_pr_implementation_no_go(item.pr)
+        except Exception as exc:
+            logger.warning(
+                "merge_wait: could not revoke stale approval on PR #%d after head drift (%s); "
+                "operator action required",
+                item.pr,
+                exc,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "head_drift_revoke_failed")
+        self._clear_owned_arm(item)
+        logger.warning("merge_wait: PR #%d head drifted; returning to fresh review", item.pr)
+        return StageOutcome(Disposition.FAIL_BACK, "head_drift")
+
+    @staticmethod
+    def _clear_owned_arm(item: WorkItem) -> None:
+        """Drop process-local ownership only after its durable containment write."""
+        item.armed = False
+        item.payload.pop(_OWNED_ARM_HEAD_KEY, None)
 
     def _route_merged(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Dispatch the existing deduplicated post-merge learning step."""

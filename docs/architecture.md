@@ -59,9 +59,12 @@ in §5.1, which tags `state:skip` on epics before any other durable mutation.
  ([`_park_resumable`](hephaestus/automation/pipeline/coordinator.py),
  [`_finalize_resumable`](hephaestus/automation/pipeline/coordinator.py)).
 - **One automatic merge authority per head.** `state:implementation-go` is
- applied only by `pr_review._eval`, which is the sole stage authorized to
- write the label. Once applied, `merge_wait` reactivates `auto-merge` and
- revalidates the label + PR head immediately before and after arming
+ applied only by `pr_review._eval`, which is the sole positive merge
+ authorization. Once applied, `merge_wait` revalidates the label and live PR
+ head immediately before it arms, records that head only after its conditional
+ arm succeeds, and rechecks it on every owned poll. A drifted owned arm is
+ deferred before the stale approval is revoked and the item returns to fresh
+ review; externally armed PRs are never adopted or changed
  ([`pr_review.py`](hephaestus/automation/pipeline/stages/pr_review.py),
  [`merge_wait.py`](hephaestus/automation/pipeline/stages/merge_wait.py)).
 - **Globally bounded budgets.** Stages count retries on `_on_job_done` so
@@ -453,8 +456,8 @@ absolute operator state:
 | `state:plan-no-go` | planner-scope| [`plan_review._eval`](hephaestus/automation/pipeline/stages/plan_review.py) |
 | `state:plan-go` | planner-scope| [`plan_review._eval`](hephaestus/automation/pipeline/stages/plan_review.py) |
 | `state:plan-blocked` | planner-scope| [`plan_review._eval`](hephaestus/automation/pipeline/stages/plan_review.py) |
-| `state:implementation-no-go` | review-scope | [`pr_review._eval`](hephaestus/automation/pipeline/stages/pr_review.py) |
-| `state:implementation-go` | review-scope | [`pr_review._eval`](hephaestus/automation/pipeline/stages/pr_review.py) — **sole authority** |
+| `state:implementation-no-go` | review-scope | [`pr_review._eval`](hephaestus/automation/pipeline/stages/pr_review.py), or owned-arm head-drift containment in [`merge_wait`](hephaestus/automation/pipeline/stages/merge_wait.py) |
+| `state:implementation-go` | review-scope | [`pr_review._eval`](hephaestus/automation/pipeline/stages/pr_review.py) — **sole positive authorization** |
 | `state:skip` | absolute | operator / exhaustion in [`pr_review`](hephaestus/automation/pipeline/stages/pr_review.py) / [`implementation`](hephaestus/automation/pipeline/stages/implementation.py) |
 
 Every **stage-issued** `state:skip` durable write (the `pr_review` and
@@ -489,8 +492,11 @@ state:skip : NO RANK (excluded from rank compare)
 ```
 
 A label alone never authorizes merge. `merge_wait` revalidates the
-`state:implementation-go` label and the PR head immediately before and
-after arming and revokes on drift.
+`state:implementation-go` label and live PR head immediately before arming,
+then compares every owned poll with the head it recorded after a successful
+arm. On drift it verifies deferral, revokes the stale label through the
+review-state protocol, clears local ownership evidence, and requires fresh
+review before another arm.
 
 Plan-review labels are the sole durable authority. Review comments explain and
 audit a decision but never authorize a transition, block a stage, or backfill a
@@ -855,9 +861,10 @@ stateDiagram-v2
     Inspect --> Arm: approval and head valid
     Arm --> Poll: armed by this run
     Arm --> Failed: arm rejected or head changed
-    Poll --> Poll: open and still armed
+    Poll --> Poll: open, still armed, and reviewed head unchanged
+    Poll --> PRReview: owned head drift contained
     Poll --> Learn: merged
-    Poll --> Failed: closed, approval revoked, or arm lost
+    Poll --> Failed: closed, arm lost, or containment failed
     Poll --> OperatorOwned: ownership ambiguous
     Learn --> Complete: disabled or recorded
     Learn --> Failed: durable outcome ambiguous
@@ -871,7 +878,9 @@ Architectural contract:
 
 - Merge authorization is bound to the reviewed head commit.
 - Existing external merge ownership is preserved.
-- Revoked approval returns to PR review before a new arm.
+- An owned arm whose head drifts is verified deferred before its stale approval
+  is revoked; only then does it return to PR review before a new arm.
+- Missing current-run head evidence follows the same fail-closed containment.
 - Ambiguous merge or learning state stops for operator inspection.
 - Polling is timer-driven and consumes no review or implementation revision.
 
@@ -929,7 +938,7 @@ budgets. Every `routes.py` row and every doc row MUST agree.
 | `plan_review` | `IMPLEMENTATION` | `nogo` → `PLANNING`; `plan_cycles_exhausted` → `FINISHED`; `*` → `PLANNING` | `plan_review_iter = 3`, `plan_cycles = 2` |
 | `implementation` | `PR_REVIEW` | `plan_not_go` → `PLAN_REVIEW`; `already_implementation_go_pr` → `MERGE_WAIT`; `*` → `FINISHED` | `implement = 2`, `test_fix = 1` |
 | `pr_review` | `MERGE_WAIT` | `agent_error` → `IMPLEMENTATION`; `human_blocked` → `FINISHED`; `exhaustion` → `FINISHED`; `*` → `PR_REVIEW` | `pr_review_iter = 3`, `pr_review_hard = 6` |
-| `merge_wait` | `FINISHED` | `not_implementation_go` → `PR_REVIEW`; `closed` → `FINISHED`; `*` → `FINISHED` | `merge = DEFAULT_DRIVE_GREEN_LOOPS = 5` |
+| `merge_wait` | `FINISHED` | `head_drift` / `not_implementation_go` → `PR_REVIEW`; `closed` → `FINISHED`; `*` → `FINISHED` | `merge = DEFAULT_DRIVE_GREEN_LOOPS = 5` |
 | `finished` | `FINISHED` | — (terminal) | — |
 
 Budget provenance (cross-check):
@@ -1346,7 +1355,9 @@ Exit-code priority is:
 - **Head-bound** — an artifact or check whose correctness depends on
  matching the live `headRefOid` of the PR. `merge_wait` captures the
  head SHA at arm time and polls it; a head drift between ARM and POLL
- is a terminal containment failure.
+ on a still-live owned arm is contained by verified deferral, stale-approval
+ revocation, and fresh PR review. Only a failed containment mutation is
+ terminal; a vanished or externally owned arm remains operator-owned.
 - **Skip-reason marker** — the `<!-- hephaestus-state-skip-reason -->` HTML-comment marker ([`SKIP_REASON_MARKER`](hephaestus/automation/state_labels.py)) that prefixes every `state:skip` reason-comment body produced by [`format_skip_reason_comment`](hephaestus/automation/state_labels.py), so a repo reader can deterministically trace the automated skip reason.
 - **File-system loader** — the Jinja `FileSystemLoader` resolved from `__file__`-relative paths in [`prompts/catalog.py`](hephaestus/prompts/catalog.py); deliberately NOT `PackageLoader` to avoid importlib editable-install staleness (#2308).
 - **Conflict-resolution request** — the [`ConflictResolutionRequest`](hephaestus/automation/_review_conflict_resolver.py) immutable context consumed by the cohesive [`ReviewConflictResolver`](hephaestus/automation/_review_conflict_resolver.py) unit split out of `_review_phase.py` (#2209).
