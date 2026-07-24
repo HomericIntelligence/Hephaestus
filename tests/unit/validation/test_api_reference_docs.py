@@ -54,6 +54,14 @@ class TestPdocTargets:
         )
         assert expected in recipe
 
+    def test_release_workflow_docs_recipe_matches_expected_targets(self) -> None:
+        workflow = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        expected = (
+            "uv run pdoc " + " ".join(expected_pdoc_targets(REPO_ROOT)) + " --output-dir docs/api"
+        )
+
+        assert expected in workflow
+
 
 class TestFindViolations:
     """Tests for generated ``docs/api`` output validation."""
