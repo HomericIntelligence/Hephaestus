@@ -1029,16 +1029,13 @@ After `coordinator._seed_pass`, if all queues + timers + in-flight are empty,
 re-seeds up to `--loops` and either exits on a zero-work pass or
 continues.
 
-### Merge-wait recovery seeding
+### Merge-wait restart semantics
 
-On restart the coordinator reads
-[`pending_drive_green_arms`](hephaestus/automation/pipeline/stages/base.py)
-per repo and seeds any non-terminal arms back into `merge_wait` with
-`SeedEntry.merge_wait_recovery=True`
-([`_pending_arm_recovery_entries`](hephaestus/automation/pipeline/coordinator.py)).
-`MergeWaitStage.on_enter` then reconciles durable `prepared` records
-(distinguished from `confirmed` records) so a known-armed PR does not
-get enabled a second time.
+The queue is in-memory: a restart re-seeds normally through the ordinary
+[`classifier`](hephaestus/automation/pipeline/seeding.py) and does not recover
+per-run merge-wait ownership. Other-run auto-merge arms are
+[blocked without adoption, mutation, or re-arming](hephaestus/automation/pipeline/stages/merge_wait.py)
+by the restarted run; they require operator handling.
 
 ---
 
