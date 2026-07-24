@@ -256,10 +256,9 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=5,
         help=(
-            "Per-issue drive-green loop iterations before the issue is tagged "
-            "state:skip and the worker moves on (default: 5; replaces "
-            "--max-merge-attempts, whose default of 1 skip-parked issues on a "
-            "single transient failure)."
+            "Maximum pending polls of a current-run auto-merge arm per issue before "
+            "merge-wait stops the item without changing labels (default: 5; replaces "
+            "--max-merge-attempts)."
         ),
     )
     p.add_argument(
