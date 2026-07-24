@@ -21,6 +21,7 @@ GIT_OPS: frozenset[str] = frozenset(
         "clone",
         "sync_checkout",
         "create_worktree",
+        "verify_pr_review_checkout",
         "remove_worktree",
         "rebase",
         "push",

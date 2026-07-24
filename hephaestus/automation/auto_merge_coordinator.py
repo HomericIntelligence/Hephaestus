@@ -240,7 +240,7 @@ class AutoMergeCoordinator:
         )
 
     def enable_auto_merge(self, pr_number: int, is_bot_pr: bool = False) -> bool:
-        """Refuse legacy automatic arming; MergeWaitStage is the sole armer.
+        """Refuse legacy automatic arming while queue auto-merge is unavailable.
 
         The queue pipeline is the production entry point, but compatibility
         callers must be fail-closed too: a stale implementation-GO label must
@@ -250,7 +250,11 @@ class AutoMergeCoordinator:
         if not self.defer_auto_merge(pr_number):
             logger.error("Could not verify auto-merge disabled for PR #%s", pr_number)
             return False
-        logger.error("Refusing legacy auto-merge arm for PR #%s; use MergeWaitStage", pr_number)
+        logger.error(
+            "Refusing legacy auto-merge arm for PR #%s; "
+            "queue handling is unavailable pending #2419",
+            pr_number,
+        )
         return False
 
     def pr_has_implementation_go(self, pr_number: int) -> bool:

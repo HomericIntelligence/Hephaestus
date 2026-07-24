@@ -737,6 +737,9 @@ class WorkerPool:
         if job.op == "create_worktree":
             return self._git_create_worktree(job)
 
+        elif job.op == "verify_pr_review_checkout":
+            return self._git_verify_pr_review_checkout(job)
+
         elif job.op == "remove_worktree":
             return self._git_remove_worktree(job)
 
@@ -1046,6 +1049,64 @@ class WorkerPool:
                 "diff": diff,
             },
         )
+
+    @staticmethod
+    def _git_verify_pr_review_checkout(job: GitJob) -> JobResult:
+        """Synchronize a clean review checkout and bind it to one PR head.
+
+        The review snapshot comes from GitHub before this job.  A remote move
+        while synchronizing is not an error to paper over: the stage refreshes
+        a new snapshot and retries a bounded number of times without sending an
+        agent job for the stale input.
+        """
+        worktree = Path(str(job.kwargs.get("worktree_path") or ""))
+        branch = str(job.kwargs.get("branch") or "")
+        expected_head = str(job.kwargs.get("expected_head_sha") or "")
+        base_branch = str(job.kwargs.get("base_branch") or "main")
+        pr_number = job.kwargs.get("pr_number")
+        if not worktree.is_dir() or not branch or not expected_head or not base_branch:
+            return JobResult(
+                ok=False,
+                error="review checkout requires worktree, branch, base branch, and head",
+            )
+        if not git_utils.is_clean_working_tree(worktree, timeout=job.timeout_s):
+            return JobResult(ok=True, value={"ready": False, "reason": "dirty"})
+        git_utils.sync_worktree_to_remote_branch(
+            worktree,
+            branch,
+            pr_number=int(pr_number) if pr_number is not None else None,
+            timeout=job.timeout_s,
+        )
+        head = git_utils.run(
+            ["git", "rev-parse", "HEAD"], cwd=worktree, timeout=job.timeout_s
+        ).stdout.strip()
+        if head != expected_head:
+            return JobResult(ok=True, value={"ready": False, "reason": "head_drift"})
+        if not git_utils.is_clean_working_tree(worktree, timeout=job.timeout_s):
+            return JobResult(ok=True, value={"ready": False, "reason": "dirty"})
+        # Build the prompt diff from the checkout only after it is proven to
+        # be the head captured above.  ``gh pr diff`` is mutable and cannot
+        # distinguish an A -> B -> A head race from a stable A snapshot.
+        git_utils.run(
+            ["git", "fetch", "origin", "--", base_branch],
+            cwd=worktree,
+            timeout=job.timeout_s,
+        )
+        base = git_utils.run(
+            ["git", "rev-parse", f"origin/{base_branch}"],
+            cwd=worktree,
+            timeout=job.timeout_s,
+        ).stdout.strip()
+        if not base:
+            return JobResult(ok=False, error="review checkout base ref unavailable")
+        diff = git_utils.run(
+            ["git", "diff", "--no-ext-diff", "--binary", f"{base}...{head}"],
+            cwd=worktree,
+            timeout=job.timeout_s,
+        ).stdout
+        if not isinstance(diff, str):
+            return JobResult(ok=False, error="review checkout diff unavailable")
+        return JobResult(ok=True, value={"ready": True, "head": head, "base": base, "diff": diff})
 
     def _git_remove_worktree(self, job: GitJob) -> JobResult:
         """Remove a worktree by known path, or fall back to manager state."""

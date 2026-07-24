@@ -46,9 +46,10 @@ contract):
   stands down, then finish failed with the PR left UNLABELED (a human must
   act; automation may not resolve their thread). GO + open automation
   thread -> downgraded to NOGO (address + re-review). Clean GO ->
-  ``_write_go`` performs one final human-thread live-read, verifies
-  auto-merge is disabled, and applies ``state:implementation-go``.
-  ``merge_wait`` remains the sole auto-merge armer. Every
+  ``_write_go`` performs one final human-thread live-read, requires a
+  confirmed-unarmed live PR, and applies ``state:implementation-go``.
+  The checkout GitJob-proven reviewed head accompanies that label;
+  ``merge_wait`` verifies it and stands by pending #2419. Every
   real non-GO round durably writes ``state:implementation-no-go`` (doc
   section 5 owned label, "NOGO verdict, before retry/regress"; legacy
   ``_apply_impl_review_verdict`` -> ``mark_pr_implementation_no_go``
@@ -158,6 +159,7 @@ from .base import (
     StageOutcome,
     StepResult,
     WorkItem,
+    _is_confirmed_open_unarmed,
     _worktree_path,
     agent_provider,
     stage_model,
@@ -196,6 +198,7 @@ def _parse_review_response(response: str) -> _ParsedReviewResponse:
 ENTER = "ENTER"
 ADOPT_WORKTREE_WAIT = "ADOPT_WORKTREE_WAIT"
 REVIEW_WAIT = "REVIEW_WAIT"
+REVIEW_CHECKOUT_WAIT = "REVIEW_CHECKOUT_WAIT"
 VALIDATE_WAIT = "VALIDATE_WAIT"
 POST = "POST"
 DIFFICULTY_WAIT = "DIFFICULTY_WAIT"
@@ -209,6 +212,7 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
     ENTER: "_enter",
     ADOPT_WORKTREE_WAIT: "_adopt_worktree_wait",
     REVIEW_WAIT: "_review_wait",
+    REVIEW_CHECKOUT_WAIT: "_review_checkout_wait",
     VALIDATE_WAIT: "_validate_wait",
     POST: "_post",
     DIFFICULTY_WAIT: "_difficulty_wait",
@@ -239,6 +243,7 @@ def _review_context_kind(item: WorkItem) -> str:
 #: plan_review.REVIEW_ERROR_RETRY_CAP). Reset whenever a real verdict
 #: arrives.
 REVIEW_ERROR_RETRY_CAP = 2
+REVIEW_CHECKOUT_RETRY_CAP = 2
 
 _ZERO_THREAD_NOGO_MARKER = "<!-- hephaestus-pr-review-zero-thread-nogo -->"
 _NO_STRUCTURED_SUMMARY = "No structured reviewer summary was provided."
@@ -390,7 +395,7 @@ class PrReviewStage(Stage):
     """
 
     def on_enter(self, item: WorkItem, ctx: StageContext) -> StageOutcome | None:
-        """Hydrate review inputs, contain an existing arm, and reset the round counter.
+        """Hydrate review inputs, require an unarmed PR, and reset the round counter.
 
         ``attempts["pr_review_iter"]`` is per-lifetime (routing.py: attempts
         are never reset), so the per-cycle review budget is tracked in
@@ -409,26 +414,13 @@ class PrReviewStage(Stage):
 
         """
         if item.pr is not None:
-            review_context = ctx.github.pr_review_context(item.pr)
-            if review_context is None:
-                logger.warning(
-                    "pr_review:%s: review context unavailable for PR #%d",
-                    item.issue,
-                    item.pr,
-                )
-                return StageOutcome(Disposition.FINISH_FAIL, "pr_review_context_unavailable")
-            item.payload.update(review_context)
-            try:
-                ctx.github.defer_auto_merge(item.pr)
-            except Exception as exc:
-                logger.error(
-                    "pr_review:%s: failed to verify auto-merge disabled for PR #%d: %s",
-                    item.issue,
-                    item.pr,
-                    exc,
-                )
-                return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_disable_failed")
-            item.armed = False
+            # A work item can be restarted or directly seeded with stale
+            # payload. Only the exact checkout barrier below may install a
+            # reviewed-head proof for a new agent job.
+            item.payload.pop("reviewed_pr_head_sha", None)
+            arm_outcome = self._require_confirmed_unarmed(item.pr, ctx)
+            if arm_outcome is not None:
+                return arm_outcome
         cycle = item.attempts.get("implement", 0)
         if item.payload.get("pr_review_cycle") != cycle:
             item.payload["pr_review_cycle"] = cycle
@@ -537,13 +529,61 @@ class PrReviewStage(Stage):
         return Continue(next_state=REVIEW_WAIT)
 
     def _review_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """REVIEW_WAIT submits the inline review job with parsed verdicts."""
-        issue = _issue_number(item)
+        """Refresh review inputs, then bind the checkout before dispatch."""
         # Clear ALL round-scoped payload at submission (stale-result
         # guard, M3 pattern): a failed later round must never replay an
         # earlier round's verdict, threads, or address output.
         for key in _ROUND_PAYLOAD_KEYS:
             item.payload.pop(key, None)
+        item.payload.pop("reviewed_pr_head_sha", None)
+        item.payload.pop("pr_diff", None)
+        if item.pr is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        review_context = ctx.github.pr_review_context(item.pr)
+        if review_context is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "pr_review_context_unavailable")
+        expected_head = str(review_context.get("pr_head_sha") or "")
+        if not expected_head:
+            return StageOutcome(Disposition.FINISH_FAIL, "pr_review_head_unavailable")
+        base_branch = str(review_context.get("pr_base_branch") or "main")
+        item.payload.update(review_context)
+        item.payload["review_checkout_expected_head"] = expected_head
+        item.payload["review_checkout_pending"] = True
+        job = GitJob(
+            repo=item.repo,
+            op="verify_pr_review_checkout",
+            timeout_s=GIT_JOB_TIMEOUT_S,
+            kwargs={
+                "worktree_path": str(_worktree_path(item, ctx)),
+                "branch": item.branch,
+                "expected_head_sha": expected_head,
+                "base_branch": base_branch,
+                "pr_number": item.pr,
+            },
+            descr="verify_pr_review_checkout",
+        )
+        return JobRequest(job, on_done_state=REVIEW_CHECKOUT_WAIT)
+
+    def _review_checkout_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Submit review only after the fresh snapshot matches a clean checkout."""
+        expected_head = str(item.payload.pop("review_checkout_expected_head", "") or "")
+        error = str(item.payload.pop("review_checkout_error", "") or "")
+        ready = bool(item.payload.pop("review_checkout_ready", False))
+        if error:
+            return StageOutcome(Disposition.FINISH_FAIL, "review_checkout_unavailable")
+        if not ready:
+            retries = int(item.payload.get("review_checkout_retries", 0)) + 1
+            item.payload["review_checkout_retries"] = retries
+            if retries <= REVIEW_CHECKOUT_RETRY_CAP:
+                return Continue(next_state=REVIEW_WAIT)
+            return StageOutcome(Disposition.FINISH_FAIL, "review_checkout_head_drift")
+        item.payload.pop("review_checkout_retries", None)
+        item.payload["reviewed_pr_head_sha"] = expected_head
+        return self._submit_review_job(item, ctx)
+
+    def _submit_review_job(self, item: WorkItem, ctx: StageContext) -> JobRequest:
+        """Create the agent job after the checkout/head barrier succeeds."""
+        issue = _issue_number(item)
         round_index = item.payload.get("pr_review_round", 0)
         logger.info(
             "pr_review:%d: requesting review job (round %d, PR #%d)",
@@ -588,6 +628,7 @@ class PrReviewStage(Stage):
             parse=_parse_review_response,  # verdict and inline comments parsed in-worker
             descr="review",
         )
+        item.payload["review_job_pending"] = True
         return JobRequest(job, on_done_state=VALIDATE_WAIT)
 
     def _validate_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
@@ -714,12 +755,14 @@ class PrReviewStage(Stage):
             ctx: Stage context.
 
         """
-        if item.payload.pop("direct_pr_worktree_pending", None):
-            self._on_direct_pr_worktree_done(item, result)
+        if self._consume_direct_worktree_result(item, result):
+            return
+        if self._consume_review_checkout_result(item, result):
             return
 
-        if not result.ok:
-            self._on_job_failed(item, result)
+        review_job_pending = bool(item.payload.pop("review_job_pending", None))
+        is_review_result = review_job_pending or item.state == REVIEW_WAIT
+        if self._consume_failed_job(item, result, is_review_result):
             return
 
         if item.state == PUSH_WAIT:
@@ -730,24 +773,66 @@ class PrReviewStage(Stage):
             item.payload["push_no_commit"] = not bool(result.value)
             return
 
-        if item.state == REVIEW_WAIT and result.value is not None:
-            if isinstance(result.value, _ParsedReviewResponse):
-                item.payload["review_verdict"] = result.value.verdict
-                item.payload["review_text"] = result.value.verdict.raw
-                item.payload["review_threads"] = [
-                    dict(comment) for comment in result.value.comments
-                ]
-            else:
-                # Keep direct stage callers and persisted prior results
-                # compatible; only live AgentJob results use the paired parser.
-                item.payload["review_verdict"] = result.value
-                item.payload["review_text"] = getattr(result.value, "raw", str(result.value))
+        if is_review_result and result.value is not None:
+            self._store_review_result(item, result.value)
         elif item.state == VALIDATE_WAIT and result.value is not None:
             item.payload["validation_result"] = result.value
         elif item.state == DIFFICULTY_WAIT and result.value is not None:
             item.payload["difficulty_tiers"] = str(result.value)
         elif item.state == ADDRESS_WAIT and result.value is not None:
             item.payload["address_output"] = str(result.value)
+
+    @staticmethod
+    def _consume_direct_worktree_result(item: WorkItem, result: JobResult) -> bool:
+        """Store a direct-worktree completion when one is pending."""
+        if not item.payload.pop("direct_pr_worktree_pending", None):
+            return False
+        PrReviewStage._on_direct_pr_worktree_done(item, result)
+        return True
+
+    @staticmethod
+    def _consume_review_checkout_result(item: WorkItem, result: JobResult) -> bool:
+        """Store the review checkout barrier result when one is pending."""
+        if not item.payload.pop("review_checkout_pending", None):
+            return False
+        if not result.ok:
+            item.payload["review_checkout_error"] = result.error or "checkout job failed"
+            return True
+        value = result.value
+        ready = bool(isinstance(value, dict) and value.get("ready"))
+        review_diff = value.get("diff") if isinstance(value, dict) else None
+        if ready and not isinstance(review_diff, str):
+            item.payload["review_checkout_error"] = "checkout job returned no bound diff"
+            ready = False
+        if ready:
+            item.payload["pr_diff"] = review_diff
+        item.payload["review_checkout_ready"] = ready
+        return True
+
+    def _consume_failed_job(
+        self, item: WorkItem, result: JobResult, is_review_result: bool
+    ) -> bool:
+        """Store a failed result and report whether completion handling is done."""
+        if result.ok:
+            return False
+        if is_review_result:
+            item.payload["review_failed"] = True
+            return True
+        self._on_job_failed(item, result)
+        return True
+
+    @staticmethod
+    def _store_review_result(item: WorkItem, value: object) -> None:
+        """Persist one parsed or compatibility reviewer result."""
+        if isinstance(value, _ParsedReviewResponse):
+            item.payload["review_verdict"] = value.verdict
+            item.payload["review_text"] = value.verdict.raw
+            item.payload["review_threads"] = [dict(comment) for comment in value.comments]
+            return
+        # Keep direct stage callers and persisted prior results compatible;
+        # only live AgentJob results use the paired parser.
+        item.payload["review_verdict"] = value
+        item.payload["review_text"] = getattr(value, "raw", str(value))
 
     @staticmethod
     def _on_direct_pr_worktree_done(item: WorkItem, result: JobResult) -> None:
@@ -989,8 +1074,9 @@ class PrReviewStage(Stage):
         """Persist a non-GO round and choose its bounded retry or terminal route."""
         if item.pr is None or item.issue is None:  # guarded by _eval; type narrowing
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
-        if not self._write_no_go(item.pr, ctx):
-            return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_disable_failed")
+        guard_outcome = self._write_no_go(item.pr, ctx)
+        if guard_outcome is not None:
+            return guard_outcome
         # #1554 parity (m2): the progress trail counts AUTOMATION threads
         # only — a human resolving their own thread is not automation
         # progress and must not earn extension rounds.
@@ -1033,6 +1119,9 @@ class PrReviewStage(Stage):
             automation_unresolved,
             STATE_SKIP,
         )
+        arm_outcome = self._require_confirmed_unarmed(item.pr, ctx)
+        if arm_outcome is not None:
+            return arm_outcome
         write_skip_label(
             item.issue,
             ctx,
@@ -1136,6 +1225,9 @@ class PrReviewStage(Stage):
             item.issue,
             STATE_SKIP,
         )
+        arm_outcome = self._require_confirmed_unarmed(pr_number, ctx)
+        if arm_outcome is not None:
+            return arm_outcome
         write_skip_label(
             _issue_number(item),
             ctx,
@@ -1235,10 +1327,7 @@ class PrReviewStage(Stage):
             item.issue,
             item.pr,
         )
-        blocked_reason = self._write_go(item.pr, ctx)
-        if blocked_reason is not None:
-            return StageOutcome(Disposition.FINISH_FAIL, blocked_reason)
-        return StageOutcome(Disposition.ADVANCE, "review GO; merge wait pending")
+        return self._write_go(item, ctx)
 
     @staticmethod
     def _gate_no_commit(item: WorkItem) -> Continue | None:
@@ -1344,45 +1433,37 @@ class PrReviewStage(Stage):
         return StageOutcome(Disposition.FAIL_BACK, "agent_error")
 
     @staticmethod
-    def _write_no_go(pr_number: int, ctx: StageContext) -> bool:
-        """Durably mark implementation NO-GO and verify auto-merge is deferred.
+    def _require_confirmed_unarmed(pr_number: int, ctx: StageContext) -> StageOutcome | None:
+        """Read the live PR immediately before a stage-side mutation.
 
-        Doc section 5 owned label ("NOGO verdict, before retry/regress"):
-        written on EVERY real non-GO round so the PR durably reflects the
-        latest converged verdict even across restarts (legacy
-        ``mark_pr_implementation_no_go``, ``_review_phase.py:248``).
-
-        Args:
-            pr_number: GitHub PR number that earned the non-GO round.
-            ctx: Stage context carrying the GitHub accessor.
-
-        Returns:
-            ``True`` when auto-merge is known disabled, else ``False``.
-
+        No pipeline stage owns auto-merge. A non-null or unreadable request is
+        consequently an external or ambiguous state, so this method is a
+        strict non-mutation boundary.
         """
+        pr_state = ctx.github.gh_pr_state(pr_number)
+        if pr_state is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unavailable")
+        if pr_state.get("autoMergeRequest") is not None:
+            return StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
+        if not _is_confirmed_open_unarmed(pr_state):
+            return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unverified")
+        return None
+
+    @staticmethod
+    def _write_no_go(pr_number: int, ctx: StageContext) -> StageOutcome | None:
+        """Durably mark implementation NO-GO after a fresh unarmed read."""
+        arm_outcome = PrReviewStage._require_confirmed_unarmed(pr_number, ctx)
+        if arm_outcome is not None:
+            return arm_outcome
         try:
             ctx.github.mark_pr_implementation_no_go(pr_number)
-        except Exception as e:
+        except Exception as error:
             logger.warning(
                 "pr_review: failed to mark PR #%d implementation-no-go (non-fatal): %s",
                 pr_number,
-                e,
+                error,
             )
-        return PrReviewStage._ensure_auto_merge_deferred(pr_number, ctx)
-
-    @staticmethod
-    def _ensure_auto_merge_deferred(pr_number: int, ctx: StageContext) -> bool:
-        """Return whether the accessor verified an open PR has auto-merge disabled."""
-        try:
-            ctx.github.defer_auto_merge(pr_number)
-        except Exception as e:
-            logger.error(
-                "pr_review: failed to verify auto-merge disabled on PR #%d: %s",
-                pr_number,
-                e,
-            )
-            return False
-        return True
+        return None
 
     @staticmethod
     def _post_human_blocked_comment(
@@ -1423,28 +1504,28 @@ class PrReviewStage(Stage):
     def _handle_human_blocked(
         pr_number: int, human_unresolved: int, ctx: StageContext
     ) -> StageOutcome:
-        """Contain an armed PR before recording a human-review stand-down."""
-        if not PrReviewStage._ensure_auto_merge_deferred(pr_number, ctx):
-            return StageOutcome(Disposition.FINISH_FAIL, "auto_merge_disable_failed")
+        """Record a stand-down only for a confirmed-unarmed PR."""
+        arm_outcome = PrReviewStage._require_confirmed_unarmed(pr_number, ctx)
+        if arm_outcome is not None:
+            return arm_outcome
         PrReviewStage._post_human_blocked_comment(pr_number, human_unresolved, ctx)
         return StageOutcome(Disposition.FINISH_FAIL, "human_blocked")
 
     @staticmethod
-    def _write_go(pr_number: int, ctx: StageContext) -> str | None:
-        """Apply clean review GO while preserving merge-wait-only arming.
-
-        ``pr_review`` owns the automated GO decision. It verifies the PR is
-        unarmed before applying ``state:implementation-go``; only
-        ``merge_wait`` can subsequently arm auto-merge.
+    def _write_go(item: WorkItem, ctx: StageContext) -> StepResult:
+        """Apply GO only to the exact live head reviewed in this process.
 
         Args:
-            pr_number: GitHub PR number that earned the clean GO.
+            item: Work item carrying the in-memory reviewed-head proof.
             ctx: Stage context carrying the GitHub accessor.
 
         Returns:
-            ``None`` on success, otherwise a terminal outcome reason.
+            The next stage result.
 
         """
+        if item.pr is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        pr_number = item.pr
         _, _, human_unresolved = ctx.github.count_unresolved_threads_by_severity(pr_number)
         if human_unresolved:
             logger.info(
@@ -1453,19 +1534,38 @@ class PrReviewStage(Stage):
                 human_unresolved,
                 pr_number,
             )
-            if not PrReviewStage._ensure_auto_merge_deferred(pr_number, ctx):
-                return "auto_merge_disable_failed"
+            arm_outcome = PrReviewStage._require_confirmed_unarmed(pr_number, ctx)
+            if arm_outcome is not None:
+                return arm_outcome
             PrReviewStage._post_human_blocked_comment(pr_number, human_unresolved, ctx)
-            return "human_blocked"
+            return StageOutcome(Disposition.FINISH_FAIL, "human_blocked")
 
-        if not PrReviewStage._ensure_auto_merge_deferred(pr_number, ctx):
-            return "auto_merge_disable_failed"
+        pr_state = ctx.github.gh_pr_state(pr_number)
+        if pr_state is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unavailable")
+        if pr_state.get("autoMergeRequest") is not None:
+            return StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
+        if not _is_confirmed_open_unarmed(pr_state):
+            return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unverified")
+        reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
+        live_head = str(pr_state.get("headRefOid") or "")
+        if not reviewed_head or not live_head:
+            item.payload.pop("reviewed_pr_head_sha", None)
+            return Continue(next_state=REVIEW_WAIT)
+        if reviewed_head != live_head:
+            try:
+                ctx.github.mark_pr_implementation_no_go(pr_number)
+            except Exception as error:
+                logger.error("pr_review: failed to revoke stale GO on PR #%d: %s", pr_number, error)
+                return StageOutcome(Disposition.FINISH_FAIL, "implementation_no_go_label_failed")
+            item.payload.pop("reviewed_pr_head_sha", None)
+            return Continue(next_state=REVIEW_WAIT)
         try:
             ctx.github.mark_pr_implementation_go(pr_number)
         except Exception as error:
             logger.error("pr_review: failed to mark PR #%d implementation-go: %s", pr_number, error)
-            return "implementation_go_label_failed"
-        return None
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_label_failed")
+        return StageOutcome(Disposition.ADVANCE, "review GO; merge wait pending")
 
     @staticmethod
     def _final_review_comment(verdict: Any, review_text: object) -> str:

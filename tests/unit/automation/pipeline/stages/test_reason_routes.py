@@ -42,7 +42,11 @@ _EXPECTED_REASONS: dict[StageName, set[str]] = {
     # human_blocked is emitted as FINISH_FAIL (terminal), not FAIL_BACK —
     # its ROUTES row entry (-> FINISHED) documents the same destination.
     StageName.PR_REVIEW: {"agent_error"},
-    StageName.MERGE_WAIT: {"not_implementation_go"},
+    StageName.MERGE_WAIT: {
+        "not_implementation_go",
+        "reviewed_head_drift",
+        "reviewed_head_missing",
+    },
 }
 
 
@@ -107,4 +111,6 @@ def test_named_reasons_route_where_the_doc_says() -> None:
         == StageName.MERGE_WAIT
     )
     assert ROUTES[StageName.MERGE_WAIT].fail_routes["not_implementation_go"] == StageName.PR_REVIEW
+    assert ROUTES[StageName.MERGE_WAIT].fail_routes["reviewed_head_missing"] == StageName.PR_REVIEW
+    assert ROUTES[StageName.MERGE_WAIT].fail_routes["reviewed_head_drift"] == StageName.PR_REVIEW
     assert ROUTES[StageName.MERGE_WAIT].fail_routes["closed"] == StageName.FINISHED
