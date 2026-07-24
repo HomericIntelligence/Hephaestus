@@ -1115,6 +1115,10 @@ by [`WorktreeManager.git_metadata_lock_path`](hephaestus/automation/worktree_man
 For linked worktrees this resolves Git's common directory, so the primary
 checkout and every linked worktree serialize synchronization and worktree
 metadata mutations without leaving an untracked sentinel in the worktree.
+Before inspecting the origin or worktree status, it also reads the effective
+repository and worktree Git configuration with global/system configuration
+disabled, rejecting executable, transport-routing, and TLS-affecting settings
+from a reusable checkout.
 
 ### Resilience wiring
 
