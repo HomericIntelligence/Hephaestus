@@ -174,6 +174,13 @@ class ReviewConflictResolver:
         try:
             self._operations.sync_worktree(request.worktree_path, request.branch_name)
             if not self._operations.rebase_worktree(request.worktree_path, base_branch):
+                self._log(
+                    "warning",
+                    f"{pr_ref(request.pr_number)} mechanical rebase onto {base_branch} hit "
+                    "conflicts; aborted; "
+                    "deferring to implementation agent",
+                    request.thread_id,
+                )
                 return False
             self._push_rebased_branch(request.branch_name, request.worktree_path)
         except (OSError, RuntimeError, subprocess.SubprocessError) as exc:

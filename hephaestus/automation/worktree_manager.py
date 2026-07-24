@@ -535,7 +535,7 @@ class WorktreeManager:
         if not rebase_worktree_onto(worktree_path, base_branch_name, **_timeout_kw(timeout)):
             logger.warning(
                 "Could not rebase reused issue branch %s onto %s before implementation; "
-                "proceeding with current branch head",
+                "conflicts detected and rebase aborted; proceeding with current branch head",
                 branch_name,
                 self.base_branch,
             )
