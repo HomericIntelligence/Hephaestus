@@ -8,6 +8,7 @@ is terminal (FINISH_PASS ``seeded:N``).
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -104,21 +105,28 @@ class TestOnEnterAndCloneStates:
         }
         assert result.on_done_state == "DISCOVER"
 
-    def test_clone_skipped_when_already_cloned(
+    def test_existing_checkout_submits_sync_job_before_discovery(
         self, repo_item: WorkItem, repo_ctx: Any, tmp_path: Path
     ) -> None:
+        """A pre-existing checkout is synchronized before its issues are read."""
         (tmp_path / "repo-a").mkdir()
         repo_item.state = "CLONE_WAIT"
 
         result = RepoStage().step(repo_item, repo_ctx)
 
-        assert isinstance(result, Continue)
-        assert result.next_state == "DISCOVER"
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.op == "sync_checkout"
+        assert result.job.kwargs == {
+            "repo": "test-org/repo-a",
+            "dest": str(tmp_path / "repo-a"),
+        }
+        assert result.on_done_state == "DISCOVER"
 
-    def test_clone_skipped_when_explicit_repo_root_is_existing_checkout(
+    def test_explicit_existing_repo_root_submits_sync_job(
         self, repo_item: WorkItem, tmp_path: Path, make_ctx: Callable[..., Any]
     ) -> None:
-        """An isolated checkout is used directly instead of ``projects_dir / repo``."""
+        """An isolated existing checkout is synchronized at its explicit path."""
         projects_dir = tmp_path / "projects"
         checkout = tmp_path / "isolated" / "repo-a-worktree"
         checkout.mkdir(parents=True)
@@ -127,8 +135,13 @@ class TestOnEnterAndCloneStates:
 
         result = RepoStage().step(repo_item, ctx)
 
-        assert isinstance(result, Continue)
-        assert result.next_state == "DISCOVER"
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.op == "sync_checkout"
+        assert result.job.kwargs == {
+            "repo": "test-org/repo-a",
+            "dest": str(checkout),
+        }
 
     def test_clone_skipped_in_dry_run(
         self, repo_item: WorkItem, tmp_path: Path, make_ctx: Callable[..., Any]
@@ -141,6 +154,25 @@ class TestOnEnterAndCloneStates:
 
         assert isinstance(result, Continue)
         assert result.next_state == "DISCOVER"
+
+    def test_existing_checkout_is_not_synchronized_in_dry_run(
+        self,
+        repo_item: WorkItem,
+        tmp_path: Path,
+        make_ctx: Callable[..., Any],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Dry runs report a reusable checkout sync without submitting a GitJob."""
+        (tmp_path / "repo-a").mkdir()
+        ctx = make_ctx(dry_run=True, paths=_RepoPaths(tmp_path))
+        repo_item.state = "CLONE_WAIT"
+        caplog.set_level(logging.INFO, logger="hephaestus.automation.pipeline.stages.repo")
+
+        result = RepoStage().step(repo_item, ctx)
+
+        assert isinstance(result, Continue)
+        assert result.next_state == "DISCOVER"
+        assert "[dry-run] would synchronize test-org/repo-a" in caplog.text
 
     def test_clone_failure_retries_within_budget(self, repo_item: WorkItem, repo_ctx: Any) -> None:
         """First failure (attempt 1 < budget 2) re-submits the clone."""
