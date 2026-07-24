@@ -156,6 +156,8 @@ def _unsafe_local_git_config_key(config: str) -> str | None:
             "uploadpack",
         }:
             return key
+        if normalized in {"fetch.recursesubmodules", "submodule.recurse"}:
+            return key
         if normalized.startswith(("include.", "includeif.")):
             return key
         if normalized.startswith("filter.") and normalized.rsplit(".", 1)[-1] in {
@@ -914,6 +916,7 @@ class WorkerPool:
                 *fetch_config,
                 "fetch",
                 "--no-tags",
+                "--no-recurse-submodules",
                 # The preflight validates origin before this point.  Fetch it
                 # by name so a remote URL never reaches command debug logs.
                 "origin",

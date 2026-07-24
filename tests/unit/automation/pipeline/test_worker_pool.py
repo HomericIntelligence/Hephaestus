@@ -1459,6 +1459,7 @@ class TestGitOps:
                     "http.sslVerify=true",
                     "fetch",
                     "--no-tags",
+                    "--no-recurse-submodules",
                     "origin",
                     "+refs/heads/main:refs/remotes/origin/main",
                 ],
@@ -1736,6 +1737,7 @@ class TestGitOps:
             "http.sslVerify=true",
             "fetch",
             "--no-tags",
+            "--no-recurse-submodules",
             "origin",
             "+refs/heads/main:refs/remotes/origin/main",
         ]
@@ -1831,6 +1833,8 @@ class TestGitOps:
             "remote.origin.uploadpack\n/unsafe/upload-pack\0",
             "remote.origin.proxy\nhttp://unsafe-proxy\0",
             "remote.origin.proxyAuthMethod\nanyauth\0",
+            "fetch.recurseSubmodules\ntrue\0",
+            "submodule.recurse\ntrue\0",
             "core.worktree\n/unsafe/worktree\0",
         ),
         ids=(
@@ -1848,6 +1852,8 @@ class TestGitOps:
             "remote-upload-pack",
             "remote-proxy",
             "remote-proxy-auth",
+            "fetch-recurses-submodules",
+            "submodule-recurses",
             "core-worktree",
         ),
     )
