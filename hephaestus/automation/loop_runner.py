@@ -197,9 +197,9 @@ class LoopConfig:
     # default is ``ALL_SELECTABLE`` (set in the parser), so an operator opts
     # into the blocking drive-green by default.
     phases: tuple[str, ...] = ALL_PHASES
-    # Bound on pending polls of a current-run auto-merge arm per issue.
-    # Exhaustion stops the item with a non-success outcome and never mutates
-    # labels. The default of 5 tolerates transient pending merge state.
+    # Compatibility bound retained for the historical drive-green CLI. The
+    # current merge-wait stage safely stands by and does not arm or poll
+    # auto-merge; the default remains 5 for stable CLI/config compatibility.
     drive_green_loops: int = 5
     # When True (default), never dispatch two issues whose plans touch the same
     # file concurrently — defer the later one (#1623).
@@ -267,9 +267,9 @@ def _build_parser() -> argparse.ArgumentParser:
         type=_parse_positive_int,
         default=5,
         help=(
-            "Maximum pending polls of a current-run auto-merge arm per issue before "
-            "merge-wait stops the item without changing labels (default: 5; replaces "
-            "--max-merge-attempts)."
+            "Compatibility iteration bound for the historical drive-green CLI; current "
+            "merge-wait safely stands by and does not arm or poll auto-merge "
+            "(default: 5; replaces --max-merge-attempts)."
         ),
     )
     p.add_argument(

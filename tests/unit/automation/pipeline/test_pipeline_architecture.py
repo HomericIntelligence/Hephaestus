@@ -206,20 +206,20 @@ def test_legacy_auto_merge_coordinator_is_fail_closed() -> None:
     assert any(isinstance(node, ast.Constant) and node.value is False for node in ast.walk(method))
 
 
-def test_merge_wait_is_the_sole_pipeline_auto_merge_armer() -> None:
-    """Only the post-review merge-wait stage may call the arming capability."""
+def test_pipeline_stages_have_no_auto_merge_mutation_capability() -> None:
+    """The reviewed-head interlock leaves persistent auto-merge to operators."""
     callers: set[str] = set()
     for path in _PIPELINE.glob("stages/*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        if any(
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "arm_auto_merge"
-            for node in ast.walk(tree)
-        ):
-            callers.add(path.stem)
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in {"arm_auto_merge", "defer_auto_merge"}
+            ):
+                callers.add(path.stem)
 
-    assert callers == {"merge_wait"}
+    assert callers == set()
 
 
 def _sleep_violations(tree: ast.AST, filename: str, *, allow_time_import: bool) -> list[str]:

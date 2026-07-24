@@ -58,11 +58,16 @@ in §5.1, which tags `state:skip` on epics before any other durable mutation.
  into the same queue and the loop reconverges
  ([`_park_resumable`](hephaestus/automation/pipeline/coordinator.py),
  [`_finalize_resumable`](hephaestus/automation/pipeline/coordinator.py)).
-- **One automatic merge authority per head.** `state:implementation-go` is
- applied only by `pr_review._eval`, which is the sole stage authorized to
- write the label. Once applied, `merge_wait` reactivates `auto-merge` and
- revalidates the label + PR head immediately before and after arming
- ([`pr_review.py`](hephaestus/automation/pipeline/stages/pr_review.py),
+- **Reviewed-head proof, no queue merge mutation.** `state:implementation-go`
+ is applied only by `pr_review._eval`, which is the sole stage authorized to
+ write the label. Before the reviewer runs, `pr_review` snapshots the GitHub
+ review inputs and its head SHA, then requires a clean local checkout at that
+ exact SHA. The resulting in-memory proof is rechecked against a confirmed,
+ unarmed live PR before the label is written. `merge_wait` consumes that proof
+ but currently stands by; no queue stage creates, disables, adopts, or polls
+ an auto-merge request pending the separately reviewed #2419 conditional
+ merge path ([`pr_review.py`](hephaestus/automation/pipeline/stages/pr_review.py),
+ [`worker_pool.py`](hephaestus/automation/pipeline/worker_pool.py),
  [`merge_wait.py`](hephaestus/automation/pipeline/stages/merge_wait.py)).
 - **Globally bounded budgets.** Stages count retries on `_on_job_done` so
  `agent_error` retries consume the same per-item budget as ordinary
@@ -129,7 +134,6 @@ flowchart LR
     implementation -. "agent_error" .-> implementation
     pr_review -. "agent_error" .-> implementation
     implementation -. "already_implementation_go_pr" .-> merge_wait
-    merge_wait -. "arm_confirm_failed" .-> merge_wait
 ```
 
 Every back-edge in the diagram is **named** in
@@ -146,7 +150,8 @@ The main thread (coordinator) OWNS:
 - all routing and disposition semantics ([`_route`](hephaestus/automation/pipeline/coordinator.py))
 - every GitHub API mutation, through
  [`StageGitHub`](hephaestus/automation/pipeline/stages/base.py)
- (label writes, comment upserts, PR create/auto-merge)
+ (label writes, comment upserts, and PR creation; the queue does not mutate
+ auto-merge)
 It NEVER launches agents, builds/tests or git/network operations. It never
 sleeps — wakeups are the timer's responsibility.
 The single worker pool ([`WorkerPool`](hephaestus/automation/pipeline/worker_pool.py))
@@ -402,8 +407,9 @@ Key fields:
 - `result` ([`ItemResult`](hephaestus/automation/pipeline/work_item.py)) —
  final `passed / reason / final_stage` written by
  [`_finish`](hephaestus/automation/pipeline/coordinator.py).
-- `armed` — `bool` set on a confirmed drive-green arm
- ([`_arm`](hephaestus/automation/pipeline/stages/merge_wait.py)).
+- `armed` — compatibility field retained on the work item. The current
+ [`merge_wait`](hephaestus/automation/pipeline/stages/merge_wait.py) stage
+ does not set it because the queue does not arm auto-merge.
 - `worktree`, `branch` — populated by [`implementation`](hephaestus/automation/pipeline/stages/implementation.py).
 
 ### [§`StageName`](hephaestus/automation/pipeline/routing.py)
@@ -488,9 +494,12 @@ implementation-go : 4
 state:skip : NO RANK (excluded from rank compare)
 ```
 
-A label alone never authorizes merge. `merge_wait` revalidates the
-`state:implementation-go` label and the PR head immediately before and
-after arming and revokes on drift.
+A label alone never authorizes merge. `merge_wait` requires both the
+`state:implementation-go` label and a matching in-memory reviewed-head proof
+on a confirmed, unarmed live PR. A missing or drifted proof is contained by
+returning to review only after a fresh unarmed read permits stale-label
+revocation; a matching proof currently reaches a safe standby outcome pending
+issue #2419 ([`merge_wait.py`](hephaestus/automation/pipeline/stages/merge_wait.py)).
 
 Plan-review labels are the sole durable authority. Review comments explain and
 audit a decision but never authorize a transition, block a stage, or backfill a
@@ -763,7 +772,7 @@ stateDiagram-v2
 Architectural contract:
 
 - One issue maps to one active implementation pull request.
-- Auto-merge remains disabled while review is pending.
+- The queue observes but never mutates auto-merge while review is pending.
 - Implementation never writes `state:implementation-go`.
 - Missing approval returns to plan review; unsafe or exhausted work terminates
   without approval.
@@ -791,9 +800,13 @@ flowchart LR
 
 ```mermaid
 stateDiagram-v2
-    [*] --> ContainMerge
-    ContainMerge --> Review: auto-merge disabled
-    ContainMerge --> Failed: merge control unavailable
+    [*] --> VerifyUnarmed
+    VerifyUnarmed --> Review: open, complete, and unarmed
+    VerifyUnarmed --> OperatorOwned: external arm or incomplete state
+    Review --> Checkout: GitHub snapshot captured
+    Checkout --> Review: clean checkout matches snapshot head
+    Checkout --> RetryReview: checkout or head drift
+    RetryReview --> Review: bounded retry
     Review --> Validate: review produced
     Review --> RetryReview: invalid output
     RetryReview --> Review: retry available
@@ -824,22 +837,26 @@ Architectural contract:
 - Blocking findings produce `state:implementation-nogo`; only a clean review
   produces `state:implementation-go`.
 - Human-owned findings stop automation with an explanatory PR comment.
-- This stage never arms auto-merge.
+- The review proof is a fresh GitHub snapshot plus a clean checkout at that
+  snapshot's head; it exists only in the current process.
+- No queue stage arms, disables, adopts, or polls auto-merge.
 
 ### 5.6 Merge wait
 
-Merge wait turns a still-valid implementation approval into a head-bound
-auto-merge request and observes only the request it created. It does not take
-ownership of merge requests created by another actor.
+Merge wait verifies a still-valid implementation approval against its
+in-memory reviewed-head proof and then stands by. Until #2419 supplies a
+separately reviewed conditional normal-merge path, it does not create,
+disable, adopt, or poll an auto-merge request. An existing request is treated
+as external ownership and is left untouched.
 
 #### Boundary diagram
 
 ```mermaid
 flowchart LR
-    Approved["Approved PR head"] --> Verify --> Arm["Head-bound auto-merge"]
-    Arm --> Observe
-    Observe --> Merged
-    Observe --> Operator["External or ambiguous ownership"]
+    Approved["Approval label + reviewed-head proof"] --> Verify
+    Verify --> StandBy["Safe standby pending #2419"]
+    Verify --> Review["Missing or drifted proof"]
+    Verify --> Operator["External or ambiguous ownership"]
     Merged --> Learn["Optional learning"] --> Finished
 ```
 
@@ -852,13 +869,12 @@ stateDiagram-v2
     Inspect --> Failed: closed or unavailable
     Inspect --> OperatorOwned: externally armed
     Inspect --> PRReview: approval missing
-    Inspect --> Arm: approval and head valid
-    Arm --> Poll: armed by this run
-    Arm --> Failed: arm rejected or head changed
-    Poll --> Poll: open and still armed
-    Poll --> Learn: merged
-    Poll --> Failed: closed, approval revoked, or arm lost
-    Poll --> OperatorOwned: ownership ambiguous
+    Inspect --> Verify: approval label present
+    Verify --> StandBy: matching reviewed head and unarmed PR
+    Verify --> PRReview: missing or drifted proof after safe label revocation
+    Verify --> OperatorOwned: externally armed or ownership ambiguous
+    Verify --> Failed: incomplete or unavailable state
+    StandBy --> [*]
     Learn --> Complete: disabled or recorded
     Learn --> Failed: durable outcome ambiguous
     Complete --> [*]
@@ -869,11 +885,12 @@ stateDiagram-v2
 
 Architectural contract:
 
-- Merge authorization is bound to the reviewed head commit.
+- A current-process review proof is bound to the reviewed head commit.
 - Existing external merge ownership is preserved.
-- Revoked approval returns to PR review before a new arm.
+- Missing or drifted proof returns approval to PR review only after a fresh,
+  confirmed-unarmed read permits label revocation.
+- A matching proof stands by pending the #2419 conditional merge path.
 - Ambiguous merge or learning state stops for operator inspection.
-- Polling is timer-driven and consumes no review or implementation revision.
 
 ### 5.7 `finished`
 
@@ -929,7 +946,7 @@ budgets. Every `routes.py` row and every doc row MUST agree.
 | `plan_review` | `IMPLEMENTATION` | `nogo` → `PLANNING`; `plan_cycles_exhausted` → `FINISHED`; `*` → `PLANNING` | `plan_review_iter = 3`, `plan_cycles = 2` |
 | `implementation` | `PR_REVIEW` | `plan_not_go` → `PLAN_REVIEW`; `already_implementation_go_pr` → `MERGE_WAIT`; `*` → `FINISHED` | `implement = 2`, `test_fix = 1` |
 | `pr_review` | `MERGE_WAIT` | `agent_error` → `IMPLEMENTATION`; `human_blocked` → `FINISHED`; `exhaustion` → `FINISHED`; `*` → `PR_REVIEW` | `pr_review_iter = 3`, `pr_review_hard = 6` |
-| `merge_wait` | `FINISHED` | `not_implementation_go` → `PR_REVIEW`; `closed` → `FINISHED`; `*` → `FINISHED` | `merge = DEFAULT_DRIVE_GREEN_LOOPS = 5` |
+| `merge_wait` | `FINISHED` | `not_implementation_go`, `reviewed_head_missing`, or `reviewed_head_drift` → `PR_REVIEW`; `closed` → `FINISHED`; `*` → `FINISHED` | — (no queue-stage budget) |
 | `finished` | `FINISHED` | — (terminal) | — |
 
 Budget provenance (cross-check):
@@ -950,7 +967,8 @@ Budget provenance (cross-check):
  [`loop_runner.py LoopConfig.drive_green_loops`](hephaestus/automation/loop_runner.py).
 - `merge = 5` (CLI default for `--drive-green-loops`,
  [`DEFAULT_DRIVE_GREEN_LOOPS`](hephaestus/automation/pipeline/routing.py))
- is the pre-merge poll budget mirrored by the merge-wait coordination.
+ is retained routing compatibility metadata for the legacy drive-green CLI;
+ the queue `merge_wait` stage does not poll or consume this budget.
 All per-item-lifetime counters live in
 [`WorkItem.attempts`](hephaestus/automation/pipeline/work_item.py);
 they are NEVER reset when an item re-enters a stage, so cross-stage
@@ -1033,9 +1051,12 @@ continues.
 
 The queue is in-memory: a restart re-seeds normally through the ordinary
 [`classifier`](hephaestus/automation/pipeline/seeding.py) and does not recover
-per-run merge-wait ownership. Other-run auto-merge arms are
-[blocked without adoption, mutation, or re-arming](hephaestus/automation/pipeline/stages/merge_wait.py)
-by the restarted run; they require operator handling.
+the process-local reviewed-head proof. A direct PR seed or restart therefore
+cannot use a durable implementation-GO label by itself: merge wait first
+requires a confirmed-unarmed read, then returns the PR to review after safely
+revoking a stale label. Other-run auto-merge requests are
+[blocked without adoption or mutation](hephaestus/automation/pipeline/stages/merge_wait.py)
+and require operator handling.
 
 ---
 
@@ -1055,10 +1076,9 @@ mutations.
  `resume_session_id`, when set for a direct runner, selects its persisted
  session instead of creating a fresh one; its returned id is carried in the
  `JobResult` and persisted by the coordinator under the job's logical role.
- `sandbox = "workspace-write"` (default) or `"read-only"`
- (implementation review only); `expected_head_sha` — when set, the worker
- refuses to dispatch the agent unless the local `git rev-parse HEAD`
- equals this remote-reviewed SHA and the worktree is clean.
+ `sandbox = "workspace-write"` (default) or `"read-only"` (including PR
+ review). The agent job has no head-SHA field; the checkout barrier runs before
+ it as a `verify_pr_review_checkout` Git job.
  `sandbox = "read-only"` activates `allowed_tools = "Read,Glob,Grep"`
  and `permission_mode = "dontAsk"` on the Claude call site.
 - [`BuildTestJob`](hephaestus/automation/pipeline/jobs.py) — subprocess
@@ -1066,8 +1086,12 @@ mutations.
  coordinator constructs them from vetted templates
  (`PRE_PR_TEST_ARGV` for the pre-PR test gate).
 - [`GitJob`](hephaestus/automation/pipeline/jobs.py) — `op ∈ {clone,
- sync_checkout, create_worktree, remove_worktree, rebase, push, commit_push}`,
- validated by `__post_init__`.
+ sync_checkout, create_worktree, verify_pr_review_checkout, remove_worktree,
+ rebase, push, commit_push}`, validated by `__post_init__`. Before a PR-review
+ agent job, `verify_pr_review_checkout` receives the worktree path, branch,
+ expected snapshot SHA, and PR number. The worker rejects a dirty checkout,
+ synchronizes the branch, requires `git rev-parse HEAD` to equal that SHA, and
+ checks cleanliness again ([`_git_verify_pr_review_checkout`](hephaestus/automation/pipeline/worker_pool.py)).
 - [`CompactJob`](hephaestus/automation/pipeline/jobs.py) — a best-effort
  `/compact` turn for a persisted Claude, Codex, or Pi session; it never blocks
  the retry lifecycle.
@@ -1295,7 +1319,7 @@ retirement conditions are satisfied.
 | Compatibility path | Retirement gate |
 |---|---|
 | `legacy_issue_impl_go_fallback` | After #2055 is deployed, a complete supported-repository seed pass reports zero fallback observations. |
-| `already_implementation_go_pr` and `not_implementation_go` | After #2055 reconstructs eligibility from head-bound review proof and supported repositories contain zero open legacy implementation-GO PRs. |
+| `already_implementation_go_pr` and `not_implementation_go` | After reviewed-head proof is present for every eligible current-process PR and supported repositories contain zero open legacy implementation-GO PRs. |
 
 ---
 
@@ -1344,9 +1368,11 @@ Exit-code priority is:
  short-circuit through earlier stages when it carries a later-stage
  label. Never equality.
 - **Head-bound** — an artifact or check whose correctness depends on
- matching the live `headRefOid` of the PR. `merge_wait` captures the
- head SHA at arm time and polls it; a head drift between ARM and POLL
- is a terminal containment failure.
+ matching the live `headRefOid` of the PR. `pr_review` creates its
+ process-local proof only after a GitHub snapshot and a clean checkout agree
+ on that SHA; it rechecks the proof before writing the GO label. `merge_wait`
+ compares that proof with the confirmed-unarmed live PR and stands by pending
+ #2419 rather than arming or polling auto-merge.
 - **Skip-reason marker** — the `<!-- hephaestus-state-skip-reason -->` HTML-comment marker ([`SKIP_REASON_MARKER`](hephaestus/automation/state_labels.py)) that prefixes every `state:skip` reason-comment body produced by [`format_skip_reason_comment`](hephaestus/automation/state_labels.py), so a repo reader can deterministically trace the automated skip reason.
 - **File-system loader** — the Jinja `FileSystemLoader` resolved from `__file__`-relative paths in [`prompts/catalog.py`](hephaestus/prompts/catalog.py); deliberately NOT `PackageLoader` to avoid importlib editable-install staleness (#2308).
 - **Conflict-resolution request** — the [`ConflictResolutionRequest`](hephaestus/automation/_review_conflict_resolver.py) immutable context consumed by the cohesive [`ReviewConflictResolver`](hephaestus/automation/_review_conflict_resolver.py) unit split out of `_review_phase.py` (#2209).

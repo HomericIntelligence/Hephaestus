@@ -46,8 +46,9 @@ from .pipeline.routing import PipelineScope, StageName
 
 logger = logging.getLogger(__name__)
 
-#: Contiguous stage subset the historical drive-green CLI runs.  Direct PRs
-#: first receive the normal PR review, then the sole conditional merge-wait arm.
+#: Contiguous stage subset the historical drive-green CLI runs. Direct PRs
+#: first receive the normal PR review, then merge-wait verifies the proof and
+#: safely stands by without mutating auto-merge.
 _CI_DRIVER_SCOPE_STAGES: frozenset[StageName] = frozenset(
     {StageName.PR_REVIEW, StageName.MERGE_WAIT}
 )
@@ -84,7 +85,7 @@ def _build_parser() -> argparse.ArgumentParser:
     toggles, worker and agent timeouts, and GitHub throttling.
     """
     parser = build_automation_parser(
-        description="Run loop-owned PR review and conditional auto-merge arming",
+        description="Run loop-owned PR review and safe merge-wait verification",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:

@@ -674,33 +674,31 @@ class TestDryRun:
 class TestFailBackRouting:
     """The Disposition->action table's FAIL_BACK rows."""
 
-    def test_owned_merge_wait_lost_approval_returns_to_pr_review(
+    def test_unarmed_merge_wait_lost_approval_returns_to_pr_review(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Containment completes before the fresh PR-review context is entered."""
+        """An unarmed PR with a missing loop label returns for fresh review."""
         github = FakeStageGitHub(
             pr_impl_state=(False, False),
             pr_state={
                 "state": "OPEN",
                 "headRefOid": "a" * 40,
-                "autoMergeRequest": {"enabledAt": "this-run"},
+                "autoMergeRequest": None,
             },
         )
         coordinator, _, _ = make_coordinator(tmp_path, monkeypatch, github=github)
 
-        class ReviewAfterContainment(StubStage):
+        class ReviewAfterMissingApproval(StubStage):
             def on_enter(self, item: WorkItem, ctx: Any) -> Any:
-                assert github.mutation_log == [("defer_auto_merge", (12,))]
-                assert item.armed is False
+                assert github.mutation_log == []
                 return super().on_enter(item, ctx)
 
-        coordinator.stages[StageName.PR_REVIEW] = ReviewAfterContainment(
+        coordinator.stages[StageName.PR_REVIEW] = ReviewAfterMissingApproval(
             StageOutcome(Disposition.FINISH_FAIL, "stop")
         )
         item = _issue_item(3, StageName.MERGE_WAIT)
-        item.armed = True
         item.pr = 12
-        item.state = "POLL"
+        item.state = "ARM"
 
         coordinator._push_item(item, StageName.MERGE_WAIT, enter=False)
         coordinator._drain_queues()
@@ -708,7 +706,7 @@ class TestFailBackRouting:
         assert item.stage is StageName.FINISHED
         assert item.result is not None
         assert item.result.reason == "stop"
-        assert github.mutation_log == [("defer_auto_merge", (12,))]
+        assert github.mutation_log == []
 
     def test_external_auto_merge_block_does_not_enter_pr_review(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -736,38 +734,30 @@ class TestFailBackRouting:
         assert not coordinator.queues[StageName.PR_REVIEW]
         assert github.mutation_log == []
 
-    def test_owned_auto_merge_defer_failure_does_not_enter_pr_review(
+    def test_partial_merge_wait_state_does_not_enter_pr_review(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A containment error is terminal rather than an unsafe fresh review."""
-
-        class FailingDeferGitHub(FakeStageGitHub):
-            def defer_auto_merge(self, pr_number: int) -> None:
-                self._log("defer_auto_merge", pr_number)
-                raise RuntimeError("transport failure")
-
-        github = FailingDeferGitHub(
+        """An incomplete read is terminal rather than an unsafe fresh review."""
+        github = FakeStageGitHub(
             pr_impl_state=(False, False),
             pr_state={
                 "state": "OPEN",
                 "headRefOid": "a" * 40,
-                "autoMergeRequest": {"enabledAt": "this-run"},
             },
         )
         coordinator, _, _ = make_coordinator(tmp_path, monkeypatch, github=github)
         item = _issue_item(3, StageName.MERGE_WAIT)
-        item.armed = True
         item.pr = 12
-        item.state = "POLL"
+        item.state = "ARM"
 
         coordinator._push_item(item, StageName.MERGE_WAIT, enter=False)
         coordinator._drain_queues()
 
         assert item.stage is StageName.FINISHED
         assert item.result is not None
-        assert item.result.reason == "auto_merge_defer_failed"
+        assert item.result.reason == "pr_state_unverified"
         assert not coordinator.queues[StageName.PR_REVIEW]
-        assert github.mutation_log == [("defer_auto_merge", (12,))]
+        assert github.mutation_log == []
 
     def test_named_reason_routes_to_mapped_stage(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

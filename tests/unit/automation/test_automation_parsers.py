@@ -503,7 +503,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
         _store_true(
             "--no-auto-merge",
             "no_auto_merge",
-            "(Deprecated, ignored) merge arming is owned by merge_wait",
+            "(Deprecated, ignored) queue auto-merge handling is unavailable pending #2419",
         ),
         _dry_run_spec(
             _dry_help("Suppress GitHub mutations and git pushes (no PR creation, no commits).")
@@ -578,9 +578,9 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "_StoreAction",
             5,
             help_text=(
-                "Maximum pending polls of a current-run auto-merge arm per issue before "
-                "merge-wait stops the item without changing labels (default: 5; replaces "
-                "--max-merge-attempts)."
+                "Compatibility iteration bound for the historical drive-green CLI; current "
+                "merge-wait safely stands by and does not arm or poll auto-merge "
+                "(default: 5; replaces --max-merge-attempts)."
             ),
         ),
         _action_spec(
