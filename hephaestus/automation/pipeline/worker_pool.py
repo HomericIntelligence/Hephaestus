@@ -637,18 +637,11 @@ class WorkerPool:
             ["git", "remote", "get-url", "origin"], cwd=checkout, timeout=job.timeout_s
         ).stdout.strip()
         normalized_origin = origin.rstrip("/").removesuffix(".git")
-        expected_origins = {
-            f"https://github.com/{expected_repo}",
-            f"ssh://git@github.com/{expected_repo}",
-            f"git@github.com:{expected_repo}",
-        }
-        if normalized_origin not in expected_origins:
+        expected_origin = f"https://github.com/{expected_repo}"
+        if normalized_origin != expected_origin:
             return JobResult(
                 ok=False,
-                error=(
-                    f"checkout has unexpected origin; expected origin {expected_repo}, "
-                    f"found {origin}"
-                ),
+                error=f"checkout has unexpected origin; expected origin {expected_repo}",
             )
 
         status = git_utils.run(
@@ -684,7 +677,7 @@ class WorkerPool:
                 ),
             )
 
-        metadata_lock = checkout / "build" / ".worktrees" / ".git-metadata.lock"
+        metadata_lock = WorktreeManager.git_metadata_lock_path(checkout)
         with _interruptible_file_lock(
             metadata_lock,
             shutdown=self._shutdown,

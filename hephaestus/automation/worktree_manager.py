@@ -44,6 +44,7 @@ _AUTOMATION_PROMPT_PREFIXES = (
     ".claude-prompt-",
     ".claude-followup-",
 )
+_GIT_METADATA_LOCK_NAME = ".hephaestus-git-metadata.lock"
 
 
 def _timeout_kw(timeout: int | None) -> dict[str, Any]:
@@ -124,9 +125,18 @@ class WorktreeManager:
 
         logger.debug("Initialized WorktreeManager at %s", self.base_dir)
 
+    @staticmethod
+    def git_metadata_lock_path(repo_root: Path) -> Path:
+        """Return the cross-process lock guarding ``repo_root``'s Git metadata.
+
+        The sentinel belongs in ``.git`` so acquiring it never creates an
+        untracked file in a reusable checkout's worktree.
+        """
+        return repo_root / ".git" / _GIT_METADATA_LOCK_NAME
+
     def _git_metadata_lock_path(self) -> Path:
         """Return the cross-process lock guarding shared git worktree metadata."""
-        return self.base_dir / ".git-metadata.lock"
+        return self.git_metadata_lock_path(self.repo_root)
 
     @property
     def base_branch(self) -> str:
