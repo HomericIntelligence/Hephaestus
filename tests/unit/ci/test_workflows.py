@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -534,15 +537,453 @@ class TestAutoTagReleaseDispatch:
     def test_release_concurrency_keys_on_resolved_tag(self) -> None:
         """Dispatched and tag-push release runs must serialize per tag, not per branch.
 
-        With ``release-${{ github.ref }}`` every workflow_dispatch run grouped on
-        the branch ref, so two dispatched runs for DIFFERENT tags serialized while
-        a dispatched and a tag-push run of the SAME tag did not share a group.
-        Keying on ``inputs.tag`` first makes dispatched runs group per tag.
+        ``github.ref_name`` is the short tag name for a tag push, so it matches the
+        explicit ``tag`` dispatch input. ``github.ref`` includes ``refs/tags/`` and
+        would let a tag push and a manual dispatch for the same tag run together.
         """
         workflow = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
         concurrency = workflow["concurrency"]
-        assert concurrency["group"] == "release-${{ inputs.tag || github.ref }}"
+        assert concurrency["group"] == "release-${{ inputs.tag || github.ref_name }}"
         assert concurrency["cancel-in-progress"] is False
+
+    def test_release_dispatch_requires_a_tag_and_supports_docs_only_recovery(self) -> None:
+        """Recovery must select an explicit tag and never republish its package."""
+        workflow = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        inputs = workflow[True]["workflow_dispatch"]["inputs"]
+
+        assert inputs["tag"]["required"] is True
+        docs_only = inputs["docs_only"]
+        assert docs_only["required"] is False
+        assert docs_only["default"] is False
+        assert docs_only["type"] == "boolean"
+
+    def test_docs_only_recovery_skips_normal_release_jobs(self) -> None:
+        """Docs recovery keeps tag validation but skips test, publish, and release writes."""
+        workflow = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        jobs = workflow["jobs"]
+
+        duplicate_guard = "needs.resolve-release.outputs.completed_release_exists != 'true'"
+        assert jobs["test"]["if"] == f"${{{{ !inputs.docs_only && {duplicate_guard} }}}}"
+        assert jobs["type-check"]["if"] == f"${{{{ !inputs.docs_only && {duplicate_guard} }}}}"
+        assert (
+            jobs["build-and-publish"]["if"] == f"${{{{ !inputs.docs_only && {duplicate_guard} }}}}"
+        )
+        assert jobs["deploy-docs"]["needs"] == [
+            "resolve-release",
+            "test",
+            "type-check",
+            "build-and-publish",
+        ]
+        assert jobs["deploy-docs"]["if"] == (
+            "${{ always() && needs.resolve-release.result == 'success' && "
+            "(inputs.docs_only || (needs.test.result == 'success' && "
+            "needs.type-check.result == 'success' && "
+            "needs.build-and-publish.result == 'success' && "
+            "needs.resolve-release.outputs.completed_release_exists != 'true')) }}"
+        )
+
+    def test_new_release_records_immutable_source_provenance(self) -> None:
+        """Every newly created release records the exact source SHA used to build it."""
+        workflow = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        steps = workflow["jobs"]["build-and-publish"]["steps"]
+        create = [step for step in steps if step.get("name") == "Create GitHub Release"]
+
+        assert len(create) == 1
+        assert create[0]["with"]["body"] == (
+            "<!-- hephaestus-source-sha:${{ needs.resolve-release.outputs.sha }} -->"
+        )
+
+    def _publish_draft_step(self) -> dict[str, Any]:
+        """Return the step that publishes a recovered draft release."""
+        workflow = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        return next(
+            step
+            for step in workflow["jobs"]["build-and-publish"]["steps"]
+            if step.get("name") == "Publish existing draft release"
+        )
+
+    def _run_draft_publisher(
+        self, tmp_path: Path, release_body: str
+    ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+        """Run the draft-publishing shell step against a deterministic fake gh CLI."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        args_file = tmp_path / "gh-edit-args.json"
+        (bin_dir / "gh").write_text(
+            "#!/usr/bin/env python3\n"
+            "import json\n"
+            "import os\n"
+            "import sys\n"
+            "from pathlib import Path\n"
+            "args = sys.argv[1:]\n"
+            "if args[:2] == ['release', 'view']:\n"
+            "    print(os.environ['GH_RELEASE_BODY'])\n"
+            "elif args[:2] == ['release', 'edit']:\n"
+            "    Path(os.environ['GH_EDIT_ARGS_FILE']).write_text(\n"
+            "        json.dumps(args), encoding='utf-8'\n"
+            "    )\n"
+            "else:\n"
+            "    sys.exit(2)\n",
+            encoding="utf-8",
+        )
+        (bin_dir / "gh").chmod(0o755)
+        env = {
+            **os.environ,
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "GH_EDIT_ARGS_FILE": str(args_file),
+            "GH_RELEASE_BODY": release_body,
+            "SHA": "0123456789012345678901234567890123456789",
+            "TAG": "v0.10.0",
+        }
+        result = subprocess.run(
+            ["bash", "-c", self._publish_draft_step()["run"]],
+            check=False,
+            capture_output=True,
+            env=env,
+            text=True,
+        )
+        return result, json.loads(args_file.read_text(encoding="utf-8"))
+
+    def test_publish_existing_draft_release_finalizes_and_records_source_marker(
+        self, tmp_path: Path
+    ) -> None:
+        """An unmarked draft is published with exactly one source-provenance marker."""
+        step = self._publish_draft_step()
+        marker = "<!-- hephaestus-source-sha:0123456789012345678901234567890123456789 -->"
+        result, args = self._run_draft_publisher(tmp_path, "Existing draft notes")
+
+        assert step["if"] == (
+            "steps.existing.outputs.exists == 'true' && steps.existing.outputs.draft == 'true'"
+        )
+        assert result.returncode == 0
+        assert args == [
+            "release",
+            "edit",
+            "v0.10.0",
+            "--draft=false",
+            "--notes",
+            f"Existing draft notes\n\n{marker}",
+        ]
+        assert args[-1].count(marker) == 1
+
+    def test_publish_existing_draft_release_does_not_duplicate_source_marker(
+        self, tmp_path: Path
+    ) -> None:
+        """A marked draft is finalized without rewriting or duplicating its marker."""
+        marker = "<!-- hephaestus-source-sha:0123456789012345678901234567890123456789 -->"
+        result, args = self._run_draft_publisher(tmp_path, f"Existing draft notes\n{marker}")
+
+        assert result.returncode == 0
+        assert args == ["release", "edit", "v0.10.0", "--draft=false"]
+
+    def _resolve_step(self) -> dict[str, Any]:
+        workflow = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        return next(
+            step
+            for step in workflow["jobs"]["resolve-release"]["steps"]
+            if step.get("id") == "resolve"
+        )
+
+    def _run_resolver(
+        self,
+        tmp_path: Path,
+        *,
+        docs_only: bool,
+        release_state: str,
+        deployment_state: str,
+        provenance_state: str = "linked",
+        tag: str = "v0.10.0",
+        source_sha: str = "0123456789012345678901234567890123456789",
+        api_failure: str = "",
+    ) -> subprocess.CompletedProcess[str]:
+        """Execute the resolver shell with deterministic local GitHub fixtures."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir(parents=True)
+        (bin_dir / "git").write_text(
+            '#!/bin/sh\nif [ "$1" = "rev-parse" ]; then echo "$GH_SOURCE_SHA"; fi\n',
+            encoding="utf-8",
+        )
+        (bin_dir / "gh").write_text(
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            "  api)\n"
+            '    case "$2" in\n'
+            "      --include)\n"
+            '        case "$GH_RELEASE_STATE" in\n'
+            "          published)\n"
+            '            if [ "$GH_PROVENANCE_STATE" = "unmarked" ]; then\n'
+            '              printf \'HTTP/2.0 200 OK\\n\\n{"draft":false,'
+            '"immutable":true,"body":""}\\n\'\n'
+            "            else\n"
+            '              printf \'HTTP/2.0 200 OK\\n\\n{"draft":false,'
+            '"immutable":true,"body":"<!-- hephaestus-source-sha:%s -->"}'
+            '\\n\' "$GH_SOURCE_SHA"\n'
+            "            fi ;;\n"
+            '          draft) printf \'HTTP/2.0 200 OK\\n\\n{"draft":true,'
+            '"immutable":true,"body":""}\\n\' ;;\n'
+            "          missing) printf 'HTTP/2.0 404 Not Found\\n\\n{}\\n'; exit 1 ;;\n"
+            "          *) printf 'HTTP/2.0 500 Server Error\\n\\n{}\\n'; exit 1 ;;\n"
+            "        esac ;;\n"
+            '      *"/deployments?environment=pypi&sha=${GH_SOURCE_SHA}")\n'
+            '        [ "$GH_DEPLOYMENT_STATE" = "error" ] && exit 1\n'
+            '        [ "$GH_DEPLOYMENT_STATE" = "missing" ] || echo 42 ;;\n'
+            "      *'/deployments/42/statuses?per_page=1')\n"
+            '        [ "$GH_API_FAILURE" = "deployment-status" ] && exit 1\n'
+            '        [ "$GH_DEPLOYMENT_STATE" = "published" ] && '
+            "echo 'success\\thttps://github.com/HomericIntelligence/Hephaestus"
+            "/actions/runs/300/job/400' "
+            "|| echo 'failure\\t' ;;\n"
+            "      *'/actions/runs/300')\n"
+            '        [ "$GH_API_FAILURE" = "action-run" ] && exit 1\n'
+            '        case "$GH_PROVENANCE_STATE" in\n'
+            "          unlinked) echo 'Release\\t.github/workflows/release.yml\\t"
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' ;;\n"
+            '          wrong-workflow) echo "Other workflow\\t.github/workflows/release.yml'
+            '\\t$GH_SOURCE_SHA" ;;\n'
+            '          *) echo "Release\\t.github/workflows/release.yml\\t$GH_SOURCE_SHA" ;;\n'
+            "        esac ;;\n"
+            "      *'/actions/jobs/400')\n"
+            '        [ "$GH_API_FAILURE" = "action-job" ] && exit 1\n'
+            '        case "$GH_PROVENANCE_STATE" in\n'
+            '          cross-run-job) echo "999\\t$GH_SOURCE_SHA\\tbuild-and-publish'
+            '\\tsuccess\\tsuccess\\tskipped" ;;\n'
+            '          no-release) echo "300\\t$GH_SOURCE_SHA\\tbuild-and-publish'
+            '\\tsuccess\\tskipped\\tskipped" ;;\n'
+            '          no-publish) echo "300\\t$GH_SOURCE_SHA\\tbuild-and-publish'
+            '\\tskipped\\tsuccess\\tskipped" ;;\n'
+            '          finalized) echo "300\\t$GH_SOURCE_SHA\\tbuild-and-publish'
+            '\\tsuccess\\tskipped\\tsuccess" ;;\n'
+            '          *) echo "300\\t$GH_SOURCE_SHA\\tbuild-and-publish'
+            '\\tsuccess\\tsuccess\\tskipped" ;;\n'
+            "        esac ;;\n"
+            "    esac ;;\n"
+            "  *) exit 2 ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        for command in (bin_dir / "git", bin_dir / "gh"):
+            command.chmod(0o755)
+
+        output = tmp_path / "github-output"
+        env = {
+            **os.environ,
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "INPUT_TAG": tag,
+            "EVENT_REF": "refs/heads/main",
+            "DOCS_ONLY": str(docs_only).lower(),
+            "GH_TOKEN": "test-token",
+            "GITHUB_REPOSITORY": "HomericIntelligence/Hephaestus",
+            "REPOSITORY": "HomericIntelligence/Hephaestus",
+            "GITHUB_OUTPUT": str(output),
+            "GH_RELEASE_STATE": release_state,
+            "GH_DEPLOYMENT_STATE": deployment_state,
+            "GH_PROVENANCE_STATE": provenance_state,
+            "GH_SOURCE_SHA": source_sha,
+            "GH_API_FAILURE": api_failure,
+        }
+        return subprocess.run(
+            ["bash", "-c", self._resolve_step()["run"]],
+            check=False,
+            capture_output=True,
+            env=env,
+            text=True,
+        )
+
+    def test_docs_only_recovery_accepts_linked_published_release(self, tmp_path: Path) -> None:
+        """Docs-only recovery accepts only the release workflow that published this SHA."""
+        result = self._run_resolver(
+            tmp_path,
+            docs_only=True,
+            release_state="published",
+            deployment_state="published",
+        )
+
+        assert result.returncode == 0
+
+    def test_docs_only_recovery_accepts_a_finalized_draft_release(self, tmp_path: Path) -> None:
+        """A normal run that publishes a pre-existing draft remains docs-recoverable."""
+        result = self._run_resolver(
+            tmp_path,
+            docs_only=True,
+            release_state="published",
+            deployment_state="published",
+            provenance_state="finalized",
+        )
+
+        assert result.returncode == 0
+
+    @pytest.mark.parametrize(
+        ("release_state", "deployment_state", "provenance_state", "tag", "error"),
+        [
+            ("missing", "published", "linked", "v0.10.0", "existing GitHub Release"),
+            ("draft", "published", "linked", "v0.10.0", "published GitHub Release"),
+            ("published", "missing", "linked", "v0.10.0", "same release workflow run"),
+            ("published", "failed", "linked", "v0.10.0", "same release workflow run"),
+            ("published", "published", "unlinked", "v0.10.0", "same release workflow run"),
+            ("published", "published", "wrong-workflow", "v0.10.0", "same release workflow run"),
+            ("published", "published", "cross-run-job", "v0.10.0", "same release workflow run"),
+            ("published", "published", "no-publish", "v0.10.0", "same release workflow run"),
+            ("published", "published", "no-release", "v0.10.0", "same release workflow run"),
+            ("published", "published", "unmarked", "v0.10.1", "same release workflow run"),
+            (
+                "error",
+                "published",
+                "linked",
+                "v0.10.0",
+                "Could not inspect existing GitHub Release",
+            ),
+        ],
+    )
+    def test_docs_only_recovery_rejects_unpublished_source(
+        self,
+        tmp_path: Path,
+        release_state: str,
+        deployment_state: str,
+        provenance_state: str,
+        tag: str,
+        error: str,
+    ) -> None:
+        """Docs-only recovery must not deploy an unpublished or retargeted source."""
+        result = self._run_resolver(
+            tmp_path,
+            docs_only=True,
+            release_state=release_state,
+            deployment_state=deployment_state,
+            provenance_state=provenance_state,
+            tag=tag,
+        )
+
+        assert result.returncode == 1
+        assert error in result.stderr
+
+    @pytest.mark.parametrize("docs_only", [False, True])
+    def test_deployment_list_failure_aborts_all_recovery_modes(
+        self, tmp_path: Path, docs_only: bool
+    ) -> None:
+        """Deployment API errors must never allow a duplicate publication attempt."""
+        result = self._run_resolver(
+            tmp_path,
+            docs_only=docs_only,
+            release_state="published",
+            deployment_state="error",
+        )
+
+        assert result.returncode == 1
+        assert "Could not inspect PyPI deployments" in result.stderr
+
+    @pytest.mark.parametrize("docs_only", [False, True])
+    @pytest.mark.parametrize(
+        ("api_failure", "error"),
+        [
+            ("deployment-status", "Could not inspect PyPI deployment 42"),
+            ("action-run", "Could not inspect release workflow run 300"),
+            ("action-job", "Could not inspect release job 400"),
+        ],
+    )
+    def test_provenance_api_failure_aborts_all_recovery_modes(
+        self, tmp_path: Path, docs_only: bool, api_failure: str, error: str
+    ) -> None:
+        """Every provenance API failure prevents docs deployment and duplicate publication."""
+        result = self._run_resolver(
+            tmp_path,
+            docs_only=docs_only,
+            release_state="published",
+            deployment_state="published",
+            api_failure=api_failure,
+        )
+
+        assert result.returncode == 1
+        assert error in result.stderr
+
+    def test_docs_only_recovery_accepts_the_audited_v010_legacy_tuple(self, tmp_path: Path) -> None:
+        """The sole pre-marker release remains recoverable only at its audited tag and SHA."""
+        result = self._run_resolver(
+            tmp_path,
+            docs_only=True,
+            release_state="published",
+            deployment_state="published",
+            provenance_state="unmarked",
+            source_sha="99a5437fc351fd7737fc85e7d4d76504d88a00d1",
+        )
+
+        assert result.returncode == 0
+
+        wrong_source = self._run_resolver(
+            tmp_path / "wrong-source",
+            docs_only=True,
+            release_state="published",
+            deployment_state="published",
+            provenance_state="unmarked",
+            source_sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        assert wrong_source.returncode == 1
+
+        wrong_tag = self._run_resolver(
+            tmp_path / "wrong-tag",
+            docs_only=True,
+            release_state="published",
+            deployment_state="published",
+            provenance_state="unmarked",
+            tag="v0.10.1",
+            source_sha="99a5437fc351fd7737fc85e7d4d76504d88a00d1",
+        )
+        assert wrong_tag.returncode == 1
+
+    def test_normal_release_continues_for_manual_partial_release(self, tmp_path: Path) -> None:
+        """An existing manual release does not suppress a missing PyPI publication."""
+        result = self._run_resolver(
+            tmp_path,
+            docs_only=False,
+            release_state="published",
+            deployment_state="missing",
+        )
+
+        assert result.returncode == 0
+        assert "completed_release_exists=false" in (tmp_path / "github-output").read_text(
+            encoding="utf-8"
+        )
+
+    def test_normal_release_allows_a_draft_to_be_completed(self, tmp_path: Path) -> None:
+        """A draft remains eligible for normal publish-and-finalize recovery."""
+        result = self._run_resolver(
+            tmp_path,
+            docs_only=False,
+            release_state="draft",
+            deployment_state="missing",
+        )
+
+        assert result.returncode == 0
+        assert "completed_release_exists=false" in (tmp_path / "github-output").read_text(
+            encoding="utf-8"
+        )
+
+    def test_normal_release_rejects_unprovenanced_published_release(self, tmp_path: Path) -> None:
+        """A published immutable release without source provenance is not safely retryable."""
+        result = self._run_resolver(
+            tmp_path,
+            docs_only=False,
+            release_state="published",
+            deployment_state="missing",
+            provenance_state="unmarked",
+            tag="v0.10.1",
+        )
+
+        assert result.returncode == 1
+        assert "lacks immutable source provenance" in result.stderr
+
+    def test_normal_release_marks_linked_publication_as_duplicate(self, tmp_path: Path) -> None:
+        """A queued duplicate release becomes a no-op only after the linked release completed."""
+        result = self._run_resolver(
+            tmp_path,
+            docs_only=False,
+            release_state="published",
+            deployment_state="published",
+        )
+
+        assert result.returncode == 0
+        assert "completed_release_exists=true" in (tmp_path / "github-output").read_text(
+            encoding="utf-8"
+        )
 
 
 class TestReleaseAttestations:

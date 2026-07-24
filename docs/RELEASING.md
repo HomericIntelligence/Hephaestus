@@ -45,8 +45,8 @@ hatch-vcs dynamic versioning, so the package version is derived from the git tag
 ## Manual Tag + Release (escape hatch)
 
 If `auto-tag.yml` is skipped and a tag was pushed manually, the **Release** workflow also accepts
-a `workflow_dispatch` with an optional explicit `tag` input. Leave it blank to use the latest tag,
-or supply a tag name (e.g. `v0.8.0`) to release a specific ref.
+a `workflow_dispatch` with a required explicit `tag` input (for example, `v0.8.0`). Always name
+the tag: it serializes a manual dispatch with a tag-push release for that same version.
 
 ### Dispatch failed after tag push
 
@@ -66,9 +66,21 @@ Instead, dispatch the Release workflow directly with the stranded tag named expl
 gh workflow run release.yml -f tag=vX.Y.Z   # the exact tag auto-tag pushed
 ```
 
-Never dispatch with a blank `tag` input in this state. Blank means "latest tag", which is only
-correct until another tag lands between the failure and your recovery — always name the
-stranded tag.
+### Docs-only recovery after publication
+
+If PyPI publishing and GitHub Release creation succeed but the final API-doc deployment fails,
+do not re-run the normal release: PyPI versions are immutable and the workflow would try to
+publish the same package again. After the workflow fix is merged, run the repaired workflow from
+`main` in docs-only mode instead:
+
+```bash
+gh workflow run release.yml --ref main -f tag=vX.Y.Z -f docs_only=true
+```
+
+The recovery verifies that `vX.Y.Z` already has a published GitHub Release created by the same
+successful PyPI release-workflow job for the tag's immutable commit, checks out that commit to
+generate the API reference, and deploys only the Pages artifact. It performs no PyPI upload or
+GitHub Release write.
 
 ## PyPI Trusted Publishing
 
