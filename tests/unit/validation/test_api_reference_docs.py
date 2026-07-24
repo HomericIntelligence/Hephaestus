@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from hephaestus.validation.api_reference import (
     DEFAULT_REPO_ROOT,
@@ -55,12 +56,21 @@ class TestPdocTargets:
         assert expected in recipe
 
     def test_release_workflow_docs_recipe_matches_expected_targets(self) -> None:
-        workflow = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        workflow = yaml.safe_load(
+            (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        )
         expected = (
             "uv run pdoc " + " ".join(expected_pdoc_targets(REPO_ROOT)) + " --output-dir docs/api"
         )
+        steps = workflow["jobs"]["deploy-docs"]["steps"]
+        pdoc_steps = [
+            step
+            for step in steps
+            if step.get("name") == "Generate API reference (pdoc -> docs/api/)"
+        ]
 
-        assert expected in workflow
+        assert len(pdoc_steps) == 1
+        assert pdoc_steps[0]["run"] == expected
 
 
 class TestFindViolations:
