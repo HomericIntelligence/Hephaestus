@@ -6,6 +6,7 @@ stage-local state machine. The base protocol and step-result types live in
 """
 
 from .base import (
+    ConditionalMergeResult,
     Continue,
     JobRequest,
     Stage,
@@ -23,6 +24,7 @@ from .pr_review import PrReviewStage
 from .repo import RepoStage
 
 __all__ = [
+    "ConditionalMergeResult",
     "Continue",
     "FinishedStage",
     "ImplementationStage",

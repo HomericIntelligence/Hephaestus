@@ -505,7 +505,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
         _store_true(
             "--no-auto-merge",
             "no_auto_merge",
-            "(Deprecated, ignored) queue auto-merge handling is unavailable pending #2419",
+            "(Deprecated, ignored) native auto-merge is not used; merge-wait conditionally merges",
         ),
         _dry_run_spec(
             _dry_help("Suppress GitHub mutations and git pushes (no PR creation, no commits).")

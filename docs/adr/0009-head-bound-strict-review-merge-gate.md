@@ -46,3 +46,15 @@ the current head, and must fail closed if it cannot revoke stale eligibility.
   administrator bypass.
 - Artifact, head-race, identity, byte-limit, and read-only-worker behavior are
   regression-tested as security boundaries.
+
+## Superseding clarification (2026-07-25)
+
+The arming and disable-containment language above records the accepted
+historical design; it is not the active implementation. Issue #2419 found
+that GitHub exposes no conditional disable operation or durable ownership token
+for an auto-merge request, so a read-then-disable protocol can disable an
+external replacement. The active merge-wait contract therefore never creates
+or mutates native auto-merge. After #2423's process-local reviewed-head proof,
+it performs one ordinary repo-scoped REST squash merge conditional on that
+exact SHA, with fresh open/`main`/unarmed/exclusive-GO admission and bounded
+reconciliation of the result.

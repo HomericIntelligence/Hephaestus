@@ -17,6 +17,7 @@ import pytest
 from hephaestus.automation.pipeline.events import StageEvent
 from hephaestus.automation.pipeline.routing import ROUTES, StageName
 from hephaestus.automation.pipeline.stages import (
+    ConditionalMergeResult,
     StageContext,
     StageGitHub,
 )
@@ -361,6 +362,17 @@ class FakeStageGitHub(FakeGitHub):
         """Mirror ci_driver.CIDriver._gh_pr_state (canned answer)."""
         del pr_number  # single canned answer; not per-PR keyed
         return self._pr_state
+
+    def gh_pr_merge_readiness(self, pr_number: int) -> dict[str, Any] | None:
+        """Mirror the post-405 operational readiness lookup."""
+        del pr_number
+        return dict(self._pr_state) if isinstance(self._pr_state, dict) else self._pr_state
+
+    def merge_pr_if_head(self, pr_number: int, reviewed_sha: str) -> ConditionalMergeResult:
+        """Mirror one successful SHA-conditional normal merge request."""
+        self._log("merge_pr_if_head", pr_number, reviewed_sha)
+        self._pr_state = {"state": "MERGED"}
+        return ConditionalMergeResult(status=200, body={"merged": True})
 
     def drive_green_learn_terminal(self, issue_number: int) -> bool:
         """Mirror ci_driver._learn_record_terminal over the arming record.

@@ -493,7 +493,7 @@ jobs:
 
           state=$(jq -r '.autoMergeRequest' pr.json)
           if [ "$state" != "null" ] && [ -n "$state" ]; then
-            echo "::notice::Auto-merge is armed by the automation loop."
+            echo "::notice::Auto-merge is present and external to the automation loop."
             exit 0
           fi
           echo "OK: auto-merge is currently disabled"

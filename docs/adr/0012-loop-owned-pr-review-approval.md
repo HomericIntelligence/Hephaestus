@@ -57,3 +57,11 @@ it belongs in that stage rather than in GitHub Actions.
   automation loop does not change CI/CD and it never independently authorizes
   the loop.
 - The retired policy no longer appears as an active contract.
+
+## Superseding clarification (2026-07-25)
+
+The pending #2419 wording above is historical. The active `merge_wait`
+implementation now uses one repo-scoped ordinary REST squash merge conditional
+on the process-local reviewed SHA after fresh open/`main`/unarmed/exclusive-GO
+admission. It still never creates, disables, adopts, or polls native
+auto-merge, and stale proof returns to review with zero label mutation.

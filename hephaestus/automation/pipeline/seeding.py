@@ -272,9 +272,9 @@ def classify_issue(facts: IssueFacts) -> Classification:
     if facts.pr_is_open:
         # The loop-owned approval label records review eligibility, not durable
         # merge authority.  A restart sends it to merge_wait, which confirms an
-        # unarmed PR before revoking a stale label and returning to review; a
-        # matching current-process proof stands by.  Pending #2419, no queue
-        # stage creates, disables, adopts, or polls automatic merge.
+        # unarmed PR before returning to review; a matching current-process
+        # proof attempts one ordinary conditional merge. No queue stage
+        # creates, disables, adopts, or polls automatic merge.
         if facts.pr_has_implementation_go:
             return (
                 StageName.MERGE_WAIT,
