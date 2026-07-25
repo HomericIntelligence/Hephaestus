@@ -25,7 +25,7 @@ def test_public_reexports_match_canonical_submodules() -> None:
             "gh_pr_state",
         ],
         "reviews": ["gh_pr_review_post", "gh_pr_inline_comment_index"],
-        "threads": ["gh_pr_list_unresolved_threads", "gh_pr_resolve_thread"],
+        "threads": ["gh_pr_list_unresolved_threads"],
     }
 
     for module_name, names in expected.items():

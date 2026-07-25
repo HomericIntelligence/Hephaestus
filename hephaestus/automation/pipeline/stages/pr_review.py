@@ -46,10 +46,11 @@ contract):
   with the PR left UNLABELED (a human must act; automation may not resolve
   their thread). Any open blocking automation thread -> no-go label and
   address + re-review. A clean audit ->
-  ``_write_go`` performs one final human-thread live-read, requires a
+  ``_write_go`` performs one final complete-thread live-read, requires a
   confirmed-unarmed live PR, and applies ``state:implementation-go``.
   The checkout GitJob-proven reviewed head accompanies that label;
-  ``merge_wait`` verifies it before one SHA-conditional normal merge. Every
+  ``merge_wait`` verifies it before each bounded SHA-conditional normal merge
+  attempt. Every
   real blocking round durably writes ``state:implementation-no-go`` before
   looping/regressing, non-fatally. Exhaustion -> durably
   apply ``state:skip`` [durable] -> SKIP.
@@ -321,10 +322,10 @@ def _surviving_threads(
     - ``wont_fix`` entries are documented-by-design decisions — accepted,
       so any reviewer thread re-raising one of those thread ids is DROPPED
       (never re-posted; the legacy recurrence-acceptance path, #1329).
-    - ``unaddressed`` entries are prior findings the current diff does NOT
-      resolve — RE-OPENED as new postable threads (the legacy
-      ``_classify_unaddressed_findings`` -> post path), unless the reviewer
-      already re-raised the same thread id this round.
+    - ``unaddressed`` entries are prior findings the current diff does not
+      address. They are represented in the next audit, but a still-open
+      process thread is handed to a human rather than being resolved or
+      replaced by automation.
 
     Fail-open: a missing/unparseable validator output filters nothing — a
     validator blip must never suppress the reviewer's own findings (the
@@ -552,101 +553,6 @@ def _without_duplicate_live_process_findings(
         if key is not None:
             existing.add(key)
     return retained
-
-
-def _validator_resolution_ids(validation_result: Any, expected_ids: set[str]) -> set[str] | None:
-    """Return validator-confirmed process ids, rejecting forged/malformed output.
-
-    The validation contract represents ADDRESSED entries by their absence from
-    ``unaddressed`` and ``wont_fix``. That implicit disposition is accepted
-    only after every explicit id has been checked against the host-read live
-    set presented to the validator. A malformed or foreign id therefore
-    resolves nothing.
-    """
-    parsed = _parse_validation_result(validation_result)
-    if parsed is None:
-        return None
-    seen: set[str] = set()
-    unaddressed: set[str] = set()
-    for bucket in ("unaddressed", "wont_fix"):
-        entries = parsed.get(bucket)
-        if not isinstance(entries, list):
-            return None
-        for entry in entries:
-            if not isinstance(entry, dict):
-                return None
-            thread_id = _durable_thread_id(entry)
-            if thread_id is None or thread_id not in expected_ids or thread_id in seen:
-                return None
-            seen.add(thread_id)
-            if bucket == "unaddressed":
-                unaddressed.add(thread_id)
-    return expected_ids - unaddressed
-
-
-def _safe_process_resolution_receipts(
-    item: WorkItem, live_threads: list[dict[str, Any]]
-) -> list[dict[str, Any]] | None:
-    """Return only live validator-confirmed receipts with unchanged participants."""
-    records = _process_thread_records(item)
-    snapshot = item.payload.get("validation_process_threads", [])
-    if records is None or not isinstance(snapshot, list):
-        return None
-    expected_ids: set[str] = set()
-    for fact in snapshot:
-        if not isinstance(fact, dict):
-            return None
-        thread_id = _durable_thread_id(fact)
-        if thread_id is None or thread_id not in records or thread_id in expected_ids:
-            return None
-        expected_ids.add(thread_id)
-    confirmed = _validator_resolution_ids(item.payload.get("validation_result"), expected_ids)
-    if confirmed is None:
-        return None
-    live_process = _live_process_threads(records, live_threads)
-    if live_process is None:
-        return None
-    safe: list[dict[str, Any]] = []
-    for thread_id in sorted(confirmed):
-        record = records[thread_id]
-        live = live_process.get(thread_id)
-        if live is None:
-            continue
-        initial_signature = _thread_comment_signature(record)
-        current_signature = _thread_comment_signature(live)
-        if initial_signature is None or initial_signature != current_signature:
-            continue
-        safe.append(record)
-    return safe
-
-
-def _safe_process_advisory_receipts(
-    item: WorkItem, live_threads: list[dict[str, Any]]
-) -> list[dict[str, Any]] | None:
-    """Prove every advisory thread is an unchanged receipt from this process.
-
-    Author logins are not evidence of authorship: a human can reply through
-    the same account as the automation host. Positive transitions therefore
-    accept advisory threads only when their complete participant/body facts
-    still exactly equal the host-read receipt recorded at post time.
-    """
-    records = _process_thread_records(item)
-    if records is None:
-        return None
-    receipts: list[dict[str, Any]] = []
-    for live in live_threads:
-        if _thread_is_blocking(live):
-            continue
-        thread_id = _durable_thread_id(live)
-        receipt = records.get(thread_id) if thread_id is not None else None
-        if (
-            receipt is None
-            or _thread_comment_signature(receipt) is None
-            or _thread_comment_signature(receipt) != _thread_comment_signature(live)
-        ):
-            return None
-        receipts.append(receipt)
-    return receipts
 
 
 def _thread_is_blocking(thread: dict[str, Any]) -> bool:
@@ -1258,60 +1164,17 @@ class PrReviewStage(Stage):
             item.payload["address_error"] = True
 
     @staticmethod
-    def _resolve_validated_process_threads(
-        item: WorkItem,
-        ctx: StageContext,
-    ) -> StepResult | None:
-        """Resolve only validator-confirmed process receipts on the reviewed head."""
-        if item.pr is None:
-            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
-        arm_outcome = PrReviewStage._require_reviewed_unarmed(item, ctx)
-        if arm_outcome is not None:
-            return arm_outcome
-        try:
-            current_live = ctx.github.list_unresolved_review_threads(item.pr)
-        except Exception as error:
-            logger.warning(
-                "pr_review:%s: could not refresh process threads before resolution (%s)",
-                item.issue,
-                type(error).__name__,
-            )
-            item.payload["review_audit_failure"] = True
-            return Continue(next_state=EVAL)
-        resolution_receipts = _safe_process_resolution_receipts(item, current_live)
-        if resolution_receipts is None:
-            item.payload["review_audit_failure"] = True
-            return Continue(next_state=EVAL)
-        if not resolution_receipts:
-            return None
-        expected_head_sha = str(item.payload.get("reviewed_pr_head_sha") or "")
-        try:
-            resolved = ctx.github.resolve_validated_review_threads(
-                item.pr,
-                resolution_receipts,
-                expected_head_sha,
-            )
-        except Exception as error:
-            logger.warning(
-                "pr_review:%s: validated thread resolution failed (%s)",
-                item.issue,
-                type(error).__name__,
-            )
-            item.payload["review_audit_failure"] = True
-            return Continue(next_state=EVAL)
-        if resolved is None:
-            item.payload.pop("reviewed_pr_head_sha", None)
-            return Continue(next_state=REVIEW_WAIT)
-        if resolved != len(resolution_receipts):
-            item.payload["review_audit_failure"] = True
-            return Continue(next_state=EVAL)
-        return None
-
-    @staticmethod
     def _reconcile_process_threads_before_post(
         item: WorkItem, ctx: StageContext, threads: list[dict[str, Any]]
     ) -> list[dict[str, Any]] | StepResult:
-        """Resolve validated process receipts, then remove only duplicate findings."""
+        """Suppress duplicate findings and hand live process threads to a human.
+
+        GitHub's review-thread mutation accepts only a thread id.  A fresh
+        read cannot make a subsequent resolution safe because a human reply
+        can arrive between those two API calls.  Open process threads therefore
+        remain a GitHub-human gate even when a validator says their code change
+        is addressed; a fresh run can proceed after a human resolves them.
+        """
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
         records = _process_thread_records(item)
@@ -1320,14 +1183,11 @@ class PrReviewStage(Stage):
             return Continue(next_state=EVAL)
         if not records:
             return threads
-        resolution_outcome = PrReviewStage._resolve_validated_process_threads(item, ctx)
-        if resolution_outcome is not None:
-            return resolution_outcome
         try:
             current_live = ctx.github.list_unresolved_review_threads(item.pr)
         except Exception as error:
             logger.warning(
-                "pr_review:%s: could not verify process-thread resolution (%s)",
+                "pr_review:%s: could not refresh process threads (%s)",
                 item.issue,
                 type(error).__name__,
             )
@@ -1337,6 +1197,12 @@ class PrReviewStage(Stage):
         if live_process is None:
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
+        if live_process:
+            return PrReviewStage._handle_automation_threads_requiring_human_resolution(
+                item,
+                len(live_process),
+                ctx,
+            )
         return _without_duplicate_live_process_findings(threads, live_process)
 
     @staticmethod
@@ -1375,7 +1241,9 @@ class PrReviewStage(Stage):
         validation job's verdict (:func:`_surviving_threads`, m1): wont_fix
         findings are dropped, unaddressed prior findings are re-opened.
         Zero open blocking automation threads skip the address leg straight to
-        EVAL; advisory threads are handled only by the final explicit resolver.
+        EVAL. Advisory findings remain in the audit summary but are never
+        published as inline threads: GitHub conversation resolution would make
+        such a thread a merge blocker that this loop must not resolve.
         """
         if item.pr is None:  # guarded by step(); kept for restart safety
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
@@ -1390,7 +1258,11 @@ class PrReviewStage(Stage):
         reconciled = self._reconcile_process_threads_before_post(item, ctx, threads)
         if not isinstance(reconciled, list):
             return reconciled
-        threads = reconciled
+        threads = [
+            thread
+            for thread in reconciled
+            if str(thread.get("severity") or "").strip().lower() in BLOCKING_SEVERITIES
+        ]
         if any(not _is_postable_finding(thread) for thread in threads):
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
@@ -1576,14 +1448,20 @@ class PrReviewStage(Stage):
                 live_threads = ctx.github.list_unresolved_review_threads(item.pr)
             except Exception:
                 return self._compact_before_next_review(item, ctx)
-            blocking, _, human = _thread_counts(live_threads)
-            if not blocking and not human:
+            blocking, advisory, human = _thread_counts(live_threads)
+            if not blocking and not advisory and not human:
                 return self._compact_before_next_review(item, ctx)
             bind_outcome = self._bind_current_head_for_negative(item, ctx)
             if bind_outcome is not None:
                 return bind_outcome
             if human:
                 return PrReviewStage._handle_human_blocked(item, human, ctx)
+            if blocking or advisory:
+                return PrReviewStage._handle_automation_threads_requiring_human_resolution(
+                    item,
+                    blocking + advisory,
+                    ctx,
+                )
             payload["review_error_retries"] = 0
             round_done = payload.get("pr_review_round", 0) + 1
             payload["pr_review_round"] = round_done
@@ -1635,8 +1513,15 @@ class PrReviewStage(Stage):
             )
             return PrReviewStage._handle_human_blocked(item, human_unresolved, ctx)
 
-        if blocking_auto == 0:
-            return self._handle_clean_go(item, ctx, minor_auto)
+        if blocking_auto == 0 and minor_auto == 0:
+            return self._handle_clean_go(item, ctx)
+
+        if minor_auto and not blocking_auto:
+            return self._handle_automation_threads_requiring_human_resolution(
+                item,
+                minor_auto,
+                ctx,
+            )
 
         return self._handle_non_go(
             item,
@@ -1756,11 +1641,10 @@ class PrReviewStage(Stage):
         logger.warning("pr_review:%d: address step failed; failing back", item.issue)
         return self._fail_back_agent_error(item)
 
-    def _handle_clean_go(self, item: WorkItem, ctx: StageContext, minor_auto: int) -> StepResult:
-        """Resolve advisory threads, apply review GO, and route onward."""
+    def _handle_clean_go(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Apply review GO only after the complete unresolved-thread read is empty."""
         if item.pr is None or item.issue is None:  # guarded by caller; narrowing
             return self._fail_back_agent_error(item)
-        del minor_auto
         logger.info(
             "pr_review:%d: clean structural audit; advancing PR #%d to merge wait",
             item.issue,
@@ -2075,7 +1959,45 @@ class PrReviewStage(Stage):
         return StageOutcome(Disposition.FINISH_FAIL, "human_blocked")
 
     @staticmethod
-    def _write_go(item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901 - label gate and readbacks
+    def _handle_automation_threads_requiring_human_resolution(
+        item: WorkItem,
+        automation_unresolved: int,
+        ctx: StageContext,
+    ) -> StepResult:
+        """Record a fail-closed handoff for open loop-created review threads.
+
+        GitHub's thread-resolution mutation has no compare-and-set input: it
+        accepts only a thread id, so an immediately preceding receipt read cannot prevent a
+        concurrent human reply from being resolved.  The loop consequently
+        records NO-GO and leaves each thread for a human to verify and resolve.
+        """
+        if item.pr is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        no_go = PrReviewStage._write_no_go(item, ctx)
+        if no_go is not None:
+            return no_go
+        body = (
+            "**Automation stand-down: unresolved automation review thread(s) require "
+            "human resolution.**\n\n"
+            f"{automation_unresolved} automation-created review thread(s) remain open on this "
+            "PR. GitHub does not provide a conditional thread-resolution mutation, so "
+            "automation will not resolve a thread after a read that could race a human reply. "
+            "The PR is marked `state:implementation-no-go` and remains unarmed. A human must "
+            "verify the fixes and resolve the thread(s); a fresh automation pass can then "
+            "re-review the current head."
+        )
+        try:
+            ctx.github.post_pr_comment(item.pr, body)
+        except Exception as error:
+            logger.warning(
+                "pr_review: failed to post automation-thread handoff on PR #%d (non-fatal): %s",
+                item.pr,
+                error,
+            )
+        return StageOutcome(Disposition.FINISH_FAIL, "automation_threads_require_human_resolution")
+
+    @staticmethod
+    def _write_go(item: WorkItem, ctx: StageContext) -> StepResult:
         """Apply GO only to the exact live head reviewed in this process.
 
         Args:
@@ -2107,46 +2029,12 @@ class PrReviewStage(Stage):
                 pr_number,
             )
             return PrReviewStage._handle_human_blocked(item, human_unresolved, ctx)
-        if blocking:
-            no_go = PrReviewStage._write_no_go(item, ctx)
-            if no_go is not None:
-                return no_go
-            return Continue(next_state=REVIEW_WAIT)
-        if advisory:
-            advisory_receipts = _safe_process_advisory_receipts(item, live_threads)
-            if advisory_receipts is None or len(advisory_receipts) != advisory:
-                return StageOutcome(Disposition.FINISH_FAIL, "advisory_threads_unresolvable")
-            arm_outcome = PrReviewStage._require_reviewed_unarmed(item, ctx)
-            if arm_outcome is not None:
-                return arm_outcome
-            expected_head_sha = str(item.payload.get("reviewed_pr_head_sha") or "")
-            try:
-                resolved = ctx.github.resolve_advisory_threads(
-                    pr_number,
-                    advisory_receipts,
-                    expected_head_sha,
-                )
-                refreshed = ctx.github.list_unresolved_review_threads(pr_number)
-            except Exception as error:
-                logger.warning(
-                    "pr_review: advisory-thread resolution/read-back failed on PR #%d (%s)",
-                    pr_number,
-                    type(error).__name__,
-                )
-                return StageOutcome(Disposition.FINISH_FAIL, "review_threads_unavailable")
-            if resolved is None:
-                item.payload.pop("reviewed_pr_head_sha", None)
-                return Continue(next_state=REVIEW_WAIT)
-            refreshed_blocking, refreshed_advisory, refreshed_human = _thread_counts(refreshed)
-            if refreshed_human:
-                return PrReviewStage._handle_human_blocked(item, refreshed_human, ctx)
-            if refreshed_blocking:
-                no_go = PrReviewStage._write_no_go(item, ctx)
-                if no_go is not None:
-                    return no_go
-                return Continue(next_state=REVIEW_WAIT)
-            if refreshed_advisory or resolved != len(advisory_receipts):
-                return StageOutcome(Disposition.FINISH_FAIL, "advisory_threads_unresolved")
+        if blocking or advisory:
+            return PrReviewStage._handle_automation_threads_requiring_human_resolution(
+                item,
+                blocking + advisory,
+                ctx,
+            )
         arm_outcome = PrReviewStage._require_reviewed_unarmed(item, ctx)
         if arm_outcome is not None:
             return arm_outcome

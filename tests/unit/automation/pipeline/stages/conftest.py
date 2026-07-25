@@ -75,7 +75,6 @@ class FakeStageGitHub(FakeGitHub):
         pr_state: dict[str, Any] | None | _DefaultPrState = _DEFAULT_PR_STATE,
         pr_review_context: dict[str, str] | None = None,
         learn_terminal: bool = False,
-        resolve_count: int = 0,
     ) -> None:
         """Initialize the fake with canned read answers.
 
@@ -107,7 +106,6 @@ class FakeStageGitHub(FakeGitHub):
             learn_terminal: Seed answer for drive_green_learn_terminal —
                 True mirrors an issue whose post-merge /learn already ran
                 terminally (the #848 dedupe record).
-            resolve_count: Canned return count for resolve_automation_threads.
 
         """
         super().__init__()
@@ -147,8 +145,6 @@ class FakeStageGitHub(FakeGitHub):
             }
         )
         self._learn_terminal = learn_terminal
-        self._resolve_count = resolve_count
-        self._resolved_review_threads: set[str] = set()
         self._posted_thread_ids: dict[int, list[str]] = {}
         self.learn_results: dict[int, bool] = {}
         self.learn_claims: set[int] = set()
@@ -274,8 +270,6 @@ class FakeStageGitHub(FakeGitHub):
                     posted[cursor] if cursor < len(posted) else f"live-thread-{pr_number}-{cursor}"
                 )
                 cursor += 1
-                if thread_id in self._resolved_review_threads:
-                    continue
                 threads.append(
                     {
                         "id": thread_id,
@@ -300,36 +294,6 @@ class FakeStageGitHub(FakeGitHub):
                     }
                 )
         return threads
-
-    def resolve_automation_threads(self, pr_number: int) -> int:
-        self._log("resolve_automation_threads", pr_number)
-        return self._resolve_count
-
-    def resolve_advisory_threads(
-        self,
-        pr_number: int,
-        thread_receipts: list[dict[str, Any]],
-        expected_head_sha: str,
-    ) -> int | None:
-        """Resolve only the supplied advisory automation thread ids."""
-        del expected_head_sha
-        thread_ids = [str(receipt["id"]) for receipt in thread_receipts]
-        self._log("resolve_advisory_threads", pr_number, tuple(thread_ids))
-        self._resolved_review_threads.update(thread_ids)
-        return len(thread_ids)
-
-    def resolve_validated_review_threads(
-        self,
-        pr_number: int,
-        thread_receipts: list[dict[str, Any]],
-        expected_head_sha: str,
-    ) -> int | None:
-        """Resolve only the stage's durable process-owned thread receipts."""
-        del expected_head_sha
-        thread_ids = [str(receipt["id"]) for receipt in thread_receipts]
-        self._log("resolve_validated_review_threads", pr_number, tuple(thread_ids))
-        self._resolved_review_threads.update(thread_ids)
-        return len(thread_ids)
 
     # -- mutator surface used by the stages ----------------------------------
     # Coordinator-neutral names (the pipeline architecture guard forbids

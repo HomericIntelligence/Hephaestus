@@ -118,7 +118,7 @@ _RAW_RULES: list[tuple[str, Severity, str, str]] = [
         # Flag any ``gh pr merge`` invocation that carries ``--auto`` or a
         # rejected strategy flag, or that omits the required manual squash
         # strategy. Docs must not instruct an agent to arm a merge autonomously.
-        # `merge_wait` owns the one-shot SHA-conditional REST path; this
+        # `merge_wait` owns the bounded SHA-conditional REST merge path; this
         # guard continues to forbid native automatic-merge instructions.
         r"gh\s+pr\s+merge\b"
         r"(?:"

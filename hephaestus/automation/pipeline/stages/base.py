@@ -264,38 +264,6 @@ class StageGitHub(Protocol):
         """Return fresh unresolved review-thread facts, including ownership."""
         ...
 
-    def resolve_automation_threads(self, pr_number: int) -> int:
-        """Resolve unresolved automation-owned review threads; return the count (#1856)."""
-        ...
-
-    def resolve_advisory_threads(
-        self,
-        pr_number: int,
-        thread_receipts: list[dict[str, Any]],
-        expected_head_sha: str,
-    ) -> int | None:
-        """Resolve only unchanged process advisory receipts on the expected head.
-
-        ``None`` means the fresh open/unarmed/head proof no longer holds and
-        callers must restart review without making a positive transition.
-        """
-        ...
-
-    def resolve_validated_review_threads(
-        self,
-        pr_number: int,
-        thread_receipts: list[dict[str, Any]],
-        expected_head_sha: str,
-    ) -> int | None:
-        """Resolve host-validated, process-owned threads after a fresh read.
-
-        Callers must first prove the PR is on the exact reviewed, unarmed
-        head and intersect the ids with their own post receipts. Implementors
-        re-read the complete live thread set and recheck the expected open,
-        unarmed head immediately before every external resolution.
-        """
-        ...
-
     def create_pr(self, issue_number: int, branch: str, title: str, body: str) -> int:
         """Durably ensure the PR exists and return its number (idempotent).
 

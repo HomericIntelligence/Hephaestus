@@ -6,9 +6,8 @@ into two layers:
 * This module holds the **shared address core** — the untraced parser
   (:func:`_parse_addressed_block`), its diagnostic helper
   (:func:`_log_address_parse_error`), the agent-invoking fix session
-  (:func:`run_address_fix_session`), and the hallucination-guarded thread
-  resolver (:func:`resolve_addressed_threads`). These are consumed directly by
-  the pipeline ``pr_review`` stage collaborators (``_review_phase`` /
+  (:func:`run_address_fix_session`). These are consumed directly by the
+  pipeline ``pr_review`` stage collaborators (``_review_phase`` /
   ``review_thread_resolver``) and by the standalone
   :class:`~hephaestus.automation.address_review.AddressReviewer`. Every symbol
   here is reachable with mocked subprocess/agent seams, so the module carries
@@ -49,7 +48,6 @@ from .claude_invoke import invoke_claude_with_session
 from .claude_models import implementer_model
 from .comment_difficulty import classify_comments, format_todo_line
 from .git_utils import get_repo_slug, pr_ref
-from .github_api import gh_pr_resolve_thread
 from .prompts import get_address_review_prompt
 from .session_naming import AGENT_IMPLEMENTER
 
@@ -344,43 +342,3 @@ def run_address_fix_session(
             parse_fn=parse_fn,
             pr_number=pr_number,
         )
-
-
-def resolve_addressed_threads(
-    addressed: list[str],
-    replies: dict[str, str],
-    presented_thread_ids: set[str],
-    *,
-    dry_run: bool = False,
-) -> None:
-    """Resolve the review threads the agent explicitly fixed (with hallucination guard).
-
-    Shared core of :meth:`AddressReviewer._resolve_addressed_threads` and the
-    in-loop address step (#28). Only resolves threads listed in ``addressed``
-    AND present in ``presented_thread_ids`` — the agent response is untrusted
-    input, so a hallucinated or cross-PR thread ID must never reach
-    :func:`gh_pr_resolve_thread`. Membership against the set actually presented
-    to the agent is the trust boundary (#661).
-
-    Args:
-        addressed: Thread-id strings Claude reported as fixed.
-        replies: Mapping of thread-id to a one-line reply describing the fix. The
-            mapping is retained for the agent-output contract but intentionally
-            not posted; resolving quietly avoids adding duplicate review noise.
-        presented_thread_ids: Thread IDs we presented to Claude (the unresolved
-            set on this PR at fix time).
-        dry_run: Forwarded to :func:`gh_pr_resolve_thread`.
-
-    """
-    for thread_id in addressed:
-        if thread_id not in presented_thread_ids:
-            logger.warning(
-                "Skipping resolve of unknown thread_id %r — not in the "
-                "unresolved-set presented to Claude (likely hallucinated)",
-                thread_id,
-            )
-            continue
-        try:
-            gh_pr_resolve_thread(thread_id, dry_run=dry_run)
-        except Exception as e:
-            logger.warning("Could not resolve thread %s: %s", thread_id, e)

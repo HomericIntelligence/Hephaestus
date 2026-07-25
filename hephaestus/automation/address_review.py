@@ -56,14 +56,13 @@ from ._reviewer_base import BaseReviewer
 # (unit-covered, off the coverage omit-list). They are re-exported here
 # (``name as name``) so the long-pinned patch sites — e.g.
 # ``hephaestus.automation.address_review.run_address_fix_session`` /
-# ``._parse_addressed_block`` / ``.resolve_addressed_threads`` — and the
+# ``._parse_addressed_block`` — and the
 # ``from hephaestus.automation.address_review import ...`` call sites keep
 # resolving after the #1823 split.
 from .address_review_core import (
     _ADDRESS_PARSE_DEFAULT as _ADDRESS_PARSE_DEFAULT,
     _log_address_parse_error as _log_address_parse_error,
     _parse_addressed_block as _parse_addressed_block,
-    resolve_addressed_threads as resolve_addressed_threads,
     run_address_fix_session as run_address_fix_session,
 )
 from .agent_config import DEFAULT_AGENT_TIMEOUT
@@ -312,7 +311,7 @@ class AddressReviewer(BaseReviewer):
         self._save_review_state(review_state)
         return session_id, review_state, branch_name, worktree_path
 
-    def _commit_push_and_resolve(
+    def _commit_push_and_record(
         self,
         *,
         issue_number: int,
@@ -326,7 +325,7 @@ class AddressReviewer(BaseReviewer):
         slot_id: int,
         thread_id: int,
     ) -> None:
-        """Commit fixes, push branch, resolve addressed threads, update review state.
+        """Commit fixes, push branch, and record the agent's address claim.
 
         Args:
             issue_number: GitHub issue number.
@@ -334,8 +333,8 @@ class AddressReviewer(BaseReviewer):
             branch_name: Git branch name.
             worktree_path: Path to worktree.
             addressed: Thread IDs the agent addressed.
-            replies: Mapping of thread_id → reply text forwarded to resolve helper.
-            threads: All threads presented to the fix session.
+            replies: Mapping returned by the agent's parse contract.
+            threads: Threads presented to the fix session; retained for call compatibility.
             review_state: Review state to update.
             slot_id: Worker slot for status tracking.
             thread_id: Current thread id for logging.
@@ -347,11 +346,8 @@ class AddressReviewer(BaseReviewer):
         self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Pushing")
         self._push_branch(branch_name, worktree_path)
 
-        self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Resolving threads")
-        presented_thread_ids = {t["id"] for t in threads}
-        # Pass the real replies dict — not {} — so _resolve_addressed_threads can post
-        # reply comments on each resolved thread as required by the review protocol.
-        self._resolve_addressed_threads(addressed, replies, presented_thread_ids)
+        del replies, threads
+        self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Recording handoff")
 
         with self.state_lock:
             existing_ids = set(review_state.addressed_thread_ids)
@@ -415,7 +411,7 @@ class AddressReviewer(BaseReviewer):
                     f"Claude addressed {len(addressed)} thread(s) on PR {pr_ref(pr_number)}",
                     thread_id,
                 )
-                self._commit_push_and_resolve(
+                self._commit_push_and_record(
                     issue_number=issue_number,
                     pr_number=pr_number,
                     branch_name=branch_name,
@@ -641,36 +637,6 @@ class AddressReviewer(BaseReviewer):
             dry_run=self.options.dry_run,
             timeout=self.options.agent_timeout,
             advise_timeout=self.options.advise_timeout,
-        )
-
-    def _resolve_addressed_threads(
-        self,
-        addressed: list[str],
-        replies: dict[str, str],
-        presented_thread_ids: set[str],
-    ) -> None:
-        """Resolve the review threads that the agent explicitly fixed.
-
-        Only resolves threads listed in ``addressed`` AND present in
-        ``presented_thread_ids``. Why: the agent response is untrusted input —
-        a hallucinated or cross-PR thread ID would otherwise be passed straight
-        to ``gh api graphql resolveReviewThread``. Membership against the set
-        we actually presented to Claude is the trust boundary.
-
-        Args:
-            addressed: List of thread_id strings Claude reported as fixed
-            replies: Mapping of thread_id to one-line reply describing the fix.
-                Retained for the agent-output contract; resolution is quiet and
-                does not post these replies to GitHub.
-            presented_thread_ids: Set of thread IDs we presented to Claude
-                (i.e. the unresolved set on this PR at fix time)
-
-        """
-        resolve_addressed_threads(
-            addressed,
-            replies,
-            presented_thread_ids,
-            dry_run=self.options.dry_run,
         )
 
     def _commit_if_changes(self, issue_number: int, worktree_path: Path) -> None:

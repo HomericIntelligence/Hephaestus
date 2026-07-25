@@ -1858,72 +1858,6 @@ class TestUnresolvedThreads:
         with pytest.raises(RuntimeError, match="api"):
             adapter.count_unresolved_threads(7)
 
-    @pytest.mark.parametrize(
-        "pr_state",
-        [
-            pytest.param(
-                {"state": "OPEN", "headRefOid": "b" * 40, "autoMergeRequest": None},
-                id="head-drift",
-            ),
-            pytest.param(
-                {
-                    "state": "OPEN",
-                    "headRefOid": "a" * 40,
-                    "autoMergeRequest": {"enabledAt": "now"},
-                },
-                id="auto-merge-armed",
-            ),
-        ],
-    )
-    def test_validated_thread_resolution_rechecks_expected_unarmed_head(
-        self,
-        adapter: pg.PipelineGitHub,
-        monkeypatch: pytest.MonkeyPatch,
-        pr_state: dict[str, Any],
-    ) -> None:
-        """A mutation-time head/arm mismatch resolves no review thread."""
-        receipt = {
-            "id": "process-thread",
-            "comments": [{"author": "hephaestus[bot]", "body": "finding"}],
-        }
-        live = {**receipt, "automation_owned": True}
-        monkeypatch.setattr(adapter, "gh_pr_state", lambda _pr: pr_state)
-        monkeypatch.setattr(adapter, "list_unresolved_review_threads", lambda _pr: [live])
-        resolve = MagicMock()
-        monkeypatch.setattr(github_api_mod, "gh_pr_resolve_thread", resolve)
-
-        assert adapter.resolve_validated_review_threads(42, [receipt], "a" * 40) is None
-        resolve.assert_not_called()
-
-    def test_advisory_resolution_requires_unchanged_process_receipt(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A same-login reply changes the receipt even when ownership says bot."""
-        receipt = {
-            "id": "process-thread",
-            "body": "<!-- hephaestus-severity: nitpick -->\nfinding",
-            "comments": [{"author": "mvillmow", "body": "finding"}],
-        }
-        live = {
-            **receipt,
-            "automation_owned": True,
-            "comments": [
-                {"author": "mvillmow", "body": "finding"},
-                {"author": "mvillmow", "body": "human reply"},
-            ],
-        }
-        monkeypatch.setattr(
-            adapter,
-            "gh_pr_state",
-            lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
-        )
-        monkeypatch.setattr(adapter, "list_unresolved_review_threads", lambda _pr: [live])
-        resolve = MagicMock()
-        monkeypatch.setattr(github_api_mod, "gh_pr_resolve_thread", resolve)
-
-        assert adapter.resolve_advisory_threads(42, [receipt], "a" * 40) == 0
-        resolve.assert_not_called()
-
 
 class TestGhPrState:
     """The merge_wait single PR-state read (re-housed CIDriver._gh_pr_state)."""
@@ -2220,7 +2154,7 @@ class TestSeverityMarker:
         ],
         ids=["unknown", "malformed"],
     )
-    def test_unrecognized_severity_neither_resolves_nor_authorizes_go(
+    def test_unrecognized_severity_stays_blocking(
         self,
         adapter: pg.PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
@@ -2234,144 +2168,10 @@ class TestSeverityMarker:
         }
         monkeypatch.setattr(adapter, "_unresolved_threads", lambda _pr: [thread])
         monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "automation-bot")
-        resolve = MagicMock()
         mark_go = MagicMock()
-        monkeypatch.setattr(github_api_mod, "gh_pr_resolve_thread", resolve)
         monkeypatch.setattr(adapter, "mark_pr_implementation_go", mark_go)
 
         counts = adapter.count_unresolved_threads_by_severity(42)
-        if counts == (0, 1, 0):
-            resolved = adapter.resolve_advisory_threads(
-                42,
-                [
-                    {
-                        "id": "corrupt_thread_id",
-                        "comments": [{"author": "automation-bot", "body": "Finding"}],
-                    }
-                ],
-                "a" * 40,
-            )
-            if resolved == 1:
-                adapter.mark_pr_implementation_go(42)
 
         assert counts == (1, 0, 0)
-        resolve.assert_not_called()
         mark_go.assert_not_called()
-
-    def test_resolve_automation_threads_skips_human(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """resolve_automation_threads skips human-owned threads."""
-        automation_thread = {
-            "id": "auto_thread_id",
-            "author": "automation-bot",
-        }
-        human_thread = {
-            "id": "human_thread_id",
-            "author": "reviewer",
-        }
-
-        threads = [automation_thread, human_thread]
-        resolved_ids = []
-
-        def capture_resolve(thread_id: str, dry_run: bool = False) -> None:
-            resolved_ids.append(thread_id)
-
-        monkeypatch.setattr(adapter, "_unresolved_threads", lambda pr: threads)
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "automation-bot")
-        monkeypatch.setattr(github_api_mod, "gh_pr_resolve_thread", capture_resolve)
-
-        count = adapter.resolve_automation_threads(42)
-
-        assert count == 1
-        assert "auto_thread_id" in resolved_ids
-        assert "human_thread_id" not in resolved_ids
-
-    def test_mixed_participant_thread_is_human_blocking_and_not_resolved(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A human reply makes an automation-started thread human-blocking."""
-        mixed_thread = {
-            "id": "mixed_thread_id",
-            "body": "<!-- hephaestus-severity: minor -->\nNit",
-            "authors": ["automation-bot", "reviewer"],
-            "comments": [
-                {"author": "automation-bot"},
-                {"author": "reviewer"},
-            ],
-        }
-        monkeypatch.setattr(adapter, "_unresolved_threads", lambda pr: [mixed_thread])
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "automation-bot")
-        monkeypatch.setattr(
-            adapter,
-            "gh_pr_state",
-            lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
-        )
-        resolve = MagicMock()
-        monkeypatch.setattr(github_api_mod, "gh_pr_resolve_thread", resolve)
-
-        assert adapter.count_unresolved_threads_by_severity(42) == (0, 0, 1)
-        assert (
-            adapter.resolve_advisory_threads(
-                42,
-                [
-                    {
-                        "id": "mixed_thread_id",
-                        "comments": [{"author": "automation-bot", "body": "Nit"}],
-                    }
-                ],
-                "a" * 40,
-            )
-            == 0
-        )
-        resolve.assert_not_called()
-
-    def test_resolve_validated_threads_rechecks_fresh_automation_ownership(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The adapter rejects a receipt that gained a human participant."""
-        monkeypatch.setattr(
-            adapter,
-            "list_unresolved_review_threads",
-            lambda _pr: [
-                {
-                    "id": "a-process-only",
-                    "automation_owned": True,
-                    "comments": [{"author": "automation-bot", "body": "one"}],
-                },
-                {
-                    "id": "z-human-replied",
-                    "automation_owned": False,
-                    "comments": [
-                        {"author": "automation-bot", "body": "two"},
-                        {"author": "reviewer", "body": "human reply"},
-                    ],
-                },
-            ],
-        )
-        monkeypatch.setattr(
-            adapter,
-            "gh_pr_state",
-            lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
-        )
-        resolve = MagicMock()
-        monkeypatch.setattr(github_api_mod, "gh_pr_resolve_thread", resolve)
-
-        assert (
-            adapter.resolve_validated_review_threads(
-                42,
-                [
-                    {
-                        "id": "a-process-only",
-                        "comments": [{"author": "automation-bot", "body": "one"}],
-                    },
-                    {
-                        "id": "z-human-replied",
-                        "comments": [{"author": "automation-bot", "body": "two"}],
-                    },
-                ],
-                "a" * 40,
-            )
-            == 0
-        )
-        resolve.assert_not_called()
