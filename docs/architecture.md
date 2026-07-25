@@ -63,10 +63,14 @@ in §5.1, which tags `state:skip` on epics before any other durable mutation.
  write the label. Before the reviewer runs, `pr_review` snapshots the GitHub
  review inputs and its head SHA, then requires a clean local checkout at that
  exact SHA. The resulting in-memory proof is rechecked against a confirmed,
- unarmed live PR before the label is written. `merge_wait` consumes that proof
- only after fresh open/`main`/unarmed/exclusive-GO admission, then issues one
- SHA-conditional ordinary squash merge. No queue stage creates, disables,
- adopts, or polls an auto-merge request
+ unarmed live PR before the label is written. `merge_wait` uses that same
+ active-run proof before every request in a bounded sequence (default: five)
+ of SHA-conditional ordinary REST squash merges. Each request has fresh
+ open/`main`/unarmed/exclusive-GO admission; only classified retryable HTTP 405
+ readiness and unresolved transport ambiguity can timer-park a later request.
+ The direct adapter makes one request per call and never retries. No queue
+ stage invokes `gh pr merge`, creates, disables, adopts, or polls native
+ auto-merge, manages a merge queue, or uses an administrator bypass
  ([`pr_review.py`](hephaestus/automation/pipeline/stages/pr_review.py),
  [`worker_pool.py`](hephaestus/automation/pipeline/worker_pool.py),
  [`merge_wait.py`](hephaestus/automation/pipeline/stages/merge_wait.py)).
