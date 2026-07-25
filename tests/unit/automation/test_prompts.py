@@ -875,6 +875,8 @@ class TestImplLoopReviewRubric:
             assert '"grade": "A"' in out
             assert '"comments": [' in out
             assert "Verdict: <GO|NOGO>" not in out
+            assert "Grade/Verdict" not in out
+            assert "DROP a verdict" not in out
 
     def test_impl_loop_prompt_states_context_model(self) -> None:
         """The impl-loop reviewer must declare TASK/PLAN/PLAN-REVIEW + diff context."""
