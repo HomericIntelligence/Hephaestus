@@ -25,6 +25,25 @@ from pathlib import Path
 from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, format_output
 
+_BROKEN_ANCHOR_ERROR = re.compile(
+    r"^(?P<source>.+): broken anchor '#(?P<anchor>.*)' in link "
+    r"'(?P<target>.*)' \(valid: (?P<valid>.*)\)$"
+)
+
+
+def _format_anchor_error(error: str) -> str:
+    """Render a raw validation finding through the human-text boundary."""
+    if (value := error.removeprefix("Target file not found: ")) != error:
+        return text("Target file not found: %(value0)s", value0=value)
+    if (value := error.removeprefix("Source file not found: ")) != error:
+        return text("Source file not found: %(value0)s", value0=value)
+    if match := _BROKEN_ANCHOR_ERROR.fullmatch(error):
+        return text(
+            "%(source)s: broken anchor '#%(anchor)s' in link '%(target)s' (valid: %(valid)s)",
+            **match.groupdict(),
+        )
+    return error
+
 
 def heading_to_anchor(heading: str) -> str:
     """Convert markdown heading text to a GitHub-style anchor slug.
@@ -192,7 +211,7 @@ def check_anchors(
 
     if errors:
         for error in errors:
-            print(error, file=sys.stderr)
+            print(_format_anchor_error(error), file=sys.stderr)
         print(
             text("\n%(value0)s broken anchor link(s) found.", value0=len(errors)), file=sys.stderr
         )

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from hephaestus.cli.localization import using_localizer
 from hephaestus.validation.tier_labels import (
     BAD_PATTERNS,
     CANONICAL_TIERS,
@@ -29,6 +30,26 @@ def _all_wrong_pairings() -> list[tuple[str, str]]:
         for wrong in CANONICAL_TIERS.values()
         if wrong != correct
     ]
+
+
+def test_human_tier_report_localizes_labels_without_changing_json() -> None:
+    """Text labels use the catalog while machine-readable findings are unchanged."""
+    finding = TierLabelFinding("guide.md", 7, "P0", "high", "critical", "P0 high")
+    before_json = format_json([finding])
+    with using_localizer(
+        {
+            "Found %(count)d tier label mismatch(es):": "%(count)d incohérence(s) de niveau :",
+            "    Found: %(tier)s/%(found)s  Expected: %(tier)s/%(expected)s": (
+                "    Trouvé : %(tier)s/%(found)s  Attendu : %(tier)s/%(expected)s"
+            ),
+        }
+    ):
+        report = format_report([finding])
+        localized_json = format_json([finding])
+
+    assert "1 incohérence(s) de niveau" in report
+    assert "Trouvé : P0/high" in report
+    assert localized_json == before_json
 
 
 class TestFindViolations:

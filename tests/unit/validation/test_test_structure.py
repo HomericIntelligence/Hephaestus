@@ -2,6 +2,9 @@
 
 from pathlib import Path
 
+import pytest
+
+from hephaestus.cli.localization import using_localizer
 from hephaestus.validation.test_structure import (
     SANCTIONED_EXTRA_TEST_DIRS,
     _detect_src_package,
@@ -607,6 +610,30 @@ class TestScriptsCoverageWiredIntoEntryPoint:
         _make_test_dir(test_root, "utils")
 
         assert check_test_structure(tmp_path, src_package="mypkg") is True
+
+    def test_scripts_coverage_errors_are_localized(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The human scripts-coverage report localizes its authored diagnosis."""
+        src = tmp_path / "mypkg"
+        _make_package(src, "utils")
+        (src / "__init__.py").touch()
+        test_root = tmp_path / "tests" / "unit"
+        _make_test_dir(test_root, "utils")
+        scripts_root = tmp_path / "scripts"
+        scripts_root.mkdir()
+        (scripts_root / "foo.py").write_text("# script\n", encoding="utf-8")
+
+        with using_localizer(
+            {
+                "  The scripts/ smoke harness is required so every scripts/*.py is "
+                "auto-tested via --help.": (
+                    "  Le harnais scripts/ est requis pour tester chaque scripts/*.py via --help."
+                )
+            }
+        ):
+            assert check_test_structure(tmp_path, src_package="mypkg") is False
+        assert "Le harnais scripts/" in capsys.readouterr().err
 
 
 class TestCheckScriptsCoverage:

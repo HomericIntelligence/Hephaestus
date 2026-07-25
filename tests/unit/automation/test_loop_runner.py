@@ -27,6 +27,7 @@ from hephaestus.automation.loop_runner import (
     _validate_phases,
     main,
 )
+from hephaestus.cli.localization import using_localizer
 from hephaestus.utils.helpers import NETWORK_TIMEOUT
 
 # ---------------------------------------------------------------------------
@@ -131,6 +132,24 @@ def test_parse_args_accepts_github_throttle_options() -> None:
     args = loop_runner._parse_args(["--gh-global-rate", "4.5", "--gh-global-burst", "11"])
     assert args.gh_global_rate == 4.5
     assert args.gh_global_burst == 11.0
+
+
+def test_parse_args_localizes_positive_integer_type_diagnostic(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Loop-runner numeric validation renders its human diagnostic through the catalog."""
+    with using_localizer(
+        {
+            "expected a positive integer, got %(value0)r": (
+                "un entier positif était attendu, reçu %(value0)r"
+            )
+        }
+    ):
+        with pytest.raises(SystemExit) as exc:
+            loop_runner._parse_args(["--drive-green-loops", "not-a-number"])
+
+    assert exc.value.code == 2
+    assert "un entier positif était attendu, reçu 'not-a-number'" in capsys.readouterr().err
 
 
 def test_parse_args_accepts_drive_green_loops() -> None:

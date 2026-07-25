@@ -37,6 +37,89 @@ from hephaestus.utils.helpers import NETWORK_TIMEOUT
 _tomllib = import_tomllib()
 
 
+def _format_consistency_error(error: str) -> str:
+    """Localize a human report while keeping checker and JSON results raw."""
+    if (value := error.removeprefix("AGENTS.md not found at ")) != error:
+        return text("AGENTS.md not found at %(value0)s", value0=value)
+    if error == (
+        "AGENTS.md: No coverage threshold mention found (expected pattern: '<N>%+ test coverage')"
+    ):
+        return text(
+            "AGENTS.md: No coverage threshold mention found "
+            "(expected pattern: '<N>%%+ test coverage')"
+        )
+    if match := re.fullmatch(
+        r"AGENTS\.md: Coverage threshold mismatch — AGENTS\.md says (?P<found>\d+)%, "
+        r"pyproject\.toml says (?P<expected>\d+)%",
+        error,
+    ):
+        return text(
+            "AGENTS.md: Coverage threshold mismatch — AGENTS.md says %(found)d%%, "
+            "pyproject.toml says %(expected)d%%",
+            found=int(match["found"]),
+            expected=int(match["expected"]),
+        )
+    if (value := error.removeprefix("DEFINITION_OF_DONE.md not found at ")) != error:
+        return text("DEFINITION_OF_DONE.md not found at %(value0)s", value0=value)
+    if error == (
+        "DEFINITION_OF_DONE.md: No coverage threshold mention found "
+        "(expected '--cov-fail-under=<N>' or 'drops total under <N>%')"
+    ):
+        return text(
+            "DEFINITION_OF_DONE.md: No coverage threshold mention found "
+            "(expected '--cov-fail-under=<N>' or 'drops total under <N>%%')"
+        )
+    if match := re.fullmatch(
+        r"DEFINITION_OF_DONE\.md: Coverage threshold mismatch — "
+        r"DEFINITION_OF_DONE\.md says (?P<found>\d+)%, pyproject\.toml says (?P<expected>\d+)%",
+        error,
+    ):
+        return text(
+            "DEFINITION_OF_DONE.md: Coverage threshold mismatch — "
+            "DEFINITION_OF_DONE.md says %(found)d%%, pyproject.toml says %(expected)d%%",
+            found=int(match["found"]),
+            expected=int(match["expected"]),
+        )
+    if (value := error.removeprefix("README.md not found at ")) != error:
+        return text("README.md not found at %(value0)s", value0=value)
+    if match := re.fullmatch(
+        r"README\.md: --cov path mismatch — README\.md has '--cov=(?P<found>.+)', "
+        r"pyproject\.toml uses '--cov=(?P<expected>.+)'",
+        error,
+    ):
+        return text(
+            "README.md: --cov path mismatch — README.md has '--cov=%(found)s', "
+            "pyproject.toml uses '--cov=%(expected)s'",
+            **match.groupdict(),
+        )
+    if match := re.fullmatch(
+        r"pyproject\.toml: --cov-fail-under mismatch — "
+        r"addopts has --cov-fail-under=(?P<found>\d+), "
+        r"but \[tool\.coverage\.report\]\.fail_under=(?P<expected>\d+)",
+        error,
+    ):
+        return text(
+            "pyproject.toml: --cov-fail-under mismatch — "
+            "addopts has --cov-fail-under=%(found)d, "
+            "but [tool.coverage.report].fail_under=%(expected)d",
+            found=int(match["found"]),
+            expected=int(match["expected"]),
+        )
+    if match := re.fullmatch(
+        r"README\.md: Test count mismatch — README\.md says (?P<found>\d+), "
+        r"actual pytest count is (?P<actual>\d+) \(tolerance: (?P<tolerance>\d+)%\)",
+        error,
+    ):
+        return text(
+            "README.md: Test count mismatch — README.md says %(found)d, "
+            "actual pytest count is %(actual)d (tolerance: %(tolerance)d%%)",
+            found=int(match["found"]),
+            actual=int(match["actual"]),
+            tolerance=int(match["tolerance"]),
+        )
+    return error
+
+
 def _load_pyproject(repo_root: Path) -> dict[str, Any]:
     """Load ``pyproject.toml`` using tomllib/tomli.
 
@@ -393,7 +476,7 @@ def check_doc_config_consistency(
 
     if all_errors:
         for error in all_errors:
-            print(error, file=sys.stderr)
+            print(_format_consistency_error(error), file=sys.stderr)
         print(
             text("\nFound %(value0)s doc/config consistency violation(s).", value0=len(all_errors)),
             file=sys.stderr,

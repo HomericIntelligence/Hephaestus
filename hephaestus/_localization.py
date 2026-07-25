@@ -19,7 +19,7 @@ _PERCENT_PLACEHOLDER = re.compile(
     (?P<width>\*|\d+)?
     (?:\.(?P<precision>\*|\d+))?
     [hlL]?
-    (?P<conversion>[diouxXeEfFgGcrsa%])
+    (?P<conversion>[diouxXeEfFgGcrsa])
     """,
     re.VERBOSE,
 )
@@ -28,7 +28,13 @@ _PERCENT_PLACEHOLDER = re.compile(
 def _placeholder_signature(
     template: str,
 ) -> tuple[tuple[str, ...], tuple[tuple[str, str], ...]]:
-    """Return ordered positional and order-independent named placeholders."""
+    """Return ordered positional and order-independent named placeholders.
+
+    ``%`` is accepted only as a complete placeholder or the literal escape
+    ``%%``.  Silently skipping an invalid token would allow a catalog to be
+    constructed successfully and defer its failure until a translated message
+    is rendered.
+    """
     positional: list[str] = []
     named: list[tuple[str, str]] = []
     cursor = 0
@@ -36,22 +42,23 @@ def _placeholder_signature(
         percent = template.find("%", cursor)
         if percent < 0:
             break
+        if template.startswith("%%", percent):
+            cursor = percent + 2
+            continue
         match = _PERCENT_PLACEHOLDER.match(template, percent)
         if match is None:
-            cursor = percent + 1
-            continue
+            raise ValueError(f"invalid percent placeholder in template {template!r}")
         cursor = match.end()
         conversion = match.group("conversion")
-        if conversion != "%":
-            if match.group("width") == "*":
-                positional.append("*")
-            if match.group("precision") == "*":
-                positional.append("*")
-            name = match.group("name")
-            if name is None:
-                positional.append(conversion)
-            else:
-                named.append((name, conversion))
+        if match.group("width") == "*":
+            positional.append("*")
+        if match.group("precision") == "*":
+            positional.append("*")
+        name = match.group("name")
+        if name is None:
+            positional.append(conversion)
+        else:
+            named.append((name, conversion))
     return tuple(positional), tuple(sorted(named))
 
 
@@ -72,7 +79,12 @@ class Localizer:
 
     def __init__(self, catalog: Mapping[str, str] | None = None) -> None:
         """Create a localizer from a defensively copied catalog."""
-        copied = dict(catalog or {})
+        if catalog is None:
+            copied: dict[str, str] = {}
+        elif not isinstance(catalog, Mapping):
+            raise TypeError("localization catalog must be a mapping")
+        else:
+            copied = dict(catalog)
         _validate_catalog(copied)
         object.__setattr__(self, "_catalog", MappingProxyType(copied))
 

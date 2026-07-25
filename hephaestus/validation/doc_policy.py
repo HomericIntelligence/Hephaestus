@@ -304,18 +304,25 @@ def format_text_report(findings: list[Finding], verbose: bool = False) -> str:
 
     """
     if not findings:
-        return "No policy violations found.\n"
+        return text("No policy violations found.\n")
 
     lines: list[str] = [
-        f"Found {len(findings)} policy violation(s):",
+        text("Found %(count)d policy violation(s):", count=len(findings)),
         "",
     ]
     for f in findings:
-        lines.append(f"  [{f.severity.value}] {f.file}:{f.line}")
-        lines.append(f"    Rule: {f.rule}")
-        lines.append(f"    Reason: {f.description}")
+        lines.append(
+            text(
+                "  [%(severity)s] %(file)s:%(line)d",
+                severity=f.severity.value,
+                file=f.file,
+                line=f.line,
+            )
+        )
+        lines.append(text("    Rule: %(rule)s", rule=f.rule))
+        lines.append(text("    Reason: %(reason)s", reason=f.description))
         if verbose:
-            lines.append(f"    Content: {f.content.strip()}")
+            lines.append(text("    Content: %(content)s", content=f.content.strip()))
         lines.append("")
 
     return "\n".join(lines)

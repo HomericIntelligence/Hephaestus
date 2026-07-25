@@ -188,9 +188,12 @@ def validate_agent_flags(parser: argparse.ArgumentParser, args: argparse.Namespa
             offending.append(f"{flag}={value}")
     if offending:
         parser.error(
-            f"--agent={args.agent} does not honor "
-            + ", ".join(offending)
-            + f" (these flag values are not supported by the {args.agent} agent)"
+            text(
+                "--agent=%(agent)s does not honor %(flags)s (these flag values are not "
+                "supported by the %(agent)s agent)",
+                agent=args.agent,
+                flags=", ".join(offending),
+            )
         )
 
 
@@ -206,11 +209,15 @@ def validate_input_files(parser: argparse.ArgumentParser, args: argparse.Namespa
     """
     prompt_file = Path(args.prompt_file).expanduser().resolve()
     if not prompt_file.is_file():
-        parser.error(f"--prompt-file does not exist or is not a file: {prompt_file}")
+        parser.error(
+            text("--prompt-file does not exist or is not a file: %(path)s", path=prompt_file)
+        )
     if args.skill_file:
         skill_file = Path(args.skill_file).expanduser().resolve()
         if not skill_file.is_file():
-            parser.error(f"--skill-file does not exist or is not a file: {skill_file}")
+            parser.error(
+                text("--skill-file does not exist or is not a file: %(path)s", path=skill_file)
+            )
 
 
 def run_agent(args: argparse.Namespace) -> int:

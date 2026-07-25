@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
+from hephaestus.cli.localization import using_localizer
 from hephaestus.cli.utils import (
     CommandRegistry,
     add_github_throttle_args,
@@ -65,6 +66,25 @@ class TestConfirmAction:
         """'no' is accepted as negative."""
         with patch("builtins.input", return_value="no"):
             assert confirm_action() is False
+
+    def test_default_prompt_and_choice_display_use_active_localizer(self) -> None:
+        """The translated display still accepts the canonical ``y`` decision."""
+        prompts: list[str] = []
+
+        def respond(prompt: str) -> str:
+            prompts.append(prompt)
+            return "y"
+
+        with using_localizer(
+            {
+                "Are you sure?": "Confirmer l'action ?",
+                "y/N": "o/N",
+            }
+        ):
+            with patch("builtins.input", side_effect=respond):
+                assert confirm_action() is True
+
+        assert prompts == ["Confirmer l'action ? [o/N] "]
 
 
 class TestCommandRegistry:
@@ -317,6 +337,25 @@ class TestAddGithubThrottleArgs:
         with pytest.raises(SystemExit) as exc:
             parser.parse_args([flag, value])
         assert exc.value.code == 2
+
+    def test_invalid_rate_diagnostic_uses_active_localizer(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Shared throttle type failures render through the active catalog."""
+        parser = argparse.ArgumentParser()
+        with using_localizer(
+            {
+                "expected a finite number, got %(value0)r": (
+                    "un nombre fini était attendu, reçu %(value0)r"
+                )
+            }
+        ):
+            add_github_throttle_args(parser)
+            with pytest.raises(SystemExit) as exc:
+                parser.parse_args(["--gh-global-rate", "not-a-number"])
+
+        assert exc.value.code == 2
+        assert "un nombre fini était attendu, reçu 'not-a-number'" in capsys.readouterr().err
 
     def test_configure_from_args(self) -> None:
         parser = argparse.ArgumentParser()

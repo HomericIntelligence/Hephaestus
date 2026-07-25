@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from hephaestus.cli.localization import using_localizer
 from hephaestus.utils.helpers import NETWORK_TIMEOUT
 from hephaestus.validation.doc_config import (
     check_addopts_cov_fail_under,
@@ -304,6 +305,25 @@ class TestCheckDocConfigConsistency:
         (tmp_path / "README.md").write_text("")
         result = check_doc_config_consistency(tmp_path, skip_test_count=True)
         assert result == 1
+
+    def test_text_errors_are_localized(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Human doc/config errors translate while structured errors stay raw."""
+        _write_pyproject(tmp_path, _minimal_pyproject(fail_under=90))
+        (tmp_path / "AGENTS.md").write_text("We maintain 80%+ test coverage.")
+        (tmp_path / "README.md").write_text("")
+        with using_localizer(
+            {
+                "AGENTS.md: Coverage threshold mismatch — AGENTS.md says %(found)d%%, "
+                "pyproject.toml says %(expected)d%%": (
+                    "AGENTS.md : seuil différent — AGENTS.md dit %(found)d%%, "
+                    "pyproject.toml dit %(expected)d%%"
+                ),
+            }
+        ):
+            assert check_doc_config_consistency(tmp_path, skip_test_count=True) == 1
+        assert "seuil différent" in capsys.readouterr().err
 
     def test_dod_threshold_mismatch_fails(
         self, tmp_path: Path, capsys: pytest.CaptureFixture

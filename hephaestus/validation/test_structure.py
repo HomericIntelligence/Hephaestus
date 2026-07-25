@@ -304,6 +304,31 @@ def check_scripts_coverage(
     return len(errors) == 0, errors
 
 
+def _format_scripts_coverage_error(error: str) -> str:
+    """Render authored scripts-coverage diagnostics without changing raw findings."""
+    harness_required = (
+        "  The scripts/ smoke harness is required so every scripts/*.py is auto-tested via --help."
+    )
+    if error == harness_required:
+        return text(
+            "  The scripts/ smoke harness is required so every scripts/*.py is "
+            "auto-tested via --help."
+        )
+    if (value := error.removeprefix("  Missing: ")) != error:
+        return text("  Missing: %(value0)s", value0=value)
+    coverage_broken = (
+        "  tests/unit/scripts/conftest.py no longer globs scripts/*.py — auto-coverage is broken."
+    )
+    if error == coverage_broken:
+        return text(
+            "  tests/unit/scripts/conftest.py no longer globs scripts/*.py — "
+            "auto-coverage is broken."
+        )
+    if error == "  No scripts/*.py files found — unexpected.":
+        return text("  No scripts/*.py files found — unexpected.")
+    return error
+
+
 def _report_mirror_check(
     src_root: Path,
     test_root: Path,
@@ -467,7 +492,7 @@ def _report_scripts_coverage_check(
         return True
     print(text("ERROR: scripts/ test coverage is incomplete:"), file=sys.stderr)
     for line in errors:
-        print(line, file=sys.stderr)
+        print(_format_scripts_coverage_error(line), file=sys.stderr)
     return False
 
 

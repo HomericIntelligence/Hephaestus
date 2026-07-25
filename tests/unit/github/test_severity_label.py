@@ -7,11 +7,13 @@ here instead of silently no-op'ing in CI.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from unittest import mock
 
 import pytest
 
+from hephaestus.cli.localization import using_localizer
 from hephaestus.github import severity_label as sl
 
 # A faithful sample of how GitHub renders an issue-form dropdown answer.
@@ -179,6 +181,29 @@ def test_main_reconciles_on_valid_input(monkeypatch: pytest.MonkeyPatch) -> None
     with mock.patch.object(sl, "apply_severity_label") as applied:
         assert sl.main([]) == 0
     applied.assert_called_once_with("o/r", 42, "major")
+
+
+def test_main_localizes_plain_success_but_not_json(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Controlled workflow status is localizable only in its text-mode renderer."""
+    monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+    monkeypatch.setenv("ISSUE_NUMBER", "42")
+    monkeypatch.setenv("ISSUE_BODY", "### Severity\n\nmajor\n")
+    source = "Reconciled severity label to: %(selected)s"
+    with (
+        mock.patch.object(sl, "apply_severity_label"),
+        using_localizer({source: "Étiquette de sévérité réconciliée : %(selected)s"}),
+    ):
+        assert sl.main([]) == 0
+    assert "Étiquette de sévérité réconciliée : major" in capsys.readouterr().out
+
+    with (
+        mock.patch.object(sl, "apply_severity_label"),
+        using_localizer({source: "Étiquette de sévérité réconciliée : %(selected)s"}),
+    ):
+        assert sl.main(["--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["message"] == "Reconciled severity label to: major"
 
 
 def test_main_help_does_not_touch_env() -> None:

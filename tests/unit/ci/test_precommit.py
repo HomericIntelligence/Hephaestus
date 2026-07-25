@@ -14,6 +14,7 @@ from hephaestus.ci.precommit import (
     load_precommit_config,
     write_step_summary,
 )
+from hephaestus.cli.localization import using_localizer
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -24,6 +25,20 @@ def test_summary_table_includes_reported_values() -> None:
     assert "passed" in table
     assert "45s" in table
     assert "300" in table
+
+
+def test_summary_table_localizes_authored_markdown() -> None:
+    """The human summary translates its labels while retaining measured values."""
+    with using_localizer(
+        {
+            "## Pre-commit Hook Benchmark": "## Référence des hooks pré-commit",
+            "| Elapsed time | %(seconds)ds |": "| Temps écoulé | %(seconds)ds |",
+        }
+    ):
+        table = format_summary_table(45, 300, "passed")
+
+    assert "## Référence des hooks pré-commit" in table
+    assert "| Temps écoulé | 45s |" in table
 
 
 def test_threshold_is_strictly_greater_than_limit() -> None:

@@ -236,7 +236,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
 
     if args.epic and args.issues:
-        parser.error("Cannot specify both --epic and --issues")
+        parser.error(text("Cannot specify both --epic and --issues"))
 
     return args
 

@@ -145,9 +145,11 @@ class CursesUI:
         """
         if curses is None:
             raise RuntimeError(
-                "CursesUI requires the stdlib `curses` module, which is not "
-                "bundled with CPython on Windows. Run the automation pipeline "
-                "from a POSIX environment, or set --no-ui."
+                get_localizer().text(
+                    "CursesUI requires the stdlib `curses` module, which is not "
+                    "bundled with CPython on Windows. Run the automation pipeline "
+                    "from a POSIX environment, or set --no-ui."
+                )
             )
         self.status_tracker = status_tracker
         self.log_manager = log_manager

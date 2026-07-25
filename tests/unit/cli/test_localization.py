@@ -53,6 +53,30 @@ def test_invalid_placeholder_catalogs_are_rejected(source: str, translated: str)
         Localizer({source: translated})
 
 
+@pytest.mark.parametrize(
+    ("source", "translated"),
+    [
+        ("Value %s", "Valeur %s %q"),
+        ("Value %q", "Valeur"),
+        ("Count %(count)d", "Compte %(count)d %q"),
+    ],
+)
+def test_malformed_percent_specifiers_are_rejected_at_catalog_construction(
+    source: str,
+    translated: str,
+) -> None:
+    """A malformed percent token cannot survive catalog validation to fail rendering."""
+    with pytest.raises(ValueError):
+        Localizer({source: translated})
+
+
+@pytest.mark.parametrize("catalog", [[], (), 0, False])
+def test_falsy_non_mapping_catalogs_are_rejected(catalog: object) -> None:
+    """Only ``None`` selects the empty catalog; falsy non-mappings are invalid input."""
+    with pytest.raises(TypeError, match="mapping"):
+        Localizer(cast(Any, catalog))
+
+
 def test_escaped_percent_is_not_a_placeholder() -> None:
     """Escaped percent signs may differ without changing the value signature."""
     localizer = Localizer({"Progress: %(value)d%%": "Avancement : %(value)d %%"})

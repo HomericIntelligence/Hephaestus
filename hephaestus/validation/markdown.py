@@ -340,6 +340,26 @@ Callers may pass custom lists to :func:`validate_readme` or
 """
 
 
+def _format_readme_issue(issue: str) -> str:
+    """Translate authored README-report prose while retaining raw result data."""
+    if issue in {
+        "Code blocks missing language specification",
+        "File must end with newline",
+    }:
+        return text(issue)
+    if match := re.fullmatch(
+        r"Line (?P<line>\d+): (?P<kind>List|Heading) without blank line before", issue
+    ):
+        return text(
+            "Line %(line)d: %(kind)s without blank line before",
+            line=int(match["line"]),
+            kind=match["kind"],
+        )
+    if (value := issue.removeprefix("Error reading file: ")) != issue:
+        return text("Error reading file: %(value0)s", value0=value)
+    return issue
+
+
 @dataclass
 class ReadmeValidationResult:
     """Validation result for a single README file.
@@ -466,7 +486,7 @@ def _print_readme_summary(results: list[ReadmeValidationResult]) -> None:
             for section in result.missing_sections:
                 print(text("    - Missing section: %(value0)s", value0=section))
             for issue in result.formatting_issues:
-                print(text("    - %(value0)s", value0=issue))
+                print(text("    - %(value0)s", value0=_format_readme_issue(issue)))
 
     print("=" * 70)
 
@@ -585,6 +605,18 @@ def validate_internal_link(link: str, source_file: Path, repo_root: Path) -> tup
     if not target_path.exists():
         return False, f"File not found: {link_path}"
     return True, ""
+
+
+def _format_link_error(error: str) -> str:
+    """Translate authored link-error prose while preserving structured findings."""
+    for prefix, template in (
+        ("Link target outside repository: ", "Link target outside repository: %(value0)s"),
+        ("Broken link: ", "Broken link: %(value0)s"),
+        ("File not found: ", "File not found: %(value0)s"),
+    ):
+        if error.startswith(prefix):
+            return text(template, value0=error.removeprefix(prefix))
+    return error
 
 
 def validate_file_links(file_path: Path, repo_root: Path, verbose: bool = False) -> dict[str, Any]:
@@ -711,7 +743,7 @@ def print_link_summary(results: dict[str, Any]) -> None:
                         value1=broken["target"],
                     )
                 )
-                print(text("      -> %(value0)s", value0=broken["error"]))
+                print(text("      -> %(value0)s", value0=_format_link_error(broken["error"])))
 
     print("=" * 70)
 

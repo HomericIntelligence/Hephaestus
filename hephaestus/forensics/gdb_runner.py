@@ -137,6 +137,7 @@ python
 import gdb
 EXIT_FILE = {exit_file!r}
 CORE_FILE = {core_file!r}
+CRASH_MESSAGE = {crash_message!r}
 # POSIX shell convention for signal-terminated processes (128 + signo).
 SIG_MAP = {{"SIGABRT": 6, "SIGSEGV": 11, "SIGBUS": 7, "SIGFPE": 8, "SIGILL": 4}}
 state = {{"signaled": False}}
@@ -152,7 +153,7 @@ def on_stop(event):
     # We never set breakpoints, so the only stops we expect are signals.
     if isinstance(event, gdb.SignalEvent):
         signo = event.stop_signal
-        print("[run-under-gdb] caught " + signo + "; dumping " + CORE_FILE)
+        print(CRASH_MESSAGE % {{"signal": signo, "core": CORE_FILE}})
         gdb.execute("generate-core-file " + CORE_FILE)
         gdb.execute("bt full")
         gdb.execute("info threads")
@@ -222,6 +223,7 @@ def build_gdb_script(gdb_log: str, core_file: str, exit_file: str) -> str:
         gdb_log=gdb_log,
         core_file=core_file,
         exit_file=exit_file,
+        crash_message=text("[run-under-gdb] caught %(signal)s; dumping %(core)s"),
     )
 
 

@@ -11,6 +11,7 @@ import pytest
 
 from hephaestus.agents.runtime import AgentRunResult
 from hephaestus.automation import agent_stage
+from hephaestus.cli.localization import using_localizer
 from hephaestus.prompts import PromptCatalog
 
 
@@ -413,6 +414,38 @@ def test_main_rejects_missing_prompt_file(
         agent_stage.main(argv)
     assert exc.value.code == 2
     assert "--prompt-file does not exist" in capsys.readouterr().err
+
+
+def test_main_localizes_missing_prompt_file_diagnostic(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Agent-stage parser errors use the active catalog while preserving the path."""
+    missing_prompt = tmp_path / "missing.md"
+    argv = [
+        "--prompt-file",
+        str(missing_prompt),
+        "--repo-root",
+        str(tmp_path),
+        "--stage",
+        "x",
+        "--output",
+        str(tmp_path / "out.txt"),
+    ]
+    with using_localizer(
+        {
+            "--prompt-file does not exist or is not a file: %(path)s": (
+                "--prompt-file est introuvable ou n'est pas un fichier : %(path)s"
+            )
+        }
+    ):
+        with pytest.raises(SystemExit) as exc:
+            agent_stage.main(argv)
+
+    assert exc.value.code == 2
+    stderr = capsys.readouterr().err
+    assert "--prompt-file est introuvable ou n'est pas un fichier" in stderr
+    assert str(missing_prompt.resolve()) in stderr
 
 
 def test_main_rejects_missing_skill_file(

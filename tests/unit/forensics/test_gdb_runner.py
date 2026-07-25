@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from hephaestus.cli.localization import using_localizer
 from hephaestus.forensics.gdb_runner import (
     _validate_gdb_cmd_prefix,
     build_gdb_script,
@@ -86,6 +87,15 @@ class TestBuildGdbScript:
         script = build_gdb_script("a", "b", "c")
         assert "gdb.events.stop.connect" in script
         assert "gdb.events.exited.connect" in script
+
+    def test_localizes_crash_message_before_gdb_executes_script(self) -> None:
+        """Generated GDB Python receives a translated template, not a Hephaestus import."""
+        source = "[run-under-gdb] caught %(signal)s; dumping %(core)s"
+        with using_localizer({source: "[gdb] signal %(signal)s ; noyau %(core)s"}):
+            script = build_gdb_script("a", "b", "c")
+
+        assert "[gdb] signal %(signal)s ; noyau %(core)s" in script
+        assert 'CRASH_MESSAGE % {"signal": signo, "core": CORE_FILE}' in script
 
 
 class TestRunUnderGdb:

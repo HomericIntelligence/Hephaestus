@@ -157,7 +157,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.json:
             emit_json_status(1, message)
         else:
-            print(message, file=sys.stderr)
+            print(
+                text(
+                    "Unexpected GITHUB_REPOSITORY %(repository)r (expected owner/name)",
+                    repository=repo,
+                ),
+                file=sys.stderr,
+            )
         return 1
     raw = os.environ.get("ISSUE_NUMBER", "")
     if not raw.isdigit():
@@ -165,7 +171,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.json:
             emit_json_status(1, message)
         else:
-            print(message, file=sys.stderr)
+            print(
+                text("Unexpected ISSUE_NUMBER %(number)r (not a positive integer)", number=raw),
+                file=sys.stderr,
+            )
         return 1
     selected = parse_severity(os.environ.get("ISSUE_BODY", ""))
     apply_severity_label(repo, int(raw), selected)
@@ -173,7 +182,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         emit_json_status(0, message, severity=selected)
     else:
-        print(message)
+        print(
+            text(
+                "Reconciled severity label to: %(selected)s",
+                selected=selected or text("(none)"),
+            )
+        )
     return 0
 
 

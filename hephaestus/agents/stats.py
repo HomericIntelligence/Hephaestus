@@ -163,31 +163,38 @@ def format_stats_text(stats: dict[str, Any]) -> str:
 
     """
     sep = "=" * 60
-    lines: list[str] = [sep, "Agent System Statistics Report", sep, ""]
+    lines: list[str] = [sep, text("Agent System Statistics Report"), sep, ""]
 
-    lines += ["OVERVIEW", "-" * 60, f"Total Agents: {stats['total_agents']}", ""]
+    lines += [
+        text("OVERVIEW"),
+        "-" * 60,
+        text("Total Agents: %(count)d", count=stats["total_agents"]),
+        "",
+    ]
 
-    lines += ["AGENTS BY LEVEL", "-" * 60]
+    lines += [text("AGENTS BY LEVEL"), "-" * 60]
     for level in sorted(stats["by_level"]):
         names = sorted(stats["by_level"][level])
-        lines.append(f"  Level {level}: {len(names)} agent(s)")
+        lines.append(text("  Level %(level)s: %(count)d agent(s)", level=level, count=len(names)))
     if stats["agents_without_level"]:
-        lines.append(f"  No level: {len(stats['agents_without_level'])} agent(s)")
+        lines.append(
+            text("  No level: %(count)d agent(s)", count=len(stats["agents_without_level"]))
+        )
     lines.append("")
 
-    lines += ["TOP TOOLS (by frequency)", "-" * 60]
+    lines += [text("TOP TOOLS (by frequency)"), "-" * 60]
     top_tools = sorted(stats["tool_frequency"].items(), key=lambda x: -x[1])[:10]
     for tool, count in top_tools:
-        lines.append(f"  {tool}: {count}")
+        lines.append(text("  %(tool)s: %(count)d", tool=tool, count=count))
     lines.append("")
 
-    lines += ["TOP SKILLS (by reference count)", "-" * 60]
+    lines += [text("TOP SKILLS (by reference count)"), "-" * 60]
     top_skills = sorted(stats["skill_frequency"].items(), key=lambda x: -x[1])[:10]
     if top_skills:
         for skill, count in top_skills:
-            lines.append(f"  {skill}: {count}")
+            lines.append(text("  %(skill)s: %(count)d", skill=skill, count=count))
     else:
-        lines.append("  (none)")
+        lines.append(text("  (none)"))
     lines.append("")
 
     lines.append(sep)

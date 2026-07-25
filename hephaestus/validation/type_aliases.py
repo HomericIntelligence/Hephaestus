@@ -23,6 +23,14 @@ from pathlib import Path
 from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, format_output
 
+_TYPE_ALIAS_ERROR = re.compile(
+    r"^(?P<path>.+):(?P<line>\d+): Type alias shadows domain-specific name\n"
+    r"  (?P<source>.*)\n"
+    r"  Suggestion: Use '(?P<target>.*)' directly instead of aliasing to '(?P<alias>.*)'\n"
+    r"  To suppress this check, add: # type: ignore\[shadowing\]$",
+    re.DOTALL,
+)
+
 
 def is_shadowing_pattern(alias: str, target: str) -> bool:
     """Check if alias name shadows the target name.
@@ -125,7 +133,31 @@ def format_error(file_path: Path, line_num: int, line: str, alias: str, target: 
         f"{file_path}:{line_num}: Type alias shadows domain-specific name\n"
         f"  {line}\n"
         f"  Suggestion: Use '{target}' directly instead of aliasing to '{alias}'\n"
-        f"  To suppress this check, add: # type: ignore[shadowing]"
+        "  To suppress this check, add: # type: ignore[shadowing]"
+    )
+
+
+def format_human_error(error: str) -> str:
+    """Translate a raw type-alias finding for the human-only CLI report."""
+    match = _TYPE_ALIAS_ERROR.fullmatch(error)
+    if match is None:
+        return error
+    values = match.groupdict()
+    return "\n".join(
+        [
+            text(
+                "%(path)s:%(line)d: Type alias shadows domain-specific name",
+                path=values["path"],
+                line=int(values["line"]),
+            ),
+            text("  %(value)s", value=values["source"]),
+            text(
+                "  Suggestion: Use '%(target)s' directly instead of aliasing to '%(alias)s'",
+                target=values["target"],
+                alias=values["alias"],
+            ),
+            text("  To suppress this check, add: # type: ignore[shadowing]"),
+        ]
     )
 
 
@@ -205,7 +237,7 @@ def main() -> int:
         return exit_code
 
     if errors:
-        print("\n".join(errors), file=sys.stderr)
+        print("\n".join(format_human_error(error) for error in errors), file=sys.stderr)
         print(
             text("\nFound %(value0)s type alias shadowing violation(s)", value0=len(errors)),
             file=sys.stderr,

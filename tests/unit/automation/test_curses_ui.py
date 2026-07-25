@@ -3,6 +3,9 @@
 import threading
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from hephaestus.automation import curses_ui
 from hephaestus.automation.curses_ui import CursesUI, LogBuffer, ThreadLogManager
 from hephaestus.automation.status_tracker import StatusTracker
 from hephaestus.cli.localization import using_localizer
@@ -112,6 +115,21 @@ class TestCursesUI:
         tracker = StatusTracker(num_workers)
         log_manager = ThreadLogManager()
         return CursesUI(tracker, log_manager)
+
+    def test_unavailable_curses_diagnostic_uses_active_localizer(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The platform-specific CursesUI error is catalog-backed."""
+        monkeypatch.setattr(curses_ui, "curses", None)
+        source = (
+            "CursesUI requires the stdlib `curses` module, which is not "
+            "bundled with CPython on Windows. Run the automation pipeline "
+            "from a POSIX environment, or set --no-ui."
+        )
+
+        with using_localizer({source: "Interface curses indisponible."}):
+            with pytest.raises(RuntimeError, match="Interface curses indisponible\\."):
+                CursesUI(StatusTracker(1), ThreadLogManager())
 
     def test_captures_localizer_for_deferred_rendering(self) -> None:
         """Fixed labels translate while live status and logs stay unchanged."""

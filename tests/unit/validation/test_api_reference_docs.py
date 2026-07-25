@@ -8,16 +8,34 @@ from pathlib import Path
 import pytest
 import yaml
 
+from hephaestus.cli.localization import using_localizer
 from hephaestus.validation.api_reference import (
     DEFAULT_REPO_ROOT,
     ApiReferenceFinding,
     expected_pdoc_targets,
     find_violations,
+    format_json,
+    format_report,
     list_subpackage_pages,
     main,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def test_format_report_localizes_human_text_without_changing_json() -> None:
+    """API-reference findings retain their structured JSON representation."""
+    findings = [ApiReferenceFinding(kind="missing-page", detail="docs/api/hephaestus/foo.html")]
+    before_json = format_json(findings)
+    with using_localizer(
+        {"FAIL: %(count)d API-reference violation(s):": "ÉCHEC : %(count)d violation(s) API"}
+    ):
+        report = format_report(findings)
+        localized_json = format_json(findings)
+
+    assert "ÉCHEC : 1 violation(s) API" in report
+    assert "docs/api/hephaestus/foo.html" in report
+    assert localized_json == before_json
 
 
 def _write_html(path: Path) -> None:

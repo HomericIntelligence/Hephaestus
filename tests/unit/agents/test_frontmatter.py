@@ -16,6 +16,7 @@ from hephaestus.agents.frontmatter import (
     validate_agents_main,
     validate_frontmatter,
 )
+from hephaestus.cli.localization import using_localizer
 
 _VALID_FM = (
     "---\nname: test-agent\ndescription: A test\ntools: Read,Write\nmodel: sonnet\n---\n# Body\n"
@@ -177,6 +178,30 @@ class TestValidateAgentsMain:
         rc = validate_agents_main(["--agents-dir", str(agents_dir)])
         assert rc == 1
         assert "FAIL" in capsys.readouterr().out
+
+    def test_text_invalid_agent_localizes_error_but_json_stays_english(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Validation findings are rendered locally only in the human report."""
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        (agents_dir / "bad.md").write_text(_NO_FM)
+        catalog = {
+            "No YAML frontmatter found (should start with --- and end with ---)": (
+                "Aucun en-tête YAML trouvé (doit commencer et finir par ---)"
+            )
+        }
+
+        with using_localizer(catalog):
+            assert validate_agents_main(["--agents-dir", str(agents_dir)]) == 1
+        assert "Aucun en-tête YAML" in capsys.readouterr().out
+
+        with using_localizer(catalog):
+            assert validate_agents_main(["--agents-dir", str(agents_dir), "--json"]) == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["results"][0]["errors"] == [
+            "No YAML frontmatter found (should start with --- and end with ---)"
+        ]
 
     def test_json_success(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         agents_dir = tmp_path / "agents"

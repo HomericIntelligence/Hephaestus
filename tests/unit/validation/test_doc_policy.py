@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from hephaestus.cli.localization import using_localizer
 from hephaestus.validation.doc_policy import (
     Finding,
     Severity,
@@ -28,6 +29,28 @@ def make_md(tmp_path: Path, name: str, content: str) -> Path:
     path = tmp_path / name
     path.write_text(textwrap.dedent(content))
     return path
+
+
+def test_text_report_localizes_headers_without_changing_json() -> None:
+    """Text report labels are catalog-backed and serialized findings stay stable."""
+    finding = Finding(
+        file="docs/example.md",
+        line=4,
+        severity=Severity.CRITICAL,
+        rule="no-push-main",
+        description="Example detail",
+        content="git push origin main",
+    )
+    before_json = format_json_report([finding])
+    with using_localizer(
+        {"Found %(count)d policy violation(s):": "%(count)d violation(s) de politique trouvée(s) :"}
+    ):
+        report = format_text_report([finding])
+        localized_json = format_json_report([finding])
+
+    assert "1 violation(s) de politique trouvée(s)" in report
+    assert "docs/example.md:4" in report
+    assert localized_json == before_json
 
 
 # ---------------------------------------------------------------------------

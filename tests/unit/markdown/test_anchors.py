@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from hephaestus.cli.localization import using_localizer
 from hephaestus.markdown.anchors import (
     _collect_markdown_files,
     check_anchors,
@@ -205,6 +206,28 @@ class TestCheckAnchors:
         check_anchors(target_file=target, source_files=[source], verbose=True)
         captured = capsys.readouterr()
         assert "valid" in captured.out.lower()
+
+    def test_broken_anchor_text_is_localized_but_validation_data_stays_raw(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Text rendering translates authored prose without changing findings."""
+        target = tmp_path / "install.md"
+        target.write_text("# Setup\n")
+        source = tmp_path / "README.md"
+        source.write_text("[link](install.md#missing)")
+
+        with using_localizer(
+            {
+                "%(source)s: broken anchor '#%(anchor)s' in link '%(target)s' (valid: %(valid)s)": (
+                    "%(source)s : ancre '#%(anchor)s' absente dans '%(target)s' "
+                    "(valides : %(valid)s)"
+                ),
+            }
+        ):
+            assert check_anchors(target, [source]) == 1
+
+        assert "ancre" in capsys.readouterr().err
+        assert "broken anchor" in validate_anchors([source], target)[0]
 
 
 class TestMain:

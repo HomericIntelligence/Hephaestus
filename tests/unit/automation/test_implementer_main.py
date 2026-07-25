@@ -20,6 +20,7 @@ import pytest
 
 from hephaestus.automation import implementer as implementer_mod
 from hephaestus.automation.pipeline.routing import StageName
+from hephaestus.cli.localization import using_localizer
 
 
 @pytest.fixture(autouse=True)
@@ -67,6 +68,20 @@ class TestModuleSurface:
 
     def test_claude_impl_timeout_constant_exposed(self) -> None:
         assert isinstance(implementer_mod._CLAUDE_IMPL_TIMEOUT, int)
+
+
+def test_parse_args_localizes_mutually_exclusive_scope_diagnostic(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Implementer parser errors render through the active localization catalog."""
+    with using_localizer(
+        {"Cannot specify both --epic and --issues": "--epic et --issues sont incompatibles"}
+    ):
+        with pytest.raises(SystemExit) as exc:
+            implementer_mod._parse_args(["--epic", "1", "--issues", "2"])
+
+    assert exc.value.code == 2
+    assert "--epic et --issues sont incompatibles" in capsys.readouterr().err
 
 
 def test_main_builds_implementation_scope_and_dispatches(tmp_path: Path) -> None:

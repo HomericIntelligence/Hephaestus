@@ -37,14 +37,18 @@ def format_summary_table(elapsed_s: int, file_count: int, hook_status: str) -> s
         Markdown-formatted table string including a trailing newline.
 
     """
-    status_icon = "[PASS]" if hook_status == "passed" else "[FAIL]"
-    return (
-        "## Pre-commit Hook Benchmark\n\n"
-        "| Metric | Value |\n"
-        "|--------|-------|\n"
-        f"| Hook status | {status_icon} {hook_status} |\n"
-        f"| Elapsed time | {elapsed_s}s |\n"
-        f"| Files processed | {file_count} |\n"
+    status_icon = text("[PASS]") if hook_status == "passed" else text("[FAIL]")
+    return "\n".join(
+        [
+            text("## Pre-commit Hook Benchmark"),
+            "",
+            text("| Metric | Value |"),
+            "|--------|-------|",
+            text("| Hook status | %(icon)s %(status)s |", icon=status_icon, status=hook_status),
+            text("| Elapsed time | %(seconds)ds |", seconds=elapsed_s),
+            text("| Files processed | %(count)d |", count=file_count),
+            "",
+        ]
     )
 
 
@@ -108,9 +112,12 @@ def bench_precommit_main(argv: list[str] | None = None) -> int:
     write_step_summary(table)
     if over_threshold:
         emit_warning(
-            f"Pre-commit hooks took {args.elapsed}s, which exceeds "
-            f"the {args.threshold}s threshold. "
-            "Consider reviewing hook configuration for performance regressions."
+            text(
+                "Pre-commit hooks took %(elapsed)ds, which exceeds the %(threshold)ds "
+                "threshold. Consider reviewing hook configuration for performance regressions.",
+                elapsed=args.elapsed,
+                threshold=args.threshold,
+            )
         )
     return 0
 

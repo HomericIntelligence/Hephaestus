@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from hephaestus.scripts_lib.scaffold_subpackage import main
+from hephaestus.cli.localization import using_localizer
+from hephaestus.scripts_lib.scaffold_subpackage import _build_plan, main
 
 
 def _run(args: list[str], tmp_path: Path) -> int:
@@ -112,6 +113,13 @@ class TestDryRun:
         _run(["--dry-run", "myutils"], tmp_path)
         out = capsys.readouterr().out
         assert "myutils" in out
+
+    def test_plan_hints_use_active_localizer(self, tmp_path: Path) -> None:
+        """Prebuilt human hints retain dynamic names while translating their labels."""
+        with using_localizer({"Next steps for '%(name)s':": "Étapes suivantes pour '%(name)s' :"}):
+            plan = _build_plan("myutils", tmp_path, with_cli=False)
+
+        assert plan.hints[0] == "Étapes suivantes pour 'myutils' :"
 
 
 class TestWithCli:

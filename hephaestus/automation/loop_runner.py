@@ -110,9 +110,13 @@ def _parse_positive_int(value: str) -> int:
     try:
         number = int(value)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}") from exc
+        raise argparse.ArgumentTypeError(
+            text("expected a positive integer, got %(value0)r", value0=value)
+        ) from exc
     if number <= 0:
-        raise argparse.ArgumentTypeError(f"expected a positive integer, got {number}")
+        raise argparse.ArgumentTypeError(
+            text("expected a positive integer, got %(value0)s", value0=number)
+        )
     return number
 
 
@@ -127,11 +131,19 @@ def _parse_positive_int_list(value: str, label: str) -> list[int]:
             number = int(item)
         except ValueError as exc:
             raise argparse.ArgumentTypeError(
-                f"expected comma-separated {label} numbers, got {item!r}"
+                text(
+                    "expected comma-separated %(label)s numbers, got %(value0)r",
+                    label=label,
+                    value0=item,
+                )
             ) from exc
         if number <= 0:
             raise argparse.ArgumentTypeError(
-                f"{label} numbers must be positive integers, got {number}"
+                text(
+                    "%(label)s numbers must be positive integers, got %(value0)s",
+                    label=label,
+                    value0=number,
+                )
             )
         numbers.append(number)
     return numbers
@@ -152,9 +164,11 @@ def _parse_metrics_port(value: str) -> int:
     try:
         port = int(value)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"metrics port must be an integer, got {value!r}") from exc
+        raise argparse.ArgumentTypeError(
+            text("metrics port must be an integer, got %(value0)r", value0=value)
+        ) from exc
     if not 0 <= port <= 65535:
-        raise argparse.ArgumentTypeError("metrics port must be in 0..65535")
+        raise argparse.ArgumentTypeError(text("metrics port must be in 0..65535"))
     return port
 
 

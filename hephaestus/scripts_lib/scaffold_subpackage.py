@@ -90,18 +90,22 @@ def _build_plan(name: str, root: Path, *, with_cli: bool) -> _Plan:
         files.append((root / "scripts" / f"{name}.py", _SCRIPT_SHIM.format(name=name)))
 
     hints: list[str] = [
-        f"Next steps for '{name}':",
-        f"  1. Add 'hephaestus/{name}/' to the directory tree in README.md",
-        f"  2. Implement hephaestus/{name}/{name}.py",
-        f"  3. Run: uv run pytest tests/unit/{name}/ -v",
+        text("Next steps for '%(name)s':", name=name),
+        text("  1. Add 'hephaestus/%(name)s/' to the directory tree in README.md", name=name),
+        text("  2. Implement hephaestus/%(name)s/%(name)s.py", name=name),
+        text("  3. Run: uv run pytest tests/unit/%(name)s/ -v", name=name),
     ]
     if with_cli:
         cmd = name.replace("_", "-")
         hints += [
-            "  4. Register the console script in pyproject.toml [project.scripts]:",
-            f'       hephaestus-{cmd} = "hephaestus.scripts_lib.{name}:main"',
-            "     Then run: uv sync",
-            "  5. Add the command to the README CLI table",
+            text("  4. Register the console script in pyproject.toml [project.scripts]:"),
+            text(
+                '       hephaestus-%(command)s = "hephaestus.scripts_lib.%(name)s:main"',
+                command=cmd,
+                name=name,
+            ),
+            text("     Then run: uv sync"),
+            text("  5. Add the command to the README CLI table"),
         ]
     return _Plan(files=files, hints=hints)
 
@@ -181,7 +185,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.dry_run:
-        msg = f"[dry-run] Would create {len(plan.files)} file(s) for '{args.name}':"
+        msg = text(
+            "[dry-run] Would create %(count)d file(s) for '%(name)s':",
+            count=len(plan.files),
+            name=args.name,
+        )
         if args.json:
             print(
                 json.dumps(

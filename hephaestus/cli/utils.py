@@ -292,9 +292,13 @@ def _finite_float(value: str) -> float:
     try:
         parsed = float(value)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"expected a finite number, got {value!r}") from exc
+        raise argparse.ArgumentTypeError(
+            text("expected a finite number, got %(value0)r", value0=value)
+        ) from exc
     if not math.isfinite(parsed):
-        raise argparse.ArgumentTypeError(f"expected a finite number, got {value!r}")
+        raise argparse.ArgumentTypeError(
+            text("expected a finite number, got %(value0)r", value0=value)
+        )
     return parsed
 
 
@@ -302,7 +306,9 @@ def _non_negative_float(value: str) -> float:
     """Parse a finite non-negative float."""
     parsed = _finite_float(value)
     if parsed < 0:
-        raise argparse.ArgumentTypeError(f"expected a non-negative number, got {value!r}")
+        raise argparse.ArgumentTypeError(
+            text("expected a non-negative number, got %(value0)r", value0=value)
+        )
     return parsed
 
 
@@ -310,7 +316,9 @@ def _positive_float(value: str) -> float:
     """Parse a finite positive float."""
     parsed = _finite_float(value)
     if parsed <= 0:
-        raise argparse.ArgumentTypeError(f"expected a positive number, got {value!r}")
+        raise argparse.ArgumentTypeError(
+            text("expected a positive number, got %(value0)r", value0=value)
+        )
     return parsed
 
 
@@ -318,7 +326,9 @@ def _at_least_one_float(value: str) -> float:
     """Parse a finite float greater than or equal to one."""
     parsed = _finite_float(value)
     if parsed < 1.0:
-        raise argparse.ArgumentTypeError(f"expected a number >= 1.0, got {value!r}")
+        raise argparse.ArgumentTypeError(
+            text("expected a number >= 1.0, got %(value0)r", value0=value)
+        )
     return parsed
 
 
@@ -376,9 +386,7 @@ def emit_json_status(exit_code: int, message: str | None = None, **extra: Any) -
     print(json.dumps(envelope))
 
 
-def confirm_action(
-    prompt: str = "Are you sure?", default: bool = False, max_attempts: int = 3
-) -> bool:
+def confirm_action(prompt: str | None = None, default: bool = False, max_attempts: int = 3) -> bool:
     """Prompt user for confirmation.
 
     Args:
@@ -390,10 +398,16 @@ def confirm_action(
         User's confirmation decision
 
     """
-    choices = "Y/n" if default else "y/N"
+    source_prompt = prompt or "Are you sure?"
+    translated_prompt = text(source_prompt)
+    choices = text("Y/n" if default else "y/N")
     for _ in range(max_attempts):
         try:
-            choice = input(f"{prompt} [{choices}] ").strip().lower()
+            choice = (
+                input(text("%(prompt)s [%(choices)s] ", prompt=translated_prompt, choices=choices))
+                .strip()
+                .lower()
+            )
         except KeyboardInterrupt:
             print(text("\nOperation cancelled."))
             sys.exit(1)

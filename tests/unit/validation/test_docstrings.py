@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from hephaestus.cli.localization import using_localizer
 from hephaestus.validation.docstrings import (
     FragmentFinding,
     format_json,
@@ -11,6 +12,26 @@ from hephaestus.validation.docstrings import (
     scan_directory,
     scan_file,
 )
+
+
+def test_human_fragment_report_localizes_labels_without_changing_json() -> None:
+    """Source labels translate while finding data and JSON remain source values."""
+    findings = [FragmentFinding("file.py", 10, "and stuff", "def foo")]
+    before_json = format_json(findings)
+    with using_localizer(
+        {
+            "Found %(count)d genuine docstring fragment(s):": (
+                "%(count)d fragment(s) de docstring détecté(s) :"
+            ),
+            "    Context: %(context)s": "    Contexte : %(context)s",
+        }
+    ):
+        report = format_report(findings)
+        localized_json = format_json(findings)
+
+    assert "1 fragment(s) de docstring détecté(s)" in report
+    assert "Contexte : def foo" in report
+    assert localized_json == before_json
 
 
 class TestIsGenuineFragment:

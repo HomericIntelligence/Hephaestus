@@ -105,10 +105,17 @@ class TierLabelFinding:
     def format(self) -> str:
         """Return a human-readable description of this finding."""
         return (
-            f"  {self.file}:{self.line}\n"
-            f"    Found: {self.tier}/{self.found_name}  "
-            f"Expected: {self.tier}/{self.expected_name}\n"
-            f"    Text: {self.raw_text!r}\n"
+            text("  %(file)s:%(line)d", file=self.file, line=self.line)
+            + "\n"
+            + text(
+                "    Found: %(tier)s/%(found)s  Expected: %(tier)s/%(expected)s",
+                tier=self.tier,
+                found=self.found_name,
+                expected=self.expected_name,
+            )
+            + "\n"
+            + text("    Text: %(value)r", value=self.raw_text)
+            + "\n"
         )
 
 
@@ -240,9 +247,9 @@ def format_report(findings: list[TierLabelFinding]) -> str:
 
     """
     if not findings:
-        return "No tier label mismatches found.\n"
+        return text("No tier label mismatches found.\n")
 
-    lines: list[str] = [f"Found {len(findings)} tier label mismatch(es):", ""]
+    lines: list[str] = [text("Found %(count)d tier label mismatch(es):", count=len(findings)), ""]
     for f in findings:
         lines.append(f.format())
     return "\n".join(lines)

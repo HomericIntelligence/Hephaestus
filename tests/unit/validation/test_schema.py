@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from hephaestus.cli.localization import using_localizer
 from hephaestus.validation.schema import (
     check_files,
     load_schema_map,
@@ -237,6 +238,23 @@ class TestCheckFiles:
         """Empty files list returns 0."""
         exit_code, _error_count = check_files([], tmp_path, [])
         assert exit_code == 0
+
+    def test_text_validation_error_is_localized(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Human schema diagnostics use the localization boundary."""
+        missing_yaml = tmp_path / "missing.yaml"
+        schema_file = tmp_path / "schema.json"
+        schema_file.write_text(json.dumps({"type": "object"}))
+        mapping = [(re.compile(r"^missing\.yaml$"), schema_file)]
+
+        with using_localizer(
+            {"Could not read/parse YAML: %(value0)s": "YAML illisible : %(value0)s"}
+        ):
+            exit_code, _error_count = check_files([missing_yaml], tmp_path, mapping)
+
+        assert exit_code == 1
+        assert "YAML illisible" in capsys.readouterr().err
 
 
 class TestMain:

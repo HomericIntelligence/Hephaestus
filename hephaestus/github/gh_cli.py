@@ -86,7 +86,14 @@ def _handle_timeout(
         emit_json_status(124, message, stdout=stdout, stderr=stderr)
     else:
         _write_streams(stdout, stderr)
-        print(message, file=sys.stderr)
+        print(
+            text(
+                "gh %(command)s timed out after %(timeout)ss",
+                command=" ".join(gh_args),
+                timeout=exc.timeout,
+            ),
+            file=sys.stderr,
+        )
     return 124
 
 
@@ -125,7 +132,7 @@ def main(argv: list[str] | None = None) -> int:
     if gh_args and gh_args[0] == "--":
         gh_args = gh_args[1:]
     if not gh_args:
-        parser.error("missing gh arguments")
+        parser.error(text("missing gh arguments"))
 
     configure_github_throttle_from_args(args)
     try:

@@ -2,14 +2,56 @@
 
 from pathlib import Path
 
+from hephaestus.cli.localization import using_localizer
 from hephaestus.validation.type_aliases import (
     _update_string_state,
     check_files,
     detect_shadowing,
     format_error,
+    format_human_error,
     is_shadowing_pattern,
     main,
 )
+
+
+def test_human_error_localizes_labels_without_changing_machine_error() -> None:
+    """Human labels translate while the checker's error string stays stable."""
+    error = format_error(Path("foo.py"), 10, "Result = DomainResult", "Result", "DomainResult")
+    with using_localizer(
+        {
+            "%(path)s:%(line)d: Type alias shadows domain-specific name": (
+                "%(path)s:%(line)d : l'alias masque un nom de domaine"
+            ),
+            "  Suggestion: Use '%(target)s' directly instead of aliasing to '%(alias)s'": (
+                "  Suggestion : utiliser '%(target)s' directement au lieu de l'alias '%(alias)s'"
+            ),
+        }
+    ):
+        message = format_human_error(error)
+
+    assert "foo.py:10 : l'alias masque un nom de domaine" in message
+    assert "Result = DomainResult" in message
+    assert "Type alias shadows domain-specific name" in error
+
+
+def test_type_alias_json_stays_english_under_a_catalog(tmp_path: Path, monkeypatch, capsys) -> None:
+    """The JSON finding is protocol data, never a translated report."""
+    import json
+
+    py_file = tmp_path / "bad.py"
+    py_file.write_text("Result = DomainResult\n")
+    monkeypatch.setattr("sys.argv", ["check-type-aliases", "--json", str(tmp_path)])
+    with using_localizer(
+        {
+            "%(path)s:%(line)d: Type alias shadows domain-specific name": (
+                "traduit %(path)s %(line)d"
+            )
+        }
+    ):
+        assert main() == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert "Type alias shadows domain-specific name" in payload["violations"][0]
 
 
 class TestIsShadowingPattern:

@@ -25,6 +25,22 @@ from hephaestus.cli.utils import create_validation_parser, emit_json_status, res
 SchemaMapping = list[tuple[re.Pattern[str], Path]]
 
 
+def _format_validation_error(error: str) -> str:
+    """Localize authored validation prose while preserving raw error data APIs."""
+    if error == (
+        "jsonschema not installed. Install with: pip install HomericIntelligence-Hephaestus[schema]"
+    ):
+        return text(
+            "jsonschema not installed. "
+            "Install with: pip install HomericIntelligence-Hephaestus[schema]"
+        )
+    if (value := error.removeprefix("Could not read/parse YAML: ")) != error:
+        return text("Could not read/parse YAML: %(value0)s", value0=value)
+    if match := re.fullmatch(r"  \[(?P<path>.+)] (?P<message>.+)", error):
+        return text("  [%(path)s] %(message)s", **match.groupdict())
+    return error
+
+
 def load_schema_map(schema_map_file: Path) -> SchemaMapping:
     r"""Load a schema mapping from a JSON file.
 
@@ -162,7 +178,7 @@ def check_files(
         if errors:
             print(text("FAIL: %(value0)s", value0=file_path), file=sys.stderr)
             for error in errors:
-                print(error, file=sys.stderr)
+                print(_format_validation_error(error), file=sys.stderr)
             any_failure = True
             error_count += len(errors)
         elif verbose:
