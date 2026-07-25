@@ -215,7 +215,11 @@ class TestQuiescence:
     ) -> None:
         """A repo seed's products traverse their entry stages into the ledger."""
         seed = [SeedEntry(kind="repo", identifier="repo-a", stage=StageName.REPO, reason="seed")]
-        coordinator, pool, _ = make_coordinator(tmp_path, monkeypatch, seed_entries=[seed])
+        # The repo item and its one actionable product are both live until
+        # each reaches the finished sink.
+        coordinator, pool, _ = make_coordinator(
+            tmp_path, monkeypatch, seed_entries=[seed], max_workers=2
+        )
 
         class ProducingRepoStage(StubStage):
             def step(self, item: WorkItem, ctx: Any) -> Any:
@@ -549,7 +553,10 @@ class TestDrainOrder:
 
     def test_downstream_first(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """merge_wait drains before review, planning, and repo."""
-        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+        # This test intentionally fills four distinct stages before draining;
+        # the coordinator-wide permit budget must be large enough to admit
+        # that four-item fixture.
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch, max_workers=4)
         for stage in (
             StageName.PLANNING,
             StageName.MERGE_WAIT,
@@ -602,9 +609,9 @@ class TestAdmission:
     ) -> None:
         """The global work window caps jobs across repositories and stage queues.
 
-        Each source queue has capacity one here.  Put the work in distinct
-        stages so the assertion exercises global worker admission instead of
-        attempting to bypass the first item's capacity-reserving source lease.
+        With C=1, a second item in a different stage cannot be admitted while
+        the first is in flight. The global permit rejects it before the worker
+        admission check, rather than allowing one item per stage queue.
         """
         coordinator, pool, _ = make_coordinator(
             tmp_path, monkeypatch, repos=["repo-a", "repo-b"], max_workers=1
@@ -615,19 +622,20 @@ class TestAdmission:
         coordinator.stages[StageName.PR_REVIEW] = StubStage(
             JobRequest(_agent_job(repo="repo-b", issue=2), on_done_state="V"),
         )
-        coordinator._push_item(
-            _issue_item(1, repo="repo-a"), StageName.MERGE_WAIT, enter=True
+        assert (
+            coordinator._push_item(_issue_item(1, repo="repo-a"), StageName.MERGE_WAIT, enter=True)
+            is True
         )
-        coordinator._push_item(
-            _issue_item(2, repo="repo-b"), StageName.PR_REVIEW, enter=True
+        assert (
+            coordinator._push_item(_issue_item(2, repo="repo-b"), StageName.PR_REVIEW, enter=True)
+            is False
         )
         coordinator._drain_queues()
 
         assert len(pool.submitted) == 1
         assert coordinator.inflight_per_repo["repo-a"] == 1
         assert coordinator.inflight_per_repo["repo-b"] == 0
-        queued_repos = [item.repo for item in coordinator.queues[StageName.PR_REVIEW].snapshot()]
-        assert queued_repos == ["repo-b"]
+        assert coordinator.queues[StageName.PR_REVIEW].snapshot() == []
 
 
 class TestRateBudget:

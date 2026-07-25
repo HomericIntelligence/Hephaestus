@@ -13,6 +13,7 @@ from typing import Any
 
 from hephaestus.automation.pipeline.coordinator import Coordinator, PipelineConfig
 from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
+from hephaestus.automation.pipeline.queues import StageQueue
 from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
 from hephaestus.automation.pipeline.stages.base import JobRequest
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
@@ -81,7 +82,12 @@ def test_full_next_stage_retains_completed_transition_until_retry(tmp_path: Path
             org="org",
             repos=["repo-a"],
             parallel_repos=1,
-            max_workers=1,
+            # Two valid live items are needed for this targeted full-next-stage
+            # fallback. Production queues have capacity C, so replace only the
+            # destination below with a smaller test double to exercise the
+            # defensive handoff path that remains lossless under an unexpected
+            # downstream capacity reduction.
+            max_workers=2,
             projects_dir=tmp_path,
         ),
         github=FakeStageGitHub(),
@@ -94,6 +100,7 @@ def test_full_next_stage_retains_completed_transition_until_retry(tmp_path: Path
     )
     source = _issue(1, StageName.PLANNING)
     blocker = _issue(2, StageName.PLAN_REVIEW)
+    coordinator.queues[StageName.PLAN_REVIEW] = StageQueue(capacity=1)
 
     # Dispatch source normally so the coordinator owns its source-stage slot.
     coordinator._push_item(source, StageName.PLANNING, enter=True)
@@ -114,7 +121,7 @@ def test_full_next_stage_retains_completed_transition_until_retry(tmp_path: Path
     assert not coordinator.shutdown.is_set()
     assert not coordinator._fatal
     assert destination.snapshot() == [blocker]
-    assert source_queue.occupancy == source_queue.capacity == 1
+    assert source_queue.occupancy == 1
 
     # Once the next stage opens, the coordinator retries the retained transition exactly once.
     assert destination.pop() is blocker

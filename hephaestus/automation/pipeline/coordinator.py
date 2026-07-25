@@ -290,7 +290,7 @@ class PipelineConfig:
 
 
 def _work_window(config: PipelineConfig) -> int:
-    """Return the global bound for queued and executing pipeline work."""
+    """Return the global bound for all nonterminal pipeline work."""
     return max(1, config.parallel_repos * config.max_workers)
 
 
@@ -451,6 +451,13 @@ class Coordinator:
         self._leases: dict[int, StageQueueLease] = {}
         self._pending_handoffs: dict[int, _PendingHandoff] = {}
         self._direct_issue_source: _DirectIssueSource | None = None
+        # A StageQueue's capacity only bounds that one stage.  This permit
+        # set is the coordinator-wide admission budget: an item acquires one
+        # permit on first entry and keeps it while it moves between queues,
+        # leases, in-flight jobs, timers, and a retained handoff.  It releases
+        # only after the finished sink completes.  The set is therefore
+        # bounded by ``_work_window(config)``, not by the number of stages.
+        self._live_work_permit_ids: set[int] = set()
         self.ledger: list[ItemResult] = []
         self.preserved: list[PreservedWorktree] = []
         self.items: list[WorkItem] = []
@@ -839,6 +846,25 @@ class Coordinator:
             and not self._pending_handoffs
             and self._direct_issue_source is None
         )
+
+    @property
+    def live_work_count(self) -> int:
+        """Return the number of nonterminal work permits currently held."""
+        return len(self._live_work_permit_ids)
+
+    def _try_acquire_work_permit(self, item: WorkItem) -> bool:
+        """Reserve one global live-work slot for a newly admitted item."""
+        item_id = id(item)
+        if item_id in self._live_work_permit_ids:
+            return True
+        if self.live_work_count >= _work_window(self.config):
+            return False
+        self._live_work_permit_ids.add(item_id)
+        return True
+
+    def _release_work_permit(self, item: WorkItem) -> None:
+        """Release *item*'s permit after the terminal sink has completed."""
+        self._live_work_permit_ids.discard(id(item))
 
     # -- stage-queue leases -------------------------------------------------
 
@@ -1501,6 +1527,7 @@ class Coordinator:
             # Sink outcomes are terminal: the result is already recorded.
             self._record_event("done", self._item_key(item), outcome.note)
             self._release_source_lease(item)
+            self._release_work_permit(item)
             return
 
         if disposition is Disposition.ADVANCE:
@@ -1589,6 +1616,7 @@ class Coordinator:
                 self.ledger.append(item.result)
                 item.payload["_recorded"] = True
             self._release_source_lease(item)
+            self._release_work_permit(item)
             return
         result = ItemResult(passed=passed, reason=reason, final_stage=item.stage)
         self._handoff_item(item, StageName.FINISHED, enter=True, result=result)
@@ -1635,7 +1663,7 @@ class Coordinator:
                 keys.add((it.repo, it.issue))
         return keys
 
-    def _push_item(self, item: WorkItem, stage: StageName, enter: bool) -> None:
+    def _push_item(self, item: WorkItem, stage: StageName, enter: bool) -> bool:
         """Push *item* into *stage*'s queue (the single push chokepoint).
 
         Every durable GitHub mutation for this transition already happened
@@ -1648,25 +1676,34 @@ class Coordinator:
         from an already-tracked item re-pushing itself on timer/retry/fail-back/
         advance, which must always be allowed through.
         """
+        is_new_item = id(item) not in self._seen_item_ids
         if (
-            id(item) not in self._seen_item_ids
+            is_new_item
             and item.kind is ItemKind.ISSUE
             and item.issue is not None
             and (item.repo, item.issue) in self._live_issue_keys()
         ):
             logger.info("seed skipped: #%s already queued/in-flight in %s", item.issue, item.repo)
-            return
+            return False
+        if is_new_item and not self._try_acquire_work_permit(item):
+            logger.debug(
+                "global live-work capacity reached (%d); deferring %s",
+                _work_window(self.config),
+                self._item_key(item),
+            )
+            return False
         item.stage = stage
         if enter:
             item.state = "ENTER"
             item.payload["_enter_pending"] = True
             item.add_history_event(stage, item.state, note="enqueued")
-        if id(item) not in self._seen_item_ids:
+        if is_new_item:
             self._seen_item_ids.add(id(item))
             self.items.append(item)
             item.payload.setdefault("entry_stage", stage.value)
         self.queues[stage].push(item)
         self._record_event("push", stage.value, self._item_key(item))
+        return True
 
     @staticmethod
     def _item_key(item: WorkItem) -> str:
@@ -1710,8 +1747,8 @@ class Coordinator:
                 item.result = ItemResult(
                     passed=entry.passed, reason=entry.reason, final_stage=StageName.FINISHED
                 )
-            self._push_item(item, item.stage, enter=True)
-            pushed += 1
+            if self._push_item(item, item.stage, enter=True):
+                pushed += 1
         return pushed + self._drain_direct_issue_source()
 
     def _begin_direct_issue_source(self, repo: str) -> None:
@@ -1723,8 +1760,10 @@ class Coordinator:
         self._direct_issue_source = _DirectIssueSource(repo=repo, issues=iter(open_issues))
 
     def _direct_issue_queues_can_accept(self) -> bool:
-        """Return whether any direct issue can be classified and enqueued now."""
-        return all(self.queues[stage].can_offer() for stage in _DIRECT_ISSUE_ENTRY_STAGES)
+        """Return whether one direct issue can be classified and enqueued now."""
+        return self.live_work_count < _work_window(self.config) and all(
+            self.queues[stage].can_offer() for stage in _DIRECT_ISSUE_ENTRY_STAGES
+        )
 
     def _drain_direct_issue_source(self) -> int:
         """Pull explicit issues directly into queues without a seed spill buffer.
@@ -1766,10 +1805,12 @@ class Coordinator:
                     final_stage=StageName.FINISHED,
                 )
             # ``_direct_issue_queues_can_accept`` covers every possible
-            # classifier result and this method owns the coordinator thread,
-            # so the ordinary lifecycle push cannot overflow here.
-            self._push_item(item, item.stage, enter=True)
-            pushed += 1
+            # classifier result and the coordinator-wide permit budget. This
+            # source owns the coordinator thread, so a failed lifecycle push
+            # can only be an idempotent duplicate; it never represents
+            # saturation or a completion/shutdown fault.
+            if self._push_item(item, item.stage, enter=True):
+                pushed += 1
         return pushed
 
     def _clamp_seed_stage_to_scope(
