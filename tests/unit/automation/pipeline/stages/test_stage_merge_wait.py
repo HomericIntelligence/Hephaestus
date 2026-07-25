@@ -747,8 +747,10 @@ def test_persistent_405_clean_readiness_retries_after_one_fresh_wait(
         "mergeable": "MERGEABLE",
         "mergeStateStatus": "CLEAN",
     }
+    states: list[dict[str, object] | None] = [_open_pr() for _ in range(5)]
+    states.append({"state": "MERGED"})
     github = _ConditionalGitHub(
-        states=[_open_pr() for _ in range(5)] + [{"state": "MERGED"}],
+        states=states,
         merge_results=[
             ConditionalMergeResult(
                 status=405,
