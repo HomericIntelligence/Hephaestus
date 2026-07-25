@@ -404,6 +404,8 @@ class TestQuiescence:
         entries = coordinator._seed_direct_scope("repo-a")
         item = coordinator._entry_to_item(entries[0], "repo-a")
 
+        assert entries[0].stage is StageName.PR_REVIEW
+        assert item.stage is StageName.PR_REVIEW
         assert item.pr == 701
         assert item.issue == 700
         assert item.payload["issue_title"] == "Review the migration"
