@@ -34,6 +34,10 @@ PLAN_REVIEW_STATES: Final[frozenset[str]] = frozenset(
 )
 
 MAX_AGENT_HISTORY_CHARS: Final[int] = 48_000
+#: Planning/review prompts receive the current plan and/or latest review in
+#: dedicated fields.  Keep the restart-only current-revision context bounded
+#: so append-only superseded artifacts cannot compete with active feedback.
+MAX_CURRENT_REVISION_CONTEXT_CHARS: Final[int] = 12_000
 MAX_REVIEW_SUMMARY_CHARS: Final[int] = 800
 
 _OLD_PLAN_PAYLOAD = "<!-- hephaestus-plan-history:old-plan -->"
@@ -492,3 +496,70 @@ def history_projection(
         rendered += f"{separator}{heading}\n\n{excerpt}"
         remaining -= len(excerpt)
     return rendered
+
+
+def current_plan_context(
+    comments: Sequence[IssueComment | str],
+    *,
+    max_chars: int = MAX_CURRENT_REVISION_CONTEXT_CHARS,
+) -> str:
+    """Return a bounded canonical-plan excerpt without superseded revisions.
+
+    The append-only journal remains the durable recovery and audit record.
+    This projection is only supplemental agent context for a resumed planner,
+    which already receives the immediate NOGO critique separately.
+    """
+    if max_chars <= 0:
+        return ""
+    snapshot = journal_snapshot(comments)
+    if not snapshot.current_plan:
+        return ""
+    plan = render_current_plan(snapshot.current_plan, revision=snapshot.revision)
+    return _bounded_excerpt(plan, max_chars)
+
+
+def current_revision_context(
+    comments: Sequence[IssueComment | str],
+    *,
+    max_chars: int = MAX_CURRENT_REVISION_CONTEXT_CHARS,
+) -> str:
+    """Return bounded current plan context while preserving its paired review.
+
+    Superseded plan/review artifacts are deliberately excluded: they remain
+    durable on GitHub but can contain stale, mutually incompatible critique.
+    When space is constrained, preserve the current review in full whenever
+    possible and spend the remaining budget on a deterministic plan excerpt.
+    """
+    if max_chars <= 0:
+        return ""
+    snapshot = journal_snapshot(comments)
+    plan = (
+        render_current_plan(snapshot.current_plan, revision=snapshot.revision)
+        if snapshot.current_plan
+        else ""
+    )
+    review = (
+        render_current_review(snapshot.current_review, revision=snapshot.revision)
+        if snapshot.current_review
+        and snapshot.current_review_revision is not None
+        and snapshot.current_review_revision >= snapshot.revision
+        else ""
+    )
+    if not plan:
+        return _bounded_excerpt(review, max_chars)
+    if not review:
+        return _bounded_excerpt(plan, max_chars)
+
+    plan_heading = "## Current rejected plan\n\n"
+    review_heading = "## Current review\n\n"
+    separator = "\n\n---\n\n"
+    fixed_size = len(plan_heading) + len(review_heading) + len(separator) + len(review)
+    if fixed_size >= max_chars:
+        return _bounded_excerpt(
+            f"{review_heading}{review}",
+            max_chars,
+        )
+    return (
+        f"{plan_heading}{_bounded_excerpt(plan, max_chars - fixed_size)}"
+        f"{separator}{review_heading}{review}"
+    )

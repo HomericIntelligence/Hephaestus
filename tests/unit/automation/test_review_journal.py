@@ -5,10 +5,13 @@ from __future__ import annotations
 from hephaestus.automation.review_journal import (
     HISTORY_MARKER,
     MAX_AGENT_HISTORY_CHARS,
+    MAX_CURRENT_REVISION_CONTEXT_CHARS,
     IssueComment,
     archive_plan_body,
     archive_review_body,
     blocked_audit_recovery_body,
+    current_plan_context,
+    current_revision_context,
     history_projection,
     journal_snapshot,
     plan_fingerprint,
@@ -140,6 +143,65 @@ def test_projection_indexes_the_plan_belonging_to_each_revision() -> None:
 
     revision_one = next(line for line in projection.splitlines() if "Revision 1:" in line)
     assert f"plan_sha={plan_fingerprint('Plan one')}" in revision_one
+
+
+def test_current_revision_context_excludes_superseded_plan_and_review_artifacts() -> None:
+    """Restart context keeps only the current rejected revision's instructions."""
+    comments = [
+        _owned(archive_plan_body(1, "Plan v1", "Plan v2")),
+        _owned(archive_review_body(1, "Review v1\n\nstate:plan-no-go")),
+        _owned(render_current_plan("Plan v2", revision=2)),
+        _owned(render_current_review("Review v2\n\nstate:plan-no-go", revision=2)),
+    ]
+
+    context = current_revision_context(comments)
+
+    assert "Plan v2" in context
+    assert "Review v2" in context
+    assert "Plan v1" not in context
+    assert "Review v1" not in context
+
+
+def test_current_revision_context_preserves_latest_review_when_plan_is_oversized() -> None:
+    """A long plan cannot crowd out the immediate reviewer critique."""
+    comments = [
+        _owned(render_current_plan("x" * 50_000, revision=7)),
+        _owned(render_current_review("Latest finding\n\nstate:plan-no-go", revision=7)),
+    ]
+
+    context = current_revision_context(comments)
+
+    assert len(context) <= MAX_CURRENT_REVISION_CONTEXT_CHARS
+    assert "Latest finding" in context
+    assert "state:plan-no-go" in context
+
+
+def test_current_plan_context_excludes_current_review_and_superseded_revisions() -> None:
+    """Amendments receive the last plan separately from the direct critique."""
+    comments = [
+        _owned(archive_plan_body(1, "Plan v1", "Plan v2")),
+        _owned(archive_review_body(1, "Review v1\n\nstate:plan-no-go")),
+        _owned(render_current_plan("Plan v2", revision=2)),
+        _owned(render_current_review("Review v2\n\nstate:plan-no-go", revision=2)),
+    ]
+
+    context = current_plan_context(comments)
+
+    assert "Plan v2" in context
+    assert "Plan v1" not in context
+    assert "Review v1" not in context
+    assert "Review v2" not in context
+
+
+def test_current_plan_context_honors_its_explicit_size_budget() -> None:
+    """An oversized previous plan cannot expand an amendment prompt unboundedly."""
+    context = current_plan_context(
+        [_owned(render_current_plan("x" * 2_000, revision=2))],
+        max_chars=128,
+    )
+
+    assert len(context) <= 128
+    assert "artifact excerpt truncated" in context
 
 
 def test_projection_respects_tiny_explicit_budget() -> None:
