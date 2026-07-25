@@ -113,16 +113,17 @@ def test_conditional_merge_succeeds_only_after_lifecycle_confirms_merged(
     assert github.merge_attempts == [(12, "a" * 40)]
 
 
-def test_mergeable_has_hooks_readiness_merges_successfully(
-    make_ctx: Any, make_work_item: Any
+@pytest.mark.parametrize("merge_state_status", ["HAS_HOOKS"])
+def test_mergeable_requestable_readiness_merges_successfully(
+    make_ctx: Any, make_work_item: Any, merge_state_status: str
 ) -> None:
-    """A mergeable pre-receive-hook state reaches the conditional PUT."""
+    """Mergeable requestable readiness states reach the conditional PUT."""
     github = _ConditionalGitHub(
         states=[_open_pr(), _open_pr(), {"state": "MERGED"}],
         readiness={
             **_open_pr(),
             "mergeable": "MERGEABLE",
-            "mergeStateStatus": "HAS_HOOKS",
+            "mergeStateStatus": merge_state_status,
         },
     )
     ctx = make_ctx(github=github)
@@ -134,15 +135,35 @@ def test_mergeable_has_hooks_readiness_merges_successfully(
     assert github.merge_attempts == [(12, "a" * 40)]
 
 
-@pytest.mark.parametrize("merge_state_status", ["BLOCKED", "UNSTABLE"])
-def test_readiness_waits_before_the_first_conditional_merge(
-    make_ctx: Any, make_work_item: Any, merge_state_status: str
+def test_unstable_mergeable_optional_failure_reaches_the_conditional_put(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """UNSTABLE + MERGEABLE may be accepted by server protection."""
+    github = _ConditionalGitHub(
+        states=[_open_pr(), _open_pr(), {"state": "MERGED"}],
+        readiness={
+            **_open_pr(),
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "UNSTABLE",
+        },
+    )
+    ctx = make_ctx(github=github)
+    ctx.config.enable_learn = False
+
+    result = MergeWaitStage().step(_reviewed_item(make_work_item), ctx)
+
+    assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
+    assert github.merge_attempts == [(12, "a" * 40)]
+
+
+def test_blocked_readiness_waits_before_the_first_conditional_merge(
+    make_ctx: Any, make_work_item: Any
 ) -> None:
     """Pending readiness is polled without burning a conditional PUT."""
     not_ready = {
         **_open_pr(),
         "mergeable": "MERGEABLE",
-        "mergeStateStatus": merge_state_status,
+        "mergeStateStatus": "BLOCKED",
     }
     ready = {
         **_open_pr(),
@@ -676,6 +697,47 @@ def test_405_reenters_readiness_wait_without_a_second_conditional_put(
     assert github.merge_attempts == [(12, "a" * 40)]
 
 
+def test_persistent_405_unstable_readiness_does_not_duplicate_the_put(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A 405 parks while readiness is unchanged instead of retrying the same PUT."""
+    unstable = {
+        **_open_pr(),
+        "mergeable": "MERGEABLE",
+        "mergeStateStatus": "UNSTABLE",
+    }
+    github = _ConditionalGitHub(
+        states=[_open_pr()],
+        merge_results=[
+            ConditionalMergeResult(
+                status=405,
+                body={"message": "not ready"},
+                transport_error=False,
+                malformed=False,
+                dry_run=False,
+            )
+        ],
+        readiness=[unstable, unstable, unstable],
+    )
+    item = _reviewed_item(make_work_item)
+    stage = MergeWaitStage()
+    ctx = make_ctx(github=github, budget_fn=lambda _route: 2)
+
+    first = stage.step(item, ctx)
+
+    assert first == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
+    assert item.payload["retry_delay_s"] == 5.0
+    assert item.attempts["merge"] == 1
+    assert github.merge_attempts == [(12, "a" * 40)]
+
+    second = stage.step(item, ctx)
+
+    assert second == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
+    assert item.payload["retry_delay_s"] == 10.0
+    assert item.attempts["merge"] == 1
+    assert github.merge_attempts == [(12, "a" * 40)]
+
+
 @pytest.mark.parametrize("merge_state_status", ["CONFLICTING", "DIRTY"])
 def test_405_conflicting_or_dirty_readiness_is_terminal(
     make_ctx: Any, make_work_item: Any, merge_state_status: str
@@ -833,6 +895,39 @@ def test_readiness_wait_has_a_bounded_minute_scale_deadline_without_puts(
     assert github.merge_attempts == []
     assert item.payload["merge_readiness_deadline_s"] == 1900.0
     assert item.payload["merge_readiness_polls"] == 18
+
+
+@pytest.mark.parametrize("now", [1900.0, 1901.0])
+def test_requestable_readiness_honors_an_existing_matching_deadline_without_puts(
+    make_ctx: Any, make_work_item: Any, now: float
+) -> None:
+    """A ready PR cannot outlive an already-established matching wait deadline."""
+    github = _ConditionalGitHub(
+        readiness={
+            **_open_pr(),
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+        }
+    )
+    item = _reviewed_item(make_work_item)
+    item.payload.update(
+        {
+            "merge_readiness_head_sha": "a" * 40,
+            "merge_readiness_proof_generation": 0,
+            "merge_readiness_deadline_s": 1900.0,
+            "merge_readiness_polls": 17,
+        }
+    )
+
+    result = MergeWaitStage().step(
+        item,
+        make_ctx(github=github, now_fn=lambda: now),
+    )
+
+    assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_timeout")
+    assert github.merge_attempts == []
+    assert item.payload["merge_readiness_deadline_s"] == 1900.0
+    assert item.payload["merge_readiness_polls"] == 17
 
 
 def test_readiness_wait_resets_its_deadline_for_a_fresh_reviewed_head(

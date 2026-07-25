@@ -19,6 +19,9 @@
 > stable public API surface, not a 1.0 tag; the package remains tag-driven and is
 > currently on the 0.10.x series.
 
+The 15-minute operational readiness wait described below is not part of the
+released 0.10.0 behavior.
+
 ## Current main (unreleased)
 
 Before a request, `merge_wait` may wait up to 15 minutes for operational GitHub

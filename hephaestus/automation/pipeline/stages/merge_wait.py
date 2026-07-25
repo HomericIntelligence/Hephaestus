@@ -43,12 +43,13 @@ LEARN_WAIT = "LEARN_WAIT"
 MW_FINISH = "MW_FINISH"
 FINISH = MW_FINISH
 
-_REQUESTABLE_READINESS = frozenset({"CLEAN", "HAS_HOOKS"})
-_RETRYABLE_READINESS = frozenset({"BEHIND", "BLOCKED", "UNKNOWN", "UNSTABLE"})
+_REQUESTABLE_READINESS = frozenset({"CLEAN", "HAS_HOOKS", "UNSTABLE"})
+_RETRYABLE_READINESS = frozenset({"BEHIND", "BLOCKED", "UNKNOWN"})
 _CONFLICTING_READINESS = frozenset({"CONFLICTING", "DIRTY"})
 _READINESS_WAIT_INITIAL_S = 5.0
 _READINESS_WAIT_TIMEOUT_S = 15 * 60.0
 _READINESS_WAIT_DELAY_CAP_S = 60.0
+_DECLINED_READINESS_FINGERPRINT = "merge_readiness_declined_fingerprint"
 
 
 def build_drive_green_learn_prompt(issue_number: int, pr_number: int) -> str:
@@ -306,6 +307,9 @@ class MergeWaitStage(Stage):
         # now-clean readiness result must therefore wait for a fresh turn: a
         # later entry will re-read the authoritative admission facts before it
         # considers another SHA-conditional request.
+        fingerprint = self._readiness_fingerprint(readiness)
+        if fingerprint is not None:
+            item.payload[_DECLINED_READINESS_FINGERPRINT] = fingerprint
         parked = self._wait_for_readiness(item, ctx, readiness=readiness, park_if_ready=True)
         if parked is None:  # Defensive type boundary; park_if_ready never returns None.
             return self._park_for_readiness(item, ctx)
@@ -362,13 +366,92 @@ class MergeWaitStage(Stage):
             return StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_unavailable")
         if isinstance(readiness_head, str) and readiness_head and readiness_head != reviewed_head:
             return self._park_for_readiness(item, ctx)
+        fingerprint = self._readiness_fingerprint(readiness)
+        declined_fingerprint = self._declined_readiness_fingerprint(item, fingerprint)
         if status in _REQUESTABLE_READINESS and mergeable == "MERGEABLE":
-            return self._park_for_readiness(item, ctx) if park_if_ready else None
+            return self._requestable_readiness_outcome(
+                item,
+                ctx,
+                fingerprint=fingerprint,
+                declined_fingerprint=declined_fingerprint,
+                park_if_ready=park_if_ready,
+            )
         if status in _CONFLICTING_READINESS or mergeable == "CONFLICTING":
             return StageOutcome(Disposition.FINISH_FAIL, "merge_conflicting")
         if status not in _RETRYABLE_READINESS and mergeable != "UNKNOWN":
             return StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_unknown")
         return self._park_for_readiness(item, ctx)
+
+    @staticmethod
+    def _readiness_fingerprint(readiness: dict[str, Any]) -> list[str] | None:
+        """Return the readiness facts that must change after a 405 before re-requesting."""
+        readiness_head = readiness.get("headRefOid")
+        if not isinstance(readiness_head, str) or not readiness_head:
+            return None
+        return [
+            readiness_head,
+            str(readiness.get("mergeable") or "").upper(),
+            str(readiness.get("mergeStateStatus") or "").upper(),
+        ]
+
+    @staticmethod
+    def _declined_readiness_fingerprint(
+        item: WorkItem, current_fingerprint: list[str] | None
+    ) -> object:
+        """Return the declined fingerprint, clearing it once readiness changes."""
+        declined_fingerprint = item.payload.get(_DECLINED_READINESS_FINGERPRINT)
+        if (
+            declined_fingerprint is not None
+            and current_fingerprint is not None
+            and declined_fingerprint != current_fingerprint
+        ):
+            item.payload.pop(_DECLINED_READINESS_FINGERPRINT, None)
+            return None
+        return declined_fingerprint
+
+    def _requestable_readiness_outcome(
+        self,
+        item: WorkItem,
+        ctx: StageContext,
+        *,
+        fingerprint: list[str] | None,
+        declined_fingerprint: object,
+        park_if_ready: bool,
+    ) -> StepResult | None:
+        """Allow ready PRs to request unless an unchanged 405 already declined them."""
+        deadline_outcome = self._matching_readiness_deadline_outcome(item, ctx)
+        if deadline_outcome is not None:
+            return deadline_outcome
+        if declined_fingerprint == fingerprint:
+            return self._park_for_readiness(item, ctx)
+        return self._park_for_readiness(item, ctx) if park_if_ready else None
+
+    @staticmethod
+    def _matching_readiness_deadline_outcome(
+        item: WorkItem, ctx: StageContext
+    ) -> StageOutcome | None:
+        """Fail closed when an existing matching readiness wait has already expired."""
+        reviewed_head = item.payload.get("reviewed_pr_head_sha")
+        if not isinstance(reviewed_head, str) or not reviewed_head:
+            return StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_state_invalid")
+        proof_generation = item.payload.get("reviewed_pr_proof_generation", 0)
+        if isinstance(proof_generation, bool) or not isinstance(proof_generation, int):
+            return StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_state_invalid")
+        if (
+            item.payload.get("merge_readiness_head_sha") != reviewed_head
+            or item.payload.get("merge_readiness_proof_generation") != proof_generation
+        ):
+            return None
+        deadline = item.payload.get("merge_readiness_deadline_s")
+        if isinstance(deadline, bool) or (
+            deadline is not None and not isinstance(deadline, (int, float))
+        ):
+            return StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_state_invalid")
+        if deadline is None:
+            return None
+        if ctx.now() >= deadline:
+            return StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_timeout")
+        return None
 
     @staticmethod
     def _park_for_readiness(item: WorkItem, ctx: StageContext) -> StageOutcome:
