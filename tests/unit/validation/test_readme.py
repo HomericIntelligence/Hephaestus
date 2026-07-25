@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from hephaestus.cli.localization import using_localizer
 from hephaestus.validation.markdown import (
     ReadmeValidationResult,
+    _print_readme_summary,
     find_readmes,
     validate_all_readmes,
     validate_readme,
@@ -36,6 +38,24 @@ class TestReadmeValidationResult:
         assert result.passed is False
         assert "Overview" in result.missing_sections
         assert len(result.formatting_issues) == 1
+
+    def test_human_summary_localizes_formatting_issue(self, tmp_path: Path, capsys) -> None:
+        """Text reports translate their authored finding labels only."""
+        result = ReadmeValidationResult(
+            file=tmp_path / "README.md",
+            passed=False,
+            formatting_issues=["Code blocks missing language specification"],
+        )
+        with using_localizer(
+            {
+                "Code blocks missing language specification": (
+                    "Les blocs de code n'ont pas de langage"
+                )
+            }
+        ):
+            _print_readme_summary([result])
+
+        assert "Les blocs de code" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------

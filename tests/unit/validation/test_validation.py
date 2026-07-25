@@ -3,6 +3,7 @@
 
 import pytest
 
+from hephaestus.cli.localization import using_localizer
 from hephaestus.markdown.utils import find_markdown_files
 from hephaestus.validation.markdown import (
     check_markdown_formatting,
@@ -11,6 +12,7 @@ from hephaestus.validation.markdown import (
     extract_markdown_links,
     extract_sections,
     find_readmes,
+    print_link_summary,
     validate_all_links,
     validate_directory_exists,
     validate_file_exists,
@@ -42,6 +44,26 @@ class TestMarkdownValidation:
         assert not validate_file_exists(test_file)
         test_file.write_text("content")
         assert validate_file_exists(test_file)
+
+    def test_human_link_summary_localizes_authored_error(self, capsys):
+        """Text-mode link errors translate without changing the results payload."""
+        results = {
+            "passed": [],
+            "failed": [
+                {
+                    "path": "docs/guide.md",
+                    "broken_links": [
+                        {"line": 3, "target": "missing.md", "error": "File not found: missing.md"}
+                    ],
+                }
+            ],
+            "total_links": 1,
+            "broken_links": 1,
+        }
+        with using_localizer({"File not found: %(value0)s": "Fichier introuvable : %(value0)s"}):
+            print_link_summary(results)
+
+        assert "Fichier introuvable : missing.md" in capsys.readouterr().out
 
     def test_validate_directory_exists(self, tmp_path):
         """Test directory existence validation."""

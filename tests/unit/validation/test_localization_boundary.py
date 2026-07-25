@@ -10,7 +10,7 @@ _PARSER_CALLS = {
     "add_parser",
     "add_subparsers",
 }
-_DISPLAY_KEYWORDS = {"description", "epilog", "help", "usage"}
+_DISPLAY_KEYWORDS = {"description", "epilog", "help", "title", "usage"}
 
 
 def _call_name(node: ast.expr) -> str:
@@ -43,6 +43,15 @@ def _is_argparse_translation_global(node: ast.expr) -> bool:
         and isinstance(node.value, ast.Name)
         and node.value.id == "argparse"
         and node.attr in {"_", "ngettext"}
+    )
+
+
+def _is_direct_user_message(node: ast.Call) -> bool:
+    """Return whether a call carries a literal user-facing message."""
+    if not node.args:
+        return False
+    return isinstance(node.args[0], (ast.Constant, ast.JoinedStr)) and not _is_text_boundary(
+        node.args[0]
     )
 
 
@@ -80,6 +89,27 @@ def test_user_facing_text_crosses_localization_boundary() -> None:  # noqa: C901
                     and not _is_text_boundary(node.args[0])
                 ):
                     violations.append(f"{path}:{node.lineno}: untranslated argument group title")
+
+            if (
+                name == "ArgumentTypeError"
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "argparse"
+                and _is_direct_user_message(node)
+            ):
+                violations.append(f"{path}:{node.lineno}: untranslated argparse type error")
+
+            if (
+                name == "error"
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "parser"
+                and _is_direct_user_message(node)
+            ):
+                violations.append(f"{path}:{node.lineno}: untranslated parser error")
+
+            if name == "input" and _is_direct_user_message(node):
+                violations.append(f"{path}:{node.lineno}: untranslated interactive prompt")
 
             if name != "print" or not node.args:
                 continue

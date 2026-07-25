@@ -18,6 +18,7 @@ from hephaestus.agents.stats import (
     format_stats_text,
     main,
 )
+from hephaestus.cli.localization import using_localizer
 
 _VALID_FM = (
     "---\nname: test-agent\ndescription: A test\n"
@@ -202,6 +203,23 @@ class TestFormatStatsText:
     def test_returns_string(self, tmp_path: Path) -> None:
         stats = self._make_stats(tmp_path)
         assert isinstance(format_stats_text(stats), str)
+
+    def test_localizes_human_report_without_changing_json(self, tmp_path: Path) -> None:
+        """The human report uses source templates; JSON stays structured source data."""
+        stats = self._make_stats(tmp_path)
+        before_json = format_stats_json(stats)
+        with using_localizer(
+            {
+                "Agent System Statistics Report": "Rapport de statistiques des agents",
+                "Total Agents: %(count)d": "Total des agents : %(count)d",
+            }
+        ):
+            report = format_stats_text(stats)
+            localized_json = format_stats_json(stats)
+
+        assert "Rapport de statistiques des agents" in report
+        assert "Total des agents : 2" in report
+        assert localized_json == before_json
 
 
 class TestFormatStatsJson:

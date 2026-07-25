@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from hephaestus.cli.localization import using_localizer
 from hephaestus.github.stats import (
     collect_stats,
     format_stats_table,
@@ -225,6 +226,20 @@ class TestFormatStatsTable:
         table = format_stats_table(self._make_stats())
         assert "COMMITS" in table
         assert "42" in table
+
+    def test_localizes_human_table(self) -> None:
+        """Report labels are catalog-backed while numeric values stay intact."""
+        with using_localizer(
+            {
+                "GitHub Contribution Statistics": "Statistiques des contributions GitHub",
+                "  Total:  %(count)6d": "  Total :  %(count)6d",
+            }
+        ):
+            table = format_stats_table(self._make_stats())
+
+        assert "Statistiques des contributions GitHub" in table
+        assert "Total :" in table
+        assert "10" in table
 
 
 class TestMain:
