@@ -2700,7 +2700,7 @@ class TestNoGoLabel:
         class ArmedAfterWriteGitHub(FakeStageGitHub):
             def __init__(self) -> None:
                 super().__init__()
-                self._states = [
+                self._states: list[dict[str, Any]] = [
                     {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
                     {
                         "state": "OPEN",
