@@ -48,7 +48,9 @@ class AgentJob:
     resume_session_id: str | None = None
     prompt_kwargs: dict[str, Any] = field(default_factory=dict)
     output_format: str = "text"
-    parse: Callable[[str], Any] | None = None  # e.g. claude_invoke.parse_review_verdict
+    # Examples: review_audit.parse_review_audit or a label-native plan parser.
+    # The deprecated textual verdict parser must not be attached here.
+    parse: Callable[[str], Any] | None = None
     # Existing agent jobs retain the established write-capable default; callers
     # that only inspect repository state request ``read-only`` explicitly.
     sandbox: str = "workspace-write"
