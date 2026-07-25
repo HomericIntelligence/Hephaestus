@@ -113,11 +113,11 @@ def test_conditional_merge_succeeds_only_after_lifecycle_confirms_merged(
     assert github.merge_attempts == [(12, "a" * 40)]
 
 
-@pytest.mark.parametrize("merge_state_status", ["HAS_HOOKS"])
+@pytest.mark.parametrize("merge_state_status", ["CLEAN", "HAS_HOOKS", "UNSTABLE"])
 def test_mergeable_requestable_readiness_merges_successfully(
     make_ctx: Any, make_work_item: Any, merge_state_status: str
 ) -> None:
-    """Mergeable requestable readiness states reach the conditional PUT."""
+    """Initially-ready requestable states reach the PUT without seeding a wait."""
     github = _ConditionalGitHub(
         states=[_open_pr(), _open_pr(), {"state": "MERGED"}],
         readiness={
@@ -128,32 +128,14 @@ def test_mergeable_requestable_readiness_merges_successfully(
     )
     ctx = make_ctx(github=github)
     ctx.config.enable_learn = False
+    item = _reviewed_item(make_work_item)
 
-    result = MergeWaitStage().step(_reviewed_item(make_work_item), ctx)
-
-    assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
-    assert github.merge_attempts == [(12, "a" * 40)]
-
-
-def test_unstable_mergeable_optional_failure_reaches_the_conditional_put(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """UNSTABLE + MERGEABLE may be accepted by server protection."""
-    github = _ConditionalGitHub(
-        states=[_open_pr(), _open_pr(), {"state": "MERGED"}],
-        readiness={
-            **_open_pr(),
-            "mergeable": "MERGEABLE",
-            "mergeStateStatus": "UNSTABLE",
-        },
-    )
-    ctx = make_ctx(github=github)
-    ctx.config.enable_learn = False
-
-    result = MergeWaitStage().step(_reviewed_item(make_work_item), ctx)
+    result = MergeWaitStage().step(item, ctx)
 
     assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
     assert github.merge_attempts == [(12, "a" * 40)]
+    assert "merge_readiness_deadline_s" not in item.payload
+    assert "merge_readiness_polls" not in item.payload
 
 
 def test_blocked_readiness_waits_before_the_first_conditional_merge(
@@ -747,10 +729,10 @@ def test_persistent_405_clean_readiness_retries_after_one_fresh_wait(
         "mergeable": "MERGEABLE",
         "mergeStateStatus": "CLEAN",
     }
-    states: list[dict[str, object] | None] = [_open_pr() for _ in range(5)]
-    states.append({"state": "MERGED"})
+    scripted_states: list[dict[str, object] | None] = [_open_pr() for _ in range(5)]
+    scripted_states.append({"state": "MERGED"})
     github = _ConditionalGitHub(
-        states=states,
+        states=scripted_states,
         merge_results=[
             ConditionalMergeResult(
                 status=405,
