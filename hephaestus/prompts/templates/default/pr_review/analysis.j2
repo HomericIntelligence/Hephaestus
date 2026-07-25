@@ -31,10 +31,12 @@ Analyze PR #{{ pr_number }} using {{ review_context_kind }} #{{ issue_number }} 
 > Do not return the skill's raw report. After it completes, translate every
 > material finding into the mandatory structured comments below and retain a
 > bounded summary for the informational audit comment.
-> If it is unavailable, perform the equivalent review
-> directly using this prompt. The review output is informational: only the
-> confirmed GitHub implementation-state label transition can authorize
-> `merge_wait`.
+> If it is unavailable, perform the equivalent review directly using this
+> prompt. In either case, review evidence may select only the confirmed GitHub
+> implementation-state label; `merge_wait` independently verifies the
+> reviewed-head proof and may perform its own one-shot SHA-conditional normal
+> merge. Never ask an agent to enable, disable, adopt, or otherwise manage
+> native auto-merge.
 
 **Assume the code is WRONG; your job is to prove it right.** Do not review for
 plausibility — review for falsification: trace each changed execution path,

@@ -49,10 +49,9 @@ contract):
   ``_write_go`` performs one final human-thread live-read, requires a
   confirmed-unarmed live PR, and applies ``state:implementation-go``.
   The checkout GitJob-proven reviewed head accompanies that label;
-  ``merge_wait`` verifies it and stands by pending #2419. Every
-  real blocking round durably writes ``state:implementation-no-go`` (doc
-  section 5 owned label, before retry/regress) before looping/regressing,
-  non-fatally. Exhaustion -> durably
+  ``merge_wait`` verifies it before one SHA-conditional normal merge. Every
+  real blocking round durably writes ``state:implementation-no-go`` before
+  looping/regressing, non-fatally. Exhaustion -> durably
   apply ``state:skip`` [durable] -> SKIP.
 - Downgraded-GO cost (DELIBERATE 2-round divergence from legacy): legacy
   downgraded a GO with open automation threads and ran the address step in

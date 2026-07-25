@@ -458,7 +458,7 @@ jobs:
   auto-merge-policy:
     name: auto-merge-policy
     # Advisory (NOT a required check): the automation loop owns review,
-    # confirmed implementation-state labels, and merge-wait standby. This job
+    # confirmed implementation-state labels, and conditional merging. This job
     # reports observable PR state but never authorizes the loop or substitutes
     # for that process.
     if: github.event_name == 'pull_request'
@@ -496,7 +496,7 @@ jobs:
 
           state=$(jq -r '.autoMergeRequest' pr.json)
           if [ "$state" != "null" ] && [ -n "$state" ]; then
-            echo "::notice::Auto-merge is armed; this workflow does not infer or manage ownership."
+            echo "::notice::Auto-merge is present and external to the automation loop."
             exit 0
           fi
           echo "OK: auto-merge is currently disabled"

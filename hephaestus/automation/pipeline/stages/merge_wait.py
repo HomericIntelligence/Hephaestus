@@ -1,29 +1,16 @@
-"""Merge-wait: reviewed-head interlock and post-merge learning.
+"""Merge-wait: final head-bound admission and one conditional normal merge.
 
-``pr_review`` owns the only automated GO/NOGO decision and writes the
-loop-owned ``state:implementation-go`` label.  It consumes an in-memory
-reviewed-head proof only when it matches the live, confirmed-unarmed PR head.
-Until #2419 supplies a separately reviewed conditional normal-merge path, a
-matching proof stands down safely: this stage never creates, disables, adopts,
-or polls an auto-merge request.
-
-The implemented mini-state graph is:
-
-- Open PR: ENTER -> ARM -> FINISH_FAIL(``merge_wait_standing_by``) after
-  reviewed-head and confirmed-unarmed checks.
-- Already-merged PR: ENTER -> ARM -> LEARN_WAIT -> MW_FINISH,
-  preserving the exactly-once post-merge learning contract through
-  ``ctx.github.drive_green_learn_terminal``.
-
-The persistent approval label is deliberately insufficient after a restart or
-direct ``--prs`` seed because the reviewed-head proof is process-local.  Those
-paths revoke the stale label only after a fresh confirmed-unarmed state read
-and return to review; merge-wait-only scope consequently terminates safely.
+``pr_review`` owns the loop's source-review decision. This stage may perform
+one ordinary REST squash merge only after it observes the exact active-run
+reviewed head, an exclusive implementation-GO label, an open ``main`` PR, and
+an explicitly absent auto-merge request. It never enables, disables, adopts,
+or polls native auto-merge.
 """
 
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from hephaestus.automation.agent_config import implementer_model, learn_claude_timeout
 from hephaestus.automation.learn import build_learn_prompt
@@ -51,11 +38,13 @@ from .base import (
 logger = logging.getLogger(__name__)
 
 ENTER = "ENTER"
-ARM = "ARM"
-POLL = "POLL"
+MERGE = "MERGE"
 LEARN_WAIT = "LEARN_WAIT"
 MW_FINISH = "MW_FINISH"
 FINISH = MW_FINISH
+
+_RETRYABLE_READINESS = frozenset({"BEHIND", "BLOCKED", "HAS_HOOKS", "UNKNOWN", "UNSTABLE"})
+_CONFLICTING_READINESS = frozenset({"CONFLICTING", "DIRTY"})
 
 
 def build_drive_green_learn_prompt(issue_number: int, pr_number: int) -> str:
@@ -68,10 +57,10 @@ def build_drive_green_learn_prompt(issue_number: int, pr_number: int) -> str:
 
 
 class MergeWaitStage(Stage):
-    """Verify a reviewed approval without creating persistent merge authority."""
+    """Attempt a bounded SHA-conditional merge after final live admission."""
 
     def on_enter(self, item: WorkItem, ctx: StageContext) -> StageOutcome | None:
-        """Reject an unscoped PR without altering any operator-owned arm."""
+        """Reject an unscoped PR without touching any GitHub state."""
         del ctx
         if item.issue is None:
             logger.warning(
@@ -83,13 +72,11 @@ class MergeWaitStage(Stage):
         return None
 
     def step(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """Execute the current merge-wait mini-state."""
+        """Execute the merge-wait state machine."""
         if item.state == ENTER:
-            return Continue(next_state=ARM)
-        if item.state == ARM:
-            return self._arm(item, ctx)
-        if item.state == POLL:
-            return self._poll(item, ctx)
+            return Continue(next_state=MERGE)
+        if item.state == MERGE:
+            return self._merge(item, ctx)
         if item.state == LEARN_WAIT:
             return self._request_learn(item, ctx)
         if item.state == MW_FINISH:
@@ -99,93 +86,137 @@ class MergeWaitStage(Stage):
         logger.warning("merge_wait:%s: unknown state %r", item.issue, item.state)
         return StageOutcome(Disposition.FINISH_FAIL, f"unknown state: {item.state}")
 
-    def _arm(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """Consume only a matching current-review proof, then stand down."""
+    def _merge(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Read final admission facts, then make at most one conditional request."""
+        admitted = self._admit(item, ctx)
+        if not isinstance(admitted, tuple):
+            return admitted
+        pr_state, reviewed_head = admitted
+        del pr_state
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
-        pr_state, terminal = self._read_confirmed_open_unarmed(item, ctx)
-        if terminal is not None:
-            return terminal
-        if pr_state is None:
-            return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unavailable")
-        has_go, has_no_go = ctx.github.pr_has_implementation_state_label(item.pr)
-        if not has_go or has_no_go:
-            return StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
-        head_sha = str(pr_state.get("headRefOid") or "")
-        if not head_sha:
-            logger.warning(
-                "merge_wait: PR #%d has no readable head; operator action required", item.pr
-            )
-            return StageOutcome(Disposition.FINISH_FAIL, "missing_pr_head")
-        reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
-        if reviewed_head != head_sha:
-            return self._revoke_stale_reviewed_head(item, ctx, reviewed_head)
-        return StageOutcome(Disposition.FINISH_FAIL, "merge_wait_standing_by")
+        if item.attempts["merge"] >= ctx.budget("merge"):
+            return StageOutcome(Disposition.FINISH_FAIL, "merge_attempts_exhausted")
+        item.attempts["merge"] += 1
+        result = ctx.github.merge_pr_if_head(item.pr, reviewed_head)
+        if result.dry_run:
+            return StageOutcome(Disposition.FINISH_FAIL, "conditional_merge_dry_run")
+        if result.malformed:
+            return StageOutcome(Disposition.FINISH_FAIL, "merge_result_malformed")
+        if result.transport_error or result.status is None:
+            return self._reconcile_transport_ambiguity(item, ctx)
+        if result.status == 200:
+            if result.body is not None and result.body.get("merged") is True:
+                return self._reconcile_successful_merge(item, ctx)
+            return StageOutcome(Disposition.FINISH_FAIL, "merge_not_merged")
+        if result.status == 409:
+            return self._reconcile_head_conflict(item, ctx)
+        if result.status == 405:
+            return self._reconcile_not_ready(item, ctx)
+        if result.status in {403, 404, 422}:
+            return StageOutcome(Disposition.FINISH_FAIL, f"merge_http_{result.status}")
+        return StageOutcome(Disposition.FINISH_FAIL, f"merge_http_{result.status}")
 
-    def _poll(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """Stand down when a live unarmed PR reaches the retired poll state."""
+    def _admit(self, item: WorkItem, ctx: StageContext) -> tuple[dict[str, Any], str] | StepResult:
+        """Return the complete final-admission facts or a safe terminal route."""
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
-        _pr_state, terminal = self._read_confirmed_open_unarmed(item, ctx)
-        if terminal is not None:
-            return terminal
-        return StageOutcome(Disposition.FINISH_FAIL, "merge_wait_standing_by")
-
-    def _read_confirmed_open_unarmed(
-        self, item: WorkItem, ctx: StageContext
-    ) -> tuple[dict[str, object] | None, StepResult | None]:
-        """Read one PR state and return it only when it is complete, open, and unarmed."""
-        if item.pr is None:
-            return None, StageOutcome(Disposition.FINISH_FAIL, "no_pr")
         pr_state = ctx.github.gh_pr_state(item.pr)
         terminal = _terminal_pr_outcome(pr_state, item.pr)
         if terminal is not None:
-            result = (
-                self._route_merged(item, ctx)
-                if terminal.disposition is Disposition.FINISH_PASS
-                else terminal
-            )
-            return None, result
+            if terminal.disposition is Disposition.FINISH_PASS:
+                return self._route_merged(item, ctx)
+            return terminal
         if pr_state is None:
-            logger.warning(
-                "merge_wait: PR #%d state unavailable; operator action required", item.pr
-            )
-            return None, StageOutcome(Disposition.FINISH_FAIL, "pr_state_unavailable")
+            return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unavailable")
         if pr_state.get("autoMergeRequest") is not None:
-            logger.warning(
-                "merge_wait: PR #%d is already armed; leaving it to the operator", item.pr
-            )
-            return None, StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
+            return StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
         if not _is_confirmed_open_unarmed(pr_state):
-            return None, StageOutcome(Disposition.FINISH_FAIL, "pr_state_unverified")
-        return pr_state, None
+            return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unverified")
+        if pr_state.get("baseRefName") != "main":
+            return StageOutcome(Disposition.FINISH_FAIL, "non_main_base")
+        has_go, has_no_go = ctx.github.pr_has_implementation_state_label(item.pr)
+        if not has_go or has_no_go:
+            return StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
+        head = str(pr_state.get("headRefOid") or "")
+        if not head:
+            return StageOutcome(Disposition.FINISH_FAIL, "missing_pr_head")
+        reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
+        if reviewed_head != head:
+            return self._revoke_stale_reviewed_head(item, ctx, reviewed_head)
+        return pr_state, reviewed_head
 
     def _revoke_stale_reviewed_head(
         self, item: WorkItem, ctx: StageContext, reviewed_head: str
-    ) -> StepResult:
-        """Re-read before revoking a stale label and return to review if still stale."""
-        if item.pr is None:
-            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
-        current_state, terminal = self._read_confirmed_open_unarmed(item, ctx)
-        if terminal is not None:
-            return terminal
-        if current_state is None:
-            return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unavailable")
-        current_head = str(current_state.get("headRefOid") or "")
-        if not current_head:
-            return StageOutcome(Disposition.FINISH_FAIL, "missing_pr_head")
-        if reviewed_head == current_head:
-            return StageOutcome(Disposition.FINISH_FAIL, "merge_wait_standing_by")
-        try:
-            ctx.github.mark_pr_implementation_no_go(item.pr)
-        except Exception as exc:
-            logger.warning(
-                "merge_wait: could not revoke stale approval on PR #%d (%s)", item.pr, exc
-            )
-            return StageOutcome(Disposition.FINISH_FAIL, "implementation_no_go_label_failed")
+    ) -> StageOutcome:
+        """Discard stale process-local proof without relabelling a live PR.
+
+        A final read cannot prove this process owns a future label: an external
+        arm or newer GO can arrive immediately afterward. Fresh review owns any
+        subsequent state decision, so this method performs zero mutations.
+        """
+        del item, ctx
         if not reviewed_head:
             return StageOutcome(Disposition.FAIL_BACK, "reviewed_head_missing")
         return StageOutcome(Disposition.FAIL_BACK, "reviewed_head_drift")
+
+    def _reconcile_successful_merge(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Require a fresh terminal lifecycle observation after HTTP 200."""
+        if item.pr is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        state = ctx.github.gh_pr_state(item.pr)
+        terminal = _terminal_pr_outcome(state, item.pr)
+        if terminal is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "merge_not_merged")
+        if terminal.disposition is Disposition.FINISH_PASS:
+            return self._route_merged(item, ctx)
+        return terminal
+
+    def _reconcile_head_conflict(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Classify a conditional-SHA conflict using fresh live lifecycle state."""
+        admitted = self._admit(item, ctx)
+        if not isinstance(admitted, tuple):
+            return admitted
+        return StageOutcome(Disposition.FINISH_FAIL, "merge_409_without_head_drift")
+
+    def _reconcile_not_ready(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Use operational readiness to distinguish retryable 405 from conflict."""
+        if item.pr is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        readiness = ctx.github.gh_pr_merge_readiness(item.pr)
+        terminal = _terminal_pr_outcome(readiness, item.pr)
+        if terminal is not None:
+            if terminal.disposition is Disposition.FINISH_PASS:
+                return self._route_merged(item, ctx)
+            return terminal
+        if readiness is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_unavailable")
+        if readiness.get("autoMergeRequest") is not None:
+            return StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
+        admitted = self._admit(item, ctx)
+        if not isinstance(admitted, tuple):
+            return admitted
+        status = str(readiness.get("mergeStateStatus") or "").upper()
+        if status in _CONFLICTING_READINESS:
+            return StageOutcome(Disposition.FINISH_FAIL, "merge_conflicting")
+        if status not in _RETRYABLE_READINESS:
+            return StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_unknown")
+        return self._retry(item, ctx)
+
+    def _reconcile_transport_ambiguity(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Re-read lifecycle before deciding whether an unknown request may retry."""
+        admitted = self._admit(item, ctx)
+        if not isinstance(admitted, tuple):
+            return admitted
+        return self._retry(item, ctx)
+
+    @staticmethod
+    def _retry(item: WorkItem, ctx: StageContext) -> StageOutcome:
+        """Timer-park a bounded retry without issuing another merge in this step."""
+        if item.attempts["merge"] >= ctx.budget("merge"):
+            return StageOutcome(Disposition.FINISH_FAIL, "merge_attempts_exhausted")
+        item.payload["retry_delay_s"] = float(min(2 ** max(0, item.attempts["merge"] - 1), 60))
+        return StageOutcome(Disposition.RETRY, "merge_not_ready")
 
     def _route_merged(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Dispatch the existing deduplicated post-merge learning step."""
