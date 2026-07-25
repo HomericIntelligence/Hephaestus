@@ -59,6 +59,27 @@ class TestStageQueueLeases:
         assert source.snapshot() == [claimed_item]
         assert source.offer(_item("may-enter-after-restore")) is True
 
+    def test_claim_serializes_held_lease_to_preserve_fifo_order(self) -> None:
+        """A second claim cannot overtake a lease that may restore to the front."""
+        source = StageQueue(capacity=3)
+        first = _item("first")
+        second = _item("second")
+        third = _item("third")
+        source.push(first)
+        source.push(second)
+        source.push(third)
+
+        lease = source.claim()
+
+        assert lease is not None
+        assert lease.item is first
+        assert source.claim() is None
+        assert source.snapshot() == [second, third]
+
+        lease.restore()
+
+        assert source.snapshot() == [first, second, third]
+
     def test_successful_handoff_releases_source_and_enqueues_item_once(self) -> None:
         """A successful handoff frees only the source reservation it transfers."""
         source = StageQueue(capacity=1)

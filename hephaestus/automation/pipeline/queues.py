@@ -145,10 +145,15 @@ class StageQueue:
         """Claim the FIFO-ready item without releasing this queue's capacity.
 
         The returned lease owns the item until it is restored or handed off.
-        Ready work inspection remains available through :meth:`snapshot`, but
-        the claim continues to count toward :attr:`occupancy`.
+        Only one lease may be active at a time, so an outstanding lease also
+        returns ``None`` even when later items are ready. Ready work inspection
+        remains available through :meth:`snapshot`, but the claim continues to
+        count toward :attr:`occupancy`.
         """
-        if not self._items:
+        # A lease can restore its item to the front.  Serializing claims keeps
+        # that restoration ahead of every item that was already ready, rather
+        # than reversing two independently restored leases.
+        if self._held or not self._items:
             return None
 
         self._held += 1
