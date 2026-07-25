@@ -695,18 +695,19 @@ Architectural contract:
 ### 5.2 Planning
 
 Planning produces one canonical implementation plan from the issue and its
-durable chronological journal. The GitHub journal remains complete; agent
-prompts receive the complete sequence while it fits the context budget, then
-an ordered revision index plus the latest complete plan and review. A blocked
-plan is an automation stop: only an external actor may resolve the dependency
-and replace `state:plan-blocked` with exactly one next plan-state label.
+durable chronological journal. The GitHub journal remains complete for audit
+and recovery. A resumed rejected plan receives only bounded context for its
+current canonical plan and paired current review; superseded revisions do not
+compete with the active critique. A blocked plan is an automation stop: only
+an external actor may resolve the dependency and replace `state:plan-blocked`
+with exactly one next plan-state label.
 
 #### Boundary diagram
 
 ```mermaid
 flowchart LR
     Issue["Issue text"] --> Context
-    History["Plan and review history"] --> Context
+    History["Current rejected plan/review"] --> Context
     Context --> Planner --> Canonical["Canonical plan comment"]
     Canonical --> PlanReview["Plan review"]
 ```
@@ -737,9 +738,9 @@ Architectural contract:
 
 - The first automation journal role is the canonical implementation plan,
   identified by an opaque marker and updated only by its owning GitHub actor.
-- Every iteration receives the ordered issue → plan → review → revision
-  sequence, with a bounded index projection only when the complete journal is
-  too large for an agent prompt.
+- A restarted rejected plan receives only its bounded current canonical plan
+  and paired current review. Superseded revision comments remain audit and
+  recovery artifacts and are not active planner context.
 - Journal ingestion is bounded by both comment count and body bytes. If either
   limit is exceeded, automation stops with an explicit manual-recovery error
   instead of silently dropping old plan/review revisions.
@@ -767,7 +768,7 @@ an audit record and context source, never an authorization fallback.
 ```mermaid
 flowchart LR
     Plan["Canonical plan"] --> Review
-    History["Ordered plan/review history"] --> Review
+    History["Current plan and direct critique"] --> Review
     Review -->|"plan-go / plan-no-go"| CanonicalReview["Canonical review comment"]
     CanonicalReview --> Label["Confirmed GitHub plan-state label"]
     Review -->|"plan-blocked"| BlockLatch["Confirmed blocked label"]
@@ -823,6 +824,10 @@ Architectural contract:
 - The plan archive contains the next-plan recovery payload. On restart, a
   missing review archive or canonical update is completed idempotently before
   another agent runs.
+- Review receives the current plan and direct prior critique. An amendment
+  receives the bounded current canonical plan and direct critique; superseded
+  journal revisions remain durable audit and recovery artifacts, not prompt
+  context.
 - A blocked verdict states exactly what decision or dependency is required.
   Because BLOCKED is the safety latch, its label is confirmed before the
   fallible explanatory write; an audit-write failure can never leave the item

@@ -27,6 +27,7 @@ from hephaestus.automation.protocol import (
 from hephaestus.automation.review_journal import (
     HISTORY_MARKER,
     archive_plan_body,
+    archive_review_body,
     render_current_plan,
     render_current_review,
 )
@@ -115,8 +116,8 @@ class TestParsePlanReviewVerdict:
         assert plan_review.parse_plan_review_verdict(response).is_error
 
 
-def test_history_omits_stale_canonical_review_already_archived() -> None:
-    """A superseded canonical review is not repeated after its immutable archive."""
+def test_amend_history_excludes_superseded_review_artifacts() -> None:
+    """Amend context does not revive an archived NOGO critique."""
     history = plan_review._plan_history(
         [
             "<!-- hephaestus-plan-history:revision=1:kind=plan -->\nPlan v1",
@@ -126,7 +127,7 @@ def test_history_omits_stale_canonical_review_already_archived() -> None:
         ]
     )
 
-    assert history.count("Review v1") == 1
+    assert "Review v1" not in history
     assert "Plan v2" in history
 
 
@@ -1006,9 +1007,10 @@ class TestPlanReviewStageOnJobDone:
         assert github.labels[401] == {"state:plan-blocked"}
         assert github.comments[401][1].endswith("state:plan-blocked")
 
-    def test_next_review_receives_complete_durable_history(
+    def test_next_review_receives_current_artifacts_without_redundant_history(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
+        """The reviewer gets the direct plan and critique, not stale revisions."""
         stage = PlanReviewStage()
         github = FakeStageGitHub()
         github.comments[8] = [
@@ -1024,8 +1026,34 @@ class TestPlanReviewStageOnJobDone:
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)
+        assert result.job.prompt_kwargs["plan_text"] == "Plan v2"
+        assert result.job.prompt_kwargs["plan_history"] == ""
+
+    def test_amendment_receives_only_current_plan_context(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An amendment retains its prior plan but not superseded critique."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub()
+        github.comments[8] = [
+            archive_plan_body(1, "Plan v1", "Plan v2"),
+            archive_review_body(1, "Review v1\n\nstate:plan-no-go"),
+            render_current_plan("Plan v2", revision=2),
+            render_current_review("Review v2\n\nstate:plan-no-go", revision=2),
+        ]
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=8, state="AMEND_WAIT")
+        item.payload["prior_review"] = "Review v2\n\nstate:plan-no-go"
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)
         history = result.job.prompt_kwargs["plan_history"]
-        assert history.index("Plan v1") < history.index("Review v1") < history.index("Plan v2")
+        assert "Plan v2" in history
+        assert "Plan v1" not in history
+        assert "Review v1" not in history
+        assert "Review v2" not in history
 
     def test_failed_result_is_not_stored(self, make_ctx: Any, make_work_item: Any) -> None:
         """A failed job result is logged and never stored."""

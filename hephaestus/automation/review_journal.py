@@ -33,16 +33,13 @@ PLAN_REVIEW_STATES: Final[frozenset[str]] = frozenset(
     {"state:plan-go", "state:plan-no-go", "state:plan-blocked"}
 )
 
-MAX_AGENT_HISTORY_CHARS: Final[int] = 48_000
-MAX_REVIEW_SUMMARY_CHARS: Final[int] = 800
+#: Planning/review prompts receive the current plan and/or latest review in
+#: dedicated fields. Keep the restart-only current-revision context bounded
+#: so append-only superseded artifacts cannot compete with active feedback.
+MAX_CURRENT_REVISION_CONTEXT_CHARS: Final[int] = 12_000
 
 _OLD_PLAN_PAYLOAD = "<!-- hephaestus-plan-history:old-plan -->"
 _NEW_PLAN_PAYLOAD = "<!-- hephaestus-plan-history:new-plan -->"
-_TRUNCATION_NOTICE = (
-    "<!-- hephaestus-history-projection:truncated -->\n"
-    "_Older complete artifacts remain in the GitHub issue journal; this prompt "
-    "contains their ordered index and the latest actionable artifacts._"
-)
 _TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 
 
@@ -362,60 +359,6 @@ def journal_snapshot(comments: Sequence[IssueComment | str]) -> JournalSnapshot:
     )
 
 
-def review_state(review: str) -> str:
-    """Return the final plan-state token without legacy free-text fallback."""
-    return parse_plan_review_state(review) or "unparseable"
-
-
-def _review_reason(review: str) -> str:
-    meaningful = [
-        line.strip()
-        for line in review.splitlines()
-        if line.strip() and not line.lstrip().startswith(("<!--", "##", "state:plan-", "Verdict:"))
-    ]
-    text = " ".join(meaningful)
-    if len(text) <= MAX_REVIEW_SUMMARY_CHARS:
-        return text
-    return f"{text[:MAX_REVIEW_SUMMARY_CHARS].rstrip()}…"
-
-
-def _history_index(snapshot: JournalSnapshot, *, max_chars: int) -> str:
-    """Render a compact, bounded index for superseded and current revisions."""
-    if max_chars <= 0:
-        return ""
-    lines = ["## Ordered revision index"]
-    by_revision: dict[int, dict[str, HistoryArtifact]] = {}
-    for artifact in snapshot.history:
-        by_revision.setdefault(artifact.revision, {})[artifact.kind] = artifact
-    for revision in sorted(by_revision):
-        pair = by_revision[revision]
-        plan = pair.get("plan")
-        review = pair.get("review")
-        old_plan = archived_old_plan(plan.body) if plan else ""
-        review_payload = extract_current_review(review.body) if review else ""
-        fingerprint = plan_fingerprint(old_plan) if old_plan else "missing"
-        review_reason = _review_reason(review_payload) or "none"
-        lines.append(
-            f"- Revision {revision}: plan_sha={fingerprint}; "
-            f"review={review_state(review_payload)}; "
-            f"reason={_bounded_excerpt(review_reason, 120)}"
-        )
-    if snapshot.current_plan:
-        current_review = (
-            snapshot.current_review
-            if snapshot.current_review_revision is not None
-            and snapshot.current_review_revision >= snapshot.revision
-            else ""
-        )
-        current_reason = _review_reason(current_review) or "none"
-        lines.append(
-            f"- Revision {snapshot.revision} (current): "
-            f"plan_sha={plan_fingerprint(snapshot.current_plan)}; "
-            f"review={review_state(current_review)}; reason={current_reason}"
-        )
-    return _bounded_excerpt("\n".join(lines), max_chars)
-
-
 def _bounded_excerpt(text: str, max_chars: int) -> str:
     """Return a deterministic head/tail excerpt that fits *max_chars*."""
     if max_chars <= 0:
@@ -431,64 +374,68 @@ def _bounded_excerpt(text: str, max_chars: int) -> str:
     return f"{text[:head]}{marker}{text[-tail:] if tail else ''}"
 
 
-def history_projection(
-    comments: Sequence[IssueComment | str], *, max_chars: int = MAX_AGENT_HISTORY_CHARS
+def current_plan_context(
+    comments: Sequence[IssueComment | str],
+    *,
+    max_chars: int = MAX_CURRENT_REVISION_CONTEXT_CHARS,
 ) -> str:
-    """Return chronological agent context while keeping the complete GitHub journal intact."""
+    """Return a bounded canonical-plan excerpt without superseded revisions.
+
+    The append-only journal remains the durable recovery and audit record.
+    This projection is only supplemental agent context for a resumed planner,
+    which already receives the immediate NOGO critique separately.
+    """
     if max_chars <= 0:
         return ""
     snapshot = journal_snapshot(comments)
-    full_parts = [artifact.body for artifact in snapshot.history]
-    if snapshot.current_plan:
-        full_parts.append(render_current_plan(snapshot.current_plan, revision=snapshot.revision))
-    if (
-        snapshot.current_review
-        and snapshot.current_review_revision is not None
-        and snapshot.current_review_revision >= snapshot.revision
-    ):
-        full_parts.append(
-            render_current_review(snapshot.current_review, revision=snapshot.revision)
-        )
-    full = "\n\n---\n\n".join(full_parts)
-    if len(full) <= max_chars:
-        return full
+    if not snapshot.current_plan:
+        return ""
+    plan = render_current_plan(snapshot.current_plan, revision=snapshot.revision)
+    return _bounded_excerpt(plan, max_chars)
 
-    current_parts: list[tuple[str, str]] = []
-    if snapshot.current_plan:
-        current_parts.append(
-            (
-                "## Current plan excerpt",
-                render_current_plan(snapshot.current_plan, revision=snapshot.revision),
-            )
-        )
-    if (
-        snapshot.current_review
+
+def current_revision_context(
+    comments: Sequence[IssueComment | str],
+    *,
+    max_chars: int = MAX_CURRENT_REVISION_CONTEXT_CHARS,
+) -> str:
+    """Return bounded current plan context while preserving its paired review.
+
+    Superseded plan/review artifacts are deliberately excluded: they remain
+    durable on GitHub but can contain stale, mutually incompatible critique.
+    When space is constrained, preserve the current review in full whenever
+    possible and spend the remaining budget on a deterministic plan excerpt.
+    """
+    if max_chars <= 0:
+        return ""
+    snapshot = journal_snapshot(comments)
+    plan = (
+        render_current_plan(snapshot.current_plan, revision=snapshot.revision)
+        if snapshot.current_plan
+        else ""
+    )
+    review = (
+        render_current_review(snapshot.current_review, revision=snapshot.revision)
+        if snapshot.current_review
         and snapshot.current_review_revision is not None
         and snapshot.current_review_revision >= snapshot.revision
-    ):
-        current_parts.append(
-            (
-                "## Current review excerpt",
-                render_current_review(snapshot.current_review, revision=snapshot.revision),
-            )
-        )
-    if max_chars <= len(_TRUNCATION_NOTICE):
-        return _bounded_excerpt(_TRUNCATION_NOTICE, max_chars)
-    index_budget = max_chars // 2
-    index = _history_index(snapshot, max_chars=index_budget)
-    prefix = f"{_TRUNCATION_NOTICE}\n\n{index}" if index else _TRUNCATION_NOTICE
+        else ""
+    )
+    if not plan:
+        return _bounded_excerpt(review, max_chars)
+    if not review:
+        return _bounded_excerpt(plan, max_chars)
+
+    plan_heading = "## Current rejected plan\n\n"
+    review_heading = "## Current review\n\n"
     separator = "\n\n---\n\n"
-    headings_size = sum(len(separator) + len(heading) + 2 for heading, _ in current_parts)
-    available = max_chars - len(prefix) - headings_size
-    if available < 0:
-        return _bounded_excerpt(prefix, max_chars)
-
-    rendered = prefix
-    remaining = available
-    for index_in_parts, (heading, artifact) in enumerate(current_parts):
-        parts_left = len(current_parts) - index_in_parts
-        excerpt_budget = remaining // parts_left
-        excerpt = _bounded_excerpt(artifact, excerpt_budget)
-        rendered += f"{separator}{heading}\n\n{excerpt}"
-        remaining -= len(excerpt)
-    return rendered
+    fixed_size = len(plan_heading) + len(review_heading) + len(separator) + len(review)
+    if fixed_size >= max_chars:
+        return _bounded_excerpt(
+            f"{review_heading}{review}",
+            max_chars,
+        )
+    return (
+        f"{plan_heading}{_bounded_excerpt(plan, max_chars - fixed_size)}"
+        f"{separator}{review_heading}{review}"
+    )

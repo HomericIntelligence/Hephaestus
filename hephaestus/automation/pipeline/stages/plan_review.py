@@ -74,7 +74,7 @@ from hephaestus.automation.protocol import (
 )
 from hephaestus.automation.review_journal import (
     IssueComment,
-    history_projection,
+    current_plan_context,
     journal_snapshot,
     parse_plan_review_state,
     render_current_review,
@@ -153,8 +153,8 @@ def _current_revision(comments: Sequence[IssueComment | str]) -> int:
 
 
 def _plan_history(comments: Sequence[IssueComment | str]) -> str:
-    """Render tracked comments in logical revision order for the next agent."""
-    return history_projection(comments)
+    """Return a bounded prior-plan excerpt for a resumed planner amendment."""
+    return current_plan_context(comments)
 
 
 def _confirm_pending_amendment_transition(
@@ -419,7 +419,10 @@ class PlanReviewStage(Stage):
                     "iteration": round_index,
                     "prior_review": item.payload.get("prior_review") or None,
                     "advise_findings": item.payload.get("advise_findings", ""),
-                    "plan_history": _plan_history(ctx.github.issue_comments(item.issue)),
+                    # The reviewer already receives the complete current plan
+                    # and direct prior critique; superseded journal entries
+                    # would only duplicate stale feedback.
+                    "plan_history": "",
                 },
                 parse=parse_plan_review_verdict,  # verdict parsed in-worker
                 descr="review",
