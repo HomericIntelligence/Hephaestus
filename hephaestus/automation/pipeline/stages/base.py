@@ -74,6 +74,7 @@ __all__ = [
     "AgentJob",
     "BuildTestJob",
     "CompactJob",
+    "ConditionalMergeResult",
     "Continue",
     "Disposition",
     "GitJob",
@@ -103,6 +104,23 @@ GIT_JOB_TIMEOUT_S = 600
 
 #: Poll backoff cap in seconds (legacy ``min(2**attempt, 60)`` — shared by
 #: every stage that uses the legacy exponential poll delay.
+
+
+@dataclass(frozen=True)
+class ConditionalMergeResult:
+    """Outcome of one SHA-conditional normal GitHub merge request.
+
+    ``status`` and ``body`` preserve the server's response for merge-wait to
+    classify. ``transport_error`` means the server outcome is unknown, while
+    ``malformed`` means the response was received but could not be safely
+    interpreted. The adapter never retries this mutation itself.
+    """
+
+    status: int | None
+    body: dict[str, Any] | None
+    transport_error: bool = False
+    malformed: bool = False
+    dry_run: bool = False
 
 
 @runtime_checkable
@@ -320,6 +338,14 @@ class StageGitHub(Protocol):
         head OID and classify merged, closed, and open lifecycle states.
         """
         ...
+
+    def gh_pr_merge_readiness(self, pr_number: int) -> dict[str, Any] | None:
+        """Read operational normal-merge readiness after an HTTP 405 response."""
+        pass
+
+    def merge_pr_if_head(self, pr_number: int, reviewed_sha: str) -> ConditionalMergeResult:
+        """Perform one immediate normal merge conditional on ``reviewed_sha``."""
+        pass
 
     def drive_green_learn_terminal(self, issue_number: int) -> bool:
         """Return True when the post-merge ``/learn`` is already terminal.

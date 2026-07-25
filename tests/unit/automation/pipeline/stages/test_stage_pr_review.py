@@ -877,7 +877,7 @@ class TestEvalVerdicts:
     def test_go_with_zero_threads_marks_implementation_go_and_advances_to_merge_wait(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """The PR-review gate marks GO; merge_wait later verifies and stands by."""
+        """The PR-review gate marks GO; merge_wait later verifies the exact head."""
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(0, 0)])
         ctx = make_ctx(github=github)

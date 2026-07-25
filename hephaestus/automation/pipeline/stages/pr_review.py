@@ -49,7 +49,7 @@ contract):
   ``_write_go`` performs one final human-thread live-read, requires a
   confirmed-unarmed live PR, and applies ``state:implementation-go``.
   The checkout GitJob-proven reviewed head accompanies that label;
-  ``merge_wait`` verifies it and stands by pending #2419. Every
+  ``merge_wait`` verifies it before one SHA-conditional normal merge. Every
   real non-GO round durably writes ``state:implementation-no-go`` (doc
   section 5 owned label, "NOGO verdict, before retry/regress"; legacy
   ``_apply_impl_review_verdict`` -> ``mark_pr_implementation_no_go``

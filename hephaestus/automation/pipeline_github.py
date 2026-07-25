@@ -41,6 +41,7 @@ from hephaestus.automation.arming_state import (
     ArmingStateStore,
 )
 from hephaestus.automation.git_utils import issue_auto_impl_branch_name
+from hephaestus.automation.pipeline.stages.base import ConditionalMergeResult
 from hephaestus.automation.prompts.pr_review import (
     BLOCKING_SEVERITIES,
     SEVERITY_MARKER_PREFIX,
@@ -77,6 +78,35 @@ from hephaestus.utils.file_lock import file_lock
 logger = logging.getLogger(__name__)
 
 _CLOSES_ISSUE_LINE_RE = re.compile(r"^Closes #(\d+)\s*$", re.MULTILINE)
+_HTTP_STATUS_RE = re.compile(r"^HTTP/\S+\s+(\d{3})\b", re.MULTILINE)
+
+
+def _parse_included_http_response(
+    stdout: str,
+) -> tuple[int | None, dict[str, Any] | None, bool]:
+    """Parse the final status and JSON object from ``gh api --include`` output.
+
+    A missing HTTP status means the CLI did not provide enough evidence to
+    classify the request. A received non-object or invalid body is explicitly
+    malformed so callers fail closed rather than treating it as transport
+    ambiguity.
+    """
+    matches = list(_HTTP_STATUS_RE.finditer(stdout))
+    if not matches:
+        return None, None, False
+    status = int(matches[-1].group(1))
+    headers_end = re.search(r"\r?\n\r?\n", stdout[matches[-1].start() :])
+    if headers_end is None:
+        return status, None, True
+    body_start = matches[-1].start() + headers_end.end()
+    body = stdout[body_start:].strip()
+    if not body:
+        return status, None, True
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError:
+        return status, None, True
+    return (status, parsed, False) if isinstance(parsed, dict) else (status, None, True)
 
 
 def _split_threads(threads: list[dict[str, Any]]) -> tuple[int, int]:
@@ -862,6 +892,67 @@ class PipelineGitHub:
         except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError) as exc:
             logger.warning("PR #%s: gh_pr_state read failed: %s", pr_number, exc)
             return None
+
+    def gh_pr_merge_readiness(self, pr_number: int) -> dict[str, Any] | None:
+        """Read operational readiness after a conditional normal merge returns 405.
+
+        This read classifies whether GitHub declined an otherwise valid merge
+        because the PR is not ready, rather than treating CI/CD state as a
+        separate source of merge authority.
+        """
+        try:
+            result = self._gh(
+                [
+                    "pr",
+                    "view",
+                    str(pr_number),
+                    "--json",
+                    "state,headRefOid,mergedAt,baseRefName,autoMergeRequest,mergeable,mergeStateStatus",
+                ]
+            )
+            data = json.loads(result.stdout or "{}")
+            return data if isinstance(data, dict) else None
+        except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError) as exc:
+            logger.warning("PR #%s: merge readiness read failed: %s", pr_number, exc)
+            return None
+
+    def merge_pr_if_head(self, pr_number: int, reviewed_sha: str) -> ConditionalMergeResult:
+        """Attempt one immediate squash merge conditional on the reviewed SHA.
+
+        The request deliberately avoids the GitHub CLI PR-merge subcommand,
+        native auto-merge, merge queues, administrator flags, and retries. A
+        stage-owned lifecycle read decides whether an ambiguous request may be
+        retried later.
+        """
+        if pr_number <= 0 or not re.fullmatch(r"[0-9a-fA-F]{40}", reviewed_sha):
+            return ConditionalMergeResult(status=None, body=None, malformed=True)
+        owner, name = self._owner_name()
+        if self._skip(f"conditionally squash merge PR #{pr_number} at {reviewed_sha}"):
+            return ConditionalMergeResult(status=None, body=None, dry_run=True)
+        try:
+            result = gh_call(
+                [
+                    "api",
+                    "--method",
+                    "PUT",
+                    "--include",
+                    f"/repos/{owner}/{name}/pulls/{pr_number}/merge",
+                    "-f",
+                    f"sha={reviewed_sha}",
+                    "-f",
+                    "merge_method=squash",
+                ],
+                check=False,
+                retry_on_rate_limit=False,
+                max_retries=1,
+            )
+        except (subprocess.SubprocessError, RuntimeError, OSError) as exc:
+            logger.warning("PR #%s: conditional merge transport failure: %s", pr_number, exc)
+            return ConditionalMergeResult(status=None, body=None, transport_error=True)
+        status, body, malformed = _parse_included_http_response(result.stdout or "")
+        if status is None:
+            return ConditionalMergeResult(status=None, body=None, transport_error=True)
+        return ConditionalMergeResult(status=status, body=body, malformed=malformed)
 
     def drive_green_learn_terminal(self, issue_number: int) -> bool:
         """Return True when the post-merge ``/learn`` is already terminal.

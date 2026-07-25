@@ -200,8 +200,9 @@ class LoopConfig:
     # into the blocking drive-green by default.
     phases: tuple[str, ...] = ALL_PHASES
     # Compatibility bound retained for the historical drive-green CLI. The
-    # current merge-wait stage safely stands by and does not arm or poll
-    # auto-merge; the default remains 5 for stable CLI/config compatibility.
+    # current merge-wait stage conditionally merges only a freshly admitted
+    # reviewed head and never manages native auto-merge; the default remains 5
+    # for stable CLI/config compatibility.
     drive_green_loops: int = 5
     # When True (default), never dispatch two issues whose plans touch the same
     # file concurrently — defer the later one (#1623).
@@ -272,7 +273,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=5,
         help=(
             "Compatibility iteration bound for the historical drive-green CLI; current "
-            "merge-wait safely stands by and does not arm or poll auto-merge "
+            "merge-wait conditionally merges reviewed heads and does not manage native auto-merge "
             "(default: 5; replaces --max-merge-attempts)."
         ),
     )

@@ -11,7 +11,8 @@ GitHub Actions validates repository code independently. Normal
 its binary verdict, but the automation loop does not change checks, workflows,
 statuses, artifacts, leases, or `pull_request_target` events. After the review
 returns a current-head GO, the loop applies `state:implementation-go`;
-`merge_wait` consumes that loop-owned label, while restarted labels re-enter
+`merge_wait` consumes that loop-owned label with its process-local reviewed
+head proof and conditionally merges only that SHA; restarted labels re-enter
 merge-wait. CI/CD never independently produces or validates authorization.
 
 ## Current required contexts
