@@ -42,6 +42,9 @@ def test_named_placeholders_may_be_reordered() -> None:
         ("Hello %(name)s", "Bonjour %(other)s"),
         ("Count %(count)d", "Compte %(count)s"),
         ("%s has %d", "%d a %s"),
+        ("Width %*s", "Large %s"),
+        ("Precision %.*f", "Précision %f"),
+        ("Number %*.*f", "Nombre %.*f"),
     ],
 )
 def test_invalid_placeholder_catalogs_are_rejected(source: str, translated: str) -> None:
