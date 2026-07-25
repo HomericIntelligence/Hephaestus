@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
+from hephaestus.cli.localization import using_localizer
 from hephaestus.cli.utils import create_validation_parser, resolve_repo_root
 
 ISSUE_1418_FILES = [
@@ -77,6 +78,23 @@ def test_create_validation_parser_preserves_parser_customization() -> None:
     assert parser.prog == "custom-check"
     assert "usage: custom-check [flags] path" in help_text
     assert "Example: custom-check path" in help_text
+
+
+def test_create_validation_parser_localizes_only_display_metadata() -> None:
+    """Descriptions and help translate while syntax and exits remain stable."""
+    with using_localizer(
+        {
+            "check things": "vérifier les choses",
+            "Repository root (default: auto-detect)": "Racine du dépôt",
+        }
+    ):
+        parser = create_validation_parser("check things", prog="validator")
+
+    help_text = parser.format_help()
+    assert "vérifier les choses" in help_text
+    assert "Racine du dépôt" in help_text
+    assert "--repo-root REPO_ROOT" in help_text
+    assert parser.parse_args(["--repo-root", "/tmp/project"]).repo_root == Path("/tmp/project")
 
 
 def test_resolve_repo_root_prefers_explicit_path() -> None:

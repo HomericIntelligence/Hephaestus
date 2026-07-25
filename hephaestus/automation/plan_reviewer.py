@@ -30,6 +30,7 @@ from hephaestus.automation._review_utils import (
     print_worker_summary,
     work_report_context,
 )
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_agent_timeout_arg, configure_cli_logging, emit_json_status
 from hephaestus.github.rate_limit import wait_until
 from hephaestus.utils.terminal import terminal_guard
@@ -693,7 +694,7 @@ Examples:
         type=int,
         nargs="+",
         required=True,
-        help="Issue numbers whose plans should be reviewed",
+        help=text("Issue numbers whose plans should be reviewed"),
     )
     add_agent_timeout_arg(parser)
     return parser

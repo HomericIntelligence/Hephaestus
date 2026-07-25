@@ -28,6 +28,7 @@ import re
 import sys
 from pathlib import Path
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, format_output, resolve_repo_root
 
 # Scripts that are imported by other scripts (not invoked directly) — always active.
@@ -234,18 +235,24 @@ def check_stale_scripts(
 
     if verbose and scripts_dir.is_dir():
         all_scripts = get_all_scripts(scripts_dir)
-        print(f"Total scripts: {len(all_scripts)}")
-        print(f"Stale candidates: {len(stale)}\n")
+        print(text("Total scripts: %(value0)s", value0=len(all_scripts)))
+        print(text("Stale candidates: %(value0)s\n", value0=len(stale)))
 
     if stale:
         prefix = "ERROR" if strict else "WARNING"
-        print(f"{prefix}: Found {len(stale)} possibly stale script(s):\n")
+        print(
+            text(
+                "%(value0)s: Found %(value1)s possibly stale script(s):\n",
+                value0=prefix,
+                value1=len(stale),
+            )
+        )
         for script_name in stale:
-            print(f"  scripts/{script_name}")
-        print("\nConsider removing these scripts if they are no longer needed.")
+            print(text("  scripts/%(value0)s", value0=script_name))
+        print(text("\nConsider removing these scripts if they are no longer needed."))
         return 1 if strict else 0
 
-    print("No stale script candidates found.")
+    print(text("No stale script candidates found."))
     return 0
 
 
@@ -263,19 +270,19 @@ def main() -> int:
     parser.add_argument(
         "--strict",
         action="store_true",
-        help="Exit 1 when stale scripts are found (default: warn only, exit 0)",
+        help=text("Exit 1 when stale scripts are found (default: warn only, exit 0)"),
     )
     parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
-        help="Print summary counts before results",
+        help=text("Print summary counts before results"),
     )
     parser.add_argument(
         "--exclude",
         metavar="PATTERN",
         default=None,
-        help="Exclude scripts whose name contains PATTERN (e.g. 'test_')",
+        help=text("Exclude scripts whose name contains PATTERN (e.g. 'test_')"),
     )
 
     args = parser.parse_args()

@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 from typing import Any, cast
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, emit_json_status, format_output
 from hephaestus.io.toml import import_tomllib
 from hephaestus.utils.helpers import get_repo_root
@@ -200,22 +201,22 @@ def check_coverage(threshold: float, path: str, coverage_file: Path) -> bool:
 
     if coverage is None:
         # User-facing CLI report output — intentionally written to stdout.
-        print(f"\nCoverage Report: {path}")
-        print("  Status: Coverage data not available")
-        print("  PASSED - Coverage check skipped")
+        print(text("\nCoverage Report: %(value0)s", value0=path))
+        print(text("  Status: Coverage data not available"))
+        print(text("  PASSED - Coverage check skipped"))
         return True
 
     # User-facing CLI report output — intentionally written to stdout.
-    print(f"\nCoverage Report: {path}")
-    print(f"  Coverage: {coverage:.2f}%")
-    print(f"  Threshold: {threshold:.2f}%")
+    print(text("\nCoverage Report: %(value0)s", value0=path))
+    print(text("  Coverage: %(value0).2f%%", value0=coverage))
+    print(text("  Threshold: %(value0).2f%%", value0=threshold))
 
     if coverage >= threshold:
-        print("  PASSED - Coverage meets threshold")
+        print(text("  PASSED - Coverage meets threshold"))
         return True
 
     gap = threshold - coverage
-    print(f"  FAILED - Coverage is {gap:.2f}% below threshold")
+    print(text("  FAILED - Coverage is %(value0).2f%% below threshold", value0=gap))
     return False
 
 
@@ -241,7 +242,10 @@ def _check_module_floors(
         if args.json:
             emit_json_status(1, message=f"Could not parse module coverage: {e}")
         else:
-            print(f"\nERROR: Could not parse module coverage: {e}", file=sys.stderr)
+            print(
+                text("\nERROR: Could not parse module coverage: %(value0)s", value0=e),
+                file=sys.stderr,
+            )
         return 1
 
     all_modules_pass = True
@@ -251,7 +255,10 @@ def _check_module_floors(
             # Module is configured but not found in the coverage report — fail loudly
             if not args.json:
                 print(
-                    f"\nERROR: Module {module_path} expected in coverage report but not found",
+                    text(
+                        "\nERROR: Module %(value0)s expected in coverage report but not found",
+                        value0=module_path,
+                    ),
                     file=sys.stderr,
                 )
             all_modules_pass = False
@@ -263,13 +270,20 @@ def _check_module_floors(
         if coverage_metric < module_threshold:
             if not args.json:
                 print(
-                    f"\nModule {module_path}: {coverage_metric:.2f}% "
-                    f"(below threshold of {module_threshold:.2f}%)",
+                    text(
+                        "\nModule %(module)s: %(coverage).2f%% "
+                        "(below threshold of %(threshold).2f%%)",
+                        module=module_path,
+                        coverage=coverage_metric,
+                        threshold=module_threshold,
+                    ),
                     file=sys.stderr,
                 )
             all_modules_pass = False
         elif not args.json and args.verbose:
-            print(f"  {module_path}: {coverage_metric:.2f}% ✓")
+            print(
+                text("  %(value0)s: %(value1).2f%% ✓", value0=module_path, value1=coverage_metric)
+            )
 
     return 0 if all_modules_pass else 1
 
@@ -323,30 +337,30 @@ def main() -> int:
         "--threshold",
         type=float,
         default=None,
-        help="Minimum required coverage percentage (overrides config)",
+        help=text("Minimum required coverage percentage (overrides config)"),
     )
     parser.add_argument(
         "--path",
         type=str,
         default=".",
-        help="Path to source code being tested (default: .)",
+        help=text("Path to source code being tested (default: .)"),
     )
     parser.add_argument(
         "--coverage-file",
         type=Path,
         default=Path("coverage.xml"),
-        help="Path to coverage report file (default: coverage.xml)",
+        help=text("Path to coverage report file (default: coverage.xml)"),
     )
     parser.add_argument(
         "--config",
         type=Path,
         default=None,
-        help="Path to coverage.toml config file",
+        help=text("Path to coverage.toml config file"),
     )
     parser.add_argument(
         "--verbose",
         action="store_true",
-        help="Enable verbose output",
+        help=text("Enable verbose output"),
     )
 
     args = parser.parse_args()
@@ -360,10 +374,10 @@ def main() -> int:
 
     if args.verbose and not args.json:
         # User-facing CLI verbose output — intentionally written to stdout.
-        print("Checking coverage with settings:")
-        print(f"  Threshold: {threshold}%")
-        print(f"  Path: {args.path}")
-        print(f"  Coverage file: {args.coverage_file}")
+        print(text("Checking coverage with settings:"))
+        print(text("  Threshold: %(value0)s%%", value0=threshold))
+        print(text("  Path: %(value0)s", value0=args.path))
+        print(text("  Coverage file: %(value0)s", value0=args.coverage_file))
 
     if not args.coverage_file.exists():
         if args.json:
@@ -371,9 +385,12 @@ def main() -> int:
             return 1
         # User-facing actionable guidance — intentionally written to stderr so
         # the message appears even when stdout is redirected to a file.
-        print(f"\nWARNING: Coverage file not found: {args.coverage_file}", file=sys.stderr)
         print(
-            "\nRun tests with coverage first: pytest --cov=<package> --cov-report=xml",
+            text("\nWARNING: Coverage file not found: %(value0)s", value0=args.coverage_file),
+            file=sys.stderr,
+        )
+        print(
+            text("\nRun tests with coverage first: pytest --cov=<package> --cov-report=xml"),
             file=sys.stderr,
         )
         return 1

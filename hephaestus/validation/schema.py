@@ -19,6 +19,7 @@ from typing import Any
 
 import yaml
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, emit_json_status, resolve_repo_root
 
 SchemaMapping = list[tuple[re.Pattern[str], Path]]
@@ -136,7 +137,7 @@ def check_files(
         schema_path = resolve_schema(file_path, repo_root, schema_map)
         if schema_path is None:
             print(
-                f"WARNING: No schema mapping for {file_path} — skipping",
+                text("WARNING: No schema mapping for %(value0)s — skipping", value0=file_path),
                 file=sys.stderr,
             )
             continue
@@ -146,7 +147,11 @@ def check_files(
                 schema_cache[schema_path] = json.loads(schema_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError) as exc:
                 print(
-                    f"ERROR: Could not load schema {schema_path}: {exc}",
+                    text(
+                        "ERROR: Could not load schema %(value0)s: %(value1)s",
+                        value0=schema_path,
+                        value1=exc,
+                    ),
                     file=sys.stderr,
                 )
                 any_failure = True
@@ -155,13 +160,13 @@ def check_files(
 
         errors = validate_file(file_path, schema_cache[schema_path])
         if errors:
-            print(f"FAIL: {file_path}", file=sys.stderr)
+            print(text("FAIL: %(value0)s", value0=file_path), file=sys.stderr)
             for error in errors:
                 print(error, file=sys.stderr)
             any_failure = True
             error_count += len(errors)
         elif verbose:
-            print(f"PASS: {file_path}")
+            print(text("PASS: %(value0)s", value0=file_path))
 
     if any_failure and dry_run:
         return 0, error_count
@@ -183,24 +188,24 @@ def main() -> int:
         "files",
         nargs="*",
         type=Path,
-        help="Config files to validate",
+        help=text("Config files to validate"),
     )
     parser.add_argument(
         "--schema-map",
         type=Path,
         default=None,
-        help="JSON file defining pattern-to-schema mappings",
+        help=text("JSON file defining pattern-to-schema mappings"),
     )
     parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
-        help="Print passing file names",
+        help=text("Print passing file names"),
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print errors but exit 0",
+        help=text("Print errors but exit 0"),
     )
 
     args = parser.parse_args()
@@ -217,8 +222,10 @@ def main() -> int:
             emit_json_status(1, message="--schema-map is required")
         else:
             print(
-                "ERROR: --schema-map is required. Provide a JSON file mapping "
-                "file patterns to schema paths.",
+                text(
+                    "ERROR: --schema-map is required. Provide a JSON file mapping "
+                    "file patterns to schema paths."
+                ),
                 file=sys.stderr,
             )
         return 1
@@ -229,7 +236,7 @@ def main() -> int:
         if args.json:
             emit_json_status(1, message=f"Could not load schema map: {exc}")
         else:
-            print(f"ERROR: Could not load schema map: {exc}", file=sys.stderr)
+            print(text("ERROR: Could not load schema map: %(value0)s", value0=exc), file=sys.stderr)
         return 1
 
     exit_code, error_count = check_files(

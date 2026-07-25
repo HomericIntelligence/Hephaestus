@@ -20,6 +20,7 @@ import re
 import sys
 from pathlib import Path
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, format_output
 
 
@@ -98,7 +99,10 @@ def detect_shadowing(file_path: Path) -> list[tuple[int, str, str, str]]:
                         violations.append((line_num, stripped, alias, target))
 
     except (OSError, UnicodeDecodeError) as e:
-        print(f"Warning: Could not read {file_path}: {e}", file=sys.stderr)
+        print(
+            text("Warning: Could not read %(value0)s: %(value1)s", value0=file_path, value1=e),
+            file=sys.stderr,
+        )
 
     return violations
 
@@ -171,19 +175,21 @@ def main() -> int:
         "paths",
         nargs="+",
         type=Path,
-        help="Files or directories to check",
+        help=text("Files or directories to check"),
     )
     parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
-        help="Print verbose output",
+        help=text("Print verbose output"),
     )
 
     args = parser.parse_args()
 
     if args.verbose and not args.json:
-        print(f"Checking {len(args.paths)} path(s) for type alias shadowing...")
+        print(
+            text("Checking %(value0)s path(s) for type alias shadowing...", value0=len(args.paths))
+        )
 
     exit_code, errors = check_files(args.paths)
 
@@ -200,7 +206,10 @@ def main() -> int:
 
     if errors:
         print("\n".join(errors), file=sys.stderr)
-        print(f"\nFound {len(errors)} type alias shadowing violation(s)", file=sys.stderr)
+        print(
+            text("\nFound %(value0)s type alias shadowing violation(s)", value0=len(errors)),
+            file=sys.stderr,
+        )
 
     return exit_code
 

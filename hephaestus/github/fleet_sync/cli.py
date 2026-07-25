@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 
 from hephaestus.agents.runtime import add_agent_argument, resolve_agent
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import (
     add_github_throttle_args,
     add_json_arg,
@@ -34,40 +35,40 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print actions without executing GitHub, Git, or agent mutations",
+        help=text("Print actions without executing GitHub, Git, or agent mutations"),
     )
     parser.add_argument(
         "--org",
         metavar="ORG",
         default=None,
-        help="GitHub organization (overrides FLEET_ORG and .fleet.yml)",
+        help=text("GitHub organization (overrides FLEET_ORG and .fleet.yml)"),
     )
     parser.add_argument(
         "--repos",
         nargs="+",
         metavar="REPO",
         default=None,
-        help="Restrict to specific repos (overrides FLEET_REPOS and .fleet.yml)",
+        help=text("Restrict to specific repos (overrides FLEET_REPOS and .fleet.yml)"),
     )
     parser.add_argument(
         "--config",
         metavar="PATH",
         type=str,
         default=None,
-        help="Path to fleet config YAML (default: ./.fleet.yml then repo-root .fleet.yml)",
+        help=text("Path to fleet config YAML (default: ./.fleet.yml then repo-root .fleet.yml)"),
     )
     parser.add_argument(
         "--skip-conflict-resolution",
         action="store_true",
-        help="Skip agent conflict resolution for conflicted PRs",
+        help=text("Skip agent conflict resolution for conflicted PRs"),
     )
     add_agent_argument(parser)
     add_prompt_dir_argument(parser)
-    parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging")
+    parser.add_argument("--verbose", "-v", action="store_true", help=text("Debug logging"))
     parser.add_argument(
         "--ascii",
         action="store_true",
-        help=(
+        help=text(
             "Use ASCII fallbacks (==, *, ->, --) instead of Unicode "
             "box/check/arrow/dash glyphs in log output; use when piping "
             "stdout to ASCII-only consumers."

@@ -23,6 +23,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, format_output
 
 _yaml: Any | None = None
@@ -271,19 +272,19 @@ def validate_agents_main(argv: list[str] | None = None) -> int:
 
     """
     parser = argparse.ArgumentParser(
-        description="Validate frontmatter in agent markdown files",
-        epilog="Example: %(prog)s --agents-dir .claude/agents",
+        description=text("Validate frontmatter in agent markdown files"),
+        epilog=text("Example: %(prog)s --agents-dir .claude/agents"),
     )
     parser.add_argument(
         "--agents-dir",
         type=Path,
         default=None,
-        help="Path to agents directory (default: <repo-root>/.claude/agents)",
+        help=text("Path to agents directory (default: <repo-root>/.claude/agents)"),
     )
     parser.add_argument(
         "--strict",
         action="store_true",
-        help="Treat warnings as errors",
+        help=text("Treat warnings as errors"),
     )
     add_json_arg(parser)
     add_version_arg(parser)
@@ -305,7 +306,10 @@ def validate_agents_main(argv: list[str] | None = None) -> int:
             }
             print(format_output(payload, "json"))
             return 1
-        print(f"ERROR: agents directory not found: {agents_dir}", file=sys.stderr)
+        print(
+            text("ERROR: agents directory not found: %(value0)s", value0=agents_dir),
+            file=sys.stderr,
+        )
         return 1
 
     md_files = sorted(agents_dir.glob("*.md"))
@@ -321,7 +325,7 @@ def validate_agents_main(argv: list[str] | None = None) -> int:
             }
             print(format_output(payload, "json"))
             return 1
-        print(f"No agent files found in {agents_dir}", file=sys.stderr)
+        print(text("No agent files found in %(value0)s", value0=agents_dir), file=sys.stderr)
         return 1
 
     if args.json:
@@ -331,15 +335,15 @@ def validate_agents_main(argv: list[str] | None = None) -> int:
     for file_path in md_files:
         is_valid, errors = check_agent_file(file_path)
         if is_valid:
-            print(f"  OK  {file_path.name}")
+            print(text("  OK  %(value0)s", value0=file_path.name))
         else:
             invalid_count += 1
-            print(f"FAIL  {file_path.name}")
+            print(text("FAIL  %(value0)s", value0=file_path.name))
             for err in errors:
-                print(f"      - {err}")
+                print(text("      - %(value0)s", value0=err))
 
     total = len(md_files)
-    print(f"\n{total - invalid_count}/{total} agents valid")
+    print(text("\n%(value0)s/%(value1)s agents valid", value0=total - invalid_count, value1=total))
 
     return 0 if invalid_count == 0 else 1
 

@@ -20,6 +20,7 @@ import sys
 from datetime import datetime
 from typing import Any
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import (
     add_github_throttle_args,
     add_json_arg,
@@ -67,7 +68,10 @@ def get_current_repo() -> str:
         check=False,
     )
     if result.returncode != 0:
-        print(f"Error: Failed to get repo name: {result.stderr}", file=sys.stderr)
+        print(
+            text("Error: Failed to get repo name: %(value0)s", value0=result.stderr),
+            file=sys.stderr,
+        )
         sys.exit(1)
     return result.stdout.strip()
 
@@ -312,8 +316,8 @@ def main() -> int:
 
     """
     parser = argparse.ArgumentParser(
-        description="Get GitHub contribution statistics",
-        epilog=(
+        description=text("Get GitHub contribution statistics"),
+        epilog=text(
             "Examples:\n"
             "  hephaestus-github-stats 2026-01-01 2026-01-31\n"
             "  hephaestus-github-stats 2026-01-01 2026-01-31 --author mvillmow\n"
@@ -321,10 +325,10 @@ def main() -> int:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("start_date", help="Start date (YYYY-MM-DD)")
-    parser.add_argument("end_date", help="End date (YYYY-MM-DD)")
-    parser.add_argument("--author", help="Filter by author username")
-    parser.add_argument("--repo", help="Repository (owner/repo), defaults to current repo")
+    parser.add_argument("start_date", help=text("Start date (YYYY-MM-DD)"))
+    parser.add_argument("end_date", help=text("End date (YYYY-MM-DD)"))
+    parser.add_argument("--author", help=text("Filter by author username"))
+    parser.add_argument("--repo", help=text("Repository (owner/repo), defaults to current repo"))
     add_github_throttle_args(parser)
     add_json_arg(parser)
     add_version_arg(parser)
@@ -336,27 +340,37 @@ def main() -> int:
         if args.json:
             emit_json_status(1, message=f"Invalid start date format: {args.start_date}")
         else:
-            print(f"Error: Invalid start date format: {args.start_date}", file=sys.stderr)
-            print("Expected format: YYYY-MM-DD", file=sys.stderr)
+            print(
+                text("Error: Invalid start date format: %(value0)s", value0=args.start_date),
+                file=sys.stderr,
+            )
+            print(text("Expected format: YYYY-MM-DD"), file=sys.stderr)
         return 1
 
     if not validate_date(args.end_date):
         if args.json:
             emit_json_status(1, message=f"Invalid end date format: {args.end_date}")
         else:
-            print(f"Error: Invalid end date format: {args.end_date}", file=sys.stderr)
-            print("Expected format: YYYY-MM-DD", file=sys.stderr)
+            print(
+                text("Error: Invalid end date format: %(value0)s", value0=args.end_date),
+                file=sys.stderr,
+            )
+            print(text("Expected format: YYYY-MM-DD"), file=sys.stderr)
         return 1
 
     repo = args.repo if args.repo else get_current_repo()
 
     if not args.json:
-        print(f"Repository: {repo}")
-        print(f"Date range: {args.start_date} to {args.end_date}")
+        print(text("Repository: %(value0)s", value0=repo))
+        print(
+            text(
+                "Date range: %(value0)s to %(value1)s", value0=args.start_date, value1=args.end_date
+            )
+        )
         if args.author:
-            print(f"Author: {args.author}")
+            print(text("Author: %(value0)s", value0=args.author))
         print()
-        print("Fetching statistics...")
+        print(text("Fetching statistics..."))
 
     stats = collect_stats(args.start_date, args.end_date, args.author, repo)
     if args.json:

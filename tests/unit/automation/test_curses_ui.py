@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 from hephaestus.automation.curses_ui import CursesUI, LogBuffer, ThreadLogManager
 from hephaestus.automation.status_tracker import StatusTracker
+from hephaestus.cli.localization import using_localizer
 
 
 class TestLogBuffer:
@@ -111,6 +112,37 @@ class TestCursesUI:
         tracker = StatusTracker(num_workers)
         log_manager = ThreadLogManager()
         return CursesUI(tracker, log_manager)
+
+    def test_captures_localizer_for_deferred_rendering(self) -> None:
+        """Fixed labels translate while live status and logs stay unchanged."""
+        tracker = StatusTracker(2)
+        manager = ThreadLogManager()
+        tracker.update_slot(1, "building release")
+        manager.log(1, "raw worker output")
+        with using_localizer(
+            {
+                "Hephaestus Issue Implementer": "Implémenteur Hephaestus",
+                "Worker %(worker)d: [idle]": "Ouvrier %(worker)d : [inactif]",
+                "Worker %(worker)d: %(status)s": "Ouvrier %(worker)d : %(status)s",
+                "Recent Activity:": "Activité récente :",
+            }
+        ):
+            ui = CursesUI(tracker, manager)
+
+        ui.stdscr = MagicMock()
+        ui.stdscr.getmaxyx.return_value = (20, 100)
+        with (
+            patch("hephaestus.automation.curses_ui.curses.has_colors", return_value=False),
+            patch("hephaestus.automation.curses_ui.curses.color_pair"),
+        ):
+            ui._refresh_display()
+
+        rendered = [call.args[2] for call in ui.stdscr.addstr.call_args_list]
+        assert "Implémenteur Hephaestus" in rendered
+        assert "Ouvrier 0 : [inactif]" in rendered
+        assert "Ouvrier 1 : building release" in rendered
+        assert "Activité récente :" in rendered
+        assert "raw worker output" in rendered
 
     def test_init(self) -> None:
         """Test CursesUI initialization."""

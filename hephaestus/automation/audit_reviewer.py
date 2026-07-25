@@ -28,6 +28,7 @@ from hephaestus.agents.runtime import (
     uses_direct_agent_runner,
 )
 from hephaestus.automation.prompts.catalog import PromptCatalog
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import (
     configure_cli_logging,
     configure_github_throttle_from_args,
@@ -258,9 +259,11 @@ def _build_parser() -> argparse.ArgumentParser:
         nargs="+",
         type=int,
         default=[],
-        help="Audit only these PR numbers (default: all open).",
+        help=text("Audit only these PR numbers (default: all open)."),
     )
-    parser.add_argument("--codex", action="store_true", help="Deprecated alias for --agent codex.")
+    parser.add_argument(
+        "--codex", action="store_true", help=text("Deprecated alias for --agent codex.")
+    )
     return parser
 
 

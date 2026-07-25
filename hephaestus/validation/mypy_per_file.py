@@ -24,6 +24,7 @@ import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, emit_json_status
 from hephaestus.utils.helpers import NETWORK_TIMEOUT
 
@@ -87,7 +88,7 @@ def run_mypy_per_file(
 
     """
     if not files:
-        print("mypy-each-file: no files to check", file=sys.stderr)
+        print(text("mypy-each-file: no files to check"), file=sys.stderr)
         return 0
 
     executable = python_executable or sys.executable
@@ -113,7 +114,11 @@ def run_mypy_per_file(
                 # A hung mypy run must not stall the whole check; treat it as a
                 # failure for this file so the aggregate rc is non-zero (#684).
                 print(
-                    f"mypy-each-file: {filepath} timed out after {exc.timeout}s",
+                    text(
+                        "mypy-each-file: %(value0)s timed out after %(value1)ss",
+                        value0=filepath,
+                        value1=exc.timeout,
+                    ),
                     file=sys.stderr,
                 )
                 rc = 124

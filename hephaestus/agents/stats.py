@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.loader import AgentInfo, load_all_agents
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, format_output
 
 # ---------------------------------------------------------------------------
@@ -221,26 +222,26 @@ def main() -> int:
 
     """
     parser = argparse.ArgumentParser(
-        description="Generate statistics for agent markdown files",
-        epilog="Example: %(prog)s --agents-dir .claude/agents --format text",
+        description=text("Generate statistics for agent markdown files"),
+        epilog=text("Example: %(prog)s --agents-dir .claude/agents --format text"),
     )
     parser.add_argument(
         "--agents-dir",
         type=Path,
         default=None,
-        help="Path to agents directory (default: <repo-root>/.claude/agents)",
+        help=text("Path to agents directory (default: <repo-root>/.claude/agents)"),
     )
     parser.add_argument(
         "--format",
         choices=["text", "json"],
         default="text",
-        help="Output format (default: text)",
+        help=text("Output format (default: text)"),
     )
     parser.add_argument(
         "--output",
         type=Path,
         default=None,
-        help="Write output to file instead of stdout",
+        help=text("Write output to file instead of stdout"),
     )
     add_json_arg(parser)
     add_version_arg(parser)
@@ -255,12 +256,15 @@ def main() -> int:
         agents_dir = get_repo_root() / ".claude" / "agents"
 
     if not agents_dir.is_dir():
-        print(f"ERROR: agents directory not found: {agents_dir}", file=sys.stderr)
+        print(
+            text("ERROR: agents directory not found: %(value0)s", value0=agents_dir),
+            file=sys.stderr,
+        )
         return 1
 
     agents = load_all_agents(agents_dir)
     if not agents:
-        print(f"No agent files found in {agents_dir}", file=sys.stderr)
+        print(text("No agent files found in %(value0)s", value0=agents_dir), file=sys.stderr)
         return 1
 
     stats = collect_agent_stats(agents)
@@ -273,7 +277,7 @@ def main() -> int:
 
     if args.output:
         args.output.write_text(output, encoding="utf-8")
-        print(f"Written to {args.output}")
+        print(text("Written to %(value0)s", value0=args.output))
     else:
         print(output)
 

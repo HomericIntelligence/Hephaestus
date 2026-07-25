@@ -20,6 +20,7 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, resolve_repo_root
 
 PACKAGE_NAME = "hephaestus"
@@ -150,7 +151,7 @@ def main(argv: list[str] | None = None) -> int:
         "--docs-dir",
         type=Path,
         default=None,
-        help="Generated API reference directory (default: <repo-root>/docs/api)",
+        help=text("Generated API reference directory (default: <repo-root>/docs/api)"),
     )
     args = parser.parse_args(argv)
     repo_root = resolve_repo_root(args)

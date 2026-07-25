@@ -34,6 +34,7 @@ import subprocess
 import sys
 import threading
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import (
     configure_cli_logging,
     configure_github_throttle_from_args,
@@ -168,12 +169,12 @@ def _build_parser() -> argparse.ArgumentParser:
     target.add_argument(
         "--repo",
         metavar="OWNER/NAME",
-        help="Single target repo (default: the current git checkout's origin).",
+        help=text("Single target repo (default: the current git checkout's origin)."),
     )
     target.add_argument(
         "--org",
         metavar="ORG",
-        help="Apply to every non-archived, non-fork repo in the org.",
+        help=text("Apply to every non-archived, non-fork repo in the org."),
     )
     return parser
 

@@ -42,6 +42,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, resolve_repo_root
 
 # ---------------------------------------------------------------------------
@@ -353,20 +354,20 @@ def main() -> int:
         "--directory",
         type=Path,
         default=None,
-        help="Directory to scan (default: repository root)",
+        help=text("Directory to scan (default: repository root)"),
     )
     parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
-        help="Print violating line content in text output",
+        help=text("Print violating line content in text output"),
     )
     parser.add_argument(
         "--exclude",
         action="append",
         metavar="PREFIX",
         default=None,
-        help="Additional path prefix to exclude (may be repeated)",
+        help=text("Additional path prefix to exclude (may be repeated)"),
     )
 
     args = parser.parse_args()

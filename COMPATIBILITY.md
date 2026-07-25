@@ -247,6 +247,10 @@ Lazy-loaded symbols (accessible via `hephaestus.<name>`): `add_logging_args`,
 | Symbol | Added | Notes |
 |--------|-------|-------|
 | `Colors` | 0.1.0 | ANSI color constants for terminal output |
+| `Localizer` | next | Immutable source-template catalog |
+| `get_localizer` | next | Return the active localization context |
+| `text` | next | Render a user-facing source template |
+| `using_localizer` | next | Temporarily select a context-local catalog |
 | `CommandRegistry` | 0.1.0 | Registry type for CLI subcommands |
 | `COMMAND_REGISTRY` | 0.1.0 | Default shared `CommandRegistry` instance |
 | `DRY_RUN_HELP_CAVEAT` | 0.9.0 | Standard help text appended for dry-run flags |

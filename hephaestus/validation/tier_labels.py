@@ -36,6 +36,7 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, resolve_repo_root
 
 # ---------------------------------------------------------------------------
@@ -276,7 +277,7 @@ def check_tier_label_consistency(target: Path) -> int:
 
     """
     if not target.is_file():
-        print(f"ERROR: File not found: {target}", file=sys.stderr)
+        print(text("ERROR: File not found: %(value0)s", value0=target), file=sys.stderr)
         return 1
 
     content = target.read_text(encoding="utf-8")
@@ -284,12 +285,22 @@ def check_tier_label_consistency(target: Path) -> int:
 
     if violations:
         print(
-            f"ERROR: Found {len(violations)} tier label mismatch(es) in {target}:",
+            text(
+                "ERROR: Found %(value0)s tier label mismatch(es) in %(value1)s:",
+                value0=len(violations),
+                value1=target,
+            ),
             file=sys.stderr,
         )
         for lineno, line, pattern, reason in violations:
-            print(f"  Line {lineno}: {line.rstrip()}", file=sys.stderr)
-            print(f"    Pattern: {pattern!r} — {reason}", file=sys.stderr)
+            print(
+                text("  Line %(value0)s: %(value1)s", value0=lineno, value1=line.rstrip()),
+                file=sys.stderr,
+            )
+            print(
+                text("    Pattern: %(value0)r — %(value1)s", value0=pattern, value1=reason),
+                file=sys.stderr,
+            )
         return 1
 
     return 0
@@ -326,12 +337,12 @@ def main() -> int:
         "--directory",
         type=Path,
         default=None,
-        help="Directory to scan (default: repository root).",
+        help=text("Directory to scan (default: repository root)."),
     )
     parser.add_argument(
         "--glob",
         default="**/*.md",
-        help="Glob pattern to match Markdown files (default: **/*.md).",
+        help=text("Glob pattern to match Markdown files (default: **/*.md)."),
     )
     parser.add_argument(
         "--exclude",
@@ -339,13 +350,13 @@ def main() -> int:
         dest="excludes",
         metavar="DIR",
         default=[],
-        help=("Directory name to exclude (repeatable, default: .venv build .git .worktrees)."),
+        help=text("Directory name to exclude (repeatable, default: .venv build .git .worktrees)."),
     )
     parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
-        help="Print details for each mismatch found.",
+        help=text("Print details for each mismatch found."),
     )
 
     args = parser.parse_args()
@@ -354,7 +365,10 @@ def main() -> int:
     try:
         repo_root = resolve_repo_root(args)
     except Exception as exc:
-        print(f"ERROR: Could not determine repository root: {exc}", file=sys.stderr)
+        print(
+            text("ERROR: Could not determine repository root: %(value0)s", value0=exc),
+            file=sys.stderr,
+        )
         return 2
 
     scan_root = args.directory if args.directory is not None else repo_root
@@ -366,7 +380,7 @@ def main() -> int:
     try:
         findings = scan_repository(scan_root, glob=args.glob, excludes=excludes)
     except OSError as exc:
-        print(f"ERROR: I/O error during scan: {exc}", file=sys.stderr)
+        print(text("ERROR: I/O error during scan: %(value0)s", value0=exc), file=sys.stderr)
         return 2
 
     if args.json:
@@ -376,7 +390,7 @@ def main() -> int:
         if findings:
             return 1
     else:
-        print("No tier label mismatches found.")
+        print(text("No tier label mismatches found."))
 
     return 0 if not findings else 1
 

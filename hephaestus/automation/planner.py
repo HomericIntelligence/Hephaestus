@@ -25,6 +25,7 @@ import argparse
 import logging
 
 from hephaestus.agents.runtime import resolve_agent
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import (
     add_advise_timeout_arg,
     add_agent_timeout_arg,
@@ -105,27 +106,27 @@ Examples:
         "--issues",
         type=int,
         nargs="+",
-        help="Issue numbers to plan (default: all open issues)",
+        help=text("Issue numbers to plan (default: all open issues)"),
     )
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Force re-planning even when the issue is already at-or-past state:plan-go",
+        help=text("Force re-planning even when the issue is already at-or-past state:plan-go"),
     )
     parser.add_argument(
         "--system-prompt",
         type=Path,
-        help="(Deprecated, ignored) system prompt file path; kept for CLI compatibility",
+        help=text("(Deprecated, ignored) system prompt file path; kept for CLI compatibility"),
     )
     parser.add_argument(
         "--no-skip-closed",
         action="store_true",
-        help="(Deprecated, ignored) kept for CLI compatibility; closed issues never queue",
+        help=text("(Deprecated, ignored) kept for CLI compatibility; closed issues never queue"),
     )
     parser.add_argument(
         "--no-advise",
         action="store_true",
-        help="Skip the advise step (don't search team knowledge base before planning)",
+        help=text("Skip the advise step (don't search team knowledge base before planning)"),
     )
     add_agent_timeout_arg(parser)
     add_advise_timeout_arg(parser)

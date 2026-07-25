@@ -39,6 +39,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from hephaestus.cli.localization import text
+
 if TYPE_CHECKING:
     from hephaestus.automation.pipeline.coordinator import PipelineConfig
     from hephaestus.automation.pipeline.routing import PipelineScope
@@ -266,12 +268,14 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
         verbose_help="Enable DEBUG logging",
     )
-    p.add_argument("--loops", type=int, default=5, help="Number of loop iterations (default: 5)")
+    p.add_argument(
+        "--loops", type=int, default=5, help=text("Number of loop iterations (default: 5)")
+    )
     p.add_argument(
         "--drive-green-loops",
         type=_parse_positive_int,
         default=5,
-        help=(
+        help=text(
             "Compatibility iteration bound for the historical drive-green CLI; current "
             "merge-wait conditionally merges reviewed heads and does not manage native auto-merge "
             "(default: 5; replaces --max-merge-attempts)."
@@ -281,23 +285,23 @@ def _build_parser() -> argparse.ArgumentParser:
         "--parallel-repos",
         type=int,
         default=1,
-        help="Repos processed in parallel per loop iteration (default: 1)",
+        help=text("Repos processed in parallel per loop iteration (default: 1)"),
     )
     p.add_argument(
         "--phases",
         default=",".join(ALL_SELECTABLE),
-        help=(
-            "Comma-separated subset of phases/stages to run. "
-            f"Valid: {','.join(ALL_SELECTABLE)} "
+        help=text(
+            "Comma-separated subset of phases/stages to run. Valid: %(valid)s "
             "(plan/implement are loop-body phases; drive-green runs per issue "
-            "when selected and also does one final repo-level catch-up sweep)."
+            "when selected and also does one final repo-level catch-up sweep).",
+            valid=",".join(ALL_SELECTABLE),
         ),
     )
     p.add_argument(
         "--issues",
         type=_parse_issue_list,
         default=None,
-        help=(
+        help=text(
             "Comma-separated issue numbers to pass to issue-scoped phases "
             "(plan, implement, drive-green). Default: phase auto-discovery."
         ),
@@ -306,7 +310,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--prs",
         type=_parse_pr_list,
         default=None,
-        help=(
+        help=text(
             "Comma-separated PR numbers to seed directly into pipeline PR stages. "
             "Default: no direct PR scope."
         ),
@@ -314,14 +318,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--no-advise",
         action="store_true",
-        help="Pass --no-advise to phases that support the advise preflight",
+        help=text("Pass --no-advise to phases that support the advise preflight"),
     )
     p.add_argument(
         "--no-serialize-file-overlap",
         action="store_false",
         dest="serialize_file_overlap",
         default=True,
-        help=(
+        help=text(
             "Disable file-overlap serialization; dispatch all issues in a round"
             " concurrently even when their plans touch the same file (#1623)"
         ),
@@ -329,12 +333,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--nitpick",
         action="store_true",
-        help="Pass --nitpick to review phases (reviewer emits nitpick comments)",
+        help=text("Pass --nitpick to review phases (reviewer emits nitpick comments)"),
     )
     p.add_argument(
         "--drive-green-all",
         action="store_true",
-        help=(
+        help=text(
             "Compatibility option for the retired broad drive-green sweep. "
             "Repository discovery remains linked-issue based and never scans "
             "unrelated open PRs; use --prs for an explicit PR scope."
@@ -343,21 +347,23 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--run-pre-pr-tests",
         action="store_true",
-        help=(
+        help=text(
             "Run the implementation-stage pre-PR unit-test gate before committing and creating PRs."
         ),
     )
     p.add_argument(
         "--model",
         default="",
-        help=(
+        help=text(
             "Model ID applied to every phase (planner, reviewer, implementer, advise) "
             "for child processes, so no HEPH_*_MODEL env vars are required. The /learn "
             "step inherits its parent phase's model automatically. A per-phase flag below "
             "overrides this for that phase."
         ),
     )
-    p.add_argument("--planner-model", default="", help="HEPH_PLANNER_MODEL for child processes")
+    p.add_argument(
+        "--planner-model", default="", help=text("HEPH_PLANNER_MODEL for child processes")
+    )
     reasoning_help = (
         "Explicit Codex reasoning effort for this role. Use default to omit "
         "model_reasoning_effort; when omitted, the selected model alias keeps its default."
@@ -366,12 +372,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--planner-reasoning-effort",
         choices=("default", "low", "medium", "high", "xhigh"),
         default="",
-        help=reasoning_help,
+        help=text(reasoning_help),
     )
     p.add_argument(
         "--reviewer-model",
         default="",
-        help=(
+        help=text(
             "HEPH_REVIEWER_MODEL for child processes (plan-review + PR-review); "
             "use terra:default to select GPT-5.6 Terra without an explicit reasoning override"
         ),
@@ -379,26 +385,28 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--implementer-model",
         default="",
-        help="HEPH_IMPLEMENTER_MODEL for child processes (implement, address-review, drive-green)",
+        help=text(
+            "HEPH_IMPLEMENTER_MODEL for child processes (implement, address-review, drive-green)"
+        ),
     )
     p.add_argument(
         "--reviewer-reasoning-effort",
         choices=("default", "low", "medium", "high", "xhigh"),
         default="",
-        help=reasoning_help,
+        help=text(reasoning_help),
     )
     p.add_argument(
         "--implementer-reasoning-effort",
         choices=("default", "low", "medium", "high", "xhigh"),
         default="",
-        help=reasoning_help,
+        help=text(reasoning_help),
     )
     p.add_argument(
         "--org",
         nargs="?",
         const=_ORG_AUTODETECT,
         default=None,
-        help=(
+        help=text(
             "Enumerate non-fork, non-archived repos in a GitHub org. "
             "Pass `--org NAME` for a specific org, or `--org` alone to auto-detect "
             "the org from the current repo's git remote. "
@@ -410,21 +418,22 @@ def _build_parser() -> argparse.ArgumentParser:
         "--projects-dir",
         type=str,
         default=None,
-        help=(
+        help=text(
             "Local directory containing repo clones. When omitted, resolved from "
             "the ``PROJECTS_ROOT`` env var (if set and existing), otherwise the "
-            "current checkout parent when available, then "
-            f"``{DEFAULT_PROJECTS_DIR}``."
+            "current checkout parent when available, then ``%(default)s``.",
+            default=DEFAULT_PROJECTS_DIR,
         ),
     )
     p.add_argument(
         "--phase-timeout",
         type=float,
         default=_default_phase_timeout_s(),
-        help=(
+        help=text(
             "Per-phase timeout in seconds (default: HEPH_PHASE_TIMEOUT or "
-            f"{int(_default_phase_timeout_s())}s). Pass 0 or a negative value to disable. "
-            "This bounds each AGENT JOB the pipeline runs, not a whole phase subprocess."
+            "%(default)ds). Pass 0 or a negative value to disable. This bounds "
+            "each AGENT JOB the pipeline runs, not a whole phase subprocess.",
+            default=int(_default_phase_timeout_s()),
         ),
     )
     p.add_argument(
@@ -432,7 +441,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=_parse_metrics_port,
         default=0,
         metavar="PORT",
-        help=(
+        help=text(
             "Loopback-only port for the local Prometheus /metrics and /health server "
             "(0 disables it)."
         ),
@@ -441,7 +450,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--repos",
         type=_parse_repo_list,
         default=None,
-        help=(
+        help=text(
             "Comma-separated repo list (e.g. `--repos foo,bar`). Overrides org "
             "enumeration. Space-separated input is NOT accepted."
         ),

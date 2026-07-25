@@ -23,6 +23,7 @@ import subprocess
 import sys
 from typing import Any
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import (
     add_github_throttle_args,
     add_json_arg,
@@ -392,21 +393,21 @@ def _merge_pr(repo_name: str, pr_number: int, head_sha: str) -> dict[str, Any]:
 def _build_arg_parser() -> argparse.ArgumentParser:
     """Build the PR merge CLI argument parser."""
     parser = argparse.ArgumentParser(
-        description="Merge open PRs with successful CI/CD into main (squash via PR API)"
+        description=text("Merge open PRs with successful CI/CD into main (squash via PR API)")
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print commands and API actions without executing",
+        help=text("Print commands and API actions without executing"),
     )
     parser.add_argument(
         "--push-all",
         action="store_true",
-        help="Push all PR head branches to origin even if CI/CD failed",
+        help=text("Push all PR head branches to origin even if CI/CD failed"),
     )
     parser.add_argument(
         "--repo",
-        help="Repository in format OWNER/REPO (auto-detected if not provided)",
+        help=text("Repository in format OWNER/REPO (auto-detected if not provided)"),
     )
     add_github_throttle_args(parser)
     add_json_arg(parser)

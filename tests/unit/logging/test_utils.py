@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from hephaestus.logging.formatters import JsonFormatter
+from hephaestus.logging.formatters import JsonFormatter, _LocalizedFormatter
 from hephaestus.logging.utils import (
     ContextLogger,
     get_logger,
@@ -38,6 +38,7 @@ class TestGetLogger:
     def test_returns_context_logger(self) -> None:
         """get_logger returns a ContextLogger instance."""
         logger = get_logger("test.module")
+        assert isinstance(logger.logger.handlers[0].formatter, _LocalizedFormatter)
         assert isinstance(logger, ContextLogger)
 
     def test_default_level_is_info(self) -> None:
@@ -425,6 +426,25 @@ class TestSetupLogging:
         root.handlers.clear()
         try:
             setup_logging(level=logging.WARNING)
+        finally:
+            root.handlers.clear()
+            root.handlers.extend(saved)
+
+    def test_plain_handlers_are_localized_and_existing_handler_is_preserved(self) -> None:
+        """Only newly created plain handlers receive the localized formatter."""
+        root = logging.getLogger()
+        saved = list(root.handlers)
+        root.handlers.clear()
+        custom = logging.StreamHandler(io.StringIO())
+        custom_formatter = logging.Formatter("CUSTOM %(message)s")
+        custom.setFormatter(custom_formatter)
+        root.addHandler(custom)
+        try:
+            setup_logging()
+            assert custom.formatter is custom_formatter
+            created = [handler for handler in root.handlers if handler is not custom]
+            assert created
+            assert all(isinstance(handler.formatter, _LocalizedFormatter) for handler in created)
         finally:
             root.handlers.clear()
             root.handlers.extend(saved)

@@ -5,6 +5,7 @@ Exercises the real combined workflow to catch regressions in handler
 deduplication and propagation behaviour.
 """
 
+import json
 import logging
 import sys
 
@@ -141,6 +142,28 @@ class TestJsonFormat:
                 assert "message" in parsed
                 assert "level" in parsed
                 assert "timestamp" in parsed
+
+    def test_catalog_changes_plain_output_but_not_json_fields(self, capsys) -> None:
+        """The same catalog leaves structured logging exactly structured."""
+        from hephaestus.cli.localization import using_localizer
+        from hephaestus.logging.utils import get_logger
+
+        with using_localizer({"Ready %d": "Prêt %d"}):
+            plain = get_logger("test.localized.plain", level=logging.INFO)
+            structured = get_logger(
+                "test.localized.json",
+                json_format=True,
+                level=logging.INFO,
+            )
+            plain.info("Ready %d", 2)
+            structured.info("Ready %d", 2, extra={"request_id": "abc"})
+
+        lines = capsys.readouterr().out.strip().splitlines()
+        assert any("Prêt 2" in line for line in lines)
+        payload = json.loads(next(line for line in lines if line.startswith("{")))
+        assert payload["message"] == "Ready 2"
+        assert payload["request_id"] == "abc"
+        assert {"timestamp", "level", "logger", "message"} <= payload.keys()
 
 
 class TestContextLogger:

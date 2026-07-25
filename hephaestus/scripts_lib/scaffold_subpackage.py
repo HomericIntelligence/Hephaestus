@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 from typing import NamedTuple
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg
 
 _VALID_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -129,27 +130,31 @@ def main(argv: list[str] | None = None) -> int:
     """
     parser = argparse.ArgumentParser(
         prog="hephaestus-scaffold-subpackage",
-        description="Scaffold a new hephaestus subpackage skeleton with matching test directory.",
+        description=text(
+            "Scaffold a new hephaestus subpackage skeleton with matching test directory."
+        ),
     )
     parser.add_argument(
         "name",
-        help="Subpackage name: lowercase snake_case (e.g. my_utils)",
+        help=text("Subpackage name: lowercase snake_case (e.g. my_utils)"),
     )
     parser.add_argument(
         "--with-cli",
         action="store_true",
-        help="Also generate a scripts/ shim for a CLI entry point",
+        help=text("Also generate a scripts/ shim for a CLI entry point"),
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print planned paths without writing any files",
+        help=text("Print planned paths without writing any files"),
     )
     parser.add_argument(
         "--root",
         type=Path,
         default=None,
-        help="Repository root (defaults to the repo root auto-detected from this file's location)",
+        help=text(
+            "Repository root (defaults to the repo root auto-detected from this file's location)"
+        ),
     )
     add_json_arg(parser)
     add_version_arg(parser)
@@ -157,7 +162,7 @@ def main(argv: list[str] | None = None) -> int:
 
     error = _validate_name(args.name)
     if error:
-        print(f"Error: {error}", file=sys.stderr)
+        print(text("Error: %(value0)s", value0=error), file=sys.stderr)
         return 1
 
     root = args.root if args.root is not None else _default_root()
@@ -167,7 +172,10 @@ def main(argv: list[str] | None = None) -> int:
     pkg_dir = root / "hephaestus" / args.name
     if pkg_dir.exists():
         print(
-            f"Error: target directory {pkg_dir} already exists; refusing to overwrite.",
+            text(
+                "Error: target directory %(value0)s already exists; refusing to overwrite.",
+                value0=pkg_dir,
+            ),
             file=sys.stderr,
         )
         return 1
@@ -187,7 +195,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(msg)
             for path, _ in plan.files:
-                print(f"  {path}")
+                print(text("  %(value0)s", value0=path))
         return 0
 
     created: list[str] = []
@@ -199,9 +207,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         print(json.dumps({"name": args.name, "files_created": created}))
     else:
-        print(f"Created {len(created)} file(s) for '{args.name}':")
+        print(
+            text(
+                "Created %(value0)s file(s) for '%(value1)s':",
+                value0=len(created),
+                value1=args.name,
+            )
+        )
         for p in created:
-            print(f"  {p}")
+            print(text("  %(value0)s", value0=p))
         print()
         print("\n".join(plan.hints))
 

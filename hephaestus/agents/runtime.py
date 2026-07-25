@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from hephaestus.cli.localization import text
 from hephaestus.constants import (
     agent_auth_status_timeout,
 )
@@ -123,7 +124,7 @@ def add_agent_argument(parser: argparse.ArgumentParser) -> None:
         "--agent",
         choices=AGENT_CHOICES,
         default=None,
-        help=(
+        help=text(
             "Agent backend to invoke for model-driven steps "
             "(default: auto-detect authenticated backend, preferring claude when authenticated)"
         ),

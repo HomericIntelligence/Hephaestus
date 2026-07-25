@@ -39,6 +39,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 from hephaestus.logging.utils import get_logger
 
@@ -221,7 +222,12 @@ class DatasetDownloader:
                                 filled = int(bar_length * downloaded / total_size)
                                 bar = "=" * filled + "-" * (bar_length - filled)
                                 print(
-                                    f"\rDownloading {filename}: [{bar}] {percent:.1f}%",
+                                    text(
+                                        "\rDownloading %(value0)s: [%(value1)s] %(value2).1f%%",
+                                        value0=filename,
+                                        value1=bar,
+                                        value2=percent,
+                                    ),
                                     end="",
                                     flush=True,
                                 )
@@ -652,8 +658,8 @@ def main() -> int:
     dataset_choices = ["mnist", "fashion_mnist", "cifar10", "cifar100", "emnist", "all"]
 
     parser = argparse.ArgumentParser(
-        description="Download machine learning datasets",
-        epilog=(
+        description=text("Download machine learning datasets"),
+        epilog=text(
             "Examples:\n"
             "  %(prog)s mnist\n"
             "  %(prog)s cifar10 datasets/cifar10\n"
@@ -662,18 +668,18 @@ def main() -> int:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("dataset", choices=dataset_choices, help="Dataset to download")
+    parser.add_argument("dataset", choices=dataset_choices, help=text("Dataset to download"))
     parser.add_argument(
         "output_dir",
         nargs="?",
         default=None,
-        help="Output directory (default: datasets/<dataset>)",
+        help=text("Output directory (default: datasets/<dataset>)"),
     )
     parser.add_argument(
         "--split",
         default="balanced",
         choices=sorted(EMNIST_SPLITS),
-        help="EMNIST split (only used when dataset=emnist, default: balanced)",
+        help=text("EMNIST split (only used when dataset=emnist, default: balanced)"),
     )
     add_json_arg(parser)
     add_version_arg(parser)

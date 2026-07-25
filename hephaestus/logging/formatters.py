@@ -16,11 +16,17 @@ Usage:
     logger.info("hello", extra={"request_id": "abc-123"})
 """
 
+from __future__ import annotations
+
+import copy
 import json
 import logging
 import traceback
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from hephaestus._localization import Localizer
 
 # Fields that are reserved for the formatter and cannot be overridden by
 # context or extra data.  If a context key collides with one of these, it
@@ -28,6 +34,32 @@ from typing import Any
 RESERVED_FIELDS: frozenset[str] = frozenset(
     {"timestamp", "level", "logger", "message", "exception", "stack_info"}
 )
+
+
+class _LocalizedFormatter(logging.Formatter):
+    """Translate copied plain-text log message templates."""
+
+    def __init__(
+        self,
+        fmt: str | None = None,
+        datefmt: str | None = None,
+        *,
+        localizer: Localizer | None = None,
+    ) -> None:
+        """Capture the active localizer for deferred or threaded formatting."""
+        super().__init__(fmt, datefmt=datefmt)
+        if localizer is None:
+            from hephaestus._localization import get_localizer
+
+            localizer = get_localizer()
+        self._localizer = localizer
+
+    def format(self, record: logging.LogRecord) -> str:
+        """Format a translated shallow copy without mutating the record."""
+        copied = copy.copy(record)
+        if isinstance(copied.msg, str):
+            copied.msg = self._localizer.template(copied.msg)
+        return super().format(copied)
 
 
 class JsonFormatter(logging.Formatter):

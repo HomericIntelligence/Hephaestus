@@ -58,6 +58,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 
 # A literal space is permitted because tokens are produced by ``shlex.split``
@@ -264,7 +265,10 @@ def run_under_gdb(
     command_bin = resolve_command(command)
     if command_bin is None:
         print(
-            f"[run-under-gdb] ERROR: could not resolve command '{command}' on PATH",
+            text(
+                "[run-under-gdb] ERROR: could not resolve command '%(value0)s' on PATH",
+                value0=command,
+            ),
             file=sys.stderr,
         )
         return 127
@@ -282,10 +286,16 @@ def run_under_gdb(
         gdb_script = script_handle.name
 
     try:
-        print(f"[run-under-gdb] gdb log  : {gdb_log}", file=sys.stderr)
-        print(f"[run-under-gdb] core file: {core_file} (written on crash)", file=sys.stderr)
-        print(f"[run-under-gdb] binary   : {command_bin}", file=sys.stderr)
-        print(f"[run-under-gdb] args     : {' '.join(command_args)}", file=sys.stderr)
+        print(text("[run-under-gdb] gdb log  : %(value0)s", value0=gdb_log), file=sys.stderr)
+        print(
+            text("[run-under-gdb] core file: %(value0)s (written on crash)", value0=core_file),
+            file=sys.stderr,
+        )
+        print(text("[run-under-gdb] binary   : %(value0)s", value0=command_bin), file=sys.stderr)
+        print(
+            text("[run-under-gdb] args     : %(value0)s", value0=" ".join(command_args)),
+            file=sys.stderr,
+        )
 
         gdb_cmd = [
             *prefix,
@@ -318,23 +328,23 @@ def _build_parser() -> argparse.ArgumentParser:
     """Build the argument parser for the ``hephaestus-run-under-gdb`` CLI."""
     parser = argparse.ArgumentParser(
         prog="hephaestus-run-under-gdb",
-        description=(
+        description=text(
             "Run a command under gdb -batch so a real ELF core and backtrace "
             "are captured before the inferior's own signal handler runs."
         ),
     )
     parser.add_argument(
         "core_dir",
-        help="directory for cores and gdb logs (created if absent)",
+        help=text("directory for cores and gdb logs (created if absent)"),
     )
     parser.add_argument(
         "command",
-        help="the program to run (resolved via PATH if not an explicit path)",
+        help=text("the program to run (resolved via PATH if not an explicit path)"),
     )
     parser.add_argument(
         "command_args",
         nargs=argparse.REMAINDER,
-        help="arguments passed to the command verbatim",
+        help=text("arguments passed to the command verbatim"),
     )
     add_json_arg(parser)
     add_version_arg(parser)
@@ -374,7 +384,7 @@ def main(argv: list[str] | None = None) -> int:
             gdb_cmd_prefix=os.environ.get("GDB_CMD_PREFIX"),
         )
     except ValueError as exc:
-        print(f"[run-under-gdb] ERROR: {exc}", file=sys.stderr)
+        print(text("[run-under-gdb] ERROR: %(value0)s", value0=exc), file=sys.stderr)
         if args.json:
             emit_json_status(2, message=f"invalid GDB_CMD_PREFIX: {exc}")
         return 2

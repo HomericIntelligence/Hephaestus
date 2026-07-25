@@ -8,7 +8,8 @@ from datetime import datetime
 
 import pytest
 
-from hephaestus.logging.formatters import RESERVED_FIELDS, JsonFormatter
+from hephaestus.cli.localization import using_localizer
+from hephaestus.logging.formatters import RESERVED_FIELDS, JsonFormatter, _LocalizedFormatter
 
 
 @pytest.fixture()
@@ -193,3 +194,37 @@ class TestReservedFields:
         """RESERVED_FIELDS must contain all standard JSON log fields."""
         expected = {"timestamp", "level", "logger", "message", "exception", "stack_info"}
         assert expected == RESERVED_FIELDS
+
+
+class TestLocalizedFormatter:
+    """Tests for plain-text log localization."""
+
+    def test_translates_template_with_deferred_interpolation(self) -> None:
+        """The copied template is translated before logging interpolates args."""
+        record = logging.LogRecord(
+            "test",
+            logging.INFO,
+            "test.py",
+            1,
+            "Processed %(count)d files",
+            ({"count": 2},),
+            None,
+        )
+        with using_localizer({"Processed %(count)d files": "%(count)d fichiers traités"}):
+            formatter = _LocalizedFormatter("%(message)s")
+
+        assert formatter.format(record) == "2 fichiers traités"
+        assert record.msg == "Processed %(count)d files"
+        assert json.loads(JsonFormatter().format(record))["message"] == "Processed 2 files"
+
+    def test_captures_localizer_at_construction(self) -> None:
+        """Formatting after a context exits retains the selected catalog."""
+        with using_localizer({"Ready": "Prêt"}):
+            formatter = _LocalizedFormatter("%(message)s")
+        record = logging.LogRecord("test", logging.INFO, "test.py", 1, "Ready", (), None)
+        assert formatter.format(record) == "Prêt"
+
+    def test_non_string_message_is_unchanged(self) -> None:
+        """Non-string logging payloads retain standard formatter behavior."""
+        record = logging.LogRecord("test", logging.INFO, "test.py", 1, 42, (), None)
+        assert _LocalizedFormatter("%(message)s").format(record) == "42"

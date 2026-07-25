@@ -12,7 +12,8 @@ Hephaestus is the shared utilities and tooling library for the HomericIntelligen
 - **hephaestus.automation** — Issue planning / implementation / PR review pipeline
 - **hephaestus.benchmarks** — Benchmark comparison and regression detection
 - **hephaestus.ci** — CI helpers (precommit, workflows, docker timing)
-- **hephaestus.cli** — CLI argument parsing and output formatting
+- **hephaestus.cli** — CLI argument parsing, localized human text, and output formatting
+  ([localization boundary](localization.md))
 - **hephaestus.config** — Configuration loading and management (YAML, JSON, env vars)
 - **hephaestus.datasets** — Dataset downloading utilities
 - **hephaestus.discovery** — Discovery of agents, skills, and code blocks

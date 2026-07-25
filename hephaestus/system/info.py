@@ -13,6 +13,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, format_output
 from hephaestus.utils.helpers import run_subprocess
 
@@ -249,58 +250,58 @@ def format_system_info(info: dict[str, Any], format_type: str = "text") -> str:
 
     # Text format
     output = []
-    output.append("=== System Information ===")
+    output.append(text("=== System Information ==="))
     output.append("")
 
     # OS Information
-    output.append("OS Information:")
-    output.append(f"  OS: {info['os']['name']}")
-    output.append(f"  Kernel: {info['os']['kernel']}")
-    output.append(f"  Machine: {info['os']['machine']}")
-    output.append(f"  Processor: {info['os']['processor']}")
+    output.append(text("OS Information:"))
+    output.append(text("  OS: %(value)s", value=info["os"]["name"]))
+    output.append(text("  Kernel: %(value)s", value=info["os"]["kernel"]))
+    output.append(text("  Machine: %(value)s", value=info["os"]["machine"]))
+    output.append(text("  Processor: %(value)s", value=info["os"]["processor"]))
     output.append("")
 
     # Python Information
-    output.append("Python:")
+    output.append(text("Python:"))
     python_info = info["python"]
-    output.append(f"  Version: {python_info['version']}")
-    output.append(f"  Implementation: {python_info['implementation']}")
-    output.append(f"  Compiler: {python_info['compiler']}")
-    output.append(f"  Path: {python_info['path']}")
+    output.append(text("  Version: %(value)s", value=python_info["version"]))
+    output.append(text("  Implementation: %(value)s", value=python_info["implementation"]))
+    output.append(text("  Compiler: %(value)s", value=python_info["compiler"]))
+    output.append(text("  Path: %(value)s", value=python_info["path"]))
     output.append("")
 
     # Git Information
-    output.append("Git:")
+    output.append(text("Git:"))
     git_info = info["git"]
-    output.append(f"  Repository: {git_info['repository']}")
+    output.append(text("  Repository: %(value)s", value=git_info["repository"]))
     if git_info["branch"]:
-        output.append(f"  Branch: {git_info['branch']}")
+        output.append(text("  Branch: %(value)s", value=git_info["branch"]))
     if git_info["commit"]:
-        output.append(f"  Commit: {git_info['commit']}")
+        output.append(text("  Commit: %(value)s", value=git_info["commit"]))
     output.append("")
 
     # Directory Information
-    output.append("Directory:")
-    output.append(f"  Current: {info['directory']['current']}")
+    output.append(text("Directory:"))
+    output.append(text("  Current: %(value)s", value=info["directory"]["current"]))
     output.append("")
 
     # Environment Information
-    output.append("Environment:")
+    output.append(text("Environment:"))
     for key, value in info["environment"].items():
-        output.append(f"  {key}: {value}")
+        output.append(text("  %(key)s: %(value)s", key=key, value=value))
     output.append("")
 
     # Tools Information (if available)
     if "tools" in info:
-        output.append("Tools:")
+        output.append(text("Tools:"))
         for tool_name, (version, path) in info["tools"].items():
             if path:
-                output.append(f"  {tool_name}: {version}")
+                output.append(text("  %(tool)s: %(version)s", tool=tool_name, version=version))
             else:
-                output.append(f"  {tool_name}: Not found")
+                output.append(text("  %(tool)s: Not found", tool=tool_name))
         output.append("")
 
-    output.append("=== End System Information ===")
+    output.append(text("=== End System Information ==="))
     return "\n".join(output)
 
 
@@ -308,8 +309,12 @@ def main() -> int:
     """Collect and display system information."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="Collect system information")
-    parser.add_argument("--no-tools", action="store_true", help="Skip tool version checks")
+    parser = argparse.ArgumentParser(description=text("Collect system information"))
+    parser.add_argument(
+        "--no-tools",
+        action="store_true",
+        help=text("Skip tool version checks"),
+    )
     add_json_arg(parser)
     add_version_arg(parser)
 

@@ -10,6 +10,7 @@ from typing import cast
 
 import yaml
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, format_output
 
 
@@ -68,14 +69,19 @@ def write_step_summary(content: str, summary_path: str | None = None) -> None:
 
 def bench_precommit_main(argv: list[str] | None = None) -> int:
     """Report pre-commit timing without making performance advisory-only."""
-    parser = argparse.ArgumentParser(description="Report pre-commit hook benchmark results.")
-    parser.add_argument("--elapsed", type=int, required=True, help="Elapsed time in seconds.")
-    parser.add_argument("--files", type=int, default=0, help="Number of files processed.")
+    parser = argparse.ArgumentParser(description=text("Report pre-commit hook benchmark results."))
+    parser.add_argument("--elapsed", type=int, required=True, help=text("Elapsed time in seconds."))
+    parser.add_argument("--files", type=int, default=0, help=text("Number of files processed."))
     parser.add_argument(
-        "--status", default="passed", help='Hook exit status string, e.g. "passed" or "failed".'
+        "--status",
+        default="passed",
+        help=text('Hook exit status string, e.g. "passed" or "failed".'),
     )
     parser.add_argument(
-        "--threshold", type=int, default=120, help="Warning threshold in seconds (default: 120)."
+        "--threshold",
+        type=int,
+        default=120,
+        help=text("Warning threshold in seconds (default: 120)."),
     )
     add_json_arg(parser)
     add_version_arg(parser)

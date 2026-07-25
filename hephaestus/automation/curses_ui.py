@@ -21,6 +21,7 @@ import time
 from collections import deque
 from typing import Any
 
+from hephaestus.cli.localization import get_localizer
 from hephaestus.utils.terminal import restore_terminal
 
 from .status_tracker import StatusTracker
@@ -128,7 +129,7 @@ class CursesUI:
         self,
         status_tracker: StatusTracker,
         log_manager: ThreadLogManager,
-    ):
+    ) -> None:
         """Initialize curses UI.
 
         Args:
@@ -150,6 +151,7 @@ class CursesUI:
             )
         self.status_tracker = status_tracker
         self.log_manager = log_manager
+        self._localizer = get_localizer()
         self.stdscr: Any = None
         self.running = False
         self.thread: threading.Thread | None = None
@@ -234,7 +236,7 @@ class CursesUI:
         height, width = self.stdscr.getmaxyx()
 
         # Display title
-        title = "Hephaestus Issue Implementer"
+        title = self._localizer.text("Hephaestus Issue Implementer")
         if len(title) < width:
             self.stdscr.addstr(0, 0, title, curses.A_BOLD)
 
@@ -263,10 +265,17 @@ class CursesUI:
                 break
 
             if status is None:
-                status_text = f"Worker {i}: [idle]"
+                status_text = self._localizer.text(
+                    "Worker %(worker)d: [idle]",
+                    worker=i,
+                )
                 attr = curses.color_pair(1) if curses.has_colors() else curses.A_DIM
             else:
-                status_text = f"Worker {i}: {status}"
+                status_text = self._localizer.text(
+                    "Worker %(worker)d: %(status)s",
+                    worker=i,
+                    status=status,
+                )
                 attr = curses.color_pair(2) if curses.has_colors() else curses.A_NORMAL
 
             # Truncate to fit width
@@ -314,7 +323,12 @@ class CursesUI:
             return row
 
         with contextlib.suppress(curses.error):
-            self.stdscr.addstr(row, 0, "Recent Activity:", curses.A_BOLD)
+            self.stdscr.addstr(
+                row,
+                0,
+                self._localizer.text("Recent Activity:"),
+                curses.A_BOLD,
+            )
         row += 1
 
         # Gather recent logs from all threads

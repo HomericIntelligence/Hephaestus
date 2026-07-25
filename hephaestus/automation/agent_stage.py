@@ -15,6 +15,7 @@ from hephaestus.agents.runtime import (
     uses_direct_agent_runner,
 )
 from hephaestus.automation.agent_config import normalize_claude_model
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 from hephaestus.io.utils import write_secure
 from hephaestus.prompts import PromptCatalog, add_prompt_dir_argument
@@ -23,33 +24,41 @@ from hephaestus.utils.terminal import install_sigtstp_only, terminal_guard
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the command-line parser for the agent stage runner."""
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--prompt-file", required=True, help="Prompt file to send to the agent")
-    parser.add_argument("--repo-root", required=True, help="Repository root for the agent")
-    parser.add_argument("--stage", required=True, help="Human-readable automation stage name")
-    parser.add_argument("--output", required=True, help="Where to write the agent's final response")
-    parser.add_argument("--log-file", help="Where to write combined agent stdout/stderr")
-    parser.add_argument("--skill-file", help="Optional skill instructions to prepend to the prompt")
+    parser = argparse.ArgumentParser(description=text(__doc__))
+    parser.add_argument(
+        "--prompt-file", required=True, help=text("Prompt file to send to the agent")
+    )
+    parser.add_argument("--repo-root", required=True, help=text("Repository root for the agent"))
+    parser.add_argument("--stage", required=True, help=text("Human-readable automation stage name"))
+    parser.add_argument(
+        "--output", required=True, help=text("Where to write the agent's final response")
+    )
+    parser.add_argument("--log-file", help=text("Where to write combined agent stdout/stderr"))
+    parser.add_argument(
+        "--skill-file", help=text("Optional skill instructions to prepend to the prompt")
+    )
     add_agent_argument(parser)
     add_prompt_dir_argument(parser)
-    parser.add_argument("--model", default="", help="Optional agent model override")
+    parser.add_argument("--model", default="", help=text("Optional agent model override"))
     parser.add_argument(
         "--sandbox",
         choices=["read-only", "workspace-write", "danger-full-access"],
         default="workspace-write",
-        help="Sandbox mode for agents that support it",
+        help=text("Sandbox mode for agents that support it"),
     )
     parser.add_argument(
         "--approval",
         choices=["untrusted", "on-request", "never"],
         default="never",
-        help="Approval policy for agents that support it",
+        help=text("Approval policy for agents that support it"),
     )
-    parser.add_argument("--timeout", type=int, default=1800, help="Subprocess timeout in seconds")
+    parser.add_argument(
+        "--timeout", type=int, default=1800, help=text("Subprocess timeout in seconds")
+    )
     parser.add_argument(
         "--debug",
         action="store_true",
-        help="Print the agent command before running",
+        help=text("Print the agent command before running"),
     )
     add_json_arg(parser)
     add_version_arg(parser)
@@ -82,7 +91,7 @@ def run_claude(
 ) -> int:
     """Run one stage with Claude Code, the default Hephaestus agent."""
     if args.debug:
-        print("Running: claude --print", file=sys.stderr)
+        print(text("Running: claude --print"), file=sys.stderr)
 
     try:
         result = run_claude_text(
@@ -110,7 +119,7 @@ def run_direct_agent(
 ) -> int:
     """Run one stage with a provider-neutral direct agent."""
     if args.debug:
-        print(f"Running: {args.agent} direct session", file=sys.stderr)
+        print(text("Running: %(value0)s direct session", value0=args.agent), file=sys.stderr)
 
     try:
         result = run_agent_session(

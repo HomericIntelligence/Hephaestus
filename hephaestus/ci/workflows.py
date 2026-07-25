@@ -27,6 +27,7 @@ import sys
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status, format_output
 
 _yaml: Any | None = None
@@ -221,12 +222,19 @@ def validate_workflow(workflow_file: Path) -> list[Violation]:
 
     """
     if _yaml is None:
-        print(f"WARNING: Skipping {workflow_file} (pyyaml not installed)", file=sys.stderr)
+        print(
+            text("WARNING: Skipping %(value0)s (pyyaml not installed)", value0=workflow_file),
+            file=sys.stderr,
+        )
         return []
 
     if workflow_file.stat().st_size > _MAX_FILE_SIZE:
         print(
-            f"WARNING: Skipping {workflow_file} (exceeds {_MAX_FILE_SIZE} byte limit)",
+            text(
+                "WARNING: Skipping %(value0)s (exceeds %(value1)s byte limit)",
+                value0=workflow_file,
+                value1=_MAX_FILE_SIZE,
+            ),
             file=sys.stderr,
         )
         return []
@@ -236,7 +244,11 @@ def validate_workflow(workflow_file: Path) -> list[Violation]:
             data: Any = _yaml.safe_load(fh)
         except _yaml.YAMLError as exc:
             print(
-                f"WARNING: Skipping {workflow_file} (YAML parse error: {exc})",
+                text(
+                    "WARNING: Skipping %(value0)s (YAML parse error: %(value1)s)",
+                    value0=workflow_file,
+                    value1=exc,
+                ),
                 file=sys.stderr,
             )
             return []
@@ -282,7 +294,7 @@ def collect_workflow_files(paths: list[str]) -> list[Path]:
             files.extend(sorted(p.glob("*.yml")))
             files.extend(sorted(p.glob("*.yaml")))
         else:
-            print(f"WARNING: Path not found: {p}", file=sys.stderr)
+            print(text("WARNING: Path not found: %(value0)s", value0=p), file=sys.stderr)
 
     seen: set[Path] = set()
     result: list[Path] = []
@@ -307,14 +319,14 @@ def check_workflow_inventory_main() -> int:
 
     """
     parser = argparse.ArgumentParser(
-        description="Detect drift between .github/workflows/*.yml files and README.md table.",
-        epilog="Example: %(prog)s --repo-root /path/to/repo",
+        description=text("Detect drift between .github/workflows/*.yml files and README.md table."),
+        epilog=text("Example: %(prog)s --repo-root /path/to/repo"),
     )
     parser.add_argument(
         "--repo-root",
         type=Path,
         default=None,
-        help="Repository root (default: auto-detect via git)",
+        help=text("Repository root (default: auto-detect via git)"),
     )
     add_json_arg(parser)
     add_version_arg(parser)
@@ -340,26 +352,28 @@ def check_workflow_inventory_main() -> int:
         return 0 if in_sync else 1
 
     if not undocumented and not missing_files:
-        print("OK: workflow inventory is in sync.")
+        print(text("OK: workflow inventory is in sync."))
         return 0
 
-    print("ERROR: workflow inventory drift detected!\n")
+    print(text("ERROR: workflow inventory drift detected!\n"))
 
     if undocumented:
-        print("Files on disk but NOT documented in .github/workflows/README.md:")
+        print(text("Files on disk but NOT documented in .github/workflows/README.md:"))
         for name in undocumented:
-            print(f"  + {name}")
+            print(text("  + %(value0)s", value0=name))
         print()
 
     if missing_files:
-        print("Files documented in README.md table but NOT present on disk:")
+        print(text("Files documented in README.md table but NOT present on disk:"))
         for name in missing_files:
-            print(f"  - {name}")
+            print(text("  - %(value0)s", value0=name))
         print()
 
     print(
-        "Fix: update the Workflow Summary table in .github/workflows/README.md "
-        "so it exactly matches the *.yml files on disk."
+        text(
+            "Fix: update the Workflow Summary table in .github/workflows/README.md "
+            "so it exactly matches the *.yml files on disk."
+        )
     )
     return 1
 
@@ -372,13 +386,13 @@ def validate_workflow_checkout_main() -> int:
 
     """
     parser = argparse.ArgumentParser(
-        description="Validate that composite actions are preceded by actions/checkout.",
-        epilog="Example: %(prog)s .github/workflows/ci.yml",
+        description=text("Validate that composite actions are preceded by actions/checkout."),
+        epilog=text("Example: %(prog)s .github/workflows/ci.yml"),
     )
     parser.add_argument(
         "paths",
         nargs="*",
-        help="Workflow files or directories (default: .github/workflows/)",
+        help=text("Workflow files or directories (default: .github/workflows/)"),
     )
     add_json_arg(parser)
     add_version_arg(parser)
@@ -397,7 +411,7 @@ def validate_workflow_checkout_main() -> int:
         if args.json:
             emit_json_status(0, message="no workflow files found", files_checked=0)
             return 0
-        print("No workflow files found to validate.")
+        print(text("No workflow files found to validate."))
         return 0
 
     all_violations: list[Violation] = []
@@ -421,15 +435,32 @@ def validate_workflow_checkout_main() -> int:
     if all_violations:
         for v in all_violations:
             print(
-                f"\nERROR: {v.workflow_file} :: job '{v.job_name}' :: step {v.step_index} "
-                f"uses '{v.composite_action}'\n"
-                f"       but actions/checkout is not a preceding step.\n"
-                f"       Composite actions and reusable workflows require checkout first."
+                text(
+                    "\nERROR: %(workflow)s :: job '%(job)s' :: step %(step)d "
+                    "uses '%(action)s'\n"
+                    "       but actions/checkout is not a preceding step.\n"
+                    "       Composite actions and reusable workflows require checkout first.",
+                    workflow=v.workflow_file,
+                    job=v.job_name,
+                    step=v.step_index,
+                    action=v.composite_action,
+                )
             )
-        print(f"\nFound {len(all_violations)} violation(s) in {len(workflow_files)} file(s).")
+        print(
+            text(
+                "\nFound %(value0)s violation(s) in %(value1)s file(s).",
+                value0=len(all_violations),
+                value1=len(workflow_files),
+            )
+        )
         return 1
 
-    print(f"OK: {len(workflow_files)} workflow file(s) checked. All pass checkout-first invariant.")
+    print(
+        text(
+            "OK: %(value0)s workflow file(s) checked. All pass checkout-first invariant.",
+            value0=len(workflow_files),
+        )
+    )
     return 0
 
 

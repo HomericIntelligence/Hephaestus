@@ -6,6 +6,7 @@ import re
 import sys
 from pathlib import Path
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, format_output, resolve_repo_root
 from hephaestus.io.toml import import_tomllib
 
@@ -94,7 +95,11 @@ def check_ci_matrix_coverage(repo_root: Path) -> bool:
     tested = extract_ci_matrix_python_versions(workflow_path.read_text(encoding="utf-8"))
     missing = sorted(set(advertised) - set(tested))
     if missing:
-        print(f"ERROR: CI matrix is missing classifier Python versions: {missing}")
+        print(
+            text(
+                "ERROR: CI matrix is missing classifier Python versions: %(value0)s", value0=missing
+            )
+        )
         return False
     return True
 
@@ -112,7 +117,7 @@ def check_python_version_consistency(
                 break
     if verbose:
         for key, value in sorted(versions.items()):
-            print(f"  {key}: {value}")
+            print(text("  %(value0)s: %(value1)s", value0=key, value1=value))
     checked = {
         value
         for key, value in versions.items()
@@ -143,9 +148,9 @@ def main() -> int:
             )
         )
     elif consistent:
-        print("OK: Python version specifications are consistent")
+        print(text("OK: Python version specifications are consistent"))
     else:
-        print("ERROR: Python version inconsistency detected", file=sys.stderr)
+        print(text("ERROR: Python version inconsistency detected"), file=sys.stderr)
     return 0 if passed else 1
 
 

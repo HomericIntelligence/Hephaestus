@@ -36,6 +36,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, emit_json_status, resolve_repo_root
 
 ALLOWED_ROOT_FILES: frozenset[str] = frozenset({"__init__.py", "conftest.py"})
@@ -313,14 +314,28 @@ def _report_mirror_check(
     if mirrored:
         if verbose:
             src_count = len(_get_subpackages(src_root))
-            print(f"OK: All {src_count} source subpackages have test directories.")
+            print(
+                text(
+                    "OK: All %(value0)s source subpackages have test directories.", value0=src_count
+                )
+            )
         return True
     print(
-        "ERROR: The following source subpackages have no corresponding tests/unit/ directory:",
+        text(
+            "ERROR: The following source subpackages have no corresponding tests/unit/ directory:"
+        ),
         file=sys.stderr,
     )
     for name in sorted(missing):
-        print(f"  {src_package}/{name}  ->  tests/unit/{name}/ (missing)", file=sys.stderr)
+        print(
+            text(
+                "  %(value0)s/%(value1)s  ->  tests/unit/%(value2)s/ (missing)",
+                value0=src_package,
+                value1=name,
+                value2=name,
+            ),
+            file=sys.stderr,
+        )
     return False
 
 
@@ -328,16 +343,18 @@ def _report_loose_files_check(test_root: Path, verbose: bool) -> bool:
     no_loose, violations = check_no_loose_test_files(test_root)
     if no_loose:
         if verbose:
-            print("OK: No loose test_*.py files at tests/unit/ root.")
+            print(text("OK: No loose test_*.py files at tests/unit/ root."))
         return True
     print(
-        "ERROR: test_*.py files found directly under tests/unit/.\n"
-        "Move them into the appropriate sub-package.\n"
-        "Violation(s):",
+        text(
+            "ERROR: test_*.py files found directly under tests/unit/.\n"
+            "Move them into the appropriate sub-package.\n"
+            "Violation(s):"
+        ),
         file=sys.stderr,
     )
     for p in violations:
-        print(f"  {p}", file=sys.stderr)
+        print(text("  %(value0)s", value0=p), file=sys.stderr)
     return False
 
 
@@ -349,17 +366,19 @@ def _report_unsanctioned_dirs_check(
     ok_extra, unsanctioned = check_no_unsanctioned_test_dirs(src_root, test_root)
     if ok_extra:
         if verbose:
-            print("OK: No unsanctioned extra test directories under tests/unit/.")
+            print(text("OK: No unsanctioned extra test directories under tests/unit/."))
         return True
     print(
-        "ERROR: tests/unit/ has directories with no source subpackage and no\n"
-        "allowlist entry. Add a SANCTIONED_EXTRA_TEST_DIRS entry (with a target\n"
-        "comment) in hephaestus/validation/test_structure.py, or remove the dir.\n"
-        "Unsanctioned:",
+        text(
+            "ERROR: tests/unit/ has directories with no source subpackage and no\n"
+            "allowlist entry. Add a SANCTIONED_EXTRA_TEST_DIRS entry (with a target\n"
+            "comment) in hephaestus/validation/test_structure.py, or remove the dir.\n"
+            "Unsanctioned:"
+        ),
         file=sys.stderr,
     )
     for name in sorted(unsanctioned):
-        print(f"  tests/unit/{name}/", file=sys.stderr)
+        print(text("  tests/unit/%(value0)s/", value0=name), file=sys.stderr)
     return False
 
 
@@ -371,18 +390,24 @@ def _report_ghost_packages_check(
     ok, ghosts = check_no_ghost_packages(src_root, test_root)
     if ok:
         if verbose:
-            print("OK: No ghost (content-free) mirror directories.")
+            print(text("OK: No ghost (content-free) mirror directories."))
         return True
     print(
-        "ERROR: tests/unit/ has directories mirroring a source subpackage where\n"
-        "BOTH the source package (no module beyond __init__.py) and the test dir\n"
-        "(no test_*.py) are content-free. Remove both ghost dirs, or add real\n"
-        "content.\nGhost(s):",
+        text(
+            "ERROR: tests/unit/ has directories mirroring a source subpackage where\n"
+            "BOTH the source package (no module beyond __init__.py) and the test dir\n"
+            "(no test_*.py) are content-free. Remove both ghost dirs, or add real\n"
+            "content.\nGhost(s):"
+        ),
         file=sys.stderr,
     )
     for name in sorted(ghosts):
         print(
-            f"  hephaestus/{name}/ (no modules)  <->  tests/unit/{name}/ (no tests)",
+            text(
+                "  hephaestus/%(value0)s/ (no modules)  <->  tests/unit/%(value1)s/ (no tests)",
+                value0=name,
+                value1=name,
+            ),
             file=sys.stderr,
         )
     return False
@@ -392,16 +417,18 @@ def _report_phantom_test_dirs_check(test_root: Path, verbose: bool) -> bool:
     ok, phantoms = check_no_phantom_test_dirs(test_root)
     if ok:
         if verbose:
-            print("OK: No phantom test directories under tests/unit/.")
+            print(text("OK: No phantom test directories under tests/unit/."))
         return True
 
     print(
-        "ERROR: tests/unit/ has content-free directories. Remove stale dirs, "
-        "or add real test files if the directory is intentional.\nPhantom(s):",
+        text(
+            "ERROR: tests/unit/ has content-free directories. Remove stale dirs, "
+            "or add real test files if the directory is intentional.\nPhantom(s):"
+        ),
         file=sys.stderr,
     )
     for name in sorted(phantoms):
-        print(f"  tests/unit/{name}/ (no Python source)", file=sys.stderr)
+        print(text("  tests/unit/%(value0)s/ (no Python source)", value0=name), file=sys.stderr)
     return False
 
 
@@ -409,17 +436,19 @@ def _report_stray_tests_root_files_check(tests_root: Path, verbose: bool) -> boo
     no_stray, violations = check_no_stray_tests_root_files(tests_root)
     if no_stray:
         if verbose:
-            print("OK: No stray test_*.py files at tests/ root.")
+            print(text("OK: No stray test_*.py files at tests/ root."))
         return True
     print(
-        "ERROR: test_*.py files found directly under tests/ (outside testpaths).\n"
-        "These are silently never collected by pytest. Move them into\n"
-        "tests/unit/ or tests/integration/ under a mirroring sub-package.\n"
-        "Violation(s):",
+        text(
+            "ERROR: test_*.py files found directly under tests/ (outside testpaths).\n"
+            "These are silently never collected by pytest. Move them into\n"
+            "tests/unit/ or tests/integration/ under a mirroring sub-package.\n"
+            "Violation(s):"
+        ),
         file=sys.stderr,
     )
     for p in violations:
-        print(f"  {p}", file=sys.stderr)
+        print(text("  %(value0)s", value0=p), file=sys.stderr)
     return False
 
 
@@ -432,9 +461,11 @@ def _report_scripts_coverage_check(
     if ok_scripts:
         if verbose:
             n_scripts = sum(1 for _ in scripts_root.glob("*.py"))
-            print(f"OK: {n_scripts} scripts/*.py covered by the smoke harness.")
+            print(
+                text("OK: %(value0)s scripts/*.py covered by the smoke harness.", value0=n_scripts)
+            )
         return True
-    print("ERROR: scripts/ test coverage is incomplete:", file=sys.stderr)
+    print(text("ERROR: scripts/ test coverage is incomplete:"), file=sys.stderr)
     for line in errors:
         print(line, file=sys.stderr)
     return False
@@ -466,11 +497,11 @@ def check_test_structure(
     scripts_root = repo_root / "scripts"
 
     if not src_root.is_dir():
-        print(f"ERROR: Source root not found: {src_root}", file=sys.stderr)
+        print(text("ERROR: Source root not found: %(value0)s", value0=src_root), file=sys.stderr)
         return False
 
     if not test_root.is_dir():
-        print(f"ERROR: Test root not found: {test_root}", file=sys.stderr)
+        print(text("ERROR: Test root not found: %(value0)s", value0=test_root), file=sys.stderr)
         return False
 
     results = [
@@ -526,13 +557,13 @@ def main() -> int:
         "--src-package",
         type=str,
         default=None,
-        help="Source package directory name (default: auto-detect from pyproject.toml)",
+        help=text("Source package directory name (default: auto-detect from pyproject.toml)"),
     )
     parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
-        help="Print detailed output",
+        help=text("Print detailed output"),
     )
 
     args = parser.parse_args()

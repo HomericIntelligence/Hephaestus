@@ -28,6 +28,7 @@ import os
 import re
 import sys
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import (
     add_github_throttle_args,
     add_json_arg,
@@ -138,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
 
     """
     parser = argparse.ArgumentParser(
-        description=(
+        description=text(
             "Reconcile the severity:* label for a GitHub issue from its issue-form "
             "Severity answer. Reads GITHUB_REPOSITORY, ISSUE_NUMBER and ISSUE_BODY "
             "from the environment."

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Tests for system information utilities."""
 
+import json
 import sys
 
+from hephaestus.cli.localization import using_localizer
 from hephaestus.system.info import (
     extract_version_word,
     format_system_info,
@@ -157,8 +159,6 @@ class TestFormatSystemInfo:
 
     def test_json_format_is_valid(self) -> None:
         """JSON output is valid JSON."""
-        import json
-
         info = get_system_info(include_tools=False)
         text = format_system_info(info, format_type="json")
         parsed = json.loads(text)
@@ -170,6 +170,23 @@ class TestFormatSystemInfo:
         text = format_system_info(info, format_type="yaml")
         assert "=== System Information ===" in text
         assert "=== System Information ===" in format_system_info(info, format_type="")
+
+    def test_text_localization_preserves_json(self) -> None:
+        """Synthetic catalogs affect text labels but not structured output."""
+        info = get_system_info(include_tools=False)
+        baseline_json = json.loads(format_system_info(info, "json"))
+        with using_localizer(
+            {
+                "=== System Information ===": "=== Informations système ===",
+                "  OS: %(value)s": "  Système : %(value)s",
+            }
+        ):
+            localized_text = format_system_info(info, "text")
+            localized_json = json.loads(format_system_info(info, "json"))
+
+        assert "=== Informations système ===" in localized_text
+        assert "  Système :" in localized_text
+        assert localized_json == baseline_json
 
 
 def test_main_returns_zero(monkeypatch):

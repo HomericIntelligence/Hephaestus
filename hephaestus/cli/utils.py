@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus._version_lookup import get_version
+from hephaestus.cli.localization import text
 from hephaestus.constants import AUTOMATION_LOG_FORMAT, LOG_DATEFMT
 from hephaestus.logging.utils import setup_logging
 from hephaestus.utils.helpers import get_repo_root
@@ -118,9 +119,9 @@ def create_parser(
     """
     parser = argparse.ArgumentParser(
         prog=prog_name,
-        description=description,
-        epilog=epilog,
-        usage=usage,
+        description=text(description) if description is not None else None,
+        epilog=text(epilog) if epilog is not None else None,
+        usage=text(usage) if usage is not None else None,
         formatter_class=formatter_class,
         add_help=add_help,
     )
@@ -143,12 +144,14 @@ def add_logging_args(parser: argparse.ArgumentParser) -> None:
         parser: ArgumentParser instance
 
     """
-    logging_group = parser.add_argument_group("logging options")
-    logging_group.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
+    logging_group = parser.add_argument_group(text("logging options"))
     logging_group.add_argument(
-        "-q", "--quiet", action="store_true", help="Suppress informational messages"
+        "-v", "--verbose", action="store_true", help=text("Enable verbose output")
     )
-    logging_group.add_argument("--log-file", help="Log to file instead of stdout")
+    logging_group.add_argument(
+        "-q", "--quiet", action="store_true", help=text("Suppress informational messages")
+    )
+    logging_group.add_argument("--log-file", help=text("Log to file instead of stdout"))
 
 
 def add_version_arg(parser: argparse.ArgumentParser) -> None:
@@ -176,7 +179,7 @@ def add_json_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--json",
         action="store_true",
-        help="Emit machine-readable JSON output instead of human-readable text",
+        help=text("Emit machine-readable JSON output instead of human-readable text"),
     )
 
 
@@ -215,7 +218,7 @@ def create_validation_parser(
             "--repo-root",
             type=Path,
             default=None,
-            help="Repository root (default: auto-detect)",
+            help=text("Repository root (default: auto-detect)"),
         )
     add_json_arg(parser)
     return parser
@@ -280,7 +283,7 @@ def add_dry_run_arg(parser: argparse.ArgumentParser, *, prefix: str | None = Non
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help=help_text,
+        help=text(help_text),
     )
 
 
@@ -321,13 +324,13 @@ def _at_least_one_float(value: str) -> float:
 
 def add_github_throttle_args(parser: argparse.ArgumentParser) -> None:
     """Add GitHub global-throttle configuration flags to a CLI parser."""
-    group = parser.add_argument_group("GitHub throttle options")
+    group = parser.add_argument_group(text("GitHub throttle options"))
     group.add_argument(
         "--gh-global-rate",
         type=_non_negative_float,
         default=10.0,
         metavar="FLOAT",
-        help=(
+        help=text(
             "Global gh token-bucket refill rate in calls/sec (default: 10.0). "
             "Pass 0 to disable the global throttle."
         ),
@@ -337,7 +340,7 @@ def add_github_throttle_args(parser: argparse.ArgumentParser) -> None:
         type=_at_least_one_float,
         default=30.0,
         metavar="FLOAT",
-        help="Global gh token-bucket burst size (default: 30.0).",
+        help=text("Global gh token-bucket burst size (default: 30.0)."),
     )
 
 
@@ -392,7 +395,7 @@ def confirm_action(
         try:
             choice = input(f"{prompt} [{choices}] ").strip().lower()
         except KeyboardInterrupt:
-            print("\nOperation cancelled.")
+            print(text("\nOperation cancelled."))
             sys.exit(1)
 
         if not choice:
@@ -402,7 +405,7 @@ def confirm_action(
         elif choice in ["n", "no"]:
             return False
         else:
-            print("Invalid choice. Please enter 'y' or 'n'.")
+            print(text("Invalid choice. Please enter 'y' or 'n'."))
     return default
 
 
@@ -538,7 +541,11 @@ def add_agent_timeout_arg(
         type=int,
         default=None,
         metavar="SECONDS",
-        help=f"Agent subprocess timeout in seconds (default: {default_doc}).{extra}",
+        help=text(
+            "Agent subprocess timeout in seconds (default: %(default)d).%(extra)s",
+            default=default_doc,
+            extra=extra,
+        ),
     )
 
 
@@ -555,7 +562,7 @@ def add_advise_timeout_arg(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=None,
         metavar="SECONDS",
-        help="Timeout for the advise sub-agent in seconds (default: 7200).",
+        help=text("Timeout for the advise sub-agent in seconds (default: 7200)."),
     )
 
 
@@ -572,7 +579,7 @@ def add_poll_max_wait_arg(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=None,
         metavar="SECONDS",
-        help="Max wall-clock seconds to poll CI before backing off (default: 1200).",
+        help=text("Max wall-clock seconds to poll CI before backing off (default: 1200)."),
     )
 
 
@@ -589,7 +596,7 @@ def add_git_message_timeout_arg(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=None,
         metavar="SECONDS",
-        help="Timeout for the lightweight commit/PR message agent (default: 1200).",
+        help=text("Timeout for the lightweight commit/PR message agent (default: 1200)."),
     )
 
 
@@ -606,7 +613,7 @@ def add_learn_timeout_arg(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=None,
         metavar="SECONDS",
-        help="Timeout for the /learn agent session (default: 7200).",
+        help=text("Timeout for the /learn agent session (default: 7200)."),
     )
 
 
@@ -623,5 +630,5 @@ def add_follow_up_timeout_arg(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=None,
         metavar="SECONDS",
-        help="Timeout for the follow-up-issue agent session (default: 7200).",
+        help=text("Timeout for the follow-up-issue agent session (default: 7200)."),
     )

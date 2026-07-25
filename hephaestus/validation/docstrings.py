@@ -19,6 +19,7 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, resolve_repo_root
 
 _CONTINUATION_STARTERS = frozenset(
@@ -288,12 +289,12 @@ def main() -> int:
         "--directory",
         type=Path,
         default=None,
-        help="Directory to scan (default: auto-detect source package)",
+        help=text("Directory to scan (default: auto-detect source package)"),
     )
     parser.add_argument(
         "--verbose",
         action="store_true",
-        help="Print detailed output",
+        help=text("Print detailed output"),
     )
 
     args = parser.parse_args()

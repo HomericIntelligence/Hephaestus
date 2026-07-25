@@ -54,6 +54,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import BinaryIO
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 
 #: Default candidate output directories, tried in order. The first that
@@ -280,7 +281,7 @@ def _build_parser() -> argparse.ArgumentParser:
     """Build the argument parser for the ``hephaestus-coredump-handler`` CLI."""
     parser = argparse.ArgumentParser(
         prog="hephaestus-coredump-handler",
-        description=(
+        description=text(
             "Kernel pipe-mode core_pattern handler. Invoked by the Linux kernel "
             "with the core ELF on stdin; not meant to be run interactively."
         ),
@@ -288,7 +289,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--target-dir",
         default=None,
-        help=(
+        help=text(
             "explicit output directory for the core file. Takes precedence over "
             "COREDUMP_TARGET_DIRS and the built-in default. The kernel invokes a "
             "core_pattern pipe handler with a minimal environment, so an env var "
@@ -299,22 +300,22 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--verify",
         action="store_true",
-        help=(
+        help=text(
             "verification mode: do not read stdin. Inspect the resolved bundle "
             "directory and assert the handler-ran contract (a missing "
             "handler.log means the handler never ran). Exit 0 if the handler "
             "ran, 3 if its failure signal was lost. For CI artifact steps."
         ),
     )
-    parser.add_argument("pid", nargs="?", help="PID of the crashing process (%%p)")
-    parser.add_argument("exe", nargs="?", help="executable basename (%%e)")
-    parser.add_argument("crash_time", nargs="?", help="crash time, seconds since epoch (%%t)")
-    parser.add_argument("signal", nargs="?", help="signal number (%%s)")
+    parser.add_argument("pid", nargs="?", help=text("PID of the crashing process (%%p)"))
+    parser.add_argument("exe", nargs="?", help=text("executable basename (%%e)"))
+    parser.add_argument("crash_time", nargs="?", help=text("crash time, seconds since epoch (%%t)"))
+    parser.add_argument("signal", nargs="?", help=text("signal number (%%s)"))
     parser.add_argument(
         "global_pid",
         nargs="?",
         default="",
-        help="global (host-namespace) PID (%%P) — captured, unused in the filename",
+        help=text("global (host-namespace) PID (%%P) — captured, unused in the filename"),
     )
     add_json_arg(parser)
     add_version_arg(parser)
@@ -367,7 +368,10 @@ def _run_verify(target_dir: str | None, as_json: bool) -> int:
     if as_json:
         emit_json_status(exit_code, message=detail, verdict=verdict)
     else:
-        print(f"{verdict}: {detail}", file=sys.stdout if exit_code == 0 else sys.stderr)
+        print(
+            text("%(value0)s: %(value1)s", value0=verdict, value1=detail),
+            file=sys.stdout if exit_code == 0 else sys.stderr,
+        )
     return exit_code
 
 
@@ -408,7 +412,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.json:
             emit_json_status(1, message=msg)
         else:
-            print(f"hephaestus-coredump-handler: {msg}", file=sys.stderr)
+            print(text("hephaestus-coredump-handler: %(value0)s", value0=msg), file=sys.stderr)
         return 1
 
     # TTY guard: when invoked by the kernel, stdin is a pipe carrying the core
@@ -419,9 +423,11 @@ def main(argv: list[str] | None = None) -> int:
             emit_json_status(1, message="stdin is a TTY — refusing to run")
         else:
             print(
-                "hephaestus-coredump-handler: stdin is a TTY — refusing to run "
-                "(would block). This is a kernel core_pattern handler; test it with "
-                "`printf 'fake' | hephaestus-coredump-handler <pid> <exe> <time> <sig>`.",
+                text(
+                    "hephaestus-coredump-handler: stdin is a TTY — refusing to run "
+                    "(would block). This is a kernel core_pattern handler; test it with "
+                    "`printf 'fake' | hephaestus-coredump-handler <pid> <exe> <time> <sig>`."
+                ),
                 file=sys.stderr,
             )
         return 1

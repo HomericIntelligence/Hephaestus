@@ -23,6 +23,8 @@ import sys
 import types
 from pathlib import Path
 
+from hephaestus.cli.localization import text
+
 
 def _get_tomllib() -> types.ModuleType:
     """Return the ``tomllib`` module, falling back to ``tomli`` on Python 3.10.
@@ -138,7 +140,7 @@ def main() -> int:
     try:
         declared = _load_scripts()
     except RuntimeError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        print(text("ERROR: %(value0)s", value0=exc), file=sys.stderr)
         return 1
 
     documented = _readme_documented_commands()
@@ -149,33 +151,40 @@ def main() -> int:
 
     if missing:
         ok = False
-        print("ERROR: The following commands are declared in pyproject.toml but NOT documented")
-        print("       in README.md.  Add them to the CLI Commands section and run this script")
-        print("       to verify.\n")
+        print(
+            text("ERROR: The following commands are declared in pyproject.toml but NOT documented")
+        )
+        print(
+            text("       in README.md.  Add them to the CLI Commands section and run this script")
+        )
+        print(text("       to verify.\n"))
         for cmd in missing:
-            print(f"  - {cmd}")
+            print(text("  - %(value0)s", value0=cmd))
         print()
 
     prose_ok, prose_mismatches = check_prose_counts(REPO_ROOT, len(declared))
     if not prose_ok:
         ok = False
-        print("ERROR: Prose counts disagree with pyproject.toml [project.scripts]:\n")
+        print(text("ERROR: Prose counts disagree with pyproject.toml [project.scripts]:\n"))
         for mismatch in prose_mismatches:
-            print(f"  - {mismatch}")
+            print(text("  - %(value0)s", value0=mismatch))
         print()
 
     reference_problems = check_docs_command_references(REPO_ROOT, declared)
     if reference_problems:
         ok = False
-        print("ERROR: Documentation references unregistered console scripts:\n")
+        print(text("ERROR: Documentation references unregistered console scripts:\n"))
         for problem in reference_problems:
-            print(f"  - {problem}")
+            print(text("  - %(value0)s", value0=problem))
         print()
 
     if ok:
         print(
-            f"OK: all {len(declared)} pyproject.toml scripts are documented, "
-            "source-derived counts agree, and guarded docs reference registered commands."
+            text(
+                "OK: all %(count)d pyproject.toml scripts are documented, "
+                "source-derived counts agree, and guarded docs reference registered commands.",
+                count=len(declared),
+            )
         )
         return 0
 

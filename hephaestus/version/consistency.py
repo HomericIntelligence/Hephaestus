@@ -29,6 +29,7 @@ import sys
 from importlib.metadata import PackageNotFoundError, version as _dist_version
 from pathlib import Path
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import (
     create_validation_parser,
     emit_json_status,
@@ -133,9 +134,11 @@ def _get_canonical_version(repo_root: Path) -> str:
     version = _version_from_git_tag(repo_root) or _version_from_metadata()
     if version is None:
         print(
-            "ERROR: could not determine the canonical version.\n"
-            "  This project uses hatch-vcs dynamic versioning; a vX.Y.Z git tag\n"
-            "  or an installed distribution is required.",
+            text(
+                "ERROR: could not determine the canonical version.\n"
+                "  This project uses hatch-vcs dynamic versioning; a vX.Y.Z git tag\n"
+                "  or an installed distribution is required."
+            ),
             file=sys.stderr,
         )
         sys.exit(1)
@@ -218,7 +221,7 @@ def check_version_consistency(repo_root: Path, verbose: bool = False) -> int:
     """
     canonical_version = _get_canonical_version(repo_root)
     if verbose:
-        print(f"Canonical version (git tag / metadata): {canonical_version}")
+        print(text("Canonical version (git tag / metadata): %(value0)s", value0=canonical_version))
     return 0
 
 
@@ -240,14 +243,22 @@ def _check_init_version_errors(
         return []
     if not package_init.is_file():
         if verbose:
-            print(f"INFO: {package_init} not found — skipping __version__ check")
+            print(
+                text("INFO: %(value0)s not found — skipping __version__ check", value0=package_init)
+            )
         return []
     content = package_init.read_text(encoding="utf-8")
     m = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', content, re.MULTILINE)
     if m and m.group(1) != canonical:
         return [f"{package_init}: __version__ is '{m.group(1)}', expected '{canonical}'"]
     if verbose and m:
-        print(f"PASS: {package_init} __version__ matches ({canonical})")
+        print(
+            text(
+                "PASS: %(value0)s __version__ matches (%(value1)s)",
+                value0=package_init,
+                value1=canonical,
+            )
+        )
     return []
 
 
@@ -280,7 +291,7 @@ def _check_skill_version_errors(
             rel = md_file.relative_to(repo_root)
             errors.extend(_find_aspirational_versions(md_file, canonical_tuple, str(rel)))
     if not errors and verbose:
-        print("PASS: skill markdown files have no aspirational version references")
+        print(text("PASS: skill markdown files have no aspirational version references"))
     return errors
 
 
@@ -310,7 +321,7 @@ def check_package_version_consistency(
     """
     canonical = _get_canonical_version(repo_root)
     if verbose:
-        print(f"Canonical version (git tag / metadata): {canonical}")
+        print(text("Canonical version (git tag / metadata): %(value0)s", value0=canonical))
 
     all_errors: list[str] = []
     all_errors.extend(_check_init_version_errors(package_init, canonical, verbose))
@@ -321,15 +332,18 @@ def check_package_version_consistency(
 
     if all_errors:
         for error in all_errors:
-            print(f"ERROR: {error}", file=sys.stderr)
+            print(text("ERROR: %(value0)s", value0=error), file=sys.stderr)
         print(
-            f"\nFound {len(all_errors)} package version consistency violation(s).",
+            text(
+                "\nFound %(value0)s package version consistency violation(s).",
+                value0=len(all_errors),
+            ),
             file=sys.stderr,
         )
         return 1
 
     if verbose:
-        print(f"\nOK: all package version checks passed ({canonical})")
+        print(text("\nOK: all package version checks passed (%(value0)s)", value0=canonical))
     return 0
 
 
@@ -364,7 +378,7 @@ def bump_version(
     try:
         current = parse_version(current_str)
     except ValueError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        print(text("ERROR: %(value0)s", value0=exc), file=sys.stderr)
         return 1
 
     if part == "major":
@@ -375,7 +389,10 @@ def bump_version(
         new = (current[0], current[1], current[2] + 1)
     else:
         print(
-            f"ERROR: invalid part '{part}': must be 'major', 'minor', or 'patch'",
+            text(
+                "ERROR: invalid part '%(value0)s': must be 'major', 'minor', or 'patch'",
+                value0=part,
+            ),
             file=sys.stderr,
         )
         return 1
@@ -383,11 +400,13 @@ def bump_version(
     new_str = f"{new[0]}.{new[1]}.{new[2]}"
 
     if dry_run:
-        print(f"Would bump version: {current_str} -> {new_str}")
+        print(
+            text("Would bump version: %(value0)s -> %(value1)s", value0=current_str, value1=new_str)
+        )
         return 0
 
     if verbose:
-        print(f"Bumping version: {current_str} -> {new_str}")
+        print(text("Bumping version: %(value0)s -> %(value1)s", value0=current_str, value1=new_str))
 
     manager = VersionManager(repo_root=repo_root)
     manager.update(new_str, verbose=verbose)
@@ -396,17 +415,21 @@ def bump_version(
     result = check_version_consistency(repo_root, verbose=verbose)
     if result != 0:
         print(
-            "ERROR: post-bump consistency check failed; files may be in an inconsistent state.",
+            text(
+                "ERROR: post-bump consistency check failed; files may be in an inconsistent state."
+            ),
             file=sys.stderr,
         )
         return 1
 
-    print(f"Version bumped: {current_str} -> {new_str}")
+    print(text("Version bumped: %(value0)s -> %(value1)s", value0=current_str, value1=new_str))
     print()
-    print("Next steps (hatch-vcs derives the published version from the git tag):")
-    print(f'  1. git tag -s v{new_str} -m "Release v{new_str}"')
-    print(f"  2. git push origin v{new_str}")
-    print("  See docs/RELEASING.md for the full release workflow.")
+    print(text("Next steps (hatch-vcs derives the published version from the git tag):"))
+    print(
+        text('  1. git tag -s v%(value0)s -m "Release v%(value1)s"', value0=new_str, value1=new_str)
+    )
+    print(text("  2. git push origin v%(value0)s", value0=new_str))
+    print(text("  See docs/RELEASING.md for the full release workflow."))
     return 0
 
 
@@ -430,7 +453,7 @@ def check_version_consistency_main() -> int:
         "--verbose",
         "-v",
         action="store_true",
-        help="Print parsed versions even when they match",
+        help=text("Print parsed versions even when they match"),
     )
     args = parser.parse_args()
     root = resolve_repo_root(args)
@@ -460,7 +483,7 @@ def check_package_versions_main() -> int:
         "--package-init",
         type=Path,
         default=None,
-        help=(
+        help=text(
             "Path to the package __init__.py to check for __version__. "
             "Example: hephaestus/__init__.py"
         ),
@@ -468,13 +491,13 @@ def check_package_versions_main() -> int:
     parser.add_argument(
         "--scan-skills",
         action="store_true",
-        help="Also scan .claude-plugin/skills/ and .claude/ markdown files",
+        help=text("Also scan .claude-plugin/skills/ and .claude/ markdown files"),
     )
     parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
-        help="Print passing check names and canonical version",
+        help=text("Print passing check names and canonical version"),
     )
     args = parser.parse_args()
     root = resolve_repo_root(args)
@@ -519,18 +542,18 @@ def bump_version_main() -> int:
     parser.add_argument(
         "part",
         choices=["major", "minor", "patch"],
-        help="Which version part to bump",
+        help=text("Which version part to bump"),
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print what would change without writing",
+        help=text("Print what would change without writing"),
     )
     parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
-        help="Print additional details",
+        help=text("Print additional details"),
     )
     args = parser.parse_args()
     root = resolve_repo_root(args)

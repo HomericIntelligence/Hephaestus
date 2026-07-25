@@ -30,6 +30,7 @@ import re
 import sys
 from typing import Any
 
+from hephaestus.cli.localization import text
 from hephaestus.constants import repo_root
 
 # Permission tools whose single argument is a filesystem path/glob. Only these
@@ -82,18 +83,20 @@ def main(argv: list[str] | None = None) -> int:
     """
     settings_path = repo_root() / ".claude" / "settings.json"
     if not settings_path.exists():
-        print(f"settings file not found: {settings_path}", file=sys.stderr)
+        print(text("settings file not found: %(value0)s", value0=settings_path), file=sys.stderr)
         return 1
     settings = json.loads(settings_path.read_text(encoding="utf-8"))
     violations = find_violations(settings)
     if violations:
         print(
-            "Non-canonical permission paths in .claude/settings.json "
-            "(use canonical POSIX paths, no '//' or '\\'):",
+            text(
+                "Non-canonical permission paths in .claude/settings.json "
+                "(use canonical POSIX paths, no '//' or '\\'):"
+            ),
             file=sys.stderr,
         )
         for violation in violations:
-            print(f"  - {violation}", file=sys.stderr)
+            print(text("  - %(value0)s", value0=violation), file=sys.stderr)
         return 1
     return 0
 

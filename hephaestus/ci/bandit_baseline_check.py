@@ -7,6 +7,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from hephaestus.cli.localization import text
+
 
 def count_by_test_id(report: dict[str, Any]) -> dict[str, int]:
     """Return {test_id: count} for LOW-severity results in a bandit JSON report.
@@ -44,13 +46,15 @@ def main(report_path: Path, baseline_path: Path) -> int:
     baseline = json.loads(baseline_path.read_text(encoding="utf-8"))["counts"]
     problems = diff_against_baseline(count_by_test_id(report), baseline)
     if problems:
-        print("ERROR: bandit LOW-severity findings drifted from the baseline:")
+        print(text("ERROR: bandit LOW-severity findings drifted from the baseline:"))
         for p in problems:
-            print(f"  {p}")
+            print(text("  %(value0)s", value0=p))
         print(
-            "\nReview the new/increased findings, then either fix them or update "
-            "hephaestus/ci/bandit_low_baseline.json with a security re-review "
-            "(issue #1481)."
+            text(
+                "\nReview the new/increased findings, then either fix them or update "
+                "hephaestus/ci/bandit_low_baseline.json with a security re-review "
+                "(issue #1481)."
+            )
         )
         return 1
     return 0

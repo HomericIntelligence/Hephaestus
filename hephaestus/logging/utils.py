@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from hephaestus.constants import LOG_FORMAT
-from hephaestus.logging.formatters import JsonFormatter
+from hephaestus.logging.formatters import JsonFormatter, _LocalizedFormatter
 
 # Module-level lock protects the check-then-add TOCTOU in get_logger()
 _handler_setup_lock = threading.Lock()
@@ -173,7 +173,11 @@ def get_logger(
     logger.setLevel(level or logging.INFO)
 
     use_json = json_format or _ENV_JSON_FORMAT
-    formatter: logging.Formatter = JsonFormatter() if use_json else logging.Formatter(LOG_FORMAT)
+    from hephaestus._localization import get_localizer
+
+    formatter: logging.Formatter = (
+        JsonFormatter() if use_json else _LocalizedFormatter(LOG_FORMAT, localizer=get_localizer())
+    )
 
     # Lock protects the check-then-add TOCTOU race condition during concurrent initialization
     with _handler_setup_lock:
@@ -237,8 +241,14 @@ def setup_logging(
     if json_format or _ENV_JSON_FORMAT:
         formatter = JsonFormatter()
     else:
+        from hephaestus._localization import get_localizer
+
         format_string = format_string or LOG_FORMAT
-        formatter = logging.Formatter(format_string, datefmt=datefmt)
+        formatter = _LocalizedFormatter(
+            format_string,
+            datefmt=datefmt,
+            localizer=get_localizer(),
+        )
 
     primary_target = sys.stderr if primary_stream == "stderr" else sys.stdout
     stream_targets = [primary_target]

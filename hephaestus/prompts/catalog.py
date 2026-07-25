@@ -16,6 +16,8 @@ from jinja2 import (
     StrictUndefined,
 )
 
+from hephaestus.cli.localization import text
+
 #: Packaged default templates, resolved by filesystem path relative to this
 #: module so loading never depends on importlib package metadata (which races
 #: an editable-install rebuild, #2308).
@@ -147,5 +149,5 @@ def add_prompt_dir_argument(parser: argparse.ArgumentParser) -> None:
         type=Path,
         action=_PromptDirAction,
         metavar="PATH",
-        help="Optional directory layered over packaged Jinja prompt templates",
+        help=text("Optional directory layered over packaged Jinja prompt templates"),
     )

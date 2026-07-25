@@ -16,6 +16,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, format_output, resolve_repo_root
 from hephaestus.utils.helpers import NETWORK_TIMEOUT, get_repo_root
 
@@ -98,19 +99,50 @@ def check_max_complexity(
         repo_root = get_repo_root()
 
     if verbose:
-        print(f"\nChecking cyclomatic complexity (threshold={threshold}) in: {path}")
+        print(
+            text(
+                "\nChecking cyclomatic complexity (threshold=%(value0)s) in: %(value1)s",
+                value0=threshold,
+                value1=path,
+            )
+        )
 
     violations = run_ruff_complexity_check(path, threshold, repo_root)
 
     if not violations:
-        print(f"\n[OK] Complexity check passed: all functions <= CC {threshold} in {path}")
+        print(
+            text(
+                "\n[OK] Complexity check passed: all functions <= CC %(value0)s in %(value1)s",
+                value0=threshold,
+                value1=path,
+            )
+        )
         return True
 
-    print(f"\n[FAIL] {len(violations)} function(s) exceed CC {threshold} in {path}:")
+    print(
+        text(
+            "\n[FAIL] %(value0)s function(s) exceed CC %(value1)s in %(value2)s:",
+            value0=len(violations),
+            value1=threshold,
+            value2=path,
+        )
+    )
     for v in violations:
-        print(f"  {v['file']}:{v['row']}:{v['col']}: {v['message']}")
+        print(
+            text(
+                "  %(value0)s:%(value1)s:%(value2)s: %(value3)s",
+                value0=v["file"],
+                value1=v["row"],
+                value2=v["col"],
+                value3=v["message"],
+            )
+        )
 
-    print("\nTip: Refactor using extract-method or guard-clause flattening to reduce complexity.")
+    print(
+        text(
+            "\nTip: Refactor using extract-method or guard-clause flattening to reduce complexity."
+        )
+    )
     return False
 
 
@@ -129,18 +161,18 @@ def main() -> int:
         "--threshold",
         type=int,
         default=10,
-        help="Maximum allowed cyclomatic complexity (default: 10)",
+        help=text("Maximum allowed cyclomatic complexity (default: 10)"),
     )
     parser.add_argument(
         "--path",
         type=str,
         default=".",
-        help="Path to source code to check (default: .)",
+        help=text("Path to source code to check (default: .)"),
     )
     parser.add_argument(
         "--verbose",
         action="store_true",
-        help="Enable verbose output",
+        help=text("Enable verbose output"),
     )
     args = parser.parse_args()
 

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, format_output, resolve_repo_root
 from hephaestus.logging.utils import get_logger
 from hephaestus.markdown.utils import find_markdown_files
@@ -452,20 +453,20 @@ def _print_readme_summary(results: list[ReadmeValidationResult]) -> None:
     failed = [r for r in results if not r.passed]
 
     print("\n" + "=" * 70)
-    print("README VALIDATION SUMMARY")
+    print(text("README VALIDATION SUMMARY"))
     print("=" * 70)
-    print(f"Total READMEs: {len(results)}")
-    print(f"Passed: {len(passed)}")
-    print(f"Failed: {len(failed)}")
+    print(text("Total READMEs: %(value0)s", value0=len(results)))
+    print(text("Passed: %(value0)s", value0=len(passed)))
+    print(text("Failed: %(value0)s", value0=len(failed)))
 
     if failed:
-        print(f"\nFailed READMEs ({len(failed)}):")
+        print(text("\nFailed READMEs (%(value0)s):", value0=len(failed)))
         for result in failed:
-            print(f"  {result.file}")
+            print(text("  %(value0)s", value0=result.file))
             for section in result.missing_sections:
-                print(f"    - Missing section: {section}")
+                print(text("    - Missing section: %(value0)s", value0=section))
             for issue in result.formatting_issues:
-                print(f"    - {issue}")
+                print(text("    - %(value0)s", value0=issue))
 
     print("=" * 70)
 
@@ -487,26 +488,26 @@ def check_readmes_main() -> int:
         "--directory",
         type=Path,
         default=None,
-        help="Directory to scan (default: current working directory)",
+        help=text("Directory to scan (default: current working directory)"),
     )
     parser.add_argument(
         "--required-section",
         action="append",
         dest="required_sections",
         metavar="SECTION",
-        help="Required section heading (repeatable; overrides defaults)",
+        help=text("Required section heading (repeatable; overrides defaults)"),
     )
     parser.add_argument(
         "--verbose",
         action="store_true",
-        help="Print each README path as it is checked",
+        help=text("Print each README path as it is checked"),
     )
 
     args = parser.parse_args()
     directory = args.directory or Path.cwd()
 
     if not directory.is_dir():
-        print(f"ERROR: Directory not found: {directory}", file=sys.stderr)
+        print(text("ERROR: Directory not found: %(value0)s", value0=directory), file=sys.stderr)
         return 1
 
     required_sections: list[str] | None = args.required_sections or None
@@ -517,7 +518,7 @@ def check_readmes_main() -> int:
         if args.json:
             print(format_output({"directory": str(directory), "results": []}, "json"))
         else:
-            print(f"No README.md files found in {directory}")
+            print(text("No README.md files found in %(value0)s", value0=directory))
         return 0
 
     if args.json:
@@ -535,7 +536,7 @@ def check_readmes_main() -> int:
         if args.verbose:
             for result in results:
                 status = "PASS" if result.passed else "FAIL"
-                print(f"[{status}] {result.file}")
+                print(text("[%(value0)s] %(value1)s", value0=status, value1=result.file))
         _print_readme_summary(results)
 
     return 0 if all(r.passed for r in results) else 1
@@ -684,21 +685,33 @@ def print_link_summary(results: dict[str, Any]) -> None:
     """
     total_files = len(results["passed"]) + len(results["failed"])
     print("\n" + "=" * 70)
-    print("LINK VALIDATION SUMMARY")
+    print(text("LINK VALIDATION SUMMARY"))
     print("=" * 70)
-    print(f"Total files: {total_files}")
-    print(f"Files with valid links: {len(results['passed'])}")
-    print(f"Files with broken links: {len(results['failed'])}")
-    print(f"\nTotal links checked: {results['total_links']}")
-    print(f"Broken links: {results['broken_links']}")
+    print(text("Total files: %(value0)s", value0=total_files))
+    print(text("Files with valid links: %(value0)s", value0=len(results["passed"])))
+    print(text("Files with broken links: %(value0)s", value0=len(results["failed"])))
+    print(text("\nTotal links checked: %(value0)s", value0=results["total_links"]))
+    print(text("Broken links: %(value0)s", value0=results["broken_links"]))
 
     if results["failed"]:
-        print(f"\nFiles with broken links ({len(results['failed'])}):")
+        print(text("\nFiles with broken links (%(value0)s):", value0=len(results["failed"])))
         for file_result in results["failed"]:
-            print(f"  {file_result['path']} - {len(file_result['broken_links'])} broken")
+            print(
+                text(
+                    "  %(value0)s - %(value1)s broken",
+                    value0=file_result["path"],
+                    value1=len(file_result["broken_links"]),
+                )
+            )
             for broken in file_result["broken_links"]:
-                print(f"    Line {broken['line']}: {broken['target']}")
-                print(f"      -> {broken['error']}")
+                print(
+                    text(
+                        "    Line %(value0)s: %(value1)s",
+                        value0=broken["line"],
+                        value1=broken["target"],
+                    )
+                )
+                print(text("      -> %(value0)s", value0=broken["error"]))
 
     print("=" * 70)
 
@@ -719,13 +732,13 @@ def main() -> int:
         nargs="?",
         type=Path,
         default=None,
-        help="Directory to scan (default: repo root)",
+        help=text("Directory to scan (default: repo root)"),
     )
     parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
-        help="Print verbose output",
+        help=text("Print verbose output"),
     )
 
     args = parser.parse_args()
@@ -733,7 +746,7 @@ def main() -> int:
     directory = args.directory or repo_root
 
     if not directory.exists():
-        print(f"ERROR: Directory not found: {directory}", file=sys.stderr)
+        print(text("ERROR: Directory not found: %(value0)s", value0=directory), file=sys.stderr)
         return 1
 
     results = validate_all_links(directory, repo_root, verbose=args.verbose)

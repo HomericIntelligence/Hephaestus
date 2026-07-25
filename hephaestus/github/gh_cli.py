@@ -7,6 +7,7 @@ import subprocess
 import sys
 from typing import Any
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import (
     add_github_throttle_args,
     add_json_arg,
@@ -35,7 +36,9 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the parser for ``hephaestus-gh``."""
     parser = argparse.ArgumentParser(
         prog="hephaestus-gh",
-        description="Run gh through Hephaestus's retry, circuit-breaker, and throttle adapter.",
+        description=text(
+            "Run gh through Hephaestus's retry, circuit-breaker, and throttle adapter."
+        ),
         allow_abbrev=False,
     )
     add_github_throttle_args(parser)
@@ -45,7 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
         "gh_args",
         nargs=argparse.REMAINDER,
         metavar="GH_ARG",
-        help="Arguments passed through to gh. Prefix with -- if they start with a dash.",
+        help=text("Arguments passed through to gh. Prefix with -- if they start with a dash."),
     )
     return parser
 
