@@ -992,6 +992,7 @@ class TestProcessOwnedReviewThreadLifecycle:
             "author": participants[0],
             "authors": participants,
             "comments": [{"author": author, "body": body} for author in participants],
+            "review_id": f"review-{thread_id}",
         }
 
     def test_validated_process_threads_converge_without_22_to_31_growth(
@@ -1025,7 +1026,7 @@ class TestProcessOwnedReviewThreadLifecycle:
 
             def post_review_threads(
                 self, pr_number: int, threads: list[dict[str, Any]], summary: str
-            ) -> list[str]:
+            ) -> list[dict[str, Any]]:
                 del summary
                 self.posted_batches.append([dict(thread) for thread in threads])
                 thread_ids: list[str] = []
@@ -1039,7 +1040,8 @@ class TestProcessOwnedReviewThreadLifecycle:
                         )
                     )
                 self._log("gh_pr_review_post", pr_number, "COMMENT")
-                return thread_ids
+                new_ids = set(thread_ids)
+                return [dict(thread) for thread in self.live if str(thread.get("id")) in new_ids]
 
         inherited = [
             self._thread(f"inherited-{index}", index + 1, f"old {index}") for index in range(10)
@@ -1146,7 +1148,7 @@ class TestProcessOwnedReviewThreadLifecycle:
 
             def post_review_threads(
                 self, pr_number: int, threads: list[dict[str, Any]], summary: str
-            ) -> list[str]:
+            ) -> list[dict[str, Any]]:
                 del summary
                 self.posted = [dict(thread) for thread in threads]
                 posted_ids = [f"reopened-{index}" for index, _ in enumerate(threads)]
@@ -1159,7 +1161,7 @@ class TestProcessOwnedReviewThreadLifecycle:
                         )
                     )
                 self._log("gh_pr_review_post", pr_number, "COMMENT")
-                return posted_ids
+                return [dict(thread) for thread in self.live if thread["id"] in posted_ids]
 
         prior = self._thread("process-1", 3, "fix this")
         github = ExternallyResolvedGitHub()
@@ -1208,7 +1210,7 @@ class TestProcessOwnedReviewThreadLifecycle:
 
             def post_review_threads(
                 self, pr_number: int, threads: list[dict[str, Any]], summary: str
-            ) -> list[str]:
+            ) -> list[dict[str, Any]]:
                 del summary
                 self.posted = [dict(thread) for thread in threads]
                 posted_ids = [f"reopened-{index}" for index, _ in enumerate(threads)]
@@ -1221,7 +1223,7 @@ class TestProcessOwnedReviewThreadLifecycle:
                         )
                     )
                 self._log("gh_pr_review_post", pr_number, "COMMENT")
-                return posted_ids
+                return [dict(thread) for thread in self.live if thread["id"] in posted_ids]
 
         prior = self._thread("process-1", 3, "fix this")
         changed = dict(prior)
@@ -1317,7 +1319,7 @@ class TestProcessOwnedReviewThreadLifecycle:
 
             def post_review_threads(
                 self, pr_number: int, threads: list[dict[str, Any]], summary: str
-            ) -> list[str]:
+            ) -> list[dict[str, Any]]:
                 self._log("gh_pr_review_post", pr_number, "COMMENT")
                 return []
 
@@ -1608,6 +1610,74 @@ class TestEvalVerdicts:
         assert result == StageOutcome(Disposition.FINISH_FAIL, "implementation_go_readback_failed")
         assert github.mutation_log == [("mark_pr_implementation_go", (1001,))]
 
+    def test_post_go_label_head_drift_clears_safe_label_and_restarts_review(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A nonconditional GO write cannot survive a post-write head drift."""
+
+        class PostWriteDriftGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__()
+                self.go_written = False
+
+            def mark_pr_implementation_go(self, pr_number: int) -> None:
+                super().mark_pr_implementation_go(pr_number)
+                self.go_written = True
+
+            def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
+                del pr_number
+                return {
+                    "state": "OPEN",
+                    "headRefOid": ("b" if self.go_written else "a") * 40,
+                    "autoMergeRequest": None,
+                }
+
+        stage = PrReviewStage()
+        github = PostWriteDriftGitHub()
+        item = make_work_item(issue=36, pr=1001, state="EVAL")
+        item.payload.update({"review_verdict": _verdict("GO"), "reviewed_pr_head_sha": "a" * 40})
+
+        result = stage.step(item, make_ctx(github=github))
+
+        assert result == Continue(next_state="REVIEW_WAIT")
+        assert "reviewed_pr_head_sha" not in item.payload
+        assert github.pr_has_implementation_state_label(1001) == (False, False)
+        assert ("mark_pr_implementation_go", (1001,)) in github.mutation_log
+        assert any(name == "gh_issue_remove_labels" for name, _ in github.mutation_log)
+
+    def test_post_go_label_auto_merge_arm_stands_down_without_clearing(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A post-write external arm makes the label unsafe to revoke."""
+
+        class PostWriteArmGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__()
+                self.go_written = False
+
+            def mark_pr_implementation_go(self, pr_number: int) -> None:
+                super().mark_pr_implementation_go(pr_number)
+                self.go_written = True
+
+            def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
+                del pr_number
+                return {
+                    "state": "OPEN",
+                    "headRefOid": "a" * 40,
+                    "autoMergeRequest": {"enabledAt": "now"} if self.go_written else None,
+                }
+
+        stage = PrReviewStage()
+        github = PostWriteArmGitHub()
+        item = make_work_item(issue=37, pr=1001, state="EVAL")
+        item.payload.update({"review_verdict": _verdict("GO"), "reviewed_pr_head_sha": "a" * 40})
+
+        result = stage.step(item, make_ctx(github=github))
+
+        assert result == StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
+        assert github.pr_has_implementation_state_label(1001) == (True, False)
+        assert not any(name == "gh_issue_remove_labels" for name, _ in github.mutation_log)
+
     def test_ungraded_go_is_converted_to_nogo_and_cannot_advance(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -1808,6 +1878,7 @@ class TestEvalVerdicts:
                     "automation_owned": True,
                     "author": "mvillmow",
                     "authors": ["mvillmow", "mvillmow"],
+                    "review_id": "review-process-advisory",
                     "comments": [
                         {"author": "mvillmow", "body": "original finding"},
                         {"author": "mvillmow", "body": "human reply"},
@@ -1840,6 +1911,7 @@ class TestEvalVerdicts:
                     {
                         **github.live,
                         "authors": ["mvillmow"],
+                        "review_id": "review-process-advisory",
                         "comments": [{"author": "mvillmow", "body": "original finding"}],
                     }
                 ],

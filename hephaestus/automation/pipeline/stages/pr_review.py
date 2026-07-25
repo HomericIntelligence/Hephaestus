@@ -450,6 +450,20 @@ def _thread_comment_signature(thread: dict[str, Any]) -> tuple[tuple[str, str], 
     return tuple(signature)
 
 
+def _is_process_thread_receipt(raw: dict[str, Any]) -> bool:
+    """Return whether one post-time receipt proves exactly one created comment."""
+    review_id = raw.get("review_id")
+    comments = raw.get("comments")
+    return bool(
+        _durable_thread_id(raw)
+        and isinstance(review_id, str)
+        and review_id.strip()
+        and isinstance(comments, list)
+        and len(comments) == 1
+        and _thread_comment_signature(raw) is not None
+    )
+
+
 def _process_thread_records(item: WorkItem) -> dict[str, dict[str, Any]] | None:
     """Load the process-only post receipts, rejecting malformed identities."""
     raw_records = item.payload.get("process_review_threads", [])
@@ -457,7 +471,7 @@ def _process_thread_records(item: WorkItem) -> dict[str, dict[str, Any]] | None:
         return None
     records: dict[str, dict[str, Any]] = {}
     for raw in raw_records:
-        if not isinstance(raw, dict):
+        if not isinstance(raw, dict) or not _is_process_thread_receipt(raw):
             return None
         thread_id = _durable_thread_id(raw)
         if thread_id is None or thread_id in records:
@@ -1327,22 +1341,26 @@ class PrReviewStage(Stage):
         return _without_duplicate_live_process_findings(threads, live_process)
 
     @staticmethod
-    def _record_posted_process_threads(
-        item: WorkItem, posted: list[str], live_threads: list[dict[str, Any]]
-    ) -> bool:
-        """Append only host-read receipts for threads posted in this process."""
-        posted_ids = {str(posted_id) for posted_id in posted}
-        new_records = {
-            thread_id: dict(thread)
-            for thread in live_threads
-            if (thread_id := _durable_thread_id(thread)) is not None and thread_id in posted_ids
-        }
+    def _record_posted_process_threads(item: WorkItem, post_receipts: list[dict[str, Any]]) -> bool:
+        """Append only immutable receipts produced at the post boundary.
+
+        A later full unresolved-thread read is deliberately not a source of
+        receipts: a same-login human reply can arrive in that window. The
+        adapter returns each process-created thread only after proving its
+        sole initial comment and owning review identity.
+        """
+        new_records: dict[str, dict[str, Any]] = {}
+        for receipt in post_receipts:
+            if not isinstance(receipt, dict):
+                return False
+            thread_id = _durable_thread_id(receipt)
+            if thread_id is None or thread_id in new_records:
+                return False
+            new_records[thread_id] = dict(receipt)
+        if any(not _is_process_thread_receipt(receipt) for receipt in new_records.values()):
+            return False
         records = _process_thread_records(item)
-        if (
-            len(new_records) != len(posted)
-            or records is None
-            or any(thread_id in records for thread_id in new_records)
-        ):
+        if records is None or any(thread_id in records for thread_id in new_records):
             return False
         # Keep the original post receipt intact. A later human reply must not
         # be absorbed into the baseline used to prove this is still our thread.
@@ -1381,33 +1399,38 @@ class PrReviewStage(Stage):
         # addressing use the normalized live read-back installed below.
         item.payload["review_threads"] = threads
         try:
-            posted = list(
+            post_receipts = list(
                 ctx.github.post_review_threads(
                     item.pr,
                     list(threads),
                     self._final_review_comment(audit),
                 )
             )
-            live_threads = ctx.github.list_unresolved_review_threads(item.pr)
         except Exception as error:
             logger.warning(
-                "pr_review:%s: review finding publication/read-back failed (%s)",
+                "pr_review:%s: review finding publication failed (%s)",
                 item.issue,
                 type(error).__name__,
             )
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
-        live_ids = {str(thread.get("id")) for thread in live_threads if thread.get("id")}
-        if len(posted) != len(threads) or any(not thread_id for thread_id in posted):
+        if len(post_receipts) != len(threads):
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
-        if any(str(thread_id) not in live_ids for thread_id in posted):
+        if not self._record_posted_process_threads(item, post_receipts):
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
-        if not self._record_posted_process_threads(item, posted, live_threads):
+        item.payload["posted_thread_ids"] = [str(receipt["id"]) for receipt in post_receipts]
+        try:
+            live_threads = ctx.github.list_unresolved_review_threads(item.pr)
+        except Exception as error:
+            logger.warning(
+                "pr_review:%s: review finding live read-back failed (%s)",
+                item.issue,
+                type(error).__name__,
+            )
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
-        item.payload["posted_thread_ids"] = posted
         item.payload["unresolved_threads"] = [dict(thread) for thread in live_threads]
         blocking_auto, minor_auto, human_unresolved = _thread_counts(live_threads)
         remediation_threads = _normalize_blocking_remediation_threads(live_threads)
@@ -1874,6 +1897,68 @@ class PrReviewStage(Stage):
         return None
 
     @staticmethod
+    def _revalidate_go_write(item: WorkItem, ctx: StageContext) -> StepResult | None:
+        """Check the nonconditional GO write against fresh state and labels.
+
+        GitHub exposes no conditional label mutation.  A push or external
+        auto-merge arm can therefore race after the pre-write guard.  Remove
+        the newly written loop label only when a fresh state still proves the
+        PR open and unarmed *and* the label is exclusively GO; otherwise leave
+        externally ambiguous state untouched and stand down.
+        """
+        if item.pr is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        pr_number = item.pr
+        try:
+            state = ctx.github.gh_pr_state(pr_number)
+            has_go, has_no_go = ctx.github.pr_has_implementation_state_label(pr_number)
+        except Exception as error:
+            logger.warning(
+                "pr_review: failed to revalidate GO write on PR #%d (%s)",
+                pr_number,
+                type(error).__name__,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_readback_failed")
+        reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
+        live_head = str(state.get("headRefOid") or "") if isinstance(state, dict) else ""
+        if (
+            _is_confirmed_open_unarmed(state)
+            and bool(reviewed_head)
+            and reviewed_head == live_head
+            and has_go
+            and not has_no_go
+        ):
+            return None
+        # The label can be safely revoked only while the PR remains open and
+        # explicitly unarmed, and only if it is still the loop's exclusive GO
+        # label. Do not mutate an externally armed/closed/ambiguous PR or a
+        # label state another actor may have changed.
+        if _is_confirmed_open_unarmed(state) and has_go and not has_no_go:
+            try:
+                ctx.github.remove_labels(pr_number, list(ALL_IMPLEMENTATION_STATE_LABELS))
+                cleared_go, cleared_no_go = ctx.github.pr_has_implementation_state_label(pr_number)
+            except Exception as error:
+                logger.warning(
+                    "pr_review: failed to clear stale GO label on PR #%d (%s)",
+                    pr_number,
+                    type(error).__name__,
+                )
+                return StageOutcome(
+                    Disposition.FINISH_FAIL,
+                    "implementation_go_postwrite_clear_failed",
+                )
+            if cleared_go or cleared_no_go:
+                return StageOutcome(
+                    Disposition.FINISH_FAIL,
+                    "implementation_go_postwrite_clear_failed",
+                )
+            item.payload.pop("reviewed_pr_head_sha", None)
+            return Continue(next_state=REVIEW_WAIT)
+        if isinstance(state, dict) and state.get("autoMergeRequest") is not None:
+            return StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
+        return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_readback_failed")
+
+    @staticmethod
     def _bind_current_head_for_negative(item: WorkItem, ctx: StageContext) -> StageOutcome | None:
         """Bind the current open head for a negative-only transition."""
         if item.pr is None:
@@ -2092,17 +2177,9 @@ class PrReviewStage(Stage):
         except Exception as error:
             logger.error("pr_review: failed to mark PR #%d implementation-go: %s", pr_number, error)
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_label_failed")
-        try:
-            has_go, has_no_go = ctx.github.pr_has_implementation_state_label(pr_number)
-        except Exception as error:
-            logger.warning(
-                "pr_review: failed to verify PR #%d implementation-go: %s",
-                pr_number,
-                error,
-            )
-            return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_readback_failed")
-        if not has_go or has_no_go:
-            return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_readback_failed")
+        postwrite_outcome = PrReviewStage._revalidate_go_write(item, ctx)
+        if postwrite_outcome is not None:
+            return postwrite_outcome
         return StageOutcome(Disposition.ADVANCE, "review audit; merge wait pending")
 
     @staticmethod

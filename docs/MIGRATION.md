@@ -4,9 +4,11 @@
 > via hatch-vcs). **1.0 has not been released yet** — the section below is the
 > *forthcoming* 1.0 migration guidance, published ahead of the cut so consumers can
 > prepare. 0.10.0's headline change is the queue pipeline's reviewed-head review
-> interlock: `pr_review` writes `state:implementation-go` only for the current
-> process's reviewed head, and `merge_wait` revalidates that proof before standing by
-> on a confirmed-unarmed PR. No queue stage arms auto-merge pending #2419. There are **no breaking changes
+> interlock: `pr_review` writes `state:implementation-go` only after complete
+> structural/thread facts, an exact current-process reviewed open/unarmed head, and
+> exclusive-label readback; audit prose and model decision text are informational.
+> `merge_wait` revalidates that proof before standing by. No queue stage arms
+> auto-merge pending #2419. There are **no breaking changes
 > to the documented public API** from 0.9.x: upgrading requires no code changes for
 > code that uses only the documented public API in
 > [`COMPATIBILITY.md`](../COMPATIBILITY.md). Operators of the automation loop should

@@ -321,20 +321,25 @@ class StageGitHub(Protocol):
 
     def post_review_threads(
         self, pr_number: int, threads: list[dict[str, Any]], summary: str
-    ) -> list[str]:
-        """Durably post surviving review threads to the PR; return thread ids.
+    ) -> list[dict[str, Any]]:
+        """Post review threads and return immutable post-time process receipts.
 
-        The pr_review POST step's durable write (doc section 5 step 3). The
-        coordinator maps this onto ``gh_pr_review_post``.
+        Each receipt identifies one created thread and proves its sole initial
+        comment's content and review identity at the post/readback boundary.
+        A reply observed before that proof must produce no receipt; later
+        process resolution therefore fails closed rather than treating a
+        same-login human reply as automation-owned.
         """
         ...
 
     def mark_pr_implementation_go(self, pr_number: int) -> None:
         """Durably apply ``state:implementation-go`` to the PR.
 
-        The PR review stage applies this after its normal `$athena:pr-review`
-        invocation (or its inline-review fallback) reports GO. No external CI
-        status or secondary artifact can apply it.
+        The PR review stage requests this only after complete structural audit
+        facts, live thread facts, and an exact reviewed open/unarmed head pass
+        its mutation guard. A post-write readback must still prove the same
+        head and exclusive label. Audit prose, grades, CI, and secondary
+        artifacts are informational rather than label authority.
         """
         ...
 

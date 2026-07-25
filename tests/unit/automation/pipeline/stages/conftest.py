@@ -289,6 +289,7 @@ class FakeStageGitHub(FakeGitHub):
                         "automation_owned": not is_human,
                         "author": "hephaestus[bot]" if not is_human else "reviewer",
                         "authors": ["hephaestus[bot]" if not is_human else "reviewer"],
+                        "review_id": f"review-{pr_number}-{cursor}",
                         "comments": [
                             {
                                 "author": "hephaestus[bot]" if not is_human else "reviewer",
@@ -429,11 +430,27 @@ class FakeStageGitHub(FakeGitHub):
 
     def post_review_threads(
         self, pr_number: int, threads: list[dict[str, Any]], summary: str
-    ) -> list[str]:
-        """Mirror the coordinator thread post (delegates to gh_pr_review_post)."""
+    ) -> list[dict[str, Any]]:
+        """Mirror a post-time immutable receipt returned by the coordinator."""
         ids = self.gh_pr_review_post(pr_number, threads, summary)
         self._posted_thread_ids[pr_number] = list(ids)
-        return ids
+        review_id = f"review-{pr_number}-{len(self.reviews.get(pr_number, []))}"
+        return [
+            {
+                "id": thread_id,
+                "path": str(thread.get("path") or "a.py"),
+                "line": thread.get("line"),
+                "side": str(thread.get("side") or "RIGHT"),
+                "body": str(thread.get("body") or "finding"),
+                "author": "hephaestus[bot]",
+                "authors": ["hephaestus[bot]"],
+                "comments": [
+                    {"author": "hephaestus[bot]", "body": str(thread.get("body") or "finding")}
+                ],
+                "review_id": review_id,
+            }
+            for thread_id, thread in zip(ids, threads, strict=True)
+        ]
 
     def mark_pr_implementation_go(self, pr_number: int) -> None:
         """Mirror pr_manager.mark_pr_implementation_go (records mutation)."""

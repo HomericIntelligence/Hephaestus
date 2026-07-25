@@ -86,9 +86,8 @@ from the crashed turn is discarded; this is by design. Issue work happens in
 ## When `state:skip` applies
 
 `state:skip` is the only label that takes an issue out of the loop entirely. It
-is operator-applied, applied when the review loop exhausts its budget without a
-confirmed clear structural review, or applied to epics before exclusion from the
-issue queue. A crash alone
+is applied by an operator, by review-budget exhaustion without confirmed clear
+structural facts, or to epics before exclusion from the issue queue. A crash alone
 does **not** apply `state:skip`; re-running the loop is the correct first
 response to a crash. Apply `state:skip` yourself only when an issue is genuinely
 stuck after repeated attempts (for a stuck-but-green PR, see the

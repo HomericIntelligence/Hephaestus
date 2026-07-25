@@ -655,17 +655,22 @@ class PipelineGitHub:
             legacy_marker=PLAN_REVIEW_PREFIX,
         )
 
-    def _repo_review_threads_for_review(self, pr_number: int, review_id: str) -> list[str]:
-        """Return unresolved review-thread ids created by one REST review.
+    def _repo_review_thread_receipts_for_review(
+        self,
+        pr_number: int,
+        review_id: str,
+        expected_comments: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Return immutable sole-comment receipts from one just-created review.
 
         ``review_id`` is the REST review POST response's ``node_id`` field —
         the GraphQL global node id of the same ``PullRequestReview`` object
-        returned here as ``comments.nodes[0].pullRequestReview.id``. Both are
-        GraphQL-node-id space (not REST numeric ``id``), so they are directly
-        comparable at the ``review.get("id") != review_id`` check below; see
-        ``test_round_trips_rest_node_id_against_graphql_review_id`` for the
-        pinned invariant. Preserves the #375 guarantee: only threads created
-        by *this* review are returned.
+        returned in the sole first comment's ``pullRequestReview.id``. A
+        receipt is accepted only when that thread still has exactly one
+        complete comment whose body/path/line/side matches one requested
+        comment. This intentionally fails closed if any reply arrives between
+        POST and this first receipt readback: author login alone is never
+        evidence that the process authored a reply.
         """
         query = (
             "query($owner:String!,$name:String!,$number:Int!,$after:String){"
@@ -673,14 +678,25 @@ class PipelineGitHub:
             "    pullRequest(number:$number){"
             "      reviewThreads(first:100,after:$after){"
             "        pageInfo{ hasNextPage endCursor }"
-            "        nodes{ id isResolved comments(first:1){ "
-            "nodes{ pullRequestReview{ id } } } }"
+            "        nodes{ id isResolved path line side:diffSide "
+            "comments(first:2){ pageInfo{ hasNextPage } "
+            "nodes{ body author{ login } pullRequestReview{ id } } } }"
             "      }"
             "    }"
             "  }"
             "}"
         )
-        seen: dict[str, None] = {}
+        expected = [
+            (
+                str(comment.get("path") or ""),
+                comment.get("line"),
+                str(comment.get("side") or "RIGHT"),
+                str(comment.get("body") or ""),
+            )
+            for comment in expected_comments
+        ]
+        unmatched = list(expected)
+        receipts: list[dict[str, Any]] = []
         after: str | None = None
         try:
             while True:
@@ -697,15 +713,50 @@ class PipelineGitHub:
                 for node in review_threads.get("nodes", []):
                     if node.get("isResolved"):
                         continue
-                    first_comments = node.get("comments", {}).get("nodes", [])
-                    if not first_comments:
+                    comment_connection = node.get("comments", {})
+                    comments = comment_connection.get("nodes", [])
+                    if (
+                        comment_connection.get("pageInfo", {}).get("hasNextPage")
+                        or len(comments) != 1
+                    ):
                         continue
-                    review = first_comments[0].get("pullRequestReview") or {}
+                    first_comment = comments[0]
+                    review = first_comment.get("pullRequestReview") or {}
                     if review.get("id") != review_id:
                         continue
                     thread_id = node.get("id")
-                    if thread_id:
-                        seen[thread_id] = None
+                    author_node = first_comment.get("author")
+                    author = author_node.get("login") if isinstance(author_node, dict) else ""
+                    body = first_comment.get("body")
+                    key = (
+                        str(node.get("path") or ""),
+                        node.get("line"),
+                        str(node.get("side") or "RIGHT"),
+                        str(body or ""),
+                    )
+                    if (
+                        not isinstance(thread_id, str)
+                        or not thread_id
+                        or not isinstance(author, str)
+                        or not author
+                        or not isinstance(body, str)
+                        or key not in unmatched
+                    ):
+                        continue
+                    unmatched.remove(key)
+                    receipts.append(
+                        {
+                            "id": thread_id,
+                            "path": key[0],
+                            "line": key[1],
+                            "side": key[2],
+                            "body": body,
+                            "author": author,
+                            "authors": [author],
+                            "comments": [{"author": author, "body": body}],
+                            "review_id": review_id,
+                        }
+                    )
                 page_info = review_threads.get("pageInfo", {})
                 if not page_info.get("hasNextPage"):
                     break
@@ -714,9 +765,11 @@ class PipelineGitHub:
                     raise RuntimeError("could not fetch all PR review threads")
                 after = next_cursor
         except (subprocess.SubprocessError, RuntimeError, json.JSONDecodeError) as exc:
-            logger.warning("Could not fetch review threads for PR #%s: %s", pr_number, exc)
+            logger.warning("Could not fetch review receipts for PR #%s: %s", pr_number, exc)
             return []
-        return list(seen)
+        if unmatched or len(receipts) != len(expected):
+            return []
+        return receipts
 
     def _skip(self, what: str) -> bool:
         """Return True (and log) when dry-run should skip a mutation."""
@@ -1421,8 +1474,8 @@ class PipelineGitHub:
 
     def post_review_threads(
         self, pr_number: int, threads: list[dict[str, Any]], summary: str
-    ) -> list[str]:
-        """Post surviving review threads (``gh_pr_review_post``)."""
+    ) -> list[dict[str, Any]]:
+        """Post review threads and return immutable process-created receipts."""
         if self._skip(f"post {len(threads)} review thread(s) on PR #{pr_number}"):
             return []
         if self._repo_slug is not None:
@@ -1458,18 +1511,22 @@ class PipelineGitHub:
             if not review_node_id:
                 logger.warning("Posted PR review on #%s but no review node id returned", pr_number)
                 return []
-            thread_ids = self._repo_review_threads_for_review(pr_number, str(review_node_id))
-            if review_comments and not thread_ids:
+            receipts = self._repo_review_thread_receipts_for_review(
+                pr_number,
+                str(review_node_id),
+                review_comments,
+            )
+            if review_comments and not receipts:
                 logger.warning(
-                    "Posted PR review %s (node id %r) on #%s with %d comment(s) but "
-                    "matched zero review threads; comments may be orphaned",
+                    "Posted PR review %s (node id %r) on #%s with %d comment(s) but could not "
+                    "prove immutable sole-comment receipts; leaving them unresolved",
                     review.get("id"),
                     review_node_id,
                     pr_number,
                     len(review_comments),
                 )
-            return thread_ids
-        return github_api.gh_pr_review_post(pr_number, threads, summary)
+            return receipts
+        return []
 
     def claim_drive_green_learn(self, issue_number: int, pr_number: int) -> bool:
         """Persist and read back the pre-dispatch /learn claim.

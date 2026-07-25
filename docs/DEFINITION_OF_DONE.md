@@ -14,7 +14,7 @@ A piece of work is **done** when every item below is true.
 | 1 | Branch named `<issue-number>-<description>` | Convention (PR reviewer) |
 | 2 | PR body contains the literal line `Closes #<issue-number>` (capital C, no colon, on its own line) | CI gate `pr-policy` (`.github/workflows/_required.yml`) |
 | 3 | Every commit on the branch is cryptographically signed and DCO-signed (`git commit -S -s`) | CI gate `pr-policy` |
-| 4 | `pr_review` writes loop-owned `state:implementation-go` only after `$athena:pr-review` (or the inline fallback) and a current-process reviewed-head proof. `merge_wait` revalidates that proof against a confirmed-unarmed PR and stands by; pending #2419, no queue stage mutates auto-merge. | Queue gate; advisory `auto-merge-policy` and human review |
+| 4 | `pr_review` writes loop-owned `state:implementation-go` only after structural audit facts, complete live thread facts, an exact reviewed open/unarmed head, and exclusive-label readback. Audit prose, grades, CI, and model decision text are informational. `merge_wait` verifies the current-process proof and stands by; pending #2419, no queue stage mutates auto-merge. | Queue gate; advisory `auto-merge-policy` and human review |
 | 5 | Commit messages follow Conventional Commits (`type(scope): description`) | CI gate `pr-policy` (Check 3) + local `commit-msg` hook `conventional-commit-msg` |
 | 6 | `uv run ruff check hephaestus/ tests/` passes | CI job `lint` |
 | 7 | `uv run ruff format --check hephaestus/ tests/` passes (no files would be reformatted) | CI job `lint` |
@@ -39,7 +39,7 @@ A piece of work is **done** when every item below is true.
 > contexts) and the direct GitHub ruleset contexts documented in
 > [`docs/ci/required-checks.md`](ci/required-checks.md) do. The aggregate gate
 > excludes advisory `auto-merge-policy`; the automation loop records
-> implementation approval with a confirmed exclusive `state:implementation-go`
+> implementation state with a confirmed exclusive `state:implementation-go`
 > label plus a process-local reviewed-head proof. Pending #2419, that state
 > reaches merge-wait standby rather than automatic merge.
 

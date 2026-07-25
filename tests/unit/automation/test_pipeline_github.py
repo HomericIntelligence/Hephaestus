@@ -84,7 +84,6 @@ _MUTATOR_CASES = [
     ),
     ("mark_pr_implementation_go", (7,), "pr_manager", "mark_pr_implementation_go"),
     ("mark_pr_implementation_no_go", (7,), "pr_manager", "mark_pr_implementation_no_go"),
-    ("post_review_threads", (7, [], "sum"), "github_api", "gh_pr_review_post"),
     ("skip_epics", ({5: ["epic"]},), "github_api", "skip_epics"),
     ("ensure_state_labels", (), "github_api", "_ensure_labels_exist"),
 ]
@@ -1111,7 +1110,7 @@ class TestRepoScoping:
             7, [], "summary"
         )
 
-        assert posted == ["thread-1"]
+        assert posted == []
         assert any("repos/org/repo-a/pulls/7/reviews" in call for call in calls)
 
     def test_repo_scoped_review_post_warns_on_zero_matched_threads(
@@ -1165,11 +1164,76 @@ class TestRepoScoping:
             ).post_review_threads(7, [{"path": "a.py", "line": 1, "body": "x"}], "summary")
 
         assert posted == []
-        assert any("matched zero review threads" in r.message for r in caplog.records)
+        assert any(
+            "could not prove immutable sole-comment receipts" in r.message for r in caplog.records
+        )
+
+    def test_repo_scoped_review_post_rejects_same_login_reply_before_receipt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A reply before first receipt readback cannot become a process receipt."""
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            if argv[:2] == ["api", "graphql"]:
+                payload = {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "reviewThreads": {
+                                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                    "nodes": [
+                                        {
+                                            "id": "thread-1",
+                                            "isResolved": False,
+                                            "path": "a.py",
+                                            "line": 1,
+                                            "side": "RIGHT",
+                                            "comments": {
+                                                "pageInfo": {
+                                                    "hasNextPage": False,
+                                                    "endCursor": None,
+                                                },
+                                                "nodes": [
+                                                    {
+                                                        "body": (
+                                                            "<!-- hephaestus-severity: "
+                                                            "major -->\nfinding"
+                                                        ),
+                                                        "author": {"login": "mvillmow"},
+                                                        "pullRequestReview": {"id": "review-node"},
+                                                    },
+                                                    {
+                                                        "body": "human follow-up",
+                                                        "author": {"login": "mvillmow"},
+                                                        "pullRequestReview": None,
+                                                    },
+                                                ],
+                                            },
+                                        }
+                                    ],
+                                }
+                            }
+                        }
+                    }
+                }
+                return SimpleNamespace(stdout=json.dumps(payload))
+            if "repos/org/repo-a/pulls/7/reviews" in argv:
+                return SimpleNamespace(stdout=json.dumps({"id": 999, "node_id": "review-node"}))
+            return SimpleNamespace(stdout="")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        posted = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).post_review_threads(
+            7,
+            [{"path": "a.py", "line": 1, "side": "RIGHT", "severity": "major", "body": "finding"}],
+            "summary",
+        )
+
+        assert posted == []
 
 
-class TestRepoReviewThreadsForReview:
-    """_repo_review_threads_for_review: REST node_id vs GraphQL pullRequestReview.id."""
+class TestRepoReviewThreadReceipts:
+    """Post-time receipt lookup binds immutable first comments to the REST review id."""
 
     def test_fetches_matching_review_thread_after_first_hundred(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1188,7 +1252,19 @@ class TestRepoReviewThreadsForReview:
             {
                 "id": "PRRT_matching",
                 "isResolved": False,
-                "comments": {"nodes": [{"pullRequestReview": {"id": "review-node"}}]},
+                "path": "a.py",
+                "line": 1,
+                "side": "RIGHT",
+                "comments": {
+                    "pageInfo": {"hasNextPage": False},
+                    "nodes": [
+                        {
+                            "body": "finding",
+                            "author": {"login": "hephaestus[bot]"},
+                            "pullRequestReview": {"id": "review-node"},
+                        }
+                    ],
+                },
             },
             {
                 "id": "PRRT_other_review",
@@ -1223,7 +1299,13 @@ class TestRepoReviewThreadsForReview:
 
         gh = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
 
-        assert gh._repo_review_threads_for_review(7, "review-node") == ["PRRT_matching"]
+        receipts = gh._repo_review_thread_receipts_for_review(
+            7,
+            "review-node",
+            [{"path": "a.py", "line": 1, "side": "RIGHT", "body": "finding"}],
+        )
+
+        assert [receipt["id"] for receipt in receipts] == ["PRRT_matching"]
         assert len(calls) == 2
         assert "after=cursor-1" in calls[1]
 
@@ -1255,14 +1337,20 @@ class TestRepoReviewThreadsForReview:
                                         {
                                             "id": "PRRT_matching",
                                             "isResolved": False,
+                                            "path": "a.py",
+                                            "line": 1,
+                                            "side": "RIGHT",
                                             "comments": {
+                                                "pageInfo": {"hasNextPage": False},
                                                 "nodes": [
                                                     {
+                                                        "body": "finding",
+                                                        "author": {"login": "hephaestus[bot]"},
                                                         "pullRequestReview": {
                                                             "id": rest_review_response["node_id"]
-                                                        }
+                                                        },
                                                     }
-                                                ]
+                                                ],
                                             },
                                         },
                                         {
@@ -1286,9 +1374,13 @@ class TestRepoReviewThreadsForReview:
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
 
         gh = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
-        result = gh._repo_review_threads_for_review(7, str(rest_review_response["node_id"]))
+        result = gh._repo_review_thread_receipts_for_review(
+            7,
+            str(rest_review_response["node_id"]),
+            [{"path": "a.py", "line": 1, "side": "RIGHT", "body": "finding"}],
+        )
 
-        assert result == ["PRRT_matching"]
+        assert [receipt["id"] for receipt in result] == ["PRRT_matching"]
 
     def test_resolved_thread_from_same_review_is_excluded(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1322,7 +1414,11 @@ class TestRepoReviewThreadsForReview:
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
 
         gh = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
-        result = gh._repo_review_threads_for_review(7, "review-node")
+        result = gh._repo_review_thread_receipts_for_review(
+            7,
+            "review-node",
+            [{"path": "a.py", "line": 1, "side": "RIGHT", "body": "finding"}],
+        )
 
         assert result == []
 

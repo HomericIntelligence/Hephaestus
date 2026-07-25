@@ -9,7 +9,8 @@ resume planning/implementing it.
 
 ## Background
 
-`state:skip` is absolute and operator-only (#1576/#1584): the pipeline's
+`state:skip` is an absolute exclusion applied by an operator, review-budget
+exhaustion, or epic seeding: the pipeline's
 seeding classifier (`pipeline/seeding.py` `classify_issue`) excludes any
 `state:skip`-labeled issue from the work queue entirely, before any other
 state label is consulted. This is a *point-in-time* exclusion — if
