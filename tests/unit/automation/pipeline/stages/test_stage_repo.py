@@ -1,9 +1,9 @@
 """RepoStage tests: label ensure, clone, discovery walk, epic-tag order (#1817).
 
 Doc section "1. repo" is the binding contract: ENTER -> CLONE_WAIT ->
-DISCOVER -> SEEDED; budget clone=2; epics tagged ``state:skip`` [durable]
-BEFORE exclusion; orphan PRs without a linked issue are skipped; the repo item
-is terminal (FINISH_PASS ``seeded:N``).
+DISCOVER -> SOURCE; budget clone=2.  The stage initializes only a bounded
+metadata cursor; the coordinator owns one-at-a-time classification, epic
+tagging, and terminal completion.
 """
 
 from __future__ import annotations
@@ -223,7 +223,9 @@ class TestDiscover:
     ) -> list[int]:
         """Patch the repo-stage read seams; returns the classify-call order."""
         classified: list[int] = []
-        monkeypatch.setattr(loop_repo_manager_mod, "_list_open_issue_meta", lambda org, repo: meta)
+        monkeypatch.setattr(
+            loop_repo_manager_mod, "_iter_open_issue_meta", lambda org, repo: iter(meta)
+        )
         monkeypatch.setattr(
             loop_repo_manager_mod, "_list_open_pr_meta", lambda org, repo: open_prs or []
         )
@@ -237,7 +239,7 @@ class TestDiscover:
         monkeypatch.setattr(seeding_mod, "classify_issue", fake_classify)
         return classified
 
-    def test_discover_classifies_through_repo_scoped_github(
+    def test_discover_initializes_source_without_eager_issue_reads(
         self,
         repo_item: WorkItem,
         tmp_path: Path,
@@ -268,8 +270,10 @@ class TestDiscover:
         ctx = make_ctx(github=github, paths=_RepoPaths(tmp_path))
         monkeypatch.setattr(
             loop_repo_manager_mod,
-            "_list_open_issue_meta",
-            lambda org, repo: [{"number": 8, "labels": ["state:implementation-go"], "title": "x"}],
+            "_iter_open_issue_meta",
+            lambda org, repo: iter(
+                [{"number": 8, "labels": ["state:implementation-go"], "title": "x"}]
+            ),
         )
         monkeypatch.setattr(loop_repo_manager_mod, "_list_open_pr_meta", lambda org, repo: [])
         monkeypatch.setattr(
@@ -282,11 +286,10 @@ class TestDiscover:
         result = RepoStage().step(repo_item, ctx)
 
         assert isinstance(result, Continue)
-        assert github.issue_reads == [8]
-        # Issue-level implementation-go on an open PR is a legacy compatibility
-        # label (#2140): post-#2280 it routes back to review, not merge_wait.
-        assert repo_item.payload["products"][0]["stage"] is StageName.PR_REVIEW
-        assert repo_item.payload["products"][0]["pr"] == 44
+        assert result.next_state == "SOURCE"
+        assert github.issue_reads == []
+        assert "products" not in repo_item.payload
+        assert "_repo_issue_source" in repo_item.payload
 
     def test_discover_failure_finishes_fail(
         self,
@@ -297,7 +300,7 @@ class TestDiscover:
         """Discovery failures are not converted into a successful empty run."""
         monkeypatch.setattr(
             loop_repo_manager_mod,
-            "_list_open_issue_meta",
+            "_iter_open_issue_meta",
             lambda org, repo: (_ for _ in ()).throw(RuntimeError("gh failed")),
         )
         repo_item.state = "DISCOVER"
@@ -308,13 +311,13 @@ class TestDiscover:
         assert result.disposition is Disposition.FINISH_FAIL
         assert "discovery failed" in result.note
 
-    def test_discover_classifies_dedups_and_stages_products(
+    def test_discover_retains_only_a_metadata_cursor(
         self,
         repo_item: WorkItem,
         repo_ctx: Any,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """N issues (with a duplicate) classify into entry-queue products."""
+        """Discovery does not classify/dedup into an unbounded product list."""
         meta = [
             {"number": 1, "labels": [], "title": "one"},
             {"number": 2, "labels": ["state:plan-go"], "title": "two"},
@@ -333,20 +336,18 @@ class TestDiscover:
 
         result = RepoStage().step(repo_item, repo_ctx)
 
-        assert isinstance(result, Continue) and result.next_state == "SEEDED"
-        assert classified == [1, 2]  # dedup: issue 1 classified once
-        products = repo_item.payload["products"]
-        stages = {p["number"]: p["stage"] for p in products}
-        assert stages == {1: StageName.PLANNING, 2: StageName.IMPLEMENTATION}
-        assert repo_item.payload["seeded_count"] == 2
+        assert isinstance(result, Continue) and result.next_state == "SOURCE"
+        assert classified == []
+        assert "products" not in repo_item.payload
+        assert "seeded_count" not in repo_item.payload
 
-    def test_epics_tagged_durably_before_exclusion(
+    def test_discover_does_not_mutate_before_source_consumption(
         self,
         repo_item: WorkItem,
         repo_ctx: Any,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The skip_epics write lands BEFORE the epic is excluded (order test)."""
+        """The source owns the later durable epic-tagging side effect."""
         meta = [
             {"number": 5, "labels": ["epic"], "title": "Epic: umbrella"},
             {"number": 6, "labels": [], "title": "real work"},
@@ -362,22 +363,17 @@ class TestDiscover:
 
         RepoStage().step(repo_item, repo_ctx)
 
-        # Durable tag written through the sanctioned chokepoint...
-        assert ("skip_epics", ((5,),)) in gh.mutation_log
-        assert "state:skip" in gh.labels[5]
-        # ...BEFORE the exclusion was materialized: the epic never reached
-        # the classifier, and its product records the exclusion.
-        assert classified == [6]
-        epic_products = [p for p in repo_item.payload["products"] if p["number"] == 5]
-        assert epic_products[0]["stage"] is None
+        assert gh.mutation_log == []
+        assert classified == []
+        assert "products" not in repo_item.payload
 
-    def test_skip_epics_failure_blocks_exclusion_until_reseed(
+    def test_discover_defers_epic_tag_failure_to_source_consumption(
         self,
         repo_item: WorkItem,
         repo_ctx: Any,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A failed skip write leaves no excluded product; a reseed retries it."""
+        """Source setup is read-only, even when the eventual write would fail."""
         meta = [
             {"number": 5, "labels": ["epic"], "title": "Epic: umbrella"},
             {"number": 6, "labels": [], "title": "real work"},
@@ -399,37 +395,25 @@ class TestDiscover:
 
         result = RepoStage().step(repo_item, repo_ctx)
 
-        assert isinstance(result, StageOutcome)
-        assert result.disposition is Disposition.FINISH_FAIL
+        assert isinstance(result, Continue)
         assert "products" not in repo_item.payload
         assert classified == []
         assert 5 not in gh.labels
-
         monkeypatch.setattr(gh, "skip_epics", original_skip_epics)
-        reseed_item = WorkItem(
-            repo="repo-a", kind=ItemKind.REPO, stage=StageName.REPO, state="DISCOVER"
-        )
-
-        reseed = RepoStage().step(reseed_item, repo_ctx)
-
-        assert isinstance(reseed, Continue) and reseed.next_state == "SEEDED"
-        assert "state:skip" in gh.labels[5]
-        assert [p["number"] for p in reseed_item.payload["products"]] == [5, 6]
 
     @pytest.mark.parametrize(
-        ("include_bot_prs", "include_all_authors", "expected"),
+        ("include_bot_prs", "include_all_authors"),
         [
-            pytest.param(True, False, [], id="viewer-only-including-bots"),
-            pytest.param(False, False, [], id="viewer-only-without-bots"),
-            pytest.param(True, True, [], id="all-authors-including-bots"),
-            pytest.param(False, True, [], id="all-authors-without-bots"),
+            pytest.param(True, False, id="viewer-only-including-bots"),
+            pytest.param(False, False, id="viewer-only-without-bots"),
+            pytest.param(True, True, id="all-authors-including-bots"),
+            pytest.param(False, True, id="all-authors-without-bots"),
         ],
     )
     def test_drive_green_all_honors_author_and_bot_filters(
         self,
         include_bot_prs: bool,
         include_all_authors: bool,
-        expected: list[int],
         repo_item: WorkItem,
         tmp_path: Path,
         make_ctx: Callable[..., Any],
@@ -467,8 +451,8 @@ class TestDiscover:
 
         RepoStage().step(repo_item, ctx)
 
-        orphan = [p for p in repo_item.payload["products"] if p.get("kind") == "pr"]
-        assert [p["number"] for p in orphan] == expected
+        assert "products" not in repo_item.payload
+        assert "_repo_issue_source" in repo_item.payload
 
     def test_drive_green_all_skips_viewer_resolution_for_all_authors(
         self,
@@ -531,23 +515,16 @@ class TestDiscover:
         assert result.disposition is Disposition.FINISH_FAIL
         assert "discovery failed" in result.note
 
-    def test_seeded_finishes_pass_with_cached_count(
+    def test_source_state_yields_to_the_coordinator(
         self, repo_item: WorkItem, repo_ctx: Any
     ) -> None:
-        """Terminal: FINISH_PASS(seeded:N) uses the cached discovery count."""
-        repo_item.state = "SEEDED"
-        repo_item.payload["products"] = [
-            {"number": 1, "stage": StageName.PLANNING, "reason": "r"},
-            {"number": 2, "stage": None, "reason": "excluded"},
-            {"number": 3, "stage": StageName.PR_REVIEW, "reason": "r"},
-        ]
-        repo_item.payload["seeded_count"] = 1
+        """SOURCE is a non-spinning yield point for coordinator source pull."""
+        repo_item.state = "SOURCE"
 
         result = RepoStage().step(repo_item, repo_ctx)
 
-        assert isinstance(result, StageOutcome)
-        assert result.disposition is Disposition.FINISH_PASS
-        assert result.note == "seeded:1"
+        assert isinstance(result, Continue)
+        assert result.next_state == "SOURCE"
 
     def test_unknown_state_finishes_failed(self, repo_item: WorkItem, repo_ctx: Any) -> None:
         repo_item.state = "BOGUS"

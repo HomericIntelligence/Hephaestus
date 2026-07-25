@@ -77,7 +77,9 @@ def test_repo_discovery_never_materializes_an_unbounded_products_spill(
         {"number": 101, "labels": ["state:needs-plan"], "title": "first"},
         {"number": 102, "labels": ["state:needs-plan"], "title": "second"},
     ]
-    monkeypatch.setattr(loop_repo_manager, "_list_open_issue_meta", lambda _org, _repo: metadata)
+    monkeypatch.setattr(
+        loop_repo_manager, "_iter_open_issue_meta", lambda _org, _repo: iter(metadata)
+    )
     monkeypatch.setattr(seeding_mod, "seed_issue_from_github", lambda issue, _github: _facts(issue))
 
     result = RepoStage().step(repo_item, ctx)
@@ -106,7 +108,9 @@ def test_repo_issue_source_is_lossless_and_ordered_at_capacity_one(
         events.append(("classify", issue))
         return _facts(issue)
 
-    monkeypatch.setattr(loop_repo_manager, "_list_open_issue_meta", lambda _org, _repo: metadata)
+    monkeypatch.setattr(
+        loop_repo_manager, "_iter_open_issue_meta", lambda _org, _repo: iter(metadata)
+    )
     monkeypatch.setattr(seeding_mod, "seed_issue_from_github", classify)
 
     coordinator = Coordinator(
@@ -139,3 +143,49 @@ def test_repo_issue_source_is_lossless_and_ordered_at_capacity_one(
     assert coordinator.shutdown.is_set() is False
     assert coordinator._fatal is False
     assert coordinator._all_idle()
+
+
+def test_repo_source_tags_epic_before_exclusion_and_next_issue_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An epic is durably excluded before the cursor advances to live work."""
+    events: list[tuple[str, int]] = []
+    metadata = [
+        {"number": 5, "labels": ["epic"], "title": "Epic: umbrella"},
+        {"number": 6, "labels": ["state:needs-plan"], "title": "implementation"},
+    ]
+
+    class _RecordingGitHub(FakeStageGitHub):
+        def skip_epics(self, epics_labels: dict[int, list[str]]) -> None:
+            events.extend(("tag", number) for number in epics_labels)
+            super().skip_epics(epics_labels)
+
+    def classify(issue: int, github: Any) -> IssueFacts:
+        del github
+        events.append(("classify", issue))
+        return _facts(issue)
+
+    monkeypatch.setattr(
+        loop_repo_manager, "_iter_open_issue_meta", lambda _org, _repo: iter(metadata)
+    )
+    monkeypatch.setattr(seeding_mod, "seed_issue_from_github", classify)
+    github = _RecordingGitHub(labels=["state:needs-plan"])
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            loops=1,
+            parallel_repos=1,
+            max_workers=1,
+            dry_run=True,
+            projects_dir=tmp_path,
+        ),
+        github=github,
+        pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+    coordinator.stages[StageName.PLANNING] = _ImmediatePassStage(events)
+
+    assert coordinator.run() == 0
+    assert events == [("tag", 5), ("classify", 6), ("complete", 6)]
+    assert "state:skip" in github.labels[5]

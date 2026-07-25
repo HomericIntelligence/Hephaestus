@@ -118,7 +118,7 @@ from hephaestus.automation.pipeline.stages import (
     StageGitHub,
 )
 from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARGV
-from hephaestus.automation.pipeline.stages.repo import product_to_work_item
+from hephaestus.automation.pipeline.stages.repo import RepoIssueSource, product_to_work_item
 from hephaestus.automation.pipeline.summary import RunStats, latest_logical_items, print_summary
 from hephaestus.automation.pipeline.work_item import (
     ItemKind,
@@ -126,7 +126,7 @@ from hephaestus.automation.pipeline.work_item import (
     PreservedWorktree,
     WorkItem,
 )
-from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_GO, STATE_PLAN_BLOCKED
+from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_GO, STATE_PLAN_BLOCKED, is_epic
 from hephaestus.prompts import PromptCatalog
 
 logger = logging.getLogger(__name__)
@@ -758,6 +758,7 @@ class Coordinator:
                     self._wait_for_completion(timeout=0.2)
                     continue
                 self._drain_queues()
+                self._drain_repo_issue_sources()
                 self._drain_direct_issue_source()
                 if self._all_idle():
                     if not self._reseed_if_converged():
@@ -1263,6 +1264,159 @@ class Coordinator:
                 self._run_item(item)
             self._drain_pending_handoffs()
 
+    def _repo_source_can_admit(self, item: WorkItem) -> bool:
+        """Return whether a repo source can transfer its permit to one issue.
+
+        The source itself is initially a normal live item.  Before admitting
+        its next classified child it relinquishes that permit, so C=1 can
+        make forward progress without a second slot.  Once a child owns the
+        sole permit, the source retains only its source-stage lease and waits
+        without holding an unbounded product buffer.
+        """
+        source_owns_permit = id(item) in self._live_work_permit_ids
+        prospective_live = self.live_work_count - int(source_owns_permit)
+        return prospective_live < _work_window(self.config) and all(
+            self.queues[stage].can_offer() for stage in _DIRECT_ISSUE_ENTRY_STAGES
+        )
+
+    def _drain_repo_issue_sources(self) -> None:
+        """Pull at most one admitted issue from each active repository cursor.
+
+        ``RepoStage`` establishes a :class:`RepoIssueSource` after checkout
+        preparation.  The coordinator is the only queue owner, so it keeps
+        the source-stage lease while a single raw metadata row waits for
+        global capacity, transfers the source's permit to the child at
+        admission, and retries the same row on the next available slot.
+        """
+        for lease in list(self._leases.values()):
+            item = lease.item
+            if item.kind is not ItemKind.REPO or item.state != "SOURCE":
+                continue
+            source = item.payload.get("_repo_issue_source")
+            if not isinstance(source, RepoIssueSource):
+                continue
+            if id(item) in self._pending_handoffs:
+                continue
+            self._drain_repo_issue_source(item, source)
+
+    def _drain_repo_issue_source(  # noqa: C901 - source lifecycle is intentionally linear
+        self, item: WorkItem, source: RepoIssueSource
+    ) -> None:
+        """Consume one repository source cursor until one child is admitted.
+
+        Exclusions (notably epics) need no child capacity and are consumed in
+        order after their durable skip write.  An eligible pending row stays
+        in ``source.pending`` until every possible entry queue and the global
+        permit budget can accept it; no classified product is retained.
+        """
+        ctx = self._ctx_for(item)
+        while True:
+            metadata = source.pending
+            if metadata is None:
+                try:
+                    metadata = next(source.metadata)
+                except StopIteration:
+                    item.payload.pop("_repo_issue_source", None)
+                    self._finish(item, passed=True, reason=f"seeded:{source.seeded_count}")
+                    return
+                except Exception as exc:
+                    logger.warning("repo:%s: discovery source failed: %s", item.repo, exc)
+                    item.payload.pop("_repo_issue_source", None)
+                    self._finish(item, passed=False, reason=f"discovery failed: {exc}")
+                    return
+
+            number = int(metadata["number"])
+            labels = list(metadata.get("labels") or [])
+            title = str(metadata.get("title") or "")
+            # Metadata epics need no expensive issue fetch.  The durable
+            # label write is completed before source consumption advances.
+            if is_epic(labels, title):
+                try:
+                    ctx.github.skip_epics({number: labels})
+                except Exception as exc:
+                    logger.warning(
+                        "repo:%s: could not tag excluded epic #%d state:skip: %s",
+                        item.repo,
+                        number,
+                        exc,
+                    )
+                    item.payload.pop("_repo_issue_source", None)
+                    self._finish(item, passed=False, reason=f"epic skip tag failed: {exc}")
+                    return
+                logger.info(
+                    "repo:%s: #%d is an epic; tagged state:skip, excluded", item.repo, number
+                )
+                source.pending = None
+                self._progress = True
+                return
+
+            if not self._repo_source_can_admit(item):
+                source.pending = metadata
+                return
+
+            try:
+                facts = _seeding.seed_issue_from_github(number, ctx.github)
+                if STATE_PLAN_BLOCKED in facts.labels:
+                    ctx.github.ensure_blocked_audit(number)
+                entry = _seeding.seed_entry_from_facts(facts)
+                scope_stages = self.config.scope.stages if self.config.scope is not None else None
+                stage, reason, passed = self._scope_seed_decision(
+                    number, entry.stage, entry.reason, scope_stages
+                )
+                entry = replace(entry, stage=stage, reason=reason, passed=passed)
+            except Exception as exc:
+                logger.warning(
+                    "repo:%s: issue #%d classification failed: %s", item.repo, number, exc
+                )
+                item.payload.pop("_repo_issue_source", None)
+                self._finish(item, passed=False, reason=f"discovery failed: {exc}")
+                return
+
+            if entry.stage is None:
+                try:
+                    if entry.skip_tag_obligation is not None:
+                        ctx.github.skip_epics({entry.skip_tag_obligation.issue: []})
+                except Exception as exc:
+                    logger.warning(
+                        "repo:%s: could not tag excluded epic #%d state:skip: %s",
+                        item.repo,
+                        number,
+                        exc,
+                    )
+                    item.payload.pop("_repo_issue_source", None)
+                    self._finish(item, passed=False, reason=f"epic skip tag failed: {exc}")
+                    return
+                logger.info("[%s] excluded: %s", item.repo, entry.reason)
+                source.pending = None
+                self._progress = True
+                return
+
+            new_item = self._entry_to_item(entry, item.repo)
+            if new_item.stage is StageName.FINISHED and new_item.result is None:
+                new_item.result = ItemResult(
+                    passed=entry.passed,
+                    reason=entry.reason,
+                    final_stage=StageName.FINISHED,
+                )
+            elif new_item.stage is not StageName.REPO:
+                self._pass_work_count += 1
+
+            # This is the source-to-child permit transfer.  The source keeps
+            # its queue lease, but no longer consumes global live-work budget
+            # while the admitted child progresses through the pipeline.
+            self._release_work_permit(item)
+            source.pending = None
+            if self._push_item(new_item, new_item.stage, enter=True):
+                source.seeded_count += 1
+                self._progress = True
+                return
+            # The preflight covers capacity; a false push is therefore only
+            # the existing idempotent duplicate guard.  Do not retain it in
+            # a second source buffer.  The duplicate's live peer now governs
+            # the next admission opportunity.
+            self._progress = True
+            return
+
     def _drain_implementation(self) -> None:
         """Drain the implementation queue under topo order + file-overlap gating.
 
@@ -1427,6 +1581,16 @@ class Coordinator:
                 if isinstance(result, Continue):
                     item.state = result.next_state
                     item.add_history_event(item.stage, item.state)
+                    if (
+                        item.kind is ItemKind.REPO
+                        and item.state == "SOURCE"
+                        and isinstance(item.payload.get("_repo_issue_source"), RepoIssueSource)
+                    ):
+                        # The source owns this repo's active queue lease.  It
+                        # is consumed only by _drain_repo_issue_sources(),
+                        # which admits no more than one classified issue at a
+                        # time and therefore cannot spin or spill products.
+                        return
                     continue
                 if isinstance(result, JobRequest):
                     if self.config.dry_run:

@@ -14,13 +14,14 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 from hephaestus.automation.git_utils import COMMIT_POLICY_REWRITE_EXEC
 from hephaestus.automation.github_api import skip_epics
-from hephaestus.automation.state_labels import partition_epics
+from hephaestus.automation.state_labels import is_epic
 from hephaestus.github.client import gh_call
 from hephaestus.resilience.subprocess_resilience import resilient_call
 from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
@@ -116,46 +117,91 @@ def _gh_list_repos(org: str) -> list[str]:
     ]
 
 
-def _list_open_issue_meta(org: str, repo: str) -> list[dict[str, Any]]:
-    """Return open-issue metadata for ``org/repo`` — reads only, no tagging.
+def _iter_open_issue_meta(org: str, repo: str) -> Iterator[dict[str, Any]]:
+    """Yield normalized open-issue metadata one GitHub page at a time.
 
-    One ``gh issue list`` returning ``{number, labels, title}`` dicts (labels
-    flattened to names). Extracted from :func:`_list_open_issue_numbers` so
-    the pipeline repo stage (#1817) can reuse the read while routing the epic
-    ``state:skip`` tagging through its coordinator-owned accessor instead of
-    the in-band :func:`skip_epics` side effect below.
+    The REST issues endpoint is deliberately requested one bounded page at a
+    time.  In particular, do not replace this with ``gh api --paginate
+    --slurp``: that command retains every page before Python can apply
+    backpressure, and the old ``gh issue list --limit 500`` silently omitted
+    the tail of a busy repository.  The cursor is the next page number; one
+    page's JSON body is the maximum discovery metadata retained here.
 
-    Raises RuntimeError on GitHub/JSON failures so pipeline discovery never
-    converts an unreadable repo into a successful empty run.
+    GitHub's issues endpoint also returns pull requests.  Those rows are
+    ignored because this helper preserves the historical ``gh issue list``
+    contract.  Every other malformed row or malformed page is fatal rather
+    than being mistaken for an empty/converged repository.
+
+    Raises:
+        RuntimeError: On a network/CLI/JSON failure or malformed API page.
+
     """
-    try:
-        out = gh_call(
-            [
-                "issue",
-                "list",
-                "--repo",
-                f"{org}/{repo}",
-                "--state",
-                "open",
-                "--limit",
-                "500",
-                "--json",
-                "number,labels,title",
-            ],
-            timeout=NETWORK_TIMEOUT,
-        )
-        entries = json.loads(out.stdout or "[]")
-    except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"failed to list open issues for {org}/{repo}: {exc}") from exc
-    return [
-        {
-            "number": e["number"],
-            "labels": [lbl["name"] for lbl in e.get("labels", [])],
-            "title": e.get("title", ""),
-        }
-        for e in entries
-        if isinstance(e, dict) and "number" in e
-    ]
+    page = 1
+    while True:
+        try:
+            out = gh_call(
+                [
+                    "api",
+                    f"/repos/{org}/{repo}/issues?state=open&per_page=100"
+                    f"&sort=created&direction=asc&page={page}",
+                ],
+                timeout=NETWORK_TIMEOUT,
+            )
+            entries = json.loads(out.stdout or "[]")
+            if not isinstance(entries, list):
+                raise ValueError("expected an issue-list page")
+        except (
+            subprocess.SubprocessError,
+            RuntimeError,
+            OSError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as exc:
+            raise RuntimeError(f"failed to list open issues for {org}/{repo}: {exc}") from exc
+
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise RuntimeError(
+                    f"failed to list open issues for {org}/{repo}: malformed issue row"
+                )
+            # REST's /issues includes PRs.  They are not issue-source rows.
+            if "pull_request" in entry:
+                continue
+            number = entry.get("number")
+            title = entry.get("title", "")
+            labels = entry.get("labels", [])
+            if not isinstance(number, int) or number <= 0:
+                raise RuntimeError(
+                    f"failed to list open issues for {org}/{repo}: malformed issue number"
+                )
+            if not isinstance(title, str) or not isinstance(labels, list):
+                raise RuntimeError(
+                    f"failed to list open issues for {org}/{repo}: malformed issue metadata"
+                )
+            label_names: list[str] = []
+            for label in labels:
+                if not isinstance(label, dict) or not isinstance(label.get("name"), str):
+                    raise RuntimeError(
+                        f"failed to list open issues for {org}/{repo}: malformed issue label"
+                    )
+                label_names.append(label["name"])
+            yield {"number": number, "labels": label_names, "title": title}
+
+        # A short response is the terminal cursor.  An exact 100-row page is
+        # followed by one inexpensive empty-page probe, avoiding a hard cap.
+        if len(entries) < 100:
+            return
+        page += 1
+
+
+def _list_open_issue_meta(org: str, repo: str) -> Iterator[dict[str, Any]]:
+    """Return the bounded open-issue metadata iterator for ``org/repo``.
+
+    The historical name is retained for import compatibility, but callers
+    must consume it as a source rather than materializing it.  See
+    :func:`_iter_open_issue_meta` for the page and validation contract.
+    """
+    return _iter_open_issue_meta(org, repo)
 
 
 def _list_open_pr_meta(org: str, repo: str) -> list[dict[str, Any]]:
@@ -234,29 +280,35 @@ def _list_open_issue_numbers(org: str, repo: str, *, dry_run: bool = False) -> l
     read failures propagate as RuntimeError so automation does not treat an
     unreadable repo as converged.
     """
-    meta = _list_open_issue_meta(org, repo)
-    kept, epics = partition_epics(meta)
-    if epics:
-        epic_set = set(epics)
-        for num in epics:
-            LOG.info(
-                "[%s] issue #%s is an epic/roadmap tracking issue; excluding from planning loop",
-                repo,
-                num,
-            )
-        epic_labels = {m["number"]: m["labels"] for m in meta if m["number"] in epic_set}
+    kept: list[int] = []
+    for metadata in _list_open_issue_meta(org, repo):
+        number = int(metadata["number"])
+        labels = list(metadata["labels"])
+        if not is_epic(labels, str(metadata["title"])):
+            kept.append(number)
+            continue
+
+        LOG.info(
+            "[%s] issue #%s is an epic/roadmap tracking issue; excluding from planning loop",
+            repo,
+            number,
+        )
         # Best-effort skip-tagging: never let a label write break discovery.
         # The owning repo is passed explicitly — this runs in the multi-repo
         # parent process, where ambient cwd resolution wrote other repos'
-        # epic numbers onto the launch-directory repo (#2245).
+        # epic numbers onto the launch-directory repo (#2245).  The write is
+        # performed before the exclusion is honored, one bounded metadata row
+        # at a time; do not first collect all epic labels in a spill list.
         if dry_run:
-            LOG.info("[dry-run] [%s] would tag excluded epics state:skip", repo)
+            LOG.info("[dry-run] [%s] would tag excluded epic #%s state:skip", repo, number)
         else:
             try:
-                skip_epics(epic_labels, repo=(org, repo))
+                skip_epics({number: labels}, repo=(org, repo))
             except Exception as exc:  # pragma: no cover - defensive
-                LOG.warning("[%s] could not tag excluded epics state:skip: %s", repo, exc)
-    return kept
+                LOG.warning(
+                    "[%s] could not tag excluded epic #%s state:skip: %s", repo, number, exc
+                )
+    return sorted(kept)
 
 
 def _count_open_issues(org: str, repo: str, *, dry_run: bool = False) -> int:
