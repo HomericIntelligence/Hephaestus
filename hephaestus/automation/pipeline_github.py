@@ -208,17 +208,20 @@ def _has_no_explicit_pull_request_bypasses(protection: dict[str, Any]) -> bool:
 
     Classic branch protection exposes actor allowances that may bypass pull
     request requirements under ``required_pull_request_reviews``.  A missing
-    review-requirement object means this response exposes no such allowance;
-    once the object is present, every allowance collection must be present,
-    list-typed, and empty.  This is deliberately fail-closed because a merge
-    actor must not infer that an unreadable allowance is safe.
+    review-requirement object means this response exposes no such allowance.
+    GitHub also omits the allowance field itself when no PR bypass is
+    configured. Once the field is present, every allowance collection must be
+    present, list-typed, and empty. This is deliberately fail-closed because a
+    merge actor must not infer that a malformed allowance is safe.
     """
     reviews = protection.get("required_pull_request_reviews")
     if reviews is None:
         return True
     if not isinstance(reviews, dict):
         return False
-    allowances = reviews.get("bypass_pull_request_allowances")
+    if "bypass_pull_request_allowances" not in reviews:
+        return True
+    allowances = reviews["bypass_pull_request_allowances"]
     if not isinstance(allowances, dict):
         return False
     for actor_type in ("users", "teams", "apps"):

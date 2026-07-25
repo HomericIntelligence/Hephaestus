@@ -80,6 +80,21 @@ def fully_enforced_branch_protection() -> str:
     )
 
 
+@pytest.fixture
+def fully_enforced_protection_without_bypass_allowances() -> str:
+    """Mirror GitHub's valid full response when no PR bypass is configured."""
+    return json.dumps(
+        {
+            "required_conversation_resolution": {"enabled": True},
+            "enforce_admins": {"enabled": True},
+            "required_pull_request_reviews": {
+                "dismiss_stale_reviews": True,
+                "required_approving_review_count": 1,
+            },
+        }
+    )
+
+
 def test_adapter_satisfies_stage_github_protocol(adapter: pg.PipelineGitHub) -> None:
     """Runtime protocol conformance (mypy checks it statically too)."""
     assert isinstance(adapter, StageGitHub)
@@ -195,6 +210,28 @@ class TestConversationResolutionAdmission:
             check=False,
         )
 
+    def test_accepts_valid_protection_without_a_bypass_allowance_field(
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        fully_enforced_protection_without_bypass_allowances: str,
+    ) -> None:
+        """An omitted allowance field represents no configured PR bypass."""
+        adapter.repo = "repo"
+        call_mock = MagicMock(
+            return_value=SimpleNamespace(
+                stdout=fully_enforced_protection_without_bypass_allowances,
+                returncode=0,
+            )
+        )
+        monkeypatch.setattr(pg, "gh_call", call_mock)
+
+        assert adapter.base_branch_requires_conversation_resolution(7, "main") is True
+        call_mock.assert_called_once_with(
+            ["api", "--method", "GET", "/repos/org/repo/branches/main/protection"],
+            check=False,
+        )
+
     @pytest.mark.parametrize(
         "protection",
         [
@@ -211,11 +248,6 @@ class TestConversationResolutionAdmission:
             {
                 "required_conversation_resolution": {"enabled": True},
                 "enforce_admins": {"enabled": "true"},
-            },
-            {
-                "required_conversation_resolution": {"enabled": True},
-                "enforce_admins": {"enabled": True},
-                "required_pull_request_reviews": {},
             },
             "not-json",
         ],
@@ -243,13 +275,15 @@ class TestConversationResolutionAdmission:
             {"users": [], "teams": [{"slug": "maintainers"}], "apps": []},
             {"users": [], "teams": [], "apps": [{"slug": "merge-bot"}]},
             {"users": "not-a-list", "teams": [], "apps": []},
+            None,
+            [],
         ],
     )
     def test_explicit_or_malformed_bypass_allowances_fail_closed(
         self,
         adapter: pg.PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
-        bypass_allowances: dict[str, object],
+        bypass_allowances: object,
     ) -> None:
         """Any listed PR-requirement bypass can also evade conversation safety."""
         adapter.repo = "repo"
