@@ -74,6 +74,14 @@ in §5.1, which tags `state:skip` on epics before any other durable mutation.
  attempts; cross-stage regression cycles terminate in finite steps
  ([`_FAIL_BACK_CAP`](hephaestus/automation/pipeline/coordinator.py),
  [`ROUTES`](hephaestus/automation/pipeline/routing.py)).
+- **Globally bounded live work.** The coordinator admits at most
+ `C = max(1, parallel_repos × max_workers)` nonterminal work items at once.
+ A work permit remains with an item while it is queued, leased, running,
+ timer-parked, or waiting for a full destination queue; it is released only
+ after the finished sink records the terminal result
+ ([`_work_window`](hephaestus/automation/pipeline/coordinator.py),
+ [`Coordinator._push_item`](hephaestus/automation/pipeline/coordinator.py),
+ [`Coordinator._release_work_permit`](hephaestus/automation/pipeline/coordinator.py)).
 
 ### Non-goals
 
@@ -171,14 +179,23 @@ thread lock, outer) **and**
 [`_interruptible_file_lock`](hephaestus/automation/pipeline/worker_pool.py)
 (cross-process flock, inner). Worktrees share `.git`, so two concurrent
 operations on the same checkout would race.
-The only cross-thread channel is
+The only cross-thread **payload** channel is the bounded
 [`CompletionQueue`](hephaestus/automation/pipeline/queues.py)
-(`queue.Queue[(JobHandle, JobResult)]`); its blocking
-`get(timeout=…)` is the loop's idle sleep
-([`_wait_for_completion`](hephaestus/automation/pipeline/coordinator.py)).
-Poll interval = [`_IDLE_POLL_S = 1.0`](hephaestus/automation/pipeline/coordinator.py).
-Pool size = `parallel_repos × max_workers`
-([`WorkerPool(size=…)`](hephaestus/automation/pipeline/worker_pool.py)).
+(`queue.Queue[(JobHandle, JobResult)]`, capacity `C`). A separate
+`threading.Event` latch is control-plane-only: workers set it after a
+non-blocking completion publish, and signal handlers set it to wake an idle
+coordinator. Neither writes a sentinel into the completion queue or blocks on
+queue capacity
+([`WorkerPool._on_future_done`](hephaestus/automation/pipeline/worker_pool.py),
+[`Coordinator._wait_for_completion`](hephaestus/automation/pipeline/coordinator.py),
+[`Coordinator._wake_completion_wait`](hephaestus/automation/pipeline/coordinator.py)).
+The idle coordinator may wait on that event for its bounded poll interval
+([`_IDLE_POLL_S = 1.0`](hephaestus/automation/pipeline/coordinator.py)); it
+does not make a producer or signal handler wait. Pool size = `parallel_repos × max_workers`.
+Each stage-queue capacity and the
+completion-queue capacity are `C = max(1, parallel_repos × max_workers)`
+([`_work_window`](hephaestus/automation/pipeline/coordinator.py),
+[`WorkerPool(size=…)`](hephaestus/automation/pipeline/worker_pool.py)).
 
 ### Ticks
 
@@ -205,14 +222,19 @@ tick does, in order:
  ([`_DRAIN_ORDER`](hephaestus/automation/pipeline/coordinator.py)).
  Implementation drains separately to enforce dependency topo-order
  and file-overlap serialization; other queues drain with the per-repo
- in-flight cap ([`_drain_implementation`](hephaestus/automation/pipeline/coordinator.py),
+ in-flight cap. Pending destination-first handoffs are retried before and
+ between drains, and bounded direct/repository sources are admitted only at
+ safe capacity points ([`_drain_implementation`](hephaestus/automation/pipeline/coordinator.py),
  [`_drain_queues`](hephaestus/automation/pipeline/coordinator.py),
+ [`_drain_pending_handoffs`](hephaestus/automation/pipeline/coordinator.py),
+ [`_drain_repo_issue_sources`](hephaestus/automation/pipeline/coordinator.py),
  [`_admit`](hephaestus/automation/pipeline/coordinator.py)).
 6. **Idle-or-loop check** — if all queues + timers + in-flight are empty,
  re-seed up to `--loops` and either exit on zero work or continue
  ([`_all_idle`](hephaestus/automation/pipeline/coordinator.py),
  [`_reseed_if_converged`](hephaestus/automation/pipeline/coordinator.py)).
- Otherwise block on [`completion_q`](hephaestus/automation/pipeline/coordinator.py).
+ Otherwise wait on the completion/signal latch and drain the bounded
+ completion queue.
 A defensive step watchdog ([`_STEP_WATCHDOG_S = 15.0`](hephaestus/automation/pipeline/coordinator.py))
 warns when any `stage.step()` call exceeds ~15 s. 5 s proved too tight in
 practice: routine repo-stage steps (clone + label reads over the network)
@@ -250,6 +272,54 @@ protocol, then returns `StageOutcome(…)`. The coordinator's
 [`_route`](hephaestus/automation/pipeline/coordinator.py) applies the
 disposition to the queue.
 
+### Global capacity, leases, and source cursors
+
+Let `C = max(1, parallel_repos × max_workers)`. `C` is a global live-work
+window, not a per-stage concurrency target. Every stage queue and the
+completion queue have capacity `C`, while the coordinator holds one global
+permit for every nonterminal `WorkItem`. Consequently, seven stage queues do
+not permit `7C` simultaneous work items: an item holds the same permit as it
+moves through the pipeline and releases it only after `finished` records its
+outcome.
+
+Queue draining claims an item through a
+[`StageQueueLease`](hephaestus/automation/pipeline/queues.py). The lease keeps
+the source queue slot occupied while a stage runs. A transition is
+destination-first: the destination must accept the item before the source
+lease is released and the item stage/history/result are changed. When the
+destination is full, the coordinator retains exactly one pending handoff on
+that source lease and retries it after downstream drains. The completed stage
+action is therefore not replayed, and a full destination is ordinary
+backpressure rather than a spill list, shutdown, or failure
+([`StageQueueLease.handoff`](hephaestus/automation/pipeline/queues.py),
+[`Coordinator._handoff_item`](hephaestus/automation/pipeline/coordinator.py),
+[`Coordinator._drain_pending_handoffs`](hephaestus/automation/pipeline/coordinator.py)).
+
+Intake is also source-driven rather than an eager list of classified products:
+
+- Explicit `--issues` and `--prs` use one cursor each. The coordinator
+  classifies the next value only after every possible entry queue and the
+  global live-work window can accept it; unadmitted caller input remains in
+  the iterator, not in a `SeedEntry` or `WorkItem` spill buffer.
+- Repository intake uses a FIFO repository source. Once a repo has prepared
+  its checkout, its `RepoIssueSource` retains at most one pending metadata row
+  and one fetched GitHub page. The coordinator keeps at most `C` active repo
+  sources and gives each one admission attempt per FIFO round-robin, so a large
+  repository cannot monopolize discovery.
+- Organization repositories, issues, and open PRs use REST pages of at most 100 rows.
+  Pagination continues until the short terminal
+  page; there is no `gh ... --limit 500` discovery cap. Organization scope
+  resolution returns the filtered repository names before the FIFO source
+  admits repo work, while issue and PR runtime cursors consume their pages
+  lazily.
+
+The implementation is in
+[`Coordinator._drain_direct_issue_source`](hephaestus/automation/pipeline/coordinator.py),
+[`Coordinator._drain_repo_entry_source`](hephaestus/automation/pipeline/coordinator.py),
+[`Coordinator._drain_repo_issue_sources`](hephaestus/automation/pipeline/coordinator.py),
+[`RepoIssueSource`](hephaestus/automation/pipeline/stages/repo.py), and
+[`loop_repo_manager`](hephaestus/automation/loop_repo_manager.py).
+
 ### Non-blocking retry / timer-park contract
 
 Stages never sleep — the coordinator's timer heap owns every delay.
@@ -262,6 +332,13 @@ key and parks the item on the heap
 A missing key means "retry on the next drain tick" (no delay).
 [`BACKOFF_CAP_S = 60`](hephaestus/automation/pipeline/stages/base.py) is
 shared by every stage that uses the legacy exponential poll delay.
+Timer parking releases the source-stage lease but retains the item's global
+work permit. On expiry, the timer heap remains the item's owner until its
+stage queue accepts it; an occupied stage queue leaves the expired entry at
+the heap head for a later tick. That is bounded backpressure, not an overflow
+or a reason to repeat the delayed stage action
+([`_timer_park`](hephaestus/automation/pipeline/coordinator.py),
+[`_wake_timers`](hephaestus/automation/pipeline/coordinator.py)).
 
 ### Interrupt semantics
 
@@ -278,10 +355,17 @@ end-of-run summary lists them under `RESUMABLE at <stage>`. Resume is
 label/PR/worktree reconstruction: rerunning the same scoped command
 re-seeds each item into the correct entry queue. There is no persisted
 queue snapshot.
+The signal handler only sets the shutdown and wake latches; it never writes
+to, or waits on, the bounded completion queue. Completion-queue saturation is
+an internal invariant violation: the worker callback records a latch without
+blocking or spilling, the coordinator fails the run, and still-live work is
+finalized resumably. It does not set `shutdown` and does not turn into exit
+code 130 ([`WorkerPool._on_future_done`](hephaestus/automation/pipeline/worker_pool.py),
+[`Coordinator._drain_completions`](hephaestus/automation/pipeline/coordinator.py)).
 
 ### Exit codes
 
-- `130` — interrupted run.
+- `130` — interrupted by SIGINT, SIGTERM, or SIGHUP.
 - `1` — any effective item failed, skipped, blocked; or the coordinator hit a fatal error.
 - `0` — clean run.
 [`_exit_code`](hephaestus/automation/pipeline/coordinator.py) deliberately
@@ -380,8 +464,9 @@ cross-stage cycles terminate even if a stage has a budget bookkeeping bug
 
 The single per-item record moving through the queue. Thread-safety is by
 construction: a `WorkItem` and its `StageQueue` are only ever touched by
-the coordinator thread; the single cross-thread channel is
-[`CompletionQueue`](hephaestus/automation/pipeline/queues.py).
+the coordinator thread; the only cross-thread payload channel is the bounded
+[`CompletionQueue`](hephaestus/automation/pipeline/queues.py). Event latches
+carry wake/fault signals only, never `WorkItem` or `JobResult` payloads.
 Key fields:
 
 - `repo`, `kind` ([`ItemKind`](hephaestus/automation/pipeline/work_item.py)) —
@@ -506,6 +591,12 @@ audit a decision but never authorize a transition, block a stage, or backfill a
 missing label. Comment markers locate actor-owned journal artifacts only;
 foreign marker text is ignored.
 
+Likewise, prose such as `Verdict: GO` or `Verdict: NOGO` is reviewer output,
+not durable routing authority. A reviewer may propose a label from that
+analysis, but the coordinator advances only after the relevant GitHub
+`state:*` mutation succeeds and is confirmed. On restart, seeding reads the
+labels and PR state, not verdict text.
+
 ---
 
 ## 5. The seven queue stages
@@ -540,15 +631,17 @@ resume.
 
 ### 5.1 Repo intake
 
-Repo intake discovers candidate work, records exclusions, and routes each
-eligible issue or pull request to the stage implied by its durable state.
+Repo intake discovers candidate work through a bounded source, records
+exclusions, and routes each eligible issue or pull request to the stage implied
+by its durable state.
 
 #### Boundary diagram
 
 ```mermaid
 flowchart LR
-    Repository --> Discover --> Classify
-    Classify -->|"eligible"| WorkItems["Routed work items"]
+    Repository --> Discover --> Source["Bounded issue source"]
+    Source --> Classify
+    Classify -->|"eligible"| WorkItems["One routed work item"]
     Classify -->|"excluded"| DurableSkip["Durable skip state"]
     WorkItems --> Queues["Downstream queues"]
     DurableSkip --> Complete
@@ -562,12 +655,14 @@ stateDiagram-v2
     Prepare --> Discover: repository available
     Prepare --> Prepare: transient failure
     Prepare --> Failed: retry limit reached
-    Discover --> Classify: candidates loaded
+    Discover --> Source: source initialized
+    Source --> Classify: one candidate admitted
     Discover --> Failed: discovery failed
     Classify --> RecordExclusions: exclusions found
     Classify --> Dispatch: no exclusions
     RecordExclusions --> Dispatch: exclusions durable
-    Dispatch --> Complete: eligible items routed
+    Dispatch --> Source: next candidate
+    Source --> Complete: cursor exhausted
     Complete --> [*]
     Failed --> [*]
 ```
@@ -577,6 +672,10 @@ Architectural contract:
 - Exclusions become durable before excluded work leaves the queue.
 - Discovery never writes planning, review, implementation, or merge verdicts.
 - Failure of the repository item does not fabricate outcomes for its issues.
+- Runtime repository discovery does not eagerly build `products` or downstream
+  `WorkItem` lists. It fetches one issue page at a time, holds at most one
+  pending metadata row per active repository cursor, and drains active cursors
+  in FIFO round-robin order.
 
 ### 5.2 Planning
 
@@ -834,7 +933,7 @@ Architectural contract:
 - Every implementation review is posted to the pull request.
 - Actionable findings use durable inline threads and severity.
 - Prior rounds remain visible in the PR timeline.
-- Blocking findings produce `state:implementation-nogo`; only a clean review
+- Blocking findings produce `state:implementation-no-go`; only a clean review
   produces `state:implementation-go`.
 - Human-owned findings stop automation with an explanatory PR comment.
 - The review proof is a fresh GitHub snapshot plus a clean checkout at that
@@ -1031,18 +1130,21 @@ BEFORE the exclusion is honored
 
 ### Seeding and re-seed scope
 
-- `--repos` seeds one repo item per named repository
- ([`seed_from_cli`](hephaestus/automation/pipeline/seeding.py)).
-- `--issues` seeds issue-scoped items through the classifier and routes
- them past the durable-label-based decision.
-- `--prs` routes direct PRs by merge/close state then impl label.
-- `--org` expands to non-fork, non-archived repository seeds
- ([`loop_runner.py`](hephaestus/automation/loop_runner.py)).
+- `--repos` is consumed by a FIFO repository cursor; it creates repo work only
+ when both the REPO queue and the global live-work window have capacity.
+- `--issues` and `--prs` are direct bounded cursors. Each value is classified
+ only when its eventual entry queue is guaranteed to accept it, so a large
+ CLI scope is not converted into an eager seed list.
+- `--org` follows the GitHub REST repository pagination until exhaustion,
+ filters forked/archived repos, then passes the resolved names to that FIFO
+ source. Issue and PR discovery likewise use 100-row REST pages rather than a
+ 500-item CLI limit ([`loop_repo_manager.py`](hephaestus/automation/loop_repo_manager.py)).
 When `--issues` or `--prs` is set, the resolved `--repos` list is used
 ONLY for context — repo discovery is NOT enqueued, so a scoped run
 cannot reconstruct every open issue in the repo (deliberate scope
 isolation).
-After `coordinator._seed_pass`, if all queues + timers + in-flight are empty,
+After `coordinator._seed_pass`, if all queues, active leases, source cursors,
+timers, and in-flight jobs are empty,
 [`_reseed_if_converged`](hephaestus/automation/pipeline/coordinator.py)
 re-seeds up to `--loops` and either exits on a zero-work pass or
 continues.
@@ -1100,8 +1202,8 @@ mutations.
 
 [`JobResult.ok = False, value = None, error`](hephaestus/automation/pipeline/jobs.py)
 on any failure (return code != 0, `subprocess.TimeoutExpired`,
-exception). Stdout/stderr tails trimmed to 4 KiB for the JSONL event
-log; error message truncated to 500 chars.
+exception). Stdout/stderr tails are trimmed to 4 KiB in the `JobResult`;
+the error message is truncated to 500 chars.
 
 ### Completion contract
 
@@ -1114,6 +1216,15 @@ that escapes `future.result()` (exception + process-control escapes
 `worker_crash` result so a non-cancelled submit never silently loses
 its completion. Only futures cancelled before starting emit no
 completion (the coordinator synthesizes those).
+
+The completion queue is bounded to `C`, and the worker callback uses
+`put_nowait`. Under the global permit invariant, every in-flight job has a
+reserved completion slot. If that invariant is ever violated, the callback
+sets a saturation latch and wakes the coordinator; it neither blocks nor keeps
+an overflow buffer. The coordinator treats that latch as a fatal internal
+fault and preserves remaining in-flight items as resumable work. Signal
+handlers use the same wake mechanism but only a real OS signal sets shutdown
+and selects exit code 130.
 
 ### Per-repo lock layering
 
@@ -1223,6 +1334,23 @@ the constructor so the default construction path keeps its zero-I/O
 import contract
 ([`Coordinator.__init__`](hephaestus/automation/pipeline/coordinator.py)).
 
+### Bounded diagnostics and non-authoritative JSONL
+
+The coordinator retains only finite local diagnostic state: the in-memory
+event deque defaults to 1,024 records, detailed terminal items/ledger/
+preserved-worktree entries default to 128, and the per-repository stage-context
+cache is an LRU capped at `C`. A constant-space terminal summary still
+aggregates the entire run's pass/fail totals after older details are trimmed
+([`PipelineConfig.event_log_capacity`](hephaestus/automation/pipeline/coordinator.py),
+[`PipelineConfig.terminal_detail_capacity`](hephaestus/automation/pipeline/coordinator.py),
+[`Coordinator._record_terminal_result`](hephaestus/automation/pipeline/coordinator.py)).
+
+When `event_log_path` is configured, the coordinator also appends diagnostic
+records to JSONL. That file is best-effort: an I/O failure logs a
+warning and disables further JSONL writes without changing pipeline routing.
+It is not a queue snapshot or recovery journal. GitHub labels, comments, and
+PR state remain the only restart authority.
+
 ### Gauges
 
 [`_emit_observability_tick`](hephaestus/automation/pipeline/coordinator.py)
@@ -1250,8 +1378,8 @@ terminate a production automation loop.
 [`AlertTracker.observe(snapshot)`](hephaestus/observability/alerts.py) is
 called once per tick with the coordinator's
 [`_observability_snapshot`](hephaestus/automation/pipeline/coordinator.py).
-Emitted events drive `hephaestus_pipeline_alert_active` and a durable
-`alert_<fired|resolved>` event log entry.
+Emitted events drive `hephaestus_pipeline_alert_active` and a best-effort
+`alert_<fired|resolved>` diagnostic event-log entry.
 
 - **Default trigger**: queue-depth threshold is read from
  [`PipelineConfig.alert_queue_depth_threshold`](hephaestus/automation/pipeline/coordinator.py)
@@ -1267,6 +1395,11 @@ Emitted events drive `hephaestus_pipeline_alert_active` and a durable
 - **Failure-mode safety**: alerts are emitted only from measured queue
  depths and circuit-breaker snapshots, never from worker pool internal
  liveness (so a slow worker never causes an alert).
+
+Queue depth measures ready backlog, not a queue fault: a full stage queue is
+normal backpressure while a lease, timer, or source cursor retains ownership.
+Completion saturation is instead an invariant-breaking fatal error and is not
+represented as ordinary queue-depth pressure.
 
 ### Health endpoint
 
@@ -1335,7 +1468,7 @@ Exit-code priority is:
 
 | Priority | Code | Meaning |
 |---|---:|---|
-| 1 | `130` | The run was interrupted; this takes priority over other outcomes. |
+| 1 | `130` | SIGINT, SIGTERM, or SIGHUP interrupted the run; this takes priority over other outcomes. |
 | 2 | `1` | At least one effective item failed, skipped, or blocked. |
 | 3 | `0` | Every effective item completed successfully. |
 
@@ -1353,8 +1486,9 @@ Exit-code priority is:
 - **StageQueue** — FIFO queue for one
  [`StageName`](hephaestus/automation/pipeline/routing.py), owned only
  by the coordinator. [`queues.py`](hephaestus/automation/pipeline/queues.py).
-- **CompletionQueue** — the only cross-thread channel
- (`queue.Queue[(JobHandle, JobResult)]`).
+- **CompletionQueue** — the bounded cross-thread payload channel
+ (`queue.Queue[(JobHandle, JobResult)]`, capacity `C`). Event latches carry
+ wake and saturation signals without queue payloads.
  [`queues.py`](hephaestus/automation/pipeline/queues.py).
 - **Durable journal** — GitHub labels, comments, PR state, and
  `ArmingStateStore` records. Restart reconstruction reads this;
