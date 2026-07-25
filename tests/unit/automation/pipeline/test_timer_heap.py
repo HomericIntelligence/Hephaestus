@@ -21,6 +21,7 @@ from hephaestus.automation.pipeline.coordinator import (
     PipelineConfig,
 )
 from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
+from hephaestus.automation.pipeline.stages.base import ConditionalMergeResult
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
@@ -182,6 +183,126 @@ class TestRetryDelayConsumption:
         assert item.stage is StageName.PR_REVIEW
         assert item.state == "POLL"
         assert item.payload.get("_enter_pending") is not True
+
+    def test_merge_wait_timer_reentry_is_bounded_without_duplicate_puts(
+        self, clocked: tuple[Coordinator, FakeClock]
+    ) -> None:
+        """Each timer wake earns one new attempt and exhaustion parks no duplicate."""
+
+        class NotReadyGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__(
+                    pr_impl_state=(True, False),
+                    learn_terminal=True,
+                    pr_state={
+                        "state": "OPEN",
+                        "headRefOid": "a" * 40,
+                        "baseRefName": "main",
+                        "autoMergeRequest": None,
+                    },
+                )
+                self.puts = 0
+
+            def merge_pr_if_head(self, pr_number: int, reviewed_sha: str) -> ConditionalMergeResult:
+                self.puts += 1
+                return ConditionalMergeResult(status=405, body={"message": "not ready"})
+
+            def gh_pr_merge_readiness(self, pr_number: int) -> dict[str, Any] | None:
+                return {
+                    "state": "OPEN",
+                    "headRefOid": "a" * 40,
+                    "baseRefName": "main",
+                    "autoMergeRequest": None,
+                    "mergeable": "MERGEABLE",
+                    "mergeStateStatus": "BEHIND",
+                }
+
+        coordinator, clock = clocked
+        github = NotReadyGitHub()
+        coordinator.github = github
+        coordinator._ctx_cache.clear()
+        coordinator.config.budget_overrides["merge"] = 2
+        item = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=88,
+            pr=12,
+            stage=StageName.MERGE_WAIT,
+            state="MERGE",
+            payload={"reviewed_pr_head_sha": "a" * 40},
+        )
+
+        coordinator._run_item(item)
+
+        assert github.puts == 1
+        assert len(coordinator.timers) == 1
+        clock.now += 2.0
+        coordinator._wake_timers()
+        coordinator._drain_queues()
+
+        assert github.puts == 2
+        assert item.result is not None
+        assert item.result.reason == "merge_attempts_exhausted"
+        assert coordinator.timers == []
+        coordinator._wake_timers()
+        coordinator._drain_queues()
+        assert github.puts == 2
+
+    def test_merge_wait_transport_ambiguity_timer_reentry_is_bounded(
+        self, clocked: tuple[Coordinator, FakeClock]
+    ) -> None:
+        """An unknown PUT result gets delayed retries and exactly consumes the budget."""
+
+        class AmbiguousGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__(
+                    pr_impl_state=(True, False),
+                    learn_terminal=True,
+                    pr_state={
+                        "state": "OPEN",
+                        "headRefOid": "a" * 40,
+                        "baseRefName": "main",
+                        "autoMergeRequest": None,
+                    },
+                )
+                self.puts = 0
+
+            def merge_pr_if_head(self, pr_number: int, reviewed_sha: str) -> ConditionalMergeResult:
+                self.puts += 1
+                return ConditionalMergeResult(status=None, body=None, transport_error=True)
+
+        coordinator, clock = clocked
+        github = AmbiguousGitHub()
+        coordinator.github = github
+        coordinator._ctx_cache.clear()
+        coordinator.config.budget_overrides["merge"] = 2
+        item = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=89,
+            pr=12,
+            stage=StageName.MERGE_WAIT,
+            state="MERGE",
+            payload={"reviewed_pr_head_sha": "a" * 40},
+        )
+
+        coordinator._run_item(item)
+
+        assert github.puts == 1
+        assert item.attempts["merge"] == 1
+        assert len(coordinator.timers) == 1
+        clock.now += 2.0
+        coordinator._wake_timers()
+        coordinator._drain_queues()
+
+        assert github.puts == 2
+        assert item.attempts["merge"] == 2
+        assert item.result is not None
+        assert item.result.reason == "merge_attempts_exhausted"
+        assert coordinator.timers == []
+        coordinator._wake_timers()
+        coordinator._drain_queues()
+        assert github.puts == 2
 
 
 class TestStepWatchdog:

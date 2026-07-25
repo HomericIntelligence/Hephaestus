@@ -5,8 +5,9 @@
 > *forthcoming* 1.0 migration guidance, published ahead of the cut so consumers can
 > prepare. 0.10.0's headline change is the queue pipeline's reviewed-head review
 > interlock: `pr_review` writes `state:implementation-go` only for the current
-> process's reviewed head, and `merge_wait` revalidates that proof before standing by
-> on a confirmed-unarmed PR. No queue stage arms auto-merge pending #2419. There are **no breaking changes
+> process's reviewed head, and `merge_wait` revalidates that proof before one
+> SHA-conditional normal squash merge on a confirmed-unarmed PR. No queue stage
+> arms native auto-merge. There are **no breaking changes
 > to the documented public API** from 0.9.x: upgrading requires no code changes for
 > code that uses only the documented public API in
 > [`COMPATIBILITY.md`](../COMPATIBILITY.md). Operators of the automation loop should

@@ -52,7 +52,8 @@ logger = logging.getLogger(__name__)
 
 #: Contiguous stage subset the historical drive-green CLI runs. Direct PRs
 #: first receive the normal PR review, then merge-wait verifies the proof and
-#: safely stands by without mutating auto-merge.
+#: conditionally merges only an admitted reviewed head without mutating native
+#: auto-merge.
 _CI_DRIVER_SCOPE_STAGES: frozenset[StageName] = frozenset(
     {StageName.PR_REVIEW, StageName.MERGE_WAIT}
 )

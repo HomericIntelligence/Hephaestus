@@ -67,6 +67,92 @@ def test_adapter_satisfies_stage_github_protocol(adapter: pg.PipelineGitHub) -> 
     assert isinstance(adapter, StageGitHub)
 
 
+class TestConditionalMerge:
+    """The conditional REST merge seam preserves the server's exact outcome."""
+
+    def test_uses_only_sha_and_squash_method_in_repo_scoped_put(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The atomic SHA condition replaces every native auto-merge path."""
+        adapter.repo = "repo"
+        call_mock = MagicMock(
+            return_value=SimpleNamespace(
+                stdout='HTTP/2.0 200 OK\ncontent-type: application/json\n\n{"merged": true}',
+                returncode=0,
+            )
+        )
+        monkeypatch.setattr(pg, "gh_call", call_mock)
+
+        result = adapter.merge_pr_if_head(7, "a" * 40)
+
+        assert result.status == 200
+        assert result.body == {"merged": True}
+        call_mock.assert_called_once_with(
+            [
+                "api",
+                "--method",
+                "PUT",
+                "--include",
+                "/repos/org/repo/pulls/7/merge",
+                "-f",
+                f"sha={'a' * 40}",
+                "-f",
+                "merge_method=squash",
+            ],
+            check=False,
+            retry_on_rate_limit=False,
+            max_retries=1,
+        )
+
+    def test_preserves_a_409_response_for_stage_level_head_drift_handling(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The adapter does not collapse an expected SHA conflict into transport failure."""
+        adapter.repo = "repo"
+        monkeypatch.setattr(
+            pg,
+            "gh_call",
+            MagicMock(
+                return_value=SimpleNamespace(
+                    stdout='HTTP/2.0 409 Conflict\n\n{"message": "head changed"}', returncode=1
+                )
+            ),
+        )
+
+        result = adapter.merge_pr_if_head(7, "a" * 40)
+
+        assert result.status == 409
+        assert result.body == {"message": "head changed"}
+        assert result.transport_error is False
+
+    def test_transport_exception_is_explicit_and_never_retried_by_adapter(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only merge-wait's lifecycle reconciliation may choose a bounded retry."""
+        adapter.repo = "repo"
+        call_mock = MagicMock(side_effect=OSError("connection reset"))
+        monkeypatch.setattr(pg, "gh_call", call_mock)
+
+        result = adapter.merge_pr_if_head(7, "a" * 40)
+
+        assert result.transport_error is True
+        assert result.status is None
+        call_mock.assert_called_once()
+
+    def test_dry_run_returns_a_non_mutating_result_without_calling_github(
+        self, dry_adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Dry-run may report the intended merge but cannot issue the PUT."""
+        dry_adapter.repo = "repo"
+        call_mock = MagicMock()
+        monkeypatch.setattr(pg, "gh_call", call_mock)
+
+        result = dry_adapter.merge_pr_if_head(7, "a" * 40)
+
+        assert result.dry_run is True
+        call_mock.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Mutator mapping matrix: (method, args, patch-owner, underlying-name)
 # 'module' = a function bound into pipeline_github's namespace at import.
