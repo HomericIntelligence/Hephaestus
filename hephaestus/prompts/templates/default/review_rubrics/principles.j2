@@ -1,5 +1,5 @@
 
-**Software-engineering principles (graded — each can DROP a verdict, not just keep it):**
+**Software-engineering principles (graded — each can require an audit finding):**
 
 P1 — KISS — Keep It Simple Stupid.
     Is this the simplest solution that meets the requirement? Flag any
@@ -59,9 +59,7 @@ P7 — POLA — Principle Of Least Astonishment.
     defaults, inconsistent naming, non-obvious side effects, silent
     failures, or behavior that contradicts the docstring/name.
 
-**Verdict floor (mandatory):** if ANY of P1–P7 reveals a critical or
-major finding, the verdict CANNOT be GO even if every other
-dimension scores A. Reviewer must explicitly downgrade and cite the
-offending principle by name (e.g. "Verdict: NOGO — P2/YAGNI: diff adds
-a config flag with no current consumer; P7/POLA: new flag's default
-inverts the existing convention.").
+**Finding floor (mandatory):** if ANY of P1–P7 reveals a critical or
+major finding, record an actionable finding that cites the offending
+principle by name. Findings inform durable workflow state; they are not a
+textual approval or rejection.

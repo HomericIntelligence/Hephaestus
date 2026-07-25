@@ -7,13 +7,16 @@ state before relying on this record for a merge decision.
 ## CI is not automation-loop authorization
 
 GitHub Actions validates repository code independently. Normal
-`$athena:pr-review` may collect current check evidence and incorporate it into
-its binary verdict, but the automation loop does not change checks, workflows,
-statuses, artifacts, leases, or `pull_request_target` events. After the review
-returns a current-head GO, the loop applies `state:implementation-go`;
-`merge_wait` consumes that loop-owned label with its process-local reviewed
-head proof and conditionally merges only that SHA; restarted labels re-enter
-merge-wait. CI/CD never independently produces or validates authorization.
+`$athena:pr-review` may collect current check evidence as audit context, but
+its prose, grades, and decision-shaped output do not authorize the loop. The
+automation loop does not change checks, workflows, statuses, artifacts, leases,
+or `pull_request_target` events. `pr_review` applies
+`state:implementation-go` only after a structural audit and fresh live GitHub
+facts confirm the exact open, unarmed reviewed head, complete thread state, and
+exclusive label transition by readback. `merge_wait` consumes that loop-owned
+label with its process-local reviewed-head proof and conditionally merges only
+that SHA; restarted labels re-enter review. CI/CD never independently produces
+or validates authorization.
 
 ## Current required contexts
 

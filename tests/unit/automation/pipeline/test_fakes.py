@@ -142,8 +142,9 @@ class TestFakeWorkerPool:
 class TestFakeGitHub:
     """FakeGitHub mirrors the real mutator surface and logs every mutation."""
 
-    def test_label_and_comment_mutators_update_state_and_log(self, fake_github: FakeGitHub) -> None:
+    def test_label_and_comment_mutators_update_state_and_log(self) -> None:
         """Label/comment mutators mutate dict state and append to the log."""
+        fake_github = FakeGitHub()
         fake_github.gh_create_label("state:needs-plan")
         fake_github.gh_issue_add_labels(7, ["state:needs-plan"])
         fake_github.gh_issue_comment(7, "planning started")
@@ -161,27 +162,25 @@ class TestFakeGitHub:
             "skip_epics",
         ]
 
-    def test_pr_and_review_mutators(self, fake_github: FakeGitHub) -> None:
-        """PR/review mutators return ids and record resolved threads."""
+    def test_pr_and_review_mutators(self) -> None:
+        """PR/review mutators return ids and record durable writes."""
+        fake_github = FakeGitHub()
         pr = fake_github.gh_pr_create("7-auto", "title", "body\n\nCloses #7\n")
         threads = fake_github.gh_pr_review_post(
             pr, [{"path": "a.py", "line": 1, "side": "RIGHT", "body": "nit"}], "summary"
         )
         assert len(threads) == 1
-        fake_github.gh_pr_resolve_thread(threads[0], reply_body="done")
         fake_github.gh_pr_update_review_comment("comment-node", "edited")
         issue = fake_github.gh_issue_create("t", "b", labels=["bug"])
         comment_id = fake_github.gh_issue_upsert_comment(issue, "<!-- marker -->", "hello")
         fake_github.gh_issue_delete_comment(comment_id)
 
         assert pr in fake_github.prs
-        assert threads[0] in fake_github.resolved_threads
         assert "bug" in fake_github.labels[issue]
         mutated = [name for name, _ in fake_github.mutation_log]
         assert mutated == [
             "gh_pr_create",
             "gh_pr_review_post",
-            "gh_pr_resolve_thread",
             "gh_pr_update_review_comment",
             "gh_issue_create",
             "gh_issue_upsert_comment",

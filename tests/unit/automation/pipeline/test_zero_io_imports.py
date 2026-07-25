@@ -61,19 +61,6 @@ _THIN_FETCH_PREFIXES = (
 _CAPABILITY_EXEMPT: dict[str, dict[str, frozenset[str] | None]] = {
     "seeding.py": dict.fromkeys(_THIN_FETCH_PREFIXES),
     "admission.py": dict.fromkeys(_THIN_FETCH_PREFIXES),
-    # stages/plan_review.py may import ONLY the pure verdict parser pieces
-    # (claude_invoke.parse_review_verdict — the ONLY allowed symbol) to attach as
-    # AgentJob.parse — the architecture doc's plan_review contract says the
-    # "verdict [is] parsed in-worker by claude_invoke.parse_review_verdict"
-    # (#1814). The exemption is SYMBOL-scoped: importing any other
-    # claude_invoke symbol (e.g. invoke_claude_with_session) or the module
-    # itself still trips the guard, as does any other I/O-flavored import.
-    "plan_review.py": {"hephaestus.automation.claude_invoke": frozenset({"parse_review_verdict"})},
-    # stages/pr_review.py gets the SAME symbol-scoped exemption for the same
-    # reason: the architecture doc's pr_review contract parses the reviewer
-    # verdict in-worker (#1815), so the stage attaches parse_review_verdict
-    # as AgentJob.parse. No other claude_invoke symbol is permitted.
-    "pr_review.py": {"hephaestus.automation.claude_invoke": frozenset({"parse_review_verdict"})},
 }
 
 
@@ -223,13 +210,8 @@ def test_capability_scope_still_blocks_io_in_seeding() -> None:
     assert not any("dependency_resolver" in v for v in violations)
 
 
-def test_plan_review_exemption_is_symbol_scoped() -> None:
-    """The plan_review.py claude_invoke exemption permits ONLY parse_review_verdict.
-
-    A synthetic plan_review.py importing ReviewVerdict, an execution symbol
-    (invoke_claude_with_session), or the whole claude_invoke module must
-    all be flagged. Only the sanctioned parse_review_verdict from-import passes.
-    """
+def test_plan_review_rejects_the_legacy_textual_verdict_parser() -> None:
+    """Pipeline stages cannot reintroduce the inert textual-verdict parser."""
     synthetic_source = (
         "from hephaestus.automation.claude_invoke import parse_review_verdict\n"
         "from hephaestus.automation.claude_invoke import ReviewVerdict\n"
@@ -237,20 +219,27 @@ def test_plan_review_exemption_is_symbol_scoped() -> None:
         "import hephaestus.automation.claude_invoke\n"
     )
     tree = ast.parse(synthetic_source, filename="<synthetic-plan-review>")
-    violations = _collect_violations(tree, "plan_review.py", _CAPABILITY_EXEMPT["plan_review.py"])
+    violations = _collect_violations(tree, "plan_review.py", {})
 
-    # Lines 2, 3, and 4 violate the tightened exemption (only parse_review_verdict
-    # is allowed). Line 1 (parse_review_verdict) produces no violation.
-    assert len(violations) == 3, violations
-    assert any("import ReviewVerdict" in v for v in violations)
-    assert any("import invoke_claude_with_session" in v for v in violations)
+    assert len(violations) == 4, violations
+    assert any(
+        v.startswith("plan_review.py:1: from hephaestus.automation.claude_invoke")
+        for v in violations
+    )
+    assert any(
+        v.startswith("plan_review.py:2: from hephaestus.automation.claude_invoke")
+        for v in violations
+    )
+    assert any(
+        v.startswith("plan_review.py:3: from hephaestus.automation.claude_invoke")
+        for v in violations
+    )
     # A bare module import exposes the whole surface: always a violation
     # under a symbol-scoped exemption.
     assert any(
         v.startswith("plan_review.py:4: import hephaestus.automation.claude_invoke")
         for v in violations
     )
-    assert not any(":1:" in v for v in violations)
 
 
 def test_forbidden_detects_synthetic_forbidden_import() -> None:

@@ -23,14 +23,15 @@ links to the full section below.
    make it pass, keep coverage at 83%+ (target 90%).
 5. **Open the PR** ([Pull Request Process](#pull-request-process)) — sign every
    commit (`git commit -S`), put `Closes #<issue-number>` on its own line in the
-   body, and keep auto-merge disabled. After an unconditional independent
-   current-head `$athena:pr-review` GO, the loop applies
-   `state:implementation-go`; `merge_wait` then revalidates the in-memory
+   body, and keep auto-merge disabled. `$athena:pr-review` output is audit
+   evidence, not authorization. The loop applies `state:implementation-go`
+   only after a structural audit and fresh live GitHub facts confirm the exact
+   open, unarmed reviewed head, complete thread state, and exclusive label
+   transition by readback. `merge_wait` then revalidates the in-memory
    reviewed-head proof and conditionally squash-merges that exact head without
-   mutating native auto-merge.
-   Normal review may collect CI/CD evidence and incorporate it into its binary
-   verdict, but the loop does not change CI/CD and CI itself never
-   independently authorizes it. Do not enable auto-merge manually.
+   mutating native auto-merge. Normal review may collect CI/CD evidence as
+   context, but the loop does not change CI/CD and CI itself never independently
+   authorizes it. Do not enable auto-merge manually.
 
 If anything in steps 1–2 fails, see [Platform Support](#platform-support) for
 the supported Python versions and platform-specific test behavior.
@@ -284,15 +285,17 @@ valid issue reference, signed commits, or DCO sign-offs:
    with `git commit -s -S`.
 
 Do not enable auto-merge manually. The queue applies
-`state:implementation-go` only after `$athena:pr-review` for the PR's current
-head. `merge_wait` consumes the loop-owned label together with its in-memory
+`state:implementation-go` only after a structural audit and fresh live GitHub
+facts confirm the PR's exact open, unarmed reviewed head, complete thread
+state, and exclusive label transition by readback. `$athena:pr-review` prose,
+grades, and decision-shaped output are audit evidence, not authorization.
+`merge_wait` consumes the loop-owned label together with its in-memory
 reviewed-head proof and conditionally squash-merges that exact head; it does
 not create, disable, adopt, or poll an auto-merge request. A restart has no
-proof and returns the PR to review without mutating labels.
-Normal review may collect CI/CD evidence and incorporate it into its binary
-verdict, but the loop does not change CI/CD and no CI check independently
-authorizes it; the advisory `auto-merge-policy` is not the authorization
-mechanism.
+proof and returns the PR to review without mutating labels. Normal review may
+collect CI/CD evidence as context, but the loop does not change CI/CD and no
+CI check independently authorizes it; the advisory `auto-merge-policy` is not
+the authorization mechanism.
 
 Also: ensure tests pass locally (`uv run pytest`), keep commits to logical units with
 [conventional commit](https://www.conventionalcommits.org/) messages, and never bypass

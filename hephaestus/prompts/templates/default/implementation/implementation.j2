@@ -96,6 +96,9 @@ After you return, the orchestrator will:
 Missing `Closes #N` or signed-commit policy is enforced outside the automation
 loop. Only the queue's `pr_review` stage may publish implementation approval.
 After that approval, `merge_wait` independently revalidates the exact reviewed
-head and may perform one SHA-conditional normal squash merge. Agents must not
-enable, disable, adopt, or otherwise manage native auto-merge. This policy
-applies to every PR — no exceptions.
+head before each individual SHA-conditional normal REST squash-merge request.
+It may make a bounded sequence (default: five); only classified retryable HTTP
+405 readiness and unresolved transport ambiguity can timer-park a later
+request. Agents must not invoke `gh pr merge`, enable, disable, adopt, or
+otherwise manage native auto-merge, manage a merge queue, or use an
+administrator bypass. This policy applies to every PR — no exceptions.

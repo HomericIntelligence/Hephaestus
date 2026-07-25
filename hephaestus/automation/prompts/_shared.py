@@ -132,10 +132,9 @@ def _prior_review_block(
 def get_terse_output_directive(*, terminal_output_contract: str | None = None) -> str:
     """Render the shared terse-output directive from the active catalog.
 
-    Most agent prompts retain the historical terse ``Verdict:`` line.  Plan
-    review is different: its state token is the only decision contract and is
-    confirmed through the GitHub label.  Callers can therefore supply a
-    terminal-output contract without duplicating the rest of this directive.
+    Decision authority belongs to the workflow's durable state, never a terse
+    textual verdict. Callers can supply a terminal-output contract without
+    duplicating the rest of this directive.
     """
     from .catalog import PromptCatalog
 

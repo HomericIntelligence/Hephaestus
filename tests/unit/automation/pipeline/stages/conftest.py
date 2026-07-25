@@ -9,6 +9,7 @@ format stay identical to what coordinator tests (#1817) will assert.
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -30,6 +31,10 @@ from hephaestus.automation.protocol import (
     PLAN_REVIEW_PREFIX,
 )
 from hephaestus.automation.review_journal import IssueComment, blocked_audit_recovery_body
+from hephaestus.automation.state_labels import (
+    STATE_IMPLEMENTATION_GO,
+    STATE_IMPLEMENTATION_NO_GO,
+)
 from tests.unit.automation.pipeline.conftest import FakeGitHub
 
 
@@ -64,12 +69,13 @@ class FakeStageGitHub(FakeGitHub):
         pr_head_branch: str | None = None,
         pr_head_writable: bool = True,
         pr_impl_state: tuple[bool, bool] = (False, False),
+        pr_impl_readbacks: list[tuple[bool, bool] | Exception] | None = None,
         unresolved: list[tuple[int, int]] | None = None,
         by_severity: list[tuple[int, int, int]] | None = None,
         pr_state: dict[str, Any] | None | _DefaultPrState = _DEFAULT_PR_STATE,
+        conversation_resolution: bool = True,
         pr_review_context: dict[str, str] | None = None,
         learn_terminal: bool = False,
-        resolve_count: int = 0,
     ) -> None:
         """Initialize the fake with canned read answers.
 
@@ -86,6 +92,9 @@ class FakeStageGitHub(FakeGitHub):
                 and may receive coordinator-owned address commits.
             pr_impl_state: Canned (has_go, has_no_go) answer for
                 pr_has_implementation_state_label.
+            pr_impl_readbacks: Optional FIFO of independent label readbacks;
+                entries may be contradictory, absent, or exceptions. When
+                empty, the current post-mutation state is returned.
             unresolved: FIFO of (automation, human) answers for
                 count_unresolved_threads — consumed one per call, last
                 entry repeating (lets tests script a decreasing /
@@ -95,10 +104,11 @@ class FakeStageGitHub(FakeGitHub):
                 deriving from unresolved (legacy: all automation = blocking).
             pr_state: Canned answer for gh_pr_state (merge_wait's single
                 PR-state read); ``None`` mirrors a transient read failure.
+            conversation_resolution: Whether the admitted PR base has the
+                server-enforced required-conversation-resolution protection.
             learn_terminal: Seed answer for drive_green_learn_terminal —
                 True mirrors an issue whose post-merge /learn already ran
                 terminally (the #848 dedupe record).
-            resolve_count: Canned return count for resolve_automation_threads.
 
         """
         super().__init__()
@@ -112,6 +122,7 @@ class FakeStageGitHub(FakeGitHub):
         self._pr_head_branch = pr_head_branch
         self._pr_head_writable = pr_head_writable
         self._pr_impl_state = pr_impl_state
+        self._pr_impl_readbacks = deque(pr_impl_readbacks or [])
         self._unresolved: list[tuple[int, int]] = list(unresolved or [(0, 0)])
         self._by_severity = (
             list(by_severity)
@@ -127,6 +138,8 @@ class FakeStageGitHub(FakeGitHub):
             if isinstance(pr_state, _DefaultPrState)
             else pr_state
         )
+        self._conversation_resolution = conversation_resolution
+        self.conversation_resolution_checks: list[tuple[int, str]] = []
         self._pr_review_context = (
             pr_review_context
             if pr_review_context is not None
@@ -137,7 +150,7 @@ class FakeStageGitHub(FakeGitHub):
             }
         )
         self._learn_terminal = learn_terminal
-        self._resolve_count = resolve_count
+        self._posted_thread_ids: dict[int, list[str]] = {}
         self.learn_results: dict[int, bool] = {}
         self.learn_claims: set[int] = set()
 
@@ -210,7 +223,13 @@ class FakeStageGitHub(FakeGitHub):
         return self._pr_head_writable
 
     def pr_has_implementation_state_label(self, pr_number: int) -> tuple[bool, bool]:
-        """Mirror pr_manager.pr_has_implementation_state_label (canned answer)."""
+        """Return a scripted independent label readback, when available."""
+        del pr_number
+        if self._pr_impl_readbacks:
+            readback = self._pr_impl_readbacks.popleft()
+            if isinstance(readback, Exception):
+                raise readback
+            return readback
         return self._pr_impl_state
 
     def pr_review_context(self, pr_number: int) -> dict[str, str] | None:
@@ -234,9 +253,52 @@ class FakeStageGitHub(FakeGitHub):
             return self._by_severity.pop(0)
         return self._by_severity[0]
 
-    def resolve_automation_threads(self, pr_number: int) -> int:
-        self._log("resolve_automation_threads", pr_number)
-        return self._resolve_count
+    def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+        """Return scripted fresh review-thread facts for label-gate tests."""
+        blocking, advisory, human = self.count_unresolved_threads_by_severity(pr_number)
+        posted = list(self._posted_thread_ids.get(pr_number, []))
+        posted_comments = (
+            list(self.reviews.get(pr_number, [{}])[-1].get("comments", []))
+            if self.reviews.get(pr_number)
+            else []
+        )
+        threads: list[dict[str, Any]] = []
+        cursor = 0
+        for count, is_human, severity in (
+            (blocking, False, "major"),
+            (advisory, False, "nitpick"),
+            (human, True, "major"),
+        ):
+            for _ in range(count):
+                posted_comment = posted_comments[cursor] if cursor < len(posted_comments) else {}
+                thread_id = (
+                    posted[cursor] if cursor < len(posted) else f"live-thread-{pr_number}-{cursor}"
+                )
+                cursor += 1
+                threads.append(
+                    {
+                        "id": thread_id,
+                        "path": posted_comment.get("path") or "a.py",
+                        "line": posted_comment.get("line") or cursor,
+                        "side": "RIGHT",
+                        "severity": severity,
+                        "body": (
+                            f"<!-- hephaestus-severity: {severity} -->\n"
+                            f"{posted_comment.get('body') or 'finding'}"
+                        ),
+                        "automation_owned": not is_human,
+                        "author": "hephaestus[bot]" if not is_human else "reviewer",
+                        "authors": ["hephaestus[bot]" if not is_human else "reviewer"],
+                        "review_id": f"review-{pr_number}-{cursor}",
+                        "comments": [
+                            {
+                                "author": "hephaestus[bot]" if not is_human else "reviewer",
+                                "body": posted_comment.get("body") or "finding",
+                            }
+                        ],
+                    }
+                )
+        return threads
 
     # -- mutator surface used by the stages ----------------------------------
     # Coordinator-neutral names (the pipeline architecture guard forbids
@@ -254,6 +316,12 @@ class FakeStageGitHub(FakeGitHub):
     def remove_labels(self, issue_number: int, labels: list[str]) -> None:
         """Coordinator-neutral label remove (delegates to gh_issue_remove_labels)."""
         self._issue_labels(issue_number)
+        has_go, has_no_go = self._pr_impl_state
+        if STATE_IMPLEMENTATION_GO in labels:
+            has_go = False
+        if STATE_IMPLEMENTATION_NO_GO in labels:
+            has_no_go = False
+        self._pr_impl_state = (has_go, has_no_go)
         self.gh_issue_remove_labels(issue_number, labels)
 
     def edit_labels(self, issue_number: int, *, add: list[str], remove: list[str]) -> None:
@@ -332,16 +400,36 @@ class FakeStageGitHub(FakeGitHub):
 
     def post_review_threads(
         self, pr_number: int, threads: list[dict[str, Any]], summary: str
-    ) -> list[str]:
-        """Mirror the coordinator thread post (delegates to gh_pr_review_post)."""
-        return self.gh_pr_review_post(pr_number, threads, summary)
+    ) -> list[dict[str, Any]]:
+        """Mirror a post-time immutable receipt returned by the coordinator."""
+        ids = self.gh_pr_review_post(pr_number, threads, summary)
+        self._posted_thread_ids[pr_number] = list(ids)
+        review_id = f"review-{pr_number}-{len(self.reviews.get(pr_number, []))}"
+        return [
+            {
+                "id": thread_id,
+                "path": str(thread.get("path") or "a.py"),
+                "line": thread.get("line"),
+                "side": str(thread.get("side") or "RIGHT"),
+                "body": str(thread.get("body") or "finding"),
+                "author": "hephaestus[bot]",
+                "authors": ["hephaestus[bot]"],
+                "comments": [
+                    {"author": "hephaestus[bot]", "body": str(thread.get("body") or "finding")}
+                ],
+                "review_id": review_id,
+            }
+            for thread_id, thread in zip(ids, threads, strict=True)
+        ]
 
     def mark_pr_implementation_go(self, pr_number: int) -> None:
         """Mirror pr_manager.mark_pr_implementation_go (records mutation)."""
+        self._pr_impl_state = (True, False)
         self._log("mark_pr_implementation_go", pr_number)
 
     def mark_pr_implementation_no_go(self, pr_number: int) -> None:
         """Mirror pr_manager.mark_pr_implementation_no_go (records mutation)."""
+        self._pr_impl_state = (False, True)
         self._log("mark_pr_implementation_no_go", pr_number)
 
     def post_pr_comment(self, pr_number: int, body: str) -> None:
@@ -367,6 +455,13 @@ class FakeStageGitHub(FakeGitHub):
         """Mirror the post-405 operational readiness lookup."""
         del pr_number
         return dict(self._pr_state) if isinstance(self._pr_state, dict) else self._pr_state
+
+    def base_branch_requires_conversation_resolution(
+        self, pr_number: int, base_branch: str
+    ) -> bool:
+        """Return the canned server-enforced conversation-resolution protection."""
+        self.conversation_resolution_checks.append((pr_number, base_branch))
+        return self._conversation_resolution
 
     def merge_pr_if_head(self, pr_number: int, reviewed_sha: str) -> ConditionalMergeResult:
         """Mirror one successful SHA-conditional normal merge request."""

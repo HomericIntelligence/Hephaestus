@@ -118,7 +118,6 @@ from .reviews import (  # noqa: E402
 )
 from .threads import (  # noqa: E402
     gh_pr_list_unresolved_threads as gh_pr_list_unresolved_threads,
-    gh_pr_resolve_thread as gh_pr_resolve_thread,
 )
 
 __all__ = [
@@ -179,7 +178,6 @@ __all__ = [
     "gh_pr_inline_comment_index",
     "gh_pr_label_names",
     "gh_pr_list_unresolved_threads",
-    "gh_pr_resolve_thread",
     "gh_pr_review_post",
     "gh_pr_state",
     "gh_pr_update_review_comment",

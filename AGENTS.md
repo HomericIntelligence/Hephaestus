@@ -348,14 +348,18 @@ The required CI gate `pr-policy` and the PR reviewer enforce:
    DCO `Signed-off-by` trailer.
 
 `pr-policy` blocks PRs that fail those checks. The queue runs
-`$athena:pr-review` in its normal default profile when available, then applies
-`state:implementation-go` on GO. `merge_wait` verifies the process-local
-reviewed-head proof and conditionally squash-merges that exact head; no queue
-stage mutates native auto-merge.
-Normal review may collect CI/CD evidence and incorporate it into its binary
-verdict, but the loop does not change CI/CD. CI workflows and external
-artifacts never independently grant that authority. Branch protection and
-required reviews still govern whether GitHub merges the PR.
+`$athena:pr-review` in its normal default profile when available. Its prose,
+grades, and decision-shaped output are audit evidence, not authorization.
+`pr_review` applies `state:implementation-go` only after its structural audit
+and fresh live GitHub facts confirm the reviewed open, unarmed head, complete
+thread state, and an exclusive label transition by readback. That GitHub label
+is the loop's sole durable implementation-state authority. `merge_wait`
+revalidates the process-local reviewed-head proof and conditionally
+squash-merges that exact head; no queue stage mutates native auto-merge.
+Normal review may collect CI/CD evidence as context, but the loop does not
+change CI/CD. CI workflows and external artifacts never independently grant
+that authority. Branch protection and required reviews still govern whether
+GitHub merges the PR.
 
 ```bash
 # 1. Create feature branch
@@ -533,12 +537,14 @@ omitted (see `hephaestus.agents.runtime.add_agent_argument`).
 
 **Loop-owned approval policy:** `pr_review` invokes `$athena:pr-review` with
 its normal default behavior when available, otherwise uses its inline-review
-fallback. It posts inline findings and a final grade/GO-NOGO review; a GO
-applies `state:implementation-go`. Normal review may collect CI/CD evidence
-and incorporate it into its binary verdict, but the loop does not change CI/CD
-and no workflow, status, artifact, or lease independently authorizes it.
-`merge_wait` verifies the process-local reviewed-head proof and conditionally
-merges that exact head; no queue stage mutates native auto-merge.
+fallback. It posts inline findings and an informational audit summary. Only a
+structural audit plus fresh live GitHub head, thread, and exclusive-label facts
+may write `state:implementation-go`; review prose, grades, and decision-shaped
+output do not authorize it. Normal review may collect CI/CD evidence as
+context, but the loop does not change CI/CD and no workflow, status, artifact,
+or lease independently authorizes it. `merge_wait` verifies the process-local
+reviewed-head proof and conditionally merges that exact head; no queue stage
+mutates native auto-merge.
 
 | Queue stage | Module | Purpose |
 |-------------|--------|---------|

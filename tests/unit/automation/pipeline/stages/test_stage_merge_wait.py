@@ -39,9 +39,14 @@ class _ConditionalGitHub(FakeStageGitHub):
         states: list[dict[str, object] | None] | None = None,
         merge_results: list[ConditionalMergeResult] | None = None,
         readiness: dict[str, object] | None = None,
+        conversation_resolution: bool = True,
     ) -> None:
         scripted_states = states or [_open_pr()]
-        super().__init__(pr_impl_state=labels, pr_state=scripted_states[-1])
+        super().__init__(
+            pr_impl_state=labels,
+            pr_state=scripted_states[-1],
+            conversation_resolution=conversation_resolution,
+        )
         self._states = list(scripted_states)
         self._merge_results = list(
             merge_results
@@ -100,6 +105,127 @@ def test_conditional_merge_succeeds_only_after_lifecycle_confirms_merged(
     result = MergeWaitStage().step(_reviewed_item(make_work_item), ctx)
 
     assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
+    assert github.merge_attempts == [(12, "a" * 40)]
+
+
+def test_open_thread_immediately_before_merge_fails_back_without_put(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """Merge wait independently rejects a thread that appears after review GO."""
+
+    class LateThreadGitHub(_ConditionalGitHub):
+        def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, object]]:
+            del pr_number
+            return [{"id": "late-thread", "automation_owned": True}]
+
+    github = LateThreadGitHub(states=[_open_pr()])
+
+    result = MergeWaitStage().step(_reviewed_item(make_work_item), make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.FINISH_FAIL, "unresolved_review_threads")
+    assert github.merge_attempts == []
+
+
+@pytest.mark.parametrize("conversation_resolution", [False])
+def test_missing_conversation_resolution_policy_blocks_merge_put(
+    make_ctx: Any,
+    make_work_item: Any,
+    conversation_resolution: bool,
+) -> None:
+    """A branch without server-enforced conversation resolution cannot merge."""
+    github = _ConditionalGitHub(conversation_resolution=conversation_resolution)
+
+    result = MergeWaitStage().step(_reviewed_item(make_work_item), make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.FINISH_FAIL, "conversation_resolution_required")
+    assert github.merge_attempts == []
+    assert github.conversation_resolution_checks == [(12, "main")]
+
+
+def test_missing_admin_enforcement_policy_blocks_merge_put(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """The combined server-policy admission also rejects an admin bypass risk."""
+
+    class NoAdminEnforcementGitHub(_ConditionalGitHub):
+        def base_branch_requires_conversation_resolution(
+            self, pr_number: int, base_branch: str
+        ) -> bool:
+            super().base_branch_requires_conversation_resolution(pr_number, base_branch)
+            return False
+
+    github = NoAdminEnforcementGitHub()
+
+    result = MergeWaitStage().step(_reviewed_item(make_work_item), make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.FINISH_FAIL, "conversation_resolution_required")
+    assert github.merge_attempts == []
+    assert github.conversation_resolution_checks == [(12, "main")]
+
+
+def test_unreadable_conversation_resolution_policy_blocks_merge_put(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """An unavailable server gate fails closed before the conditional PUT."""
+
+    class UnreadablePolicyGitHub(_ConditionalGitHub):
+        def base_branch_requires_conversation_resolution(
+            self, pr_number: int, base_branch: str
+        ) -> bool:
+            del pr_number, base_branch
+            raise RuntimeError("protection read failed")
+
+    github = UnreadablePolicyGitHub()
+
+    result = MergeWaitStage().step(_reviewed_item(make_work_item), make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.FINISH_FAIL, "conversation_resolution_unavailable")
+    assert github.merge_attempts == []
+
+
+def test_server_policy_rejects_thread_that_appears_after_local_thread_read(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """Server protection, not the local read, prevents a late-thread merge."""
+
+    class ServerRejectsLateThreadGitHub(_ConditionalGitHub):
+        def __init__(self) -> None:
+            super().__init__(
+                readiness={
+                    "state": "OPEN",
+                    "headRefOid": "a" * 40,
+                    "autoMergeRequest": None,
+                    "baseRefName": "main",
+                    "mergeable": "BLOCKED",
+                    "mergeStateStatus": "BLOCKED",
+                }
+            )
+            self._thread_appeared_after_local_read = False
+
+        def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, object]]:
+            del pr_number
+            return []
+
+        def base_branch_requires_conversation_resolution(
+            self, pr_number: int, base_branch: str
+        ) -> bool:
+            assert super().base_branch_requires_conversation_resolution(pr_number, base_branch)
+            self._thread_appeared_after_local_read = True
+            return True
+
+        def merge_pr_if_head(self, pr_number: int, reviewed_sha: str) -> ConditionalMergeResult:
+            assert self._thread_appeared_after_local_read
+            self.merge_attempts.append((pr_number, reviewed_sha))
+            return ConditionalMergeResult(
+                status=405,
+                body={"message": "review conversations must be resolved"},
+            )
+
+    github = ServerRejectsLateThreadGitHub()
+
+    result = MergeWaitStage().step(_reviewed_item(make_work_item), make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.RETRY, "merge_not_ready")
     assert github.merge_attempts == [(12, "a" * 40)]
 
 
@@ -413,6 +539,34 @@ def test_label_loss_or_non_main_base_prevents_the_conditional_request(
     ) == StageOutcome(Disposition.FINISH_FAIL, "non_main_base")
     assert label_lost.merge_attempts == []
     assert wrong_base.merge_attempts == []
+
+
+def test_contradictory_implementation_labels_prevent_the_conditional_request(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A contradictory durable state is not an exclusive implementation approval."""
+    github = _ConditionalGitHub(labels=(True, True), states=[_open_pr()])
+
+    result = MergeWaitStage().step(_reviewed_item(make_work_item), make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
+    assert github.merge_attempts == []
+    assert github.mutation_log == []
+
+
+def test_review_prose_cannot_replace_a_missing_implementation_go_label(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """Decision-shaped review text is never an admission fact."""
+    github = _ConditionalGitHub(labels=(False, False), states=[_open_pr()])
+    item = _reviewed_item(make_work_item)
+    item.payload["review_feedback"] = "Verdict: GO"
+
+    result = MergeWaitStage().step(item, make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
+    assert github.merge_attempts == []
+    assert github.mutation_log == []
 
 
 def test_200_without_merged_true_is_terminal(make_ctx: Any, make_work_item: Any) -> None:

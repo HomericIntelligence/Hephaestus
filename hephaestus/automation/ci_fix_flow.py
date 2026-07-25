@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 class CIFixFlow:
-    """Coordinates advise, CI-fix sessions, markers, and bot-thread cleanup."""
+    """Coordinates advise, CI-fix sessions, and marker updates."""
 
     def __init__(
         self,
@@ -35,7 +35,6 @@ class CIFixFlow:
         status_tracker_provider: Callable[[], Any],
         orchestrator: Any,
         markers: Any,
-        review_threads: Any,
         is_bot_pr_mode: Callable[[int, int], bool],
         gh_issue_json: Callable[[int], dict[str, Any]],
         get_failing_ci_logs: Callable[[int], str],
@@ -49,7 +48,6 @@ class CIFixFlow:
         self._status = status_tracker_provider
         self._orchestrator = orchestrator
         self._markers = markers
-        self._review_threads = review_threads
         self._is_bot_pr_mode = is_bot_pr_mode
         self._gh_issue_json = gh_issue_json
         self._get_failing_ci_logs = get_failing_ci_logs
@@ -156,7 +154,6 @@ class CIFixFlow:
             if fixed:
                 logger.info("Issue #%s: CI fix applied successfully", issue_number)
                 self._markers.record_head(pr_number)
-                self._review_threads.reply_and_resolve_bot_threads(pr_number)
                 return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
             logger.warning("Issue #%s: CI fix attempt %s failed", issue_number, iteration + 1)
         return None

@@ -101,16 +101,17 @@ class TestPRReviewAnalysisPrompt:
         assert "--ci-free" not in out
         assert "normal default behavior" in out
         assert "Do not return the skill's raw report" in out
-        assert "CONDITIONAL GO" in out
+        assert "structural review-audit JSON" in out
         assert "pr-policy" not in out
         assert "CI Status" not in out
         assert "merge_wait" in out
         assert "independent secondary review" not in out
         assert "eligible for secondary review" not in out
         assert "$athena:pr-review" in (prompts.get_pr_review_analysis_prompt.__doc__ or "")
-        # The code-quality verdict contract stays intact.
-        assert "Verdict: NOGO" in out
-        assert "Verdict: GO" in out
+        assert "Verdict: GO" not in out
+        assert "Verdict: NOGO" not in out
+        assert '"grade": "A"' in out
+        assert '"comments": [' in out
 
     def test_nitpicks_suppressed_by_default(self) -> None:
         """#1083: by default the reviewer must be told to OMIT nitpick comments."""
@@ -182,9 +183,9 @@ class TestPRReviewAnalysisPrompt:
             '{"path": "...", "line": 1, "side": "RIGHT", "severity": "minor", "body": "..."}'
         ) in out
         assert '"comments": [' in out
-        assert '"summary": "..."}' in out
+        assert '"summary": "...", "comments": [' in out
         # The LGTM example must appear verbatim.
-        assert '{"comments": [], "summary": "LGTM"}' in out
+        assert '{"grade": "A", "summary": "LGTM", "comments": []}' in out
         # The last fenced code block in the prompt must be the JSON block — the
         # parser takes the LAST one. Verify the closing ``` after the JSON
         # block is the final fence in the prompt.
@@ -788,6 +789,15 @@ class TestPlanLoopReviewRubric:
         out = self._build(2)
         assert self._FULL_SWEEP_MARKER in out
 
+    def test_plan_loop_r2_sweep_preserves_the_required_plan_state_label(self) -> None:
+        """The shared sweep never replaces the plan loop's terminal contract."""
+        out = self._build(2)
+
+        assert "do NOT introduce an additional terminal token" in out
+        assert "the output format required by the surrounding prompt" in out
+        for label in ("state:plan-go", "state:plan-no-go", "state:plan-blocked"):
+            assert label in out
+
     def test_plan_loop_prompt_all_iterations_contain_seven_principles(self) -> None:
         """Every iteration's prompt embeds all seven principle markers."""
         for iteration in (0, 1, 2):
@@ -867,12 +877,15 @@ class TestImplLoopReviewRubric:
         out = self._build(0)
         assert "tests proportional to the production code" in out
 
-    def test_impl_loop_prompt_preserves_verdict_format(self) -> None:
-        """The trailing Grade/Verdict output format must remain intact (parser contract)."""
+    def test_impl_loop_prompt_uses_structural_audit_format(self) -> None:
+        """The loop reviewer emits structured facts, never a textual verdict."""
         for iteration in (0, 1, 2):
             out = self._build(iteration)
-            assert "Grade: <A|B|C|D|F>" in out
-            assert "Verdict: <GO|NOGO>" in out
+            assert '"grade": "A"' in out
+            assert '"comments": [' in out
+            assert "Verdict: <GO|NOGO>" not in out
+            assert "Grade/Verdict" not in out
+            assert "DROP a verdict" not in out
 
     def test_impl_loop_prompt_states_context_model(self) -> None:
         """The impl-loop reviewer must declare TASK/PLAN/PLAN-REVIEW + diff context."""
@@ -883,12 +896,11 @@ class TestImplLoopReviewRubric:
         # It judges the diff and posts inline PR review threads.
         assert "inline PR review thread" in out
 
-    def test_impl_loop_verdict_contract_flags_omission(self) -> None:
-        """The strengthened GO/NOGO contract must flag a missing verdict line."""
+    def test_impl_loop_audit_contract_rejects_textual_decisions(self) -> None:
+        """The implementation-loop contract explicitly rejects textual decisions."""
         out = self._build(0)
-        assert "CONTRACT VIOLATION" in out
-        assert "Verdict: GO" in out
-        assert "Verdict: NOGO" in out
+        assert "Do not emit `Verdict:`" in out
+        assert "Verdict: NOGO" not in out
 
 
 class TestAddressReviewPrompt:
