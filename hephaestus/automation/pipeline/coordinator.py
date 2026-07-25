@@ -752,11 +752,6 @@ class Coordinator:
                     continue
                 self._drain_queues()
                 self._drain_direct_issue_source()
-                if self._direct_issue_source is not None:
-                    # The explicit scope is a live source, not a fully
-                    # materialized seed batch.  Pull it again immediately
-                    # after normal draining instead of treating it as idle.
-                    continue
                 if self._all_idle():
                     if not self._reseed_if_converged():
                         break
