@@ -14,13 +14,12 @@ Steps:
    checkout. Both operations are logged-skipped under dry-run — the
    coordinator's ``_submit`` asserts no job is ever submitted in dry-run.
    Budget ``clone`` = 2; exhaustion -> finished(fail).
-3. [M] DISCOVER: initialize one page-at-a-time metadata cursor and perform
-   the independent ``--drive-green-all`` read.  It never materializes a
-   list of classified products.
-4. [M] SOURCE: the coordinator owns source admission.  It takes one metadata
-   row only when it can transfer the repo source's live-work permit to the
-   classified issue, tagging epics ``state:skip`` [durable, BEFORE excluding].
-   Once the cursor is exhausted the repo item finishes ``FINISH_PASS``.
+3. [M] DISCOVER: initialize one page-at-a-time metadata cursor. It never
+   materializes a list of classified products.
+4. [M] SOURCE: the coordinator transfers the bounded cursor to its fair
+   C-capped registry, then admits one metadata row only when an issue can own
+   a live-work permit. Epics are tagged ``state:skip`` [durable, BEFORE
+   excluding].
 
 Discovery seams (``_repo_manager`` / ``_seeding`` module attributes) mirror
 the ``loop_runner._admission`` seam pattern so unit tests patch the reads
@@ -35,7 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hephaestus.automation import loop_repo_manager as _repo_manager, pr_discovery as _pr_discovery
+from hephaestus.automation import loop_repo_manager as _repo_manager
 
 from .base import (
     GIT_JOB_TIMEOUT_S,
@@ -56,24 +55,6 @@ from .base import (
 logger = logging.getLogger(__name__)
 
 
-def _drive_green_pr_is_in_scope(
-    pr: dict[str, Any], *, include_bot_prs: bool, viewer_login: str
-) -> bool:
-    """Return whether an orphan PR is eligible and belongs to author scope."""
-    if not _pr_discovery.pr_needs_loop_review(pr):
-        return False
-    if not include_bot_prs and _pr_discovery._is_bot_pr_author(pr):
-        return False
-    if not _pr_discovery._is_viewer_authored(pr, viewer_login):
-        if (pr.get("user") or {}).get("login") is None:
-            logger.warning(
-                "PR #%s has no user.login; skipping under author filter (#821)",
-                pr.get("number"),
-            )
-        return False
-    return True
-
-
 def _repo_checkout_path(item: WorkItem, ctx: StageContext) -> Path:
     """Return the effective local checkout path for the repo item.
 
@@ -88,7 +69,7 @@ def _repo_checkout_path(item: WorkItem, ctx: StageContext) -> Path:
 
 @dataclass
 class RepoIssueSource:
-    """Bounded discovery cursor retained by one in-flight repo item.
+    """Bounded discovery cursor retained by the coordinator after repo setup.
 
     ``pending`` holds at most the one metadata row whose possible issue entry
     is waiting for a coordinator-owned queue slot.  The iterator itself holds
@@ -141,10 +122,9 @@ class RepoStage(Stage):
             return self._discover(item, ctx)
 
         if item.state == "SOURCE":
-            # The coordinator parks the source lease after DISCOVER and is
-            # its only consumer.  Returning Continue retains stage-protocol
-            # compatibility for direct unit calls; Coordinator._run_item
-            # recognizes this state and yields rather than spinning.
+            # Coordinator._run_item externalizes this cursor into its fair
+            # registry. Returning Continue retains stage-protocol compatibility
+            # for direct unit calls while avoiding an eager product list.
             return Continue(next_state="SOURCE")
 
         return StageOutcome(Disposition.FINISH_FAIL, note=f"unknown state: {item.state}")
@@ -203,31 +183,11 @@ class RepoStage(Stage):
             logger.warning("repo:%s: discovery failed: %s", item.repo, exc)
             return StageOutcome(Disposition.FINISH_FAIL, note=f"discovery failed: {exc}")
 
-        # --drive-green-all: only linked PRs can be reviewed. Orphans have no
-        # requirements context and must remain outside the automation loop.
-        if getattr(ctx.config, "drive_green_all", False):
-            include_bot_prs = bool(getattr(ctx.config, "include_bot_prs", True))
-            include_all_authors = bool(getattr(ctx.config, "include_all_authors", False))
-            try:
-                open_prs = _repo_manager._iter_open_pr_meta(ctx.org, item.repo)
-                viewer_login = "" if include_all_authors else _pr_discovery._resolve_viewer_login()
-                # Issue metadata now arrives lazily, so this preflight cannot
-                # know which PRs are linked without retaining an unbounded
-                # set. The loop never queues orphan PRs from this path; retain
-                # that safety boundary without materializing a coverage spill.
-                for pr in open_prs:
-                    if _drive_green_pr_is_in_scope(
-                        pr, include_bot_prs=include_bot_prs, viewer_login=viewer_login
-                    ):
-                        logger.info(
-                            "repo:%s: leaving PR #%d outside repository discovery "
-                            "until linked issue source provides requirements",
-                            item.repo,
-                            int(pr["number"]),
-                        )
-            except Exception as exc:
-                logger.warning("repo:%s: PR discovery failed: %s", item.repo, exc)
-                return StageOutcome(Disposition.FINISH_FAIL, note=f"discovery failed: {exc}")
+        # ``--drive-green-all`` does not pre-scan unrelated PRs here. Orphan
+        # PRs have no linked issue requirements, and consuming their complete
+        # page stream would add unbounded latency without producing an
+        # admissible source item. Linked PR review context enters only through
+        # this repository's bounded issue cursor.
 
         item.payload["_repo_issue_source"] = source
         return Continue(next_state="SOURCE")

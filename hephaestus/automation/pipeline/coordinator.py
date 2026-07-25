@@ -2545,6 +2545,23 @@ class Coordinator:
         item.payload["entry_reason"] = entry.reason
         return item
 
+    def _has_pending_seed_source(self) -> bool:
+        """Return whether this pass still owns an unclassified input cursor.
+
+        A source may have admitted no issue yet, so ``_pass_work_count`` alone
+        cannot distinguish a converged pass from one awaiting its first safe
+        queue slot.  Sources themselves remain bounded: one direct cursor,
+        one repository-entry cursor, and at most C active repo cursors.
+        """
+        return any(
+            (
+                self._repo_entry_source is not None,
+                bool(self._repo_issue_sources),
+                self._direct_issue_source is not None,
+                self._direct_pr_source is not None,
+            )
+        )
+
     def _reseed_if_converged(self) -> bool:
         """Re-seed after full drain; False = stop (loops or zero-work exit).
 
@@ -2556,7 +2573,7 @@ class Coordinator:
         if self._loops_run >= self.config.loops:
             logger.info("loop budget exhausted (%d/%d)", self._loops_run, self.config.loops)
             return False
-        if self._pass_work_count == 0:
+        if self._pass_work_count == 0 and not self._has_pending_seed_source():
             logger.info(
                 "zero-work convergence: pass %d produced no actionable items; exiting early",
                 self._loops_run,
@@ -2565,7 +2582,7 @@ class Coordinator:
         self._loops_run += 1
         logger.info("re-seeding: loop %d/%d", self._loops_run, self.config.loops)
         self._seed_pass()
-        return self._pass_work_count > 0
+        return self._pass_work_count > 0 or self._has_pending_seed_source()
 
     # -- shutdown ---------------------------------------------------------------
 

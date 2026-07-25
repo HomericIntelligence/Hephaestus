@@ -262,6 +262,99 @@ def test_repo_sources_round_robin_across_repositories_at_capacity_two(
     assert coordinator.live_work_count == 0
 
 
+def test_repo_source_reseed_drains_second_pass_before_zero_work_convergence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fresh repo cursor keeps loop two alive until it classifies its issue.
+
+    The first pass fails and the second succeeds for the same discovered
+    issue.  A repository source begins with no classified work, so returning
+    from reseed based only on ``_pass_work_count`` would exit immediately and
+    strand the second cursor.
+    """
+    events: list[tuple[str, int]] = []
+
+    class _FailThenPassStage:
+        def on_enter(self, item: WorkItem, ctx: Any) -> None:
+            del item, ctx
+
+        def step(self, item: WorkItem, ctx: Any) -> StageOutcome:
+            del ctx
+            assert item.issue == 101
+            if not any(kind == "fail" for kind, _number in events):
+                events.append(("fail", item.issue))
+                return StageOutcome(Disposition.FINISH_FAIL, "first pass failed")
+            events.append(("pass", item.issue))
+            return StageOutcome(Disposition.FINISH_PASS, "replacement passed")
+
+        def on_job_done(self, item: WorkItem, result: Any, ctx: Any) -> None:
+            del item, result, ctx
+            raise AssertionError("the deterministic stage must not submit a job")
+
+    def classify(issue: int, github: Any) -> IssueFacts:
+        del github
+        events.append(("classify", issue))
+        return _facts(issue)
+
+    monkeypatch.setattr(
+        loop_repo_manager,
+        "_iter_open_issue_meta",
+        lambda _org, _repo: iter(
+            [{"number": 101, "labels": ["state:needs-plan"], "title": "retry"}]
+        ),
+    )
+    monkeypatch.setattr(seeding_mod, "seed_issue_from_github", classify)
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            loops=2,
+            parallel_repos=1,
+            max_workers=1,
+            dry_run=True,
+            projects_dir=tmp_path,
+        ),
+        github=FakeStageGitHub(labels=["state:needs-plan"]),
+        pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+    coordinator.stages[StageName.PLANNING] = _FailThenPassStage()
+
+    assert coordinator.run() == 0
+
+    assert events == [
+        ("classify", 101),
+        ("fail", 101),
+        ("classify", 101),
+        ("pass", 101),
+    ]
+    assert coordinator._loops_run == 2
+    assert coordinator._terminal_summary.dispositions == {"pass": 1}
+
+
+def test_empty_repo_source_still_converges_after_one_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A drained source with no actionable issue does not cause a reseed loop."""
+    monkeypatch.setattr(loop_repo_manager, "_iter_open_issue_meta", lambda _org, _repo: iter(()))
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            loops=3,
+            dry_run=True,
+            projects_dir=tmp_path,
+        ),
+        github=FakeStageGitHub(),
+        pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+
+    assert coordinator.run() == 0
+    assert coordinator._loops_run == 1
+    assert coordinator._all_idle()
+
+
 def test_repo_source_tags_epic_before_exclusion_and_next_issue_admission(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

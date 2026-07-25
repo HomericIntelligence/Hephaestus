@@ -17,7 +17,6 @@ from unittest.mock import MagicMock
 import pytest
 
 import hephaestus.automation.loop_repo_manager as loop_repo_manager_mod
-import hephaestus.automation.pr_discovery as pr_discovery_mod
 from hephaestus.automation.pipeline import seeding as seeding_mod
 from hephaestus.automation.pipeline.jobs import GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageName
@@ -219,15 +218,11 @@ class TestDiscover:
         meta: list[dict[str, Any]],
         facts: dict[int, IssueFacts],
         classifications: dict[int, tuple[StageName | None, str]],
-        open_prs: list[dict[str, Any]] | None = None,
     ) -> list[int]:
         """Patch the repo-stage read seams; returns the classify-call order."""
         classified: list[int] = []
         monkeypatch.setattr(
             loop_repo_manager_mod, "_iter_open_issue_meta", lambda org, repo: iter(meta)
-        )
-        monkeypatch.setattr(
-            loop_repo_manager_mod, "_iter_open_pr_meta", lambda org, repo: iter(open_prs or [])
         )
         monkeypatch.setattr(seeding_mod, "seed_issue", lambda num: facts[num])
         monkeypatch.setattr(seeding_mod, "seed_issue_from_github", lambda num, github: facts[num])
@@ -275,7 +270,6 @@ class TestDiscover:
                 [{"number": 8, "labels": ["state:implementation-go"], "title": "x"}]
             ),
         )
-        monkeypatch.setattr(loop_repo_manager_mod, "_iter_open_pr_meta", lambda org, repo: iter([]))
         monkeypatch.setattr(
             seeding_mod,
             "seed_issue",
@@ -401,31 +395,19 @@ class TestDiscover:
         assert 5 not in gh.labels
         monkeypatch.setattr(gh, "skip_epics", original_skip_epics)
 
-    @pytest.mark.parametrize(
-        ("include_bot_prs", "include_all_authors"),
-        [
-            pytest.param(True, False, id="viewer-only-including-bots"),
-            pytest.param(False, False, id="viewer-only-without-bots"),
-            pytest.param(True, True, id="all-authors-including-bots"),
-            pytest.param(False, True, id="all-authors-without-bots"),
-        ],
-    )
-    def test_drive_green_all_honors_author_and_bot_filters(
+    def test_drive_green_all_does_not_query_or_exhaust_orphan_pr_pages(
         self,
-        include_bot_prs: bool,
-        include_all_authors: bool,
         repo_item: WorkItem,
         tmp_path: Path,
         make_ctx: Callable[..., Any],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Unlinked PR pages are no-op work and must not delay source setup."""
         config = type(
             "Cfg",
             (),
             {
                 "drive_green_all": True,
-                "include_bot_prs": include_bot_prs,
-                "include_all_authors": include_all_authors,
                 "dry_run": False,
             },
         )()
@@ -435,85 +417,19 @@ class TestDiscover:
             meta=[{"number": 1, "labels": [], "title": "covered"}],
             facts={1: _facts(1)},
             classifications={1: (StageName.PLANNING, "needs plan")},
-            open_prs=[
-                {"number": 66, "user": {"login": "alice", "type": "User"}},
-                {"number": 67, "user": {"login": "bob", "type": "User"}},
-                {"number": 68, "user": {"login": "alice", "type": "Bot"}},
-                {"number": 69, "user": {"login": "depbot", "type": "Bot"}},
-            ],
         )
-        monkeypatch.setattr(
-            pr_discovery_mod,
-            "_resolve_viewer_login",
-            lambda: "alice",
+        pr_pages = MagicMock(
+            side_effect=AssertionError("orphan PR cursor must not be queried or exhausted")
         )
-        repo_item.state = "DISCOVER"
-
-        RepoStage().step(repo_item, ctx)
-
-        assert "products" not in repo_item.payload
-        assert "_repo_issue_source" in repo_item.payload
-
-    def test_drive_green_all_skips_viewer_resolution_for_all_authors(
-        self,
-        repo_item: WorkItem,
-        tmp_path: Path,
-        make_ctx: Callable[..., Any],
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        config = type(
-            "Cfg",
-            (),
-            {"drive_green_all": True, "include_all_authors": True, "dry_run": False},
-        )()
-        ctx = make_ctx(config=config, paths=_RepoPaths(tmp_path))
-        self._patch_discovery(
-            monkeypatch,
-            meta=[],
-            facts={},
-            classifications={},
-            open_prs=[],
-        )
-        resolver = MagicMock(return_value="x")
-        monkeypatch.setattr(pr_discovery_mod, "_resolve_viewer_login", resolver)
-        repo_item.state = "DISCOVER"
-
-        RepoStage().step(repo_item, ctx)
-
-        resolver.assert_not_called()
-
-    def test_drive_green_all_pr_discovery_failure_finishes_fail(
-        self,
-        repo_item: WorkItem,
-        tmp_path: Path,
-        make_ctx: Callable[..., Any],
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Orphan-PR discovery failures are visible, not successful empty runs."""
-        config = type(
-            "Cfg",
-            (),
-            {"drive_green_all": True, "include_all_authors": True, "dry_run": False},
-        )()
-        ctx = make_ctx(config=config, paths=_RepoPaths(tmp_path))
-        self._patch_discovery(
-            monkeypatch,
-            meta=[{"number": 1, "labels": [], "title": "covered"}],
-            facts={1: _facts(1, pr=55, pr_open=True)},
-            classifications={1: (StageName.PR_REVIEW, "open PR")},
-        )
-        monkeypatch.setattr(
-            loop_repo_manager_mod,
-            "_iter_open_pr_meta",
-            lambda org, repo: (_ for _ in ()).throw(RuntimeError("pr list failed")),
-        )
+        monkeypatch.setattr(loop_repo_manager_mod, "_iter_open_pr_meta", pr_pages)
         repo_item.state = "DISCOVER"
 
         result = RepoStage().step(repo_item, ctx)
 
-        assert isinstance(result, StageOutcome)
-        assert result.disposition is Disposition.FINISH_FAIL
-        assert "discovery failed" in result.note
+        assert isinstance(result, Continue)
+        assert "products" not in repo_item.payload
+        assert "_repo_issue_source" in repo_item.payload
+        pr_pages.assert_not_called()
 
     def test_source_state_yields_to_the_coordinator(
         self, repo_item: WorkItem, repo_ctx: Any
