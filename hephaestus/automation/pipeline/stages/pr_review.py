@@ -2147,7 +2147,6 @@ class PrReviewStage(Stage):
                 return Continue(next_state=REVIEW_WAIT)
             if refreshed_advisory or resolved != len(advisory_receipts):
                 return StageOutcome(Disposition.FINISH_FAIL, "advisory_threads_unresolved")
-            live_threads = refreshed
         arm_outcome = PrReviewStage._require_reviewed_unarmed(item, ctx)
         if arm_outcome is not None:
             return arm_outcome
