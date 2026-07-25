@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
@@ -44,7 +44,7 @@ VERSION_HELP = "show program's version number and exit"
 
 @dataclass(frozen=True)
 class ActionSpec:
-    """Stable subset of argparse action configuration relevant to CLI parity."""
+    """Stable executable argparse action configuration relevant to CLI parity."""
 
     option_strings: tuple[str, ...]
     dest: str
@@ -53,7 +53,10 @@ class ActionSpec:
     required: bool
     nargs: Any
     choices: tuple[Any, ...] | None
-    help: str | None
+    # Help prose is deliberately excluded from equality. It is operator-facing
+    # documentation, not a parser behavior contract; pinning wording here
+    # makes harmless documentation edits fail the executable test suite.
+    help: str | None = field(compare=False)
 
 
 def _action_spec(

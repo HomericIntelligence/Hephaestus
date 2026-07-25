@@ -171,6 +171,7 @@ _PROMPT_PREFLIGHT_ERROR = "ERROR: Prompt templates missing or unreadable — rei
 # state is still the restart authority.
 _DEFAULT_EVENT_LOG_CAPACITY = 1_024
 _DEFAULT_TERMINAL_DETAIL_CAPACITY = 128
+_SOURCE_REGISTRY_RETRY_DELAY_S = 0.05
 
 #: Downstream-first drain order: finish work before admitting new (epic
 #: #1809 "drain queues downstream-first (merge_wait -> ... -> repo)"; the
@@ -242,6 +243,11 @@ class PipelineConfig:
 
     org: str
     repos: list[str]
+    # An org-wide invocation supplies a fresh paged source per pass instead
+    # of materializing every repository in ``repos``.  The callable keeps
+    # source state out of the durable configuration and makes reseeds restart
+    # discovery from GitHub, which remains the sole routing authority.
+    repo_source_factory: Callable[[], Iterator[str]] | None = None
     issues: list[int] = field(default_factory=list)
     prs: list[int] = field(default_factory=list)
     loops: int = 1
@@ -490,7 +496,13 @@ class Coordinator:
                 raise ValueError(
                     "injected completion queue capacity must match the coordinator work window"
                 )
+            # Test doubles conventionally expose ``completion_q`` while the
+            # production WorkerPool keeps the channel private. Rebind both
+            # shapes so an injected real pool cannot publish into the stale
+            # queue supplied to its constructor.
             pool.completion_q = self.completion_q
+            if hasattr(pool, "_completion_q"):
+                pool._completion_q = self.completion_q
         self.pool: Any = pool
         set_completion_notifiers = getattr(pool, "set_completion_notifiers", None)
         if callable(set_completion_notifiers):
@@ -810,6 +822,7 @@ class Coordinator:
                 {
                     "org": self.config.org,
                     "repos": self.config.repos,
+                    "repo_source": "streamed" if self.config.repo_source_factory else "explicit",
                     "issues": self.config.issues,
                     "prs": self.config.prs,
                     "loops": self.config.loops,
@@ -1421,6 +1434,30 @@ class Coordinator:
         self._record_event("repo_source_activate", item.repo, len(self._repo_issue_sources))
         return True
 
+    def _repo_source_slots_used(self) -> int:
+        """Return active cursors plus every live REPO setup reservation.
+
+        A repository setup item becomes a detached cursor after ``SOURCE``.
+        Reserve that future cursor slot from its first queue admission through
+        terminalization so a later setup item cannot strand at ``SOURCE``
+        merely because earlier setups filled the registry first.
+        """
+        candidates: dict[int, WorkItem] = {}
+        for queue in self.queues.values():
+            for item in queue.snapshot():
+                candidates[id(item)] = item
+        for _wake, _sequence, item in self.timers:
+            candidates[id(item)] = item
+        for item in self.in_flight.values():
+            candidates[id(item)] = item
+        for lease in self._leases.values():
+            candidates[id(lease.item)] = lease.item
+        reservations = sum(
+            item.kind is ItemKind.REPO and id(item) in self._live_work_permit_ids
+            for item in candidates.values()
+        )
+        return len(self._repo_issue_sources) + reservations
+
     def _repo_source_can_admit(self) -> bool:
         """Return whether a detached repo cursor may classify and admit one issue."""
         return self.live_work_count < _work_window(self.config) and all(
@@ -1582,10 +1619,9 @@ class Coordinator:
         q = self.queues[StageName.IMPLEMENTATION]
         if not len(q):
             return
-        # Derive topology from a bounded snapshot, then lease only the chosen
-        # item. A raw pop makes that item ownerless; claiming every item would
-        # violate the one-active-lease FIFO invariant. ``claim_at`` keeps a
-        # selected dependency's original restore position when it retries.
+        # Derive topology from a bounded snapshot, then lease only selected
+        # items. A raw pop makes an item ownerless; each lease preserves its
+        # original FIFO ticket while other ready work may still dispatch.
         for duplicate in self._implementation_duplicates(q.snapshot()):
             if not self._claim_selected_implementation_item(duplicate):
                 return
@@ -1636,11 +1672,6 @@ class Coordinator:
                 continue
             self._record_event("drain", StageName.IMPLEMENTATION.value, self._item_key(item))
             self._run_item(item)
-            # A job, timer, or full-destination handoff retains the only
-            # implementation lease. Wait until it routes before selecting the
-            # next topo item.
-            if id(item) in self._leases:
-                return
 
     @staticmethod
     def _implementation_duplicates(items: list[WorkItem]) -> list[WorkItem]:
@@ -1735,7 +1766,13 @@ class Coordinator:
                         # lease and provisional permit so one repository
                         # cannot monopolize the stage while it streams.
                         if not self._externalize_repo_issue_source(item, source):
+                            # Admission reserves a registry slot before a
+                            # setup item enters REPO. This fallback preserves
+                            # liveness for an injected/custom queue that
+                            # violates that invariant: a bounded timer owns
+                            # the item until a cursor slot becomes free.
                             logger.debug("repo:%s: waiting for a source-registry slot", item.repo)
+                            self._timer_park(item, _SOURCE_REGISTRY_RETRY_DELAY_S)
                         return
                     continue
                 if isinstance(result, JobRequest):
@@ -2126,7 +2163,12 @@ class Coordinator:
         This prevents both an unbounded source spill and starvation from
         repeatedly retrying a later repository ahead of an earlier one.
         """
-        self._repo_entry_source = _RepoEntrySource(repos=iter(repos)) if repos else None
+        if self.config.repo_source_factory is not None:
+            self._repo_entry_source = _RepoEntrySource(repos=self.config.repo_source_factory())
+        elif repos:
+            self._repo_entry_source = _RepoEntrySource(repos=iter(repos))
+        else:
+            self._repo_entry_source = None
 
     def _drain_repo_entry_source(self) -> int:
         """Admit repository discovery items from the FIFO source when safe."""
@@ -2138,7 +2180,7 @@ class Coordinator:
         while (
             self.live_work_count < _work_window(self.config)
             and self.queues[StageName.REPO].can_offer()
-            and len(self._repo_issue_sources) < _work_window(self.config)
+            and self._repo_source_slots_used() < _work_window(self.config)
         ):
             repo = source.pending
             if repo is None:
@@ -2147,6 +2189,8 @@ class Coordinator:
                 except StopIteration:
                     self._repo_entry_source = None
                     break
+                except Exception as exc:
+                    raise RuntimeError(f"repository discovery source failed: {exc}") from exc
             item = WorkItem(repo=repo, kind=ItemKind.REPO, stage=StageName.REPO)
             if not self._push_item(item, StageName.REPO, enter=True):
                 # The coordinator is single-threaded and the predicate above

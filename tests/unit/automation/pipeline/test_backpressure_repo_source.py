@@ -203,6 +203,41 @@ def test_repo_entries_are_source_pulled_in_order_at_capacity_one(
     assert coordinator._all_idle()
 
 
+def test_resettable_org_repo_source_pulls_only_one_repository_at_capacity_one(
+    tmp_path: Path,
+) -> None:
+    """The coordinator, not the loop wrapper, advances the org repository source."""
+    pulls: list[str] = []
+    factories: list[object] = []
+
+    def source_factory() -> Any:
+        factories.append(object())
+        for repo in ("repo-a", "repo-b", "repo-c"):
+            pulls.append(repo)
+            yield repo
+
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=[],
+            repo_source_factory=source_factory,
+            loops=1,
+            parallel_repos=1,
+            max_workers=1,
+            dry_run=True,
+            projects_dir=tmp_path,
+        ),
+        github=FakeStageGitHub(),
+        pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+
+    assert coordinator._seed_pass() == 1
+    assert len(factories) == 1
+    assert pulls == ["repo-a"]
+    assert [item.repo for item in coordinator.queues[StageName.REPO].snapshot()] == ["repo-a"]
+
+
 def test_repo_sources_round_robin_across_repositories_at_capacity_two(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -260,6 +295,52 @@ def test_repo_sources_round_robin_across_repositories_at_capacity_two(
     ]
     assert coordinator._all_idle()
     assert coordinator.live_work_count == 0
+
+
+def test_repo_setup_reserves_a_future_source_slot_before_registry_is_full(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C+1 repositories cannot strand a setup lease at a full cursor registry."""
+    metadata = {
+        # Keep A active long enough for the registry to have one free slot
+        # while C and D are eligible for REPO setup.  The coordinator must
+        # admit only C, reserving the other slot for that in-flight setup.
+        "a": [
+            {"number": number, "labels": ["epic"], "title": f"Epic {number}"}
+            for number in range(1, 6)
+        ],
+        "b": [{"number": 10, "labels": ["epic"], "title": "Epic B"}],
+        "c": [],
+        "d": [],
+    }
+    monkeypatch.setattr(
+        loop_repo_manager,
+        "_iter_open_issue_meta",
+        lambda _org, repo: iter(metadata[repo]),
+    )
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["a", "b", "c", "d"],
+            loops=1,
+            parallel_repos=1,
+            max_workers=2,
+            dry_run=True,
+            projects_dir=tmp_path,
+        ),
+        github=FakeStageGitHub(),
+        pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+
+    assert coordinator.run() == 0
+    assert coordinator._all_idle()
+    assert coordinator.live_work_count == 0
+    assert not coordinator._leases
+    activations = [
+        event[1] for event in coordinator.event_log if event[0] == "repo_source_activate"
+    ]
+    assert activations == ["a", "b", "c", "d"]
 
 
 def test_repo_source_reseed_drains_second_pass_before_zero_work_convergence(

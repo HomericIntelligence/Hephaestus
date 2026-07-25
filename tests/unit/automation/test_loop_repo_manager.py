@@ -28,6 +28,49 @@ from hephaestus.automation.loop_repo_manager import (
 from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
 
 
+class TestOrgRepoSource:
+    """Bounded organization-repository source contracts."""
+
+    def test_pages_are_fetched_only_when_the_prior_page_is_consumed(self) -> None:
+        first_page = [
+            {"name": f"repo-{number:03d}", "fork": False, "archived": False}
+            for number in range(100)
+        ]
+        second_page = [{"name": "repo-100", "fork": False, "archived": False}]
+        with patch(
+            "hephaestus.automation.loop_repo_manager.gh_call",
+            side_effect=[
+                MagicMock(stdout=json.dumps(first_page)),
+                MagicMock(stdout=json.dumps(second_page)),
+            ],
+        ) as mock_gh:
+            source = loop_repo_manager._iter_gh_repos("acme")
+            first = [next(source) for _ in range(100)]
+            assert mock_gh.call_count == 1
+            tail = list(source)
+
+        assert first + tail == [f"repo-{number:03d}" for number in range(100)] + ["repo-100"]
+        assert mock_gh.call_args_list[1].args[0][-1].endswith("page=2")
+
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            {"name": "missing-flags"},
+            {"name": "not-a-bool", "fork": "false", "archived": False},
+            {"name": "not-a-bool", "fork": False, "archived": 0},
+        ],
+    )
+    def test_rejects_malformed_rest_repository_flags(self, entry: dict[str, object]) -> None:
+        with (
+            patch(
+                "hephaestus.automation.loop_repo_manager.gh_call",
+                return_value=MagicMock(stdout=json.dumps([entry])),
+            ),
+            pytest.raises(RuntimeError, match="malformed flags"),
+        ):
+            list(loop_repo_manager._iter_gh_repos("acme"))
+
+
 class TestListOpenPrMeta:
     """Tests for open pull-request metadata discovery."""
 

@@ -212,15 +212,15 @@ def test_repos_argparse_rejects_space_separated() -> None:
 
 
 def test_gh_list_repos_filters_forks_and_archived() -> None:
-    """``isFork: true`` and ``isArchived: true`` entries are excluded.
+    """REST ``fork: true`` and ``archived: true`` entries are excluded.
 
-    Repo names are NOT filtered — only isArchived/isFork status gates inclusion.
+    Repo names are NOT filtered — only archived/fork status gates inclusion.
     """
     payload = (
-        '[{"name":"keep","isFork":false,"isArchived":false},'
-        '{"name":"drop-fork","isFork":true,"isArchived":false},'
-        '{"name":"drop-archived","isFork":false,"isArchived":true},'
-        '{"name":"Odysseus","isFork":false,"isArchived":false}]'
+        '[{"name":"keep","fork":false,"archived":false},'
+        '{"name":"drop-fork","fork":true,"archived":false},'
+        '{"name":"drop-archived","fork":false,"archived":true},'
+        '{"name":"Odysseus","fork":false,"archived":false}]'
     )
     with patch("hephaestus.automation.loop_repo_manager.gh_call") as mock_gh_call:
         mock_gh_call.return_value = subprocess.CompletedProcess(
@@ -248,12 +248,12 @@ def test_gh_list_repos_passes_network_timeout() -> None:
 def test_gh_list_repos_pages_beyond_the_former_two_hundred_cap() -> None:
     """Organization discovery reads bounded pages without silently truncating."""
     first_page = [
-        {"name": f"repo-{number:03d}", "isFork": False, "isArchived": False}
+        {"name": f"repo-{number:03d}", "fork": False, "archived": False}
         for number in range(100)
     ]
     second_page = [
-        {"name": "repo-100", "isFork": False, "isArchived": False},
-        {"name": "fork", "isFork": True, "isArchived": False},
+        {"name": "repo-100", "fork": False, "archived": False},
+        {"name": "fork", "fork": True, "archived": False},
     ]
     with patch(
         "hephaestus.automation.loop_repo_manager.gh_call",
@@ -314,7 +314,7 @@ def test_resolve_org_and_repos_errors_when_no_scope_and_not_git() -> None:
 
 
 def test_resolve_org_and_repos_org_no_arg_autodetects() -> None:
-    """``--org`` with no value → detect org from cwd, enumerate."""
+    """``--org`` with no value resolves a streamed organization source."""
     args = loop_runner._parse_args(["--org"])
     assert args.org is loop_runner._ORG_AUTODETECT
     with (
@@ -322,20 +322,13 @@ def test_resolve_org_and_repos_org_no_arg_autodetects() -> None:
             "hephaestus.automation.loop_runner._detect_cwd_repo",
             return_value=("DetectedOrg", "AnyRepo"),
         ),
-        patch(
-            "hephaestus.automation.loop_runner._gh_list_repos",
-            return_value=["a", "b"],
-        ) as mock_list,
-        patch(
-            "hephaestus.automation.loop_runner._sort_repos_by_open_count",
-            side_effect=lambda _org, r: r,
-        ),
+        patch("hephaestus.automation.loop_runner._gh_list_repos") as mock_list,
     ):
         org, repos, err = loop_runner._resolve_org_and_repos(args)
     assert err is None
     assert org == "DetectedOrg"
-    assert repos == ["a", "b"]
-    mock_list.assert_called_once_with("DetectedOrg")
+    assert repos == []
+    mock_list.assert_not_called()
 
 
 def test_resolve_org_and_repos_org_no_arg_errors_when_not_git() -> None:
@@ -351,36 +344,27 @@ def test_resolve_org_and_repos_org_no_arg_errors_when_not_git() -> None:
 
 
 def test_resolve_org_and_repos_org_named() -> None:
-    """``--org NAME`` enumerates the named org without cwd detection."""
+    """``--org NAME`` streams the named org without cwd detection."""
     args = loop_runner._parse_args(["--org", "ExplicitOrg"])
     with (
         patch(
             "hephaestus.automation.loop_runner._detect_cwd_repo",
         ) as mock_detect,
-        patch(
-            "hephaestus.automation.loop_runner._gh_list_repos",
-            return_value=["x"],
-        ),
-        patch(
-            "hephaestus.automation.loop_runner._sort_repos_by_open_count",
-            side_effect=lambda _org, r: r,
-        ),
+        patch("hephaestus.automation.loop_runner._gh_list_repos") as mock_list,
     ):
         org, repos, err = loop_runner._resolve_org_and_repos(args)
     assert err is None
     assert org == "ExplicitOrg"
-    assert repos == ["x"]
+    assert repos == []
     mock_detect.assert_not_called()
+    mock_list.assert_not_called()
 
 
-def test_resolve_org_and_repos_org_preserves_discovery_order_without_issue_scan() -> None:
-    """--org passes repository names to the coordinator without backlog sorting."""
+def test_resolve_org_and_repos_org_defers_discovery_without_issue_scan() -> None:
+    """--org does not enumerate repos before the bounded coordinator source."""
     args = loop_runner._parse_args(["--org", "ExplicitOrg"])
     with (
-        patch(
-            "hephaestus.automation.loop_runner._gh_list_repos",
-            return_value=["alpha", "beta"],
-        ),
+        patch("hephaestus.automation.loop_runner._gh_list_repos") as mock_list,
         patch(
             "hephaestus.automation.loop_runner._sort_repos_by_open_count",
             side_effect=AssertionError("--org must not enumerate each repo's issue metadata"),
@@ -390,7 +374,8 @@ def test_resolve_org_and_repos_org_preserves_discovery_order_without_issue_scan(
 
     assert err is None
     assert org == "ExplicitOrg"
-    assert repos == ["alpha", "beta"]
+    assert repos == []
+    mock_list.assert_not_called()
     mock_sort.assert_not_called()
 
 
@@ -399,10 +384,7 @@ def test_resolve_org_and_repos_dry_run_never_tags_discovered_epics() -> None:
     args = loop_runner._parse_args(["--org", "ExplicitOrg", "--dry-run"])
     epic = {"number": 81, "title": "Epic: roadmap", "labels": ["epic"]}
     with (
-        patch(
-            "hephaestus.automation.loop_runner._gh_list_repos",
-            return_value=["Proteus"],
-        ),
+        patch("hephaestus.automation.loop_runner._gh_list_repos") as mock_list,
         patch(
             "hephaestus.automation.loop_repo_manager._list_open_issue_meta",
             return_value=[epic],
@@ -413,7 +395,8 @@ def test_resolve_org_and_repos_dry_run_never_tags_discovered_epics() -> None:
 
     assert err is None
     assert org == "ExplicitOrg"
-    assert repos == ["Proteus"]
+    assert repos == []
+    mock_list.assert_not_called()
     mock_skip.assert_not_called()
 
 
@@ -634,6 +617,18 @@ def test_main_disables_phase_timeout_when_zero(monkeypatch: pytest.MonkeyPatch) 
     assert config.phase_timeout_s is None  # type: ignore[attr-defined]
 
 
+def test_main_passes_org_discovery_as_a_resettable_pipeline_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An org-wide run never materializes repository names in PipelineConfig."""
+    config = _capture_main_config(
+        ["--org", "Org", "--dry-run", "--loops", "1", "--agent", "codex"], monkeypatch
+    )
+
+    assert config.repos == []  # type: ignore[attr-defined]
+    assert callable(config.repo_source_factory)  # type: ignore[attr-defined]
+
+
 @pytest.mark.parametrize("port", [0, 65535])
 def test_metrics_port_parser_accepts_tcp_port_range(port: int) -> None:
     """The opt-in local metrics endpoint accepts every valid TCP port."""
@@ -829,7 +824,7 @@ def test_main_errors_on_empty_repo_list() -> None:
         patch.object(loop_runner, "resolve_agent", return_value="claude"),
         patch.object(loop_runner, "_resolve_org_and_repos", return_value=("Org", [], None)),
     ):
-        rc = main(["--org", "Org"])
+        rc = main([])
     assert rc == 1
 
 

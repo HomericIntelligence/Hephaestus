@@ -86,16 +86,15 @@ def _detect_cwd_repo() -> tuple[str | None, str | None]:
     return (org, repo)
 
 
-def _gh_list_repos(org: str) -> list[str]:
-    """Return non-archived, non-fork repos for ``org`` one page at a time.
+def _iter_gh_repos(org: str) -> Iterator[str]:
+    """Yield non-archived, non-fork organization repos one REST page at a time.
 
-    ``gh repo list --limit`` silently caps organization discovery.  Requesting
-    an explicit REST page bounds the response held in memory and lets an
-    organization larger than that historical cap reach the coordinator.  The
-    coordinator then admits the returned names through its bounded repository
-    source; this helper deliberately does *not* inspect issue backlogs.
+    The generator does not prefetch the next page: the coordinator owns when
+    it asks for the next repository, so an organization-wide run retains one
+    REST page and its bounded pipeline cursors rather than every repository.
+    The API uses ``archived`` and ``fork`` (not GraphQL's ``isArchived`` /
+    ``isFork``); malformed flags fail closed before automation touches a repo.
     """
-    repos: list[str] = []
     page = 1
     while True:
         try:
@@ -110,30 +109,46 @@ def _gh_list_repos(org: str) -> list[str]:
                 timeout=NETWORK_TIMEOUT,
             )
         except subprocess.TimeoutExpired as exc:
-            raise SystemExit(f"gh repo list {org} timed out after {exc.timeout}s") from exc
+            raise RuntimeError(f"gh repo list {org} timed out after {exc.timeout}s") from exc
         except subprocess.CalledProcessError as exc:
-            raise SystemExit(
+            raise RuntimeError(
                 f"gh repo list {org} failed (rc={exc.returncode}): {(exc.stderr or '').strip()}"
             ) from exc
         try:
             entries = json.loads(out.stdout or "[]")
         except json.JSONDecodeError as exc:
-            raise SystemExit(f"gh repo list returned invalid JSON: {exc}") from exc
+            raise RuntimeError(f"gh repo list returned invalid JSON: {exc}") from exc
         if not isinstance(entries, list):
-            raise SystemExit("gh repo list returned a JSON value other than an array")
+            raise RuntimeError("gh repo list returned a JSON value other than an array")
 
         for entry in entries:
             if not isinstance(entry, dict):
-                raise SystemExit("gh repo list returned a malformed repository entry")
+                raise RuntimeError("gh repo list returned a malformed repository entry")
             name = entry.get("name")
             if not isinstance(name, str) or not name:
-                raise SystemExit("gh repo list returned a repository entry without a name")
-            if not entry.get("isArchived", False) and not entry.get("isFork", False):
-                repos.append(name)
+                raise RuntimeError("gh repo list returned a repository entry without a name")
+            archived = entry.get("archived")
+            fork = entry.get("fork")
+            if not isinstance(archived, bool) or not isinstance(fork, bool):
+                raise RuntimeError("gh repo list returned a repository entry with malformed flags")
+            if not archived and not fork:
+                yield name
 
         if len(entries) < 100:
-            return repos
+            return
         page += 1
+
+
+def _gh_list_repos(org: str) -> list[str]:
+    """Materialize :func:`_iter_gh_repos` for legacy callers and tests only.
+
+    Production ``--org`` execution passes the iterator factory to the
+    coordinator instead, retaining only a bounded source window.
+    """
+    try:
+        return list(_iter_gh_repos(org))
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def _iter_open_issue_meta(org: str, repo: str) -> Iterator[dict[str, Any]]:

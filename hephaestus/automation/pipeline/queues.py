@@ -28,15 +28,15 @@ class StageQueueLease:
     retry after the destination makes capacity available.
     """
 
-    def __init__(self, source: StageQueue, item: WorkItem, restore_index: int = 0) -> None:
+    def __init__(self, source: StageQueue, item: WorkItem, ticket: int) -> None:
         """Create an active lease owned by *source* for *item*."""
         self._source = source
         self.item = item
-        self._restore_index = restore_index
+        self._ticket = ticket
         self._active = True
 
     def restore(self) -> None:
-        """Return this active lease's item to the front of its source queue.
+        """Return this active lease's item to its original FIFO position.
 
         A released lease is a harmless no-op.  This makes cleanup paths safe
         to repeat while preserving the item's exact-once queue ownership.
@@ -44,7 +44,7 @@ class StageQueueLease:
         if not self._active:
             return
 
-        self._source._restore_lease(self.item, self._restore_index)
+        self._source._restore_lease(self.item, self._ticket)
         self._active = False
 
     def handoff(self, destination: StageQueue) -> bool:
@@ -57,7 +57,7 @@ class StageQueueLease:
         if not self._active or not destination.offer(self.item):
             return False
 
-        self._source._release_lease()
+        self._source._release_lease(self.item, self._ticket)
         self._active = False
         return True
 
@@ -72,7 +72,7 @@ class StageQueueLease:
         if not self._active:
             return
 
-        self._source._release_lease()
+        self._source._release_lease(self.item, self._ticket)
         self._active = False
 
 
@@ -99,8 +99,9 @@ class StageQueue:
             raise ValueError("StageQueue capacity must be positive")
 
         self._capacity = capacity
-        self._items: deque[WorkItem] = deque()
-        self._held = 0
+        self._items: deque[tuple[int, WorkItem]] = deque()
+        self._leased: dict[int, int] = {}
+        self._next_ticket = 0
 
     @property
     def capacity(self) -> int:
@@ -110,7 +111,7 @@ class StageQueue:
     @property
     def occupancy(self) -> int:
         """Return all ready and leased items currently held by the queue."""
-        return len(self._items) + self._held
+        return len(self._items) + len(self._leased)
 
     def push(self, item: WorkItem) -> None:
         """Append an item or raise if the queue is full.
@@ -128,11 +129,11 @@ class StageQueue:
     def can_offer(self) -> bool:
         """Return whether :meth:`offer` can append one new item now.
 
-        A claimed item retains the source queue's FIFO ownership until it is
-        restored or handed off.  New producers must not insert behind that
-        held item, even if the numeric capacity has remaining room.
+        A claimed item retains its source capacity until it is restored or
+        handed off, while an immutable FIFO ticket lets other ready work use
+        remaining capacity without allowing a retry to overtake it.
         """
-        return not self._held and self.occupancy < self._capacity
+        return self.occupancy < self._capacity
 
     def offer(self, item: WorkItem) -> bool:
         """Append an item when capacity is available.
@@ -143,57 +144,66 @@ class StageQueue:
             ownership of the work item and can retry it later.
 
         """
-        # A held lease may need to return to the front of this queue.  Do not
-        # admit newer work ahead of it, even when the numeric bound has spare
-        # capacity; admission resumes only once every lease is released.
+        # Each ready item receives a monotonic ticket. A held lease keeps its
+        # original ticket, so a later restore can reinsert before newer work
+        # without wasting otherwise available capacity now.
         if not self.can_offer():
             return False
 
-        self._items.append(item)
+        self._items.append((self._next_ticket, item))
+        self._next_ticket += 1
         return True
 
     def pop(self) -> WorkItem:
         """Remove and return the front item. Raises IndexError if empty."""
-        return self._items.popleft()
+        _ticket, item = self._items.popleft()
+        return item
 
     def claim(self) -> StageQueueLease | None:
         """Claim the FIFO-ready item without releasing this queue's capacity.
 
         The returned lease owns the item until it is restored or handed off.
-        Only one lease may be active at a time, so an outstanding lease also
-        returns ``None`` even when later items are ready. Ready work inspection
-        remains available through :meth:`snapshot`, but the claim continues to
-        count toward :attr:`occupancy`.
+        Several claims may be active concurrently up to :attr:`capacity`.
+        Their immutable tickets retain the original FIFO order whenever any
+        retry restores, while ready work inspection remains available through
+        :meth:`snapshot`.
         """
-        # A lease can restore its item to the front.  Serializing claims keeps
-        # that restoration ahead of every item that was already ready, rather
-        # than reversing two independently restored leases.
         return self.claim_at(0)
 
     def claim_at(self, index: int) -> StageQueueLease | None:
         """Claim one ready item at *index* while preserving its retry position.
 
         Implementation's topological scheduler may need to execute a
-        dependency that is ready behind the FIFO head. A selected lease still
-        serializes every other claim, and restoring it returns the item to the
-        exact position it occupied when claimed.
+        dependency that is ready behind the FIFO head. A selected lease keeps
+        its immutable ticket, so restoring it returns the item to the exact
+        order it occupied when claimed even while other work is active.
         """
-        if self._held or not 0 <= index < len(self._items):
+        if not 0 <= index < len(self._items):
             return None
 
-        item = self._items[index]
+        ticket, item = self._items[index]
         del self._items[index]
-        self._held += 1
-        return StageQueueLease(self, item, restore_index=index)
+        self._leased[id(item)] = ticket
+        return StageQueueLease(self, item, ticket=ticket)
 
-    def _restore_lease(self, item: WorkItem, index: int = 0) -> None:
-        """Restore one active lease at its claimed position without opening capacity."""
-        self._held -= 1
-        self._items.insert(index, item)
+    def _restore_lease(self, item: WorkItem, ticket: int) -> None:
+        """Restore one active lease in original FIFO order without opening capacity."""
+        if self._leased.pop(id(item), None) != ticket:
+            raise RuntimeError("StageQueue lease ticket mismatch")
+        index = next(
+            (
+                position
+                for position, (ready_ticket, _ready) in enumerate(self._items)
+                if ticket < ready_ticket
+            ),
+            len(self._items),
+        )
+        self._items.insert(index, (ticket, item))
 
-    def _release_lease(self) -> None:
+    def _release_lease(self, item: WorkItem, ticket: int) -> None:
         """Release one active lease after its item was admitted elsewhere."""
-        self._held -= 1
+        if self._leased.pop(id(item), None) != ticket:
+            raise RuntimeError("StageQueue lease ticket mismatch")
 
     def __len__(self) -> int:
         """Return the number of items in the queue."""
@@ -201,4 +211,4 @@ class StageQueue:
 
     def snapshot(self) -> list[WorkItem]:
         """Return a copy of all items in queue order (for inspection/debugging)."""
-        return list(self._items)
+        return [item for _ticket, item in self._items]

@@ -294,6 +294,9 @@ backpressure rather than a spill list, shutdown, or failure
 ([`StageQueueLease.handoff`](hephaestus/automation/pipeline/queues.py),
 [`Coordinator._handoff_item`](hephaestus/automation/pipeline/coordinator.py),
 [`Coordinator._drain_pending_handoffs`](hephaestus/automation/pipeline/coordinator.py)).
+Leases carry stable FIFO tickets, so multiple ready items can be claimed and
+run concurrently up to `C`; a retry restores ahead of later-admitted work
+without serializing the whole stage.
 
 Intake is also source-driven rather than an eager list of classified products:
 
@@ -308,9 +311,11 @@ Intake is also source-driven rather than an eager list of classified products:
   repository cannot monopolize discovery.
 - Organization repositories and linked-issue metadata use REST pages of at
   most 100 rows. Pagination continues until the short terminal page; there is
-  no `gh ... --limit 500` discovery cap. Organization scope resolution returns
-  the filtered repository names before the FIFO source admits repo work, while
-  each active repository cursor consumes issue metadata lazily. Repository
+  no `gh ... --limit 500` discovery cap. An organization invocation passes a
+  resettable paged repository iterator directly to the FIFO source; it never
+  materializes the organization's names in CLI scope resolution or pipeline
+  configuration. Each active repository cursor consumes issue metadata lazily.
+  Repository
   discovery does not pre-scan open-PR pages: PR review context enters through
   the linked issue's classification. An orphan PR has no issue requirements
   and remains outside this source; an explicit `--prs` scope can select one
@@ -1139,9 +1144,10 @@ BEFORE the exclusion is honored
  only when its eventual entry queue is guaranteed to accept it, so a large
  CLI scope is not converted into an eager seed list. `--prs` is the explicit
  route for a PR that is not reached from linked-issue discovery.
-- `--org` follows the GitHub REST repository pagination until exhaustion,
- filters forked/archived repos, then passes the resolved names to that FIFO
- source. Linked-issue discovery uses 100-row REST pages rather than a 500-item
+- `--org` is a resettable, paged GitHub REST repository source. It filters the
+ `archived` and `fork` response fields before each name enters the FIFO source;
+ repository names are not materialized up front. Linked-issue discovery uses
+ 100-row REST pages rather than a 500-item
  CLI limit; it does not bulk-scan every open PR
  ([`loop_repo_manager.py`](hephaestus/automation/loop_repo_manager.py)).
 When `--issues` or `--prs` is set, the resolved `--repos` list is used

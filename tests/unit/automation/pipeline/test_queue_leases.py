@@ -43,8 +43,8 @@ class TestStageQueueLeases:
         assert source.occupancy == source.capacity == 2
         assert source.offer(replacement) is False
 
-    def test_restore_returns_claimed_item_without_opening_admission_slot(self) -> None:
-        """Restoring a lease keeps the claimed item and FIFO-ready work lossless."""
+    def test_restore_preserves_claimed_item_and_uses_remaining_capacity(self) -> None:
+        """A lease reserves its item but does not serialize unused capacity."""
         source = StageQueue(capacity=2)
         claimed_item = _item("claimed")
         source.push(claimed_item)
@@ -52,15 +52,15 @@ class TestStageQueueLeases:
         lease = source.claim()
 
         assert lease is not None
-        assert source.offer(_item("must-not-enter-before-restore")) is False
+        later = _item("may-enter-before-restore")
+        assert source.offer(later) is True
         lease.restore()
 
-        assert source.occupancy == 1
-        assert source.snapshot() == [claimed_item]
-        assert source.offer(_item("may-enter-after-restore")) is True
+        assert source.occupancy == 2
+        assert source.snapshot() == [claimed_item, later]
 
-    def test_claim_serializes_held_lease_to_preserve_fifo_order(self) -> None:
-        """A second claim cannot overtake a lease that may restore to the front."""
+    def test_concurrent_claims_restore_in_original_fifo_order(self) -> None:
+        """Multiple active claims retain capacity and restore by original order."""
         source = StageQueue(capacity=3)
         first = _item("first")
         second = _item("second")
@@ -69,14 +69,17 @@ class TestStageQueueLeases:
         source.push(second)
         source.push(third)
 
-        lease = source.claim()
+        first_lease = source.claim()
+        second_lease = source.claim()
 
-        assert lease is not None
-        assert lease.item is first
-        assert source.claim() is None
-        assert source.snapshot() == [second, third]
+        assert first_lease is not None
+        assert second_lease is not None
+        assert first_lease.item is first
+        assert second_lease.item is second
+        assert source.snapshot() == [third]
 
-        lease.restore()
+        second_lease.restore()
+        first_lease.restore()
 
         assert source.snapshot() == [first, second, third]
 
@@ -94,8 +97,11 @@ class TestStageQueueLeases:
         assert lease is not None
         assert lease.item is selected
         assert source.snapshot() == [first, third]
-        assert source.claim() is None
+        first_lease = source.claim()
+        assert first_lease is not None
+        assert first_lease.item is first
 
+        first_lease.restore()
         lease.restore()
 
         assert source.snapshot() == [first, selected, third]

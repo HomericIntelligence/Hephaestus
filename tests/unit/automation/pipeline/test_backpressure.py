@@ -92,3 +92,23 @@ def test_coordinator_rejects_injected_completion_queue_with_wrong_capacity(
             pool=incompatible_pool,
             install_signals=False,
         )
+
+
+def test_coordinator_replaces_an_injected_unbounded_completion_queue(tmp_path: Path) -> None:
+    """A zero-maxsize test double cannot silently bypass the global C bound."""
+    config = _config(tmp_path, parallel_repos=2, max_workers=2)
+    unbounded_pool = _RecordingWorkerPool(
+        size=4,
+        shutdown=Event(),
+        completion_q=Queue(),
+    )
+
+    coordinator = Coordinator(
+        config,
+        github=FakeStageGitHub(),
+        pool=unbounded_pool,
+        install_signals=False,
+    )
+
+    assert coordinator.completion_q.maxsize == 4
+    assert unbounded_pool.completion_q is coordinator.completion_q
