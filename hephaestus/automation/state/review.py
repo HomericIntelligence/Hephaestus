@@ -98,7 +98,7 @@ def count_unparseable_verdict_passes(comments: list[dict[str, Any]]) -> int:
     Scans all plan-review comments (those whose ``body`` starts with
     :data:`PLAN_REVIEW_PREFIX`) in chronological order and counts the ones
     where :func:`latest_verdict` returns ``None``.  This is the number of
-    passes in which a reviewer posted a comment but :func:`parse_review_verdict`
+    passes in which a reviewer posted a comment but :func:`latest_verdict`
     could not find a plan-state token.
 
     A non-zero count indicates malformed historical reviewer output. This is

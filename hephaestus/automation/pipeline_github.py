@@ -27,6 +27,7 @@ import subprocess
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from hephaestus.automation import github_api, pr_manager
 from hephaestus.automation._review_phase import _is_automation_owned_thread
@@ -78,6 +79,7 @@ from hephaestus.utils.file_lock import file_lock
 logger = logging.getLogger(__name__)
 
 _CLOSES_ISSUE_LINE_RE = re.compile(r"^Closes #(\d+)\s*$", re.MULTILINE)
+_STANDALONE_VERDICT_LINE_RE = re.compile(r"(?i)^\s*verdict\s*:")
 _HTTP_STATUS_RE = re.compile(r"^HTTP/\S+\s+(\d{3})\b", re.MULTILINE)
 
 
@@ -175,19 +177,57 @@ def _with_severity_marker(comment: dict[str, Any]) -> str:
     if sev not in VALID_SEVERITIES:
         sev = "major"
     body = str(comment.get("body") or "")
-    if body.startswith(SEVERITY_MARKER_PREFIX):
-        return body  # already marked (idempotent re-post)
+    body = "\n".join(
+        line
+        for line in body.splitlines()
+        if not line.strip().startswith(SEVERITY_MARKER_PREFIX)
+        and not _STANDALONE_VERDICT_LINE_RE.match(line)
+    )
     return f"{SEVERITY_MARKER_PREFIX} {sev} -->\n{body}"
 
 
 def _thread_severity_is_blocking(thread: dict[str, Any]) -> bool:
-    """Return True if the thread's recovered severity is blocking; missing means blocking."""
+    """Return True unless the thread has one recognized advisory severity marker."""
     body = str(thread.get("body") or "")
+    severity: str | None = None
     for line in body.splitlines():
         stripped = line.strip()
-        if stripped.startswith(SEVERITY_MARKER_PREFIX) and stripped.endswith("-->"):
-            sev = stripped[len(SEVERITY_MARKER_PREFIX) : -3].strip().lower()
-            return sev in BLOCKING_SEVERITIES
+        if not stripped.startswith(SEVERITY_MARKER_PREFIX):
+            continue
+        if severity is not None or not stripped.endswith("-->"):
+            return True
+        recovered = stripped[len(SEVERITY_MARKER_PREFIX) : -3].strip().lower()
+        if recovered not in VALID_SEVERITIES:
+            return True
+        severity = recovered
+    return severity is None or severity in BLOCKING_SEVERITIES
+
+
+def _has_no_explicit_pull_request_bypasses(protection: dict[str, Any]) -> bool:
+    """Return whether the classic protection response grants no PR bypasses.
+
+    Classic branch protection exposes actor allowances that may bypass pull
+    request requirements under ``required_pull_request_reviews``.  A missing
+    review-requirement object means this response exposes no such allowance.
+    GitHub also omits the allowance field itself when no PR bypass is
+    configured. Once the field is present, every allowance collection must be
+    present, list-typed, and empty. This is deliberately fail-closed because a
+    merge actor must not infer that a malformed allowance is safe.
+    """
+    reviews = protection.get("required_pull_request_reviews")
+    if reviews is None:
+        return True
+    if not isinstance(reviews, dict):
+        return False
+    if "bypass_pull_request_allowances" not in reviews:
+        return True
+    allowances = reviews["bypass_pull_request_allowances"]
+    if not isinstance(allowances, dict):
+        return False
+    for actor_type in ("users", "teams", "apps"):
+        actors = allowances.get(actor_type)
+        if not isinstance(actors, list) or actors:
+            return False
     return True
 
 
@@ -483,52 +523,70 @@ class PipelineGitHub:
     def _repo_unresolved_threads(self, pr_number: int) -> list[dict[str, Any]]:
         """List unresolved PR review threads for this accessor's explicit repo."""
         query = (
-            "query($owner:String!,$name:String!,$number:Int!){"
+            "query($owner:String!,$name:String!,$number:Int!,$after:String){"
             "  repository(owner:$owner,name:$name){"
             "    pullRequest(number:$number){"
-            "      reviewThreads(first:100){"
+            "      reviewThreads(first:100,after:$after){"
+            "        pageInfo{ hasNextPage endCursor }"
             "        nodes{ id isResolved path line side:diffSide "
-            "comments(first:20){ nodes{ body author{ login } } } }"
+            "comments(first:20){ pageInfo{ hasNextPage } "
+            "nodes{ body author{ login } } } }"
             "      }"
             "    }"
             "  }"
             "}"
         )
-        data = self._graphql(query, number=int(pr_number))
-        nodes = (
-            data.get("data", {})
-            .get("repository", {})
-            .get("pullRequest", {})
-            .get("reviewThreads", {})
-            .get("nodes", [])
-        )
         threads: list[dict[str, Any]] = []
-        for node in nodes:
-            if node.get("isResolved"):
-                continue
-            comment_nodes = node.get("comments", {}).get("nodes", [])
-            first_comment = comment_nodes[0] if comment_nodes else {}
-            comments: list[dict[str, str]] = []
-            authors: list[str] = []
-            for comment in comment_nodes:
-                author_node = comment.get("author")
-                author = author_node.get("login") if isinstance(author_node, dict) else ""
-                author = author or ""
-                if author:
-                    authors.append(author)
-                comments.append({"body": comment.get("body") or "", "author": author})
-            threads.append(
-                {
-                    "id": node["id"],
-                    "path": node.get("path", ""),
-                    "line": node.get("line"),
-                    "side": node.get("side") or "RIGHT",
-                    "body": first_comment.get("body", ""),
-                    "author": authors[0] if authors else "",
-                    "authors": authors,
-                    "comments": comments,
-                }
+        after: str | None = None
+        while True:
+            fields: dict[str, int | str] = {"number": int(pr_number)}
+            if after is not None:
+                fields["after"] = after
+            data = self._graphql(query, **fields)
+            review_threads = (
+                data.get("data", {})
+                .get("repository", {})
+                .get("pullRequest", {})
+                .get("reviewThreads", {})
             )
+            for node in review_threads.get("nodes", []):
+                if node.get("isResolved"):
+                    continue
+                comment_connection = node.get("comments", {})
+                if comment_connection.get("pageInfo", {}).get("hasNextPage"):
+                    raise RuntimeError(
+                        f"could not fetch all comments for PR review thread {node.get('id')}"
+                    )
+                comment_nodes = comment_connection.get("nodes", [])
+                first_comment = comment_nodes[0] if comment_nodes else {}
+                comments: list[dict[str, str]] = []
+                authors: list[str] = []
+                for comment in comment_nodes:
+                    author_node = comment.get("author")
+                    author = author_node.get("login") if isinstance(author_node, dict) else ""
+                    author = author or ""
+                    if author:
+                        authors.append(author)
+                    comments.append({"body": comment.get("body") or "", "author": author})
+                threads.append(
+                    {
+                        "id": node["id"],
+                        "path": node.get("path", ""),
+                        "line": node.get("line"),
+                        "side": node.get("side") or "RIGHT",
+                        "body": first_comment.get("body", ""),
+                        "author": authors[0] if authors else "",
+                        "authors": authors,
+                        "comments": comments,
+                    }
+                )
+            page_info = review_threads.get("pageInfo", {})
+            if not page_info.get("hasNextPage"):
+                break
+            next_cursor = page_info.get("endCursor")
+            if not isinstance(next_cursor, str) or not next_cursor or next_cursor == after:
+                raise RuntimeError("could not fetch all PR review threads")
+            after = next_cursor
         return threads
 
     def _repo_issue_comments(self, issue_number: int) -> list[dict[str, Any]]:
@@ -578,56 +636,121 @@ class PipelineGitHub:
             legacy_marker=PLAN_REVIEW_PREFIX,
         )
 
-    def _repo_review_threads_for_review(self, pr_number: int, review_id: str) -> list[str]:
-        """Return unresolved review-thread ids created by one REST review.
+    def _repo_review_thread_receipts_for_review(
+        self,
+        pr_number: int,
+        review_id: str,
+        expected_comments: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Return immutable sole-comment receipts from one just-created review.
 
         ``review_id`` is the REST review POST response's ``node_id`` field —
         the GraphQL global node id of the same ``PullRequestReview`` object
-        returned here as ``comments.nodes[0].pullRequestReview.id``. Both are
-        GraphQL-node-id space (not REST numeric ``id``), so they are directly
-        comparable at the ``review.get("id") != review_id`` check below; see
-        ``test_round_trips_rest_node_id_against_graphql_review_id`` for the
-        pinned invariant. Preserves the #375 guarantee: only threads created
-        by *this* review are returned.
+        returned in the sole first comment's ``pullRequestReview.id``. A
+        receipt is accepted only when that thread still has exactly one
+        complete comment whose body/path/line/side matches one requested
+        comment. This intentionally fails closed if any reply arrives between
+        POST and this first receipt readback: author login alone is never
+        evidence that the process authored a reply.
         """
         query = (
-            "query($owner:String!,$name:String!,$number:Int!){"
+            "query($owner:String!,$name:String!,$number:Int!,$after:String){"
             "  repository(owner:$owner,name:$name){"
             "    pullRequest(number:$number){"
-            "      reviewThreads(first:100){"
-            "        nodes{ id isResolved comments(first:1){ "
-            "nodes{ pullRequestReview{ id } } } }"
+            "      reviewThreads(first:100,after:$after){"
+            "        pageInfo{ hasNextPage endCursor }"
+            "        nodes{ id isResolved path line side:diffSide "
+            "comments(first:2){ pageInfo{ hasNextPage } "
+            "nodes{ body author{ login } pullRequestReview{ id } } } }"
             "      }"
             "    }"
             "  }"
             "}"
         )
+        expected = [
+            (
+                str(comment.get("path") or ""),
+                comment.get("line"),
+                str(comment.get("side") or "RIGHT"),
+                str(comment.get("body") or ""),
+            )
+            for comment in expected_comments
+        ]
+        unmatched = list(expected)
+        receipts: list[dict[str, Any]] = []
+        after: str | None = None
         try:
-            data = self._graphql(query, number=int(pr_number))
+            while True:
+                fields: dict[str, int | str] = {"number": int(pr_number)}
+                if after is not None:
+                    fields["after"] = after
+                data = self._graphql(query, **fields)
+                review_threads = (
+                    data.get("data", {})
+                    .get("repository", {})
+                    .get("pullRequest", {})
+                    .get("reviewThreads", {})
+                )
+                for node in review_threads.get("nodes", []):
+                    if node.get("isResolved"):
+                        continue
+                    comment_connection = node.get("comments", {})
+                    comments = comment_connection.get("nodes", [])
+                    if (
+                        comment_connection.get("pageInfo", {}).get("hasNextPage")
+                        or len(comments) != 1
+                    ):
+                        continue
+                    first_comment = comments[0]
+                    review = first_comment.get("pullRequestReview") or {}
+                    if review.get("id") != review_id:
+                        continue
+                    thread_id = node.get("id")
+                    author_node = first_comment.get("author")
+                    author = author_node.get("login") if isinstance(author_node, dict) else ""
+                    body = first_comment.get("body")
+                    key = (
+                        str(node.get("path") or ""),
+                        node.get("line"),
+                        str(node.get("side") or "RIGHT"),
+                        str(body or ""),
+                    )
+                    if (
+                        not isinstance(thread_id, str)
+                        or not thread_id
+                        or not isinstance(author, str)
+                        or not author
+                        or not isinstance(body, str)
+                        or key not in unmatched
+                    ):
+                        continue
+                    unmatched.remove(key)
+                    receipts.append(
+                        {
+                            "id": thread_id,
+                            "path": key[0],
+                            "line": key[1],
+                            "side": key[2],
+                            "body": body,
+                            "author": author,
+                            "authors": [author],
+                            "comments": [{"author": author, "body": body}],
+                            "review_id": review_id,
+                        }
+                    )
+                page_info = review_threads.get("pageInfo", {})
+                if not page_info.get("hasNextPage"):
+                    break
+                next_cursor = page_info.get("endCursor")
+                if not isinstance(next_cursor, str) or not next_cursor or next_cursor == after:
+                    raise RuntimeError("could not fetch all PR review threads")
+                after = next_cursor
         except (subprocess.SubprocessError, RuntimeError, json.JSONDecodeError) as exc:
-            logger.warning("Could not fetch review threads for PR #%s: %s", pr_number, exc)
+            logger.warning("Could not fetch review receipts for PR #%s: %s", pr_number, exc)
             return []
-        nodes = (
-            data.get("data", {})
-            .get("repository", {})
-            .get("pullRequest", {})
-            .get("reviewThreads", {})
-            .get("nodes", [])
-        )
-        seen: dict[str, None] = {}
-        for node in nodes:
-            if node.get("isResolved"):
-                continue
-            first_comments = node.get("comments", {}).get("nodes", [])
-            if not first_comments:
-                continue
-            review = first_comments[0].get("pullRequestReview") or {}
-            if review.get("id") != review_id:
-                continue
-            thread_id = node.get("id")
-            if thread_id:
-                seen[thread_id] = None
-        return list(seen)
+        if unmatched or len(receipts) != len(expected):
+            return []
+        return receipts
 
     def _skip(self, what: str) -> bool:
         """Return True (and log) when dry-run should skip a mutation."""
@@ -846,23 +969,13 @@ class PipelineGitHub:
                 human += 1
         return (blocking, minor, human)
 
-    def resolve_automation_threads(self, pr_number: int) -> int:
-        """Resolve unresolved AUTOMATION-owned threads; return the count (#1856).
-
-        Never resolves human threads. Used by the GO gate to clear advisory
-        minor/nitpick threads that the reviewer waived before it writes the
-        implementation label.
-        """
-        if self._skip(f"resolve automation threads on PR #{pr_number}"):
-            return 0
+    def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+        """Return fresh unresolved threads with durable ownership facts."""
         threads = self._unresolved_threads(pr_number)
         current_login = github_api.gh_current_login()
-        resolved = 0
-        for t in threads:
-            if _is_automation_owned_thread(t, current_login) and t.get("id"):
-                github_api.gh_pr_resolve_thread(str(t["id"]), dry_run=self.dry_run)
-                resolved += 1
-        return resolved
+        for thread in threads:
+            thread["automation_owned"] = _is_automation_owned_thread(thread, current_login)
+        return threads
 
     def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
         """Read shared PR state for seed, implementation, and merge_wait.
@@ -915,6 +1028,62 @@ class PipelineGitHub:
         except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError) as exc:
             logger.warning("PR #%s: merge readiness read failed: %s", pr_number, exc)
             return None
+
+    def base_branch_requires_conversation_resolution(
+        self, pr_number: int, base_branch: str
+    ) -> bool:
+        """Read the exact base branch's classic REST protection contract.
+
+        This capability has no organization-wide fallback: merge_wait can only
+        admit a normal merge when this accessor is bound to the PR's repository
+        and GitHub confirms all of the following for the exact admitted base
+        branch: ``required_conversation_resolution.enabled``,
+        ``enforce_admins.enabled``, and no explicit pull-request bypass
+        allowances. GitHub then enforces that policy on the server at merge
+        time, including for administrators, covering a thread that appears
+        after the local read.
+        """
+        if (
+            pr_number <= 0
+            or self._repo_slug is None
+            or not isinstance(base_branch, str)
+            or not base_branch
+        ):
+            return False
+        try:
+            owner, name = self._owner_name()
+            branch = quote(base_branch, safe="")
+            result = gh_call(
+                [
+                    "api",
+                    "--method",
+                    "GET",
+                    f"/repos/{owner}/{name}/branches/{branch}/protection",
+                ],
+                check=False,
+            )
+            if result.returncode != 0:
+                return False
+            data = json.loads(result.stdout or "{}")
+        except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError) as exc:
+            logger.warning(
+                "PR #%s: failed to read protection for base branch %r: %s",
+                pr_number,
+                base_branch,
+                exc,
+            )
+            return False
+        if not isinstance(data, dict):
+            return False
+        conversation_resolution = data.get("required_conversation_resolution")
+        enforce_admins = data.get("enforce_admins")
+        return (
+            isinstance(conversation_resolution, dict)
+            and conversation_resolution.get("enabled") is True
+            and isinstance(enforce_admins, dict)
+            and enforce_admins.get("enabled") is True
+            and _has_no_explicit_pull_request_bypasses(data)
+        )
 
     def merge_pr_if_head(self, pr_number: int, reviewed_sha: str) -> ConditionalMergeResult:
         """Attempt one immediate squash merge conditional on the reviewed SHA.
@@ -1303,14 +1472,21 @@ class PipelineGitHub:
 
     def post_review_threads(
         self, pr_number: int, threads: list[dict[str, Any]], summary: str
-    ) -> list[str]:
-        """Post surviving review threads (``gh_pr_review_post``)."""
+    ) -> list[dict[str, Any]]:
+        """Post review threads and return immutable process-created receipts."""
         if self._skip(f"post {len(threads)} review thread(s) on PR #{pr_number}"):
             return []
         if self._repo_slug is not None:
             if threads:
                 diff_result = self._gh(["pr", "diff", str(pr_number)], check=False)
-                threads = github_api._filter_comments_to_diff(threads, diff_result.stdout or "")
+                postable_threads = github_api._filter_comments_to_diff(
+                    threads, diff_result.stdout or ""
+                )
+                if len(postable_threads) != len(threads):
+                    raise RuntimeError(
+                        "review-thread batch contains an anchor outside the current PR diff"
+                    )
+                threads = postable_threads
             review_comments = [
                 {
                     "path": c["path"],
@@ -1340,18 +1516,22 @@ class PipelineGitHub:
             if not review_node_id:
                 logger.warning("Posted PR review on #%s but no review node id returned", pr_number)
                 return []
-            thread_ids = self._repo_review_threads_for_review(pr_number, str(review_node_id))
-            if review_comments and not thread_ids:
+            receipts = self._repo_review_thread_receipts_for_review(
+                pr_number,
+                str(review_node_id),
+                review_comments,
+            )
+            if review_comments and not receipts:
                 logger.warning(
-                    "Posted PR review %s (node id %r) on #%s with %d comment(s) but "
-                    "matched zero review threads; comments may be orphaned",
+                    "Posted PR review %s (node id %r) on #%s with %d comment(s) but could not "
+                    "prove immutable sole-comment receipts; leaving them unresolved",
                     review.get("id"),
                     review_node_id,
                     pr_number,
                     len(review_comments),
                 )
-            return thread_ids
-        return github_api.gh_pr_review_post(pr_number, threads, summary)
+            return receipts
+        return []
 
     def claim_drive_green_learn(self, issue_number: int, pr_number: int) -> bool:
         """Persist and read back the pre-dispatch /learn claim.

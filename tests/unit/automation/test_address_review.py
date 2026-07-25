@@ -222,108 +222,6 @@ def test_codex_fix_session_falls_back_to_fresh_on_resume_failure(
     mock_fresh.assert_called_once()
 
 
-# ---------------------------------------------------------------------------
-# _resolve_addressed_threads
-# ---------------------------------------------------------------------------
-
-
-class TestResolveAddressedThreads:
-    """Tests for _resolve_addressed_threads method."""
-
-    def test_resolve_only_addressed_threads(self, reviewer: AddressReviewer) -> None:
-        """Claude reports [id1] addressed, [id2] not → only id1 resolved."""
-        addressed = ["thread-id-1"]
-        replies: dict[str, str] = {"thread-id-1": "Fixed the issue"}
-        presented = {"thread-id-1", "thread-id-2"}
-
-        with patch(
-            "hephaestus.automation.address_review_core.gh_pr_resolve_thread"
-        ) as mock_resolve:
-            reviewer._resolve_addressed_threads(addressed, replies, presented)
-
-        mock_resolve.assert_called_once_with("thread-id-1", dry_run=False)
-
-    def test_resolve_multiple_addressed_threads(self, reviewer: AddressReviewer) -> None:
-        """All addressed threads present in the unresolved set are resolved."""
-        addressed = ["thread-1", "thread-2"]
-        replies: dict[str, str] = {
-            "thread-1": "Renamed variable",
-            "thread-2": "Added type hint",
-        }
-        presented = {"thread-1", "thread-2"}
-
-        with patch(
-            "hephaestus.automation.address_review_core.gh_pr_resolve_thread"
-        ) as mock_resolve:
-            reviewer._resolve_addressed_threads(addressed, replies, presented)
-
-        assert mock_resolve.call_count == 2
-        called_ids = {call[0][0] for call in mock_resolve.call_args_list}
-        assert called_ids == {"thread-1", "thread-2"}
-
-    def test_skips_resolve_on_failure(self, reviewer: AddressReviewer) -> None:
-        """Individual resolve failures do not abort the rest."""
-        addressed = ["thread-1", "thread-2"]
-        replies: dict[str, str] = {}
-        presented = {"thread-1", "thread-2"}
-
-        with patch(
-            "hephaestus.automation.address_review_core.gh_pr_resolve_thread"
-        ) as mock_resolve:
-            mock_resolve.side_effect = [RuntimeError("API error"), None]
-            # Should not raise
-            reviewer._resolve_addressed_threads(addressed, replies, presented)
-
-        assert mock_resolve.call_count == 2
-
-    def test_skips_unknown_thread_ids(self, reviewer: AddressReviewer) -> None:
-        """Thread IDs Claude returns that we never presented are dropped silently.
-
-        This is the M2 trust-boundary safeguard: a hallucinated or cross-PR
-        thread ID must NOT reach gh_pr_resolve_thread.
-        """
-        addressed = ["thread-real", "thread-hallucinated"]
-        replies: dict[str, str] = {
-            "thread-real": "Fixed",
-            "thread-hallucinated": "Pretended to fix",
-        }
-        presented = {"thread-real"}  # only the real one was on this PR
-
-        with patch(
-            "hephaestus.automation.address_review_core.gh_pr_resolve_thread"
-        ) as mock_resolve:
-            reviewer._resolve_addressed_threads(addressed, replies, presented)
-
-        mock_resolve.assert_called_once_with("thread-real", dry_run=False)
-
-    def test_dry_run_no_resolve(self, mock_options: AddressReviewOptions, tmp_path: Path) -> None:
-        """dry_run=True → gh_pr_resolve_thread is called with dry_run=True."""
-        mock_options.dry_run = True
-
-        dry_reviewer = AddressReviewer(
-            mock_options,
-            get_repo_root=lambda: tmp_path,
-            worktree_manager_factory=MagicMock(return_value=MagicMock()),
-            status_tracker_factory=MagicMock(return_value=MagicMock()),
-            log_manager_factory=MagicMock(return_value=MagicMock()),
-        )
-        dry_reviewer.state_dir = tmp_path
-
-        addressed = ["thread-1"]
-        replies: dict[str, str] = {"thread-1": "Fixed"}
-        presented = {"thread-1"}
-
-        with patch(
-            "hephaestus.automation.address_review_core.gh_pr_resolve_thread"
-        ) as mock_resolve:
-            # dry_run is forwarded from options via _resolve_addressed_threads
-            dry_reviewer._resolve_addressed_threads(addressed, replies, presented)
-
-        # With dry_run=True, gh_pr_resolve_thread is called but internally is a no-op;
-        # we verify the dry_run flag is forwarded correctly.
-        mock_resolve.assert_called_once_with("thread-1", dry_run=True)
-
-
 class TestCommitIfChanges:
     """Tests for AddressReviewer._commit_if_changes."""
 
@@ -368,10 +266,10 @@ class TestAddressIssue:
         assert result.success is True
         assert result.pr_number == 456
 
-    def test_dry_run_stops_before_resolve(
+    def test_dry_run_stops_before_thread_handoff(
         self, mock_options: AddressReviewOptions, tmp_path: Path
     ) -> None:
-        """dry_run=True → no worktree creation, no resolve, no push calls."""
+        """dry_run=True → no worktree creation or push calls."""
         mock_options.dry_run = True
 
         mock_wm = MagicMock()
@@ -397,15 +295,13 @@ class TestAddressIssue:
                 return_value=threads,
             ),
             patch.object(dry_reviewer, "_get_or_create_worktree") as mock_worktree,
-            patch("hephaestus.automation.address_review_core.gh_pr_resolve_thread") as mock_resolve,
             patch.object(dry_reviewer, "_push_branch") as mock_push,
         ):
             result = dry_reviewer._address_issue(123, 456)
 
         assert result.success is True
-        # Dry-run guard fires before worktree creation and resolution
+        # Dry-run guard fires before worktree creation.
         mock_worktree.assert_not_called()
-        mock_resolve.assert_not_called()
         mock_push.assert_not_called()
 
     def test_no_pr_found_skips_run(self, reviewer: AddressReviewer) -> None:
@@ -415,26 +311,39 @@ class TestAddressIssue:
 
         assert results == {}
 
-    def test_address_issue_preserves_local_cooldown(self, reviewer: AddressReviewer) -> None:
-        """_address_issue keeps its one-second cooldown outside StatusTracker.slot()."""
+    def test_address_issue_claimed_fixes_require_human_resolution(
+        self, reviewer: AddressReviewer, tmp_path: Path
+    ) -> None:
+        """A code-fix claim is a handoff, not a completed address review."""
         threads = [{"id": "thread-1", "path": "foo.py", "line": 5, "body": "Fix this"}]
+        state = ReviewState(issue_number=123, pr_number=456, branch_name="branch-1")
 
         with (
             patch.object(reviewer, "_check_threads_for_address", return_value=threads),
             patch.object(
                 reviewer,
                 "_setup_address_state",
-                return_value=("session-1", MagicMock(), "branch-1", Path("/tmp/worktree")),
+                return_value=("session-1", state, "branch-1", tmp_path),
             ),
             patch.object(
-                reviewer, "_run_fix_session", return_value={"addressed": [], "replies": {}}
+                reviewer,
+                "_run_fix_session",
+                return_value={"addressed": ["thread-1"], "replies": {}},
             ),
-            patch.object(reviewer, "_commit_push_and_resolve"),
+            patch.object(reviewer, "_commit_if_changes"),
+            patch.object(reviewer, "_push_branch"),
+            patch.object(reviewer, "_save_review_state"),
             patch("hephaestus.automation.address_review.time.sleep") as mock_sleep,
         ):
             result = reviewer._address_issue(123, 456)
 
-        assert result.success is True
+        assert result.success is False
+        assert result.error == "human_review_thread_resolution_required"
+        assert state.phase is ReviewPhase.HUMAN_RESOLUTION_REQUIRED
+        assert state.addressed_thread_ids == ["thread-1"]
+        assert state.completed_at is None
+        assert state.error is not None
+        assert "human" in state.error.lower()
         mock_sleep.assert_called_once_with(1)
 
 
@@ -517,7 +426,7 @@ class TestAddressReviewerPreservedReporting:
 
 # ---------------------------------------------------------------------------
 # Extracted helpers: _check_threads_for_address, _setup_address_state,
-# _commit_push_and_resolve (PR #1296 regression tests)
+# _commit_push_and_record
 # ---------------------------------------------------------------------------
 
 
@@ -650,62 +559,8 @@ class TestSetupAddressState:
         mock_save.assert_called_once()
 
 
-class TestCommitPushAndResolve:
-    """Tests for AddressReviewer._commit_push_and_resolve helper.
-
-    The key regression test (PR #1296): _commit_push_and_resolve must pass
-    the real replies dict (not {}) to _resolve_addressed_threads.
-    """
-
-    def test_passes_real_replies_dict_to_resolve(
-        self, reviewer: AddressReviewer, tmp_path: Path
-    ) -> None:
-        """The helper must forward the REAL replies dict to _resolve_addressed_threads.
-
-        This is the critical safeguard against the historically-buggy {}
-        sentinel path. The replies dict carries reply text that must be posted
-        as comments on each resolved thread per the review protocol.
-        """
-        review_state = ReviewState(
-            issue_number=123,
-            pr_number=456,
-            branch_name="123-auto-impl",
-        )
-
-        addressed = ["t1", "t2"]
-        replies = {"t1": "Fixed the locking issue.", "t2": "Added the type hint."}
-        threads = [
-            {"id": "t1", "path": "a.py", "line": 10, "body": "fix this"},
-            {"id": "t2", "path": "b.py", "line": 20, "body": "and this"},
-        ]
-
-        with (
-            patch.object(reviewer, "_commit_if_changes"),
-            patch.object(reviewer, "_push_branch"),
-            patch.object(reviewer, "_resolve_addressed_threads") as mock_resolve,
-            patch.object(reviewer, "_save_review_state"),
-            patch.object(reviewer.status_tracker, "update_slot"),
-        ):
-            reviewer._commit_push_and_resolve(
-                issue_number=123,
-                pr_number=456,
-                branch_name="123-auto-impl",
-                worktree_path=tmp_path,
-                addressed=addressed,
-                replies=replies,
-                threads=threads,
-                review_state=review_state,
-                slot_id=0,
-                thread_id=1,
-            )
-
-        # The critical assertion: _resolve_addressed_threads is called with the
-        # REAL replies dict, not an empty dict sentinel.
-        mock_resolve.assert_called_once_with(
-            addressed,
-            replies,
-            {"t1", "t2"},
-        )
+class TestCommitPushAndRecord:
+    """AddressReviewer records agent claims without mutating review threads."""
 
     def test_updates_review_state_addressed_threads(
         self, reviewer: AddressReviewer, tmp_path: Path
@@ -725,11 +580,10 @@ class TestCommitPushAndResolve:
         with (
             patch.object(reviewer, "_commit_if_changes"),
             patch.object(reviewer, "_push_branch"),
-            patch.object(reviewer, "_resolve_addressed_threads"),
             patch.object(reviewer, "_save_review_state") as mock_save,
             patch.object(reviewer.status_tracker, "update_slot"),
         ):
-            reviewer._commit_push_and_resolve(
+            reviewer._commit_push_and_record(
                 issue_number=123,
                 pr_number=456,
                 branch_name="123-auto-impl",
@@ -745,5 +599,8 @@ class TestCommitPushAndResolve:
         # Check that the state was updated with the new addressed thread IDs
         assert "old-t1" in review_state.addressed_thread_ids
         assert "t1" in review_state.addressed_thread_ids
-        assert review_state.phase == ReviewPhase.COMPLETED
+        assert review_state.phase == ReviewPhase.HUMAN_RESOLUTION_REQUIRED
+        assert review_state.completed_at is None
+        assert review_state.error is not None
+        assert "human" in review_state.error.lower()
         mock_save.assert_called_once()

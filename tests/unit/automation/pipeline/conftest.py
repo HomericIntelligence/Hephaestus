@@ -149,9 +149,8 @@ class FakeGitHub:
     (``gh_issue_add_labels``, ``gh_issue_remove_labels``, ``gh_create_label``,
     ``skip_epics``, ``gh_issue_comment``, ``gh_issue_upsert_comment``,
     ``gh_issue_create``, ``gh_issue_delete_comment``, ``gh_pr_create``,
-    ``gh_pr_review_post``, ``gh_pr_update_review_comment``,
-    ``gh_pr_resolve_thread``), so coordinator tests can inject this double
-    without adapting call sites.
+    ``gh_pr_review_post``, ``gh_pr_update_review_comment``), so coordinator
+    tests can inject this double without adapting call sites.
     """
 
     def __init__(self) -> None:
@@ -162,7 +161,6 @@ class FakeGitHub:
         self.issues: dict[int, dict[str, Any]] = {}
         self.prs: dict[int, dict[str, Any]] = {}
         self.reviews: dict[int, list[dict[str, Any]]] = {}
-        self.resolved_threads: set[str] = set()
         self.mutation_log: list[tuple[str, tuple[Any, ...]]] = []
         self._next_issue = 900
         self._next_pr = 1000
@@ -268,18 +266,6 @@ class FakeGitHub:
         """Mirror github_api.gh_pr_update_review_comment."""
         del body  # state not modelled; the log entry is the observable
         self._log("gh_pr_update_review_comment", comment_node_id)
-
-    def gh_pr_resolve_thread(
-        self,
-        thread_id: str,
-        reply_body: str | None = None,
-        dry_run: bool = False,
-    ) -> None:
-        """Mirror github_api.gh_pr_resolve_thread."""
-        if dry_run:
-            return
-        self.resolved_threads.add(thread_id)
-        self._log("gh_pr_resolve_thread", thread_id, reply_body)
 
 
 @pytest.fixture

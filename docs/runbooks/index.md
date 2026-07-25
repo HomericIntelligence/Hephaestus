@@ -11,7 +11,7 @@ needs hands-on recovery.
 | [Automation loop crashed mid-issue](automation-loop-crash.md) | The `hephaestus-automation-loop` process died or a phase timed out and you need to resume safely. |
 | [Recover a corrupted worktree state](corrupted-worktree.md) | An issue's `build/.worktrees/issue-<N>` worktree is dirty, abandoned, or blocking a clean re-run. |
 | [Drive-green stall](ci-driver-stall.md) | A PR with loop-owned `state:implementation-go` remains blocked. |
-| [Claude quota exhausted (429)](claude-quota-exhausted.md) | A stage emits `Verdict: ERROR` and the issue is left unlabeled because the Claude API quota / session limit was hit. |
+| [Claude quota exhausted (429)](claude-quota-exhausted.md) | A stage reports a 429 quota/session-limit infrastructure failure and the issue remains unlabeled. |
 | [Reviving a state:skip-labeled issue](state-skip-revival.md) | An issue was labeled `state:skip` after automation already started work on it (planned or opened a PR) and you want to resume driving it. |
 | [No silent failures](no-silent-failures.md) | Policy reference: why `\|\| true`, `continue-on-error`, and advisory `::warning::` are forbidden, and how to fix a tripped hook. |
 | [Backup and disaster recovery](backup-restore.md) | You need to back up or restore `build/.issue_implementer` state, or rebuild a lost workstation end-to-end (policy: ADR-0012). |
@@ -36,6 +36,6 @@ copy — the module is the source of truth.
 | `state:plan-go` | Plan reviewed and approved; ready for implementation. |
 | `state:plan-no-go` | Plan reviewed and rejected; needs re-planning. |
 | `state:plan-blocked` | Automation is stopped pending a stated decision or dependency. Comments do not resume it. After resolving the block, an external actor must replace this label with exactly one next plan-state label. |
-| `state:implementation-go` | Applied by `pr_review` after a `$athena:pr-review` GO (or inline fallback); it authorizes the loop's merge-wait step. |
+| `state:implementation-go` | Applied only after a structural audit and fresh GitHub facts confirm the exact open, unarmed reviewed head, complete thread state, and exclusive-label readback. Review prose, grades, and GO-shaped output are non-authoritative; merge-wait also requires the current-process reviewed-head proof. |
 | `state:implementation-no-go` | Implementation reviewed and rejected; needs re-work. |
 | `state:skip` | Work item taken out of the loop entirely — operator-applied, auto-applied when the review loop exhausts its budget without a GO, or applied to epics before exclusion. Independent of all other state labels. See [Reviving a state:skip-labeled issue](state-skip-revival.md) to safely clear it. |

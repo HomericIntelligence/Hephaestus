@@ -63,10 +63,14 @@ in §5.1, which tags `state:skip` on epics before any other durable mutation.
  write the label. Before the reviewer runs, `pr_review` snapshots the GitHub
  review inputs and its head SHA, then requires a clean local checkout at that
  exact SHA. The resulting in-memory proof is rechecked against a confirmed,
- unarmed live PR before the label is written. `merge_wait` consumes that proof
- only after fresh open/`main`/unarmed/exclusive-GO admission, then issues one
- SHA-conditional ordinary squash merge. No queue stage creates, disables,
- adopts, or polls an auto-merge request
+ unarmed live PR before the label is written. `merge_wait` uses that same
+ active-run proof before every request in a bounded sequence (default: five)
+ of SHA-conditional ordinary REST squash merges. Each request has fresh
+ open/`main`/unarmed/exclusive-GO admission; only classified retryable HTTP 405
+ readiness and unresolved transport ambiguity can timer-park a later request.
+ The direct adapter makes one request per call and never retries. No queue
+ stage invokes `gh pr merge`, creates, disables, adopts, or polls native
+ auto-merge, manages a merge queue, or uses an administrator bypass
  ([`pr_review.py`](hephaestus/automation/pipeline/stages/pr_review.py),
  [`worker_pool.py`](hephaestus/automation/pipeline/worker_pool.py),
  [`merge_wait.py`](hephaestus/automation/pipeline/stages/merge_wait.py)).
@@ -434,10 +438,9 @@ mapping or `finished(fail)` rather than raising `KeyError`.
 ### Closed-schema stage events
 
 Stage-originated JSONL events use the closed schema in
-[`events.py`](hephaestus/automation/pipeline/events.py). `encode_stage_event`
-rejects raw reviewer text, GitHub bodies and arbitrary event objects.
-The only event type currently defined is
-[`PrReviewZeroThreadNogoEvent`](hephaestus/automation/pipeline/events.py).
+[`events.py`](hephaestus/automation/pipeline/events.py). The event surface is
+intentionally minimal: `encode_stage_event` currently rejects every event, so
+no stage event can carry reviewer text, GitHub bodies, or authorization facts.
 
 ### Scope trimming
 
@@ -496,8 +499,9 @@ Key fields:
  transition gates require a fresh GitHub read; cached labels never authorize
  advancement.
 - `payload` — `dict[str, Any]`. The stage-local scratchpad for cross-step
- handoff (`retry_delay_s`, `*_verdict`, base-captured `base_branch`,
- reviewer text, etc.).
+ handoff (`retry_delay_s`, base-captured `base_branch`, validated audit facts,
+ and process-owned thread receipts). It is not a durable authorization
+ channel.
 - `result` ([`ItemResult`](hephaestus/automation/pipeline/work_item.py)) —
  final `passed / reason / final_stage` written by
  [`_finish`](hephaestus/automation/pipeline/coordinator.py).
@@ -589,7 +593,10 @@ A label alone never authorizes merge. `merge_wait` requires both the
 `state:implementation-go` label and a matching in-memory reviewed-head proof
 on an open `main`, confirmed-unarmed live PR with an exclusive GO label. A
 missing or drifted proof returns to review without a label mutation; a matching
-proof permits one SHA-conditional ordinary squash merge
+proof permits a bounded sequence (default: five) of individual
+SHA-conditional ordinary REST squash-merge requests. Fresh admission precedes
+every request; only retryable HTTP 405 readiness and unresolved transport
+ambiguity can timer-park a later request
 ([`merge_wait.py`](hephaestus/automation/pipeline/stages/merge_wait.py)).
 
 Plan-review labels are the sole durable authority. Review comments explain and
@@ -597,11 +604,13 @@ audit a decision but never authorize a transition, block a stage, or backfill a
 missing label. Comment markers locate actor-owned journal artifacts only;
 foreign marker text is ignored.
 
-Likewise, prose such as `Verdict: GO` or `Verdict: NOGO` is reviewer output,
-not durable routing authority. A reviewer may propose a label from that
-analysis, but the coordinator advances only after the relevant GitHub
-`state:*` mutation succeeds and is confirmed. On restart, seeding reads the
-labels and PR state, not verdict text.
+Implementation reviewers emit a structural audit, not a textual decision.
+The host derives any implementation-state transition from that audit and
+current GitHub facts, then confirms the relevant GitHub `state:*` label. Text
+such as `Verdict: GO` or `Verdict: NOGO` is rejected as an implementation
+review decision and cannot authorize, block, or backfill a transition. Plan
+review instead ends with its explicit `state:plan-*` journal token. On restart,
+seeding reads labels and PR state, never reviewer decision prose.
 
 ---
 
@@ -949,11 +958,16 @@ Architectural contract:
 ### 5.6 Merge wait
 
 Merge wait verifies a still-valid implementation approval against its
-in-memory reviewed-head proof, then issues one ordinary REST squash merge
-conditional on that SHA. Admission requires an open `main` PR, an explicitly
-unarmed record, and an exclusive implementation-GO label. It does not create,
-disable, adopt, or poll an auto-merge request; an existing request is external
-ownership and is left untouched.
+in-memory reviewed-head proof before each request. It may issue a bounded
+sequence (default: five) of individual ordinary REST squash-merge requests,
+each conditional on that SHA. Admission for every request requires an open
+`main` PR, an explicitly unarmed record, and an exclusive implementation-GO
+label. Only classified retryable HTTP 405 readiness and unresolved transport
+ambiguity can timer-park a later request. The direct adapter performs one
+request per call and never retries. Merge wait does not invoke `gh pr merge`,
+create, disable, adopt, or poll native auto-merge, manage a merge queue, or use
+an administrator bypass; an existing request is external ownership and is left
+untouched.
 
 #### Boundary diagram
 
@@ -997,9 +1011,12 @@ Architectural contract:
 - A current-process review proof is bound to the reviewed head commit.
 - Existing external merge ownership is preserved.
 - Missing or drifted proof returns approval to PR review with zero label writes.
-- A matching proof can submit exactly one SHA-conditional normal merge request.
-- HTTP 409, 405 readiness, and ambiguous transport responses are reconciled
-  with fresh lifecycle reads and the per-item merge budget.
+- A matching proof can submit a bounded sequence of individual
+  SHA-conditional normal REST merge requests, each only after fresh admission.
+- HTTP 409 is reconciled with fresh lifecycle reads. Only classified retryable
+  HTTP 405 readiness and unresolved transport ambiguity can timer-park another
+  request while the per-item merge budget remains; all other outcomes stop or
+  return to review as appropriate.
 
 ### 5.7 `finished`
 
@@ -1067,9 +1084,6 @@ Budget provenance (cross-check):
 - `pr_review_hard = 6` ←
  [`_review_phase.py MAX_REVIEW_ITERATIONS_HARD_CAP`](hephaestus/automation/_review_phase.py)
  (= 3 × 2, the progress-aware extension cap).
-- `blocked_address = 2` ←
- [`review_thread_resolver.py _BLOCKED_ADDRESS_MAX_ATTEMPTS`](hephaestus/automation/review_thread_resolver.py)
- (not a stage routing table row but an inner budget).
 - `clone = 2`, `plan = 2`, `plan_cycles = 2`, `implement = 2`,
  `test_fix = 1`, `merge =
  DEFAULT_DRIVE_GREEN_LOOPS = 5` ←

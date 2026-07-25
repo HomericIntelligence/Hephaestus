@@ -62,6 +62,39 @@ def dry_adapter(tmp_path: Path) -> pg.PipelineGitHub:
     return pg.PipelineGitHub("org", dry_run=True, repo_root=tmp_path)
 
 
+@pytest.fixture
+def fully_enforced_branch_protection() -> str:
+    """Return a protection response safe for the automation merge actor."""
+    return json.dumps(
+        {
+            "required_conversation_resolution": {"enabled": True},
+            "enforce_admins": {"enabled": True},
+            "required_pull_request_reviews": {
+                "bypass_pull_request_allowances": {
+                    "users": [],
+                    "teams": [],
+                    "apps": [],
+                }
+            },
+        }
+    )
+
+
+@pytest.fixture
+def fully_enforced_protection_without_bypass_allowances() -> str:
+    """Mirror GitHub's valid full response when no PR bypass is configured."""
+    return json.dumps(
+        {
+            "required_conversation_resolution": {"enabled": True},
+            "enforce_admins": {"enabled": True},
+            "required_pull_request_reviews": {
+                "dismiss_stale_reviews": True,
+                "required_approving_review_count": 1,
+            },
+        }
+    )
+
+
 def test_adapter_satisfies_stage_github_protocol(adapter: pg.PipelineGitHub) -> None:
     """Runtime protocol conformance (mypy checks it statically too)."""
     assert isinstance(adapter, StageGitHub)
@@ -153,6 +186,132 @@ class TestConditionalMerge:
         call_mock.assert_not_called()
 
 
+class TestConversationResolutionAdmission:
+    """The base-branch protection read is narrow, repo-scoped, and fail closed."""
+
+    def test_reads_exact_base_branch_protection_and_accepts_enabled(
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        fully_enforced_branch_protection: str,
+    ) -> None:
+        adapter.repo = "repo"
+        call_mock = MagicMock(
+            return_value=SimpleNamespace(
+                stdout=fully_enforced_branch_protection,
+                returncode=0,
+            )
+        )
+        monkeypatch.setattr(pg, "gh_call", call_mock)
+
+        assert adapter.base_branch_requires_conversation_resolution(7, "main") is True
+        call_mock.assert_called_once_with(
+            ["api", "--method", "GET", "/repos/org/repo/branches/main/protection"],
+            check=False,
+        )
+
+    def test_accepts_valid_protection_without_a_bypass_allowance_field(
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        fully_enforced_protection_without_bypass_allowances: str,
+    ) -> None:
+        """An omitted allowance field represents no configured PR bypass."""
+        adapter.repo = "repo"
+        call_mock = MagicMock(
+            return_value=SimpleNamespace(
+                stdout=fully_enforced_protection_without_bypass_allowances,
+                returncode=0,
+            )
+        )
+        monkeypatch.setattr(pg, "gh_call", call_mock)
+
+        assert adapter.base_branch_requires_conversation_resolution(7, "main") is True
+        call_mock.assert_called_once_with(
+            ["api", "--method", "GET", "/repos/org/repo/branches/main/protection"],
+            check=False,
+        )
+
+    @pytest.mark.parametrize(
+        "protection",
+        [
+            {},
+            {
+                "required_conversation_resolution": {"enabled": False},
+                "enforce_admins": {"enabled": True},
+            },
+            {
+                "required_conversation_resolution": {"enabled": True},
+                "enforce_admins": {"enabled": False},
+            },
+            {"required_conversation_resolution": {"enabled": True}},
+            {
+                "required_conversation_resolution": {"enabled": True},
+                "enforce_admins": {"enabled": "true"},
+            },
+            "not-json",
+        ],
+    )
+    def test_absent_false_or_malformed_protection_flags_fail_closed(
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        protection: dict[str, object] | str,
+    ) -> None:
+        adapter.repo = "repo"
+        stdout = protection if isinstance(protection, str) else json.dumps(protection)
+        monkeypatch.setattr(
+            pg,
+            "gh_call",
+            MagicMock(return_value=SimpleNamespace(stdout=stdout, returncode=0)),
+        )
+
+        assert adapter.base_branch_requires_conversation_resolution(7, "main") is False
+
+    @pytest.mark.parametrize(
+        "bypass_allowances",
+        [
+            {"users": [{"login": "release-admin"}], "teams": [], "apps": []},
+            {"users": [], "teams": [{"slug": "maintainers"}], "apps": []},
+            {"users": [], "teams": [], "apps": [{"slug": "merge-bot"}]},
+            {"users": "not-a-list", "teams": [], "apps": []},
+            None,
+            [],
+        ],
+    )
+    def test_explicit_or_malformed_bypass_allowances_fail_closed(
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        bypass_allowances: object,
+    ) -> None:
+        """Any listed PR-requirement bypass can also evade conversation safety."""
+        adapter.repo = "repo"
+        stdout = json.dumps(
+            {
+                "required_conversation_resolution": {"enabled": True},
+                "enforce_admins": {"enabled": True},
+                "required_pull_request_reviews": {
+                    "bypass_pull_request_allowances": bypass_allowances,
+                },
+            }
+        )
+        call_mock = MagicMock(return_value=SimpleNamespace(stdout=stdout, returncode=0))
+        monkeypatch.setattr(pg, "gh_call", call_mock)
+
+        assert adapter.base_branch_requires_conversation_resolution(7, "main") is False
+        assert call_mock.call_args.args[0][2] == "GET"
+
+    def test_protection_read_is_unavailable_without_a_repo_scope(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        call_mock = MagicMock()
+        monkeypatch.setattr(pg, "gh_call", call_mock)
+
+        assert adapter.base_branch_requires_conversation_resolution(7, "main") is False
+        call_mock.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Mutator mapping matrix: (method, args, patch-owner, underlying-name)
 # 'module' = a function bound into pipeline_github's namespace at import.
@@ -170,7 +329,6 @@ _MUTATOR_CASES = [
     ),
     ("mark_pr_implementation_go", (7,), "pr_manager", "mark_pr_implementation_go"),
     ("mark_pr_implementation_no_go", (7,), "pr_manager", "mark_pr_implementation_no_go"),
-    ("post_review_threads", (7, [], "sum"), "github_api", "gh_pr_review_post"),
     ("skip_epics", ({5: ["epic"]},), "github_api", "skip_epics"),
     ("ensure_state_labels", (), "github_api", "_ensure_labels_exist"),
 ]
@@ -940,6 +1098,7 @@ class TestRepoScoping:
                     "repository": {
                         "pullRequest": {
                             "reviewThreads": {
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
                                 "nodes": [
                                     {
                                         "id": "T1",
@@ -970,7 +1129,7 @@ class TestRepoScoping:
                                         "isResolved": True,
                                         "comments": {"nodes": []},
                                     },
-                                ]
+                                ],
                             }
                         }
                     }
@@ -989,6 +1148,101 @@ class TestRepoScoping:
         assert "-F" in calls[0]
         assert "owner=org" in calls[0]
         assert "name=repo-a" in calls[0]
+
+    def test_repo_scoped_unresolved_threads_fetches_page_after_first_hundred(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A human thread after the first page must still block a GO decision."""
+        calls: list[list[str]] = []
+        first_page_nodes = [
+            {
+                "id": f"T{index}",
+                "isResolved": False,
+                "comments": {"nodes": [{"body": "bot", "author": {"login": "ci-bot"}}]},
+            }
+            for index in range(100)
+        ]
+        second_page_nodes = [
+            {
+                "id": "T100",
+                "isResolved": False,
+                "comments": {"nodes": [{"body": "human", "author": {"login": "reviewer"}}]},
+            }
+        ]
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            after_first_page = "after=cursor-1" in argv
+            payload = {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "nodes": (
+                                    second_page_nodes if after_first_page else first_page_nodes
+                                ),
+                                "pageInfo": {
+                                    "hasNextPage": not after_first_page,
+                                    "endCursor": None if after_first_page else "cursor-1",
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+            return SimpleNamespace(stdout=json.dumps(payload))
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "ci-bot")
+
+        assert pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).count_unresolved_threads(
+            7
+        ) == (100, 1)
+        assert len(calls) == 2
+        assert "after=cursor-1" in calls[1]
+
+    def test_repo_scoped_unresolved_threads_fail_closed_on_truncated_comments(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A human reply after 20 bot comments cannot be omitted from ownership."""
+        all_comments = [
+            {"body": f"bot reply {index}", "author": {"login": "ci-bot"}} for index in range(20)
+        ]
+        all_comments.append({"body": "human reply", "author": {"login": "reviewer"}})
+        payload = {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                            "nodes": [
+                                {
+                                    "id": "T1",
+                                    "isResolved": False,
+                                    "comments": {
+                                        "pageInfo": {
+                                            "hasNextPage": len(all_comments) > 20,
+                                            "endCursor": "comment-cursor-20",
+                                        },
+                                        "nodes": all_comments[:20],
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                }
+            }
+        }
+        monkeypatch.setattr(
+            pg,
+            "gh_call",
+            lambda _argv, **_kwargs: SimpleNamespace(stdout=json.dumps(payload)),
+        )
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "ci-bot")
+
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        with pytest.raises(RuntimeError, match=r"could not fetch all comments.*T1"):
+            adapter.count_unresolved_threads_by_severity(7)
 
     def test_repo_scoped_fetch_error_fails_closed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1101,8 +1355,37 @@ class TestRepoScoping:
             7, [], "summary"
         )
 
-        assert posted == ["thread-1"]
+        assert posted == []
         assert any("repos/org/repo-a/pulls/7/reviews" in call for call in calls)
+
+    def test_repo_scoped_review_post_rejects_mixed_anchor_batch_before_write(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An invalid anchor must not leave a partially posted review batch."""
+        calls: list[list[str]] = []
+        diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+ok\n"
+
+        def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            if argv[:2] == ["pr", "diff"]:
+                return SimpleNamespace(stdout=diff)
+            raise AssertionError(f"unexpected GitHub write/query: {argv}")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        with pytest.raises(RuntimeError, match="anchor outside the current PR diff"):
+            adapter.post_review_threads(
+                7,
+                [
+                    {"path": "a.py", "line": 1, "side": "RIGHT", "body": "valid"},
+                    {"path": "a.py", "line": 2, "side": "RIGHT", "body": "stale"},
+                ],
+                "summary",
+            )
+
+        assert len(calls) == 1
+        assert calls[0][:3] == ["pr", "diff", "7"]
 
     def test_repo_scoped_review_post_warns_on_zero_matched_threads(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
@@ -1155,11 +1438,150 @@ class TestRepoScoping:
             ).post_review_threads(7, [{"path": "a.py", "line": 1, "body": "x"}], "summary")
 
         assert posted == []
-        assert any("matched zero review threads" in r.message for r in caplog.records)
+        assert any(
+            "could not prove immutable sole-comment receipts" in r.message for r in caplog.records
+        )
+
+    def test_repo_scoped_review_post_rejects_same_login_reply_before_receipt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A reply before first receipt readback cannot become a process receipt."""
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            if argv[:2] == ["api", "graphql"]:
+                payload = {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "reviewThreads": {
+                                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                    "nodes": [
+                                        {
+                                            "id": "thread-1",
+                                            "isResolved": False,
+                                            "path": "a.py",
+                                            "line": 1,
+                                            "side": "RIGHT",
+                                            "comments": {
+                                                "pageInfo": {
+                                                    "hasNextPage": False,
+                                                    "endCursor": None,
+                                                },
+                                                "nodes": [
+                                                    {
+                                                        "body": (
+                                                            "<!-- hephaestus-severity: "
+                                                            "major -->\nfinding"
+                                                        ),
+                                                        "author": {"login": "mvillmow"},
+                                                        "pullRequestReview": {"id": "review-node"},
+                                                    },
+                                                    {
+                                                        "body": "human follow-up",
+                                                        "author": {"login": "mvillmow"},
+                                                        "pullRequestReview": None,
+                                                    },
+                                                ],
+                                            },
+                                        }
+                                    ],
+                                }
+                            }
+                        }
+                    }
+                }
+                return SimpleNamespace(stdout=json.dumps(payload))
+            if "repos/org/repo-a/pulls/7/reviews" in argv:
+                return SimpleNamespace(stdout=json.dumps({"id": 999, "node_id": "review-node"}))
+            return SimpleNamespace(stdout="")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        posted = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).post_review_threads(
+            7,
+            [{"path": "a.py", "line": 1, "side": "RIGHT", "severity": "major", "body": "finding"}],
+            "summary",
+        )
+
+        assert posted == []
 
 
-class TestRepoReviewThreadsForReview:
-    """_repo_review_threads_for_review: REST node_id vs GraphQL pullRequestReview.id."""
+class TestRepoReviewThreadReceipts:
+    """Post-time receipt lookup binds immutable first comments to the REST review id."""
+
+    def test_fetches_matching_review_thread_after_first_hundred(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Receipt lookup paginates without accepting another review's threads."""
+        calls: list[list[str]] = []
+        first_page_nodes = [
+            {
+                "id": f"PRRT_other_{index}",
+                "isResolved": False,
+                "comments": {"nodes": [{"pullRequestReview": {"id": "other-review-node"}}]},
+            }
+            for index in range(100)
+        ]
+        second_page_nodes = [
+            {
+                "id": "PRRT_matching",
+                "isResolved": False,
+                "path": "a.py",
+                "line": 1,
+                "side": "RIGHT",
+                "comments": {
+                    "pageInfo": {"hasNextPage": False},
+                    "nodes": [
+                        {
+                            "body": "finding",
+                            "author": {"login": "hephaestus[bot]"},
+                            "pullRequestReview": {"id": "review-node"},
+                        }
+                    ],
+                },
+            },
+            {
+                "id": "PRRT_other_review",
+                "isResolved": False,
+                "comments": {"nodes": [{"pullRequestReview": {"id": "other-review-node"}}]},
+            },
+        ]
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            after_first_page = "after=cursor-1" in argv
+            payload = {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "nodes": (
+                                    second_page_nodes if after_first_page else first_page_nodes
+                                ),
+                                "pageInfo": {
+                                    "hasNextPage": not after_first_page,
+                                    "endCursor": None if after_first_page else "cursor-1",
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+            return SimpleNamespace(stdout=json.dumps(payload))
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        gh = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+
+        receipts = gh._repo_review_thread_receipts_for_review(
+            7,
+            "review-node",
+            [{"path": "a.py", "line": 1, "side": "RIGHT", "body": "finding"}],
+        )
+
+        assert [receipt["id"] for receipt in receipts] == ["PRRT_matching"]
+        assert len(calls) == 2
+        assert "after=cursor-1" in calls[1]
 
     def test_round_trips_rest_node_id_against_graphql_review_id(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1189,14 +1611,20 @@ class TestRepoReviewThreadsForReview:
                                         {
                                             "id": "PRRT_matching",
                                             "isResolved": False,
+                                            "path": "a.py",
+                                            "line": 1,
+                                            "side": "RIGHT",
                                             "comments": {
+                                                "pageInfo": {"hasNextPage": False},
                                                 "nodes": [
                                                     {
+                                                        "body": "finding",
+                                                        "author": {"login": "hephaestus[bot]"},
                                                         "pullRequestReview": {
                                                             "id": rest_review_response["node_id"]
-                                                        }
+                                                        },
                                                     }
-                                                ]
+                                                ],
                                             },
                                         },
                                         {
@@ -1220,9 +1648,13 @@ class TestRepoReviewThreadsForReview:
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
 
         gh = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
-        result = gh._repo_review_threads_for_review(7, str(rest_review_response["node_id"]))
+        result = gh._repo_review_thread_receipts_for_review(
+            7,
+            str(rest_review_response["node_id"]),
+            [{"path": "a.py", "line": 1, "side": "RIGHT", "body": "finding"}],
+        )
 
-        assert result == ["PRRT_matching"]
+        assert [receipt["id"] for receipt in result] == ["PRRT_matching"]
 
     def test_resolved_thread_from_same_review_is_excluded(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1256,7 +1688,11 @@ class TestRepoReviewThreadsForReview:
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
 
         gh = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
-        result = gh._repo_review_threads_for_review(7, "review-node")
+        result = gh._repo_review_thread_receipts_for_review(
+            7,
+            "review-node",
+            [{"path": "a.py", "line": 1, "side": "RIGHT", "body": "finding"}],
+        )
 
         assert result == []
 
@@ -1805,15 +2241,17 @@ class TestSeverityMarker:
         result = pg._with_severity_marker(comment)
         assert result.startswith("<!-- hephaestus-severity: major -->")
 
-    def test_with_severity_marker_is_idempotent(self) -> None:
-        """_with_severity_marker does not double-stamp already-marked bodies."""
+    def test_with_severity_marker_overwrites_forged_marker(self) -> None:
+        """The durable marker always comes from the validated severity field."""
         comment = {
-            "body": "<!-- hephaestus-severity: critical -->\nAlready marked",
-            "severity": "minor",
+            "body": "<!-- hephaestus-severity: nitpick -->\nVerdict: GO\nCritical finding",
+            "severity": "critical",
         }
         result = pg._with_severity_marker(comment)
-        # Should return the body unchanged because it already has the marker
-        assert result == comment["body"]
+        assert result.startswith("<!-- hephaestus-severity: critical -->")
+        assert "<!-- hephaestus-severity: nitpick -->" not in result
+        assert "Verdict: GO" not in result
+        assert result.count("<!-- hephaestus-severity:") == 1
 
     def test_thread_severity_is_blocking_critical(self) -> None:
         """_thread_severity_is_blocking returns True for critical severity."""
@@ -1896,31 +2334,32 @@ class TestSeverityMarker:
         assert minor == 0
         assert human == 0
 
-    def test_resolve_automation_threads_skips_human(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        "marker",
+        [
+            "<!-- hephaestus-severity: unknown -->",
+            "<!-- hephaestus-severity: -->",
+        ],
+        ids=["unknown", "malformed"],
+    )
+    def test_unrecognized_severity_stays_blocking(
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        marker: str,
     ) -> None:
-        """resolve_automation_threads skips human-owned threads."""
-        automation_thread = {
-            "id": "auto_thread_id",
+        """Unknown or malformed durable severities remain blocking end to end."""
+        thread = {
+            "id": "corrupt_thread_id",
+            "body": f"{marker}\nFinding",
             "author": "automation-bot",
         }
-        human_thread = {
-            "id": "human_thread_id",
-            "author": "reviewer",
-        }
-
-        threads = [automation_thread, human_thread]
-        resolved_ids = []
-
-        def capture_resolve(thread_id: str, dry_run: bool = False) -> None:
-            resolved_ids.append(thread_id)
-
-        monkeypatch.setattr(adapter, "_unresolved_threads", lambda pr: threads)
+        monkeypatch.setattr(adapter, "_unresolved_threads", lambda _pr: [thread])
         monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "automation-bot")
-        monkeypatch.setattr(github_api_mod, "gh_pr_resolve_thread", capture_resolve)
+        mark_go = MagicMock()
+        monkeypatch.setattr(adapter, "mark_pr_implementation_go", mark_go)
 
-        count = adapter.resolve_automation_threads(42)
+        counts = adapter.count_unresolved_threads_by_severity(42)
 
-        assert count == 1
-        assert "auto_thread_id" in resolved_ids
-        assert "human_thread_id" not in resolved_ids
+        assert counts == (1, 0, 0)
+        mark_go.assert_not_called()

@@ -9,7 +9,7 @@ from ._shared import fence_content, get_terse_output_directive
 from .catalog import PromptCatalog
 
 #: Severities that BLOCK a GO when their automation thread is unresolved (#1856).
-#: ``minor``/``nitpick`` are advisory — a GO the reviewer returned must not
+#: ``minor``/``nitpick`` are advisory — a clean audit must not
 #: deadlock to state:skip over a nit it declined to block on. An unmarked or
 #: unknown severity is treated as BLOCKING (fail-safe), which reproduces the
 #: pre-#1856 all-blocking behavior when severity is not yet seeded.
@@ -81,7 +81,12 @@ def get_pr_review_analysis_prompt(
         untrusted_notice=fenced.untrusted_notice,
         review_rubric=get_pr_review_rubric().strip(),
         nitpick_directive=nitpick_directive,
-        terse_output_directive=get_terse_output_directive(),
+        terse_output_directive=get_terse_output_directive(
+            terminal_output_contract=(
+                "End with exactly one fenced structural review-audit JSON object; "
+                "do not emit a Verdict line or any other decision token."
+            )
+        ),
     )
 
 

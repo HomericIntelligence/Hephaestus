@@ -269,7 +269,7 @@ class TestROUTES:
         block = "\n".join(source_lines[block_start:block_end])
         assert "_review_phase.py MAX_REVIEW_ITERATIONS (=3)" in block
         assert "_review_phase.py MAX_REVIEW_ITERATIONS_HARD_CAP (=3*2)" in block
-        assert "review_thread_resolver.py _BLOCKED_ADDRESS_MAX_ATTEMPTS (=2)" in block
+        assert "thread handoffs never" in block
         # No ``_review_phase.py:<NN>`` cite may replace the value-tag form.
         cite_lines = [
             tail

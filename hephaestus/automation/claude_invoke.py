@@ -1,10 +1,9 @@
 """Shared Claude-CLI helpers.
 
-Verdict parsing, rate-limit detection, and deterministic-session invocation.
+Rate-limit detection and deterministic-session invocation.
 
 What lives here:
 
-- :func:`parse_review_verdict` — verdict parser used by automation review loops
 - :func:`scan_quota_reset` — shared cross-stream rate-limit scanner so all
   phases get identical 429 handling.
 - :func:`detect_model_usage_cap` — classifier for the model-specific
@@ -610,6 +609,11 @@ def detect_model_usage_cap(*texts: str) -> bool:
     return False
 
 
+# Deprecated historical compatibility parser.  There are no production
+# callers: active implementation review accepts only structural audits and
+# GitHub labels are the sole transition authority.  Do not attach this parser
+# to an agent job or use it for routing; it is retained only for isolated
+# historical-parser unit coverage until the compatibility surface is removed.
 _VERDICT_RE = re.compile(
     r"^\s*\**\s*Verdict\s*:\s*\**\s*(CONDITIONAL[\s-]?GO|GO|NO[\s-]?GO|ERROR)\b",
     re.MULTILINE | re.IGNORECASE,
@@ -620,15 +624,16 @@ _SUMMARY_PAIR_RE = re.compile(
     re.MULTILINE | re.IGNORECASE,
 )
 
-# Sentinel review text emitted when the reviewer subprocess itself fails
-# (e.g. an API 400 from an advisor-tier mismatch, a timeout, or a crash). It
-# parses to ``verdict="ERROR"`` via :func:`parse_review_verdict`, which the
-# review loop treats as inconclusive — re-review next loop, never skip/label.
+# Deprecated companion fixture for the historical compatibility parser.  It
+# is not emitted by an active review loop.
 INFRA_ERROR_REVIEW_TEXT = "Grade: F\nVerdict: ERROR\n"
 
 
 def parse_review_verdict(text: str) -> ReviewVerdict:
-    """Extract grade and Go/NoGo verdict from a review response.
+    """Parse historical textual verdicts for compatibility tests only.
+
+    This function has no production caller.  New code must use structural
+    review-audit parsing and GitHub label/state checks instead.
 
     Looks for lines like:
         Grade: B+

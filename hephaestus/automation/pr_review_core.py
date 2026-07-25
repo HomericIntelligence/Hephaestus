@@ -43,7 +43,6 @@ from hephaestus.agents.runtime import (
 from hephaestus.github.client import PromptTooLongError
 from hephaestus.io.utils import write_secure
 
-from . import _review_utils
 from ._review_utils import log_file_path
 from .agent_config import DEFAULT_AGENT_TIMEOUT
 from .claude_invoke import invoke_claude_with_session, raise_for_error_envelope
@@ -51,6 +50,7 @@ from .claude_models import reviewer_model
 from .git_utils import get_repo_root, get_repo_slug, pr_ref
 from .github_api import gh_pr_review_post
 from .prompts import get_pr_review_analysis_prompt
+from .review_audit import ReviewAudit, parse_review_audit, render_review_audit
 from .session_naming import AGENT_PR_REVIEWER, reviewer_agent
 
 logger = logging.getLogger(__name__)
@@ -190,9 +190,13 @@ def _invoke_and_parse_review_session(
         )
         write_secure(log_file, result.stdout or "")
         review_text = result.stdout or ""
-        parsed = _review_utils.parse_json_block(review_text)
-        parsed["review_text"] = review_text
-        return parsed
+        audit = parse_review_audit(review_text)
+        return {
+            "audit": audit,
+            "comments": [dict(comment) for comment in audit.findings],
+            "summary": audit.summary,
+            "review_text": audit.raw_feedback,
+        }
 
     repo_root = get_repo_root()
     repo_slug = get_repo_slug(repo_root)
@@ -231,11 +235,13 @@ def _invoke_and_parse_review_session(
     except (json.JSONDecodeError, AttributeError):
         response_text = stdout or ""
 
-    parsed = _review_utils.parse_json_block(response_text)
-    # The Verdict:/Grade: line lives in the reviewer prose, not the JSON
-    # summary block. Surface it so callers parse the real verdict.
-    parsed["review_text"] = response_text
-    return parsed
+    audit = parse_review_audit(response_text)
+    return {
+        "audit": audit,
+        "comments": [dict(comment) for comment in audit.findings],
+        "summary": audit.summary,
+        "review_text": audit.raw_feedback,
+    }
 
 
 def run_pr_review_analysis(
@@ -255,11 +261,9 @@ def run_pr_review_analysis(
     Shared core of the standalone ``PRReviewer._run_analysis_session`` and the
     in-loop implementer review step (Stage 2, #28). Builds the PR-review
     analysis prompt, invokes the selected reviewer agent (Claude or Codex), and
-    returns a dict with ``comments`` (inline findings), ``summary`` (the JSON
-    summary, posted as the review body), and ``review_text`` (the full reviewer
-    prose/stdout). The ``Verdict:`` line lives in the prose, not the summary, so
-    callers derive the verdict from ``review_text`` via
-    :func:`~hephaestus.automation.claude_invoke.parse_review_verdict`.
+    returns a dict with a structural ``audit`` value, normalized inline
+    findings, an informational summary, and bounded supplemental feedback.
+    Review prose never carries authorization.
 
     Args:
         pr_number: GitHub PR number being reviewed.
@@ -275,14 +279,25 @@ def run_pr_review_analysis(
         dry_run: When True, skip the agent call and return a placeholder dict.
 
     Returns:
-        Parsed analysis dict with ``"comments"``, ``"summary"``, and
-        ``"review_text"`` (verdict-bearing prose) keys.
+        Parsed analysis dict with ``"audit"``, ``"comments"``, ``"summary"``,
+        and ``"review_text"`` (bounded supplemental feedback) keys.
 
     """
     if dry_run:
         logger.info("[DRY RUN] Would run analysis session for PR #%s", pr_number)
-        review_text = "[DRY RUN] analysis skipped"
-        return {"comments": [], "summary": review_text, "review_text": review_text}
+        audit = ReviewAudit(
+            grade=None,
+            summary="[DRY RUN] analysis skipped",
+            findings=(),
+            raw_feedback="[DRY RUN] analysis skipped",
+            valid=False,
+        )
+        return {
+            "audit": audit,
+            "comments": [],
+            "summary": audit.summary,
+            "review_text": audit.raw_feedback,
+        }
 
     prompt_file = worktree_path / f".claude-pr-review-{issue_number}.md"
     log_file = log_file_path(state_dir, "pr-review-analysis", issue_number)
@@ -444,23 +459,13 @@ def review_pr_inline(
     state_dir: Path,
     dry_run: bool = False,
     timeout: int = DEFAULT_AGENT_TIMEOUT,
-) -> tuple[str, list[str]]:
-    """Review an impl PR in-loop: run analysis, post inline threads, return verdict.
+) -> tuple[ReviewAudit, list[str]]:
+    """Review an impl PR in-loop and return structural audit plus thread ids.
 
     This is the in-loop equivalent of ``PRReviewer._review_pr`` used by the
-    Stage 2 implementer session (#28). It runs a FRESH reviewer session per
-    iteration (``reviewer_agent(AGENT_PR_REVIEWER, iteration)``) so the reviewer
-    never inherits its own prior verdict, posts the analysis findings as inline
-    PR review threads via :func:`gh_pr_review_post`, and returns the reviewer's
-    VERDICT-BEARING PROSE (carrying the ``Verdict:`` line) plus the IDs of the
-    threads it created.
-
-    The verdict (``Verdict: GO|NOGO``) lives in the reviewer prose, NOT in the
-    JSON ``summary`` field — so this returns ``review_text`` (the prose), which
-    the caller feeds to :func:`parse_review_verdict`. The (verdict-free) JSON
-    ``summary`` is still what gets POSTED to GitHub as the review body. Returning
-    ``summary`` here instead would make every well-formed ``Verdict: NOGO`` parse
-    as AMBIGUOUS.
+    Stage 2 implementer session (#28). It runs a fresh reviewer session per
+    iteration, posts normalized findings with an audit-only body, and never
+    treats review prose as authorization.
 
     Args:
         pr_number: GitHub PR number to review.
@@ -473,9 +478,8 @@ def review_pr_inline(
         dry_run: When True, skip the agent call and posting.
 
     Returns:
-        ``(review_text, posted_thread_ids)`` where ``review_text`` is the
-        verdict-bearing reviewer prose. On dry-run, returns a verdict-bearing
-        placeholder and an empty list.
+        ``(audit, posted_thread_ids)``. On dry-run, the audit is invalid and no
+        review threads are posted.
 
     """
     review_token = reviewer_agent(AGENT_PR_REVIEWER, iteration)
@@ -490,11 +494,10 @@ def review_pr_inline(
         dry_run=dry_run,
         timeout=timeout,
     )
-    comments: list[dict[str, Any]] = analysis.get("comments", [])
-    summary: str = analysis.get("summary", "")
-    # The verdict lives in the prose; fall back to summary only if review_text is
-    # somehow absent (keeps the loop functioning rather than KeyError-ing).
-    review_text: str = analysis.get("review_text") or summary
+    audit = analysis.get("audit")
+    if not isinstance(audit, ReviewAudit):
+        audit = parse_review_audit(str(analysis.get("review_text") or ""))
+    comments = [dict(comment) for comment in audit.findings]
 
     if dry_run:
         logger.info(
@@ -502,12 +505,12 @@ def review_pr_inline(
             len(comments),
             pr_ref(pr_number),
         )
-        return review_text, []
+        return audit, []
 
     thread_ids = gh_pr_review_post(
         pr_number=pr_number,
         comments=comments,
-        summary=summary,
+        summary=render_review_audit(audit),
         dry_run=False,
         # #1083: a later review iteration commenting on a line an earlier
         # iteration already flagged edits that comment instead of duplicating.
@@ -519,4 +522,4 @@ def review_pr_inline(
         len(thread_ids),
         pr_ref(pr_number),
     )
-    return review_text, thread_ids
+    return audit, thread_ids

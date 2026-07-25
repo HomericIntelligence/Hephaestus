@@ -14,7 +14,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hephaestus.automation.claude_invoke import parse_review_verdict
 from hephaestus.automation.pr_review_core import (
     AGGRESSIVE_DIFF_BUDGET_CHARS,
     DEFAULT_DIFF_BUDGET_CHARS,
@@ -23,6 +22,7 @@ from hephaestus.automation.pr_review_core import (
     review_pr_inline,
     run_pr_review_analysis,
 )
+from hephaestus.automation.review_audit import ReviewAudit
 from hephaestus.github.client import PromptTooLongError
 
 
@@ -320,7 +320,7 @@ class TestRunPrReviewAnalysis:
             patch("hephaestus.automation.pr_review_core.run_agent_text") as mock_agent,
         ):
             mock_agent.return_value = MagicMock(
-                stdout='Verdict: GO\n```json\n{"comments": [], "summary": "ok"}\n```'
+                stdout='```json\n{"grade": "A", "comments": [], "summary": "ok"}\n```'
             )
             run_pr_review_analysis(
                 pr_number=1,
@@ -334,11 +334,13 @@ class TestRunPrReviewAnalysis:
 
         assert captured["advise_findings"] == "prior team finding"
 
-    def test_claude_path_preserves_review_text_for_verdict(self, tmp_path: Path) -> None:
-        """Claude JSON summary may omit Verdict, but full prose must be returned."""
+    def test_claude_path_uses_structural_audit(self, tmp_path: Path) -> None:
+        """Claude JSON output produces a structural audit; prose is supplemental."""
         response_text = (
             "Detailed review.\n\nGrade: A\nVerdict: GO\n\n"
-            "```json\n" + json.dumps({"comments": [], "summary": "No inline findings."}) + "\n```"
+            "```json\n"
+            + json.dumps({"grade": "A", "comments": [], "summary": "No inline findings."})
+            + "\n```"
         )
 
         with (
@@ -360,14 +362,17 @@ class TestRunPrReviewAnalysis:
             )
 
         assert out["summary"] == "No inline findings."
-        assert "Verdict: GO" in out["review_text"]
-        assert parse_review_verdict(out["review_text"]).verdict == "GO"
+        assert out["audit"].valid is True
+        assert "Verdict:" in out["review_text"]
+        assert out["audit"].grade == "A"
 
-    def test_codex_path_preserves_stdout_for_verdict(self, tmp_path: Path) -> None:
-        """Codex stdout prose must survive JSON parsing for verdict extraction."""
+    def test_codex_path_uses_structural_audit(self, tmp_path: Path) -> None:
+        """Codex stdout uses the same structural audit contract."""
         stdout = (
             "Review complete.\n\nGrade: D\nVerdict: NOGO\n\n"
-            "```json\n" + json.dumps({"comments": [], "summary": "Needs fixes."}) + "\n```"
+            "```json\n"
+            + json.dumps({"grade": "D", "comments": [], "summary": "Needs fixes."})
+            + "\n```"
         )
 
         with patch(
@@ -385,12 +390,13 @@ class TestRunPrReviewAnalysis:
             )
 
         assert out["summary"] == "Needs fixes."
-        assert "Verdict: NOGO" in out["review_text"]
-        assert parse_review_verdict(out["review_text"]).verdict == "NOGO"
+        assert out["audit"].valid is True
+        assert "Verdict:" in out["review_text"]
+        assert out["audit"].grade == "D"
 
     def test_uses_canonical_review_utils_parser_patch_target(self, tmp_path: Path) -> None:
         """PR-review parsing goes through the canonical patch target."""
-        stdout = 'review prose\n```json\n{"comments": [], "summary": "real"}\n```'
+        stdout = 'review prose\n```json\n{"grade":"B","comments": [], "summary": "real"}\n```'
 
         with (
             patch(
@@ -398,9 +404,9 @@ class TestRunPrReviewAnalysis:
                 return_value=MagicMock(stdout=stdout),
             ),
             patch(
-                "hephaestus.automation._review_utils.parse_json_block",
-                return_value={"comments": [], "summary": "patched"},
-            ) as parse_json,
+                "hephaestus.automation.pr_review_core.parse_review_audit",
+                return_value=ReviewAudit("B", "patched", (), "review prose", True),
+            ) as parse_audit,
         ):
             out = run_pr_review_analysis(
                 pr_number=1,
@@ -412,9 +418,9 @@ class TestRunPrReviewAnalysis:
                 dry_run=False,
             )
 
-        parse_json.assert_called_once_with(stdout)
+        parse_audit.assert_called_once_with(stdout)
         assert out["summary"] == "patched"
-        assert out["review_text"] == stdout
+        assert out["review_text"] == "review prose"
 
     def test_prompt_passed_via_stdin_not_argv(self, tmp_path: Path) -> None:
         """The reviewer prompt is piped via stdin, never embedded in argv.
@@ -428,8 +434,9 @@ class TestRunPrReviewAnalysis:
 
         def _fake_invoke(**kwargs: object) -> tuple[str, str]:
             captured.update(kwargs)
+            review_json = json.dumps({"grade": "A", "comments": [], "summary": "ok"})
             return (
-                '{"result": "```json\\n{\\"comments\\": [], \\"summary\\": \\"ok\\"}\\n```"}',
+                json.dumps({"result": f"```json\n{review_json}\n```"}),
                 "",
             )
 
@@ -460,8 +467,9 @@ class TestRunPrReviewAnalysis:
             calls.append({"prompt": prompt, **kwargs})
             if len(calls) == 1:
                 return ('{"is_error": true, "result": "Prompt is too long"}', "")
+            review_json = json.dumps({"grade": "A", "comments": [], "summary": "ok"})
             return (
-                '{"result": "```json\\n{\\"comments\\": [], \\"summary\\": \\"ok\\"}\\n```"}',
+                json.dumps({"result": f"```json\n{review_json}\n```"}),
                 "",
             )
 
@@ -531,7 +539,22 @@ class TestReviewPrInline:
         analysis = {
             "comments": [{"path": "a.py", "line": 1, "body": "fix"}],
             "summary": "Findings for GitHub.",
-            "review_text": "Full reviewer prose.\n\nGrade: C\nVerdict: NOGO\n",
+            "review_text": "Full reviewer prose.",
+            "audit": ReviewAudit(
+                grade="C",
+                summary="Findings for GitHub.",
+                findings=(
+                    {
+                        "path": "a.py",
+                        "line": 1,
+                        "side": "RIGHT",
+                        "severity": "major",
+                        "body": "fix",
+                    },
+                ),
+                raw_feedback="Full reviewer prose.",
+                valid=True,
+            ),
         }
         with (
             patch(
@@ -543,7 +566,7 @@ class TestReviewPrInline:
                 return_value=["thread-1"],
             ) as mock_post,
         ):
-            summary, thread_ids = review_pr_inline(
+            audit, thread_ids = review_pr_inline(
                 pr_number=42,
                 issue_number=1,
                 worktree_path=tmp_path,
@@ -555,12 +578,13 @@ class TestReviewPrInline:
             )
 
         assert thread_ids == ["thread-1"]
-        assert "NOGO" in summary
+        assert isinstance(audit, ReviewAudit)
+        assert audit.grade == "C"
         # FRESH per-iteration reviewer session: reviewer_agent(AGENT_PR_REVIEWER, 2).
         assert mock_analysis.call_args.kwargs["review_agent"] == "pr-reviewer-r2"
         mock_post.assert_called_once()
         assert mock_post.call_args.kwargs["pr_number"] == 42
-        assert mock_post.call_args.kwargs["summary"] == "Findings for GitHub."
+        assert "Review summary: Findings for GitHub." in mock_post.call_args.kwargs["summary"]
 
     def test_dry_run_skips_posting(self, tmp_path: Path) -> None:
         with patch("hephaestus.automation.pr_review_core.gh_pr_review_post") as mock_post:
@@ -578,20 +602,15 @@ class TestReviewPrInline:
         mock_post.assert_not_called()
 
 
-class TestVerdictFromProseNotSummary:
-    """The Grade/Verdict pair lives in review prose, not the JSON summary.
+class TestStructuralAuditNotProse:
+    """Structural audit fields drive review handling; prose is supplemental."""
 
-    Regression for the AMBIGUOUS misread: review_pr_inline must return the
-    verdict-bearing prose so parse_review_verdict sees `Grade`/`Verdict`, even
-    though the JSON `summary` field (posted to GitHub) carries no verdict line.
-    """
-
-    def test_run_analysis_surfaces_review_text_with_verdict(self, tmp_path: Path) -> None:
-        """run_pr_review_analysis returns the prose body (carrying Verdict:) as review_text."""
+    def test_run_analysis_keeps_prose_supplemental(self, tmp_path: Path) -> None:
+        """A legacy decision token in prose does not change the structural audit."""
         prose = (
             "## Review\nFindings here.\n\n"
             "Grade: F\nVerdict: NOGO — two real defects.\n\n"
-            '```json\n{"comments": [], "summary": "two defects (no verdict here)"}\n```'
+            '```json\n{"grade": "F", "comments": [], "summary": "two defects"}\n```'
         )
         # Claude wraps the prose in a JSON result envelope.
         envelope = json.dumps({"result": prose})
@@ -616,20 +635,33 @@ class TestVerdictFromProseNotSummary:
                 state_dir=tmp_path,
                 dry_run=False,
             )
-        # summary is the JSON field (no verdict); review_text is the prose (has verdict).
-        assert out["summary"] == "two defects (no verdict here)"
-        assert "Grade: F\nVerdict: NOGO" in out["review_text"]
+        assert out["summary"] == "two defects"
+        assert out["audit"].grade == "F"
+        assert "Verdict: NOGO" in out["review_text"]
 
-    def test_review_pr_inline_returns_verdict_text_not_summary(self, tmp_path: Path) -> None:
-        """review_pr_inline returns the verdict-bearing prose, so the loop parses NOGO."""
-        from hephaestus.automation.claude_invoke import parse_review_verdict
-
+    def test_review_pr_inline_returns_structural_audit_not_prose(self, tmp_path: Path) -> None:
+        """review_pr_inline returns the structural audit and audit-only comment."""
         analysis = {
             "comments": [
                 {"path": "a.py", "line": 1, "side": "RIGHT", "severity": "major", "body": "x"}
             ],
             "summary": "a defect (no verdict token here)",
-            "review_text": "## Review\nProse.\n\nGrade: F\nVerdict: NOGO — a real defect.\n",
+            "review_text": "## Review\nProse.\n\nVerdict: NOGO — a real defect.\n",
+            "audit": ReviewAudit(
+                grade="F",
+                summary="a defect",
+                findings=(
+                    {
+                        "path": "a.py",
+                        "line": 1,
+                        "side": "RIGHT",
+                        "severity": "major",
+                        "body": "x",
+                    },
+                ),
+                raw_feedback="## Review\nProse.",
+                valid=True,
+            ),
         }
         with (
             patch(
@@ -639,7 +671,7 @@ class TestVerdictFromProseNotSummary:
                 "hephaestus.automation.pr_review_core.gh_pr_review_post", return_value=["thread-1"]
             ),
         ):
-            review_text, thread_ids = review_pr_inline(
+            audit, thread_ids = review_pr_inline(
                 pr_number=1,
                 issue_number=1,
                 worktree_path=tmp_path,
@@ -649,6 +681,6 @@ class TestVerdictFromProseNotSummary:
                 state_dir=tmp_path,
                 dry_run=False,
             )
-        # The returned text must carry the verdict so the loop reads NOGO, not AMBIGUOUS.
-        assert parse_review_verdict(review_text).verdict == "NOGO"
+        assert isinstance(audit, ReviewAudit)
+        assert audit.grade == "F"
         assert thread_ids == ["thread-1"]

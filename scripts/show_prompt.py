@@ -237,8 +237,7 @@ def build_prompt(
         return get_impl_resume_feedback_prompt(
             issue_number=issue_number,
             prev_iteration=iteration,
-            verdict="NOGO",
-            review_text="(previous review text)",
+            review_feedback="(previous review feedback)",
         )
 
     # -- PR review stages ---------------------------------------------------

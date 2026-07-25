@@ -251,8 +251,9 @@ class StageGitHub(Protocol):
 
         Mirrors ``_review_phase._count_unresolved_threads_blocking_go``
         (#1152): the pr_review EVAL gate — a GO only stands with zero of
-        both; open human threads yield HUMAN_BLOCKED, open automation
-        threads downgrade GO to NOGO. This read resolves nothing.
+        both; open human threads yield HUMAN_BLOCKED, while open automation
+        threads require a human verification/reply/resolution handoff. This
+        read never resolves a GitHub thread.
         """
         ...
 
@@ -260,8 +261,8 @@ class StageGitHub(Protocol):
         """Return (blocking_automation, minor_automation, human) unresolved counts (#1856)."""
         ...
 
-    def resolve_automation_threads(self, pr_number: int) -> int:
-        """Resolve unresolved automation-owned review threads; return the count (#1856)."""
+    def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+        """Return fresh unresolved review-thread facts, including ownership."""
         ...
 
     def create_pr(self, issue_number: int, branch: str, title: str, body: str) -> int:
@@ -307,20 +308,25 @@ class StageGitHub(Protocol):
 
     def post_review_threads(
         self, pr_number: int, threads: list[dict[str, Any]], summary: str
-    ) -> list[str]:
-        """Durably post surviving review threads to the PR; return thread ids.
+    ) -> list[dict[str, Any]]:
+        """Post review threads and return immutable post-time process receipts.
 
-        The pr_review POST step's durable write (doc section 5 step 3). The
-        coordinator maps this onto ``gh_pr_review_post``.
+        Each receipt identifies one created thread and proves its sole initial
+        comment's content and review identity at the post/readback boundary.
+        A reply observed before that proof must produce no receipt; later
+        process resolution therefore fails closed rather than treating a
+        same-login human reply as automation-owned.
         """
         ...
 
     def mark_pr_implementation_go(self, pr_number: int) -> None:
         """Durably apply ``state:implementation-go`` to the PR.
 
-        The PR review stage applies this after its normal `$athena:pr-review`
-        invocation (or its inline-review fallback) reports GO. No external CI
-        status or secondary artifact can apply it.
+        The PR review stage requests this only after complete structural audit
+        facts, live thread facts, and an exact reviewed open/unarmed head pass
+        its mutation guard. A post-write readback must still prove the same
+        head and exclusive label. Audit prose, grades, CI, and secondary
+        artifacts are informational rather than label authority.
         """
         ...
 
@@ -342,6 +348,20 @@ class StageGitHub(Protocol):
     def gh_pr_merge_readiness(self, pr_number: int) -> dict[str, Any] | None:
         """Read operational normal-merge readiness after an HTTP 405 response."""
         pass
+
+    def base_branch_requires_conversation_resolution(
+        self, pr_number: int, base_branch: str
+    ) -> bool:
+        """Return whether this PR base branch has server-enforced conversation resolution.
+
+        The read is scoped to the accessor's explicit repository and the exact
+        base branch admitted for ``pr_number``. Admission requires enforced
+        conversation resolution and administrator enforcement, with no
+        explicit PR-bypass allowances. ``False`` includes an absent,
+        unreadable, or malformed branch-protection response and must prevent a
+        normal merge request.
+        """
+        ...
 
     def merge_pr_if_head(self, pr_number: int, reviewed_sha: str) -> ConditionalMergeResult:
         """Perform one immediate normal merge conditional on ``reviewed_sha``."""

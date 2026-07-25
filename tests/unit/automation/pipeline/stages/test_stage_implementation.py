@@ -90,7 +90,7 @@ class TestComposedPromptBuilders:
         prompt = build_test_fix_prompt(42, 0, "FAILED tests/unit/test_x.py::test_y")
 
         assert "FAILED tests/unit/test_x.py::test_y" in prompt
-        assert "NOGO" in prompt  # framed as the resume template's NOGO feedback
+        assert "Address every concrete finding above" in prompt
 
 
 class TestImplementationStageOnEnter:

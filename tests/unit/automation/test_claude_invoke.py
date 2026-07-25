@@ -1,4 +1,4 @@
-"""Tests for the review-verdict parser used by automation review loops."""
+"""Tests for Claude invocation helpers and inert parser compatibility."""
 
 from __future__ import annotations
 
@@ -124,7 +124,7 @@ class TestDetectServerOverload:
 
 
 class TestParseReviewVerdict:
-    """Tests for parsing Grade and Verdict lines from review output."""
+    """Compatibility tests for an inert historical text parser."""
 
     def test_unambiguous_go(self) -> None:
         """Parse a clean GO with letter grade."""
@@ -197,11 +197,10 @@ class TestParseReviewVerdict:
 
 
 class TestInfraErrorVerdict:
-    """Reviewer-infrastructure failures parse to a distinct ERROR verdict.
+    """Historical parser compatibility retains a distinct ERROR result.
 
-    A 400/timeout/crash from the reviewer subprocess must NOT be laundered into
-    a real ``NOGO`` — that would burn review iterations and trigger a spurious
-    ``state:skip`` on a PR that was never actually reviewed (#911 / PR #1069).
+    Active reviewers return structural audits, so this fixture is never emitted
+    or routed by a production review loop.
     """
 
     def test_sentinel_text_parses_to_error_verdict(self) -> None:
@@ -378,7 +377,7 @@ _VERDICT_TOKENS = ["GO", "NOGO", "NO-GO", "NO GO", "ERROR"]
 
 
 class TestParseReviewVerdictProperties:
-    """Property-based fuzz coverage for parse_review_verdict (#1470)."""
+    """Property-based coverage for inert parser compatibility (#1470)."""
 
     @given(st.text())
     def test_never_raises_and_preserves_raw(self, text: str) -> None:

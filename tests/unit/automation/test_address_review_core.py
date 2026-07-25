@@ -41,27 +41,6 @@ class TestParseAddressedBlock:
         }
 
 
-class TestResolveAddressedThreads:
-    """resolve_addressed_threads retains its hallucination guard."""
-
-    def test_resolves_only_presented_threads(self) -> None:
-        with patch.object(core, "gh_pr_resolve_thread") as mock_resolve:
-            core.resolve_addressed_threads(
-                ["t-real", "t-hallucinated"],
-                {"t-real": "fixed"},
-                {"t-real"},
-                dry_run=False,
-            )
-
-        mock_resolve.assert_called_once_with("t-real", dry_run=False)
-
-    def test_forwards_dry_run(self) -> None:
-        with patch.object(core, "gh_pr_resolve_thread") as mock_resolve:
-            core.resolve_addressed_threads(["t1"], {"t1": "r"}, {"t1"}, dry_run=True)
-
-        mock_resolve.assert_called_once_with("t1", dry_run=True)
-
-
 class TestBuildAddressFixPrompt:
     """Tests for prompt construction and classifier forwarding."""
 

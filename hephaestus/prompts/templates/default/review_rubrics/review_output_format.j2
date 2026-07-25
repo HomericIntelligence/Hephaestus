@@ -1,17 +1,20 @@
 
-**Required output format (verdict contract — MANDATORY):**
+**Required output format (structural audit — MANDATORY):**
 
-End your response with EXACTLY these two lines, in this order, each on its own
-line, and emit NOTHING after them (no trailing prose, no closing remarks):
+End with exactly one fenced JSON object and emit no textual decision line.
+Implementation authority is represented only by the live GitHub
+implementation-state label after the PR exists; this pre-PR compatibility
+review remains informational.
 
+```json
+{"grade": "A", "summary": "...", "comments": [
+  {"path": "...", "line": 1, "side": "RIGHT", "severity": "major", "body": "..."}
+]}
 ```
-Grade: <A|B|C|D|F>
-Verdict: <GO|NOGO>
-```
 
-The `Verdict:` line MUST be present and MUST read either `Verdict: GO` or
-`Verdict: NOGO`. Omitting it, or writing any other token, is a
-CONTRACT VIOLATION (do not rely on a reader inferring the verdict). GO is
-reserved for cases where you are CONFIDENT the artifact is ready as-is. Any
-major finding, missing dimension coverage, or "needs another iteration"
-critique → Verdict: NOGO. When in doubt, NOGO.
+`grade` is one of `A`, `B`, `C`, `D`, `E`, or `F`; `summary` is a concise
+informational summary; and `comments` is an array of concrete findings. Each
+comment must provide a repository-relative `path`, positive changed-line
+`line`, `"RIGHT"` side, one of `critical`, `major`, `minor`, or `nitpick`
+severity, and actionable `body`. Emit an empty `comments` array only when no
+findings remain. Do not emit `Verdict:` or any other approval/rejection token.
