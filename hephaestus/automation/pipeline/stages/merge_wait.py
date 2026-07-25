@@ -307,9 +307,10 @@ class MergeWaitStage(Stage):
         # now-clean readiness result must therefore wait for a fresh turn: a
         # later entry will re-read the authoritative admission facts before it
         # considers another SHA-conditional request.
-        fingerprint = self._readiness_fingerprint(readiness)
-        if fingerprint is not None:
-            item.payload[_DECLINED_READINESS_FINGERPRINT] = fingerprint
+        if self._requires_declined_readiness_guard(readiness):
+            fingerprint = self._readiness_fingerprint(item, readiness)
+            if fingerprint is not None:
+                item.payload[_DECLINED_READINESS_FINGERPRINT] = fingerprint
         parked = self._wait_for_readiness(item, ctx, readiness=readiness, park_if_ready=True)
         if parked is None:  # Defensive type boundary; park_if_ready never returns None.
             return self._park_for_readiness(item, ctx)
@@ -366,7 +367,7 @@ class MergeWaitStage(Stage):
             return StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_unavailable")
         if isinstance(readiness_head, str) and readiness_head and readiness_head != reviewed_head:
             return self._park_for_readiness(item, ctx)
-        fingerprint = self._readiness_fingerprint(readiness)
+        fingerprint = self._readiness_fingerprint(item, readiness)
         declined_fingerprint = self._declined_readiness_fingerprint(item, fingerprint)
         if status in _REQUESTABLE_READINESS and mergeable == "MERGEABLE":
             return self._requestable_readiness_outcome(
@@ -383,13 +384,28 @@ class MergeWaitStage(Stage):
         return self._park_for_readiness(item, ctx)
 
     @staticmethod
-    def _readiness_fingerprint(readiness: dict[str, Any]) -> list[str] | None:
-        """Return the readiness facts that must change after a 405 before re-requesting."""
+    def _requires_declined_readiness_guard(readiness: dict[str, Any]) -> bool:
+        """Keep one accepted optional-status request from repeatedly consuming attempts."""
+        return (
+            str(readiness.get("mergeStateStatus") or "").upper() == "UNSTABLE"
+            and str(readiness.get("mergeable") or "").upper() == "MERGEABLE"
+        )
+
+    @staticmethod
+    def _readiness_fingerprint(item: WorkItem, readiness: dict[str, Any]) -> list[str] | None:
+        """Bind a declined optional-status request to its reviewed proof."""
         readiness_head = readiness.get("headRefOid")
-        if not isinstance(readiness_head, str) or not readiness_head:
+        proof_generation = item.payload.get("reviewed_pr_proof_generation", 0)
+        if (
+            not isinstance(readiness_head, str)
+            or not readiness_head
+            or isinstance(proof_generation, bool)
+            or not isinstance(proof_generation, int)
+        ):
             return None
         return [
             readiness_head,
+            str(proof_generation),
             str(readiness.get("mergeable") or "").upper(),
             str(readiness.get("mergeStateStatus") or "").upper(),
         ]

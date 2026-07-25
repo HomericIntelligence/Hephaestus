@@ -738,6 +738,92 @@ def test_persistent_405_unstable_readiness_does_not_duplicate_the_put(
     assert github.merge_attempts == [(12, "a" * 40)]
 
 
+def test_persistent_405_clean_readiness_retries_after_one_fresh_wait(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A same-state CLEAN 405 preserves the established fresh-turn retry contract."""
+    clean = {
+        **_open_pr(),
+        "mergeable": "MERGEABLE",
+        "mergeStateStatus": "CLEAN",
+    }
+    github = _ConditionalGitHub(
+        states=[_open_pr() for _ in range(5)] + [{"state": "MERGED"}],
+        merge_results=[
+            ConditionalMergeResult(
+                status=405,
+                body={"message": "not ready"},
+                transport_error=False,
+                malformed=False,
+                dry_run=False,
+            ),
+            ConditionalMergeResult(
+                status=200,
+                body={"merged": True},
+                transport_error=False,
+                malformed=False,
+                dry_run=False,
+            ),
+        ],
+        readiness=[clean, clean, clean],
+    )
+    item = _reviewed_item(make_work_item)
+    stage = MergeWaitStage()
+    ctx = make_ctx(github=github, budget_fn=lambda _route: 2)
+    ctx.config.enable_learn = False
+
+    assert stage.step(item, ctx) == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
+    assert stage.step(item, ctx) == StageOutcome(Disposition.FINISH_PASS, "merged")
+    assert github.merge_attempts == [(12, "a" * 40), (12, "a" * 40)]
+
+
+def test_fresh_same_head_proof_retries_a_prior_unstable_decline(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A re-review of unchanged code gets its own permitted conditional request."""
+    unstable = {
+        **_open_pr(),
+        "mergeable": "MERGEABLE",
+        "mergeStateStatus": "UNSTABLE",
+    }
+
+    class FreshProofGitHub(_ConditionalGitHub):
+        def gh_pr_state(self, pr_number: int) -> dict[str, object] | None:
+            del pr_number
+            return {"state": "MERGED"} if len(self.merge_attempts) == 2 else _open_pr()
+
+    github = FreshProofGitHub(
+        merge_results=[
+            ConditionalMergeResult(
+                status=405,
+                body={"message": "not ready"},
+                transport_error=False,
+                malformed=False,
+                dry_run=False,
+            ),
+            ConditionalMergeResult(
+                status=200,
+                body={"merged": True},
+                transport_error=False,
+                malformed=False,
+                dry_run=False,
+            ),
+        ],
+        readiness=[unstable, unstable, unstable],
+    )
+    item = _reviewed_item(make_work_item)
+    stage = MergeWaitStage()
+    ctx = make_ctx(github=github, budget_fn=lambda _route: 2)
+    ctx.config.enable_learn = False
+
+    assert stage.step(item, ctx) == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
+
+    item.payload["reviewed_pr_proof_generation"] = 1
+
+    assert stage.step(item, ctx) == StageOutcome(Disposition.FINISH_PASS, "merged")
+    assert github.merge_attempts == [(12, "a" * 40), (12, "a" * 40)]
+
+
 @pytest.mark.parametrize("merge_state_status", ["CONFLICTING", "DIRTY"])
 def test_405_conflicting_or_dirty_readiness_is_terminal(
     make_ctx: Any, make_work_item: Any, merge_state_status: str
