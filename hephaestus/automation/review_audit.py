@@ -20,9 +20,10 @@ _JSON_BLOCK_RE = re.compile(
 _VALID_GRADES = frozenset("ABCDEF")
 _VALID_SEVERITIES = frozenset({"critical", "major", "minor", "nitpick"})
 _RESERVED_AUTHORITY_CLAIM_RE = re.compile(
-    r"\b(?:verdict|decision)\s*:\s*[^\r\n]*"
-    r"|\bimplementation\s+approved\b"
-    r"|\bstate\s*:\s*implementation-go(?:\s+applied)?\b",
+    r"\b(?:verdict|decision|approval|rejection)\s*:\s*[^\r\n]*"
+    r"|\bimplementation[\s_-]+(?:approval|rejection)\b[^\r\n]*"
+    r"|\bimplementation\s+(?:is\s+)?(?:approved|rejected|go|no[-\s]?go|nogo)\b[^\r\n]*"
+    r"|\bstate\s*:\s*implementation-(?:no-)?go(?:\s+applied)?\b",
     re.IGNORECASE,
 )
 _SEVERITY_MARKER_RE = re.compile(r"(?im)^[ \t]*<!--\s*hephaestus-severity\s*:")

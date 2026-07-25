@@ -621,19 +621,22 @@ def _review_threads_for_review(pr_number: int, review_id: str) -> list[str]:
         return []
 
     query = (
-        "query($owner:String!,$name:String!,$number:Int!){"
+        "query($owner:String!,$name:String!,$number:Int!,$after:String){"
         "  repository(owner:$owner,name:$name){"
         "    pullRequest(number:$number){"
-        "      reviewThreads(first:100){"
+        "      reviewThreads(first:100,after:$after){"
+        "        pageInfo{ hasNextPage endCursor }"
         "        nodes{ id isResolved comments(first:1){ nodes{ pullRequestReview{ id } } } }"
         "      }"
         "    }"
         "  }"
         "}"
     )
+    seen: dict[str, None] = {}
+    after: str | None = None
     try:
-        result = _api._gh_call(
-            [
+        while True:
+            argv = [
                 "api",
                 "graphql",
                 "-f",
@@ -645,35 +648,40 @@ def _review_threads_for_review(pr_number: int, review_id: str) -> list[str]:
                 "-F",
                 f"number={int(pr_number)}",
             ]
-        )
-        data = json.loads(result.stdout)
-        _api._check_graphql_errors(data, f"_review_threads_for_review(pr={pr_number})")
+            if after is not None:
+                argv.extend(["-F", f"after={after}"])
+            result = _api._gh_call(argv)
+            data = json.loads(result.stdout)
+            _api._check_graphql_errors(data, f"_review_threads_for_review(pr={pr_number})")
+            review_threads = (
+                data.get("data", {})
+                .get("repository", {})
+                .get("pullRequest", {})
+                .get("reviewThreads", {})
+            )
+            for node in review_threads.get("nodes", []):
+                if node.get("isResolved"):
+                    continue
+                first_comments = node.get("comments", {}).get("nodes", [])
+                if not first_comments:
+                    continue
+                review = first_comments[0].get("pullRequestReview") or {}
+                if review.get("id") != review_id:
+                    continue
+                tid = node.get("id")
+                if tid:
+                    seen[tid] = None
+            page_info = review_threads.get("pageInfo", {})
+            if not page_info.get("hasNextPage"):
+                break
+            next_cursor = page_info.get("endCursor")
+            if not isinstance(next_cursor, str) or not next_cursor or next_cursor == after:
+                raise RuntimeError("could not fetch all PR review threads")
+            after = next_cursor
     except (subprocess.CalledProcessError, json.JSONDecodeError, RuntimeError) as exc:
         _api.logger.warning("Could not fetch review threads for PR #%s: %s", pr_number, exc)
         return []
 
-    nodes = (
-        data.get("data", {})
-        .get("repository", {})
-        .get("pullRequest", {})
-        .get("reviewThreads", {})
-        .get("nodes", [])
-    )
-
     # Preserve insertion order; a thread can hold multiple comments but its id
     # is unique, so a dict keyed on id dedupes naturally.
-    seen: dict[str, None] = {}
-    for node in nodes:
-        if node.get("isResolved"):
-            continue
-        first_comments = node.get("comments", {}).get("nodes", [])
-        if not first_comments:
-            continue
-        review = first_comments[0].get("pullRequestReview") or {}
-        if review.get("id") != review_id:
-            continue
-        tid = node.get("id")
-        if tid:
-            seen[tid] = None
-
     return list(seen)

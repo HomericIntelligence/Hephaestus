@@ -345,49 +345,31 @@ def test_is_automation_owned_thread_human_not_owned() -> None:
     assert _is_automation_owned_thread(thread, current_login="hephaestus-bot") is False
 
 
-def test_review_phase_apply_verdict_go_defers_auto_merge_without_labeling(tmp_path: Path) -> None:
-    """Legacy GO handling is informational while queue review is unavailable."""
-    phase = ReviewPhase(_make_ctx(tmp_path))
-    phase._apply_impl_review_verdict(
-        issue_number=7, pr_number=12, last_verdict="GO", slot_id=None, thread_id=None
-    )
-
-
-def test_review_phase_apply_verdict_marks_no_go_when_auto_merge_deferral_fails(
-    tmp_path: Path,
-) -> None:
-    """The legacy review path cannot apply labels after an unverified read-back."""
-    phase = ReviewPhase(_make_ctx(tmp_path))
-    phase._apply_impl_review_verdict(
-        issue_number=7, pr_number=12, last_verdict="GO", slot_id=None, thread_id=None
-    )
-
-
-def test_review_phase_apply_verdict_error_applies_no_label(tmp_path: Path) -> None:
-    """An ERROR verdict applies neither GO nor NO-GO labels."""
-    phase = ReviewPhase(_make_ctx(tmp_path))
-    phase._apply_impl_review_verdict(
-        issue_number=7, pr_number=12, last_verdict="ERROR", slot_id=None, thread_id=None
-    )
-
-
 @pytest.mark.parametrize(
-    "verdict, calls_go, calls_no_go",
+    "verdict",
     [
-        ("NOGO", False, True),
-        ("AMBIGUOUS", False, True),
-        ("HUMAN_BLOCKED", False, False),
+        "GO",
+        "NOGO",
+        "AMBIGUOUS",
+        "HUMAN_BLOCKED",
+        "ERROR",
     ],
 )
-def test_review_phase_apply_verdict_mapping(
-    tmp_path: Path, verdict: str, calls_go: bool, calls_no_go: bool
+def test_review_phase_apply_verdict_never_writes_implementation_labels(
+    tmp_path: Path, verdict: str
 ) -> None:
-    """Legacy verdict-shaped results never become label writes."""
+    """Legacy verdict-shaped results leave implementation labels untouched."""
     phase = ReviewPhase(_make_ctx(tmp_path))
-    phase._apply_impl_review_verdict(
-        issue_number=7, pr_number=12, last_verdict=verdict, slot_id=None, thread_id=None
-    )
-    del calls_go, calls_no_go
+    with (
+        mock.patch("hephaestus.automation.pr_manager.mark_pr_implementation_go") as mark_go,
+        mock.patch("hephaestus.automation.pr_manager.mark_pr_implementation_no_go") as mark_no_go,
+    ):
+        phase._apply_impl_review_verdict(
+            issue_number=7, pr_number=12, last_verdict=verdict, slot_id=None, thread_id=None
+        )
+
+    mark_go.assert_not_called()
+    mark_no_go.assert_not_called()
 
 
 def test_review_phase_push_branch_delegates(tmp_path: Path) -> None:

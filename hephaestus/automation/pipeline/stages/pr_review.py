@@ -138,7 +138,7 @@ from hephaestus.automation.session_naming import (
     AGENT_IMPLEMENTER,
     AGENT_PR_REVIEWER,
 )
-from hephaestus.automation.state_labels import STATE_SKIP
+from hephaestus.automation.state_labels import ALL_IMPLEMENTATION_STATE_LABELS, STATE_SKIP
 
 from ..work_item import ItemKind
 from .base import (
@@ -252,7 +252,16 @@ _ROUND_PAYLOAD_KEYS = (
     "no_commit_retry_done",
     "unaddressed_findings",
     "review_audit_failure",
+    "review_refresh_required",
 )
+
+
+def _clear_round_review_state(item: WorkItem) -> None:
+    """Discard review evidence that cannot survive a head-changing commit."""
+    for key in _ROUND_PAYLOAD_KEYS:
+        item.payload.pop(key, None)
+    item.payload.pop("reviewed_pr_head_sha", None)
+    item.payload.pop("pr_diff", None)
 
 
 def _parse_validation_result(raw: Any) -> dict[str, Any] | None:
@@ -637,10 +646,7 @@ class PrReviewStage(Stage):
         # Clear ALL round-scoped payload at submission (stale-result
         # guard, M3 pattern): a failed later round must never replay an
         # earlier round's verdict, threads, or address output.
-        for key in _ROUND_PAYLOAD_KEYS:
-            item.payload.pop(key, None)
-        item.payload.pop("reviewed_pr_head_sha", None)
-        item.payload.pop("pr_diff", None)
+        _clear_round_review_state(item)
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
         review_context = ctx.github.pr_review_context(item.pr)
@@ -874,11 +880,18 @@ class PrReviewStage(Stage):
             # was actually produced (value/changed True). A no-commit push
             # means the address turn was a phantom fix — EVAL must NOT treat
             # the round as addressed.
-            item.payload["push_no_commit"] = not bool(result.value)
-            # A new commit invalidates the proof that authorized the previous
-            # review. The next review checkout must establish a new head
-            # binding before any label transition is considered.
-            item.payload.pop("reviewed_pr_head_sha", None)
+            produced_commit = bool(result.value)
+            if produced_commit:
+                # The old audit and checkout receipt describe the pre-push
+                # head. Discard the entire round before EVAL can bind the new
+                # head to any implementation-state transition.
+                _clear_round_review_state(item)
+                item.payload["review_refresh_required"] = True
+            else:
+                # Preserve the existing no-commit gate while requiring it to
+                # re-confirm the unchanged remote head before a negative write.
+                item.payload.pop("reviewed_pr_head_sha", None)
+            item.payload["push_no_commit"] = not produced_commit
             return
 
         if is_review_result and result.value is not None:
@@ -1137,6 +1150,12 @@ class PrReviewStage(Stage):
         address_error = self._handle_address_error(item)
         if address_error is not None:
             return address_error
+
+        if payload.pop("review_refresh_required", False):
+            # A successful address push changed the reviewed head. Cross the
+            # checkout barrier and obtain a new audit before consulting live
+            # threads or writing any implementation-state label.
+            return self._compact_before_next_review(item, ctx)
 
         # Real-commit gate (#1575, M4): a no-commit push retries the address
         # once with the directive; the second no-commit turn falls through
@@ -1585,13 +1604,41 @@ class PrReviewStage(Stage):
     def _handle_human_blocked(
         item: WorkItem, human_unresolved: int, ctx: StageContext
     ) -> StepResult:
-        """Record a stand-down only for a confirmed-unarmed PR."""
+        """Clear implementation state and stand down only after readback."""
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
         pr_number = item.pr
         arm_outcome = PrReviewStage._require_reviewed_unarmed(item, ctx)
         if arm_outcome is not None:
             return arm_outcome
+        try:
+            ctx.github.remove_labels(pr_number, list(ALL_IMPLEMENTATION_STATE_LABELS))
+        except Exception as error:
+            logger.warning(
+                "pr_review: failed to clear implementation-state labels on human-blocked "
+                "PR #%d: %s",
+                pr_number,
+                error,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_state_clear_failed")
+        try:
+            has_go, has_no_go = ctx.github.pr_has_implementation_state_label(pr_number)
+        except Exception as error:
+            logger.warning(
+                "pr_review: failed to verify cleared implementation-state labels on "
+                "human-blocked PR #%d: %s",
+                pr_number,
+                error,
+            )
+            return StageOutcome(
+                Disposition.FINISH_FAIL,
+                "implementation_state_clear_readback_failed",
+            )
+        if has_go or has_no_go:
+            return StageOutcome(
+                Disposition.FINISH_FAIL,
+                "implementation_state_clear_readback_failed",
+            )
         PrReviewStage._post_human_blocked_comment(pr_number, human_unresolved, ctx)
         return StageOutcome(Disposition.FINISH_FAIL, "human_blocked")
 

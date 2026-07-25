@@ -88,26 +88,34 @@ def test_parse_review_audit_sanitizes_decision_text_from_summary() -> None:
 
 
 @pytest.mark.parametrize(
-    "reserved_claim",
+    ("approval_claim", "rejection_claim"),
     [
-        "Decision: GO",
-        "Implementation approved",
-        "state:implementation-go applied",
+        ("Decision: GO", "Decision: NOGO"),
+        ("Approval: GO", "Rejection: NOGO"),
+        ("Implementation approved", "Implementation rejected"),
+        ("Implementation GO", "Implementation NO-GO"),
+        ("Implementation approval: GO", "Implementation rejection: NOGO"),
+        (
+            "state:implementation-go applied",
+            "state:implementation-no-go applied",
+        ),
     ],
 )
 def test_render_review_audit_sanitizes_reserved_authority_claims(
-    reserved_claim: str,
+    approval_claim: str,
+    rejection_claim: str,
 ) -> None:
-    """Final rendering cannot publish reviewer-controlled transition claims."""
-    body = render_review_audit(
-        ReviewAudit(
-            grade="A",
-            summary=f"Safe summary. {reserved_claim}",
-            findings=(),
-            raw_feedback="",
-            valid=True,
+    """Final rendering cannot publish positive or negative transition claims."""
+    for reserved_claim in (approval_claim, rejection_claim):
+        body = render_review_audit(
+            ReviewAudit(
+                grade="A",
+                summary=f"Safe summary. {reserved_claim}",
+                findings=(),
+                raw_feedback="",
+                valid=True,
+            )
         )
-    )
 
-    assert reserved_claim not in body
-    assert "Safe summary." in body
+        assert reserved_claim not in body
+        assert "Safe summary." in body

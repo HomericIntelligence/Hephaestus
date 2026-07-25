@@ -30,6 +30,10 @@ from hephaestus.automation.protocol import (
     PLAN_REVIEW_PREFIX,
 )
 from hephaestus.automation.review_journal import IssueComment, blocked_audit_recovery_body
+from hephaestus.automation.state_labels import (
+    STATE_IMPLEMENTATION_GO,
+    STATE_IMPLEMENTATION_NO_GO,
+)
 from tests.unit.automation.pipeline.conftest import FakeGitHub
 
 
@@ -314,6 +318,12 @@ class FakeStageGitHub(FakeGitHub):
     def remove_labels(self, issue_number: int, labels: list[str]) -> None:
         """Coordinator-neutral label remove (delegates to gh_issue_remove_labels)."""
         self._issue_labels(issue_number)
+        has_go, has_no_go = self._pr_impl_state
+        if STATE_IMPLEMENTATION_GO in labels:
+            has_go = False
+        if STATE_IMPLEMENTATION_NO_GO in labels:
+            has_no_go = False
+        self._pr_impl_state = (has_go, has_no_go)
         self.gh_issue_remove_labels(issue_number, labels)
 
     def edit_labels(self, issue_number: int, *, add: list[str], remove: list[str]) -> None:

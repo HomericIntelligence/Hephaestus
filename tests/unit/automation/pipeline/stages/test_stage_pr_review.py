@@ -24,7 +24,7 @@ from hephaestus.automation.pipeline.work_item import ItemKind
 from hephaestus.automation.prompts.address_review import get_address_review_prompt
 from hephaestus.automation.prompts.implementation import get_impl_resume_feedback_prompt
 from hephaestus.automation.review_audit import ReviewAudit, parse_review_audit
-from hephaestus.automation.state_labels import STATE_SKIP
+from hephaestus.automation.state_labels import ALL_IMPLEMENTATION_STATE_LABELS, STATE_SKIP
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
@@ -587,7 +587,7 @@ class TestPrReviewStageStep:
         item.state = "EVAL"
 
         assert stage.step(item, ctx) == Continue(next_state="COMPACT_REVIEWER_WAIT")
-        assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
+        assert github.mutation_log == [("gh_pr_review_post", (1001, "COMMENT"))]
         assert events == []
 
     def test_review_wait_forwards_nitpick_config(self, make_ctx: Any, make_work_item: Any) -> None:
@@ -1185,7 +1185,7 @@ class TestEvalVerdicts:
     def test_go_rechecks_human_threads_and_stands_down(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A late human thread gets only a stand-down comment."""
+        """A late human thread clears implementation state and stands down."""
         stage = PrReviewStage()
         github = FakeStageGitHub(by_severity=[(0, 0, 0), (0, 0, 1)])
         ctx = make_ctx(github=github)
@@ -1197,7 +1197,13 @@ class TestEvalVerdicts:
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.FINISH_FAIL
         assert result.note == "human_blocked"
-        assert github.mutation_log == [("gh_issue_comment", (1001,))]
+        assert github.mutation_log == [
+            (
+                "gh_issue_remove_labels",
+                (1001, tuple(ALL_IMPLEMENTATION_STATE_LABELS)),
+            ),
+            ("gh_issue_comment", (1001,)),
+        ]
         assert ("mark_pr_implementation_go", (1001,)) not in github.mutation_log
         assert ("arm_auto_merge", (1001,)) not in github.mutation_log
         assert "Automation stand-down" in github.comments[1001][0]
@@ -1236,9 +1242,15 @@ class TestEvalVerdicts:
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.FINISH_FAIL
         assert result.note == "human_blocked"
-        # PR left unlabeled; the only durable write is the explanatory
-        # stand-down comment (M3), posted BEFORE the failing outcome.
-        assert github.mutation_log == [("gh_issue_comment", (1001,))]
+        # Both implementation-state labels are cleared and read back before
+        # the explanatory stand-down comment is posted.
+        assert github.mutation_log == [
+            (
+                "gh_issue_remove_labels",
+                (1001, tuple(ALL_IMPLEMENTATION_STATE_LABELS)),
+            ),
+            ("gh_issue_comment", (1001,)),
+        ]
 
     def test_failed_audit_with_human_thread_has_no_go_shaped_stand_down(
         self, make_ctx: Any, make_work_item: Any
@@ -1457,8 +1469,8 @@ class TestEvalVerdicts:
 
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.FINISH_FAIL
-        # The underlying function is gh_issue_comment (not post_pr_comment)
-        assert github.mutation_log[0][0] == "gh_issue_comment"
+        # The underlying comment function is gh_issue_comment (not post_pr_comment).
+        assert github.mutation_log[-1][0] == "gh_issue_comment"
 
     def test_go_zero_threads_does_not_resolve(self, make_ctx: Any, make_work_item: Any) -> None:
         """GO with zero threads does not call resolve_automation_threads.
@@ -1955,7 +1967,7 @@ class TestFullWalks:
         assert github.mutation_log.count(("gh_pr_review_post", (1001, "COMMENT"))) == 2
 
     def test_exhaustion_walk_applies_skip(self, make_ctx: Any, make_work_item: Any) -> None:
-        """Three plateaued NOGO rounds exhaust the soft budget -> state:skip."""
+        """Three unchanged-head NOGO rounds exhaust the soft budget -> state:skip."""
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(3, 0)])  # plateau forever
         ctx = make_ctx(github=github)
@@ -1968,9 +1980,11 @@ class TestFullWalks:
             JobResult(ok=True, value='{"unaddressed": []}'),  # validate
             JobResult(ok=True, value="tier list"),  # difficulty
             JobResult(ok=True, value="addressed"),  # address
-            JobResult(ok=True, value=True),  # push
-            JobResult(ok=True, value=True),  # compact reviewer after head change
-            JobResult(ok=True, value=True),  # compact writer after head change
+            JobResult(ok=True, value=False),  # first no-commit push
+            JobResult(ok=True, value="still unaddressed"),  # address retry
+            JobResult(ok=True, value=False),  # unchanged-head round
+            JobResult(ok=True, value=True),  # compact reviewer
+            JobResult(ok=True, value=True),  # compact writer
         ]
         pool.script(*(round_jobs * 3))
 
@@ -2091,13 +2105,86 @@ class TestNoGoLabel:
 class TestHumanBlockedComment:
     """M3: HUMAN_BLOCKED posts a durable stand-down comment before finishing."""
 
+    @pytest.mark.parametrize(
+        "starting_state",
+        [
+            pytest.param((True, False), id="implementation-go"),
+            pytest.param((False, True), id="implementation-no-go"),
+        ],
+    )
+    def test_clears_existing_implementation_state_before_standing_down(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        starting_state: tuple[bool, bool],
+    ) -> None:
+        """A human block clears either stale implementation-state label."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(
+            unresolved=[(0, 1)],
+            pr_impl_state=starting_state,
+        )
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=33, pr=1001, state="EVAL")
+        item.payload["review_verdict"] = _verdict("GO")
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "human_blocked")
+        assert github.pr_has_implementation_state_label(1001) == (False, False)
+        assert github.mutation_log == [
+            (
+                "gh_issue_remove_labels",
+                (1001, tuple(ALL_IMPLEMENTATION_STATE_LABELS)),
+            ),
+            ("gh_issue_comment", (1001,)),
+        ]
+
+    @pytest.mark.parametrize(
+        "readback",
+        [
+            pytest.param((True, False), id="implementation-go-remains"),
+            pytest.param((False, True), id="implementation-no-go-remains"),
+        ],
+    )
+    def test_does_not_claim_unlabeled_when_clear_readback_fails(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        readback: tuple[bool, bool],
+    ) -> None:
+        """A stale label after clearing prevents the stand-down comment."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(
+            unresolved=[(0, 1)],
+            pr_impl_state=readback,
+            pr_impl_readbacks=[readback],
+        )
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=33, pr=1001, state="EVAL")
+        item.payload["review_verdict"] = _verdict("GO")
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "implementation_state_clear_readback_failed",
+        )
+        assert github.mutation_log == [
+            (
+                "gh_issue_remove_labels",
+                (1001, tuple(ALL_IMPLEMENTATION_STATE_LABELS)),
+            )
+        ]
+        assert 1001 not in github.comments
+
     def test_comment_explains_blockage_before_finish_fail(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
         """The comment names the blocking human threads and the stand-down.
 
-        Journal-order oracle: the comment is the ONLY mutation and exists
-        in the mutation_log before the FINISH_FAIL outcome is returned.
+        Journal-order oracle: the label clear precedes the comment, which
+        exists in the mutation_log before FINISH_FAIL is returned.
         """
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(0, 2)])
@@ -2110,7 +2197,13 @@ class TestHumanBlockedComment:
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.FINISH_FAIL
         assert result.note == "human_blocked"
-        assert github.mutation_log == [("gh_issue_comment", (1001,))]
+        assert github.mutation_log == [
+            (
+                "gh_issue_remove_labels",
+                (1001, tuple(ALL_IMPLEMENTATION_STATE_LABELS)),
+            ),
+            ("gh_issue_comment", (1001,)),
+        ]
         body = github.comments[1001][0]
         assert "2 unresolved review thread(s) opened by a human" in body
         assert "standing down" in body
@@ -2150,6 +2243,45 @@ class TestRealCommitGate:
 
         stage.on_job_done(item, JobResult(ok=True, value=True), ctx)
         assert item.payload["push_no_commit"] is False
+
+    def test_successful_push_discards_review_evidence_and_forces_fresh_review(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A newly pushed head cannot inherit an earlier audit or receipt."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(unresolved=[(1, 0)])
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=40, pr=1001, state="PUSH_WAIT")
+        item.worktree = "/tmp/wt40"
+        item.payload.update(
+            {
+                "review_audit": _verdict("NOGO"),
+                "review_feedback": "stale feedback",
+                "review_threads": [{"thread_id": "stale"}],
+                "validation_result": '{"unaddressed": []}',
+                "reviewed_pr_head_sha": "a" * 40,
+                "pr_diff": "stale diff",
+            }
+        )
+
+        stage.on_job_done(item, JobResult(ok=True, value=True), ctx)
+
+        for key in (
+            "review_audit",
+            "review_feedback",
+            "review_threads",
+            "validation_result",
+            "reviewed_pr_head_sha",
+            "pr_diff",
+        ):
+            assert key not in item.payload
+
+        item.state = "EVAL"
+        result = stage.step(item, ctx)
+
+        assert result == Continue(next_state="COMPACT_REVIEWER_WAIT")
+        assert item.attempts["pr_review_iter"] == 0
+        assert github.mutation_log == []
 
     def test_first_no_commit_retries_address_with_directive(
         self, make_ctx: Any, make_work_item: Any

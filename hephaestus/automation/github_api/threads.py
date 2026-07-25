@@ -43,7 +43,8 @@ def gh_pr_list_unresolved_threads(
         "    pullRequest(number:$number){"
         "      reviewThreads(first:100){"
         "        nodes{ id isResolved path line side:diffSide "
-        "comments(first:20){ nodes{ body author{ login } } } }"
+        "comments(first:20){ pageInfo{ hasNextPage } "
+        "nodes{ body author{ login } } } }"
         "      }"
         "    }"
         "  }"
@@ -79,7 +80,12 @@ def gh_pr_list_unresolved_threads(
     for node in nodes:
         if node.get("isResolved"):
             continue
-        comment_nodes = node.get("comments", {}).get("nodes", [])
+        comment_connection = node.get("comments", {})
+        if comment_connection.get("pageInfo", {}).get("hasNextPage"):
+            raise RuntimeError(
+                f"could not fetch all comments for PR review thread {node.get('id')}"
+            )
+        comment_nodes = comment_connection.get("nodes", [])
         first_comment = comment_nodes[0] if comment_nodes else {}
         body = first_comment.get("body", "")
         comments: list[dict[str, str]] = []

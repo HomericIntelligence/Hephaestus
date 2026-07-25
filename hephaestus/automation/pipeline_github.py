@@ -156,14 +156,20 @@ def _with_severity_marker(comment: dict[str, Any]) -> str:
 
 
 def _thread_severity_is_blocking(thread: dict[str, Any]) -> bool:
-    """Return True if the thread's recovered severity is blocking; missing means blocking."""
+    """Return True unless the thread has one recognized advisory severity marker."""
     body = str(thread.get("body") or "")
+    severity: str | None = None
     for line in body.splitlines():
         stripped = line.strip()
-        if stripped.startswith(SEVERITY_MARKER_PREFIX) and stripped.endswith("-->"):
-            sev = stripped[len(SEVERITY_MARKER_PREFIX) : -3].strip().lower()
-            return sev in BLOCKING_SEVERITIES
-    return True
+        if not stripped.startswith(SEVERITY_MARKER_PREFIX):
+            continue
+        if severity is not None or not stripped.endswith("-->"):
+            return True
+        recovered = stripped[len(SEVERITY_MARKER_PREFIX) : -3].strip().lower()
+        if recovered not in VALID_SEVERITIES:
+            return True
+        severity = recovered
+    return severity is None or severity in BLOCKING_SEVERITIES
 
 
 class PipelineGitHub:
@@ -464,7 +470,8 @@ class PipelineGitHub:
             "      reviewThreads(first:100,after:$after){"
             "        pageInfo{ hasNextPage endCursor }"
             "        nodes{ id isResolved path line side:diffSide "
-            "comments(first:20){ nodes{ body author{ login } } } }"
+            "comments(first:20){ pageInfo{ hasNextPage } "
+            "nodes{ body author{ login } } } }"
             "      }"
             "    }"
             "  }"
@@ -486,7 +493,12 @@ class PipelineGitHub:
             for node in review_threads.get("nodes", []):
                 if node.get("isResolved"):
                     continue
-                comment_nodes = node.get("comments", {}).get("nodes", [])
+                comment_connection = node.get("comments", {})
+                if comment_connection.get("pageInfo", {}).get("hasNextPage"):
+                    raise RuntimeError(
+                        f"could not fetch all comments for PR review thread {node.get('id')}"
+                    )
+                comment_nodes = comment_connection.get("nodes", [])
                 first_comment = comment_nodes[0] if comment_nodes else {}
                 comments: list[dict[str, str]] = []
                 authors: list[str] = []
@@ -578,10 +590,11 @@ class PipelineGitHub:
         by *this* review are returned.
         """
         query = (
-            "query($owner:String!,$name:String!,$number:Int!){"
+            "query($owner:String!,$name:String!,$number:Int!,$after:String){"
             "  repository(owner:$owner,name:$name){"
             "    pullRequest(number:$number){"
-            "      reviewThreads(first:100){"
+            "      reviewThreads(first:100,after:$after){"
+            "        pageInfo{ hasNextPage endCursor }"
             "        nodes{ id isResolved comments(first:1){ "
             "nodes{ pullRequestReview{ id } } } }"
             "      }"
@@ -589,31 +602,42 @@ class PipelineGitHub:
             "  }"
             "}"
         )
+        seen: dict[str, None] = {}
+        after: str | None = None
         try:
-            data = self._graphql(query, number=int(pr_number))
+            while True:
+                fields: dict[str, int | str] = {"number": int(pr_number)}
+                if after is not None:
+                    fields["after"] = after
+                data = self._graphql(query, **fields)
+                review_threads = (
+                    data.get("data", {})
+                    .get("repository", {})
+                    .get("pullRequest", {})
+                    .get("reviewThreads", {})
+                )
+                for node in review_threads.get("nodes", []):
+                    if node.get("isResolved"):
+                        continue
+                    first_comments = node.get("comments", {}).get("nodes", [])
+                    if not first_comments:
+                        continue
+                    review = first_comments[0].get("pullRequestReview") or {}
+                    if review.get("id") != review_id:
+                        continue
+                    thread_id = node.get("id")
+                    if thread_id:
+                        seen[thread_id] = None
+                page_info = review_threads.get("pageInfo", {})
+                if not page_info.get("hasNextPage"):
+                    break
+                next_cursor = page_info.get("endCursor")
+                if not isinstance(next_cursor, str) or not next_cursor or next_cursor == after:
+                    raise RuntimeError("could not fetch all PR review threads")
+                after = next_cursor
         except (subprocess.SubprocessError, RuntimeError, json.JSONDecodeError) as exc:
             logger.warning("Could not fetch review threads for PR #%s: %s", pr_number, exc)
             return []
-        nodes = (
-            data.get("data", {})
-            .get("repository", {})
-            .get("pullRequest", {})
-            .get("reviewThreads", {})
-            .get("nodes", [])
-        )
-        seen: dict[str, None] = {}
-        for node in nodes:
-            if node.get("isResolved"):
-                continue
-            first_comments = node.get("comments", {}).get("nodes", [])
-            if not first_comments:
-                continue
-            review = first_comments[0].get("pullRequestReview") or {}
-            if review.get("id") != review_id:
-                continue
-            thread_id = node.get("id")
-            if thread_id:
-                seen[thread_id] = None
         return list(seen)
 
     def _skip(self, what: str) -> bool:
