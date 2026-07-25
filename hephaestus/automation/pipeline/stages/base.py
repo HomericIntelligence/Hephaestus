@@ -349,6 +349,18 @@ class StageGitHub(Protocol):
         """Read operational normal-merge readiness after an HTTP 405 response."""
         pass
 
+    def base_branch_requires_conversation_resolution(
+        self, pr_number: int, base_branch: str
+    ) -> bool:
+        """Return whether this PR base branch has server-enforced conversation resolution.
+
+        The read is scoped to the accessor's explicit repository and the exact
+        base branch admitted for ``pr_number``. ``False`` includes an absent,
+        unreadable, or malformed branch-protection response and must prevent a
+        normal merge request.
+        """
+        ...
+
     def merge_pr_if_head(self, pr_number: int, reviewed_sha: str) -> ConditionalMergeResult:
         """Perform one immediate normal merge conditional on ``reviewed_sha``."""
         pass

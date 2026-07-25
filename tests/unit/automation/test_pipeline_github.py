@@ -153,6 +153,60 @@ class TestConditionalMerge:
         call_mock.assert_not_called()
 
 
+class TestConversationResolutionAdmission:
+    """The base-branch protection read is narrow, repo-scoped, and fail closed."""
+
+    def test_reads_exact_base_branch_protection_and_accepts_enabled(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter.repo = "repo"
+        call_mock = MagicMock(
+            return_value=SimpleNamespace(
+                stdout='{"required_conversation_resolution": {"enabled": true}}',
+                returncode=0,
+            )
+        )
+        monkeypatch.setattr(pg, "gh_call", call_mock)
+
+        assert adapter.base_branch_requires_conversation_resolution(7, "main") is True
+        call_mock.assert_called_once_with(
+            ["api", "--method", "GET", "/repos/org/repo/branches/main/protection"],
+            check=False,
+        )
+
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            "{}",
+            '{"required_conversation_resolution": {"enabled": false}}',
+            "not-json",
+        ],
+    )
+    def test_absent_false_or_malformed_protection_fails_closed(
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        stdout: str,
+    ) -> None:
+        adapter.repo = "repo"
+        monkeypatch.setattr(
+            pg,
+            "gh_call",
+            MagicMock(return_value=SimpleNamespace(stdout=stdout, returncode=1)),
+        )
+
+        assert adapter.base_branch_requires_conversation_resolution(7, "main") is False
+
+    def test_protection_read_is_unavailable_without_a_repo_scope(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        call_mock = MagicMock()
+        monkeypatch.setattr(pg, "gh_call", call_mock)
+
+        assert adapter.base_branch_requires_conversation_resolution(7, "main") is False
+        call_mock.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Mutator mapping matrix: (method, args, patch-owner, underlying-name)
 # 'module' = a function bound into pipeline_github's namespace at import.

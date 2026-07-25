@@ -53,6 +53,13 @@ class ReviewThreadResolver:
         if self._options().dry_run:
             return armed_yield
         threads = self.list_unresolved_threads_safe(pr_number)
+        if threads is None:
+            return WorkerResult(
+                issue_number=issue_number,
+                success=False,
+                error="review_threads_unavailable",
+                pr_number=pr_number,
+            )
         if not threads:
             return armed_yield
         self._status().update_slot(
@@ -132,18 +139,18 @@ class ReviewThreadResolver:
         )
         return True
 
-    def list_unresolved_threads_safe(self, pr_number: int) -> list[dict[str, Any]]:
-        """Fetch unresolved review threads, degrading lookup failures to an empty list."""
+    def list_unresolved_threads_safe(self, pr_number: int) -> list[dict[str, Any]] | None:
+        """Fetch unresolved threads, returning ``None`` when the read is unavailable."""
         try:
             return self._list_threads(pr_number, self._options().dry_run)
         except Exception as exc:
             logger.info(
                 "Issue PR #%s: failed to fetch unresolved review threads (%s); "
-                "skipping review-thread handling",
+                "human intervention is required",
                 pr_number,
                 exc,
             )
-            return []
+            return None
 
     def format_review_threads_block(self, pr_number: int) -> str:
         """Render unresolved review threads as a Markdown prompt block."""

@@ -92,14 +92,23 @@ class MergeWaitStage(Stage):
         if not isinstance(admitted, tuple):
             return admitted
         pr_state, reviewed_head = admitted
-        del pr_state
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        base_branch = pr_state.get("baseRefName")
+        if not isinstance(base_branch, str) or not base_branch:
+            return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unverified")
         thread_admission = self._admit_no_unresolved_threads(item.pr, ctx)
         if thread_admission is not None:
             return thread_admission
         if item.attempts["merge"] >= ctx.budget("merge"):
             return StageOutcome(Disposition.FINISH_FAIL, "merge_attempts_exhausted")
+        protection_admission = self._admit_conversation_resolution(
+            item.pr,
+            base_branch,
+            ctx,
+        )
+        if protection_admission is not None:
+            return protection_admission
         item.attempts["merge"] += 1
         result = ctx.github.merge_pr_if_head(item.pr, reviewed_head)
         return self._reconcile_merge_request(item, ctx, result)
@@ -128,7 +137,12 @@ class MergeWaitStage(Stage):
 
     @staticmethod
     def _admit_no_unresolved_threads(pr_number: int, ctx: StageContext) -> StageOutcome | None:
-        """Require a final empty review-thread read before the conditional merge."""
+        """Use a final empty local thread read as a non-atomic defense in depth.
+
+        The server-enforced branch-protection admission immediately following
+        this helper is the merge safety gate: a client-side thread list can
+        change before the SHA-conditional PUT reaches GitHub.
+        """
         try:
             live_threads = ctx.github.list_unresolved_review_threads(pr_number)
         except Exception as error:
@@ -144,7 +158,33 @@ class MergeWaitStage(Stage):
                 pr_number,
                 len(live_threads),
             )
-            return StageOutcome(Disposition.FAIL_BACK, "unresolved_review_threads")
+            return StageOutcome(Disposition.FINISH_FAIL, "unresolved_review_threads")
+        return None
+
+    @staticmethod
+    def _admit_conversation_resolution(
+        pr_number: int, base_branch: str, ctx: StageContext
+    ) -> StageOutcome | None:
+        """Require the base branch's server-enforced conversation-resolution gate."""
+        try:
+            enabled = ctx.github.base_branch_requires_conversation_resolution(
+                pr_number,
+                base_branch,
+            )
+        except Exception as error:
+            logger.warning(
+                "merge_wait:%d: conversation-resolution protection read failed (%s)",
+                pr_number,
+                type(error).__name__,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "conversation_resolution_unavailable")
+        if not enabled:
+            logger.warning(
+                "merge_wait:%d: base branch %r lacks required conversation resolution",
+                pr_number,
+                base_branch,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "conversation_resolution_required")
         return None
 
     def _admit(self, item: WorkItem, ctx: StageContext) -> tuple[dict[str, Any], str] | StepResult:

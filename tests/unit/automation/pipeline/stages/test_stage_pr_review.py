@@ -1569,10 +1569,10 @@ class TestEvalVerdicts:
         assert ("arm_auto_merge", (1001,)) not in github.mutation_log
         assert item.attempts["pr_review_iter"] == 1  # real verdict counted
 
-    def test_thread_added_during_go_write_revokes_go_and_requires_human_handoff(
+    def test_thread_added_during_go_write_preserves_external_labels_and_requires_human_handoff(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A complete post-write thread reread closes the label-write race."""
+        """A late thread must not let this run relabel an external state."""
 
         class ThreadAddedDuringGoGitHub(FakeStageGitHub):
             def __init__(self) -> None:
@@ -1596,6 +1596,8 @@ class TestEvalVerdicts:
             def mark_pr_implementation_go(self, pr_number: int) -> None:
                 super().mark_pr_implementation_go(pr_number)
                 self._late_thread = True
+                # An external actor writes its own state after this run's GO.
+                self._pr_impl_state = (False, True)
 
         stage = PrReviewStage()
         github = ThreadAddedDuringGoGitHub()
@@ -1607,11 +1609,15 @@ class TestEvalVerdicts:
 
         assert result == StageOutcome(
             Disposition.FINISH_FAIL,
-            "automation_threads_require_human_resolution",
+            "late_threads_require_human_resolution",
         )
         assert ("mark_pr_implementation_go", (1001,)) in github.mutation_log
-        assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
+        assert not any(
+            name in {"mark_pr_implementation_no_go", "gh_issue_remove_labels"}
+            for name, _args in github.mutation_log
+        )
         assert github.pr_has_implementation_state_label(1001) == (False, True)
+        assert "review activity changed" in github.comments[1001][0].lower()
 
     def test_clean_go_does_not_call_the_removed_auto_merge_mutator(
         self, make_ctx: Any, make_work_item: Any

@@ -1788,9 +1788,10 @@ class PrReviewStage(Stage):
         label write can therefore race after the pre-write guard. A read after
         our write cannot prove who owns an exclusive GO label, so a changed or
         missing reviewed head only discards this process's proof and restarts
-        review. A complete thread read after the label write closes the
-        remaining admission window: any live thread revokes this run's GO via
-        the existing fresh-head/unarmed handoff guard.
+        review. A complete thread read after the label write detects review
+        activity in the remaining admission window. This run cannot establish
+        ownership of a label after that race, so it only posts a neutral human
+        handoff and makes no further label mutation.
         """
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
@@ -1822,9 +1823,13 @@ class PrReviewStage(Stage):
             return StageOutcome(Disposition.FINISH_FAIL, "review_threads_unavailable")
         blocking, advisory, human_unresolved = _thread_counts(live_threads)
         if human_unresolved:
-            return PrReviewStage._handle_human_blocked(item, human_unresolved, ctx)
+            return PrReviewStage._handle_late_threads_after_go_write(
+                item,
+                blocking + advisory + human_unresolved,
+                ctx,
+            )
         if blocking or advisory:
-            return PrReviewStage._handle_automation_threads_requiring_human_resolution(
+            return PrReviewStage._handle_late_threads_after_go_write(
                 item,
                 blocking + advisory,
                 ctx,
@@ -1841,6 +1846,45 @@ class PrReviewStage(Stage):
         if _is_confirmed_open_unarmed(state) and has_go and not has_no_go:
             return None
         return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_readback_failed")
+
+    @staticmethod
+    def _handle_late_threads_after_go_write(
+        item: WorkItem,
+        unresolved_threads: int,
+        ctx: StageContext,
+    ) -> StageOutcome:
+        """Stand down after a post-GO thread race without touching state labels.
+
+        The GO write is non-conditional. A concurrent human or automation actor
+        may own the current implementation state by the time the late thread is
+        observed, so clearing or replacing a label would be an unsafe mutation.
+        """
+        if item.pr is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        logger.warning(
+            "pr_review:%d: %d review thread(s) appeared during GO admission on PR #%d; "
+            "standing down without label changes",
+            item.issue,
+            unresolved_threads,
+            item.pr,
+        )
+        body = (
+            "**Automation stand-down: review activity changed during GO admission.**\n\n"
+            f"{unresolved_threads} unresolved review thread(s) were observed after the "
+            "implementation state write. Automation cannot prove it still owns the current "
+            "labels, so it made no further label changes. A human must verify the current "
+            "diff, reply if appropriate, and resolve the review thread(s) before another "
+            "review/merge attempt."
+        )
+        try:
+            ctx.github.post_pr_comment(item.pr, body)
+        except Exception as error:
+            logger.warning(
+                "pr_review: failed to post late-thread handoff on PR #%d (non-fatal): %s",
+                item.pr,
+                error,
+            )
+        return StageOutcome(Disposition.FINISH_FAIL, "late_threads_require_human_resolution")
 
     @staticmethod
     def _bind_current_head_for_negative(item: WorkItem, ctx: StageContext) -> StageOutcome | None:

@@ -35,17 +35,33 @@ def test_claimed_drive_green_fix_requires_human_thread_resolution(tmp_path: Path
     push.assert_called_once()
 
 
+def test_thread_lookup_failure_requires_human_intervention(tmp_path: Path) -> None:
+    """A failed thread read cannot be converted into a successful no-op."""
+    resolver = ReviewThreadResolver(
+        options_provider=lambda: CIDriverOptions(dry_run=False),
+        repo_root_provider=lambda: tmp_path,
+        state_dir_provider=lambda: tmp_path,
+        status_tracker_provider=MagicMock,
+        get_worktree_path=lambda issue, pr: tmp_path,
+        get_pr_branch=lambda pr: "fix-branch",
+        sync_worktree_and_snapshot_sha=lambda issue, path, branch: "a" * 40,
+        push_ci_fix=MagicMock(return_value=True),
+        list_threads=lambda pr, dry_run: (_ for _ in ()).throw(RuntimeError("unavailable")),
+    )
+
+    result = resolver.resolve_blocked_pr(1, 2, 0)
+
+    assert result.success is False
+    assert result.error == "review_threads_unavailable"
+
+
 def test_automation_sources_contain_no_review_thread_resolution_mutator() -> None:
     """No active automation source may resolve a GitHub review thread."""
     repo = Path(__file__).resolve().parents[3]
     targets = [
-        repo / "hephaestus/automation/pipeline_github.py",
-        repo / "hephaestus/automation/address_review.py",
-        repo / "hephaestus/automation/address_review_core.py",
-        repo / "hephaestus/automation/review_validator.py",
-        repo / "hephaestus/automation/review_thread_resolver.py",
-        repo / "hephaestus/automation/ci_fix_flow.py",
-        *sorted((repo / "hephaestus/automation/github_api").glob("*.py")),
+        path
+        for path in sorted((repo / "hephaestus/automation").rglob("*.py"))
+        if "__pycache__" not in path.parts
     ]
     forbidden = (
         "resolve" + "ReviewThread",

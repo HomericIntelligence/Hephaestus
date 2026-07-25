@@ -688,6 +688,26 @@ class TestDryRun:
 class TestFailBackRouting:
     """The Disposition->action table's FAIL_BACK rows."""
 
+    def test_merge_wait_late_thread_stand_down_is_terminal_not_rerouted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stale-ownership handoff must never enter an automatic label path."""
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+        item = _issue_item(3, StageName.MERGE_WAIT)
+        item.pr = 12
+        item.state = "MERGE"
+
+        coordinator._push_item(item, StageName.MERGE_WAIT, enter=False)
+        coordinator._route(
+            item,
+            StageOutcome(Disposition.FINISH_FAIL, "unresolved_review_threads"),
+        )
+
+        assert item.stage is StageName.FINISHED
+        assert item.result is not None
+        assert item.result.reason == "unresolved_review_threads"
+        assert not coordinator.queues[StageName.PR_REVIEW]
+
     def test_unarmed_merge_wait_lost_approval_returns_to_pr_review(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

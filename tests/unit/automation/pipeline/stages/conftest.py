@@ -73,6 +73,7 @@ class FakeStageGitHub(FakeGitHub):
         unresolved: list[tuple[int, int]] | None = None,
         by_severity: list[tuple[int, int, int]] | None = None,
         pr_state: dict[str, Any] | None | _DefaultPrState = _DEFAULT_PR_STATE,
+        conversation_resolution: bool = True,
         pr_review_context: dict[str, str] | None = None,
         learn_terminal: bool = False,
     ) -> None:
@@ -103,6 +104,8 @@ class FakeStageGitHub(FakeGitHub):
                 deriving from unresolved (legacy: all automation = blocking).
             pr_state: Canned answer for gh_pr_state (merge_wait's single
                 PR-state read); ``None`` mirrors a transient read failure.
+            conversation_resolution: Whether the admitted PR base has the
+                server-enforced required-conversation-resolution protection.
             learn_terminal: Seed answer for drive_green_learn_terminal —
                 True mirrors an issue whose post-merge /learn already ran
                 terminally (the #848 dedupe record).
@@ -135,6 +138,8 @@ class FakeStageGitHub(FakeGitHub):
             if isinstance(pr_state, _DefaultPrState)
             else pr_state
         )
+        self._conversation_resolution = conversation_resolution
+        self.conversation_resolution_checks: list[tuple[int, str]] = []
         self._pr_review_context = (
             pr_review_context
             if pr_review_context is not None
@@ -450,6 +455,13 @@ class FakeStageGitHub(FakeGitHub):
         """Mirror the post-405 operational readiness lookup."""
         del pr_number
         return dict(self._pr_state) if isinstance(self._pr_state, dict) else self._pr_state
+
+    def base_branch_requires_conversation_resolution(
+        self, pr_number: int, base_branch: str
+    ) -> bool:
+        """Return the canned server-enforced conversation-resolution protection."""
+        self.conversation_resolution_checks.append((pr_number, base_branch))
+        return self._conversation_resolution
 
     def merge_pr_if_head(self, pr_number: int, reviewed_sha: str) -> ConditionalMergeResult:
         """Mirror one successful SHA-conditional normal merge request."""

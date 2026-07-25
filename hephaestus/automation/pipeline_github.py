@@ -27,6 +27,7 @@ import subprocess
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from hephaestus.automation import github_api, pr_manager
 from hephaestus.automation._review_phase import _is_automation_owned_thread
@@ -999,6 +1000,55 @@ class PipelineGitHub:
         except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError) as exc:
             logger.warning("PR #%s: merge readiness read failed: %s", pr_number, exc)
             return None
+
+    def base_branch_requires_conversation_resolution(
+        self, pr_number: int, base_branch: str
+    ) -> bool:
+        """Read the exact base branch's classic REST protection contract.
+
+        This capability has no organization-wide fallback: merge_wait can only
+        admit a normal merge when this accessor is bound to the PR's repository
+        and GitHub confirms ``required_conversation_resolution.enabled`` for the
+        exact admitted base branch. GitHub enforces that policy on the server at
+        merge time, covering a thread that appears after the local read.
+        """
+        if (
+            pr_number <= 0
+            or self._repo_slug is None
+            or not isinstance(base_branch, str)
+            or not base_branch
+        ):
+            return False
+        try:
+            owner, name = self._owner_name()
+            branch = quote(base_branch, safe="")
+            result = gh_call(
+                [
+                    "api",
+                    "--method",
+                    "GET",
+                    f"/repos/{owner}/{name}/branches/{branch}/protection",
+                ],
+                check=False,
+            )
+            if result.returncode != 0:
+                return False
+            data = json.loads(result.stdout or "{}")
+        except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError) as exc:
+            logger.warning(
+                "PR #%s: failed to read protection for base branch %r: %s",
+                pr_number,
+                base_branch,
+                exc,
+            )
+            return False
+        if not isinstance(data, dict):
+            return False
+        conversation_resolution = data.get("required_conversation_resolution")
+        return (
+            isinstance(conversation_resolution, dict)
+            and conversation_resolution.get("enabled") is True
+        )
 
     def merge_pr_if_head(self, pr_number: int, reviewed_sha: str) -> ConditionalMergeResult:
         """Attempt one immediate squash merge conditional on the reviewed SHA.
