@@ -373,11 +373,13 @@ class TestLoopOwnedApprovalWorkflow:
         assert not LABEL_TRIGGERED_AUTO_MERGE_WORKFLOW.exists()
 
     def test_advisory_policy_reports_without_authorizing_an_arm(self) -> None:
-        """The workflow reports state; the queue does not arm auto-merge."""
+        """The workflow reports state; the queue does not own auto-merge."""
         text = REQUIRED_WORKFLOW.read_text(encoding="utf-8")
         assert "auto-merge-policy" in text
         assert "automation loop owns review" in text
         assert "auto-merge is currently disabled" in text
+        assert "Auto-merge is present and external to the automation loop." in text
+        assert "Auto-merge is armed by the automation loop." not in text
         assert "Waiting for label-triggered auto-merge workflow" not in text
         assert "gh pr merge $PR_NUMBER --auto --squash" not in text
         assert "sleep 10" not in text

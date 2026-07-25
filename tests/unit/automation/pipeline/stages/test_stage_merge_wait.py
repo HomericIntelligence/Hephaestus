@@ -1,68 +1,119 @@
-"""Tests for the intentionally simple label-only merge-wait stage."""
+"""Tests for SHA-conditional normal merging in ``merge_wait`` (#2419)."""
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any
 
-from hephaestus.automation.pipeline.routing import Disposition, StageName
-from hephaestus.automation.pipeline.stages import StageOutcome
-from hephaestus.automation.pipeline.stages.merge_wait import ARM, POLL, MergeWaitStage
+import pytest
+
+from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
+from hephaestus.automation.pipeline.stages.base import ConditionalMergeResult
+from hephaestus.automation.pipeline.stages.merge_wait import MERGE, MergeWaitStage
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
-
-class _ArmingGitHub(FakeStageGitHub):
-    def __init__(self, *, labels: tuple[bool, bool] = (True, False)) -> None:
-        super().__init__(
-            pr_impl_state=labels,
-            pr_state={"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
-        )
+_HEAD_A = "a" * 40
+_HEAD_B = "b" * 40
 
 
-def test_matching_reviewed_head_stands_down_without_creating_auto_merge(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """#2423 holds a reviewed PR safely pending the later normal merge path."""
-    github = _ArmingGitHub()
-    item = make_work_item(
+def _open_state(
+    head: str = _HEAD_A,
+    *,
+    arm: object | None = None,
+    base: str = "main",
+) -> dict[str, object]:
+    """Return a complete open PR lifecycle snapshot."""
+    return {
+        "state": "OPEN",
+        "headRefOid": head,
+        "baseRefName": base,
+        "autoMergeRequest": arm,
+    }
+
+
+class _StateQueueGitHub(FakeStageGitHub):
+    """Stage fake with ordered lifecycle reads and one typed merge outcome."""
+
+    def __init__(
+        self,
+        states: Iterable[dict[str, object] | None],
+        *,
+        result: ConditionalMergeResult,
+        labels: tuple[bool, bool] = (True, False),
+        readiness: dict[str, object] | None = None,
+    ) -> None:
+        queued = list(states)
+        super().__init__(pr_impl_state=labels, pr_state=queued[-1] if queued else None)
+        self._states = queued
+        self._result = result
+        self._readiness = readiness
+
+    def gh_pr_state(self, pr_number: int) -> dict[str, object] | None:
+        del pr_number
+        if len(self._states) > 1:
+            return self._states.pop(0)
+        return self._states[0] if self._states else None
+
+    def merge_pr_if_head(self, pr_number: int, reviewed_sha: str) -> ConditionalMergeResult:
+        self._log("merge_pr_if_head", pr_number, reviewed_sha)
+        return self._result
+
+    def gh_pr_merge_readiness(self, pr_number: int) -> dict[str, object] | None:
+        del pr_number
+        return self._readiness
+
+
+def _item(make_work_item: Any) -> Any:
+    return make_work_item(
         stage=StageName.MERGE_WAIT,
         pr=12,
-        state=ARM,
-        payload={"reviewed_pr_head_sha": "a" * 40},
+        state=MERGE,
+        payload={"reviewed_pr_head_sha": _HEAD_A},
     )
 
-    result = MergeWaitStage().step(item, make_ctx(github=github))
 
-    assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_wait_standing_by")
-    assert github.mutation_log == []
-    assert item.armed is False
-
-
-def test_existing_auto_merge_is_blocked_and_left_to_the_operator(
-    make_ctx: Any, make_work_item: Any, caplog: Any
-) -> None:
-    """An arm observed before this run never triggers recovery or re-arming."""
-    github = _ArmingGitHub()
-    github._pr_state = {
-        "state": "OPEN",
-        "headRefOid": "a" * 40,
-        "autoMergeRequest": {"enabledAt": "elsewhere"},
-    }
-    item = make_work_item(stage=StageName.MERGE_WAIT, pr=12, state=ARM)
-
-    result = MergeWaitStage().step(item, make_ctx(github=github))
-
-    assert result == StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
-    assert not any(action == "arm_auto_merge" for action, _ in github.mutation_log)
-    assert item.attempts["merge"] == 0
-    assert "already armed" in caplog.text
-
-
-def test_missing_reviewed_head_revokes_go_and_returns_to_review(
+def test_conditional_merge_success_requires_github_to_report_merged(
     make_ctx: Any, make_work_item: Any
 ) -> None:
-    """Restarted merge-wait has no durable review proof and must fail back."""
-    github = _ArmingGitHub()
-    item = make_work_item(stage=StageName.MERGE_WAIT, pr=12, state=ARM)
+    """Only 200 plus ``merged: true`` followed by a merged lifecycle succeeds."""
+    github = _StateQueueGitHub(
+        [_open_state(), {"state": "MERGED"}],
+        result=ConditionalMergeResult(status=200, body={"merged": True}),
+    )
+    ctx = make_ctx(github=github)
+    ctx.config.enable_learn = False
+
+    result = MergeWaitStage().step(_item(make_work_item), ctx)
+
+    assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
+    assert github.mutation_log == [("merge_pr_if_head", (12, _HEAD_A))]
+
+
+def test_external_auto_merge_blocks_without_label_or_merge_write(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A pre-existing external arm has priority over every merge action."""
+    github = _StateQueueGitHub(
+        [_open_state(arm={"enabledAt": "elsewhere"})],
+        result=ConditionalMergeResult(status=200, body={"merged": True}),
+    )
+
+    result = MergeWaitStage().step(_item(make_work_item), make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
+    assert github.mutation_log == []
+
+
+def test_missing_reviewed_head_revokes_exclusive_go_only_when_unarmed(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A restart cannot use a label without its process-local reviewed SHA."""
+    github = _StateQueueGitHub(
+        [_open_state(), _open_state()],
+        result=ConditionalMergeResult(status=200, body={"merged": True}),
+    )
+    item = _item(make_work_item)
+    item.payload.clear()
 
     result = MergeWaitStage().step(item, make_ctx(github=github))
 
@@ -70,245 +121,167 @@ def test_missing_reviewed_head_revokes_go_and_returns_to_review(
     assert github.mutation_log == [("mark_pr_implementation_no_go", (12,))]
 
 
-def test_poll_of_an_unarmed_pr_stands_by_without_retrying(
+def test_label_loss_before_call_returns_to_review_without_merging(
     make_ctx: Any, make_work_item: Any
 ) -> None:
-    """Merge wait no longer tracks or retries an auto-merge arm."""
-    github = _ArmingGitHub()
-    item = make_work_item(stage=StageName.MERGE_WAIT, pr=12, state=POLL)
-    github._pr_state = {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None}
-
-    result = MergeWaitStage().step(item, make_ctx(github=github))
-
-    assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_wait_standing_by")
-    assert github.mutation_log == []
-
-
-def test_closed_pr_stops_without_mutating_or_consuming_merge_budget(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A closed-unmerged PR is terminal before merge-arm handling."""
-    github = _ArmingGitHub()
-    github._pr_state = {"state": "CLOSED"}
-    item = make_work_item(stage=StageName.MERGE_WAIT, pr=12, state=POLL)
-    item.armed = True
-
-    result = MergeWaitStage().step(item, make_ctx(github=github))
-
-    assert result == StageOutcome(Disposition.FINISH_FAIL, "closed")
-    assert github.mutation_log == []
-    assert item.attempts["merge"] == 0
-
-
-def test_unavailable_pr_state_stops_without_mutating_or_consuming_merge_budget(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """An API/read failure is terminal before merge-arm handling."""
-    github = _ArmingGitHub()
-    github._pr_state = None
-    item = make_work_item(stage=StageName.MERGE_WAIT, pr=12, state=POLL)
-    item.armed = True
-
-    result = MergeWaitStage().step(item, make_ctx(github=github))
-
-    assert result == StageOutcome(Disposition.FINISH_FAIL, "pr_state_unavailable")
-    assert github.mutation_log == []
-    assert item.attempts["merge"] == 0
-
-
-def test_merge_wait_rejects_a_partial_unarmed_state_without_label_mutation(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A missing auto-merge field is ambiguous, not proof of an unarmed PR."""
-    github = _ArmingGitHub()
-    github._pr_state = {"state": "OPEN", "headRefOid": "a" * 40}
-    item = make_work_item(
-        stage=StageName.MERGE_WAIT,
-        pr=12,
-        state=ARM,
-        payload={"reviewed_pr_head_sha": "a" * 40},
+    """A live label loss is an admission failure, never a merge attempt."""
+    github = _StateQueueGitHub(
+        [_open_state()],
+        labels=(False, False),
+        result=ConditionalMergeResult(status=200, body={"merged": True}),
     )
 
-    result = MergeWaitStage().step(item, make_ctx(github=github))
-
-    assert result == StageOutcome(Disposition.FINISH_FAIL, "pr_state_unverified")
-    assert github.mutation_log == []
-
-
-def test_stale_proof_re_read_that_matches_stands_down_without_revoking_go(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A remote head moving back to the reviewed commit invalidates the stale decision."""
-
-    class FlippingStateGitHub(_ArmingGitHub):
-        def __init__(self) -> None:
-            super().__init__()
-            self._states = [
-                {"state": "OPEN", "headRefOid": "b" * 40, "autoMergeRequest": None},
-                {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
-            ]
-
-        def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
-            del pr_number
-            return self._states.pop(0)
-
-    github = FlippingStateGitHub()
-    item = make_work_item(
-        stage=StageName.MERGE_WAIT,
-        pr=12,
-        state=ARM,
-        payload={"reviewed_pr_head_sha": "a" * 40},
-    )
-
-    result = MergeWaitStage().step(item, make_ctx(github=github))
-
-    assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_wait_standing_by")
-    assert github.mutation_log == []
-
-
-def test_poll_external_auto_merge_is_blocked_without_consuming_merge_budget(
-    make_ctx: Any, make_work_item: Any, caplog: Any
-) -> None:
-    """A POLL restart never claims an arm it did not create."""
-    github = _ArmingGitHub()
-    github._pr_state = {
-        "state": "OPEN",
-        "headRefOid": "a" * 40,
-        "autoMergeRequest": {"enabledAt": "elsewhere"},
-    }
-    item = make_work_item(stage=StageName.MERGE_WAIT, pr=12, state=POLL)
-
-    result = MergeWaitStage().step(item, make_ctx(github=github))
-
-    assert result == StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
-    assert github.mutation_log == []
-    assert item.attempts["merge"] == 0
-    assert "retry_delay_s" not in item.payload
-    assert "already armed" in caplog.text
-
-
-def test_poll_external_auto_merge_without_approval_remains_blocked(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """An external arm remains operator-owned even after its approval changes."""
-    github = _ArmingGitHub(labels=(False, False))
-    github._pr_state = {
-        "state": "OPEN",
-        "headRefOid": "a" * 40,
-        "autoMergeRequest": {"enabledAt": "elsewhere"},
-    }
-    item = make_work_item(stage=StageName.MERGE_WAIT, pr=12, state=POLL)
-
-    result = MergeWaitStage().step(item, make_ctx(github=github))
-
-    assert result == StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
-    assert github.mutation_log == []
-    assert item.attempts["merge"] == 0
-    assert "retry_delay_s" not in item.payload
-
-
-def test_poll_treats_any_observed_arm_as_external(make_ctx: Any, make_work_item: Any) -> None:
-    """No in-process arm ownership remains after #2423."""
-    github = _ArmingGitHub()
-    github._pr_state = {
-        "state": "OPEN",
-        "headRefOid": "a" * 40,
-        "autoMergeRequest": {"enabledAt": "this-run"},
-    }
-    item = make_work_item(stage=StageName.MERGE_WAIT, pr=12, state=POLL)
-    item.armed = True
-    result = MergeWaitStage().step(item, make_ctx(github=github))
-
-    assert result == StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
-    assert item.attempts["merge"] == 0
-    assert "retry_delay_s" not in item.payload
-
-
-def test_poll_arm_does_not_consume_a_merge_budget(make_ctx: Any, make_work_item: Any) -> None:
-    """An operator-owned arm is never retried by the pipeline."""
-    github = _ArmingGitHub()
-    github._pr_state = {
-        "state": "OPEN",
-        "headRefOid": "a" * 40,
-        "autoMergeRequest": {"enabledAt": "this-run"},
-    }
-    item = make_work_item(stage=StageName.MERGE_WAIT, pr=12, state=POLL)
-    item.armed = True
-    result = MergeWaitStage().step(item, make_ctx(github=github, budget_fn=lambda _name: 1))
-
-    assert result == StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
-    assert item.attempts["merge"] == 0
-    assert "retry_delay_s" not in item.payload
-
-
-def test_missing_implementation_go_returns_to_review(make_ctx: Any, make_work_item: Any) -> None:
-    """A normal absent approval still returns to the loop-owned review stage."""
-    item = make_work_item(stage=StageName.MERGE_WAIT, pr=12, state=ARM)
-
-    result = MergeWaitStage().step(item, make_ctx(github=_ArmingGitHub(labels=(False, False))))
+    result = MergeWaitStage().step(_item(make_work_item), make_ctx(github=github))
 
     assert result == StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
+    assert github.mutation_log == []
 
 
-def test_external_arm_without_approval_remains_blocked(make_ctx: Any, make_work_item: Any) -> None:
-    """External arms take priority over missing labels and receive no mutation."""
-    github = _ArmingGitHub(labels=(False, False))
-    github._pr_state = {
-        "state": "OPEN",
-        "headRefOid": "a" * 40,
-        "autoMergeRequest": {"enabledAt": "this-run"},
-    }
-    item = make_work_item(stage=StageName.MERGE_WAIT, pr=12, state=POLL)
-    item.armed = True
+def test_non_main_base_is_terminal_without_conditional_merge(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """The normal merge path is limited to the repository's main branch."""
+    github = _StateQueueGitHub(
+        [_open_state(base="release")],
+        result=ConditionalMergeResult(status=200, body={"merged": True}),
+    )
 
-    result = MergeWaitStage().step(item, make_ctx(github=github))
+    result = MergeWaitStage().step(_item(make_work_item), make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.FINISH_FAIL, "non_main_base")
+    assert github.mutation_log == []
+
+
+def test_409_head_drift_revokes_stale_label_then_re_reviews(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A conditional-merge CAS miss cannot carry an old approval forward."""
+    github = _StateQueueGitHub(
+        [_open_state(), _open_state(_HEAD_B), _open_state(_HEAD_B)],
+        result=ConditionalMergeResult(status=409, body={"message": "Head branch was modified"}),
+    )
+
+    result = MergeWaitStage().step(_item(make_work_item), make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.FAIL_BACK, "reviewed_head_drift")
+    assert github.mutation_log == [
+        ("merge_pr_if_head", (12, _HEAD_A)),
+        ("mark_pr_implementation_no_go", (12,)),
+    ]
+
+
+def test_409_with_new_external_arm_never_revokes_label(make_ctx: Any, make_work_item: Any) -> None:
+    """A post-attempt arm race remains external and receives zero mutation."""
+    github = _StateQueueGitHub(
+        [_open_state(), _open_state(_HEAD_B, arm={"enabledAt": "external"})],
+        result=ConditionalMergeResult(status=409, body={"message": "Head branch was modified"}),
+    )
+
+    result = MergeWaitStage().step(_item(make_work_item), make_ctx(github=github))
 
     assert result == StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
-    assert github.mutation_log == []
-    assert item.attempts["merge"] == 0
+    assert github.mutation_log == [("merge_pr_if_head", (12, _HEAD_A))]
+
+
+def test_405_not_ready_timer_retries_within_merge_budget(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """Ordinary protection readiness uses the timer heap rather than sleeping."""
+    readiness = {**_open_state(), "mergeStateStatus": "BLOCKED", "mergeable": "MERGEABLE"}
+    github = _StateQueueGitHub(
+        [_open_state()],
+        readiness=readiness,
+        result=ConditionalMergeResult(status=405, body={"message": "not ready"}),
+    )
+    item = _item(make_work_item)
+
+    result = MergeWaitStage().step(item, make_ctx(github=github, budget_fn=lambda _name: 2))
+
+    assert result == StageOutcome(Disposition.RETRY, "merge_not_ready")
+    assert item.attempts["merge"] == 1
+    assert item.payload["retry_delay_s"] == 1
+
+
+def test_405_conflict_is_terminal_and_never_retried(make_ctx: Any, make_work_item: Any) -> None:
+    """A concrete merge conflict is not readiness and must not spin a timer."""
+    readiness = {**_open_state(), "mergeStateStatus": "DIRTY", "mergeable": "CONFLICTING"}
+    github = _StateQueueGitHub(
+        [_open_state()],
+        readiness=readiness,
+        result=ConditionalMergeResult(status=405, body={"message": "conflict"}),
+    )
+    item = _item(make_work_item)
+
+    result = MergeWaitStage().step(item, make_ctx(github=github, budget_fn=lambda _name: 2))
+
+    assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_conflict")
     assert "retry_delay_s" not in item.payload
 
 
-def test_external_arm_never_invokes_the_removed_defer_path(
+def test_200_without_merged_true_is_not_a_success_or_retry(
     make_ctx: Any, make_work_item: Any
 ) -> None:
-    """The safe operator stand-down has no disable/reconciliation operation."""
-    github = _ArmingGitHub(labels=(False, False))
-    github._pr_state = {
-        "state": "OPEN",
-        "headRefOid": "a" * 40,
-        "autoMergeRequest": {"enabledAt": "this-run"},
-    }
-    item = make_work_item(stage=StageName.MERGE_WAIT, pr=12, state=POLL)
-    item.armed = True
+    """HTTP success alone cannot claim that GitHub actually merged the PR."""
+    github = _StateQueueGitHub(
+        [_open_state()],
+        result=ConditionalMergeResult(status=200, body={"merged": False}),
+    )
+    item = _item(make_work_item)
 
-    result = MergeWaitStage().step(item, make_ctx(github=github))
+    result = MergeWaitStage().step(item, make_ctx(github=github, budget_fn=lambda _name: 2))
 
-    assert result == StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
-    assert github.mutation_log == []
-    assert item.attempts["merge"] == 0
+    assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_not_merged")
+    assert item.attempts["merge"] == 1
     assert "retry_delay_s" not in item.payload
 
 
-def test_orphan_pr_finishes_without_mutating_an_operator_owned_arm(
+@pytest.mark.parametrize("status", [403, 404, 422])
+def test_terminal_http_status_never_duplicates_merge_attempt(
+    status: int, make_ctx: Any, make_work_item: Any
+) -> None:
+    """Authorization, absence, and validation failures require an operator."""
+    github = _StateQueueGitHub(
+        [_open_state()],
+        result=ConditionalMergeResult(status=status, body={"message": "terminal"}),
+    )
+    item = _item(make_work_item)
+
+    result = MergeWaitStage().step(item, make_ctx(github=github, budget_fn=lambda _name: 5))
+
+    assert result == StageOutcome(Disposition.FINISH_FAIL, f"merge_http_{status}")
+    assert item.attempts["merge"] == 1
+    assert "retry_delay_s" not in item.payload
+
+
+def test_ambiguous_transport_re_reads_before_one_bounded_retry(
     make_ctx: Any, make_work_item: Any
 ) -> None:
-    """Missing requirements context cannot arm or disarm a PR."""
-    github = _ArmingGitHub()
-    item = make_work_item(issue=None, stage=StageName.MERGE_WAIT, pr=12, state=ARM)
+    """An uncertain request only retries after a same-head unarmed lifecycle read."""
+    github = _StateQueueGitHub(
+        [_open_state(), _open_state()],
+        result=ConditionalMergeResult(status=None, body=None, transport_error=True),
+    )
+    item = _item(make_work_item)
 
-    result = MergeWaitStage().on_enter(item, make_ctx(github=github))
+    result = MergeWaitStage().step(item, make_ctx(github=github, budget_fn=lambda _name: 2))
 
-    assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_wait_orphan")
-    assert github.mutation_log == []
+    assert result == StageOutcome(Disposition.RETRY, "merge_transport_retry")
+    assert item.attempts["merge"] == 1
+    assert item.payload["retry_delay_s"] == 1
+    assert github.mutation_log == [("merge_pr_if_head", (12, _HEAD_A))]
 
 
-def test_merged_pr_completes_without_learn_when_disabled(
+def test_ambiguous_transport_with_unreadable_lifecycle_is_terminal(
     make_ctx: Any, make_work_item: Any
 ) -> None:
-    """A merged PR remains a normal terminal success."""
-    item = make_work_item(stage=StageName.MERGE_WAIT, pr=12, state=POLL)
-    ctx = make_ctx(github=FakeStageGitHub(pr_state={"state": "MERGED"}))
-    ctx.config.enable_learn = False
+    """A lost lifecycle read after an uncertain write never permits a replay."""
+    github = _StateQueueGitHub(
+        [_open_state(), None],
+        result=ConditionalMergeResult(status=None, body=None, transport_error=True),
+    )
+    item = _item(make_work_item)
 
-    assert MergeWaitStage().step(item, ctx) == StageOutcome(Disposition.FINISH_PASS, "merged")
+    result = MergeWaitStage().step(item, make_ctx(github=github, budget_fn=lambda _name: 2))
+
+    assert result == StageOutcome(Disposition.FINISH_FAIL, "pr_state_unavailable")
+    assert "retry_delay_s" not in item.payload

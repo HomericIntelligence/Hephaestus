@@ -13,8 +13,8 @@ Remediation of the strict 2026-05-28 audit findings (`audit-finding` issues) con
 2. **Automation Pipeline Hardening** — Stabilizing the queue-based
    plan → implement → review pipeline (Epic #1809): drive-green loop
    behavior, linked-issue PR recovery, epic/skip-tag scoping, and restoring
-   the reviewed-head interlock while `merge_wait` safely stands by on a
-   confirmed-unarmed PR pending the separately reviewed #2419 merge path.
+   the reviewed-head interlock and the SHA-conditional ordinary squash merge
+   path for a confirmed-unarmed PR.
 
 3. **CLI Tool Coverage Expansion** — Expanding the CLI entry point test suite from 13 of 47 declared tools to full coverage, ensuring all command-line interfaces are properly validated.
 

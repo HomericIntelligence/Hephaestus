@@ -220,7 +220,6 @@ class TestROUTES:
                 next=StageName.FINISHED,
                 fail_routes={
                     "closed": StageName.FINISHED,
-                    "head_drift": StageName.PR_REVIEW,
                     "not_implementation_go": StageName.PR_REVIEW,
                     "reviewed_head_missing": StageName.PR_REVIEW,
                     "reviewed_head_drift": StageName.PR_REVIEW,

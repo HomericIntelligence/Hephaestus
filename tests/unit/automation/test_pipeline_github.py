@@ -1175,6 +1175,114 @@ class TestRepoReviewThreadsForReview:
         assert result == []
 
 
+class TestConditionalMerge:
+    """The #2419 adapter is a single repo-scoped SHA-conditional REST write."""
+
+    def test_puts_only_reviewed_sha_and_squash_method(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple[list[str], dict[str, object]]] = []
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            calls.append((argv, kwargs))
+            return SimpleNamespace(
+                stdout=('HTTP/2.0 200 OK\r\ncontent-type: application/json\r\n\r\n{"merged": true}')
+            )
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        sha = "a" * 40
+
+        outcome = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).merge_pr_if_head(
+            77, sha
+        )
+
+        assert outcome.status == 200
+        assert outcome.body == {"merged": True}
+        assert outcome.transport_error is False
+        assert calls == [
+            (
+                [
+                    "api",
+                    "--method",
+                    "PUT",
+                    "--include",
+                    "/repos/org/repo-a/pulls/77/merge",
+                    "-f",
+                    f"sha={sha}",
+                    "-f",
+                    "merge_method=squash",
+                ],
+                {"check": False, "retry_on_rate_limit": False, "max_retries": 1},
+            )
+        ]
+
+    def test_preserves_non_success_status_and_parsed_body(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            pg,
+            "gh_call",
+            lambda *args, **kwargs: SimpleNamespace(
+                stdout=(
+                    "HTTP/2.0 409 Conflict\ncontent-type: application/json\n\n"
+                    '{"message": "Head branch was modified"}'
+                )
+            ),
+        )
+
+        outcome = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).merge_pr_if_head(
+            77, "a" * 40
+        )
+
+        assert outcome.status == 409
+        assert outcome.body == {"message": "Head branch was modified"}
+        assert outcome.malformed is False
+
+    def test_transport_failure_is_ambiguous_not_a_second_attempt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(pg, "gh_call", MagicMock(side_effect=OSError("network reset")))
+
+        outcome = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).merge_pr_if_head(
+            77, "a" * 40
+        )
+
+        assert outcome.status is None
+        assert outcome.body is None
+        assert outcome.transport_error is True
+
+    def test_headerless_nonzero_result_is_also_transport_ambiguous(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``check=False`` can return an interrupted command rather than raise."""
+        monkeypatch.setattr(
+            pg,
+            "gh_call",
+            lambda *args, **kwargs: SimpleNamespace(stdout="", returncode=1),
+        )
+
+        outcome = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).merge_pr_if_head(
+            77, "a" * 40
+        )
+
+        assert outcome.status is None
+        assert outcome.transport_error is True
+        assert outcome.malformed is False
+
+    def test_dry_run_does_not_send_the_conditional_merge(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        call = MagicMock()
+        monkeypatch.setattr(pg, "gh_call", call)
+
+        outcome = pg.PipelineGitHub(
+            "org", repo="repo-a", dry_run=True, repo_root=tmp_path
+        ).merge_pr_if_head(77, "a" * 40)
+
+        assert outcome.dry_run is True
+        call.assert_not_called()
+
+
 class TestRepoScopedAutoMerge:
     """The pipeline adapter intentionally exposes no auto-merge mutators."""
 

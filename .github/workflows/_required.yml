@@ -456,7 +456,7 @@ jobs:
   auto-merge-policy:
     name: auto-merge-policy
     # Advisory (NOT a required check): the automation loop owns review,
-    # approval labeling, and merge arming. This job reports observable PR
+    # approval labeling, and SHA-conditional ordinary merging. This job reports observable PR
     # state but never authorizes the loop or substitutes for that process.
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
@@ -493,7 +493,7 @@ jobs:
 
           state=$(jq -r '.autoMergeRequest' pr.json)
           if [ "$state" != "null" ] && [ -n "$state" ]; then
-            echo "::notice::Auto-merge is armed by the automation loop."
+            echo "::notice::Auto-merge is present and external to the automation loop."
             exit 0
           fi
           echo "OK: auto-merge is currently disabled"

@@ -11,7 +11,7 @@ to merge received an independent review. The temporary #2054 policy therefore
 disabled every automatic armer, but it also prevented the queue from completing
 otherwise eligible work.
 
-PR heads can change while review, CI, or auto-merge operations are in flight.
+PR heads can change while review, CI, or merge operations are in flight.
 Any merge authority must consequently be bound to an authenticated artifact for
 the current head, and must fail closed if it cannot revoke stale eligibility.
 
@@ -23,11 +23,20 @@ the current head, and must fail closed if it cannot revoke stale eligibility.
    automation-authored artifact for the exact PR head before applying
    `state:implementation-go`. A NOGO routes to a real implementation pass.
 3. CI and every merge-wait transition revalidate the current-head strict GO.
-   Head drift revokes the label and auto-merge before returning to strict
-   review.
-4. `MergeWaitStage` is the sole automatic armer. It uses prepare → arm →
-   confirm and contains any failed confirmation, head race, or arming-record
-   failure by disabling auto-merge and verifying that containment.
+   Head drift revokes the label only after a confirmed-unarmed read before
+   returning to strict review.
+4. **Historical (superseded below):** `MergeWaitStage` was the sole automatic
+   armer. Its prepare → arm → confirm protocol is no longer active because
+   persistent auto-merge ownership cannot be contained safely.
+
+## Supersession note (2026-07-25)
+
+The historical persistent-auto-merge containment described by this ADR is
+superseded for the queue pipeline by issue #2419. `merge_wait` now makes one
+ordinary GitHub REST squash merge conditional on the process-local reviewed
+SHA, after verifying an open `main` PR with an exclusive approval label and no
+auto-merge request. The conditional SHA is the linearization point; any
+ambiguous outcome is reconciled from lifecycle state before a bounded retry.
 
 ## Alternatives considered
 

@@ -58,15 +58,15 @@ in §5.1, which tags `state:skip` on epics before any other durable mutation.
  into the same queue and the loop reconverges
  ([`_park_resumable`](hephaestus/automation/pipeline/coordinator.py),
  [`_finalize_resumable`](hephaestus/automation/pipeline/coordinator.py)).
-- **Reviewed-head proof, no queue merge mutation.** `state:implementation-go`
+- **Reviewed-head proof, SHA-conditional ordinary merge.** `state:implementation-go`
  is applied only by `pr_review._eval`, which is the sole stage authorized to
  write the label. Before the reviewer runs, `pr_review` snapshots the GitHub
  review inputs and its head SHA, then requires a clean local checkout at that
  exact SHA. The resulting in-memory proof is rechecked against a confirmed,
  unarmed live PR before the label is written. `merge_wait` consumes that proof
- but currently stands by; no queue stage creates, disables, adopts, or polls
- an auto-merge request pending the separately reviewed #2419 conditional
- merge path ([`pr_review.py`](hephaestus/automation/pipeline/stages/pr_review.py),
+ makes one ordinary GitHub squash-merge request conditional on that exact SHA;
+ no queue stage creates, disables, adopts, or polls an auto-merge request
+ ([`pr_review.py`](hephaestus/automation/pipeline/stages/pr_review.py),
  [`worker_pool.py`](hephaestus/automation/pipeline/worker_pool.py),
  [`merge_wait.py`](hephaestus/automation/pipeline/stages/merge_wait.py)).
 - **Globally bounded budgets.** Stages count retries on `_on_job_done` so
@@ -500,9 +500,6 @@ Key fields:
 - `result` ([`ItemResult`](hephaestus/automation/pipeline/work_item.py)) —
  final `passed / reason / final_stage` written by
  [`_finish`](hephaestus/automation/pipeline/coordinator.py).
-- `armed` — compatibility field retained on the work item. The current
- [`merge_wait`](hephaestus/automation/pipeline/stages/merge_wait.py) stage
- does not set it because the queue does not arm auto-merge.
 - `worktree`, `branch` — populated by [`implementation`](hephaestus/automation/pipeline/stages/implementation.py).
 
 ### [§`StageName`](hephaestus/automation/pipeline/routing.py)
@@ -591,8 +588,8 @@ A label alone never authorizes merge. `merge_wait` requires both the
 `state:implementation-go` label and a matching in-memory reviewed-head proof
 on a confirmed, unarmed live PR. A missing or drifted proof is contained by
 returning to review only after a fresh unarmed read permits stale-label
-revocation; a matching proof currently reaches a safe standby outcome pending
-issue #2419 ([`merge_wait.py`](hephaestus/automation/pipeline/stages/merge_wait.py)).
+revocation; a matching proof permits one ordinary squash merge conditional on
+that reviewed SHA ([`merge_wait.py`](hephaestus/automation/pipeline/stages/merge_wait.py)).
 
 Plan-review labels are the sole durable authority. Review comments explain and
 audit a decision but never authorize a transition, block a stage, or backfill a
@@ -951,17 +948,19 @@ Architectural contract:
 ### 5.6 Merge wait
 
 Merge wait verifies a still-valid implementation approval against its
-in-memory reviewed-head proof and then stands by. Until #2419 supplies a
-separately reviewed conditional normal-merge path, it does not create,
-disable, adopt, or poll an auto-merge request. An existing request is treated
-as external ownership and is left untouched.
+in-memory reviewed-head proof and then makes one ordinary GitHub squash-merge
+request conditional on that exact SHA. It does not create, disable, adopt, or
+poll an auto-merge request. An existing request is treated as external
+ownership and is left untouched.
 
 #### Boundary diagram
 
 ```mermaid
 flowchart LR
     Approved["Approval label + reviewed-head proof"] --> Verify
-    Verify --> StandBy["Safe standby pending #2419"]
+    Verify --> Merge["Conditional ordinary squash merge"]
+    Merge --> Merged["GitHub reports merged"]
+    Merge --> Retry["Known not-ready response"]
     Verify --> Review["Missing or drifted proof"]
     Verify --> Operator["External or ambiguous ownership"]
     Merged --> Learn["Optional learning"] --> Finished
@@ -977,11 +976,13 @@ stateDiagram-v2
     Inspect --> OperatorOwned: externally armed
     Inspect --> PRReview: approval missing
     Inspect --> Verify: approval label present
-    Verify --> StandBy: matching reviewed head and unarmed PR
+    Verify --> Merge: matching reviewed head and unarmed main PR
+    Merge --> Complete: GitHub reports merged
+    Merge --> Retry: immediate merge not ready
+    Retry --> Verify: bounded timer retry
     Verify --> PRReview: missing or drifted proof after safe label revocation
     Verify --> OperatorOwned: externally armed or ownership ambiguous
     Verify --> Failed: incomplete or unavailable state
-    StandBy --> [*]
     Learn --> Complete: disabled or recorded
     Learn --> Failed: durable outcome ambiguous
     Complete --> [*]
@@ -996,8 +997,11 @@ Architectural contract:
 - Existing external merge ownership is preserved.
 - Missing or drifted proof returns approval to PR review only after a fresh,
   confirmed-unarmed read permits label revocation.
-- A matching proof stands by pending the #2419 conditional merge path.
-- Ambiguous merge or learning state stops for operator inspection.
+- A matching proof permits one ordinary squash merge conditional on the
+  reviewed SHA; a 405 readiness response may retry only through the bounded
+  timer path.
+- Ambiguous transport or learning state is re-read before any retry and stops
+  for operator inspection when its lifecycle cannot be confirmed.
 
 ### 5.7 `finished`
 
@@ -1053,7 +1057,7 @@ budgets. Every `routes.py` row and every doc row MUST agree.
 | `plan_review` | `IMPLEMENTATION` | `nogo` → `PLANNING`; `plan_cycles_exhausted` → `FINISHED`; `*` → `PLANNING` | `plan_review_iter = 3`, `plan_cycles = 2` |
 | `implementation` | `PR_REVIEW` | `plan_not_go` → `PLAN_REVIEW`; `already_implementation_go_pr` → `MERGE_WAIT`; `*` → `FINISHED` | `implement = 2`, `test_fix = 1` |
 | `pr_review` | `MERGE_WAIT` | `agent_error` → `IMPLEMENTATION`; `human_blocked` → `FINISHED`; `exhaustion` → `FINISHED`; `*` → `PR_REVIEW` | `pr_review_iter = 3`, `pr_review_hard = 6` |
-| `merge_wait` | `FINISHED` | `not_implementation_go`, `reviewed_head_missing`, or `reviewed_head_drift` → `PR_REVIEW`; `closed` → `FINISHED`; `*` → `FINISHED` | — (no queue-stage budget) |
+| `merge_wait` | `FINISHED` | `not_implementation_go`, `reviewed_head_missing`, or `reviewed_head_drift` → `PR_REVIEW`; `closed` → `FINISHED`; `*` → `FINISHED` | `merge = 5` |
 | `finished` | `FINISHED` | — (terminal) | — |
 
 Budget provenance (cross-check):
@@ -1074,8 +1078,8 @@ Budget provenance (cross-check):
  [`loop_runner.py LoopConfig.drive_green_loops`](hephaestus/automation/loop_runner.py).
 - `merge = 5` (CLI default for `--drive-green-loops`,
  [`DEFAULT_DRIVE_GREEN_LOOPS`](hephaestus/automation/pipeline/routing.py))
- is retained routing compatibility metadata for the legacy drive-green CLI;
- the queue `merge_wait` stage does not poll or consume this budget.
+ bounds conditional-merge readiness and transport retries. The stage increments
+ it only for a REST attempt and never duplicates a conclusive outcome.
 All per-item-lifetime counters live in
 [`WorkItem.attempts`](hephaestus/automation/pipeline/work_item.py);
 they are NEVER reset when an item re-enters a stage, so cross-stage
@@ -1169,7 +1173,8 @@ cannot use a durable implementation-GO label by itself: merge wait first
 requires a confirmed-unarmed read, then returns the PR to review after safely
 revoking a stale label. Other-run auto-merge requests are
 [blocked without adoption or mutation](hephaestus/automation/pipeline/stages/merge_wait.py)
-and require operator handling.
+and require operator handling. A current-process proof permits one ordinary
+SHA-conditional squash merge; a restart never reconstructs that proof.
 
 ---
 
@@ -1516,8 +1521,8 @@ Exit-code priority is:
  matching the live `headRefOid` of the PR. `pr_review` creates its
  process-local proof only after a GitHub snapshot and a clean checkout agree
  on that SHA; it rechecks the proof before writing the GO label. `merge_wait`
- compares that proof with the confirmed-unarmed live PR and stands by pending
- #2419 rather than arming or polling auto-merge.
+ compares that proof with the confirmed-unarmed live PR and performs one
+ ordinary SHA-conditional squash merge rather than arming or polling auto-merge.
 - **Skip-reason marker** — the `<!-- hephaestus-state-skip-reason -->` HTML-comment marker ([`SKIP_REASON_MARKER`](hephaestus/automation/state_labels.py)) that prefixes every `state:skip` reason-comment body produced by [`format_skip_reason_comment`](hephaestus/automation/state_labels.py), so a repo reader can deterministically trace the automated skip reason.
 - **File-system loader** — the Jinja `FileSystemLoader` resolved from `__file__`-relative paths in [`prompts/catalog.py`](hephaestus/prompts/catalog.py); deliberately NOT `PackageLoader` to avoid importlib editable-install staleness (#2308).
 - **Conflict-resolution request** — the [`ConflictResolutionRequest`](hephaestus/automation/_review_conflict_resolver.py) immutable context consumed by the cohesive [`ReviewConflictResolver`](hephaestus/automation/_review_conflict_resolver.py) unit split out of `_review_phase.py` (#2209).

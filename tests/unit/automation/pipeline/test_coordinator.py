@@ -707,6 +707,7 @@ class TestFailBackRouting:
             pr_state={
                 "state": "OPEN",
                 "headRefOid": "a" * 40,
+                "baseRefName": "main",
                 "autoMergeRequest": None,
             },
         )
@@ -722,7 +723,7 @@ class TestFailBackRouting:
         )
         item = _issue_item(3, StageName.MERGE_WAIT)
         item.pr = 12
-        item.state = "ARM"
+        item.state = "MERGE"
 
         coordinator._push_item(item, StageName.MERGE_WAIT, enter=False)
         coordinator._drain_queues()
@@ -747,7 +748,7 @@ class TestFailBackRouting:
         coordinator, _, _ = make_coordinator(tmp_path, monkeypatch, github=github)
         item = _issue_item(3, StageName.MERGE_WAIT)
         item.pr = 12
-        item.state = "POLL"
+        item.state = "MERGE"
 
         coordinator._push_item(item, StageName.MERGE_WAIT, enter=False)
         coordinator._drain_queues()
@@ -772,7 +773,7 @@ class TestFailBackRouting:
         coordinator, _, _ = make_coordinator(tmp_path, monkeypatch, github=github)
         item = _issue_item(3, StageName.MERGE_WAIT)
         item.pr = 12
-        item.state = "ARM"
+        item.state = "MERGE"
 
         coordinator._push_item(item, StageName.MERGE_WAIT, enter=False)
         coordinator._drain_queues()

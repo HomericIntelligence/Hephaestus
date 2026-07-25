@@ -32,11 +32,11 @@ it belongs in that stage rather than in GitHub Actions.
    collect CI/CD evidence and incorporate it into its binary verdict, but CI
    never independently authorizes the loop.
 3. `merge_wait` consumes the loop-owned label only with the current process's
-   reviewed-head proof. Pending the separately reviewed #2419 conditional
-   merge path, it verifies a confirmed-unarmed live PR and stands by rather
-   than mutating auto-merge. An existing or ambiguous request is external and
-   left untouched. Normal GitHub branch protection and explicit operator
-   authority remain independent of this loop decision.
+   reviewed-head proof. It verifies a confirmed-unarmed live `main` PR and
+   makes one ordinary squash merge conditional on that exact SHA rather than
+   mutating auto-merge. An existing or ambiguous request is external and left
+   untouched. Normal GitHub branch protection and explicit operator authority
+   remain independent of this loop decision.
 
 ## Alternatives considered
 

@@ -456,8 +456,9 @@ hephaestus-check-complexity --help
 The `main` branch is protected; all changes go through a pull request. CI blocks
 PRs that fail its issue-reference, signature, and DCO checks. The loop runs
 `$athena:pr-review` and then writes `state:implementation-go` for the reviewed
-head. `merge_wait` revalidates the current-process proof and safely stands by;
-it does not create, disable, adopt, or poll an auto-merge request. Normal
+head. `merge_wait` revalidates the current-process proof and makes one ordinary
+GitHub squash-merge request conditional on that exact SHA; it does not create,
+disable, adopt, or poll an auto-merge request. Normal
 review may collect CI/CD evidence and incorporate it into its binary verdict,
 but the loop does not change CI/CD and no CI workflow independently authorizes
 it. The `auto-merge-policy` check is advisory.
@@ -469,9 +470,9 @@ it. The `auto-merge-policy` check is advisory.
 3. Push the branch (`git push -u origin 123-amazing-feature`).
 4. Open a pull request whose body contains the literal line `Closes #123`
    (capital `C`, no colon, on its own line — `Fixes`/`Resolves` are **not** accepted).
-5. Do not enable auto-merge manually. The automation loop's review, label, and
-   `merge_wait` stages preserve the head-bound approval boundary but currently
-   do not mutate auto-merge.
+5. Do not enable auto-merge manually. The automation loop preserves the
+   head-bound approval boundary and uses an ordinary SHA-conditional squash
+   merge without mutating auto-merge.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full process.
 

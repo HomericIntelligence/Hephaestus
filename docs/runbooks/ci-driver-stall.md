@@ -2,9 +2,9 @@
 
 Use this runbook when a PR carries loop-owned `state:implementation-go` and
 remains blocked. The current queue verifies the label only with its
-current-process reviewed-head proof, then `merge_wait` stands by; it does not
-create, disable, adopt, or poll auto-merge pending the separately reviewed
-issue #2419 conditional merge path. CI/CD is outside the loop.
+current-process reviewed-head proof, then `merge_wait` makes one ordinary
+SHA-conditional squash merge; it does not create, disable, adopt, or poll
+auto-merge. CI/CD is outside the loop.
 
 ## Containment
 
@@ -26,7 +26,8 @@ Confirm the PR has `state:implementation-go`, then rerun the bounded
 drive-green scope. A direct run or restart has no durable reviewed-head proof,
 so merge wait safely revokes the stale label only after a confirmed-unarmed
 read and returns the PR to review. A proof created during the current review
-cycle reaches safe standby rather than an auto-merge mutation:
+cycle makes an ordinary SHA-conditional squash-merge attempt rather than an
+auto-merge mutation:
 
 ```bash
 uv run hephaestus-automation-loop --prs <N> --loops 1 --max-workers 1

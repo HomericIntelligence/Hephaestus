@@ -20,6 +20,7 @@ from hephaestus.automation.pipeline.stages import (
     StageContext,
     StageGitHub,
 )
+from hephaestus.automation.pipeline.stages.base import ConditionalMergeResult
 from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARGV
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.protocol import (
@@ -66,6 +67,8 @@ class FakeStageGitHub(FakeGitHub):
         unresolved: list[tuple[int, int]] | None = None,
         by_severity: list[tuple[int, int, int]] | None = None,
         pr_state: dict[str, Any] | None | _DefaultPrState = _DEFAULT_PR_STATE,
+        merge_result: ConditionalMergeResult | None = None,
+        merge_readiness: dict[str, Any] | None = None,
         pr_review_context: dict[str, str] | None = None,
         learn_terminal: bool = False,
         resolve_count: int = 0,
@@ -94,6 +97,10 @@ class FakeStageGitHub(FakeGitHub):
                 deriving from unresolved (legacy: all automation = blocking).
             pr_state: Canned answer for gh_pr_state (merge_wait's single
                 PR-state read); ``None`` mirrors a transient read failure.
+            merge_result: Canned SHA-conditional merge result.  The default
+                mirrors a successful GitHub merge and updates the lifecycle
+                state so full-pipeline tests can reach post-merge learning.
+            merge_readiness: Canned operational read after a 405 response.
             learn_terminal: Seed answer for drive_green_learn_terminal —
                 True mirrors an issue whose post-merge /learn already ran
                 terminally (the #848 dedupe record).
@@ -135,6 +142,10 @@ class FakeStageGitHub(FakeGitHub):
                 "pr_head_sha": "a" * 40,
             }
         )
+        self._merge_result = merge_result or ConditionalMergeResult(
+            status=200, body={"merged": True}
+        )
+        self._merge_readiness = merge_readiness
         self._learn_terminal = learn_terminal
         self._resolve_count = resolve_count
         self.learn_results: dict[int, bool] = {}
@@ -361,6 +372,18 @@ class FakeStageGitHub(FakeGitHub):
         """Mirror ci_driver.CIDriver._gh_pr_state (canned answer)."""
         del pr_number  # single canned answer; not per-PR keyed
         return self._pr_state
+
+    def gh_pr_merge_readiness(self, pr_number: int) -> dict[str, Any] | None:
+        """Mirror the post-405 operational merge read."""
+        del pr_number
+        return self._merge_readiness
+
+    def merge_pr_if_head(self, pr_number: int, reviewed_sha: str) -> ConditionalMergeResult:
+        """Mirror one conditional REST merge and record the exact SHA."""
+        self._log("merge_pr_if_head", pr_number, reviewed_sha)
+        if self._merge_result.status == 200 and self._merge_result.body == {"merged": True}:
+            self._pr_state = {"state": "MERGED"}
+        return self._merge_result
 
     def drive_green_learn_terminal(self, issue_number: int) -> bool:
         """Mirror ci_driver._learn_record_terminal over the arming record.

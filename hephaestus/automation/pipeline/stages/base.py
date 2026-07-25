@@ -74,6 +74,7 @@ __all__ = [
     "AgentJob",
     "BuildTestJob",
     "CompactJob",
+    "ConditionalMergeResult",
     "Continue",
     "Disposition",
     "GitJob",
@@ -101,8 +102,22 @@ logger = logging.getLogger(__name__)
 #: not import it from each other).
 GIT_JOB_TIMEOUT_S = 600
 
-#: Poll backoff cap in seconds (legacy ``min(2**attempt, 60)`` — shared by
-#: every stage that uses the legacy exponential poll delay.
+
+@dataclass(frozen=True)
+class ConditionalMergeResult:
+    """One SHA-conditional ordinary GitHub merge attempt.
+
+    ``status`` and ``body`` preserve GitHub's HTTP response rather than the
+    ``gh`` process return code.  A missing status is transport-ambiguous: the
+    caller must reconcile lifecycle state before any bounded retry.  A parsed
+    non-object body is malformed and is terminal rather than guessed at.
+    """
+
+    status: int | None
+    body: dict[str, Any] | None
+    transport_error: bool = False
+    malformed: bool = False
+    dry_run: bool = False
 
 
 @runtime_checkable
@@ -283,8 +298,9 @@ class StageGitHub(Protocol):
         Mirrors ``pr_manager.mark_pr_implementation_no_go`` (adds the no-go
         label, removes any stale go label). ``pr_review`` writes it on every
         NOGO round before retry/regress; ``merge_wait`` may invoke the same
-        stage-owned revocation only after it has verified deferral of its own
-        head-drifted arm. No external arm may be changed through this method.
+        stage-owned revocation only after it has verified a head-drifted
+        confirmed-unarmed PR. No external auto-merge request may be changed
+        through this method.
         """
         ...
 
@@ -319,6 +335,23 @@ class StageGitHub(Protocol):
         merged/closed terminal-state checks before branch adoption or further
         routing. The merge_wait path uses the same contract to capture the
         head OID and classify merged, closed, and open lifecycle states.
+        """
+        ...
+
+    def gh_pr_merge_readiness(self, pr_number: int) -> dict[str, Any] | None:
+        """Read operational merge readiness after an immediate 405 response.
+
+        This is deliberately a separate operational read, not an approval
+        source.  It returns lifecycle fields plus GitHub's ``mergeable`` and
+        ``mergeStateStatus`` observations, or ``None`` when unreadable.
+        """
+        ...
+
+    def merge_pr_if_head(self, pr_number: int, reviewed_sha: str) -> ConditionalMergeResult:
+        """Attempt one repo-scoped ordinary squash merge conditional on ``reviewed_sha``.
+
+        The adapter performs exactly one REST ``PUT`` without native
+        auto-merge, merge-queue, administrative, or protection-bypass paths.
         """
         ...
 

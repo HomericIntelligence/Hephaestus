@@ -26,7 +26,8 @@ links to the full section below.
    body, and keep auto-merge disabled. After an unconditional independent
    current-head `$athena:pr-review` GO, the loop applies
    `state:implementation-go`; `merge_wait` then revalidates the in-memory
-   reviewed-head proof and safely stands by without mutating auto-merge.
+   reviewed-head proof and submits one ordinary squash merge conditional on
+   that exact SHA, without mutating auto-merge.
    Normal review may collect CI/CD evidence and incorporate it into its binary
    verdict, but the loop does not change CI/CD and CI itself never
    independently authorizes it. Do not enable auto-merge manually.
@@ -285,8 +286,9 @@ valid issue reference, signed commits, or DCO sign-offs:
 Do not enable auto-merge manually. The queue applies
 `state:implementation-go` only after `$athena:pr-review` for the PR's current
 head. `merge_wait` consumes the loop-owned label together with its in-memory
-reviewed-head proof and safely stands by; it does not create, disable, adopt,
-or poll an auto-merge request. A restart has no proof and returns the PR to
+reviewed-head proof and performs one ordinary squash merge conditional on that
+SHA; it does not create, disable, adopt, or poll an auto-merge request. A
+restart has no proof and returns the PR to
 review only after a confirmed-unarmed read permits stale-label revocation.
 Normal review may collect CI/CD evidence and incorporate it into its binary
 verdict, but the loop does not change CI/CD and no CI check independently

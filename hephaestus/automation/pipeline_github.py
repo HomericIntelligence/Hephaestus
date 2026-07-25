@@ -41,6 +41,7 @@ from hephaestus.automation.arming_state import (
     ArmingStateStore,
 )
 from hephaestus.automation.git_utils import issue_auto_impl_branch_name
+from hephaestus.automation.pipeline.stages.base import ConditionalMergeResult
 from hephaestus.automation.prompts.pr_review import (
     BLOCKING_SEVERITIES,
     SEVERITY_MARKER_PREFIX,
@@ -77,6 +78,39 @@ from hephaestus.utils.file_lock import file_lock
 logger = logging.getLogger(__name__)
 
 _CLOSES_ISSUE_LINE_RE = re.compile(r"^Closes #(\d+)\s*$", re.MULTILINE)
+_HTTP_STATUS_RE = re.compile(r"^HTTP/\S+\s+(\d{3})\b", re.MULTILINE)
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
+
+
+def _parse_included_http_response(raw: str) -> tuple[int | None, dict[str, Any] | None, bool]:
+    """Parse ``gh api --include`` output without mistaking its exit code for HTTP.
+
+    ``gh`` returns a process exit code, not the REST status.  The conditional
+    merge endpoint needs the HTTP outcome for its state machine, so its caller
+    requests included headers and this helper extracts the final HTTP response
+    and its JSON-object body.  Missing/invalid structure is explicitly marked
+    malformed for fail-closed handling by ``merge_wait``.
+    """
+    matches = list(_HTTP_STATUS_RE.finditer(raw))
+    if not matches:
+        return None, None, True
+    match = matches[-1]
+    try:
+        status = int(match.group(1))
+    except (TypeError, ValueError):  # pragma: no cover - regex guarantees digits
+        return None, None, True
+    response_tail = raw[match.end() :]
+    separator = re.search(r"\r?\n\r?\n", response_tail)
+    if separator is None:
+        return status, None, True
+    body_text = response_tail[separator.end() :].strip()
+    try:
+        body = json.loads(body_text)
+    except json.JSONDecodeError:
+        return status, None, True
+    if not isinstance(body, dict):
+        return status, None, True
+    return status, body, False
 
 
 def _split_threads(threads: list[dict[str, Any]]) -> tuple[int, int]:
@@ -862,6 +896,75 @@ class PipelineGitHub:
         except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError) as exc:
             logger.warning("PR #%s: gh_pr_state read failed: %s", pr_number, exc)
             return None
+
+    def gh_pr_merge_readiness(self, pr_number: int) -> dict[str, Any] | None:
+        """Read GitHub's operational merge state after an immediate 405.
+
+        Readiness is not an authorization input.  The stage separately
+        revalidates its label/head/unarmed admission facts before it permits a
+        bounded retry.
+        """
+        try:
+            result = self._gh(
+                [
+                    "pr",
+                    "view",
+                    str(pr_number),
+                    "--json",
+                    "state,headRefOid,mergedAt,baseRefName,autoMergeRequest,mergeable,mergeStateStatus",
+                ]
+            )
+            data = json.loads(result.stdout or "{}")
+            return data if isinstance(data, dict) else None
+        except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError) as exc:
+            logger.warning("PR #%s: merge readiness read failed: %s", pr_number, exc)
+            return None
+
+    def merge_pr_if_head(self, pr_number: int, reviewed_sha: str) -> ConditionalMergeResult:
+        """Perform one normal squash merge conditional on the reviewed SHA.
+
+        This deliberately avoids the GitHub CLI PR-merge subcommand and GitHub's
+        auto-merge/merge-queue/admin paths.  ``max_retries=1`` is essential:
+        an uncertain mutation must be reconciled by lifecycle reads before any
+        later bounded attempt, not replayed inside the transport client.
+        """
+        owner, name = self._owner_name()
+        if not isinstance(pr_number, int) or pr_number <= 0:
+            raise ValueError("PR number must be a positive integer")
+        if not isinstance(reviewed_sha, str) or not _SHA_RE.fullmatch(reviewed_sha):
+            raise ValueError("reviewed SHA must be a full Git object id")
+        if self._skip(f"conditionally squash-merge PR #{pr_number} at {reviewed_sha}"):
+            return ConditionalMergeResult(status=None, body=None, dry_run=True)
+        try:
+            result = gh_call(
+                [
+                    "api",
+                    "--method",
+                    "PUT",
+                    "--include",
+                    f"/repos/{owner}/{name}/pulls/{pr_number}/merge",
+                    "-f",
+                    f"sha={reviewed_sha}",
+                    "-f",
+                    "merge_method=squash",
+                ],
+                check=False,
+                retry_on_rate_limit=False,
+                max_retries=1,
+            )
+        except (subprocess.SubprocessError, RuntimeError, OSError) as exc:
+            logger.warning(
+                "PR #%s: conditional merge transport outcome unknown: %s", pr_number, exc
+            )
+            return ConditionalMergeResult(status=None, body=None, transport_error=True)
+        status, body, malformed = _parse_included_http_response(result.stdout or "")
+        if status is None:
+            # ``check=False`` preserves non-zero exits.  Without an included
+            # HTTP status GitHub may have applied the request before the
+            # connection failed, so lifecycle reconciliation—not a guessed
+            # malformed response—is the only safe next step.
+            return ConditionalMergeResult(status=None, body=None, transport_error=True)
+        return ConditionalMergeResult(status=status, body=body, malformed=malformed)
 
     def drive_green_learn_terminal(self, issue_number: int) -> bool:
         """Return True when the post-merge ``/learn`` is already terminal.
