@@ -48,7 +48,8 @@ unit/integration/shell tests, wheel build, security scans (pip-audit, Gitleaks,
 bandit), workflow-schema validation, and version-sync. It also runs the
 advisory `auto-merge-policy` job. It is intentionally **not** a required
 check: the automation loop runs `$athena:pr-review`, owns the
-`state:implementation-go` label, and conditionally arms in `merge_wait`. The
+`state:implementation-go` label, and makes one SHA-conditional ordinary
+squash-merge request in `merge_wait`; it never arms native auto-merge. The
 privileged label-event auto-merge workflow remains removed.
 
 ### Auto-Tag Workflow (`workflows/auto-tag.yml`)
