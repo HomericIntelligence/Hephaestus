@@ -306,12 +306,15 @@ Intake is also source-driven rather than an eager list of classified products:
   and one fetched GitHub page. The coordinator keeps at most `C` active repo
   sources and gives each one admission attempt per FIFO round-robin, so a large
   repository cannot monopolize discovery.
-- Organization repositories, issues, and open PRs use REST pages of at most 100 rows.
-  Pagination continues until the short terminal
-  page; there is no `gh ... --limit 500` discovery cap. Organization scope
-  resolution returns the filtered repository names before the FIFO source
-  admits repo work, while issue and PR runtime cursors consume their pages
-  lazily.
+- Organization repositories and linked-issue metadata use REST pages of at
+  most 100 rows. Pagination continues until the short terminal page; there is
+  no `gh ... --limit 500` discovery cap. Organization scope resolution returns
+  the filtered repository names before the FIFO source admits repo work, while
+  each active repository cursor consumes issue metadata lazily. Repository
+  discovery does not pre-scan open-PR pages: PR review context enters through
+  the linked issue's classification. An orphan PR has no issue requirements
+  and remains outside this source; an explicit `--prs` scope can select one
+  for fail-closed direct evaluation, but cannot supply missing requirements.
 
 The implementation is in
 [`Coordinator._drain_direct_issue_source`](hephaestus/automation/pipeline/coordinator.py),
@@ -1134,11 +1137,13 @@ BEFORE the exclusion is honored
  when both the REPO queue and the global live-work window have capacity.
 - `--issues` and `--prs` are direct bounded cursors. Each value is classified
  only when its eventual entry queue is guaranteed to accept it, so a large
- CLI scope is not converted into an eager seed list.
+ CLI scope is not converted into an eager seed list. `--prs` is the explicit
+ route for a PR that is not reached from linked-issue discovery.
 - `--org` follows the GitHub REST repository pagination until exhaustion,
  filters forked/archived repos, then passes the resolved names to that FIFO
- source. Issue and PR discovery likewise use 100-row REST pages rather than a
- 500-item CLI limit ([`loop_repo_manager.py`](hephaestus/automation/loop_repo_manager.py)).
+ source. Linked-issue discovery uses 100-row REST pages rather than a 500-item
+ CLI limit; it does not bulk-scan every open PR
+ ([`loop_repo_manager.py`](hephaestus/automation/loop_repo_manager.py)).
 When `--issues` or `--prs` is set, the resolved `--repos` list is used
 ONLY for context — repo discovery is NOT enqueued, so a scoped run
 cannot reconstruct every open issue in the repo (deliberate scope

@@ -8,9 +8,13 @@ arguments, builds a
 :class:`~hephaestus.automation.pipeline.coordinator.PipelineConfig` trimmed to
 the ``(pr_review, merge_wait)`` stage scope via
 :class:`~hephaestus.automation.pipeline.routing.PipelineScope`, seeds the
-requested issues / PRs (and, in no-scope discovery mode, the repo-wide open-PR
-sweep via ``drive_green_all``), and dispatches to
+requested issues / PRs (or, in no-scope discovery mode, the repository's
+bounded linked-issue source), and dispatches to
 :func:`~hephaestus.automation.pipeline.coordinator.run_pipeline`.
+
+It does not enumerate unrelated open PRs. An orphan PR has no issue
+requirements and remains out of repository discovery; ``--prs`` can select it
+for fail-closed direct evaluation but cannot supply the missing requirements.
 
 The former CI repair/rebase/poll stage was deliberately removed: CI/CD remains
 independent branch protection and never supplies automation-loop input. The
@@ -107,8 +111,8 @@ Examples:
   # Verbose
   %(prog)s -v
 
-  # Drive every open PR, including teammates' and bots' (default is @me only)
-  %(prog)s --all
+  # Drive one explicitly selected PR
+  %(prog)s --prs 123
         """,
         add_github_throttle=True,
         dry_run_prefix=(
@@ -124,8 +128,8 @@ Examples:
         default=[],
         help=(
             "Scope to these issue numbers' PRs. Requires at least one issue "
-            "number when given. Omit the flag entirely to drive every open "
-            "PR discovered via gh (issue-linked PRs plus bot-authored PRs)."
+            "number when given. Omit the flag to use bounded linked-issue "
+            "discovery; unrelated open PRs are not enumerated."
         ),
     )
     parser.add_argument(
@@ -152,9 +156,9 @@ Examples:
         action="store_false",
         default=True,
         help=(
-            "Exclude open bot-authored PRs (Dependabot, github-actions, etc.) "
-            "from the no-scope discovery sweep. Bot-authored PRs are included "
-            "by default so they are not architecturally invisible (#848)."
+            "Compatibility option retained for the retired open-PR sweep. "
+            "No-scope discovery is linked-issue based, so unrelated bot PRs "
+            "remain out of scope; use --prs to select a PR explicitly."
         ),
     )
     parser.add_argument(
@@ -163,10 +167,9 @@ Examples:
         action="store_true",
         default=False,
         help=(
-            "Include PRs opened by other actors (teammates and bots). Without "
-            "this flag, no-scope discovery drives only PRs authored by the "
-            "authenticated viewer (`gh api user`) (#821). Explicit --issues "
-            "and --prs scopes are processed regardless of author."
+            "Compatibility option retained for the retired author-filtered "
+            "open-PR sweep. It does not widen linked-issue discovery; explicit "
+            "--issues and --prs scopes are processed regardless of author."
         ),
     )
     add_agent_timeout_arg(parser)
@@ -236,10 +239,9 @@ def main() -> int:
         issues = list(dict.fromkeys(args.issues))
         prs = list(dict.fromkeys(args.prs))
 
-        # No-scope discovery mode: with neither --issues nor --prs, the
-        # coordinator's repo-discovery seed unions every open non-draft PR on the
-        # repo (the legacy bot-PR sweep, #819 / #848) — enabled via
-        # drive_green_all. A scoped run (issues or PRs given) stays narrow (POLA).
+        # No-scope discovery mode keeps the compatibility flag true, but the
+        # coordinator now consumes only the bounded linked-issue source. It
+        # never enumerates unrelated open PRs; a scoped run stays narrow (POLA).
         drive_green_all = not issues and not prs
 
         config = PipelineConfig(

@@ -224,11 +224,12 @@ def _list_open_issue_meta(org: str, repo: str) -> Iterator[dict[str, Any]]:
 
 
 def _iter_open_pr_meta(org: str, repo: str) -> Iterator[dict[str, Any]]:
-    """Yield open-PR metadata one REST page at a time.
+    """Yield open-PR metadata one REST page at a time for compatibility callers.
 
-    The runtime ``--drive-green-all`` path consumes this cursor directly.  Do
-    not use ``gh api --paginate --slurp`` here: it accumulates every PR page
-    before the caller can apply bounded source admission.
+    Pipeline repository discovery does not consume this cursor: it advances
+    through linked issue metadata, and unrelated orphan PRs remain out of that
+    source. Do not use ``gh api --paginate --slurp`` in an out-of-band caller:
+    it accumulates every PR page before the caller can apply its own bounds.
     """
     page = 1
     while True:
@@ -280,7 +281,7 @@ def _iter_open_pr_meta(org: str, repo: str) -> Iterator[dict[str, Any]]:
 def _list_open_pr_meta(org: str, repo: str) -> list[dict[str, Any]]:
     """Materialize the bounded cursor for compatibility-only callers.
 
-    Pipeline runtime code must use :func:`_iter_open_pr_meta`; this legacy
+    Pipeline runtime code consumes no repository-wide open-PR cursor; this
     wrapper remains for callers that specifically require a complete sorted
     list.
     """

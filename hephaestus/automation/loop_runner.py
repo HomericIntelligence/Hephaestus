@@ -210,6 +210,8 @@ class LoopConfig:
     dry_run: bool = False
     no_advise: bool = False
     nitpick: bool = False
+    # Retained CLI/config compatibility option. It does not expand the queue's
+    # linked-issue repository discovery into an unrelated open-PR sweep.
     drive_green_all: bool = False
     run_pre_pr_tests: bool = False
     # ``model`` is the catch-all applied to every phase when set; per-phase
@@ -330,10 +332,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--drive-green-all",
         action="store_true",
         help=(
-            "Pass --all to the drive-green phase: drive every open PR, "
-            "including those opened by teammates and bots. By default "
-            "drive-green operates only on PRs authored by the authenticated "
-            "viewer (#821)."
+            "Compatibility option for the retired broad drive-green sweep. "
+            "Repository discovery remains linked-issue based and never scans "
+            "unrelated open PRs; use --prs for an explicit PR scope."
         ),
     )
     p.add_argument(
