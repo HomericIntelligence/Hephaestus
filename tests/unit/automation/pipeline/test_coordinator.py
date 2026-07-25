@@ -600,23 +600,33 @@ class TestAdmission:
     def test_global_work_window_defers_second_repo_item(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The global work window caps in-flight jobs across repositories."""
+        """The global work window caps jobs across repositories and stage queues.
+
+        Each source queue has capacity one here.  Put the work in distinct
+        stages so the assertion exercises global worker admission instead of
+        attempting to bypass the first item's capacity-reserving source lease.
+        """
         coordinator, pool, _ = make_coordinator(
             tmp_path, monkeypatch, repos=["repo-a", "repo-b"], max_workers=1
         )
-        coordinator.stages[StageName.PLANNING] = StubStage(
+        coordinator.stages[StageName.MERGE_WAIT] = StubStage(
             JobRequest(_agent_job(repo="repo-a", issue=1), on_done_state="V"),
+        )
+        coordinator.stages[StageName.PR_REVIEW] = StubStage(
             JobRequest(_agent_job(repo="repo-b", issue=2), on_done_state="V"),
         )
-        coordinator._push_item(_issue_item(1, repo="repo-a"), StageName.PLANNING, enter=True)
-        coordinator._drain_queues()
-        coordinator._push_item(_issue_item(2, repo="repo-b"), StageName.PLANNING, enter=True)
+        coordinator._push_item(
+            _issue_item(1, repo="repo-a"), StageName.MERGE_WAIT, enter=True
+        )
+        coordinator._push_item(
+            _issue_item(2, repo="repo-b"), StageName.PR_REVIEW, enter=True
+        )
         coordinator._drain_queues()
 
         assert len(pool.submitted) == 1
         assert coordinator.inflight_per_repo["repo-a"] == 1
         assert coordinator.inflight_per_repo["repo-b"] == 0
-        queued_repos = [item.repo for item in coordinator.queues[StageName.PLANNING].snapshot()]
+        queued_repos = [item.repo for item in coordinator.queues[StageName.PR_REVIEW].snapshot()]
         assert queued_repos == ["repo-b"]
 
 
