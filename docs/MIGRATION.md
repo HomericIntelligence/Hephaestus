@@ -7,11 +7,8 @@
 > interlock: `pr_review` writes `state:implementation-go` only for the current
 > process's reviewed head. `merge_wait` revalidates that proof before every
 > individual SHA-conditional normal REST squash-merge request on a
-> confirmed-unarmed PR. Before a request, it may wait up to 15 minutes for
-> operational GitHub readiness without spending a merge attempt; readiness is
-> not authorization, and the exact-head/label admission is repeated before
-> every request. The merge budget (default: five) still bounds actual requests
-> and transport-ambiguity retries. No queue stage invokes `gh pr merge`, arms native
+> confirmed-unarmed PR. The merge budget (default: five) still bounds actual
+> requests and transport-ambiguity retries. No queue stage invokes `gh pr merge`, arms native
 > auto-merge, manages a merge queue, or uses an administrator bypass. There are
 > **no breaking changes
 > to the documented public API** from 0.9.x: upgrading requires no code changes for
@@ -21,6 +18,12 @@
 > 5 - Production/Stable` classifier in `pyproject.toml` reflects the maturity of the
 > stable public API surface, not a 1.0 tag; the package remains tag-driven and is
 > currently on the 0.9.x series.
+
+## Current main (unreleased)
+
+Before a request, `merge_wait` may wait up to 15 minutes for operational GitHub
+readiness without spending a merge attempt; readiness is not authorization, and the
+exact-head/label admission is repeated before every request.
 
 ## 0.x → 1.0 (forthcoming — not yet released)
 

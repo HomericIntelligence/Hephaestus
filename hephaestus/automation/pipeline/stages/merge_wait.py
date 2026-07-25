@@ -43,9 +43,9 @@ LEARN_WAIT = "LEARN_WAIT"
 MW_FINISH = "MW_FINISH"
 FINISH = MW_FINISH
 
-_RETRYABLE_READINESS = frozenset({"BEHIND", "BLOCKED", "HAS_HOOKS", "UNKNOWN", "UNSTABLE"})
+_REQUESTABLE_READINESS = frozenset({"CLEAN", "HAS_HOOKS", "UNSTABLE"})
+_RETRYABLE_READINESS = frozenset({"BEHIND", "BLOCKED", "UNKNOWN"})
 _CONFLICTING_READINESS = frozenset({"CONFLICTING", "DIRTY"})
-_READY_READINESS = "CLEAN"
 _READINESS_WAIT_INITIAL_S = 5.0
 _READINESS_WAIT_TIMEOUT_S = 15 * 60.0
 _READINESS_WAIT_DELAY_CAP_S = 60.0
@@ -362,7 +362,7 @@ class MergeWaitStage(Stage):
             return StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_unavailable")
         if isinstance(readiness_head, str) and readiness_head and readiness_head != reviewed_head:
             return self._park_for_readiness(item, ctx)
-        if status == _READY_READINESS and mergeable == "MERGEABLE":
+        if status in _REQUESTABLE_READINESS and mergeable == "MERGEABLE":
             return self._park_for_readiness(item, ctx) if park_if_ready else None
         if status in _CONFLICTING_READINESS or mergeable == "CONFLICTING":
             return StageOutcome(Disposition.FINISH_FAIL, "merge_conflicting")

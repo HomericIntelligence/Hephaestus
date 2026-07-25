@@ -113,6 +113,28 @@ def test_conditional_merge_succeeds_only_after_lifecycle_confirms_merged(
     assert github.merge_attempts == [(12, "a" * 40)]
 
 
+@pytest.mark.parametrize("merge_state_status", ["HAS_HOOKS", "UNSTABLE"])
+def test_mergeable_requestable_readiness_states_merge_successfully(
+    make_ctx: Any, make_work_item: Any, merge_state_status: str
+) -> None:
+    """GitHub mergeable states that permit a request reach the conditional PUT."""
+    github = _ConditionalGitHub(
+        states=[_open_pr(), _open_pr(), {"state": "MERGED"}],
+        readiness={
+            **_open_pr(),
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": merge_state_status,
+        },
+    )
+    ctx = make_ctx(github=github)
+    ctx.config.enable_learn = False
+
+    result = MergeWaitStage().step(_reviewed_item(make_work_item), ctx)
+
+    assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
+    assert github.merge_attempts == [(12, "a" * 40)]
+
+
 def test_readiness_waits_before_the_first_conditional_merge(
     make_ctx: Any, make_work_item: Any
 ) -> None:
