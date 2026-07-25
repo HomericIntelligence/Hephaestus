@@ -874,6 +874,69 @@ class TestFailBackRouting:
 class TestImplementationAdmission:
     """Topological order + file-overlap reuse for the implementation queue."""
 
+    def test_full_downstream_retains_implementation_lease_until_handoff(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """C=1 keeps a completed implementation item leased when review is full.
+
+        Implementation has its own topological drain, so it must claim through
+        the same lease protocol as every other stage.  Popping the source queue
+        directly drops that ownership: a full PR-review queue then turns an
+        already-completed implementation action into a poisoned terminal item.
+        """
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch)
+        implementation = StubStage(StageOutcome(Disposition.ADVANCE, "PR opened"))
+        coordinator.stages[StageName.IMPLEMENTATION] = implementation
+
+        blocker = _issue_item(22, StageName.PR_REVIEW)
+        item = _issue_item(21, StageName.IMPLEMENTATION)
+        coordinator._push_item(blocker, StageName.PR_REVIEW, enter=True)
+        coordinator._push_item(item, StageName.IMPLEMENTATION, enter=True)
+
+        coordinator._drain_implementation()
+
+        assert implementation.calls == [("enter", 21), ("step", 21)]
+        assert coordinator.queues[StageName.PR_REVIEW].snapshot() == [blocker]
+        assert len(coordinator.queues[StageName.IMPLEMENTATION]) == 0
+        assert coordinator.queues[StageName.IMPLEMENTATION].occupancy == 1
+        assert coordinator._leases[id(item)].item is item
+        assert coordinator._pending_handoffs[id(item)].target is StageName.PR_REVIEW
+        assert item.result is None
+
+        # Re-draining while the destination remains full must not re-run the
+        # completed implementation action.
+        coordinator._drain_implementation()
+        assert implementation.calls == [("enter", 21), ("step", 21)]
+
+        coordinator.queues[StageName.PR_REVIEW].pop()
+        coordinator._drain_pending_handoffs()
+
+        assert coordinator.queues[StageName.PR_REVIEW].snapshot() == [item]
+        assert id(item) not in coordinator._leases
+        assert id(item) not in coordinator._pending_handoffs
+        assert item.stage is StageName.PR_REVIEW
+
+    def test_retry_and_overlap_deferral_preserve_implementation_fifo_order(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A source retry remains ahead of a later overlap-deferred item."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        coordinator.stages[StageName.IMPLEMENTATION] = StubStage(
+            StageOutcome(Disposition.RETRY, "retry next tick")
+        )
+        retrying = _issue_item(21, StageName.IMPLEMENTATION)
+        deferred = _issue_item(22, StageName.IMPLEMENTATION)
+        coordinator._push_item(retrying, StageName.IMPLEMENTATION, enter=True)
+        coordinator._push_item(deferred, StageName.IMPLEMENTATION, enter=True)
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.admission._select_non_overlapping",
+            lambda issues, repo_of=None: (issues[:1], issues[1:]),
+        )
+
+        coordinator._drain_implementation()
+
+        assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == [retrying, deferred]
+
     def test_duplicate_issue_numbers_collapse_to_first_queued(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1275,6 +1338,7 @@ class TestDurableEventLog:
             PipelineConfig(
                 org="org",
                 repos=["repo-a"],
+                max_workers=2,
                 projects_dir=tmp_path,
                 metrics_port=9123,
             ),

@@ -458,6 +458,11 @@ class Coordinator:
         # only after the finished sink completes.  The set is therefore
         # bounded by ``_work_window(config)``, not by the number of stages.
         self._live_work_permit_ids: set[int] = set()
+        # Implementation claims an entire bounded round to derive topo order.
+        # Source retries in that round stay leased until all deferred peers can
+        # be restored in their original FIFO order.
+        self._implementation_round_item_ids: set[int] | None = None
+        self._implementation_round_source_retries: set[int] = set()
         self.ledger: list[ItemResult] = []
         self.preserved: list[PreservedWorktree] = []
         self.items: list[WorkItem] = []
@@ -1065,12 +1070,19 @@ class Coordinator:
         self._record_event("timer_park", item.stage.value, self._item_key(item), delay_s)
 
     def _wake_timers(self) -> None:
-        """Move every expired timer entry back into its stage queue."""
+        """Move expired timer entries back only after their stage accepts them.
+
+        The timer heap owns an item until its stage queue accepts it.  An
+        expired entry whose stage is at capacity remains at the heap head for a
+        later tick; it is ordinary bounded backpressure, not a pipeline fault.
+        """
         now = time.monotonic()
         while self.timers and self.timers[0][0] <= now:
-            _, _, item = heapq.heappop(self.timers)
+            _, _, item = self.timers[0]
+            if not self._push_item(item, item.stage, enter=False, defer_if_full=True):
+                return
+            heapq.heappop(self.timers)
             self._progress = True
-            self._push_item(item, item.stage, enter=False)
 
     # -- completions ----------------------------------------------------------
 
@@ -1283,44 +1295,70 @@ class Coordinator:
         q = self.queues[StageName.IMPLEMENTATION]
         if not len(q):
             return
-        items = self._dedup_implementation_items([q.pop() for _ in range(len(q))])
-        issue_items, ambiguous = self._index_issue_items(items)
-        infos = [
-            IssueInfo(
-                number=number,
-                title=str(item.payload.get("issue_title", "")),
-                dependencies=list(item.payload.get("dependencies", [])),
-            )
-            for number, item in issue_items.items()
-        ]
-        ordered = _admission.order_for_implementation(infos)
-        dispatch = ordered
-        if self.config.serialize_file_overlap and self.config.max_workers > 1 and len(ordered) > 1:
-            # Resolve each issue's owning repo from its own WorkItem: the queue is
-            # keyed by stage, so one round can hold issues from several repos (#1795).
-            repo_of = {
-                number: (self.config.org, item.repo)
-                for number, item in issue_items.items()
-                if item.repo
-            }
-            dispatch, deferred = _admission._select_non_overlapping(ordered, repo_of=repo_of)
-            for number in deferred:
-                logger.info("implementation #%s deferred (file overlap)", number)
+        # Take bounded source leases for the whole ready round before deriving
+        # the topological order. A raw ``pop`` would make a completed item
+        # ownerless while it is routed; when PR review is full that used to
+        # poison an already-completed implementation action instead of
+        # retaining its source slot for a pending handoff.
+        claimed_items: list[WorkItem] = []
+        for _ in range(len(q)):
+            item = self._claim_item(StageName.IMPLEMENTATION)
+            if item is None:  # pragma: no cover - coordinator-thread atomicity
+                break
+            claimed_items.append(item)
+        items = self._dedup_implementation_items(claimed_items)
+        self._implementation_round_item_ids = {id(item) for item in items}
+        self._implementation_round_source_retries.clear()
         ran: set[int] = set()
-        # Cross-repo same-number items bypass the number-keyed gates and dispatch
-        # directly — they are distinct work that the ordering model cannot rank.
-        dispatch_items = [issue_items[number] for number in dispatch]
-        dispatch_items.extend(it for group in ambiguous.values() for it in group)
-        for item in dispatch_items:
-            if self.shutdown.is_set() or not self._admit(item):
-                continue  # stays queued (re-pushed below)
-            ran.add(id(item))
-            self._record_event("drain", StageName.IMPLEMENTATION.value, self._item_key(item))
-            self._run_item(item)
-        # Preserve original queue order for deferred / non-admitted / non-issue items.
-        for it in items:
-            if id(it) not in ran:
-                q.push(it)
+        try:
+            issue_items, ambiguous = self._index_issue_items(items)
+            infos = [
+                IssueInfo(
+                    number=number,
+                    title=str(item.payload.get("issue_title", "")),
+                    dependencies=list(item.payload.get("dependencies", [])),
+                )
+                for number, item in issue_items.items()
+            ]
+            ordered = _admission.order_for_implementation(infos)
+            dispatch = ordered
+            if (
+                self.config.serialize_file_overlap
+                and self.config.max_workers > 1
+                and len(ordered) > 1
+            ):
+                # Resolve each issue's owning repo from its own WorkItem: the queue is
+                # keyed by stage, so one round can hold issues from several repos (#1795).
+                repo_of = {
+                    number: (self.config.org, item.repo)
+                    for number, item in issue_items.items()
+                    if item.repo
+                }
+                dispatch, deferred = _admission._select_non_overlapping(ordered, repo_of=repo_of)
+                for number in deferred:
+                    logger.info("implementation #%s deferred (file overlap)", number)
+            # Cross-repo same-number items bypass the number-keyed gates and dispatch
+            # directly — they are distinct work that the ordering model cannot rank.
+            dispatch_items = [issue_items[number] for number in dispatch]
+            dispatch_items.extend(it for group in ambiguous.values() for it in group)
+            for item in dispatch_items:
+                if self.shutdown.is_set() or not self._admit(item):
+                    continue  # source lease is restored below
+                ran.add(id(item))
+                self._record_event("drain", StageName.IMPLEMENTATION.value, self._item_key(item))
+                self._run_item(item)
+        finally:
+            # Preserve original queue order for deferred / non-admitted /
+            # non-issue items, plus no-delay retries from this round. Each
+            # lease restores to the queue front, so release all source returns
+            # in reverse original order.
+            source_returns = {id(it) for it in items if id(it) not in ran}
+            source_returns.update(self._implementation_round_source_retries)
+            for it in reversed(claimed_items):
+                if id(it) in source_returns:
+                    self._restore_source_lease(it)
+            self._implementation_round_item_ids = None
+            self._implementation_round_source_retries.clear()
 
     def _dedup_implementation_items(self, items: list[WorkItem]) -> list[WorkItem]:
         """Drop transient duplicate work items, keyed by ``(repo, issue)`` (#2057).
@@ -1571,6 +1609,15 @@ class Coordinator:
         """
         delay = item.payload.pop("retry_delay_s", None)
         if delay is None:
+            if (
+                self._implementation_round_item_ids is not None
+                and id(item) in self._implementation_round_item_ids
+            ):
+                # The implementation drain has leased a complete bounded
+                # round for topo ordering. Keep this retry's source lease
+                # until every deferred peer can be restored FIFO below.
+                self._implementation_round_source_retries.add(id(item))
+                return
             if not self._restore_source_lease(item):
                 self._push_item(item, item.stage, enter=False)
         elif self.config.dry_run:
@@ -1663,7 +1710,14 @@ class Coordinator:
                 keys.add((it.repo, it.issue))
         return keys
 
-    def _push_item(self, item: WorkItem, stage: StageName, enter: bool) -> bool:
+    def _push_item(
+        self,
+        item: WorkItem,
+        stage: StageName,
+        enter: bool,
+        *,
+        defer_if_full: bool = False,
+    ) -> bool:
         """Push *item* into *stage*'s queue (the single push chokepoint).
 
         Every durable GitHub mutation for this transition already happened
@@ -1675,6 +1729,16 @@ class Coordinator:
         exercised. Object identity (``_seen_item_ids``) distinguishes a new item
         from an already-tracked item re-pushing itself on timer/retry/fail-back/
         advance, which must always be allowed through.
+
+        ``defer_if_full`` makes bounded capacity an ordinary backpressure
+        result rather than an exception. It is reserved for timer wake-ups,
+        whose heap entry must remain the item's owner until the stage accepts
+        it. All ordinary callers retain the strict overflow invariant.
+
+        Returns:
+            ``True`` when the queue accepted the item; ``False`` when a
+            duplicate seed was skipped or a deferred queue is full.
+
         """
         is_new_item = id(item) not in self._seen_item_ids
         if (
@@ -1692,6 +1756,13 @@ class Coordinator:
                 self._item_key(item),
             )
             return False
+        acquired_permit = is_new_item
+        if not self.queues[stage].offer(item):
+            if acquired_permit:
+                self._release_work_permit(item)
+            if defer_if_full:
+                return False
+            raise OverflowError("StageQueue is full")
         item.stage = stage
         if enter:
             item.state = "ENTER"
@@ -1701,7 +1772,6 @@ class Coordinator:
             self._seen_item_ids.add(id(item))
             self.items.append(item)
             item.payload.setdefault("entry_stage", stage.value)
-        self.queues[stage].push(item)
         self._record_event("push", stage.value, self._item_key(item))
         return True
 
