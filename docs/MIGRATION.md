@@ -1,6 +1,6 @@
 # Migration Guide
 
-> **Status (as of 2026-07-17):** The latest released version is **0.10.0** (tag-driven
+> **Status (as of 2026-07-24):** The latest released version is **0.10.0** (tag-driven
 > via hatch-vcs). **1.0 has not been released yet** — the section below is the
 > *forthcoming* 1.0 migration guidance, published ahead of the cut so consumers can
 > prepare. 0.10.0's headline change is the queue pipeline's reviewed-head review
@@ -17,7 +17,7 @@
 > note `--max-merge-attempts` was replaced by `--drive-green-loops` (default 5). The `Development Status ::
 > 5 - Production/Stable` classifier in `pyproject.toml` reflects the maturity of the
 > stable public API surface, not a 1.0 tag; the package remains tag-driven and is
-> currently on the 0.9.x series.
+> currently on the 0.10.x series.
 
 ## Current main (unreleased)
 

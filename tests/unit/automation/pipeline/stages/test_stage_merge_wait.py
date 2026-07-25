@@ -113,17 +113,16 @@ def test_conditional_merge_succeeds_only_after_lifecycle_confirms_merged(
     assert github.merge_attempts == [(12, "a" * 40)]
 
 
-@pytest.mark.parametrize("merge_state_status", ["HAS_HOOKS", "UNSTABLE"])
-def test_mergeable_requestable_readiness_states_merge_successfully(
-    make_ctx: Any, make_work_item: Any, merge_state_status: str
+def test_mergeable_has_hooks_readiness_merges_successfully(
+    make_ctx: Any, make_work_item: Any
 ) -> None:
-    """GitHub mergeable states that permit a request reach the conditional PUT."""
+    """A mergeable pre-receive-hook state reaches the conditional PUT."""
     github = _ConditionalGitHub(
         states=[_open_pr(), _open_pr(), {"state": "MERGED"}],
         readiness={
             **_open_pr(),
             "mergeable": "MERGEABLE",
-            "mergeStateStatus": merge_state_status,
+            "mergeStateStatus": "HAS_HOOKS",
         },
     )
     ctx = make_ctx(github=github)
@@ -135,14 +134,15 @@ def test_mergeable_requestable_readiness_states_merge_successfully(
     assert github.merge_attempts == [(12, "a" * 40)]
 
 
+@pytest.mark.parametrize("merge_state_status", ["BLOCKED", "UNSTABLE"])
 def test_readiness_waits_before_the_first_conditional_merge(
-    make_ctx: Any, make_work_item: Any
+    make_ctx: Any, make_work_item: Any, merge_state_status: str
 ) -> None:
-    """Minute-scale readiness is polled without burning a conditional PUT."""
+    """Pending readiness is polled without burning a conditional PUT."""
     not_ready = {
         **_open_pr(),
         "mergeable": "MERGEABLE",
-        "mergeStateStatus": "BLOCKED",
+        "mergeStateStatus": merge_state_status,
     }
     ready = {
         **_open_pr(),
