@@ -33,7 +33,7 @@ jobs:
       # Credentials are intentionally persisted here: this job pushes the
       # resolved release tag (git push origin "${TAG}" later in the job),
       # which requires the checkout token to remain in the local git config.
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0 # zizmor: ignore[artipacked]
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.0 # zizmor: ignore[artipacked]
         with:
           fetch-depth: 0
           fetch-tags: true
