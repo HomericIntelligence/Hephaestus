@@ -91,7 +91,7 @@ from hephaestus.automation.models import IssueInfo
 from hephaestus.automation.pipeline import admission as _admission, seeding as _seeding
 from hephaestus.automation.pipeline.events import StageEvent, encode_stage_event
 from hephaestus.automation.pipeline.jobs import AgentJob, JobHandle, JobResult
-from hephaestus.automation.pipeline.queues import CompletionQueue, StageQueue
+from hephaestus.automation.pipeline.queues import CompletionQueue, StageQueue, StageQueueLease
 from hephaestus.automation.pipeline.routing import (
     PIPELINE_ORDER,
     ROUTES,
@@ -313,6 +313,24 @@ class _Paths:
     projects_dir: Path
 
 
+@dataclass(frozen=True)
+class _PendingHandoff:
+    """A completed route retained by its source-stage lease.
+
+    ``StageQueueLease`` keeps the source slot occupied until the destination
+    accepts the item.  The coordinator records only the next intent here; it
+    deliberately does not mutate ``WorkItem.stage``, ``state``, history, or a
+    terminal result until that destination-first admission succeeds.  There
+    can be at most one pending handoff per active lease, so this is bounded by
+    the fixed capacity of the coordinator's stage queues rather than acting as
+    a spill buffer.
+    """
+
+    target: StageName
+    enter: bool
+    result: ItemResult | None = None
+
+
 def _effective_repo_root(config: PipelineConfig, repo: str) -> Path:
     """Resolve *repo* to its explicit checkout or conventional projects path."""
     return Path(config.repo_roots.get(repo, Path(config.projects_dir) / repo))
@@ -387,6 +405,12 @@ class Coordinator:
         self.timers: list[tuple[float, int, WorkItem]] = []
         self.in_flight: dict[JobHandle, WorkItem] = {}
         self.inflight_per_repo: Counter[str] = Counter()
+        # A normal (non-implementation) drain claims instead of popping.  The
+        # active lease reserves its source capacity while an item executes or
+        # waits for a worker completion.  A pending route is represented by a
+        # single intent attached to that lease, never by an overflow queue.
+        self._leases: dict[int, StageQueueLease] = {}
+        self._pending_handoffs: dict[int, _PendingHandoff] = {}
         self.ledger: list[ItemResult] = []
         self.preserved: list[PreservedWorktree] = []
         self.items: list[WorkItem] = []
@@ -765,12 +789,149 @@ class Coordinator:
         return 0
 
     def _all_idle(self) -> bool:
-        """Return True when queues, timer heap, and in-flight map are all empty."""
+        """Return True when no ready, leased, timed, or in-flight work remains."""
         return (
             all(len(q) == 0 for q in self.queues.values())
             and not self.timers
             and not self.in_flight
+            and not self._leases
+            and not self._pending_handoffs
         )
+
+    # -- stage-queue leases -------------------------------------------------
+
+    def _claim_item(self, stage_name: StageName) -> WorkItem | None:
+        """Claim one ready item while retaining its source-stage capacity."""
+        lease = self.queues[stage_name].claim()
+        if lease is None:
+            return None
+        item = lease.item
+        item_id = id(item)
+        if item_id in self._leases:  # pragma: no cover - internal invariant
+            lease.restore()
+            raise RuntimeError(f"duplicate active lease for {self._item_key(item)}")
+        self._leases[item_id] = lease
+        return item
+
+    def _restore_source_lease(self, item: WorkItem) -> bool:
+        """Return an active item lease to its source queue without a transition."""
+        self._pending_handoffs.pop(id(item), None)
+        lease = self._leases.pop(id(item), None)
+        if lease is None:
+            return False
+        lease.restore()
+        return True
+
+    def _release_source_lease(self, item: WorkItem) -> bool:
+        """Release an active lease when work leaves every stage queue.
+
+        ``StageQueueLease`` intentionally exposes only restore or
+        destination-first handoff.  Timers and terminal sink completion are
+        neither, so restore to the source front and immediately remove that
+        same item.  This is not queue draining: it is the one coordinator
+        escape hatch into a timer/terminal ledger and preserves FIFO for all
+        remaining ready items.
+        """
+        self._pending_handoffs.pop(id(item), None)
+        lease = self._leases.pop(id(item), None)
+        if lease is None:
+            return False
+        lease.restore()
+        released = self.queues[item.stage].pop()
+        if released is not item:  # pragma: no cover - queue ownership invariant
+            raise RuntimeError("lease restored a different work item")
+        return True
+
+    def _activate_handoff(
+        self,
+        item: WorkItem,
+        target: StageName,
+        *,
+        enter: bool,
+        result: ItemResult | None,
+    ) -> None:
+        """Publish a route only after its destination accepted the item."""
+        item.stage = target
+        if enter:
+            item.state = "ENTER"
+            item.payload["_enter_pending"] = True
+            item.add_history_event(target, item.state, note="enqueued")
+        if result is not None:
+            item.result = result
+        self._record_event("push", target.value, self._item_key(item))
+
+    def _handoff_item(
+        self,
+        item: WorkItem,
+        target: StageName,
+        *,
+        enter: bool,
+        result: ItemResult | None = None,
+    ) -> bool:
+        """Route an item destination-first, retaining a full-target intent.
+
+        Direct unit-test calls do not own a source lease and retain the
+        historical push behavior.  Normal drains always carry a lease, so a
+        full destination only records a bounded intent and the completed
+        stage action is never replayed.
+        """
+        lease = self._leases.get(id(item))
+        if lease is None:
+            if result is not None:
+                item.result = result
+            self._push_item(item, target, enter=enter)
+            return True
+
+        if target is item.stage:
+            # RETRY to the source is a restore, not a self-handoff: a held
+            # lease deliberately blocks its source's ``offer`` method.
+            if result is not None:  # pragma: no cover - terminal target is FINISHED
+                raise RuntimeError("terminal result cannot route to the source stage")
+            return self._restore_source_lease(item)
+
+        if lease.handoff(self.queues[target]):
+            self._leases.pop(id(item), None)
+            self._pending_handoffs.pop(id(item), None)
+            self._activate_handoff(item, target, enter=enter, result=result)
+            self._progress = True
+            return True
+
+        pending = _PendingHandoff(target=target, enter=enter, result=result)
+        existing = self._pending_handoffs.setdefault(id(item), pending)
+        if existing != pending:  # pragma: no cover - no item can route twice while leased
+            raise RuntimeError(f"conflicting pending handoff for {self._item_key(item)}")
+        self._record_event(
+            "handoff_pending",
+            item.stage.value,
+            target.value,
+            self._item_key(item),
+        )
+        return False
+
+    def _drain_pending_handoffs(self) -> None:
+        """Retry every retained route whose destination may have opened."""
+        for item_id, pending in list(self._pending_handoffs.items()):
+            lease = self._leases.get(item_id)
+            if lease is None:  # pragma: no cover - defensive bookkeeping repair
+                self._pending_handoffs.pop(item_id, None)
+                continue
+            item = lease.item
+            if not lease.handoff(self.queues[pending.target]):
+                continue
+            self._leases.pop(item_id, None)
+            self._pending_handoffs.pop(item_id, None)
+            self._activate_handoff(
+                item,
+                pending.target,
+                enter=pending.enter,
+                result=pending.result,
+            )
+            self._record_event(
+                "handoff_retry",
+                item.stage.value,
+                self._item_key(item),
+            )
+            self._progress = True
 
     def _grace_exceeded(self) -> bool:
         """Return True when a graceful shutdown has outlived its grace window."""
@@ -808,7 +969,9 @@ class Coordinator:
         for stage_name in _DRAIN_ORDER:
             q = self.queues[stage_name]
             if len(q):
-                item = q.pop()
+                item = self._claim_item(stage_name)
+                if item is None:  # pragma: no cover - len/claim are coordinator-thread atomic
+                    continue
                 logger.error(
                     "pipeline stalled with no in-flight work; "
                     "force-running %s item %s; inflight_per_repo=%s",
@@ -823,6 +986,10 @@ class Coordinator:
 
     def _timer_park(self, item: WorkItem, delay_s: float) -> None:
         """Park *item* on the timer heap for ``delay_s`` seconds."""
+        # A timer is outside every stage queue.  Release a normal drain's
+        # source lease before parking so its capacity is not stranded while
+        # preserving the timer's single owner for the work item.
+        self._release_source_lease(item)
         wake = time.monotonic() + max(0.0, delay_s)
         heapq.heappush(self.timers, (wake, self._seq, item))
         self._seq += 1
@@ -951,6 +1118,7 @@ class Coordinator:
         seeding reconstruction resumes exactly here with no shutdown
         bookkeeping.
         """
+        self._release_source_lease(item)
         item.result = ItemResult(
             passed=False,
             reason=f"resumable at {item.stage.value}",
@@ -992,22 +1160,30 @@ class Coordinator:
 
     def _drain_queues(self) -> None:
         """Drain queues downstream-first with admission control."""
+        # A transition that previously found a full target owns its source
+        # lease.  Retry it before ordinary draining, then again after each
+        # stage: draining a target can open exactly the slot it needs.
+        self._drain_pending_handoffs()
         for stage_name in _DRAIN_ORDER:
             if self.shutdown.is_set():
                 return
             if stage_name is StageName.IMPLEMENTATION:
                 self._drain_implementation()
+                self._drain_pending_handoffs()
                 continue
             q = self.queues[stage_name]
             for _ in range(len(q)):
                 if self.shutdown.is_set():
                     return
-                item = q.pop()
+                item = self._claim_item(stage_name)
+                if item is None:  # pragma: no cover - len/claim are coordinator-thread atomic
+                    break
                 if not self._admit(item):
-                    q.push(item)
+                    self._restore_source_lease(item)
                     continue
                 self._record_event("drain", stage_name.value, self._item_key(item))
                 self._run_item(item)
+            self._drain_pending_handoffs()
 
     def _drain_implementation(self) -> None:
         """Drain the implementation queue under topo order + file-overlap gating.
@@ -1274,6 +1450,7 @@ class Coordinator:
         if item.stage is StageName.FINISHED:
             # Sink outcomes are terminal: the result is already recorded.
             self._record_event("done", self._item_key(item), outcome.note)
+            self._release_source_lease(item)
             return
 
         if disposition is Disposition.ADVANCE:
@@ -1282,7 +1459,7 @@ class Coordinator:
             if target is StageName.FINISHED:
                 self._finish(item, passed=True, reason=outcome.note or "advance")
             else:
-                self._push_item(item, target, enter=True)
+                self._handoff_item(item, target, enter=True)
             return
 
         if disposition is Disposition.RETRY:
@@ -1317,7 +1494,8 @@ class Coordinator:
         """
         delay = item.payload.pop("retry_delay_s", None)
         if delay is None:
-            self._push_item(item, item.stage, enter=False)
+            if not self._restore_source_lease(item):
+                self._push_item(item, item.stage, enter=False)
         elif self.config.dry_run:
             self._finish(
                 item, passed=False, reason=f"[dry-run] would wait {delay}s: {outcome.note}"
@@ -1350,18 +1528,20 @@ class Coordinator:
         if target is StageName.FINISHED:
             self._finish(item, passed=False, reason=outcome.note or "fail_back")
         else:
-            self._push_item(item, target, enter=True)
+            self._handoff_item(item, target, enter=True)
 
     def _finish(self, item: WorkItem, *, passed: bool, reason: str) -> None:
         """Set the item's result and hand it to the finished sink."""
-        item.result = ItemResult(passed=passed, reason=reason, final_stage=item.stage)
         if item.stage is StageName.FINISHED:
             # Poisoned inside the sink: record directly, never re-queue.
+            item.result = ItemResult(passed=passed, reason=reason, final_stage=item.stage)
             if not item.payload.get("_recorded", False):
                 self.ledger.append(item.result)
                 item.payload["_recorded"] = True
+            self._release_source_lease(item)
             return
-        self._push_item(item, StageName.FINISHED, enter=True)
+        result = ItemResult(passed=passed, reason=reason, final_stage=item.stage)
+        self._handoff_item(item, StageName.FINISHED, enter=True, result=result)
 
     def _seed_products(self, item: WorkItem) -> None:
         """Push a terminal repo item's discovered products into entry queues."""
@@ -1397,6 +1577,10 @@ class Coordinator:
                 if it.kind is ItemKind.ISSUE and it.issue is not None:
                     keys.add((it.repo, it.issue))
         for it in self.in_flight.values():
+            if it.kind is ItemKind.ISSUE and it.issue is not None:
+                keys.add((it.repo, it.issue))
+        for lease in self._leases.values():
+            it = lease.item
             if it.kind is ItemKind.ISSUE and it.issue is not None:
                 keys.add((it.repo, it.issue))
         return keys
@@ -1829,7 +2013,12 @@ class Coordinator:
                 continue
             leftovers.extend(q.snapshot())
         leftovers.extend(self.in_flight.values())
+        leftovers.extend(lease.item for lease in self._leases.values())
+        seen: set[int] = set()
         for item in leftovers:
+            if id(item) in seen:
+                continue
+            seen.add(id(item))
             if item.result is None:
                 self._park_resumable(item)
 
