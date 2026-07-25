@@ -163,7 +163,9 @@ def _sanitize_summary(summary: str) -> str:
 
 def _bounded_feedback(source: str, payload: dict[str, object] | None) -> str:
     """Return only bounded supplemental prose, excluding the JSON artifact."""
-    if payload is not None and not source:
+    if payload is not None and (
+        not source or (source.strip().startswith("{") and source.strip().endswith("}"))
+    ):
         return ""
     if not source:
         return ""

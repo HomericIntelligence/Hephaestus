@@ -58,6 +58,14 @@ def test_parse_review_audit_raw_mapping_has_no_json_feedback_artifact() -> None:
     assert audit.raw_feedback == ""
 
 
+def test_parse_review_audit_raw_json_string_has_no_json_feedback_artifact() -> None:
+    """A raw JSON audit string does not become supplemental reviewer prose."""
+    audit = parse_review_audit('{"grade":"A","summary":"No material findings","comments":[]}')
+
+    assert audit.valid is True
+    assert audit.raw_feedback == ""
+
+
 def test_parse_review_audit_rejects_unpostable_finding() -> None:
     """A material finding that cannot become a durable thread fails closed."""
     audit = parse_review_audit(
