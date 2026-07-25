@@ -2051,3 +2051,26 @@ class TestSeverityMarker:
         assert adapter.count_unresolved_threads_by_severity(42) == (0, 0, 1)
         assert adapter.resolve_advisory_threads(42, ["mixed_thread_id"]) == 0
         resolve.assert_not_called()
+
+    def test_resolve_validated_threads_rechecks_fresh_automation_ownership(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The adapter rejects a receipt that gained a human participant."""
+        monkeypatch.setattr(
+            adapter,
+            "list_unresolved_review_threads",
+            lambda _pr: [
+                {"id": "process-only", "automation_owned": True},
+                {"id": "human-replied", "automation_owned": False},
+            ],
+        )
+        resolve = MagicMock()
+        monkeypatch.setattr(github_api_mod, "gh_pr_resolve_thread", resolve)
+
+        assert (
+            adapter.resolve_validated_review_threads(
+                42, ["process-only", "human-replied", "not-live"]
+            )
+            == 1
+        )
+        resolve.assert_called_once_with("process-only", dry_run=False)

@@ -254,6 +254,15 @@ class StageGitHub(Protocol):
         """Resolve only the supplied fresh automation-owned advisory threads."""
         ...
 
+    def resolve_validated_review_threads(self, pr_number: int, thread_ids: list[str]) -> int:
+        """Resolve host-validated, process-owned threads after a fresh read.
+
+        Callers must first prove the PR is on the exact reviewed, unarmed
+        head and intersect the ids with their own post receipts. Implementors
+        re-read the complete live thread set and reject human participants.
+        """
+        ...
+
     def create_pr(self, issue_number: int, branch: str, title: str, body: str) -> int:
         """Durably ensure the PR exists and return its number (idempotent).
 

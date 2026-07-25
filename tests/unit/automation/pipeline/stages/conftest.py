@@ -302,6 +302,12 @@ class FakeStageGitHub(FakeGitHub):
         self._resolved_review_threads.update(thread_ids)
         return len(thread_ids)
 
+    def resolve_validated_review_threads(self, pr_number: int, thread_ids: list[str]) -> int:
+        """Resolve only the stage's durable process-owned thread receipts."""
+        self._log("resolve_validated_review_threads", pr_number, tuple(thread_ids))
+        self._resolved_review_threads.update(thread_ids)
+        return len(thread_ids)
+
     # -- mutator surface used by the stages ----------------------------------
     # Coordinator-neutral names (the pipeline architecture guard forbids
     # github_api mutator names inside pipeline modules); each delegates to

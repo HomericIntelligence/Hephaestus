@@ -901,6 +901,22 @@ class PipelineGitHub:
                 resolved += 1
         return resolved
 
+    def resolve_validated_review_threads(self, pr_number: int, thread_ids: list[str]) -> int:
+        """Resolve only host-validated process receipts that remain automation-only."""
+        if self._skip(f"resolve validated review threads on PR #{pr_number}"):
+            return 0
+        requested = {str(thread_id).strip() for thread_id in thread_ids if str(thread_id).strip()}
+        if not requested:
+            return 0
+        threads = self.list_unresolved_review_threads(pr_number)
+        resolved = 0
+        for thread in threads:
+            thread_id = str(thread.get("id") or "").strip()
+            if thread_id in requested and thread.get("automation_owned") is True:
+                github_api.gh_pr_resolve_thread(thread_id, dry_run=self.dry_run)
+                resolved += 1
+        return resolved
+
     def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
         """Read shared PR state for seed, implementation, and merge_wait.
 

@@ -969,6 +969,266 @@ class TestPrReviewStageStep:
         assert result.disposition == Disposition.FINISH_FAIL
 
 
+class TestProcessOwnedReviewThreadLifecycle:
+    """Process-owned review threads survive rounds without count inflation."""
+
+    @staticmethod
+    def _thread(
+        thread_id: str,
+        line: int,
+        body: str,
+        *,
+        authors: list[str] | None = None,
+    ) -> dict[str, Any]:
+        participants = authors or ["hephaestus[bot]"]
+        return {
+            "id": thread_id,
+            "path": "a.py",
+            "line": line,
+            "side": "RIGHT",
+            "severity": "major",
+            "body": f"<!-- hephaestus-severity: major -->\n{body}",
+            "automation_owned": participants == ["hephaestus[bot]"],
+            "author": participants[0],
+            "authors": participants,
+            "comments": [{"author": author, "body": body} for author in participants],
+        }
+
+    def test_validated_process_threads_converge_without_22_to_31_growth(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Ten inherited + twelve process threads become nineteen, not thirty-one."""
+
+        class LiveThreadGitHub(FakeStageGitHub):
+            def __init__(self, live: list[dict[str, Any]]) -> None:
+                super().__init__()
+                self.live = live
+                self.posted_batches: list[list[dict[str, Any]]] = []
+                self.next_id = 0
+
+            def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+                del pr_number
+                return [dict(thread) for thread in self.live]
+
+            def resolve_validated_review_threads(
+                self, pr_number: int, thread_ids: list[str]
+            ) -> int:
+                self._log("resolve_validated_review_threads", pr_number, tuple(thread_ids))
+                requested = set(thread_ids)
+                self.live = [thread for thread in self.live if thread["id"] not in requested]
+                return len(requested)
+
+            def post_review_threads(
+                self, pr_number: int, threads: list[dict[str, Any]], summary: str
+            ) -> list[str]:
+                del summary
+                self.posted_batches.append([dict(thread) for thread in threads])
+                thread_ids: list[str] = []
+                for thread in threads:
+                    thread_id = f"new-{self.next_id}"
+                    self.next_id += 1
+                    thread_ids.append(thread_id)
+                    self.live.append(
+                        TestProcessOwnedReviewThreadLifecycle._thread(
+                            thread_id, int(thread["line"]), str(thread["body"])
+                        )
+                    )
+                self._log("gh_pr_review_post", pr_number, "COMMENT")
+                return thread_ids
+
+        inherited = [
+            self._thread(f"inherited-{index}", index + 1, f"old {index}") for index in range(10)
+        ]
+        prior_process = [
+            self._thread(f"process-{index}", index + 20, f"duplicate {index}")
+            for index in range(12)
+        ]
+        github = LiveThreadGitHub(inherited + prior_process)
+        ctx = make_ctx(github=github)
+        stage = PrReviewStage()
+        item = make_work_item(issue=1, pr=1001, state="POST")
+        duplicate_findings = [
+            {
+                "path": "a.py",
+                "line": index + 20,
+                "side": "RIGHT",
+                "severity": "major",
+                "body": f"duplicate {index}",
+            }
+            for index in range(2)
+        ]
+        new_findings = [
+            {
+                "path": "a.py",
+                "line": index + 50,
+                "side": "RIGHT",
+                "severity": "major",
+                "body": f"new {index}",
+            }
+            for index in range(7)
+        ]
+        item.payload.update(
+            {
+                "reviewed_pr_head_sha": "a" * 40,
+                "process_review_threads": [dict(thread) for thread in prior_process],
+                "validation_process_threads": [dict(thread) for thread in prior_process],
+                "validation_result": {
+                    "unaddressed": [
+                        {"thread_id": "process-0"},
+                        {"thread_id": "process-1"},
+                    ],
+                    "wont_fix": [],
+                },
+                "review_audit": ReviewAudit(
+                    grade="F",
+                    summary="follow-up audit",
+                    findings=tuple(duplicate_findings + new_findings),
+                    raw_feedback="",
+                    valid=True,
+                ),
+                "review_threads": duplicate_findings + new_findings,
+            }
+        )
+
+        result = stage.step(item, ctx)
+
+        assert result == Continue(next_state="DIFFICULTY_WAIT")
+        assert github.posted_batches == [new_findings]
+        assert len(github.live) == 19  # 10 inherited + 2 unaddressed + 7 genuinely new
+        resolution = next(
+            args for name, args in github.mutation_log if name == "resolve_validated_review_threads"
+        )
+        assert resolution[0] == 1001
+        assert set(resolution[1]) == {f"process-{index}" for index in range(2, 12)}
+
+    def test_validation_receives_only_durable_live_process_thread_facts(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The validator gets host-read thread ids, never agent-supplied ids."""
+        stage = PrReviewStage()
+        item = make_work_item(issue=1, pr=1001, state="VALIDATE_WAIT")
+        process = self._thread("process-1", 3, "fix this")
+        inherited = self._thread("inherited", 8, "manual review")
+
+        class ProcessOnlyGitHub(FakeStageGitHub):
+            def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+                del pr_number
+                return [dict(process), dict(inherited)]
+
+        ctx = make_ctx(github=ProcessOnlyGitHub())
+        item.payload["process_review_threads"] = [dict(process)]
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)
+        assert json.loads(result.job.prompt_kwargs["prior_comments_json"]) == [process]
+
+    @pytest.mark.parametrize(
+        ("pr_state", "validation_result", "authors"),
+        [
+            pytest.param(
+                {"state": "OPEN", "headRefOid": "b" * 40, "autoMergeRequest": None},
+                {"unaddressed": [], "wont_fix": []},
+                ["hephaestus[bot]"],
+                id="head-drift",
+            ),
+            pytest.param(
+                {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
+                {"unaddressed": [{"thread_id": ""}], "wont_fix": []},
+                ["hephaestus[bot]"],
+                id="malformed-validator-id",
+            ),
+            pytest.param(
+                {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
+                {"unaddressed": [], "wont_fix": []},
+                ["hephaestus[bot]", "reviewer"],
+                id="human-participant",
+            ),
+        ],
+    )
+    def test_unsafe_validated_process_thread_never_resolves(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        pr_state: dict[str, Any],
+        validation_result: dict[str, Any],
+        authors: list[str],
+    ) -> None:
+        """Head drift, malformed ids, and human replies are all no-resolve boundaries."""
+
+        class ResolutionRecordingGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__(pr_state=pr_state)
+                self.live = [
+                    TestProcessOwnedReviewThreadLifecycle._thread(
+                        "process-1", 3, "fix this", authors=authors
+                    )
+                ]
+
+            def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+                del pr_number
+                return [dict(thread) for thread in self.live]
+
+            def resolve_validated_review_threads(
+                self, pr_number: int, thread_ids: list[str]
+            ) -> int:
+                self._log("resolve_validated_review_threads", pr_number, tuple(thread_ids))
+                return len(thread_ids)
+
+            def post_review_threads(
+                self, pr_number: int, threads: list[dict[str, Any]], summary: str
+            ) -> list[str]:
+                self._log("gh_pr_review_post", pr_number, "COMMENT")
+                return []
+
+        github = ResolutionRecordingGitHub()
+        ctx = make_ctx(github=github)
+        stage = PrReviewStage()
+        item = make_work_item(issue=1, pr=1001, state="POST")
+        process = self._thread("process-1", 3, "fix this")
+        item.payload.update(
+            {
+                "reviewed_pr_head_sha": "a" * 40,
+                "process_review_threads": [process],
+                "validation_process_threads": [process],
+                "validation_result": validation_result,
+                "review_audit": ReviewAudit("A", "clean", (), "", valid=True),
+                "review_threads": [],
+            }
+        )
+
+        result = stage.step(item, ctx)
+
+        if pr_state["headRefOid"] != "a" * 40:
+            assert result == Continue(next_state="REVIEW_WAIT")
+            assert github.mutation_log == []
+        assert not any(
+            name == "resolve_validated_review_threads" for name, _ in github.mutation_log
+        )
+
+    def test_truncated_live_thread_facts_skip_validation_and_all_writes(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A pagination/read failure cannot hide a later human participant."""
+
+        class TruncatedThreadsGitHub(FakeStageGitHub):
+            def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+                del pr_number
+                raise RuntimeError("could not fetch all PR review threads")
+
+        stage = PrReviewStage()
+        github = TruncatedThreadsGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="VALIDATE_WAIT")
+        item.payload["process_review_threads"] = [self._thread("process-1", 3, "fix this")]
+
+        result = stage.step(item, ctx)
+
+        assert result == Continue(next_state="EVAL")
+        assert github.mutation_log == []
+
+
 class TestPrReviewRestartSafetyGuards:
     """Unreachable PR-narrowing guards use the restart-safety no_pr contract."""
 

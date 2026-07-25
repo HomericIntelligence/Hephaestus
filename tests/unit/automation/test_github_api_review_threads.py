@@ -127,6 +127,58 @@ class TestListUnresolvedThreadsParameterisation:
 
     @patch("hephaestus.automation.github_api._gh_call")
     @patch("hephaestus.automation.github_api.get_repo_info")
+    def test_paginates_all_review_threads_before_returning_facts(
+        self, mock_repo_info: Any, mock_gh_call: Any
+    ) -> None:
+        """Threads after GitHub's first hundred remain visible to reconciliation."""
+        mock_repo_info.return_value = ("owner", "repo")
+
+        def thread(thread_id: str) -> dict[str, Any]:
+            return {
+                "id": thread_id,
+                "isResolved": False,
+                "comments": {
+                    "pageInfo": {"hasNextPage": False},
+                    "nodes": [{"body": thread_id, "author": {"login": "ci-bot"}}],
+                },
+            }
+
+        first_page = [thread(f"T{index}") for index in range(100)]
+        second_page = [thread("T100")]
+
+        def side_effect(argv: list[str], **_: Any) -> Mock:
+            after_first_page = "after=cursor-1" in argv
+            result = Mock()
+            result.stdout = json.dumps(
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "reviewThreads": {
+                                    "nodes": second_page if after_first_page else first_page,
+                                    "pageInfo": {
+                                        "hasNextPage": not after_first_page,
+                                        "endCursor": None if after_first_page else "cursor-1",
+                                    },
+                                }
+                            }
+                        }
+                    }
+                }
+            )
+            return result
+
+        mock_gh_call.side_effect = side_effect
+
+        assert [thread["id"] for thread in gh_pr_list_unresolved_threads(42)] == [
+            *(f"T{index}" for index in range(100)),
+            "T100",
+        ]
+        assert mock_gh_call.call_count == 2
+        assert "after=cursor-1" in mock_gh_call.call_args_list[1].args[0]
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    @patch("hephaestus.automation.github_api.get_repo_info")
     def test_fails_closed_when_comment_ownership_is_truncated(
         self, mock_repo_info: Any, mock_gh_call: Any
     ) -> None:
