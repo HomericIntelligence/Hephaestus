@@ -382,17 +382,18 @@ class TestQuiescence:
         assert entries[0].passed is False
         assert "no linked issue" in entries[0].reason
 
-    def test_direct_pr_with_linked_issue_preserves_full_review_context(
+    def test_direct_pr_metadata_context_enters_checkout_bound_review(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A real resolved issue remains available to the downstream gates."""
+        """A direct seed needs metadata, not an unverified remote diff."""
         github = FakeStageGitHub(
             pr_issue=700,
             issue_title="Review the migration",
             issue_body="Preserve the requirements context.",
             pr_review_context={
-                "pr_diff": "diff --git a/a.py b/a.py\n+@@ -1 +1 @@\n-old\n+new\n",
                 "pr_description": "Closes #700\n\nCarry review inputs.",
+                "pr_head_sha": "a" * 40,
+                "pr_base_branch": "main",
             },
         )
         config = PipelineConfig(org="org", repos=["repo-a"], prs=[701], projects_dir=tmp_path)
@@ -407,8 +408,8 @@ class TestQuiescence:
         assert item.issue == 700
         assert item.payload["issue_title"] == "Review the migration"
         assert item.payload["issue_body"] == "Preserve the requirements context."
-        assert item.payload["pr_diff"].startswith("diff --git")
         assert item.payload["pr_description"].startswith("Closes #700")
+        assert "pr_diff" not in item.payload
 
 
 def _fake_in_flight_item(coordinator: Coordinator, item: WorkItem) -> JobHandle:

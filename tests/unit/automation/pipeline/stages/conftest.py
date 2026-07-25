@@ -144,9 +144,9 @@ class FakeStageGitHub(FakeGitHub):
             pr_review_context
             if pr_review_context is not None
             else {
-                "pr_diff": "diff --git a/a.py b/a.py\n+@@ -1 +1 @@\n-old\n+new\n",
                 "pr_description": "Closes #1",
                 "pr_head_sha": "a" * 40,
+                "pr_base_branch": "main",
             }
         )
         self._learn_terminal = learn_terminal
