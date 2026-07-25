@@ -538,8 +538,11 @@ fallback. It posts inline findings and a final grade/GO-NOGO review; a GO
 applies `state:implementation-go`. Normal review may collect CI/CD evidence
 and incorporate it into its binary verdict, but the loop does not change CI/CD
 and no workflow, status, artifact, or lease independently authorizes it.
-`merge_wait` verifies the process-local reviewed-head proof and stands by
-pending #2419; no queue stage mutates auto-merge.
+The label is durable implementation-review state, not standalone merge
+authorization. `merge_wait` verifies the confirmed label plus the process-local
+reviewed-head proof and stands by pending #2419; no queue stage mutates
+auto-merge. See
+[`ADR-0014`](docs/adr/0014-confirmed-implementation-state-labels.md).
 
 | Queue stage | Module | Purpose |
 |-------------|--------|---------|

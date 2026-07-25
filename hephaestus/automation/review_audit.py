@@ -19,7 +19,12 @@ _JSON_BLOCK_RE = re.compile(
 )
 _VALID_GRADES = frozenset("ABCDEF")
 _VALID_SEVERITIES = frozenset({"critical", "major", "minor", "nitpick"})
-_DECISION_TEXT_RE = re.compile(r"(?i)\bverdict\s*:\s*[^\r\n]*")
+_RESERVED_AUTHORITY_CLAIM_RE = re.compile(
+    r"\b(?:verdict|decision)\s*:\s*[^\r\n]*"
+    r"|\bimplementation\s+approved\b"
+    r"|\bstate\s*:\s*implementation-go(?:\s+applied)?\b",
+    re.IGNORECASE,
+)
 _SEVERITY_MARKER_RE = re.compile(r"(?im)^[ \t]*<!--\s*hephaestus-severity\s*:")
 MAX_REVIEW_SUMMARY_CHARS = 200
 MAX_RAW_FEEDBACK_CHARS = 4000
@@ -127,8 +132,7 @@ def _normalize_finding(comment: object) -> dict[str, object] | None:
         or severity.lower() not in _VALID_SEVERITIES
         or not isinstance(body, str)
         or not body.strip()
-        or _SEVERITY_MARKER_RE.search(body)
-        or _DECISION_TEXT_RE.search(body)
+        or has_reserved_finding_control(body)
     ):
         return None
     return {
@@ -140,9 +144,14 @@ def _normalize_finding(comment: object) -> dict[str, object] | None:
     }
 
 
+def has_reserved_finding_control(body: str) -> bool:
+    """Return whether a finding body contains a pipeline-owned control."""
+    return bool(_SEVERITY_MARKER_RE.search(body) or _RESERVED_AUTHORITY_CLAIM_RE.search(body))
+
+
 def _sanitize_summary(summary: str) -> str:
     """Bound and HTML-escape the reviewer-controlled summary."""
-    compact = " ".join(_DECISION_TEXT_RE.sub("", summary).split())
+    compact = " ".join(_RESERVED_AUTHORITY_CLAIM_RE.sub("", summary).split())
     if not compact:
         return _INVALID_SUMMARY
     escaped = escape(compact, quote=False)
@@ -153,7 +162,8 @@ def _sanitize_summary(summary: str) -> str:
 
 def _bounded_feedback(source: str, payload: dict[str, object] | None) -> str:
     """Return only bounded supplemental prose, excluding the JSON artifact."""
-    del payload
+    if payload is not None and not source:
+        return ""
     if not source:
         return ""
     match = _JSON_BLOCK_RE.search(source)
@@ -182,10 +192,11 @@ def render_review_audit(audit: ReviewAudit) -> str:
     decision field in this comment. Callers must obtain authorization from a
     fresh, confirmed GitHub label transition instead.
     """
+    summary = _sanitize_summary(audit.summary)
     return (
         "## Automated PR review\n\n"
         f"Total grade: {audit.grade or 'ungraded'}\n\n"
-        f"Review summary: {audit.summary}\n\n"
+        f"Review summary: {summary}\n\n"
         "Eligibility is represented only by the live GitHub implementation-state label; "
         "this audit comment is informational."
     )

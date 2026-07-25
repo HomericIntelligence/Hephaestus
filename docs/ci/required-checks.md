@@ -11,8 +11,12 @@ GitHub Actions validates repository code independently. Normal
 its binary verdict, but the automation loop does not change checks, workflows,
 statuses, artifacts, leases, or `pull_request_target` events. After the review
 returns a current-head GO, the loop applies `state:implementation-go`;
-`merge_wait` consumes that loop-owned label, while restarted labels re-enter
-merge-wait. CI/CD never independently produces or validates authorization.
+`merge_wait` may consume that confirmed loop-owned label only with the current
+process's reviewed-head proof and a confirmed-unarmed live PR. A restarted or
+directly seeded label has no durable proof, so merge-wait returns it to PR
+review after safe stale-label revocation. CI/CD never independently produces
+or validates automation-loop authorization (see
+[`ADR-0014`](../adr/0014-confirmed-implementation-state-labels.md)).
 
 ## Current required contexts
 

@@ -14,7 +14,7 @@ needs hands-on recovery.
 | [Claude quota exhausted (429)](claude-quota-exhausted.md) | A stage records a review-audit failure and leaves implementation labels untouched because the Claude API quota / session limit was hit. |
 | [Reviving a state:skip-labeled issue](state-skip-revival.md) | An issue was labeled `state:skip` after automation already started work on it (planned or opened a PR) and you want to resume driving it. |
 | [No silent failures](no-silent-failures.md) | Policy reference: why `\|\| true`, `continue-on-error`, and advisory `::warning::` are forbidden, and how to fix a tripped hook. |
-| [Backup and disaster recovery](backup-restore.md) | You need to back up or restore `build/.issue_implementer` state, or rebuild a lost workstation end-to-end (policy: ADR-0012). |
+| [Backup and disaster recovery](backup-restore.md) | You need to back up or restore `build/.issue_implementer` state, or rebuild a lost workstation end-to-end (policy: ADR-0013). |
 
 ## Before you start
 
@@ -36,6 +36,6 @@ copy — the module is the source of truth.
 | `state:plan-go` | Plan reviewed and approved; ready for implementation. |
 | `state:plan-no-go` | Plan reviewed and rejected; needs re-planning. |
 | `state:plan-blocked` | Automation is stopped pending a stated decision or dependency. Comments do not resume it. After resolving the block, an external actor must replace this label with exactly one next plan-state label. |
-| `state:implementation-go` | Applied by `pr_review` after a `$athena:pr-review` GO (or inline fallback); it authorizes the loop's merge-wait step. |
+| `state:implementation-go` | Confirmed exclusive PR label applied by `pr_review` after a `$athena:pr-review` GO (or inline fallback). It records durable implementation-review state; merge-wait also needs the current process's reviewed-head proof and currently stands by pending #2419 (ADR-0014). |
 | `state:implementation-no-go` | Implementation reviewed and rejected; needs re-work. |
 | `state:skip` | Work item taken out of the loop entirely — operator-applied, auto-applied when the review loop exhausts its budget without a GO, or applied to epics before exclusion. Independent of all other state labels. See [Reviving a state:skip-labeled issue](state-skip-revival.md) to safely clear it. |

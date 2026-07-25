@@ -38,9 +38,10 @@ A piece of work is **done** when every item below is true.
 > protection contexts (`required-checks-gate` and the two Python 3.12 matrix
 > contexts) and the direct GitHub ruleset contexts documented in
 > [`docs/ci/required-checks.md`](ci/required-checks.md) do. The aggregate gate
-> excludes advisory `auto-merge-policy`; the automation loop's in-process
-> review result and its `state:implementation-go` label, rather than any
-> reporting check, are the automatic-merge authority.
+> excludes advisory `auto-merge-policy`; the automation loop records
+> implementation approval with a confirmed exclusive `state:implementation-go`
+> label plus a process-local reviewed-head proof. Pending #2419, that state
+> reaches merge-wait standby rather than automatic merge.
 
 ## For new features
 

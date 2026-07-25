@@ -854,6 +854,7 @@ class TestRepoScoping:
                     "repository": {
                         "pullRequest": {
                             "reviewThreads": {
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
                                 "nodes": [
                                     {
                                         "id": "T1",
@@ -884,7 +885,7 @@ class TestRepoScoping:
                                         "isResolved": True,
                                         "comments": {"nodes": []},
                                     },
-                                ]
+                                ],
                             }
                         }
                     }
@@ -903,6 +904,58 @@ class TestRepoScoping:
         assert "-F" in calls[0]
         assert "owner=org" in calls[0]
         assert "name=repo-a" in calls[0]
+
+    def test_repo_scoped_unresolved_threads_fetches_page_after_first_hundred(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A human thread after the first page must still block a GO decision."""
+        calls: list[list[str]] = []
+        first_page_nodes = [
+            {
+                "id": f"T{index}",
+                "isResolved": False,
+                "comments": {"nodes": [{"body": "bot", "author": {"login": "ci-bot"}}]},
+            }
+            for index in range(100)
+        ]
+        second_page_nodes = [
+            {
+                "id": "T100",
+                "isResolved": False,
+                "comments": {"nodes": [{"body": "human", "author": {"login": "reviewer"}}]},
+            }
+        ]
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            after_first_page = "after=cursor-1" in argv
+            payload = {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "nodes": (
+                                    second_page_nodes if after_first_page else first_page_nodes
+                                ),
+                                "pageInfo": {
+                                    "hasNextPage": not after_first_page,
+                                    "endCursor": None if after_first_page else "cursor-1",
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+            return SimpleNamespace(stdout=json.dumps(payload))
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "ci-bot")
+
+        assert pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).count_unresolved_threads(
+            7
+        ) == (100, 1)
+        assert len(calls) == 2
+        assert "after=cursor-1" in calls[1]
 
     def test_repo_scoped_fetch_error_fails_closed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1840,3 +1893,25 @@ class TestSeverityMarker:
         assert count == 1
         assert "auto_thread_id" in resolved_ids
         assert "human_thread_id" not in resolved_ids
+
+    def test_mixed_participant_thread_is_human_blocking_and_not_resolved(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A human reply makes an automation-started thread human-blocking."""
+        mixed_thread = {
+            "id": "mixed_thread_id",
+            "body": "<!-- hephaestus-severity: minor -->\nNit",
+            "authors": ["automation-bot", "reviewer"],
+            "comments": [
+                {"author": "automation-bot"},
+                {"author": "reviewer"},
+            ],
+        }
+        monkeypatch.setattr(adapter, "_unresolved_threads", lambda pr: [mixed_thread])
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "automation-bot")
+        resolve = MagicMock()
+        monkeypatch.setattr(github_api_mod, "gh_pr_resolve_thread", resolve)
+
+        assert adapter.count_unresolved_threads_by_severity(42) == (0, 0, 1)
+        assert adapter.resolve_advisory_threads(42, ["mixed_thread_id"]) == 0
+        resolve.assert_not_called()

@@ -456,8 +456,9 @@ jobs:
   auto-merge-policy:
     name: auto-merge-policy
     # Advisory (NOT a required check): the automation loop owns review,
-    # approval labeling, and merge arming. This job reports observable PR
-    # state but never authorizes the loop or substitutes for that process.
+    # confirmed implementation-state labels, and merge-wait standby. This job
+    # reports observable PR state but never authorizes the loop or substitutes
+    # for that process.
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 5

@@ -128,6 +128,7 @@ from hephaestus.automation.prompts.pr_review import (
 )
 from hephaestus.automation.review_audit import (
     ReviewAudit,
+    has_reserved_finding_control,
     parse_review_audit,
     render_review_audit,
 )
@@ -243,6 +244,7 @@ _ROUND_PAYLOAD_KEYS = (
     "review_threads",
     "raw_review_threads",
     "posted_thread_ids",
+    "remediation_threads",
     "difficulty_tiers",
     "address_error",
     "address_output",
@@ -372,6 +374,7 @@ def _is_postable_finding(thread: dict[str, Any]) -> bool:
         and str(thread.get("severity", "")).lower() in VALID_SEVERITIES
         and isinstance(thread.get("body"), str)
         and bool(thread["body"].strip())
+        and not has_reserved_finding_control(thread["body"])
     )
 
 
@@ -409,6 +412,8 @@ def _thread_is_blocking(thread: dict[str, Any]) -> bool:
         stripped = line.strip()
         if stripped.startswith(marker) and stripped.endswith("-->"):
             recovered = stripped[len(marker) : -3].strip().lower()
+            if recovered not in VALID_SEVERITIES:
+                return True
             return recovered in BLOCKING_SEVERITIES
     return True
 
@@ -426,12 +431,49 @@ def _thread_counts(threads: list[dict[str, Any]]) -> tuple[int, int, int]:
     return blocking, advisory, human
 
 
+def _normalize_blocking_remediation_threads(
+    threads: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Normalize live blocking automation threads for address prompts.
+
+    The reviewer audit contains proposed findings, not durable GitHub thread
+    identities. Address jobs must instead consume the live post/read-back
+    snapshot so pre-existing blockers are included and every presented finding
+    carries the GraphQL thread id needed for a later reply/resolve operation.
+    Threads without a durable id are omitted; POST verifies the normalized
+    count against the live blocking count and fails closed on any mismatch.
+    """
+    normalized: list[dict[str, Any]] = []
+    for thread in threads:
+        if not _thread_is_automation_owned(thread) or not _thread_is_blocking(thread):
+            continue
+        thread_id = str(thread.get("id") or thread.get("thread_id") or "").strip()
+        if not thread_id:
+            continue
+        line = thread.get("line")
+        normalized.append(
+            {
+                "thread_id": thread_id,
+                "path": str(thread.get("path") or ""),
+                "line": (
+                    line
+                    if isinstance(line, int) and not isinstance(line, bool) and line > 0
+                    else None
+                ),
+                "body": str(thread.get("body") or ""),
+            }
+        )
+    return normalized
+
+
 def _address_review_feedback(item: WorkItem) -> str:
-    """Serialize surviving findings for a fresh-PR remediation prompt."""
-    threads = item.payload.get("review_threads")
-    if isinstance(threads, list) and threads:
-        return json.dumps({"findings": threads}, ensure_ascii=False, sort_keys=True)
-    return str(item.payload.get("review_feedback") or "")
+    """Serialize normalized live blocking threads for fresh-PR remediation."""
+    threads = item.payload.get("remediation_threads")
+    return json.dumps(
+        {"findings": threads if isinstance(threads, list) else []},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
 
 
 class PrReviewStage(Stage):
@@ -740,7 +782,7 @@ class PrReviewStage(Stage):
             sandbox="read-only",
             prompt_kwargs={
                 "issue_number": item.issue,
-                "comments_json": json.dumps(item.payload.get("review_threads", [])),
+                "comments_json": json.dumps(item.payload.get("remediation_threads", [])),
                 "review_context_kind": _review_context_kind(item),
             },
             descr="difficulty",
@@ -954,7 +996,8 @@ class PrReviewStage(Stage):
         raw_threads = [dict(t) for t in item.payload.get("review_threads") or []]
         threads = _surviving_threads(raw_threads, item.payload.get("validation_result"))
         item.payload["raw_review_threads"] = raw_threads
-        # The surviving set is what gets posted, classified, and addressed.
+        # The surviving audit set is what gets posted. Classification and
+        # addressing use the normalized live read-back installed below.
         item.payload["review_threads"] = threads
         if any(not _is_postable_finding(thread) for thread in threads):
             item.payload["review_audit_failure"] = True
@@ -986,6 +1029,11 @@ class PrReviewStage(Stage):
         item.payload["posted_thread_ids"] = posted
         item.payload["unresolved_threads"] = [dict(thread) for thread in live_threads]
         blocking_auto, minor_auto, human_unresolved = _thread_counts(live_threads)
+        remediation_threads = _normalize_blocking_remediation_threads(live_threads)
+        if len(remediation_threads) != blocking_auto:
+            item.payload["review_audit_failure"] = True
+            return Continue(next_state=EVAL)
+        item.payload["remediation_threads"] = remediation_threads
         item.payload["unresolved_auto"] = blocking_auto + minor_auto
         item.payload["unresolved_human"] = human_unresolved
         if blocking_auto == 0:
@@ -1042,7 +1090,7 @@ class PrReviewStage(Stage):
                     "pr_number": item.pr,
                     "issue_number": item.issue,
                     "worktree_path": item.worktree,
-                    "threads_json": json.dumps(item.payload.get("review_threads", [])),
+                    "threads_json": json.dumps(item.payload.get("remediation_threads", [])),
                     "todo_block": item.payload.get("difficulty_tiers", ""),
                     # No-commit retry directive (#1575): non-empty ONLY on
                     # the one retry after a no-commit address turn;
@@ -1251,7 +1299,10 @@ class PrReviewStage(Stage):
             automation_unresolved,
             STATE_SKIP,
         )
-        arm_outcome = self._require_confirmed_unarmed(item.pr, ctx)
+        # Reuse the exact-head guard after the durable NO-GO write: a push in
+        # that window invalidates this exhaustion decision and must re-review
+        # the newer head instead of applying state:skip to it.
+        arm_outcome = self._require_reviewed_unarmed(item, ctx)
         if arm_outcome is not None:
             return arm_outcome
         write_skip_label(
@@ -1333,9 +1384,7 @@ class PrReviewStage(Stage):
         if no_commit:
             if not payload.get("no_commit_retry_done"):
                 payload["no_commit_retry_done"] = True
-                retry_threads = (
-                    payload.get("raw_review_threads") or payload.get("review_threads") or []
-                )
+                retry_threads = payload.get("remediation_threads") or []
                 payload["unaddressed_findings"] = [dict(t) for t in retry_threads]
                 logger.warning(
                     "pr_review:%s: address turn produced NO commit; retrying the "
@@ -1585,6 +1634,9 @@ class PrReviewStage(Stage):
                 return no_go
             return Continue(next_state=REVIEW_WAIT)
         if advisory:
+            arm_outcome = PrReviewStage._require_reviewed_unarmed(item, ctx)
+            if arm_outcome is not None:
+                return arm_outcome
             advisory_ids = [
                 str(thread["id"])
                 for thread in live_threads

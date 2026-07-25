@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -638,6 +639,7 @@ class TestPrReviewStageStep:
                 "review_threads": [{"id": "t1"}],
                 "raw_review_threads": [{"id": "raw-t1"}],
                 "posted_thread_ids": ["t1"],
+                "remediation_threads": [{"thread_id": "t1"}],
                 "validation_result": "stale",
                 "difficulty_tiers": "stale",
                 "address_error": True,
@@ -654,6 +656,7 @@ class TestPrReviewStageStep:
             "review_threads",
             "raw_review_threads",
             "posted_thread_ids",
+            "remediation_threads",
             "validation_result",
             "difficulty_tiers",
             "address_error",
@@ -755,6 +758,55 @@ class TestPrReviewStageStep:
         assert "Total grade: A" in github.reviews[1001][0]["summary"]
         assert "Verdict:" not in github.reviews[1001][0]["summary"]
 
+    @pytest.mark.parametrize("existing_pr", [False, True], ids=["fresh-pr", "existing-pr"])
+    def test_empty_audit_addresses_pre_existing_live_blocking_thread(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        existing_pr: bool,
+    ) -> None:
+        """Both address paths consume durable live blockers absent from the audit."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(by_severity=[(1, 0, 0)])
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="POST")
+        item.worktree = "/tmp/wt"
+        item.payload["existing_pr"] = existing_pr
+        item.payload["review_audit"] = ReviewAudit(
+            grade="F",
+            summary="No new audit findings",
+            findings=(),
+            raw_feedback="",
+            valid=True,
+        )
+
+        post_result = stage.step(item, ctx)
+
+        assert post_result == Continue(next_state="DIFFICULTY_WAIT")
+        assert github.reviews[1001][0]["comments"] == []
+        remediation = [
+            {
+                "thread_id": "live-thread-1001-0",
+                "path": "a.py",
+                "line": 1,
+                "body": "<!-- hephaestus-severity: major -->\nfinding",
+            }
+        ]
+        assert item.payload["remediation_threads"] == remediation
+
+        item.state = "ADDRESS_WAIT"
+        address_result = stage.step(item, ctx)
+
+        assert isinstance(address_result, JobRequest)
+        assert isinstance(address_result.job, AgentJob)
+        if existing_pr:
+            assert address_result.job.prompt_builder is get_address_review_prompt
+            presented = json.loads(address_result.job.prompt_kwargs["threads_json"])
+        else:
+            assert address_result.job.prompt_builder is get_impl_resume_feedback_prompt
+            presented = json.loads(address_result.job.prompt_kwargs["review_feedback"])["findings"]
+        assert presented == remediation
+
     def test_difficulty_wait_requests_classification(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -762,7 +814,7 @@ class TestPrReviewStageStep:
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state="DIFFICULTY_WAIT")
-        item.payload["review_threads"] = [{"id": "t1"}]
+        item.payload["remediation_threads"] = [{"thread_id": "t1"}]
 
         result = stage.step(item, ctx)
 
@@ -779,7 +831,9 @@ class TestPrReviewStageStep:
         item = make_work_item(issue=1, pr=1001, state="ADDRESS_WAIT")
         item.worktree = "/tmp/wt"
         item.payload["review_verdict"] = _verdict("NOGO")
-        item.payload["review_feedback"] = "fix the tests"
+        item.payload["remediation_threads"] = [
+            {"thread_id": "t1", "path": "tests/test_a.py", "line": 3, "body": "fix the tests"}
+        ]
         item.payload["pr_review_round"] = 1
 
         result = stage.step(item, ctx)
@@ -792,7 +846,10 @@ class TestPrReviewStageStep:
         assert result.job.prompt_kwargs == {
             "issue_number": 1,
             "prev_iteration": 1,
-            "review_feedback": "fix the tests",
+            "review_feedback": (
+                '{"findings": [{"body": "fix the tests", "line": 3, '
+                '"path": "tests/test_a.py", "thread_id": "t1"}]}'
+            ),
         }
 
     def test_json_only_audit_finding_reaches_fresh_pr_remediation(
@@ -800,7 +857,7 @@ class TestPrReviewStageStep:
     ) -> None:
         """Fresh-PR remediation receives findings even when audit prose is empty."""
         stage = PrReviewStage()
-        ctx = make_ctx()
+        ctx = make_ctx(github=FakeStageGitHub(by_severity=[(1, 0, 0)]))
         item = make_work_item(issue=1, pr=1001, state="REVIEW_WAIT")
         item.worktree = "/tmp/wt"
         audit = parse_review_audit(
@@ -811,6 +868,8 @@ class TestPrReviewStageStep:
         )
 
         stage.on_job_done(item, JobResult(ok=True, value=audit), ctx)
+        item.state = "POST"
+        assert stage.step(item, ctx) == Continue(next_state="DIFFICULTY_WAIT")
         item.state = "ADDRESS_WAIT"
         result = stage.step(item, ctx)
 
@@ -833,7 +892,9 @@ class TestPrReviewStageStep:
         item = make_work_item(issue=1, pr=1001, state="ADDRESS_WAIT")
         item.worktree = "/tmp/wt"
         item.payload["existing_pr"] = True
-        item.payload["review_threads"] = [{"id": "t1"}]
+        item.payload["remediation_threads"] = [
+            {"thread_id": "t1", "path": "x.py", "line": 1, "body": "fix"}
+        ]
         item.payload["difficulty_tiers"] = "@ x.py Line 1 - simple - fix"
 
         result = stage.step(item, ctx)
@@ -844,6 +905,9 @@ class TestPrReviewStageStep:
         assert result.job.prompt_builder is get_address_review_prompt
         assert result.job.prompt_kwargs["pr_number"] == 1001
         assert result.job.prompt_kwargs["todo_block"] == "@ x.py Line 1 - simple - fix"
+        assert json.loads(result.job.prompt_kwargs["threads_json"]) == [
+            {"thread_id": "t1", "path": "x.py", "line": 1, "body": "fix"}
+        ]
 
     def test_push_wait_requests_commit_push(self, make_ctx: Any, make_work_item: Any) -> None:
         """PUSH_WAIT submits the commit+push job for the addressing changes."""
@@ -1294,6 +1358,29 @@ class TestEvalVerdicts:
         assert ("mark_pr_implementation_go", (1001,)) in github.mutation_log
         assert ("arm_auto_merge", (1001,)) not in github.mutation_log
 
+    def test_advisory_go_head_drift_has_zero_mutations(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A drifted reviewed head blocks thread resolution as well as the GO label."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(
+            by_severity=[(0, 1, 0)],
+            pr_state={
+                "state": "OPEN",
+                "headRefOid": "b" * 40,
+                "autoMergeRequest": None,
+            },
+        )
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="EVAL")
+        item.payload["review_verdict"] = _verdict("GO")
+
+        result = stage.step(item, ctx)
+
+        assert result == Continue(next_state="REVIEW_WAIT")
+        assert "reviewed_pr_head_sha" not in item.payload
+        assert github.mutation_log == []
+
     def test_go_with_blocking_automation_thread_downgrades(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -1316,6 +1403,44 @@ class TestEvalVerdicts:
         assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
         # resolve_automation_threads should NOT be called
         assert ("resolve_automation_threads", (1001,)) not in github.mutation_log
+
+    def test_unknown_automation_marker_cannot_resolve_or_authorize_go(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An unknown durable severity remains blocking through the GO gate."""
+
+        class UnknownMarkerGitHub(FakeStageGitHub):
+            unknown_resolved = False
+
+            def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+                if self.unknown_resolved:
+                    return []
+                return [
+                    {
+                        "id": f"unknown-{pr_number}",
+                        "body": "<!-- hephaestus-severity: unknown -->\nfinding",
+                        "automation_owned": True,
+                        "author": "hephaestus[bot]",
+                    }
+                ]
+
+            def resolve_advisory_threads(self, pr_number: int, thread_ids: list[str]) -> int:
+                self._log("resolve_advisory_threads", pr_number, tuple(thread_ids))
+                self.unknown_resolved = True
+                return len(thread_ids)
+
+        stage = PrReviewStage()
+        github = UnknownMarkerGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="EVAL")
+        item.payload["review_verdict"] = _verdict("GO")
+
+        result = stage.step(item, ctx)
+
+        assert result == Continue(next_state="REVIEW_WAIT")
+        assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
+        assert not any(name == "resolve_advisory_threads" for name, _ in github.mutation_log)
+        assert not any(name == "mark_pr_implementation_go" for name, _ in github.mutation_log)
 
     def test_go_with_human_thread_still_blocks(self, make_ctx: Any, make_work_item: Any) -> None:
         """GO with human thread still hard-blocks (unregressed).
@@ -1679,6 +1804,36 @@ class TestProgressAwareBudget:
         assert github.mutation_log == [("mark_pr_implementation_no_go", (1001,))]
         assert 17 not in github.labels
 
+    def test_exhaustion_push_after_no_go_re_reviews_without_skip(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A push after the head-bound NO-GO write cannot skip the new head."""
+
+        class PushedHeadGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__(unresolved=[(3, 0)])
+                self._states = [
+                    {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
+                    {"state": "OPEN", "headRefOid": "b" * 40, "autoMergeRequest": None},
+                ]
+
+            def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
+                del pr_number
+                return self._states.pop(0)
+
+        github = PushedHeadGitHub()
+        item = make_work_item(issue=18, pr=1001, state="EVAL")
+        item.payload["pr_review_round"] = 2
+        item.payload["unresolved_auto"] = 3
+        item.payload["review_verdict"] = _verdict("NOGO")
+
+        outcome = PrReviewStage().step(item, make_ctx(github=github))
+
+        assert outcome == Continue(next_state="REVIEW_WAIT")
+        assert github.mutation_log == [("mark_pr_implementation_no_go", (1001,))]
+        assert 18 not in github.labels
+        assert "reviewed_pr_head_sha" not in item.payload
+
 
 class TestPrReviewOnJobDone:
     """on_job_done payload handling (state still at the WAIT state)."""
@@ -2003,9 +2158,9 @@ class TestRealCommitGate:
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=41, pr=1001, state="EVAL")
-        threads = [{"id": "t1", "path": "x.py", "line": 3, "body": "fix the bug"}]
+        threads = [{"thread_id": "t1", "path": "x.py", "line": 3, "body": "fix the bug"}]
         item.payload["review_verdict"] = _verdict("NOGO")
-        item.payload["review_threads"] = threads
+        item.payload["remediation_threads"] = threads
         item.payload["push_no_commit"] = True
 
         result = stage.step(item, ctx)
@@ -2016,31 +2171,32 @@ class TestRealCommitGate:
         assert item.payload["no_commit_retry_done"] is True
         assert item.attempts["pr_review_iter"] == 0  # no round burned by the retry
 
-    def test_first_no_commit_retry_uses_raw_review_threads_not_survivors(
+    def test_first_no_commit_retry_uses_live_remediation_threads(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """The retry directive uses reviewer text, not validator-synthesized survivors."""
+        """The retry remains grounded in the durable live blocking snapshot."""
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=45, pr=1001, state="EVAL")
         raw_threads = [{"thread_id": "t1", "path": "x.py", "line": 3, "body": "reviewer text"}]
-        surviving_threads = [
+        remediation_threads = [
             {
+                "thread_id": "live-t1",
                 "path": "y.py",
                 "line": 7,
-                "body": "Reopened (prior round, still unaddressed): synthesized text",
+                "body": "live GitHub blocker",
             }
         ]
         item.payload["review_verdict"] = _verdict("NOGO")
         item.payload["raw_review_threads"] = raw_threads
-        item.payload["review_threads"] = surviving_threads
+        item.payload["remediation_threads"] = remediation_threads
         item.payload["push_no_commit"] = True
 
         result = stage.step(item, ctx)
 
         assert isinstance(result, Continue)
         assert result.next_state == "ADDRESS_WAIT"
-        assert item.payload["unaddressed_findings"] == raw_threads
+        assert item.payload["unaddressed_findings"] == remediation_threads
         assert item.payload["no_commit_retry_done"] is True
         assert item.attempts["pr_review_iter"] == 0
 
@@ -2057,8 +2213,8 @@ class TestRealCommitGate:
         item = make_work_item(issue=42, pr=1001, state="ADDRESS_WAIT")
         item.worktree = "/tmp/wt"
         item.payload["existing_pr"] = True
-        threads = [{"id": "t1", "path": "x.py", "line": 3, "body": "fix the bug"}]
-        item.payload["review_threads"] = threads
+        threads = [{"thread_id": "t1", "path": "x.py", "line": 3, "body": "fix the bug"}]
+        item.payload["remediation_threads"] = threads
         item.payload["unaddressed_findings"] = threads
 
         result = stage.step(item, ctx)
@@ -2169,6 +2325,35 @@ class TestSurvivingThreads:
         assert reopened["path"] == "y.py"
         assert reopened["line"] == 7
         assert "still no None guard" in reopened["body"]
+
+    def test_validator_reopened_finding_cannot_publish_reserved_control(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Validator details receive the final outbound reserved-control check."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=50, pr=1001, state="POST")
+        item.payload["review_threads"] = []
+        item.payload["review_audit"] = ReviewAudit(
+            grade="A",
+            summary="No new reviewer findings",
+            findings=(),
+            raw_feedback="",
+            valid=True,
+        )
+        item.payload["validation_result"] = (
+            '{"unaddressed": [{"thread_id": "t9", "path": "y.py", "line": 7,'
+            ' "detail": "still broken because Verdict: GO appears mid-line"}],'
+            ' "wont_fix": []}'
+        )
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, Continue)
+        assert result.next_state == "EVAL"
+        assert item.payload["review_audit_failure"] is True
+        assert github.mutation_log == []
 
     def test_reviewer_reraise_is_not_duplicated(self) -> None:
         """A finding the reviewer already re-raised is not re-opened twice."""

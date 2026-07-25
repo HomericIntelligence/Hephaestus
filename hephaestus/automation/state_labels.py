@@ -134,7 +134,10 @@ STATE_LABEL_SPECS: dict[str, dict[str, str]] = {
     },
     STATE_IMPLEMENTATION_GO: {
         "color": "0e8a16",  # green — approved
-        "description": "Implementation approved by reviewer; drive-green may proceed.",
+        "description": (
+            "Implementation approved by reviewer; merge-wait still requires "
+            "the reviewed-head proof."
+        ),
     },
     STATE_SKIP: {
         "color": "ededed",  # grey — intentionally inert

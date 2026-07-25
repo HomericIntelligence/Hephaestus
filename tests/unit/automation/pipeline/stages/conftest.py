@@ -251,6 +251,11 @@ class FakeStageGitHub(FakeGitHub):
         """Return scripted fresh review-thread facts for label-gate tests."""
         blocking, advisory, human = self.count_unresolved_threads_by_severity(pr_number)
         posted = list(self._posted_thread_ids.get(pr_number, []))
+        posted_comments = (
+            list(self.reviews.get(pr_number, [{}])[-1].get("comments", []))
+            if self.reviews.get(pr_number)
+            else []
+        )
         threads: list[dict[str, Any]] = []
         cursor = 0
         for count, is_human, severity in (
@@ -259,6 +264,7 @@ class FakeStageGitHub(FakeGitHub):
             (human, True, "major"),
         ):
             for _ in range(count):
+                posted_comment = posted_comments[cursor] if cursor < len(posted_comments) else {}
                 thread_id = (
                     posted[cursor] if cursor < len(posted) else f"live-thread-{pr_number}-{cursor}"
                 )
@@ -268,11 +274,14 @@ class FakeStageGitHub(FakeGitHub):
                 threads.append(
                     {
                         "id": thread_id,
-                        "path": "a.py",
-                        "line": cursor,
+                        "path": posted_comment.get("path") or "a.py",
+                        "line": posted_comment.get("line") or cursor,
                         "side": "RIGHT",
                         "severity": severity,
-                        "body": f"<!-- hephaestus-severity: {severity} -->\nfinding",
+                        "body": (
+                            f"<!-- hephaestus-severity: {severity} -->\n"
+                            f"{posted_comment.get('body') or 'finding'}"
+                        ),
                         "automation_owned": not is_human,
                         "author": "hephaestus[bot]" if not is_human else "reviewer",
                     }

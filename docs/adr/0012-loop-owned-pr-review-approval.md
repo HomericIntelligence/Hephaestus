@@ -1,6 +1,6 @@
 # ADR-0012: Loop-owned Athena PR-review approval
 
-- Status: Accepted
+- Status: Accepted (historical; superseded by ADR-0014)
 - Date: 2026-07-17
 - Tracks: #2053, #2269
 - Retires: #2268, #2278 (CI/lease-dependent approval policies)

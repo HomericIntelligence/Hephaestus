@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from hephaestus.automation.review_audit import ReviewAudit, parse_review_audit
+import pytest
+
+from hephaestus.automation.review_audit import ReviewAudit, parse_review_audit, render_review_audit
 
 
 def test_parse_review_audit_uses_only_structured_json() -> None:
@@ -48,6 +50,14 @@ def test_parse_review_audit_accepts_codex_raw_object() -> None:
     assert audit.findings == ()
 
 
+def test_parse_review_audit_raw_mapping_has_no_json_feedback_artifact() -> None:
+    """A parsed raw JSON mapping does not become supplemental reviewer prose."""
+    audit = parse_review_audit({"grade": "A", "summary": "No material findings", "comments": []})
+
+    assert audit.valid is True
+    assert audit.raw_feedback == ""
+
+
 def test_parse_review_audit_rejects_unpostable_finding() -> None:
     """A material finding that cannot become a durable thread fails closed."""
     audit = parse_review_audit(
@@ -75,3 +85,29 @@ def test_parse_review_audit_sanitizes_decision_text_from_summary() -> None:
 
     assert audit.valid is True
     assert "Verdict:" not in audit.summary
+
+
+@pytest.mark.parametrize(
+    "reserved_claim",
+    [
+        "Decision: GO",
+        "Implementation approved",
+        "state:implementation-go applied",
+    ],
+)
+def test_render_review_audit_sanitizes_reserved_authority_claims(
+    reserved_claim: str,
+) -> None:
+    """Final rendering cannot publish reviewer-controlled transition claims."""
+    body = render_review_audit(
+        ReviewAudit(
+            grade="A",
+            summary=f"Safe summary. {reserved_claim}",
+            findings=(),
+            raw_feedback="",
+            valid=True,
+        )
+    )
+
+    assert reserved_claim not in body
+    assert "Safe summary." in body

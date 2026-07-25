@@ -6,6 +6,9 @@ operational claim links to the module that backs it.
 The [`docs/adr/`](adr/) records remain the bind-points for individual
 architectural decisions (`0006-queue-based-in-process-automation-pipeline`,
 …) — this document is the unified reference; ADRs are the historical record.
+The active implementation-review and merge-wait authority contract is
+[`ADR-0014`](adr/0014-confirmed-implementation-state-labels.md), which
+supersedes ADR-0012's shorthand while preserving its retired-CI-proof history.
 This file is source-grounded: every operational claim links to the module
 that backs it, in the form `[module/file.py](path/to/file.py)` or
 `[§module/Class.func](path/to/file.py)`. Per the project convention
@@ -430,13 +433,16 @@ Equivalently, when a `scope.trimmed_routes()` rewrite or a stage's own
 `ROUTES` row has no `next`/`fail` mapping, the item lands at the next valid
 mapping or `finished(fail)` rather than raising `KeyError`.
 
-### Closed-schema stage events
+### Stage-event seam (currently empty)
 
-Stage-originated JSONL events use the closed schema in
-[`events.py`](hephaestus/automation/pipeline/events.py). `encode_stage_event`
-rejects raw reviewer text, GitHub bodies and arbitrary event objects.
-The only event type currently defined is
-[`PrReviewZeroThreadNogoEvent`](hephaestus/automation/pipeline/events.py).
+The pipeline retains a reserved stage-event seam for a future authoritative
+event contract, but it currently emits no stage-originated JSONL events.
+[`encode_stage_event`](hephaestus/automation/pipeline/events.py) rejects every
+input, including raw reviewer text, GitHub bodies, and arbitrary event objects.
+Consequently, [`events.py`](hephaestus/automation/pipeline/events.py) defines
+no event types, and this seam is not part of the durable journal or restart
+reconstruction contract. It must remain closed until an authoritative event
+schema is designed and adopted.
 
 ### Scope trimming
 
@@ -553,7 +559,7 @@ absolute operator state:
 | `state:plan-go` | planner-scope| [`plan_review._eval`](hephaestus/automation/pipeline/stages/plan_review.py) |
 | `state:plan-blocked` | planner-scope| [`plan_review._eval`](hephaestus/automation/pipeline/stages/plan_review.py) |
 | `state:implementation-no-go` | review-scope | [`pr_review._eval`](hephaestus/automation/pipeline/stages/pr_review.py) |
-| `state:implementation-go` | review-scope | [`pr_review._eval`](hephaestus/automation/pipeline/stages/pr_review.py) — **sole authority** |
+| `state:implementation-go` | review-scope | [`pr_review._eval`](hephaestus/automation/pipeline/stages/pr_review.py) — **sole write authority** |
 | `state:skip` | absolute | operator / exhaustion in [`pr_review`](hephaestus/automation/pipeline/stages/pr_review.py) / [`implementation`](hephaestus/automation/pipeline/stages/implementation.py) |
 
 Every **stage-issued** `state:skip` durable write (the `pr_review` and
@@ -566,6 +572,16 @@ run log (#2264). Epic tagging in
 [`repo._seed_pass`](hephaestus/automation/pipeline/stages/repo.py) is the
 sole sanctioned seeding write: it adds both the skip label and this comment
 before excluding the epic from the rest of the pipeline.
+
+Implementation-state labels are confirmed exclusive labels: the PR-review
+stage writes them through
+[`PipelineGitHub.mark_pr_implementation_go`](hephaestus/automation/pipeline_github.py)
+or
+[`PipelineGitHub.mark_pr_implementation_no_go`](hephaestus/automation/pipeline_github.py),
+and each helper reads GitHub back to verify exactly one implementation-state
+label remains active. A confirmed `state:implementation-go` records durable
+implementation review state; it is not standalone merge authorization
+([ADR-0014](adr/0014-confirmed-implementation-state-labels.md)).
 
 Label colors per [`STATE_LABEL_SPECS`](hephaestus/automation/state_labels.py).
 Provisioning script
@@ -587,7 +603,7 @@ implementation-go : 4
 state:skip : NO RANK (excluded from rank compare)
 ```
 
-A label alone never authorizes merge. `merge_wait` requires both the
+A label alone never authorizes merge. `merge_wait` requires both the confirmed
 `state:implementation-go` label and a matching in-memory reviewed-head proof
 on a confirmed, unarmed live PR. A missing or drifted proof is contained by
 returning to review only after a fresh unarmed read permits stale-label
@@ -602,8 +618,10 @@ journal artifacts only; foreign marker text is ignored.
 Implementation review emits a structural audit (grade, summary, and durable
 inline findings). Its prose and audit fields are informational; the queue
 advances only after the relevant GitHub `state:implementation-go` or
-`state:implementation-no-go` mutation succeeds and is confirmed. On restart,
-seeding reads labels and PR state, not review output.
+`state:implementation-no-go` mutation succeeds and is confirmed by read-back.
+On restart, seeding reads labels and PR state, not review output; any missing
+process-local reviewed-head proof forces merge-wait back through PR review
+after a safe stale-label revocation.
 
 ---
 

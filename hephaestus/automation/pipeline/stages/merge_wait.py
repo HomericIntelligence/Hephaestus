@@ -108,8 +108,8 @@ class MergeWaitStage(Stage):
             return terminal
         if pr_state is None:
             return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unavailable")
-        has_go, _has_no_go = ctx.github.pr_has_implementation_state_label(item.pr)
-        if not has_go:
+        has_go, has_no_go = ctx.github.pr_has_implementation_state_label(item.pr)
+        if not has_go or has_no_go:
             return StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
         head_sha = str(pr_state.get("headRefOid") or "")
         if not head_sha:

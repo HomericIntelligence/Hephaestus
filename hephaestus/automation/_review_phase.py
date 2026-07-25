@@ -175,7 +175,7 @@ def _review_thread_count_decreased(
 
 
 def _is_automation_owned_thread(thread: dict[str, Any], current_login: str | None) -> bool:
-    """Return True for unresolved review threads the automation may resolve on GO."""
+    """Return True only when every known thread participant is automation."""
     authors = {str(author).strip() for author in thread.get("authors", []) if str(author).strip()}
     author = (thread.get("author") or "").strip()
     if author:
@@ -185,13 +185,13 @@ def _is_automation_owned_thread(thread: dict[str, Any], current_login: str | Non
         if comment_author:
             authors.add(comment_author)
 
-    if current_login and current_login in authors:
-        return True
     automation_bot_logins = {
         "github-actions[bot]",
         "hephaestus[bot]",
     }
-    return bool(authors & automation_bot_logins)
+    if current_login:
+        automation_bot_logins.add(current_login)
+    return bool(authors) and authors <= automation_bot_logins
 
 
 class ReviewPhase(StageMixin):

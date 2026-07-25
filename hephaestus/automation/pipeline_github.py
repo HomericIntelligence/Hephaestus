@@ -458,10 +458,11 @@ class PipelineGitHub:
     def _repo_unresolved_threads(self, pr_number: int) -> list[dict[str, Any]]:
         """List unresolved PR review threads for this accessor's explicit repo."""
         query = (
-            "query($owner:String!,$name:String!,$number:Int!){"
+            "query($owner:String!,$name:String!,$number:Int!,$after:String){"
             "  repository(owner:$owner,name:$name){"
             "    pullRequest(number:$number){"
-            "      reviewThreads(first:100){"
+            "      reviewThreads(first:100,after:$after){"
+            "        pageInfo{ hasNextPage endCursor }"
             "        nodes{ id isResolved path line side:diffSide "
             "comments(first:20){ nodes{ body author{ login } } } }"
             "      }"
@@ -469,41 +470,52 @@ class PipelineGitHub:
             "  }"
             "}"
         )
-        data = self._graphql(query, number=int(pr_number))
-        nodes = (
-            data.get("data", {})
-            .get("repository", {})
-            .get("pullRequest", {})
-            .get("reviewThreads", {})
-            .get("nodes", [])
-        )
         threads: list[dict[str, Any]] = []
-        for node in nodes:
-            if node.get("isResolved"):
-                continue
-            comment_nodes = node.get("comments", {}).get("nodes", [])
-            first_comment = comment_nodes[0] if comment_nodes else {}
-            comments: list[dict[str, str]] = []
-            authors: list[str] = []
-            for comment in comment_nodes:
-                author_node = comment.get("author")
-                author = author_node.get("login") if isinstance(author_node, dict) else ""
-                author = author or ""
-                if author:
-                    authors.append(author)
-                comments.append({"body": comment.get("body") or "", "author": author})
-            threads.append(
-                {
-                    "id": node["id"],
-                    "path": node.get("path", ""),
-                    "line": node.get("line"),
-                    "side": node.get("side") or "RIGHT",
-                    "body": first_comment.get("body", ""),
-                    "author": authors[0] if authors else "",
-                    "authors": authors,
-                    "comments": comments,
-                }
+        after: str | None = None
+        while True:
+            fields: dict[str, int | str] = {"number": int(pr_number)}
+            if after is not None:
+                fields["after"] = after
+            data = self._graphql(query, **fields)
+            review_threads = (
+                data.get("data", {})
+                .get("repository", {})
+                .get("pullRequest", {})
+                .get("reviewThreads", {})
             )
+            for node in review_threads.get("nodes", []):
+                if node.get("isResolved"):
+                    continue
+                comment_nodes = node.get("comments", {}).get("nodes", [])
+                first_comment = comment_nodes[0] if comment_nodes else {}
+                comments: list[dict[str, str]] = []
+                authors: list[str] = []
+                for comment in comment_nodes:
+                    author_node = comment.get("author")
+                    author = author_node.get("login") if isinstance(author_node, dict) else ""
+                    author = author or ""
+                    if author:
+                        authors.append(author)
+                    comments.append({"body": comment.get("body") or "", "author": author})
+                threads.append(
+                    {
+                        "id": node["id"],
+                        "path": node.get("path", ""),
+                        "line": node.get("line"),
+                        "side": node.get("side") or "RIGHT",
+                        "body": first_comment.get("body", ""),
+                        "author": authors[0] if authors else "",
+                        "authors": authors,
+                        "comments": comments,
+                    }
+                )
+            page_info = review_threads.get("pageInfo", {})
+            if not page_info.get("hasNextPage"):
+                break
+            next_cursor = page_info.get("endCursor")
+            if not isinstance(next_cursor, str) or not next_cursor or next_cursor == after:
+                raise RuntimeError("could not fetch all PR review threads")
+            after = next_cursor
         return threads
 
     def _repo_issue_comments(self, issue_number: int) -> list[dict[str, Any]]:
