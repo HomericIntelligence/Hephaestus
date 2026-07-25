@@ -142,6 +142,27 @@ def test_missing_conversation_resolution_policy_blocks_merge_put(
     assert github.conversation_resolution_checks == [(12, "main")]
 
 
+def test_missing_admin_enforcement_policy_blocks_merge_put(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """The combined server-policy admission also rejects an admin bypass risk."""
+
+    class NoAdminEnforcementGitHub(_ConditionalGitHub):
+        def base_branch_requires_conversation_resolution(
+            self, pr_number: int, base_branch: str
+        ) -> bool:
+            super().base_branch_requires_conversation_resolution(pr_number, base_branch)
+            return False
+
+    github = NoAdminEnforcementGitHub()
+
+    result = MergeWaitStage().step(_reviewed_item(make_work_item), make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.FINISH_FAIL, "conversation_resolution_required")
+    assert github.merge_attempts == []
+    assert github.conversation_resolution_checks == [(12, "main")]
+
+
 def test_unreadable_conversation_resolution_policy_blocks_merge_put(
     make_ctx: Any, make_work_item: Any
 ) -> None:

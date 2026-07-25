@@ -355,7 +355,9 @@ class StageGitHub(Protocol):
         """Return whether this PR base branch has server-enforced conversation resolution.
 
         The read is scoped to the accessor's explicit repository and the exact
-        base branch admitted for ``pr_number``. ``False`` includes an absent,
+        base branch admitted for ``pr_number``. Admission requires enforced
+        conversation resolution and administrator enforcement, with no
+        explicit PR-bypass allowances. ``False`` includes an absent,
         unreadable, or malformed branch-protection response and must prevent a
         normal merge request.
         """

@@ -203,6 +203,31 @@ def _thread_severity_is_blocking(thread: dict[str, Any]) -> bool:
     return severity is None or severity in BLOCKING_SEVERITIES
 
 
+def _has_no_explicit_pull_request_bypasses(protection: dict[str, Any]) -> bool:
+    """Return whether the classic protection response grants no PR bypasses.
+
+    Classic branch protection exposes actor allowances that may bypass pull
+    request requirements under ``required_pull_request_reviews``.  A missing
+    review-requirement object means this response exposes no such allowance;
+    once the object is present, every allowance collection must be present,
+    list-typed, and empty.  This is deliberately fail-closed because a merge
+    actor must not infer that an unreadable allowance is safe.
+    """
+    reviews = protection.get("required_pull_request_reviews")
+    if reviews is None:
+        return True
+    if not isinstance(reviews, dict):
+        return False
+    allowances = reviews.get("bypass_pull_request_allowances")
+    if not isinstance(allowances, dict):
+        return False
+    for actor_type in ("users", "teams", "apps"):
+        actors = allowances.get(actor_type)
+        if not isinstance(actors, list) or actors:
+            return False
+    return True
+
+
 class PipelineGitHub:
     """Coordinator-owned GitHub accessor implementing ``StageGitHub``.
 
@@ -1008,9 +1033,12 @@ class PipelineGitHub:
 
         This capability has no organization-wide fallback: merge_wait can only
         admit a normal merge when this accessor is bound to the PR's repository
-        and GitHub confirms ``required_conversation_resolution.enabled`` for the
-        exact admitted base branch. GitHub enforces that policy on the server at
-        merge time, covering a thread that appears after the local read.
+        and GitHub confirms all of the following for the exact admitted base
+        branch: ``required_conversation_resolution.enabled``,
+        ``enforce_admins.enabled``, and no explicit pull-request bypass
+        allowances. GitHub then enforces that policy on the server at merge
+        time, including for administrators, covering a thread that appears
+        after the local read.
         """
         if (
             pr_number <= 0
@@ -1045,9 +1073,13 @@ class PipelineGitHub:
         if not isinstance(data, dict):
             return False
         conversation_resolution = data.get("required_conversation_resolution")
+        enforce_admins = data.get("enforce_admins")
         return (
             isinstance(conversation_resolution, dict)
             and conversation_resolution.get("enabled") is True
+            and isinstance(enforce_admins, dict)
+            and enforce_admins.get("enabled") is True
+            and _has_no_explicit_pull_request_bypasses(data)
         )
 
     def merge_pr_if_head(self, pr_number: int, reviewed_sha: str) -> ConditionalMergeResult:

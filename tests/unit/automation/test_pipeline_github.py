@@ -62,6 +62,24 @@ def dry_adapter(tmp_path: Path) -> pg.PipelineGitHub:
     return pg.PipelineGitHub("org", dry_run=True, repo_root=tmp_path)
 
 
+@pytest.fixture
+def fully_enforced_branch_protection() -> str:
+    """Return a protection response safe for the automation merge actor."""
+    return json.dumps(
+        {
+            "required_conversation_resolution": {"enabled": True},
+            "enforce_admins": {"enabled": True},
+            "required_pull_request_reviews": {
+                "bypass_pull_request_allowances": {
+                    "users": [],
+                    "teams": [],
+                    "apps": [],
+                }
+            },
+        }
+    )
+
+
 def test_adapter_satisfies_stage_github_protocol(adapter: pg.PipelineGitHub) -> None:
     """Runtime protocol conformance (mypy checks it statically too)."""
     assert isinstance(adapter, StageGitHub)
@@ -157,12 +175,15 @@ class TestConversationResolutionAdmission:
     """The base-branch protection read is narrow, repo-scoped, and fail closed."""
 
     def test_reads_exact_base_branch_protection_and_accepts_enabled(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        fully_enforced_branch_protection: str,
     ) -> None:
         adapter.repo = "repo"
         call_mock = MagicMock(
             return_value=SimpleNamespace(
-                stdout='{"required_conversation_resolution": {"enabled": true}}',
+                stdout=fully_enforced_branch_protection,
                 returncode=0,
             )
         )
@@ -175,27 +196,77 @@ class TestConversationResolutionAdmission:
         )
 
     @pytest.mark.parametrize(
-        "stdout",
+        "protection",
         [
-            "{}",
-            '{"required_conversation_resolution": {"enabled": false}}',
+            {},
+            {
+                "required_conversation_resolution": {"enabled": False},
+                "enforce_admins": {"enabled": True},
+            },
+            {
+                "required_conversation_resolution": {"enabled": True},
+                "enforce_admins": {"enabled": False},
+            },
+            {"required_conversation_resolution": {"enabled": True}},
+            {
+                "required_conversation_resolution": {"enabled": True},
+                "enforce_admins": {"enabled": "true"},
+            },
+            {
+                "required_conversation_resolution": {"enabled": True},
+                "enforce_admins": {"enabled": True},
+                "required_pull_request_reviews": {},
+            },
             "not-json",
         ],
     )
-    def test_absent_false_or_malformed_protection_fails_closed(
+    def test_absent_false_or_malformed_protection_flags_fail_closed(
         self,
         adapter: pg.PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
-        stdout: str,
+        protection: dict[str, object] | str,
     ) -> None:
         adapter.repo = "repo"
+        stdout = protection if isinstance(protection, str) else json.dumps(protection)
         monkeypatch.setattr(
             pg,
             "gh_call",
-            MagicMock(return_value=SimpleNamespace(stdout=stdout, returncode=1)),
+            MagicMock(return_value=SimpleNamespace(stdout=stdout, returncode=0)),
         )
 
         assert adapter.base_branch_requires_conversation_resolution(7, "main") is False
+
+    @pytest.mark.parametrize(
+        "bypass_allowances",
+        [
+            {"users": [{"login": "release-admin"}], "teams": [], "apps": []},
+            {"users": [], "teams": [{"slug": "maintainers"}], "apps": []},
+            {"users": [], "teams": [], "apps": [{"slug": "merge-bot"}]},
+            {"users": "not-a-list", "teams": [], "apps": []},
+        ],
+    )
+    def test_explicit_or_malformed_bypass_allowances_fail_closed(
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        bypass_allowances: dict[str, object],
+    ) -> None:
+        """Any listed PR-requirement bypass can also evade conversation safety."""
+        adapter.repo = "repo"
+        stdout = json.dumps(
+            {
+                "required_conversation_resolution": {"enabled": True},
+                "enforce_admins": {"enabled": True},
+                "required_pull_request_reviews": {
+                    "bypass_pull_request_allowances": bypass_allowances,
+                },
+            }
+        )
+        call_mock = MagicMock(return_value=SimpleNamespace(stdout=stdout, returncode=0))
+        monkeypatch.setattr(pg, "gh_call", call_mock)
+
+        assert adapter.base_branch_requires_conversation_resolution(7, "main") is False
+        assert call_mock.call_args.args[0][2] == "GET"
 
     def test_protection_read_is_unavailable_without_a_repo_scope(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
