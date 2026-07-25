@@ -379,6 +379,47 @@ def test_resolve_org_and_repos_org_defers_discovery_without_issue_scan() -> None
     mock_sort.assert_not_called()
 
 
+@pytest.mark.parametrize("scope", [("--issues", "42"), ("--prs", "42")])
+def test_resolve_org_and_repos_rejects_numeric_scope_without_concrete_repo(
+    scope: tuple[str, str],
+) -> None:
+    """Org-wide direct numeric scopes must not materialize or pick a repo."""
+    args = loop_runner._parse_args(["--org", "ExplicitOrg", *scope])
+    with patch("hephaestus.automation.loop_runner._gh_list_repos") as mock_list:
+        org, repos, err = loop_runner._resolve_org_and_repos(args)
+
+    assert org == "ExplicitOrg"
+    assert repos == []
+    assert err == "--org with --issues/--prs requires exactly one --repos REPO scope."
+    mock_list.assert_not_called()
+
+
+@pytest.mark.parametrize("scope", [("--issues", "42"), ("--prs", "42")])
+def test_resolve_org_and_repos_rejects_multi_repo_numeric_scope(
+    scope: tuple[str, str],
+) -> None:
+    """A direct numeric target has one unambiguous repository owner."""
+    args = loop_runner._parse_args(["--org", "ExplicitOrg", "--repos", "a,b", *scope])
+
+    org, repos, err = loop_runner._resolve_org_and_repos(args)
+
+    assert org == ""
+    assert repos == []
+    assert err == "--issues/--prs require exactly one repository via --repos REPO."
+
+
+@pytest.mark.parametrize("scope", [("--issues", "42"), ("--prs", "42")])
+def test_resolve_org_and_repos_accepts_single_repo_numeric_scope(
+    scope: tuple[str, str],
+) -> None:
+    """One explicit repository preserves the direct numeric-scope contract."""
+    args = loop_runner._parse_args(["--org", "ExplicitOrg", "--repos", "target", *scope])
+
+    org, repos, err = loop_runner._resolve_org_and_repos(args)
+
+    assert (org, repos, err) == ("ExplicitOrg", ["target"], None)
+
+
 def test_resolve_org_and_repos_dry_run_never_tags_discovered_epics() -> None:
     """Organization discovery stays read-only when the loop is a dry run."""
     args = loop_runner._parse_args(["--org", "ExplicitOrg", "--dry-run"])

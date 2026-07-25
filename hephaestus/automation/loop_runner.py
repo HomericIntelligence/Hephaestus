@@ -401,6 +401,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "Enumerate non-fork, non-archived repos in a GitHub org. "
             "Pass `--org NAME` for a specific org, or `--org` alone to auto-detect "
             "the org from the current repo's git remote. "
+            "With --issues or --prs, also pass exactly one --repos REPO. "
             "Default (no flag): run only for the current repo."
         ),
     )
@@ -585,14 +586,20 @@ def _resolve_org_and_repos(
 
     Precedence:
       1. ``--repos`` given → use it; org from cwd (preferred) or ``--org NAME``.
-      2. ``--org NAME`` (explicit) → enumerate non-fork repos in NAME.
-      3. ``--org`` (no arg) → detect org from cwd; enumerate non-fork repos.
+      2. ``--org NAME`` (explicit) → stream non-fork repos in NAME.
+      3. ``--org`` (no arg) → detect org from cwd; stream non-fork repos.
       4. (no flags) → use only the cwd repo + its org.
 
     Returns ``("", [], "<reason>")`` on error so ``main()`` can log and exit.
     """
     # Branch 1: explicit --repos
     if args.repos:
+        if (args.issues or args.prs) and len(args.repos) != 1:
+            return (
+                "",
+                [],
+                "--issues/--prs require exactly one repository via --repos REPO.",
+            )
         detected_org, _ = _detect_cwd_repo()
         explicit_org = args.org if isinstance(args.org, str) else None
         org = explicit_org or detected_org
@@ -625,14 +632,14 @@ def _resolve_org_and_repos(
             LOG.info("Streaming repositories in %s through the bounded pipeline source ...", org)
             return (org, [], None)
 
-        # An explicit numeric issue/PR is only meaningful within a concrete
-        # repository. Preserve the legacy compatibility behavior for that
-        # ambiguous form rather than assigning a streamed org's first page
-        # implicitly.
-        candidates = _gh_list_repos(org)
-        if not candidates:
-            return (org, [], "No repos returned from gh repo list — possible rate limit.")
-        return (org, candidates, None)
+        # Issue and PR numbers are repository-local.  Refuse the ambiguous
+        # combination instead of materializing an entire organization and
+        # silently choosing its first repository as the direct-scope target.
+        return (
+            org,
+            [],
+            "--org with --issues/--prs requires exactly one --repos REPO scope.",
+        )
 
     # Branch 4: no flags — default to cwd repo
     detected_org, detected_repo = _detect_cwd_repo()
