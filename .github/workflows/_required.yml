@@ -490,7 +490,7 @@ jobs:
           fi
           pr_state=$(jq -r '.state' pr.json)
           if [ "$pr_state" != "OPEN" ]; then
-            echo "OK: PR state is $pr_state; auto-merge report is terminal"
+            echo "OK: PR state is $pr_state; auto-merge policy is terminal"
             exit 0
           fi
 
