@@ -1610,10 +1610,10 @@ class TestEvalVerdicts:
         assert result == StageOutcome(Disposition.FINISH_FAIL, "implementation_go_readback_failed")
         assert github.mutation_log == [("mark_pr_implementation_go", (1001,))]
 
-    def test_post_go_label_head_drift_clears_safe_label_and_restarts_review(
+    def test_post_go_label_head_drift_restarts_review_without_clearing_labels(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A nonconditional GO write cannot survive a post-write head drift."""
+        """Head drift discards local proof without claiming label ownership."""
 
         class PostWriteDriftGitHub(FakeStageGitHub):
             def __init__(self) -> None:
@@ -1641,9 +1641,46 @@ class TestEvalVerdicts:
 
         assert result == Continue(next_state="REVIEW_WAIT")
         assert "reviewed_pr_head_sha" not in item.payload
-        assert github.pr_has_implementation_state_label(1001) == (False, False)
+        assert github.pr_has_implementation_state_label(1001) == (True, False)
         assert ("mark_pr_implementation_go", (1001,)) in github.mutation_log
-        assert any(name == "gh_issue_remove_labels" for name, _ in github.mutation_log)
+        assert not any(name == "gh_issue_remove_labels" for name, _ in github.mutation_log)
+
+    def test_post_go_new_head_and_external_go_never_removes_external_label(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A post-write read cannot distinguish this process's GO from an external one."""
+
+        class ExternalGoAfterPushGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__()
+                self.external_go_written = False
+
+            def mark_pr_implementation_go(self, pr_number: int) -> None:
+                super().mark_pr_implementation_go(pr_number)
+                # Model an external actor replacing the label after pushing a
+                # new head. The accessor has no ownership token for that GO.
+                self._pr_impl_state = (True, False)
+                self.external_go_written = True
+
+            def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
+                del pr_number
+                return {
+                    "state": "OPEN",
+                    "headRefOid": ("b" if self.external_go_written else "a") * 40,
+                    "autoMergeRequest": None,
+                }
+
+        stage = PrReviewStage()
+        github = ExternalGoAfterPushGitHub()
+        item = make_work_item(issue=38, pr=1001, state="EVAL")
+        item.payload.update({"review_verdict": _verdict("GO"), "reviewed_pr_head_sha": "a" * 40})
+
+        result = stage.step(item, make_ctx(github=github))
+
+        assert result == Continue(next_state="REVIEW_WAIT")
+        assert "reviewed_pr_head_sha" not in item.payload
+        assert github.pr_has_implementation_state_label(1001) == (True, False)
+        assert github.mutation_log == [("mark_pr_implementation_go", (1001,))]
 
     def test_post_go_label_auto_merge_arm_stands_down_without_clearing(
         self, make_ctx: Any, make_work_item: Any

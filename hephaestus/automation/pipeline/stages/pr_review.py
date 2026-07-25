@@ -1899,17 +1899,32 @@ class PrReviewStage(Stage):
     def _revalidate_go_write(item: WorkItem, ctx: StageContext) -> StepResult | None:
         """Check the nonconditional GO write against fresh state and labels.
 
-        GitHub exposes no conditional label mutation.  A push or external
-        auto-merge arm can therefore race after the pre-write guard.  Remove
-        the newly written loop label only when a fresh state still proves the
-        PR open and unarmed *and* the label is exclusively GO; otherwise leave
-        externally ambiguous state untouched and stand down.
+        GitHub exposes no conditional label mutation. A push or external
+        label write can therefore race after the pre-write guard. A read after
+        our write cannot prove who owns an exclusive GO label, so a changed or
+        missing reviewed head only discards this process's proof and restarts
+        review; it never removes implementation-state labels.
         """
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
         pr_number = item.pr
         try:
             state = ctx.github.gh_pr_state(pr_number)
+        except Exception as error:
+            logger.warning(
+                "pr_review: failed to revalidate GO write on PR #%d (%s)",
+                pr_number,
+                type(error).__name__,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_readback_failed")
+        if isinstance(state, dict) and state.get("autoMergeRequest") is not None:
+            return StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
+        reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
+        live_head = str(state.get("headRefOid") or "") if isinstance(state, dict) else ""
+        if not reviewed_head or not live_head or reviewed_head != live_head:
+            item.payload.pop("reviewed_pr_head_sha", None)
+            return Continue(next_state=REVIEW_WAIT)
+        try:
             has_go, has_no_go = ctx.github.pr_has_implementation_state_label(pr_number)
         except Exception as error:
             logger.warning(
@@ -1918,43 +1933,8 @@ class PrReviewStage(Stage):
                 type(error).__name__,
             )
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_readback_failed")
-        reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
-        live_head = str(state.get("headRefOid") or "") if isinstance(state, dict) else ""
-        if (
-            _is_confirmed_open_unarmed(state)
-            and bool(reviewed_head)
-            and reviewed_head == live_head
-            and has_go
-            and not has_no_go
-        ):
-            return None
-        # The label can be safely revoked only while the PR remains open and
-        # explicitly unarmed, and only if it is still the loop's exclusive GO
-        # label. Do not mutate an externally armed/closed/ambiguous PR or a
-        # label state another actor may have changed.
         if _is_confirmed_open_unarmed(state) and has_go and not has_no_go:
-            try:
-                ctx.github.remove_labels(pr_number, list(ALL_IMPLEMENTATION_STATE_LABELS))
-                cleared_go, cleared_no_go = ctx.github.pr_has_implementation_state_label(pr_number)
-            except Exception as error:
-                logger.warning(
-                    "pr_review: failed to clear stale GO label on PR #%d (%s)",
-                    pr_number,
-                    type(error).__name__,
-                )
-                return StageOutcome(
-                    Disposition.FINISH_FAIL,
-                    "implementation_go_postwrite_clear_failed",
-                )
-            if cleared_go or cleared_no_go:
-                return StageOutcome(
-                    Disposition.FINISH_FAIL,
-                    "implementation_go_postwrite_clear_failed",
-                )
-            item.payload.pop("reviewed_pr_head_sha", None)
-            return Continue(next_state=REVIEW_WAIT)
-        if isinstance(state, dict) and state.get("autoMergeRequest") is not None:
-            return StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
+            return None
         return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_readback_failed")
 
     @staticmethod
