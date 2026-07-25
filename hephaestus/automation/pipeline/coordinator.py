@@ -2532,7 +2532,6 @@ class Coordinator:
                         issue_number=issue_number,
                         issue_title=issue_facts.title,
                         issue_body=issue_facts.body,
-                        pr_diff=review_context["pr_diff"],
                         pr_description=review_context["pr_description"],
                         passed=passed,
                     )
@@ -2567,7 +2566,6 @@ class Coordinator:
             )
             item.payload["issue_title"] = entry.issue_title
             item.payload["issue_body"] = entry.issue_body
-            item.payload["pr_diff"] = entry.pr_diff
             item.payload["pr_description"] = entry.pr_description
         else:
             item = WorkItem(
