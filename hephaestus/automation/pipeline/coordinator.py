@@ -6,8 +6,10 @@ The coordinator runs on the process main thread and owns all seven stage
 queues, the timer heap, the in-flight registry, all routing, and (through the
 :class:`~hephaestus.automation.pipeline_github.PipelineGitHub` accessor) every
 GitHub API mutation. A single worker pool executes agent, build/test, and
-git/network jobs; the ONLY cross-thread channel is the completion queue, whose
-blocking ``get(timeout=...)`` doubles as the loop's idle sleep.
+git/network jobs; the ONLY cross-thread data channel is the completion queue.
+A separate event latch wakes the idle loop for both accepted completions and
+signals, so neither a worker callback nor a signal handler can block on a
+full queue.
 
 Per tick (epic #1809 "Coordinator event loop"):
 
@@ -154,8 +156,6 @@ _MAX_STEPS_PER_TICK = 100
 #: house on_job_done pattern); this cap only guarantees cross-stage regression
 #: cycles terminate even if a stage's own bookkeeping has a bug.
 _FAIL_BACK_CAP = sum(sum(route.budgets.values()) for route in ROUTES.values())
-
-_WAKE_HANDLE = object()
 
 _PROMPT_PREFLIGHT_TEMPLATE = "shared/untrusted_notice.j2"
 _PROMPT_PREFLIGHT_ERROR = "ERROR: Prompt templates missing or unreadable — reinstall: `uv sync`."
@@ -372,6 +372,11 @@ class Coordinator:
         self.github = github
         self._github_factory = github_factory
         self.shutdown = threading.Event()
+        # These latches are the control plane for the bounded completion
+        # queue.  They carry no WorkItem/JobResult payload and therefore
+        # cannot become a second, unbounded completion buffer.
+        self._completion_wakeup = threading.Event()
+        self._completion_saturation = threading.Event()
         work_window = _work_window(config)
         self.completion_q: CompletionQueue = queue_mod.Queue(maxsize=work_window)
         if pool is None:
@@ -398,6 +403,12 @@ class Coordinator:
                 )
             pool.completion_q = self.completion_q
         self.pool: Any = pool
+        set_completion_notifiers = getattr(pool, "set_completion_notifiers", None)
+        if callable(set_completion_notifiers):
+            set_completion_notifiers(
+                wakeup=self._completion_wakeup,
+                saturation=self._completion_saturation,
+            )
 
         self.queues: dict[StageName, StageQueue] = {
             name: StageQueue(work_window) for name in StageName
@@ -671,8 +682,8 @@ class Coordinator:
             )
 
     def _wake_completion_wait(self) -> None:
-        """Wake the coordinator if it is blocked in completion_q.get()."""
-        self.completion_q.put((_WAKE_HANDLE, JobResult(ok=False, interrupted=True, error="wake")))
+        """Wake the coordinator without writing a sentinel into its bounded queue."""
+        self._completion_wakeup.set()
 
     # -- run loop ---------------------------------------------------------------
 
@@ -1008,26 +1019,34 @@ class Coordinator:
 
     def _drain_completions(self) -> None:
         """Drain ALL ready completions without blocking."""
+        # Clear before inspection.  A callback that publishes between this
+        # clear and the final get_nowait() either has its result drained now
+        # (leaving a harmless set latch) or sets the latch for the next wait.
+        self._completion_wakeup.clear()
         while True:
             try:
                 handle, result = self.completion_q.get_nowait()
             except queue_mod.Empty:
-                return
-            if handle is _WAKE_HANDLE:
-                self._record_event("wake", "completion_q")
-                continue
+                break
             self._handle_completion(handle, result)
 
+        if self._completion_saturation.is_set():
+            # This cannot occur when the C-in-flight invariant holds: each
+            # active job has one reserved slot in the C-sized completion
+            # queue.  A WorkerPool callback never blocks or spills when that
+            # invariant is violated; fail the run and finalize its still-live
+            # item resumably instead.  Crucially, this is not a signal.
+            self._record_event("completion_saturation")
+            raise RuntimeError("completion queue saturated")
+
     def _wait_for_completion(self, timeout: float) -> None:
-        """Block up to *timeout* for one completion; handle it if one arrives."""
-        try:
-            handle, result = self.completion_q.get(timeout=timeout)
-        except queue_mod.Empty:
-            return
-        if handle is _WAKE_HANDLE:
-            self._record_event("wake", "completion_q")
-            return
-        self._handle_completion(handle, result)
+        """Wait for a completion, a saturation fault, or a signal wake latch."""
+        # A test double may synchronously enqueue without owning the notifier;
+        # avoid an unnecessary idle wait in that compatible case.  Production
+        # callbacks set the event after every accepted completion.
+        if self.completion_q.empty() and not self._completion_saturation.is_set():
+            self._completion_wakeup.wait(timeout=timeout)
+        self._drain_completions()
 
     def _handle_completion(self, handle: JobHandle, result: JobResult) -> None:
         """Route one completed job back to its item.

@@ -112,6 +112,77 @@ def test_shutdown_can_reap_without_marking_interrupted(
 class TestWorkerPoolSubmitComplete:
     """Tests for basic submit/complete workflow."""
 
+    def test_completion_callback_notifies_after_delivering_one_result(
+        self,
+        shutdown_event: threading.Event,
+        tmp_path: Path,
+    ) -> None:
+        """A completed future delivers one result and wakes its coordinator."""
+        completion_q: CompletionQueue = queue.Queue(maxsize=1)
+        pool = WorkerPool(
+            size=1,
+            shutdown=shutdown_event,
+            completion_q=completion_q,
+            lock_dir=tmp_path / "locks",
+        )
+        wakeup = threading.Event()
+        saturation = threading.Event()
+        pool.set_completion_notifiers(wakeup=wakeup, saturation=saturation)
+        future: Future[JobResult] = Future()
+        result = JobResult(ok=True, value="done")
+        future.set_result(result)
+        handle = JobHandle(job=_agent_job(), on_done_state=StageName.PLANNING)
+
+        try:
+            pool._on_future_done(handle, future)
+            delivered_handle, delivered_result = completion_q.get_nowait()
+        finally:
+            pool.shutdown(mark_interrupted=False)
+
+        assert delivered_handle is handle
+        assert delivered_result is result
+        assert wakeup.is_set()
+        assert not saturation.is_set()
+
+    def test_full_completion_queue_reports_saturation_without_blocking_callback(
+        self,
+        shutdown_event: threading.Event,
+        tmp_path: Path,
+    ) -> None:
+        """An impossible completion overflow faults the run rather than deadlocking a worker."""
+        completion_q: CompletionQueue = queue.Queue(maxsize=1)
+        occupied = (object(), JobResult(ok=True, value="already queued"))
+        completion_q.put_nowait(occupied)
+        pool = WorkerPool(
+            size=1,
+            shutdown=shutdown_event,
+            completion_q=completion_q,
+            lock_dir=tmp_path / "locks",
+        )
+        wakeup = threading.Event()
+        saturation = threading.Event()
+        pool.set_completion_notifiers(wakeup=wakeup, saturation=saturation)
+        future: Future[JobResult] = Future()
+        future.set_result(JobResult(ok=True, value="would overflow"))
+        handle = JobHandle(job=_agent_job(), on_done_state=StageName.PLANNING)
+        callback = threading.Thread(target=pool._on_future_done, args=(handle, future))
+
+        try:
+            callback.start()
+            callback.join(timeout=1)
+            still_queued = completion_q.get_nowait()
+        finally:
+            if callback.is_alive():
+                completion_q.get_nowait()
+                callback.join(timeout=1)
+            pool.shutdown(mark_interrupted=False)
+
+        assert not callback.is_alive()
+        assert still_queued is occupied
+        assert saturation.is_set()
+        assert wakeup.is_set()
+        assert not shutdown_event.is_set()
+
     def test_submit_agent_job_propagates_prompt_dir_override_to_worker_thread(
         self,
         pool: WorkerPool,
