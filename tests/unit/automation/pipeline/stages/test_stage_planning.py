@@ -348,10 +348,10 @@ class TestPlanningStageEnter:
         assert STATE_PLAN_GO not in github.labels[20]
         assert STATE_NEEDS_PLAN not in github.labels[20]
 
-    def test_normal_no_go_replan_receives_complete_ordered_history(
+    def test_normal_no_go_replan_receives_current_rejected_revision_context(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """Every rejected-plan iteration gets plan then review context, without human feedback."""
+        """A replan gets its current rejected plan/review pair for recovery."""
         stage = PlanningStage()
         github = FakeStageGitHub(labels=[STATE_PLAN_NO_GO], has_plan=True)
         github.comments[29] = [
@@ -370,6 +370,29 @@ class TestPlanningStageEnter:
         assert isinstance(request, JobRequest)
         assert isinstance(request.job, AgentJob)
         assert request.job.prompt_kwargs["issue_history"] == history
+
+    def test_normal_no_go_replan_excludes_superseded_revision_context(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Old NOGO critiques cannot compete with the current rejection."""
+        stage = PlanningStage()
+        github = FakeStageGitHub(labels=[STATE_PLAN_NO_GO], has_plan=True)
+        github.comments[29] = [
+            "<!-- hephaestus-plan-history:revision=1:kind=plan -->\nPlan v1",
+            "<!-- hephaestus-plan-history:revision=1:kind=review -->\nReview v1",
+            render_current_plan("Plan v2", revision=2),
+            render_current_review("Review v2\n\nstate:plan-no-go", revision=2),
+        ]
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=29, state="ENTER")
+
+        assert stage.on_enter(item, ctx) is None
+
+        history = item.payload["issue_history"]
+        assert "Plan v2" in history
+        assert "Review v2" in history
+        assert "Plan v1" not in history
+        assert "Review v1" not in history
 
     def test_replan_entry_ignores_existing_rejected_plan_comment(
         self, make_ctx: Any, make_work_item: Any

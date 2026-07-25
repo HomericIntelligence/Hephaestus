@@ -42,7 +42,7 @@ from hephaestus.automation.protocol import PLAN_REVIEW_CANONICAL_MARKER, PLAN_RE
 from hephaestus.automation.review_journal import (
     IssueComment,
     JournalSnapshot,
-    history_projection,
+    current_revision_context,
     is_pending_review,
     journal_snapshot,
     render_current_plan,
@@ -124,8 +124,8 @@ def build_plan_prompt(
 
 
 def _planning_history(comments: Sequence[IssueComment | str]) -> str:
-    """Return every ordered plan/review journal iteration."""
-    return history_projection(comments)
+    """Return only current rejected-revision context for a resumed planner."""
+    return current_revision_context(comments)
 
 
 def _normalize_plan_comment(plan: str, *, revision: int | None = None) -> str:
