@@ -19,6 +19,48 @@ if TYPE_CHECKING:
 CompletionQueue = Queue[tuple[Any, Any]]
 
 
+class StageQueueLease:
+    """A temporary, capacity-reserving claim on one stage-queue item.
+
+    Leases are coordinator-thread objects: they are not thread-safe and their
+    lifetime is bounded by one successful :meth:`handoff` or :meth:`restore`.
+    A failed handoff intentionally leaves the lease active so the caller can
+    retry after the destination makes capacity available.
+    """
+
+    def __init__(self, source: StageQueue, item: WorkItem) -> None:
+        """Create an active lease owned by *source* for *item*."""
+        self._source = source
+        self.item = item
+        self._active = True
+
+    def restore(self) -> None:
+        """Return this active lease's item to the front of its source queue.
+
+        A released lease is a harmless no-op.  This makes cleanup paths safe
+        to repeat while preserving the item's exact-once queue ownership.
+        """
+        if not self._active:
+            return
+
+        self._source._restore_lease(self.item)
+        self._active = False
+
+    def handoff(self, destination: StageQueue) -> bool:
+        """Move this active lease to *destination* when it has capacity.
+
+        Destination admission happens before the source reservation is
+        released.  Therefore a full destination leaves the item held by this
+        lease and does not create a spill buffer or lose work.
+        """
+        if not self._active or not destination.offer(self.item):
+            return False
+
+        self._source._release_lease()
+        self._active = False
+        return True
+
+
 class StageQueue:
     """FIFO queue of work items for a stage.
 
@@ -43,6 +85,7 @@ class StageQueue:
 
         self._capacity = capacity
         self._items: deque[WorkItem] = deque()
+        self._held = 0
 
     @property
     def capacity(self) -> int:
@@ -51,8 +94,8 @@ class StageQueue:
 
     @property
     def occupancy(self) -> int:
-        """Return the number of items currently held by the queue."""
-        return len(self._items)
+        """Return all ready and leased items currently held by the queue."""
+        return len(self._items) + self._held
 
     def push(self, item: WorkItem) -> None:
         """Append an item or raise if the queue is full.
@@ -76,7 +119,10 @@ class StageQueue:
             ownership of the work item and can retry it later.
 
         """
-        if len(self._items) >= self._capacity:
+        # A held lease may need to return to the front of this queue.  Do not
+        # admit newer work ahead of it, even when the numeric bound has spare
+        # capacity; admission resumes only once every lease is released.
+        if self._held or self.occupancy >= self._capacity:
             return False
 
         self._items.append(item)
@@ -85,6 +131,28 @@ class StageQueue:
     def pop(self) -> WorkItem:
         """Remove and return the front item. Raises IndexError if empty."""
         return self._items.popleft()
+
+    def claim(self) -> StageQueueLease | None:
+        """Claim the FIFO-ready item without releasing this queue's capacity.
+
+        The returned lease owns the item until it is restored or handed off.
+        Ready work inspection remains available through :meth:`snapshot`, but
+        the claim continues to count toward :attr:`occupancy`.
+        """
+        if not self._items:
+            return None
+
+        self._held += 1
+        return StageQueueLease(self, self._items.popleft())
+
+    def _restore_lease(self, item: WorkItem) -> None:
+        """Restore one active lease at the front without changing occupancy."""
+        self._held -= 1
+        self._items.appendleft(item)
+
+    def _release_lease(self) -> None:
+        """Release one active lease after its item was admitted elsewhere."""
+        self._held -= 1
 
     def __len__(self) -> int:
         """Return the number of items in the queue."""
