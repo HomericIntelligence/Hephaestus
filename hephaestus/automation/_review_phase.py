@@ -101,7 +101,7 @@ def _audit_verdict(audit: ReviewAudit) -> ReviewVerdict:
 MAX_REVIEW_ITERATIONS = 3
 
 # Absolute ceiling on review iterations. A loop that makes genuine progress every
-# round (resolves a fresh finding without the validator re-opening a prior one)
+# round (fixes a fresh finding in code without the validator re-opening a prior one)
 # earns extra iterations beyond ``MAX_REVIEW_ITERATIONS`` — up to this hard cap —
 # so a steadily-improving PR with more real findings than the base budget can
 # converge to a clean GO instead of being stranded one address-pass short (#1554).
@@ -170,7 +170,7 @@ def _review_thread_count_decreased(
     before: list[dict[str, Any]],
     after: list[dict[str, Any]],
 ) -> bool:
-    """Return True when an address turn reduced unresolved PR review threads."""
+    """Return True when live unresolved threads decreased, for example by human action."""
     return bool(before) and len(after) < len(before)
 
 
@@ -532,7 +532,7 @@ class ReviewPhase(StageMixin):
         pr_number: int | None,
         thread_id: int | None,
     ) -> tuple[str, bool, bool]:
-        """Resolve a reviewer GO against the PR's still-open threads.
+        """Check a reviewer GO against the PR's still-open threads.
 
         A reviewer ``GO`` only converges when the PR has ZERO unresolved review
         threads (#1152): a reviewer can emit GO in the same pass that posts new
@@ -542,7 +542,7 @@ class ReviewPhase(StageMixin):
         Returns ``(verdict, go_blocked_by_automation, should_break)``:
 
         * ``verdict`` — ``"GO"`` (clean), ``"NOGO"`` (automation threads remain,
-          address + re-review), or ``"HUMAN_BLOCKED"`` (a human thread is open).
+          code-fix/human-handoff), or ``"HUMAN_BLOCKED"`` (a human thread is open).
         * ``go_blocked_by_automation`` — force the address step to run even on a
           GO pass that posted no new threads.
         * ``should_break`` — terminate the loop now (clean GO or HUMAN_BLOCKED).
@@ -561,11 +561,12 @@ class ReviewPhase(StageMixin):
             )
         if human_unresolved and pr_number is not None:
             # A GO cannot stand while a HUMAN review thread is open. Automation
-            # must NOT resolve it and cannot fix it — a human has to. Break with
+            # must NOT resolve it. It can record a code-fix claim, but a human
+            # has to verify/reply/resolve the thread. Break with
             # a distinct terminal state (no spin to exhaustion, no state:skip) so
             # the PR stays unlabeled, awaiting the human; the loop re-runs next
-            # pass via the "no go/no-go label → re-review" path once threads
-            # resolve.
+            # pass via the "no go/no-go label → re-review" path once a human
+            # resolves the thread.
             impl._log(
                 "info",
                 f"{pr_ref(pr_number)}: reviewer said GO but "
@@ -577,22 +578,22 @@ class ReviewPhase(StageMixin):
             return "HUMAN_BLOCKED", False, True
         if automation_unresolved and pr_number is not None:
             # GO + open automation thread(s): the work is NOT actually done.
-            # Downgrade to NOGO so the address step (below) fixes and resolves
-            # them, and the next iteration re-reviews to confirm.
+            # Downgrade to NOGO so the address step (below) fixes code and
+            # records claims for a human to verify/reply/resolve before GO.
             # ``go_blocked_by_automation`` forces the address step to run even
             # though this audit pass may have posted no new threads.
             impl._log(
                 "info",
                 f"{pr_ref(pr_number)}: reviewer said GO but "
                 f"{automation_unresolved} unresolved automation review thread(s) "
-                "remain — addressing and re-reviewing before GO can stand",
+                "remain — recording code-fix claims for human resolution before GO can stand",
                 thread_id,
             )
             return "NOGO", True, False
         impl._log(
             "info",
             f"{pr_ref(pr_number) if pr_number is not None else issue_ref(issue_number)}"
-            f": GO on iteration — all review threads resolved, "
+            f": GO on iteration — no review threads remain open, "
             "review loop terminated",
             thread_id,
         )
@@ -620,8 +621,9 @@ class ReviewPhase(StageMixin):
 
         Step 1 (#1152): before the fresh review, verify (via the read-only
         sub-agent) that every PRIOR review comment was truly addressed by the
-        current diff — resolving the ones confirmed fixed and re-opening the ones
-        that aren't. On iteration 0 of the existing-PR path there is no
+        current diff — recording code-fix evidence for human verification and
+        re-opening the ones that are not addressed. On iteration 0 of the
+        existing-PR path there is no
         prior-address snapshot, so seed it with the PR's currently unresolved
         threads; otherwise pre-existing threads would never be verified and the
         GO gate would (wrongly) ignore them.
@@ -815,8 +817,9 @@ class ReviewPhase(StageMixin):
     ) -> tuple[list[dict[str, Any]], bool]:
         """Run the address step for one iteration.
 
-        Resumes Session 2 to fix the posted threads, commit, push, and resolve
-        the threads it actually addressed. Skipped only when there is no PR (no
+        Resumes Session 2 to fix the posted threads and commit/push code. It
+        records claims but leaves the GitHub threads for a human to verify,
+        reply if needed, and resolve. Skipped only when there is no PR (no
         inline threads to address). ``session_id`` is informational — the
         address step resumes ``AGENT_IMPLEMENTER`` by its deterministic
         per-(repo,issue,agent) id (or starts a fresh implementer session when no
@@ -875,7 +878,7 @@ class ReviewPhase(StageMixin):
                 return prior_addressed_threads, True
             impl._log(
                 "info",
-                f"{issue_ref(issue_number)}: address step resolved no threads on "
+                f"{issue_ref(issue_number)}: address step recorded no code-fix claims on "
                 f"iteration {iteration}; stopping review loop",
                 thread_id,
             )
@@ -934,24 +937,24 @@ class ReviewPhase(StageMixin):
         """Count unresolved review threads that block a GO, by ownership.
 
         A clean structural audit may NOT stand while ANY review thread is unresolved — not
-        even an automation-owned one. The earlier implementation bulk-resolved
-        automation threads here so a GO could converge immediately; that was
-        wrong (#1152). A reviewer can post findings in the SAME pass that
-        posts new inline findings, and force-resolving those "automation-owned"
-        threads accepted the GO without the implementer ever addressing them or
-        a subsequent review verifying the fix. The GO label must only be earned
-        once every comment has been genuinely addressed AND a clean re-review
-        confirms zero unresolved threads.
+        even an automation-owned one. Earlier implementations automatically
+        resolved automation threads here so a GO could converge immediately;
+        that was wrong (#1152). A reviewer can post findings in the SAME pass
+        that posts new inline findings, and bypassing human verification would
+        accept GO without a verified fix. The GO label must only be earned once
+        every comment has been genuinely addressed, a human has resolved the
+        corresponding thread, and a clean re-review confirms zero unresolved
+        threads.
 
-        This method therefore RESOLVES NOTHING. It returns
+        This method therefore performs no thread mutation. It returns
         ``(automation_unresolved, human_unresolved)``:
 
-        * ``human_unresolved > 0`` — automation cannot fix human threads, so the
-          caller breaks with a distinct ``HUMAN_BLOCKED`` terminal state.
+        * ``human_unresolved > 0`` — automation cannot resolve human threads, so
+          the caller breaks with a distinct ``HUMAN_BLOCKED`` terminal state.
         * ``automation_unresolved > 0`` — the caller downgrades GO to NOGO so the
-          address step fixes (and resolves only what it actually addressed) and a
-          re-review re-evaluates. Convergence requires a GO pass that leaves zero
-          unresolved threads.
+          address step fixes code and records claims for a human to verify/reply/
+          resolve. Convergence requires a GO pass that leaves zero unresolved
+          threads.
 
         Returns ``(0, 0)`` when the thread list can't be fetched (fail-open:
         don't strand a GO on a transient API blip — a genuinely unresolved
@@ -1120,9 +1123,10 @@ class ReviewPhase(StageMixin):
         PR, runs the fix session (resuming ``AGENT_IMPLEMENTER`` via
         :func:`run_address_fix_session`, which fans out one sub-agent per COMMENT
         at the model tier matching its classified difficulty, #1083), then
-        commits + pushes the fixes. Thread RESOLUTION is no longer done here — it
-        moved to the evidence-based validator (#1083); this step only counts as
-        progress when a real commit was produced (#1085).
+        commits + pushes the fixes. It records code-fix claims but does not
+        mutate GitHub review threads: a human verifies/replies/resolves them.
+        This step only counts as progress when a real commit was produced
+        (#1085).
 
         Returns:
             ``True`` if at least one thread was addressed (so the loop should
@@ -1183,7 +1187,7 @@ class ReviewPhase(StageMixin):
 
         # #1083 Bug 1: gate "addressed" on a REAL commit. The fix session's
         # self-reported ``addressed`` list is not trusted on its own — a session
-        # can claim it resolved a thread while leaving the worktree clean (e.g.
+        # can claim it fixed a thread while leaving the worktree clean (e.g.
         # replying "documented as a limitation" with no code change). Only when
         # _commit_if_changes actually produced a commit do we push and report
         # progress, so a no-op fix can never advance the loop.
@@ -1200,11 +1204,9 @@ class ReviewPhase(StageMixin):
             return False
         self.runner._push_branch(branch_name, worktree_path)
 
-        # #1083 Bug 1/Move-to-reviewer: resolution is NO LONGER done here. The
-        # validator (review_validator.validate_prior_comments_addressed) resolves
-        # each prior thread only after a fresh read-only sub-agent confirms the
-        # current diff actually addresses it. This closes the "resolved without
-        # implementing" hole — a self-reported fix with no diff change stays open.
+        # Thread resolution is NEVER done here. A human must verify the current
+        # diff, reply if appropriate, and resolve each thread. A self-reported
+        # fix with no diff change stays open for that human review.
         return True
 
     def _parse_address_result(self, text: str, issue_number: int, iteration: int) -> dict[str, Any]:

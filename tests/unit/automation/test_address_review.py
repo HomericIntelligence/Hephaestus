@@ -311,26 +311,39 @@ class TestAddressIssue:
 
         assert results == {}
 
-    def test_address_issue_preserves_local_cooldown(self, reviewer: AddressReviewer) -> None:
-        """_address_issue keeps its one-second cooldown outside StatusTracker.slot()."""
+    def test_address_issue_claimed_fixes_require_human_resolution(
+        self, reviewer: AddressReviewer, tmp_path: Path
+    ) -> None:
+        """A code-fix claim is a handoff, not a completed address review."""
         threads = [{"id": "thread-1", "path": "foo.py", "line": 5, "body": "Fix this"}]
+        state = ReviewState(issue_number=123, pr_number=456, branch_name="branch-1")
 
         with (
             patch.object(reviewer, "_check_threads_for_address", return_value=threads),
             patch.object(
                 reviewer,
                 "_setup_address_state",
-                return_value=("session-1", MagicMock(), "branch-1", Path("/tmp/worktree")),
+                return_value=("session-1", state, "branch-1", tmp_path),
             ),
             patch.object(
-                reviewer, "_run_fix_session", return_value={"addressed": [], "replies": {}}
+                reviewer,
+                "_run_fix_session",
+                return_value={"addressed": ["thread-1"], "replies": {}},
             ),
-            patch.object(reviewer, "_commit_push_and_record"),
+            patch.object(reviewer, "_commit_if_changes"),
+            patch.object(reviewer, "_push_branch"),
+            patch.object(reviewer, "_save_review_state"),
             patch("hephaestus.automation.address_review.time.sleep") as mock_sleep,
         ):
             result = reviewer._address_issue(123, 456)
 
-        assert result.success is True
+        assert result.success is False
+        assert result.error == "human_review_thread_resolution_required"
+        assert state.phase is ReviewPhase.HUMAN_RESOLUTION_REQUIRED
+        assert state.addressed_thread_ids == ["thread-1"]
+        assert state.completed_at is None
+        assert state.error is not None
+        assert "human" in state.error.lower()
         mock_sleep.assert_called_once_with(1)
 
 
@@ -586,5 +599,8 @@ class TestCommitPushAndRecord:
         # Check that the state was updated with the new addressed thread IDs
         assert "old-t1" in review_state.addressed_thread_ids
         assert "t1" in review_state.addressed_thread_ids
-        assert review_state.phase == ReviewPhase.COMPLETED
+        assert review_state.phase == ReviewPhase.HUMAN_RESOLUTION_REQUIRED
+        assert review_state.completed_at is None
+        assert review_state.error is not None
+        assert "human" in review_state.error.lower()
         mock_save.assert_called_once()

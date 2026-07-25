@@ -82,7 +82,8 @@ class Route:
 # is the doc's default target. Budget provenance:
 #   plan_review_iter=3, pr_review_iter=3  <- _review_phase.py MAX_REVIEW_ITERATIONS (=3)
 #   pr_review_hard=6                       <- _review_phase.py MAX_REVIEW_ITERATIONS_HARD_CAP (=3*2)
-#   blocked_address=2  <- review_thread_resolver.py _BLOCKED_ADDRESS_MAX_ATTEMPTS (=2)
+#   blocked_address=2  <- retained compatibility budget; thread handoffs never
+#                         automatically retry or resolve GitHub review threads
 #   clone=2, plan=2, plan_cycles=2,
 #   implement=2, test_fix=1                <- architecture doc stage sections
 #   merge=DEFAULT_DRIVE_GREEN_LOOPS        <- loop_runner.py LoopConfig.drive_green_loops

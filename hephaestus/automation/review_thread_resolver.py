@@ -17,8 +17,6 @@ from .models import CIDriverOptions, WorkerResult
 
 logger = logging.getLogger(__name__)
 
-_BLOCKED_ADDRESS_MAX_ATTEMPTS = 2
-
 
 class ReviewThreadResolver:
     """Formats review-thread work and leaves GitHub resolution to a human."""
@@ -34,7 +32,6 @@ class ReviewThreadResolver:
         get_pr_branch: Callable[[int], str],
         sync_worktree_and_snapshot_sha: Callable[[int, Path, str], str | None],
         push_ci_fix: Callable[..., bool],
-        recheck_and_arm_after_fix: Callable[[int, int, int], WorkerResult | None],
         list_threads: Callable[[int, bool], list[dict[str, Any]]],
     ) -> None:
         """Initialise review-thread dependencies."""
@@ -46,46 +43,41 @@ class ReviewThreadResolver:
         self._get_pr_branch = get_pr_branch
         self._sync_worktree_and_snapshot_sha = sync_worktree_and_snapshot_sha
         self._push_ci_fix = push_ci_fix
-        self._recheck_and_arm_after_fix = recheck_and_arm_after_fix
         self._list_threads = list_threads
 
     def resolve_blocked_pr(
         self, issue_number: int, pr_number: int, acquired_slot: int
     ) -> WorkerResult:
-        """Address unresolved threads on a green-but-BLOCKED PR."""
+        """Push an attempted code fix, then hand open GitHub threads to a human."""
         armed_yield = WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
         if self._options().dry_run:
             return armed_yield
         threads = self.list_unresolved_threads_safe(pr_number)
         if not threads:
             return armed_yield
-        addressed_any = False
-        for attempt in range(1, _BLOCKED_ADDRESS_MAX_ATTEMPTS + 1):
-            prior_ids = {t["id"] for t in threads if t.get("id")}
-            self._status().update_slot(
-                acquired_slot,
-                f"{pr_ref(pr_number)}: addressing review threads [A{attempt}]",
+        self._status().update_slot(
+            acquired_slot,
+            f"{pr_ref(pr_number)}: addressing review threads",
+        )
+        if not self.address_threads_once(issue_number, pr_number, threads):
+            return WorkerResult(
+                issue_number=issue_number,
+                success=False,
+                error="address_review_fix_failed",
+                pr_number=pr_number,
             )
-            progressed = self.address_threads_once(issue_number, pr_number, threads)
-            addressed_any = addressed_any or progressed
-            threads = self.list_unresolved_threads_safe(pr_number)
-            remaining_ids = {t["id"] for t in threads if t.get("id")}
-            if not remaining_ids:
-                break
-            if not (prior_ids - remaining_ids):
-                logger.info(
-                    "Issue #%s: PR #%s address attempt %s leaves %s unresolved thread(s); "
-                    "human review must resolve them",
-                    issue_number,
-                    pr_number,
-                    attempt,
-                    len(remaining_ids),
-                )
-                return armed_yield
-        if not addressed_any:
-            return armed_yield
-        rearmed = self._recheck_and_arm_after_fix(issue_number, pr_number, acquired_slot)
-        return rearmed if rearmed is not None else armed_yield
+        logger.info(
+            "Issue #%s: PR #%s agent code-fix claims are recorded; a human must verify, "
+            "reply if needed, and resolve the still-open review threads",
+            issue_number,
+            pr_number,
+        )
+        return WorkerResult(
+            issue_number=issue_number,
+            success=False,
+            error="human_review_thread_resolution_required",
+            pr_number=pr_number,
+        )
 
     def address_threads_once(
         self, issue_number: int, pr_number: int, threads: list[dict[str, Any]]

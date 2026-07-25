@@ -103,6 +103,24 @@ def test_conditional_merge_succeeds_only_after_lifecycle_confirms_merged(
     assert github.merge_attempts == [(12, "a" * 40)]
 
 
+def test_open_thread_immediately_before_merge_fails_back_without_put(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """Merge wait independently rejects a thread that appears after review GO."""
+
+    class LateThreadGitHub(_ConditionalGitHub):
+        def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, object]]:
+            del pr_number
+            return [{"id": "late-thread", "automation_owned": True}]
+
+    github = LateThreadGitHub(states=[_open_pr()])
+
+    result = MergeWaitStage().step(_reviewed_item(make_work_item), make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.FAIL_BACK, "unresolved_review_threads")
+    assert github.merge_attempts == []
+
+
 def test_external_arm_blocks_conditional_merge_without_any_mutation(
     make_ctx: Any, make_work_item: Any
 ) -> None:

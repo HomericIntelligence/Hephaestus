@@ -251,8 +251,9 @@ class StageGitHub(Protocol):
 
         Mirrors ``_review_phase._count_unresolved_threads_blocking_go``
         (#1152): the pr_review EVAL gate — a GO only stands with zero of
-        both; open human threads yield HUMAN_BLOCKED, open automation
-        threads downgrade GO to NOGO. This read resolves nothing.
+        both; open human threads yield HUMAN_BLOCKED, while open automation
+        threads require a human verification/reply/resolution handoff. This
+        read never resolves a GitHub thread.
         """
         ...
 

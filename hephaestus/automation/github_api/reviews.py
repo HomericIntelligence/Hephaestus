@@ -121,8 +121,8 @@ def gh_pr_wont_fix_line_index(pr_number: int) -> set[ReviewCommentIndexKey]:
     """Return ``(path, line[, side])`` keys of WON'T-FIX-dismissed review threads.
 
     A thread is "won't-fix" when it is RESOLVED and any of its comments starts
-    with :data:`~hephaestus.automation.protocol.WONT_FIX_MARKER` — the validator
-    (or a human) dismissed the finding as intentional-by-design (#1163). The
+    with :data:`~hephaestus.automation.protocol.WONT_FIX_MARKER` — a human
+    dismissed the finding as intentional-by-design (#1163). The
     reviewer dedup (:func:`_edit_or_keep_comments`) uses this to SUPPRESS a
     re-raised finding on such a line, so an intentional-design comment cannot
     stack duplicate threads across runs. Fails open: ``set()`` on any error.
@@ -588,9 +588,9 @@ def gh_pr_review_post(
 
     review = json.loads(result.stdout)
     # The REST payload returns both the numeric ``id`` and the GraphQL global
-    # ``node_id``. The thread-resolution follow-up matches on the GraphQL review
-    # node id, so pass that through (preserving the #375 guarantee that only
-    # threads created by *this* review are returned).
+    # ``node_id``. Keep it so review receipts can identify only the threads
+    # created by *this* review (the #375 guarantee); any later thread resolution
+    # is a human action.
     review_node_id = review.get("node_id")
     if not review_node_id:
         _api.logger.warning("Posted PR review on #%s but no review node id returned", pr_number)
@@ -612,8 +612,8 @@ def _review_threads_for_review(pr_number: int, review_id: str) -> list[str]:
     *this* review are returned, not pre-existing human-reviewer threads — while
     using fields that actually exist in the GitHub GraphQL schema.
 
-    Returns an empty list on any failure (the caller treats no-threads as
-    "nothing to resolve later", which is safe).
+    Returns an empty list on any failure (the caller treats it as no durable
+    process receipt, which is safe).
     """
     owner, repo = _api.get_repo_info()
     if not re.match(r"^[a-zA-Z0-9_-]+$", owner) or not re.match(r"^[a-zA-Z0-9_-]+$", repo):

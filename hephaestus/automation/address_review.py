@@ -3,13 +3,13 @@
 Provides:
 - Parallel processing of issues with unresolved review threads
 - Session resume for the original implementer's agent session when supported
-- Selective thread resolution based on the agent's reported fixes
+- Agent code-fix claims recorded for human verification and thread resolution
 - State persistence and UI monitoring
 
 This module finds PRs with unresolved review threads, resumes the original
 implementer's session when supported (or starts a fresh one), runs the selected
-agent to fix the code, then resolves only the threads the agent explicitly
-reports as addressed.
+agent to fix the code, then records its claimed thread IDs. GitHub threads stay
+open: a human must verify the change, reply if appropriate, and resolve them.
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ import subprocess
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -89,7 +88,7 @@ class AddressReviewer(BaseReviewer):
     Features:
     - Parallel processing across multiple issues
     - Session resume from implementer's saved agent session when supported
-    - Selective thread resolution (only resolves threads the agent explicitly fixed)
+    - Agent fix claims retained for explicit human verification and resolution
     - State persistence for observability
     - Real-time curses UI for status monitoring
 
@@ -325,7 +324,7 @@ class AddressReviewer(BaseReviewer):
         slot_id: int,
         thread_id: int,
     ) -> None:
-        """Commit fixes, push branch, and record the agent's address claim.
+        """Commit fixes, push branch, and record a human-resolution handoff.
 
         Args:
             issue_number: GitHub issue number.
@@ -354,15 +353,20 @@ class AddressReviewer(BaseReviewer):
             for tid in addressed:
                 existing_ids.add(tid)
             review_state.addressed_thread_ids = list(existing_ids)
-            review_state.phase = ReviewPhase.COMPLETED
-            review_state.completed_at = datetime.now(timezone.utc)
+            review_state.phase = ReviewPhase.HUMAN_RESOLUTION_REQUIRED
+            review_state.completed_at = None
+            review_state.error = (
+                "Agent code-fix claims recorded; a human must verify, reply if needed, "
+                "and resolve the remaining GitHub review threads."
+            )
         self._save_review_state(review_state)
 
         iref = issue_ref(issue_number)
-        self.status_tracker.update_slot(slot_id, f"{iref}: Done")
+        self.status_tracker.update_slot(slot_id, f"{iref}: Human thread resolution required")
         self._log(
             "info",
-            f"Address review complete for issue {iref} (PR {pr_ref(pr_number)})",
+            f"Address review code-fix claims recorded for issue {iref} (PR {pr_ref(pr_number)}); "
+            "human verification, reply, and thread resolution are required",
             thread_id,
         )
 
@@ -425,7 +429,8 @@ class AddressReviewer(BaseReviewer):
                 )
                 return WorkerResult(
                     issue_number=issue_number,
-                    success=True,
+                    success=False,
+                    error="human_review_thread_resolution_required",
                     pr_number=pr_number,
                     branch_name=branch_name,
                     worktree_path=str(worktree_path),
@@ -686,7 +691,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = build_review_parser(
         description=(
             "Find PRs with unresolved review threads and use Claude Code or Codex to fix the "
-            "code, then resolve only the threads the selected agent explicitly addresses."
+            "code. Agent claims are recorded, while a human verifies, replies if needed, and "
+            "resolves the GitHub threads."
         ),
         epilog="""
 Examples:
@@ -701,7 +707,7 @@ Examples:
         """,
         issues_help="Issue numbers whose linked PRs should have review threads addressed",
         dry_run_prefix=(
-            "Show what would be done without actually resolving threads or pushing code."
+            "Show what would be done without pushing code or requiring human thread resolution."
         ),
     )
     add_agent_timeout_arg(parser)

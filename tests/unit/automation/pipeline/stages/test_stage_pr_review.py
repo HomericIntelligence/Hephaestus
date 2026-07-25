@@ -1569,6 +1569,50 @@ class TestEvalVerdicts:
         assert ("arm_auto_merge", (1001,)) not in github.mutation_log
         assert item.attempts["pr_review_iter"] == 1  # real verdict counted
 
+    def test_thread_added_during_go_write_revokes_go_and_requires_human_handoff(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A complete post-write thread reread closes the label-write race."""
+
+        class ThreadAddedDuringGoGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__()
+                self._late_thread = False
+
+            def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+                if not self._late_thread:
+                    return []
+                return [
+                    {
+                        "id": "late-thread",
+                        "severity": "major",
+                        "automation_owned": True,
+                        "author": "hephaestus[bot]",
+                        "authors": ["hephaestus[bot]"],
+                        "comments": [],
+                    }
+                ]
+
+            def mark_pr_implementation_go(self, pr_number: int) -> None:
+                super().mark_pr_implementation_go(pr_number)
+                self._late_thread = True
+
+        stage = PrReviewStage()
+        github = ThreadAddedDuringGoGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="EVAL")
+        item.payload["review_verdict"] = _verdict("GO")
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "automation_threads_require_human_resolution",
+        )
+        assert ("mark_pr_implementation_go", (1001,)) in github.mutation_log
+        assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
+        assert github.pr_has_implementation_state_label(1001) == (False, True)
+
     def test_clean_go_does_not_call_the_removed_auto_merge_mutator(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

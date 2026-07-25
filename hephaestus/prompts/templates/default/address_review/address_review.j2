@@ -1,11 +1,11 @@
 
-You are the COORDINATOR for addressing the review threads on PR #{{ pr_number }}
+You are the COORDINATOR for fixing code in response to the review threads on PR #{{ pr_number }}
 (issue #{{ issue_number }}).
 
 This runs IN-LOOP as part of the implement stage — it is no longer a separate
-pipeline phase. You are resolving the inline PR-review threads raised against
-the current diff so the same implement session can re-review and converge.
-These threads live on the PR, not on the issue.
+pipeline phase. You are fixing the underlying code concerns raised against the
+current diff. These GitHub threads live on the PR, not on the issue, and must
+remain open for a human to verify, reply if appropriate, and resolve.
 
 **Working Directory:** {{ worktree_path }}
 
@@ -18,7 +18,7 @@ These threads live on the PR, not on the issue.
 {{ threads_json_block }}
 
 The block above is a JSON array where each element has:
-- `thread_id`: GitHub GraphQL node ID of the review thread
+- `thread_id`: GitHub GraphQL node ID used for the human-resolution handoff
 - `path`: file path relative to repo root
 - `line`: line number (integer or null)
 - `body`: the reviewer's comment text
@@ -98,5 +98,6 @@ Rules for the JSON block:
   (any thread_id not in the unresolved-set we presented is dropped silently)
 - Only include threads genuinely fixed. Leave unaddressable threads out of `addressed`.
 - Emit only one JSON block, at the very end of your response (the parser takes the LAST one).
-- Note: you do NOT need to write per-thread replies — the reviewer resolves the
-  threads on its next pass after verifying the fix against the diff (#1083).
+- Do not attempt to reply to or resolve a GitHub thread. Your code-fix claim is
+  recorded by the coordinator; a human then verifies the diff, replies if
+  appropriate, and resolves the thread.

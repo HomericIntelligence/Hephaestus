@@ -593,7 +593,8 @@ def _normalize_blocking_remediation_threads(
     The reviewer audit contains proposed findings, not durable GitHub thread
     identities. Address jobs must instead consume the live post/read-back
     snapshot so pre-existing blockers are included and every presented finding
-    carries the GraphQL thread id needed for a later reply/resolve operation.
+    carries the GraphQL thread id used to identify the required human
+    verification and resolution handoff.
     Threads without a durable id are omitted; POST verifies the normalized
     count against the live blocking count and fails closed on any mismatch.
     """
@@ -1787,7 +1788,9 @@ class PrReviewStage(Stage):
         label write can therefore race after the pre-write guard. A read after
         our write cannot prove who owns an exclusive GO label, so a changed or
         missing reviewed head only discards this process's proof and restarts
-        review; it never removes implementation-state labels.
+        review. A complete thread read after the label write closes the
+        remaining admission window: any live thread revokes this run's GO via
+        the existing fresh-head/unarmed handoff guard.
         """
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
@@ -1808,6 +1811,24 @@ class PrReviewStage(Stage):
         if not reviewed_head or not live_head or reviewed_head != live_head:
             item.payload.pop("reviewed_pr_head_sha", None)
             return Continue(next_state=REVIEW_WAIT)
+        try:
+            live_threads = ctx.github.list_unresolved_review_threads(pr_number)
+        except Exception as error:
+            logger.warning(
+                "pr_review: failed to reread review threads after GO write on PR #%d (%s)",
+                pr_number,
+                type(error).__name__,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "review_threads_unavailable")
+        blocking, advisory, human_unresolved = _thread_counts(live_threads)
+        if human_unresolved:
+            return PrReviewStage._handle_human_blocked(item, human_unresolved, ctx)
+        if blocking or advisory:
+            return PrReviewStage._handle_automation_threads_requiring_human_resolution(
+                item,
+                blocking + advisory,
+                ctx,
+            )
         try:
             has_go, has_no_go = ctx.github.pr_has_implementation_state_label(pr_number)
         except Exception as error:

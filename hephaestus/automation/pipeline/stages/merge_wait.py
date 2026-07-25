@@ -95,10 +95,19 @@ class MergeWaitStage(Stage):
         del pr_state
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        thread_admission = self._admit_no_unresolved_threads(item.pr, ctx)
+        if thread_admission is not None:
+            return thread_admission
         if item.attempts["merge"] >= ctx.budget("merge"):
             return StageOutcome(Disposition.FINISH_FAIL, "merge_attempts_exhausted")
         item.attempts["merge"] += 1
         result = ctx.github.merge_pr_if_head(item.pr, reviewed_head)
+        return self._reconcile_merge_request(item, ctx, result)
+
+    def _reconcile_merge_request(
+        self, item: WorkItem, ctx: StageContext, result: Any
+    ) -> StepResult:
+        """Interpret the one permitted conditional merge response."""
         if result.dry_run:
             return StageOutcome(Disposition.FINISH_FAIL, "conditional_merge_dry_run")
         if result.malformed:
@@ -116,6 +125,27 @@ class MergeWaitStage(Stage):
         if result.status in {403, 404, 422}:
             return StageOutcome(Disposition.FINISH_FAIL, f"merge_http_{result.status}")
         return StageOutcome(Disposition.FINISH_FAIL, f"merge_http_{result.status}")
+
+    @staticmethod
+    def _admit_no_unresolved_threads(pr_number: int, ctx: StageContext) -> StageOutcome | None:
+        """Require a final empty review-thread read before the conditional merge."""
+        try:
+            live_threads = ctx.github.list_unresolved_review_threads(pr_number)
+        except Exception as error:
+            logger.warning(
+                "merge_wait:%d: final review-thread admission read failed (%s)",
+                pr_number,
+                type(error).__name__,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "review_threads_unavailable")
+        if live_threads:
+            logger.info(
+                "merge_wait:%d: refusing conditional merge with %d unresolved review thread(s)",
+                pr_number,
+                len(live_threads),
+            )
+            return StageOutcome(Disposition.FAIL_BACK, "unresolved_review_threads")
+        return None
 
     def _admit(self, item: WorkItem, ctx: StageContext) -> tuple[dict[str, Any], str] | StepResult:
         """Return the complete final-admission facts or a safe terminal route."""
