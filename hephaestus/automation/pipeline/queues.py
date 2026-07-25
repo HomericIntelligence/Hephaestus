@@ -23,16 +23,64 @@ class StageQueue:
     """FIFO queue of work items for a stage.
 
     Owned exclusively by the coordinator thread; not thread-safe.
-    Used to route items through the pipeline stage by stage.
+    Used to route items through the pipeline stage by stage.  Every queue has
+    an explicit, positive capacity.  Callers that can defer admission should
+    use :meth:`offer`, which reports a full queue without changing it.
     """
 
-    def __init__(self) -> None:
-        """Initialize an empty queue."""
+    def __init__(self, capacity: int) -> None:
+        """Initialize an empty queue with a positive item capacity.
+
+        Args:
+            capacity: Maximum number of work items the queue may hold.
+
+        Raises:
+            ValueError: If ``capacity`` is not positive.
+
+        """
+        if capacity <= 0:
+            raise ValueError("StageQueue capacity must be positive")
+
+        self._capacity = capacity
         self._items: deque[WorkItem] = deque()
 
+    @property
+    def capacity(self) -> int:
+        """Return the maximum number of items the queue can hold."""
+        return self._capacity
+
+    @property
+    def occupancy(self) -> int:
+        """Return the number of items currently held by the queue."""
+        return len(self._items)
+
     def push(self, item: WorkItem) -> None:
-        """Append an item to the queue."""
+        """Append an item or raise if the queue is full.
+
+        Callers that need to retain an item for a later retry should use
+        :meth:`offer` instead.
+
+        Raises:
+            OverflowError: If the queue has reached its capacity.
+
+        """
+        if not self.offer(item):
+            raise OverflowError("StageQueue is full")
+
+    def offer(self, item: WorkItem) -> bool:
+        """Append an item when capacity is available.
+
+        Returns:
+            ``True`` when ``item`` was appended, otherwise ``False``.  A
+            rejected offer leaves the queue unchanged so the caller retains
+            ownership of the work item and can retry it later.
+
+        """
+        if len(self._items) >= self._capacity:
+            return False
+
         self._items.append(item)
+        return True
 
     def pop(self) -> WorkItem:
         """Remove and return the front item. Raises IndexError if empty."""
