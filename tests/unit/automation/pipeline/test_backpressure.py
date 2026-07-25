@@ -6,11 +6,12 @@ from collections import Counter
 from pathlib import Path
 from queue import Queue
 from threading import Event
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from hephaestus.automation.pipeline.coordinator import Coordinator, PipelineConfig
+from hephaestus.automation.pipeline.jobs import JobHandle
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
@@ -66,7 +67,7 @@ def test_admission_rejects_when_global_worker_capacity_is_live(tmp_path: Path) -
     coordinator.config = _config(tmp_path, parallel_repos=2, max_workers=2)
     live_repos = ("repo-a", "repo-b", "repo-c", "repo-d")
     coordinator.in_flight = {
-        object(): WorkItem(repo=repo, kind=ItemKind.ISSUE, issue=index)
+        cast(JobHandle, object()): WorkItem(repo=repo, kind=ItemKind.ISSUE, issue=index)
         for index, repo in enumerate(live_repos, start=1)
     }
     coordinator.inflight_per_repo = Counter(dict.fromkeys(live_repos, 1))

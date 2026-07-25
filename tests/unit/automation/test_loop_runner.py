@@ -248,8 +248,7 @@ def test_gh_list_repos_passes_network_timeout() -> None:
 def test_gh_list_repos_pages_beyond_the_former_two_hundred_cap() -> None:
     """Organization discovery reads bounded pages without silently truncating."""
     first_page = [
-        {"name": f"repo-{number:03d}", "fork": False, "archived": False}
-        for number in range(100)
+        {"name": f"repo-{number:03d}", "fork": False, "archived": False} for number in range(100)
     ]
     second_page = [
         {"name": "repo-100", "fork": False, "archived": False},
