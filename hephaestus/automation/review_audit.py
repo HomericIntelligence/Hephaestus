@@ -169,9 +169,15 @@ def _bounded_feedback(source: str, payload: dict[str, object] | None) -> str:
         return ""
     if not source:
         return ""
-    match = _JSON_BLOCK_RE.search(source)
-    feedback = source[: match.start()] if match else source
-    feedback = feedback.strip()
+    match = _JSON_BLOCK_RE.search(source) if payload is not None else None
+    if match:
+        feedback = "\n\n".join(
+            piece
+            for piece in (source[: match.start()].strip(), source[match.end() :].strip())
+            if piece
+        )
+    else:
+        feedback = source.strip()
     if len(feedback) <= MAX_RAW_FEEDBACK_CHARS:
         return feedback
     return f"{feedback[: MAX_RAW_FEEDBACK_CHARS - 15].rstrip()}... [truncated]"

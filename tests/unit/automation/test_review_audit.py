@@ -50,6 +50,19 @@ def test_parse_review_audit_accepts_codex_raw_object() -> None:
     assert audit.findings == ()
 
 
+def test_parse_review_audit_preserves_prose_on_both_sides_of_fenced_json() -> None:
+    """Only the successfully parsed fenced audit is removed from feedback."""
+    audit = parse_review_audit(
+        "Prefix detail.\n\n```json\n"
+        '{"grade":"A","summary":"Checked","comments":[]}\n'
+        "```\n\nSuffix detail."
+    )
+
+    assert audit.valid is True
+    assert audit.grade == "A"
+    assert audit.raw_feedback == "Prefix detail.\n\nSuffix detail."
+
+
 def test_parse_review_audit_raw_mapping_has_no_json_feedback_artifact() -> None:
     """A parsed raw JSON mapping does not become supplemental reviewer prose."""
     audit = parse_review_audit({"grade": "A", "summary": "No material findings", "comments": []})
