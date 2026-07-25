@@ -77,6 +77,7 @@ from hephaestus.utils.file_lock import file_lock
 logger = logging.getLogger(__name__)
 
 _CLOSES_ISSUE_LINE_RE = re.compile(r"^Closes #(\d+)\s*$", re.MULTILINE)
+_STANDALONE_VERDICT_LINE_RE = re.compile(r"(?i)^\s*verdict\s*:")
 
 
 def _split_threads(threads: list[dict[str, Any]]) -> tuple[int, int]:
@@ -145,8 +146,12 @@ def _with_severity_marker(comment: dict[str, Any]) -> str:
     if sev not in VALID_SEVERITIES:
         sev = "major"
     body = str(comment.get("body") or "")
-    if body.startswith(SEVERITY_MARKER_PREFIX):
-        return body  # already marked (idempotent re-post)
+    body = "\n".join(
+        line
+        for line in body.splitlines()
+        if not line.strip().startswith(SEVERITY_MARKER_PREFIX)
+        and not _STANDALONE_VERDICT_LINE_RE.match(line)
+    )
     return f"{SEVERITY_MARKER_PREFIX} {sev} -->\n{body}"
 
 

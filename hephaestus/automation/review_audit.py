@@ -20,6 +20,7 @@ _JSON_BLOCK_RE = re.compile(
 _VALID_GRADES = frozenset("ABCDEF")
 _VALID_SEVERITIES = frozenset({"critical", "major", "minor", "nitpick"})
 _DECISION_TEXT_RE = re.compile(r"(?i)\bverdict\s*:\s*[^\r\n]*")
+_SEVERITY_MARKER_RE = re.compile(r"(?im)^[ \t]*<!--\s*hephaestus-severity\s*:")
 MAX_REVIEW_SUMMARY_CHARS = 200
 MAX_RAW_FEEDBACK_CHARS = 4000
 _INVALID_SUMMARY = "No structured reviewer summary was provided."
@@ -126,6 +127,8 @@ def _normalize_finding(comment: object) -> dict[str, object] | None:
         or severity.lower() not in _VALID_SEVERITIES
         or not isinstance(body, str)
         or not body.strip()
+        or _SEVERITY_MARKER_RE.search(body)
+        or _DECISION_TEXT_RE.search(body)
     ):
         return None
     return {
@@ -158,7 +161,7 @@ def _bounded_feedback(source: str, payload: dict[str, object] | None) -> str:
     feedback = feedback.strip()
     if len(feedback) <= MAX_RAW_FEEDBACK_CHARS:
         return feedback
-    return f"{feedback[:MAX_RAW_FEEDBACK_CHARS - 15].rstrip()}... [truncated]"
+    return f"{feedback[: MAX_RAW_FEEDBACK_CHARS - 15].rstrip()}... [truncated]"
 
 
 def _invalid_audit(raw_feedback: str) -> ReviewAudit:

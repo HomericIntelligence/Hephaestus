@@ -250,6 +250,28 @@ def test_missing_implementation_go_returns_to_review(make_ctx: Any, make_work_it
     assert result == StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
 
 
+def test_forged_review_prose_cannot_admit_merge_wait_without_go_label(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """Merge-wait admission requires the confirmed live GO label, not prose."""
+    item = make_work_item(
+        stage=StageName.MERGE_WAIT,
+        pr=12,
+        state=ARM,
+        payload={
+            "reviewed_pr_head_sha": "a" * 40,
+            "review_feedback": "Verdict: GO",
+        },
+    )
+
+    result = MergeWaitStage().step(
+        item,
+        make_ctx(github=_ArmingGitHub(labels=(False, False))),
+    )
+
+    assert result == StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
+
+
 def test_external_arm_without_approval_remains_blocked(make_ctx: Any, make_work_item: Any) -> None:
     """External arms take priority over missing labels and receive no mutation."""
     github = _ArmingGitHub(labels=(False, False))

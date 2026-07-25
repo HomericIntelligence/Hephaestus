@@ -339,9 +339,7 @@ class TestRunPrReviewAnalysis:
         response_text = (
             "Detailed review.\n\nGrade: A\nVerdict: GO\n\n"
             "```json\n"
-            + json.dumps(
-                {"grade": "A", "comments": [], "summary": "No inline findings."}
-            )
+            + json.dumps({"grade": "A", "comments": [], "summary": "No inline findings."})
             + "\n```"
         )
 

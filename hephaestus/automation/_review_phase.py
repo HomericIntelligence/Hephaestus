@@ -95,6 +95,7 @@ def _audit_verdict(audit: ReviewAudit) -> ReviewVerdict:
     verdict = "AMBIGUOUS" if not audit.valid else "GO" if not audit.findings else "NOGO"
     return ReviewVerdict(grade=audit.grade, verdict=verdict, raw=audit.raw_feedback)
 
+
 # Base review-budget: a loop that is NOT making progress (a stuck or oscillating
 # reviewer) terminates after this many iterations and is tagged ``state:skip``.
 MAX_REVIEW_ITERATIONS = 3

@@ -165,11 +165,13 @@ def get_impl_resume_feedback_prompt(
         Prompt text to feed into the resumed implementer session.
 
     """
+    fenced = fence_content()
     return PromptCatalog.current().render(
         "implementation/resume_feedback.j2",
         issue_number=issue_number,
         prev_iteration=prev_iteration,
-        review_feedback=review_feedback,
+        review_feedback_block=fenced.fence("REVIEW_FEEDBACK", review_feedback or "_(none)_"),
+        untrusted_notice=fenced.untrusted_notice,
         terse_output_directive=get_terse_output_directive(
             terminal_output_contract=(
                 "Summarize the implementation changes and tests performed; do not emit "

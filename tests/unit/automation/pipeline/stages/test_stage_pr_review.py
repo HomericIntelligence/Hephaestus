@@ -22,7 +22,7 @@ from hephaestus.automation.pipeline.stages.pr_review import (
 from hephaestus.automation.pipeline.work_item import ItemKind
 from hephaestus.automation.prompts.address_review import get_address_review_prompt
 from hephaestus.automation.prompts.implementation import get_impl_resume_feedback_prompt
-from hephaestus.automation.review_audit import ReviewAudit
+from hephaestus.automation.review_audit import ReviewAudit, parse_review_audit
 from hephaestus.automation.state_labels import STATE_SKIP
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
@@ -795,6 +795,35 @@ class TestPrReviewStageStep:
             "review_feedback": "fix the tests",
         }
 
+    def test_json_only_audit_finding_reaches_fresh_pr_remediation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Fresh-PR remediation receives findings even when audit prose is empty."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REVIEW_WAIT")
+        item.worktree = "/tmp/wt"
+        audit = parse_review_audit(
+            """```json
+{"grade":"F","summary":"Needs work","comments":[{"path":"a.py","line":3,
+"side":"RIGHT","severity":"major","body":"Guard the missing value"}]}
+```"""
+        )
+
+        stage.on_job_done(item, JobResult(ok=True, value=audit), ctx)
+        item.state = "ADDRESS_WAIT"
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)
+        assert result.job.prompt_builder is get_impl_resume_feedback_prompt
+        feedback = result.job.prompt_kwargs["review_feedback"]
+        assert '"path": "a.py"' in feedback
+        assert "Guard the missing value" in feedback
+        prompt = result.job.prompt_builder(**result.job.prompt_kwargs)
+        assert "BEGIN_" in prompt
+        assert "Guard the missing value" in prompt
+
     def test_address_existing_pr_runs_address_review(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -947,9 +976,7 @@ class TestEvalVerdicts:
         github = FakeStageGitHub(unresolved=[(0, 0)])
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = ReviewVerdict(
-            grade="A", verdict="GO", raw="Verdict: GO"
-        )
+        item.payload["review_verdict"] = ReviewVerdict(grade="A", verdict="GO", raw="Verdict: GO")
 
         result = stage.step(item, ctx)
 
@@ -1046,6 +1073,33 @@ class TestEvalVerdicts:
         assert result == StageOutcome(Disposition.ADVANCE, "review audit; merge wait pending")
         assert ("mark_pr_implementation_go", (1001,)) in github.mutation_log
 
+    @pytest.mark.parametrize(
+        "readback",
+        [
+            pytest.param((False, False), id="absent"),
+            pytest.param((True, True), id="contradictory"),
+            pytest.param(RuntimeError("label read failed"), id="error"),
+        ],
+    )
+    def test_go_readback_is_independent_and_fail_closed(
+        self, make_ctx: Any, make_work_item: Any, readback: Any
+    ) -> None:
+        """A GO mutation cannot admit merge-wait without confirmed labels."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(
+            unresolved=[(0, 0)],
+            pr_impl_readbacks=[readback],
+        )
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=36, pr=1001, state="EVAL")
+        item.payload["review_verdict"] = _verdict("GO")
+        item.payload["reviewed_pr_head_sha"] = "a" * 40
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "implementation_go_readback_failed")
+        assert github.mutation_log == [("mark_pr_implementation_go", (1001,))]
+
     def test_ungraded_go_is_converted_to_nogo_and_cannot_advance(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -1121,6 +1175,29 @@ class TestEvalVerdicts:
         # PR left unlabeled; the only durable write is the explanatory
         # stand-down comment (M3), posted BEFORE the failing outcome.
         assert github.mutation_log == [("gh_issue_comment", (1001,))]
+
+    def test_failed_audit_with_human_thread_has_no_go_shaped_stand_down(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A human-blocked F audit cannot publish false GO prose."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(unresolved=[(0, 1)])
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="EVAL")
+        item.payload["review_audit"] = ReviewAudit(
+            grade="F",
+            summary="Material findings remain",
+            findings=(),
+            raw_feedback="",
+            valid=True,
+        )
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "human_blocked")
+        body = github.comments[1001][0]
+        assert "reached GO" not in body
+        assert "prevent a transition" in body
 
     def test_go_with_automation_thread_downgrades_and_loops(
         self, make_ctx: Any, make_work_item: Any
@@ -1814,6 +1891,35 @@ class TestNoGoLabel:
 
         assert result == StageOutcome(Disposition.FINISH_FAIL, "implementation_no_go_label_failed")
 
+    @pytest.mark.parametrize(
+        "readback",
+        [
+            pytest.param((False, False), id="absent"),
+            pytest.param((True, True), id="contradictory"),
+            pytest.param(RuntimeError("label read failed"), id="error"),
+        ],
+    )
+    def test_no_go_readback_is_independent_and_fail_closed(
+        self, make_ctx: Any, make_work_item: Any, readback: Any
+    ) -> None:
+        """A NO-GO mutation never authorizes progress without its readback."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(
+            unresolved=[(3, 0)],
+            pr_impl_readbacks=[readback],
+        )
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=35, pr=1001, state="EVAL")
+        item.payload["review_verdict"] = _verdict("NOGO")
+        item.payload["reviewed_pr_head_sha"] = "a" * 40
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(
+            Disposition.FINISH_FAIL, "implementation_no_go_readback_failed"
+        )
+        assert github.mutation_log == [("mark_pr_implementation_no_go", (1001,))]
+
     def test_error_round_never_writes_no_go(self, make_ctx: Any, make_work_item: Any) -> None:
         """ERROR is not a verdict: no NO-GO label, no label writes at all."""
         stage = PrReviewStage()
@@ -1853,7 +1959,7 @@ class TestHumanBlockedComment:
         body = github.comments[1001][0]
         assert "2 unresolved review thread(s) opened by a human" in body
         assert "standing down" in body
-        assert "state:implementation-go" in body  # explains the unlabeled state
+        assert "without an implementation-state label" in body
 
     def test_comment_failure_is_non_fatal(self, make_ctx: Any, make_work_item: Any) -> None:
         """A failing comment write still finishes failed (never crashes)."""
@@ -2164,9 +2270,7 @@ class TestProgressCountsAutomationOnly:
         must refuse round 4 and exhaust at the soft cap.
         """
         stage = PrReviewStage()
-        github = FakeStageGitHub(
-            by_severity=[(3, 0, 0), (3, 0, 0), (3, 0, 0)]
-        )
+        github = FakeStageGitHub(by_severity=[(3, 0, 0), (3, 0, 0), (3, 0, 0)])
         ctx = make_ctx(github=github)
         item = make_work_item(issue=51, pr=1001, state="EVAL")
         assert stage.on_enter(item, ctx) is None
@@ -2186,9 +2290,7 @@ class TestProgressCountsAutomationOnly:
     ) -> None:
         """Control: the same walk with a decreasing AUTOMATION count extends."""
         stage = PrReviewStage()
-        github = FakeStageGitHub(
-            by_severity=[(5, 0, 0), (4, 0, 0), (3, 0, 0), (3, 0, 0)]
-        )
+        github = FakeStageGitHub(by_severity=[(5, 0, 0), (4, 0, 0), (3, 0, 0), (3, 0, 0)])
         ctx = make_ctx(github=github)
         item = make_work_item(issue=52, pr=1001, state="EVAL")
         assert stage.on_enter(item, ctx) is None

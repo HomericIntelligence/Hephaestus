@@ -426,6 +426,14 @@ def _thread_counts(threads: list[dict[str, Any]]) -> tuple[int, int, int]:
     return blocking, advisory, human
 
 
+def _address_review_feedback(item: WorkItem) -> str:
+    """Serialize surviving findings for a fresh-PR remediation prompt."""
+    threads = item.payload.get("review_threads")
+    if isinstance(threads, list) and threads:
+        return json.dumps({"findings": threads}, ensure_ascii=False, sort_keys=True)
+    return str(item.payload.get("review_feedback") or "")
+
+
 class PrReviewStage(Stage):
     """Stage: review -> validate -> post -> address -> EVAL.
 
@@ -1058,7 +1066,7 @@ class PrReviewStage(Stage):
             prompt_kwargs={
                 "issue_number": item.issue,
                 "prev_iteration": item.payload.get("pr_review_round", 0),
-                "review_feedback": item.payload.get("review_feedback", ""),
+                "review_feedback": _address_review_feedback(item),
             },
             descr="address",
         )
@@ -1098,9 +1106,7 @@ class PrReviewStage(Stage):
         ):
             audit = payload.get("review_verdict")
         if payload.pop("review_audit_failure", False) or not isinstance(audit, ReviewAudit):
-            return self._handle_error_verdict(
-                item, ReviewAudit(None, "", (), "", valid=False)
-            )
+            return self._handle_error_verdict(item, ReviewAudit(None, "", (), "", valid=False))
         if not audit.valid:
             return self._handle_error_verdict(item, audit)
         if not item.payload.get("reviewed_pr_head_sha"):
@@ -1406,7 +1412,7 @@ class PrReviewStage(Stage):
         return StageOutcome(Disposition.FAIL_BACK, "agent_error")
 
     @staticmethod
-    def _require_reviewed_unarmed(item: WorkItem, ctx: StageContext) -> StageOutcome | None:
+    def _require_reviewed_unarmed(item: WorkItem, ctx: StageContext) -> StepResult | None:
         """Verify the live unarmed PR is the exact head reviewed this round.
 
         No pipeline stage owns auto-merge. A non-null or unreadable request is
@@ -1462,7 +1468,7 @@ class PrReviewStage(Stage):
         return None
 
     @staticmethod
-    def _write_no_go(item: WorkItem, ctx: StageContext) -> StageOutcome | None:
+    def _write_no_go(item: WorkItem, ctx: StageContext) -> StepResult | None:
         """Durably mark NO-GO after exact-head and exclusive-label checks."""
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
@@ -1509,12 +1515,11 @@ class PrReviewStage(Stage):
 
         """
         body = (
-            "**Automation stand-down: human review thread(s) block GO.**\n\n"
-            f"The implementation review reached GO, but {human_unresolved} "
+            "**Automation stand-down: unresolved human review thread(s) prevent a transition.**\n\n"
+            f"The implementation review cannot transition while {human_unresolved} "
             "unresolved review thread(s) opened by a human remain on this PR. "
             "Automation will not resolve human threads and cannot act on them, "
-            "so it is standing down: the PR is left unlabeled (no "
-            "`state:implementation-go` / `state:implementation-no-go`) and "
+            "so it is standing down: the PR is left without an implementation-state label and "
             "auto-merge stays unarmed. Once the human thread(s) are resolved, "
             "the next automation pass will re-review this PR."
         )
@@ -1530,7 +1535,7 @@ class PrReviewStage(Stage):
     @staticmethod
     def _handle_human_blocked(
         item: WorkItem, human_unresolved: int, ctx: StageContext
-    ) -> StageOutcome:
+    ) -> StepResult:
         """Record a stand-down only for a confirmed-unarmed PR."""
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")

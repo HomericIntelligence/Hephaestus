@@ -9,6 +9,7 @@ format stay identical to what coordinator tests (#1817) will assert.
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -63,6 +64,7 @@ class FakeStageGitHub(FakeGitHub):
         pr_head_branch: str | None = None,
         pr_head_writable: bool = True,
         pr_impl_state: tuple[bool, bool] = (False, False),
+        pr_impl_readbacks: list[tuple[bool, bool] | Exception] | None = None,
         unresolved: list[tuple[int, int]] | None = None,
         by_severity: list[tuple[int, int, int]] | None = None,
         pr_state: dict[str, Any] | None | _DefaultPrState = _DEFAULT_PR_STATE,
@@ -85,6 +87,9 @@ class FakeStageGitHub(FakeGitHub):
                 and may receive coordinator-owned address commits.
             pr_impl_state: Canned (has_go, has_no_go) answer for
                 pr_has_implementation_state_label.
+            pr_impl_readbacks: Optional FIFO of independent label readbacks;
+                entries may be contradictory, absent, or exceptions. When
+                empty, the current post-mutation state is returned.
             unresolved: FIFO of (automation, human) answers for
                 count_unresolved_threads — consumed one per call, last
                 entry repeating (lets tests script a decreasing /
@@ -111,6 +116,7 @@ class FakeStageGitHub(FakeGitHub):
         self._pr_head_branch = pr_head_branch
         self._pr_head_writable = pr_head_writable
         self._pr_impl_state = pr_impl_state
+        self._pr_impl_readbacks = deque(pr_impl_readbacks or [])
         self._unresolved: list[tuple[int, int]] = list(unresolved or [(0, 0)])
         self._by_severity = (
             list(by_severity)
@@ -211,7 +217,13 @@ class FakeStageGitHub(FakeGitHub):
         return self._pr_head_writable
 
     def pr_has_implementation_state_label(self, pr_number: int) -> tuple[bool, bool]:
-        """Mirror pr_manager.pr_has_implementation_state_label (canned answer)."""
+        """Return a scripted independent label readback, when available."""
+        del pr_number
+        if self._pr_impl_readbacks:
+            readback = self._pr_impl_readbacks.popleft()
+            if isinstance(readback, Exception):
+                raise readback
+            return readback
         return self._pr_impl_state
 
     def pr_review_context(self, pr_number: int) -> dict[str, str] | None:
@@ -248,9 +260,7 @@ class FakeStageGitHub(FakeGitHub):
         ):
             for _ in range(count):
                 thread_id = (
-                    posted[cursor]
-                    if cursor < len(posted)
-                    else f"live-thread-{pr_number}-{cursor}"
+                    posted[cursor] if cursor < len(posted) else f"live-thread-{pr_number}-{cursor}"
                 )
                 cursor += 1
                 if thread_id in self._resolved_review_threads:
