@@ -50,6 +50,7 @@ import contextlib
 import os
 import re
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import BinaryIO
@@ -168,6 +169,69 @@ BUNDLE_NOT_RUN = "NOT_RUN"
 VERIFY_SIGNAL_LOST_EXIT = 3
 
 
+@dataclass(frozen=True)
+class _BundleVerification:
+    """One bundle verdict with separate machine and human representations."""
+
+    verdict: str
+    detail: str
+    detail_template: str
+    detail_values: dict[str, str]
+
+
+def _inspect_crash_bundle(log_dir: Path) -> _BundleVerification:
+    """Inspect a crash bundle without localizing its machine-readable detail."""
+    log_path = log_dir / "handler.log"
+    path = str(log_path)
+    if not log_path.is_file():
+        template = (
+            "%(path)s is missing — the handler never ran "
+            "(the kernel cannot report a pipe handler's exit code)"
+        )
+        return _BundleVerification(
+            BUNDLE_NOT_RUN,
+            template % {"path": path},
+            template,
+            {"path": path},
+        )
+    try:
+        contents = log_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        template = "%(path)s is unreadable (%(error)s)"
+        values = {"path": path, "error": str(exc)}
+        return _BundleVerification(BUNDLE_NOT_RUN, template % values, template, values)
+
+    lines = [ln for ln in contents.splitlines() if ln.strip()]
+    if not lines:
+        template = "%(path)s is empty — no handler activity recorded"
+        return _BundleVerification(
+            BUNDLE_NOT_RUN, template % {"path": path}, template, {"path": path}
+        )
+
+    # A `wrote ` line is the authoritative success signal; a successful capture
+    # may also carry a chmod/max-bytes WARNING, so `wrote ` wins over WARNING.
+    # Each kept line is "<iso-timestamp> <message>"; split off the timestamp and
+    # check that the message portion starts with "wrote " so that an ERROR: line
+    # whose path happens to contain the substring " wrote " is not misclassified.
+    def _message_is_wrote(ln: str) -> bool:
+        parts = ln.split(maxsplit=1)
+        return len(parts) == 2 and parts[1].startswith("wrote ")
+
+    if any(_message_is_wrote(ln) for ln in lines):
+        template = "%(path)s records a successful capture"
+        return _BundleVerification(BUNDLE_OK, template % {"path": path}, template, {"path": path})
+    template = (
+        "%(path)s records handler activity but no successful capture "
+        "(handler ran; inspect the log for the failure)"
+    )
+    return _BundleVerification(
+        BUNDLE_RAN_WITH_ERRORS,
+        template % {"path": path},
+        template,
+        {"path": path},
+    )
+
+
 def verify_crash_bundle(log_dir: Path) -> tuple[str, str]:
     """Enforce the handler's failure-signal contract on a crash bundle.
 
@@ -193,36 +257,8 @@ def verify_crash_bundle(log_dir: Path) -> tuple[str, str]:
         constants; ``detail`` is a human-readable explanation.
 
     """
-    log_path = log_dir / "handler.log"
-    if not log_path.is_file():
-        return BUNDLE_NOT_RUN, (
-            f"{log_path} is missing — the handler never ran "
-            "(the kernel cannot report a pipe handler's exit code)"
-        )
-    try:
-        contents = log_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        return BUNDLE_NOT_RUN, f"{log_path} is unreadable ({exc})"
-
-    lines = [ln for ln in contents.splitlines() if ln.strip()]
-    if not lines:
-        return BUNDLE_NOT_RUN, f"{log_path} is empty — no handler activity recorded"
-
-    # A `wrote ` line is the authoritative success signal; a successful capture
-    # may also carry a chmod/max-bytes WARNING, so `wrote ` wins over WARNING.
-    # Each kept line is "<iso-timestamp> <message>"; split off the timestamp and
-    # check that the message portion starts with "wrote " so that an ERROR: line
-    # whose path happens to contain the substring " wrote " is not misclassified.
-    def _message_is_wrote(ln: str) -> bool:
-        parts = ln.split(maxsplit=1)
-        return len(parts) == 2 and parts[1].startswith("wrote ")
-
-    if any(_message_is_wrote(ln) for ln in lines):
-        return BUNDLE_OK, f"{log_path} records a successful capture"
-    return BUNDLE_RAN_WITH_ERRORS, (
-        f"{log_path} records handler activity but no successful capture "
-        "(handler ran; inspect the log for the failure)"
-    )
+    inspection = _inspect_crash_bundle(log_dir)
+    return inspection.verdict, inspection.detail
 
 
 def write_core(
@@ -363,13 +399,18 @@ def _run_verify(target_dir: str | None, as_json: bool) -> int:
         raise ValueError("no candidate target directories provided")
     # log_dir is the parent of target_dir (see write_core).
     target = next((Path(c) for c in cleaned if Path(c).is_dir()), Path(cleaned[-1]))
-    verdict, detail = verify_crash_bundle(target.parent)
+    inspection = _inspect_crash_bundle(target.parent)
+    verdict, detail = inspection.verdict, inspection.detail
     exit_code = 0 if verdict in (BUNDLE_OK, BUNDLE_RAN_WITH_ERRORS) else VERIFY_SIGNAL_LOST_EXIT
     if as_json:
         emit_json_status(exit_code, message=detail, verdict=verdict)
     else:
         print(
-            text("%(value0)s: %(value1)s", value0=verdict, value1=detail),
+            text(
+                "%(verdict)s: %(detail)s",
+                verdict=verdict,
+                detail=text(inspection.detail_template, **inspection.detail_values),
+            ),
             file=sys.stdout if exit_code == 0 else sys.stderr,
         )
     return exit_code
@@ -412,7 +453,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.json:
             emit_json_status(1, message=msg)
         else:
-            print(text("hephaestus-coredump-handler: %(value0)s", value0=msg), file=sys.stderr)
+            print(
+                text(
+                    "hephaestus-coredump-handler: "
+                    "missing required argument(s) for capture: %(arguments)s",
+                    arguments=", ".join(missing),
+                ),
+                file=sys.stderr,
+            )
         return 1
 
     # TTY guard: when invoked by the kernel, stdin is a pipe carrying the core

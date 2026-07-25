@@ -398,9 +398,9 @@ def confirm_action(prompt: str | None = None, default: bool = False, max_attempt
         User's confirmation decision
 
     """
-    source_prompt = prompt or "Are you sure?"
+    source_prompt = prompt if prompt is not None else "Are you sure?"
     translated_prompt = text(source_prompt)
-    choices = text("Y/n" if default else "y/N")
+    choices = "Y/n" if default else "y/N"
     for _ in range(max_attempts):
         try:
             choice = (
@@ -419,7 +419,7 @@ def confirm_action(prompt: str | None = None, default: bool = False, max_attempt
         elif choice in ["n", "no"]:
             return False
         else:
-            print(text("Invalid choice. Please enter 'y' or 'n'."))
+            print(text("Invalid choice. Please enter '%(yes)s' or '%(no)s'.", yes="y", no="n"))
     return default
 
 

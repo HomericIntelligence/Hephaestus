@@ -83,6 +83,13 @@ def test_escaped_percent_is_not_a_placeholder() -> None:
     assert localizer.text("Progress: %(value)d%%", value=50) == "Avancement : 50 %"
 
 
+@pytest.mark.parametrize("template", ["%s %(name)s", "%(name)*s"])
+def test_catalog_rejects_templates_that_mix_named_and_positional_values(template: str) -> None:
+    """Catalogs cannot accept templates that ``Localizer.text`` cannot render."""
+    with pytest.raises(ValueError, match="mix"):
+        Localizer({template: template})
+
+
 def test_catalog_is_defensively_copied_and_localizer_is_immutable() -> None:
     """Caller mutations cannot alter an existing localizer."""
     catalog = {"Hello": "Bonjour"}

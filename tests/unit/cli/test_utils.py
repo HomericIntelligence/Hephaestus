@@ -67,8 +67,8 @@ class TestConfirmAction:
         with patch("builtins.input", return_value="no"):
             assert confirm_action() is False
 
-    def test_default_prompt_and_choice_display_use_active_localizer(self) -> None:
-        """The translated display still accepts the canonical ``y`` decision."""
+    def test_default_prompt_localizes_but_choice_tokens_remain_canonical(self) -> None:
+        """Displayed confirmation choices always match the accepted inputs."""
         prompts: list[str] = []
 
         def respond(prompt: str) -> str:
@@ -84,7 +84,31 @@ class TestConfirmAction:
             with patch("builtins.input", side_effect=respond):
                 assert confirm_action() is True
 
-        assert prompts == ["Confirmer l'action ? [o/N] "]
+        assert prompts == ["Confirmer l'action ? [y/N] "]
+
+    def test_explicit_empty_prompt_is_preserved(self) -> None:
+        """An empty prompt is distinct from omitting a prompt."""
+        prompts: list[str] = []
+
+        def respond(prompt: str) -> str:
+            prompts.append(prompt)
+            return "n"
+
+        with patch("builtins.input", side_effect=respond):
+            assert confirm_action(prompt="") is False
+
+        assert prompts == [" [y/N] "]
+
+    def test_invalid_choice_message_keeps_canonical_input_tokens(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Localized prose cannot suggest a token the parser does not accept."""
+        source = "Invalid choice. Please enter '%(yes)s' or '%(no)s'."
+        with using_localizer({source: "Choix invalide : %(yes)s/%(no)s"}):
+            with patch("builtins.input", side_effect=["invalid", "yes"]):
+                assert confirm_action() is True
+
+        assert "Choix invalide : y/n" in capsys.readouterr().out
 
 
 class TestCommandRegistry:

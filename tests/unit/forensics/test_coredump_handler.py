@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import io
+import json
 from pathlib import Path
 
 import pytest
 
+from hephaestus.cli.localization import using_localizer
 from hephaestus.forensics.coredump_handler import (
     DEFAULT_MAX_BYTES,
+    _build_parser,
     main,
     resolve_target_dir,
     write_core,
@@ -57,6 +60,17 @@ class TestResolveTargetDir:
         """An all-empty candidate list raises ValueError."""
         with pytest.raises(ValueError, match="no candidate target directories"):
             resolve_target_dir(["", ""])
+
+
+def test_coredump_placeholder_help_renders_literal_percent_tokens() -> None:
+    """Kernel ``core_pattern`` tokens remain readable after localization routing."""
+    help_text = _build_parser().format_help()
+    assert "(%p)" in help_text
+    assert "(%e)" in help_text
+    assert "(%t)" in help_text
+    assert "(%s)" in help_text
+    assert "(%P)" in help_text
+    assert "%%p" not in help_text
 
 
 class TestWriteCore:
@@ -427,8 +441,6 @@ class TestMainVerify:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        import json
-
         monkeypatch.setattr("sys.stdin", _FakeStdin(b""))
         cores = tmp_path / "cores"
         rc = main(["--verify", "--json", "--target-dir", str(cores)])
@@ -439,6 +451,124 @@ class TestMainVerify:
         assert payload["status"] == "error"
         assert payload["exit_code"] == 3
         assert payload["verdict"] == "NOT_RUN"
+
+    @pytest.mark.parametrize(
+        ("contents", "source", "translated", "expected_exit"),
+        [
+            (
+                None,
+                "%(path)s is missing — the handler never ran "
+                "(the kernel cannot report a pipe handler's exit code)",
+                "ABSENT %(path)s",
+                3,
+            ),
+            (
+                "",
+                "%(path)s is empty — no handler activity recorded",
+                "EMPTY %(path)s",
+                3,
+            ),
+            (
+                "2026-06-12T00:00:00+00:00 wrote /x (5 bytes) signal=11 exe=p\n",
+                "%(path)s records a successful capture",
+                "CAPTURED %(path)s",
+                0,
+            ),
+            (
+                "2026-06-12T00:00:00+00:00 ERROR: failed to write the core\n",
+                "%(path)s records handler activity but no successful capture "
+                "(handler ran; inspect the log for the failure)",
+                "FAILED %(path)s",
+                0,
+            ),
+        ],
+    )
+    def test_verify_plain_text_localizes_each_bundle_detail(
+        self,
+        contents: str | None,
+        source: str,
+        translated: str,
+        expected_exit: int,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Plain verification output renders authored details before interpolation."""
+        monkeypatch.setattr("sys.stdin", _FakeStdin(b""))
+        cores = tmp_path / "cores"
+        if contents is not None:
+            (tmp_path / "handler.log").write_text(contents, encoding="utf-8")
+
+        with using_localizer(
+            {
+                "%(verdict)s: %(detail)s": "RESULT %(verdict)s: %(detail)s",
+                source: translated,
+            }
+        ):
+            rc = main(["--verify", "--target-dir", str(cores)])
+
+        captured = capsys.readouterr()
+        output = captured.out if expected_exit == 0 else captured.err
+        assert rc == expected_exit
+        assert "RESULT" in output
+        assert translated.split()[0] in output
+        assert source not in output
+
+    def test_verify_plain_text_localizes_unreadable_detail(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The dynamic read error remains a value when the human template is translated."""
+        monkeypatch.setattr("sys.stdin", _FakeStdin(b""))
+        log_path = tmp_path / "handler.log"
+        log_path.write_text("irrelevant", encoding="utf-8")
+        original_read_text = Path.read_text
+
+        def deny_log_read(
+            path: Path,
+            encoding: str | None = None,
+            errors: str | None = None,
+        ) -> str:
+            if path == log_path:
+                raise OSError("permission denied")
+            return original_read_text(path, encoding=encoding, errors=errors)
+
+        monkeypatch.setattr(Path, "read_text", deny_log_read)
+        with using_localizer(
+            {
+                "%(verdict)s: %(detail)s": "RESULT %(verdict)s: %(detail)s",
+                "%(path)s is unreadable (%(error)s)": "UNREADABLE %(path)s: %(error)s",
+            }
+        ):
+            rc = main(["--verify", "--target-dir", str(tmp_path / "cores")])
+
+        assert rc == 3
+        assert "UNREADABLE" in capsys.readouterr().err
+
+    def test_verify_json_detail_remains_raw_when_plain_text_is_localized(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """JSON consumers retain the original diagnostic rather than translated prose."""
+        monkeypatch.setattr("sys.stdin", _FakeStdin(b""))
+        cores = tmp_path / "cores"
+        source = (
+            "%(path)s is missing — the handler never ran "
+            "(the kernel cannot report a pipe handler's exit code)"
+        )
+        with using_localizer({source: "ABSENT %(path)s"}):
+            rc = main(["--verify", "--json", "--target-dir", str(cores)])
+
+        payload = json.loads(capsys.readouterr().out)
+        assert rc == 3
+        assert payload["message"] == (
+            f"{tmp_path / 'handler.log'} is missing — the handler never ran "
+            "(the kernel cannot report a pipe handler's exit code)"
+        )
 
 
 class TestMainCaptureGuards:
@@ -451,6 +581,31 @@ class TestMainCaptureGuards:
         monkeypatch.setattr("sys.stdin", _FakeStdin(b"core-bytes"))
         rc = main(["--target-dir", str(tmp_path / "cores")])  # no pid/exe/time/sig
         assert rc == 1
+
+    def test_missing_positionals_localize_plain_text_but_not_json(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Capture errors render source templates only on the human-facing path."""
+        monkeypatch.setattr("sys.stdin", _FakeStdin(b"core-bytes"))
+        source = (
+            "hephaestus-coredump-handler: missing required argument(s) for capture: %(arguments)s"
+        )
+        with using_localizer({source: "GESTIONNAIRE: arguments manquants : %(arguments)s"}):
+            rc = main(["--target-dir", str(tmp_path / "cores")])
+        assert rc == 1
+        assert "GESTIONNAIRE: arguments manquants" in capsys.readouterr().err
+
+        with using_localizer({source: "GESTIONNAIRE: arguments manquants : %(arguments)s"}):
+            rc = main(["--json", "--target-dir", str(tmp_path / "cores")])
+        payload = json.loads(capsys.readouterr().out)
+        assert rc == 1
+        assert (
+            payload["message"]
+            == "missing required argument(s) for capture: pid, exe, crash_time, signal"
+        )
 
     def test_full_capture_still_writes_core(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
