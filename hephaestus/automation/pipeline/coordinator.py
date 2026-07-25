@@ -274,6 +274,11 @@ class PipelineConfig:
     force: bool = False
 
 
+def _work_window(config: PipelineConfig) -> int:
+    """Return the global bound for queued and executing pipeline work."""
+    return max(1, config.parallel_repos * config.max_workers)
+
+
 @dataclass
 class _StageRunConfig:
     """PlannerOptions-like config injected as ``StageContext.config``."""
@@ -349,24 +354,36 @@ class Coordinator:
         self.github = github
         self._github_factory = github_factory
         self.shutdown = threading.Event()
-        self.completion_q: CompletionQueue = queue_mod.Queue()
+        work_window = _work_window(config)
+        self.completion_q: CompletionQueue = queue_mod.Queue(maxsize=work_window)
         if pool is None:
             # Imported here, not module-top: WorkerPool is the pipeline's one
             # I/O-capable module and tests never need it.
             from hephaestus.automation.pipeline.worker_pool import WorkerPool
 
             pool = WorkerPool(
-                size=max(1, config.parallel_repos * config.max_workers),
+                size=work_window,
                 shutdown=self.shutdown,
                 completion_q=self.completion_q,
             )
         else:
-            # Share channels with an injected pool when it exposes them.
-            if getattr(pool, "completion_q", None) is not None:
-                self.completion_q = pool.completion_q
+            # The coordinator owns the cross-thread transport.  An injected
+            # unbounded fake queue is replaced; a differently bounded queue
+            # is rejected so it cannot silently weaken the global capacity.
+            injected_completion_q = getattr(pool, "completion_q", None)
+            injected_maxsize = getattr(injected_completion_q, "maxsize", 0)
+            if isinstance(injected_maxsize, int) and (
+                injected_maxsize > 0 and injected_maxsize != work_window
+            ):
+                raise ValueError(
+                    "injected completion queue capacity must match the coordinator work window"
+                )
+            pool.completion_q = self.completion_q
         self.pool: Any = pool
 
-        self.queues: dict[StageName, StageQueue] = {name: StageQueue() for name in StageName}
+        self.queues: dict[StageName, StageQueue] = {
+            name: StageQueue(work_window) for name in StageName
+        }
         self.timers: list[tuple[float, int, WorkItem]] = []
         self.in_flight: dict[JobHandle, WorkItem] = {}
         self.inflight_per_repo: Counter[str] = Counter()
@@ -1115,7 +1132,9 @@ class Coordinator:
 
     def _admit(self, item: WorkItem) -> bool:
         """Admission control: per-repo in-flight cap (O(1) Counter lookup)."""
-        return self.inflight_per_repo[item.repo] < max(1, self.config.max_workers)
+        return len(self.in_flight) < _work_window(self.config) and self.inflight_per_repo[
+            item.repo
+        ] < max(1, self.config.max_workers)
 
     # -- item execution -----------------------------------------------------
 
