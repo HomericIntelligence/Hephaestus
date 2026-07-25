@@ -2013,6 +2013,11 @@ class Coordinator:
             The number of items pushed (repo seeds included).
 
         """
+        # A reseed pass creates fresh WorkItems for the same logical issues.
+        # Keep final status semantics aligned with _effective_items(): the
+        # latest pass supersedes earlier attempts without retaining an
+        # unbounded logical-identity map in the terminal aggregate.
+        self._terminal_summary.reset()
         self._pass_work_count = 0
         discovery_repos = [] if self.config.issues or self.config.prs else self.config.repos
         entries = _seeding.seed_from_cli(discovery_repos, [], [])

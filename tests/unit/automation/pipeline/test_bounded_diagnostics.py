@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+from collections import deque
 from pathlib import Path
+from typing import Any
 
+import pytest
+
+from hephaestus.automation.pipeline import seeding as seeding_mod
 from hephaestus.automation.pipeline.coordinator import Coordinator, PipelineConfig
-from hephaestus.automation.pipeline.routing import StageName
+from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
+from hephaestus.automation.pipeline.seeding import SeedEntry
 from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkItem
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
@@ -73,3 +79,52 @@ def test_coordinator_bounds_diagnostics_and_keeps_full_terminal_aggregates(
     assert coordinator._terminal_summary.total == 4
     assert coordinator._terminal_summary.dispositions == {"fail": 1, "pass": 3}
     assert coordinator._exit_code() == 1
+
+
+class _TerminalStage:
+    """Return one terminal outcome per re-seeded planning item."""
+
+    def __init__(self, *outcomes: StageOutcome) -> None:
+        self._outcomes = deque(outcomes)
+
+    def on_enter(self, item: WorkItem, ctx: Any) -> None:
+        del item, ctx
+        return None
+
+    def step(self, item: WorkItem, ctx: Any) -> StageOutcome:
+        del item, ctx
+        return self._outcomes.popleft()
+
+    def on_job_done(self, item: WorkItem, result: Any, ctx: Any) -> None:
+        del item, result, ctx
+
+
+def test_terminal_summary_uses_only_the_latest_reseed_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A successful replacement must supersede an earlier failed loop outcome."""
+    passes = deque(
+        [
+            [SeedEntry(kind="issue", identifier=7, stage=StageName.PLANNING, reason="first")],
+            [SeedEntry(kind="issue", identifier=7, stage=StageName.PLANNING, reason="second")],
+        ]
+    )
+    monkeypatch.setattr(
+        seeding_mod,
+        "seed_from_cli",
+        lambda _repos, _issues, _prs: list(passes.popleft()) if passes else [],
+    )
+    coordinator = Coordinator(
+        PipelineConfig(org="org", repos=["repo-a"], loops=2, projects_dir=tmp_path),
+        github=FakeStageGitHub(),
+        pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+    coordinator.stages[StageName.PLANNING] = _TerminalStage(
+        StageOutcome(Disposition.FINISH_FAIL, "first failed"),
+        StageOutcome(Disposition.FINISH_PASS, "replacement passed"),
+    )
+
+    assert coordinator.run() == 0
+    assert coordinator._terminal_summary.total == 1
+    assert coordinator._terminal_summary.dispositions == {"pass": 1}

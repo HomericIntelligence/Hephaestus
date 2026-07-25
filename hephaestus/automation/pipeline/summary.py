@@ -135,6 +135,12 @@ class TerminalSummary:
         self._dispositions[_disposition_bucket(item)] += 1
         self._per_stage[item.stage.value] += 1
 
+    def reset(self) -> None:
+        """Start a fresh reseed-pass aggregate without retaining item identities."""
+        self.total = 0
+        self._dispositions.clear()
+        self._per_stage.clear()
+
     @property
     def dispositions(self) -> dict[str, int]:
         """Return a stable copy of counts grouped by disposition."""
