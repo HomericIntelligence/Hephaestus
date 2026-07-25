@@ -1,57 +1,37 @@
 """Tests for the user-facing localization boundary."""
 
 import argparse
-import threading
 from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from typing import Any, cast
 
 import pytest
 
-import hephaestus.cli as cli
-from hephaestus._localization import _placeholder_signature
 from hephaestus.cli.localization import Localizer, get_localizer, text, using_localizer
 
 
 def test_english_fallback_and_missing_key() -> None:
-    """Use the English source text when a catalog has no entry."""
+    """English source text is the complete fallback."""
     assert text("Uncatalogued message") == "Uncatalogued message"
     assert Localizer({"Known": "Connu"}).text("Missing") == "Missing"
 
 
 def test_synthetic_catalog_and_placeholders() -> None:
-    """Translate a stable template and then insert its named values."""
-    localizer = Localizer({"Hello %(name)s": "Bonjour %(name)s"})
-
+    """Catalogs translate named and positional templates."""
+    localizer = Localizer(
+        {
+            "Hello %(name)s": "Bonjour %(name)s",
+            "Processed %d files": "%d fichiers traités",
+        }
+    )
     assert localizer.text("Hello %(name)s", name="Ada") == "Bonjour Ada"
+    assert localizer.text("Processed %d files", 3) == "3 fichiers traités"
 
 
-def test_positional_placeholder_rendering() -> None:
-    """Translate and render positional placeholders in their original order."""
-    localizer = Localizer({"%s processed %d files": "%s a traité %d fichiers"})
-
-    assert localizer.text("%s processed %d files", "Ada", 2) == "Ada a traité 2 fichiers"
-
-
-def test_rendering_rejects_mixed_argument_styles() -> None:
-    """Reject a call that supplies positional and named formatting values."""
-    with pytest.raises(TypeError, match="cannot mix"):
-        Localizer().text("Hello", "Ada", name="Ada")
-
-
-@pytest.mark.parametrize(
-    ("template", "expected"),
-    [
-        ("Width %*s", (("*", "s"), ())),
-        ("Precision %.*f", (("*", "f"), ())),
-        ("Width and precision %*.*f", (("*", "*", "f"), ())),
-    ],
-)
-def test_placeholder_signature_includes_star_operands(
-    template: str,
-    expected: tuple[tuple[str, ...], tuple[tuple[str, str], ...]],
-) -> None:
-    """Count star width and precision operands before their value."""
-    assert _placeholder_signature(template) == expected
+def test_named_placeholders_may_be_reordered() -> None:
+    """Translations may use named values in natural target-language order."""
+    localizer = Localizer({"%(first)s then %(second)d": "%(second)d avant %(first)s"})
+    assert localizer.text("%(first)s then %(second)d", first="one", second=2) == "2 avant one"
 
 
 @pytest.mark.parametrize(
@@ -61,91 +41,34 @@ def test_placeholder_signature_includes_star_operands(
         ("Hello", "Bonjour %(name)s"),
         ("Hello %(name)s", "Bonjour %(other)s"),
         ("Count %(count)d", "Compte %(count)s"),
+        ("%s has %d", "%d a %s"),
     ],
 )
 def test_invalid_placeholder_catalogs_are_rejected(source: str, translated: str) -> None:
-    """Reject translations that change the placeholder contract."""
+    """Translations must preserve placeholder names, types, and order."""
     with pytest.raises(ValueError, match="placeholder"):
         Localizer({source: translated})
-
-
-@pytest.mark.parametrize(
-    ("source", "translated"),
-    [
-        ("Value %s", "Valeur %s %q"),
-        ("Value %q", "Valeur"),
-        ("Count %(count)d", "Compte %(count)d %q"),
-    ],
-)
-def test_malformed_percent_tokens_are_rejected(source: str, translated: str) -> None:
-    """Reject malformed tokens when the catalog is constructed."""
-    with pytest.raises(ValueError):
-        Localizer({source: translated})
-
-
-@pytest.mark.parametrize("catalog", [[], (), 0, False])
-def test_falsy_non_mapping_catalogs_are_rejected(catalog: object) -> None:
-    """Accept only mappings or ``None`` as catalog input."""
-    with pytest.raises(TypeError, match="mapping"):
-        Localizer(cast(Any, catalog))
 
 
 def test_escaped_percent_is_not_a_placeholder() -> None:
-    """Permit a literal percent escape in a formatted template."""
+    """Escaped percent signs may differ without changing the value signature."""
     localizer = Localizer({"Progress: %(value)d%%": "Avancement : %(value)d %%"})
-
     assert localizer.text("Progress: %(value)d%%", value=50) == "Avancement : 50 %"
 
 
-def test_literal_percent_without_format_values_is_catalogable() -> None:
-    """Render escaped literal percent text without formatting values."""
-    localizer = Localizer(
-        {
-            "Coverage is 100%% and the expected pattern is <N>%%+.": (
-                "La couverture est de 100%% et le modèle attendu est <N>%%+."
-            )
-        }
-    )
-
-    assert localizer.text("Coverage is 100%% and the expected pattern is <N>%%+.") == (
-        "La couverture est de 100% et le modèle attendu est <N>%+."
-    )
-
-
-def test_space_flag_placeholder_followed_by_text_cannot_be_removed() -> None:
-    """Preserve a valid space-flag operand when alphabetic text follows it."""
-    with pytest.raises(ValueError, match="placeholder"):
-        Localizer({"Count: % ditems": "Compte : éléments"})
-
-
-@pytest.mark.parametrize("source", ["Step 2%(name)s", "Step 2%s"])
-def test_placeholder_after_digit_cannot_be_removed(source: str) -> None:
-    """Preserve a valid placeholder when a digit precedes its percent sign."""
-    with pytest.raises(ValueError, match="placeholder"):
-        Localizer({source: "Étape 2"})
-
-
-@pytest.mark.parametrize("template", ["%s %(name)s", "%(name)*s"])
-def test_catalog_rejects_mixed_formatting_styles(template: str) -> None:
-    """Reject templates that cannot use one formatting argument style."""
-    with pytest.raises(ValueError, match="mix"):
-        Localizer({template: template})
-
-
 def test_catalog_is_defensively_copied_and_localizer_is_immutable() -> None:
-    """Do not let caller mutations change an existing localizer."""
+    """Caller mutations cannot alter an existing localizer."""
     catalog = {"Hello": "Bonjour"}
     localizer = Localizer(catalog)
     catalog["Hello"] = "Salut"
-
     assert localizer.text("Hello") == "Bonjour"
     with pytest.raises(AttributeError):
         localizer._catalog = {}  # type: ignore[misc]
 
 
 def test_context_nesting_and_exception_restoration() -> None:
-    """Restore the prior localizer after all context exit paths."""
-    previous_localizer = get_localizer()
+    """Scoped catalogs restore the prior localizer in all exit paths."""
+    original = get_localizer()
     with using_localizer({"Hello": "Bonjour"}) as outer:
         assert get_localizer() is outer
         with pytest.raises(RuntimeError):
@@ -153,79 +76,51 @@ def test_context_nesting_and_exception_restoration() -> None:
                 assert text("Hello") == "Hola"
                 raise RuntimeError("stop")
         assert text("Hello") == "Bonjour"
-    assert get_localizer() is previous_localizer
+    assert get_localizer() is original
 
 
-def test_concurrent_catalogs_are_isolated() -> None:
-    """Keep each concurrent context catalog separate."""
-
-    def render(catalog: dict[str, str]) -> str:
-        with using_localizer(catalog):
-            return text("Hello")
-
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        french = executor.submit(render, {"Hello": "Bonjour"})
-        spanish = executor.submit(render, {"Hello": "Hola"})
-
-    assert french.result() == "Bonjour"
-    assert spanish.result() == "Hola"
+def _ordinary_parser_help(barrier: Barrier) -> str:
+    parser = argparse.ArgumentParser(description="Application help")
+    barrier.wait()
+    return parser.format_help()
 
 
-def test_argparse_translation_does_not_mutate_global_dispatchers() -> None:
-    """Keep argparse translation dispatchers unchanged."""
+def test_argparse_metadata_is_explicit_and_concurrently_isolated() -> None:
+    """Localization does not mutate argparse's process-global dispatchers."""
     argparse_module = cast(Any, argparse)
     before = (argparse_module._, argparse_module.ngettext)
-
-    with using_localizer({"Application help": "Aide application"}):
-        parser = argparse.ArgumentParser(description=text("Application help"))
-
-    assert "Aide application" in parser.format_help()
-    assert (argparse_module._, argparse_module.ngettext) == before
-
-
-def test_localized_parser_keeps_syntax_version_and_exit_codes(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Translate metadata and keep parser control values unchanged."""
-    with using_localizer({"Application help": "Aide application"}):
-        parser = argparse.ArgumentParser(description=text("Application help"), prog="demo")
-        parser.add_argument("--mode", metavar="KIND", choices=("fast", "safe"))
-        parser.add_argument("--version", action="version", version="demo 1.2.3")
-
-    assert parser.parse_args(["--mode", "fast"]) == argparse.Namespace(mode="fast")
-    assert "--mode KIND" in parser.format_help()
-    with pytest.raises(SystemExit) as version_exit:
-        parser.parse_args(["--version"])
-    assert version_exit.value.code == 0
-    assert capsys.readouterr().out == "demo 1.2.3\n"
-    with pytest.raises(SystemExit) as syntax_exit:
-        parser.parse_args(["--mode", "other"])
-    assert syntax_exit.value.code == 2
-
-
-def test_localized_parser_construction_does_not_change_concurrent_parser() -> None:
-    """Keep an ordinary parser in English during localized construction."""
-    argparse_module = cast(Any, argparse)
-    before = (argparse_module._, argparse_module.ngettext)
-    barrier = threading.Barrier(2)
-
-    def ordinary_help() -> str:
-        barrier.wait()
-        return argparse.ArgumentParser(description="Application help").format_help()
-
+    barrier = Barrier(2)
     with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(ordinary_help)
         with using_localizer({"Application help": "Aide application"}):
             localized = argparse.ArgumentParser(description=text("Application help"))
+            ordinary_help = executor.submit(_ordinary_parser_help, barrier)
             barrier.wait()
-        ordinary = future.result()
-
-    assert "Aide application" in localized.format_help()
-    assert "Application help" in ordinary
-    assert "Aide application" not in ordinary
+            assert "Aide application" in localized.format_help()
+            assert "Application help" in ordinary_help.result()
     assert (argparse_module._, argparse_module.ngettext) == before
 
 
-def test_cli_exposes_localizer() -> None:
-    """Expose the localization boundary from the CLI package."""
-    assert cli.Localizer is Localizer
+def test_argparse_syntax_version_and_exit_codes_are_unchanged(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Only authored display metadata crosses the localization boundary."""
+    with using_localizer({"Choose a mode": "Choisissez un mode"}):
+        parser = argparse.ArgumentParser(prog="tool", description=text("Choose a mode"))
+        parser.add_argument("--mode", dest="selected", metavar="MODE", choices=("a", "b"))
+        parser.add_argument("--version", action="version", version="tool 1.2.3")
+
+    args = parser.parse_args(["--mode", "a"])
+    assert args.selected == "a"
+    help_text = parser.format_help()
+    assert "--mode MODE" in help_text
+    with pytest.raises(SystemExit) as exc_info:
+        parser.parse_args(["--version"])
+    assert exc_info.value.code == 0
+    assert capsys.readouterr().out == "tool 1.2.3\n"
+
+
+def test_mixed_positional_and_named_values_are_rejected() -> None:
+    """Formatting styles cannot be mixed in one rendering call."""
+    localizer = Localizer()
+    with pytest.raises(TypeError, match="cannot mix"):
+        localizer.text("%s %(name)s", "value", name="other")

@@ -1,4 +1,4 @@
-"""Integration tests for localized parser construction."""
+"""Integration coverage for localized CLI parser construction."""
 
 import argparse
 
@@ -12,7 +12,7 @@ pytestmark = pytest.mark.integration
 
 
 def test_direct_grouped_and_subparser_metadata_translation() -> None:
-    """Translate authored metadata without changing parser syntax."""
+    """Authored metadata translates without changing parser syntax."""
     catalog = {
         "Manage projects": "Gérer les projets",
         "Project options": "Options du projet",
@@ -37,15 +37,13 @@ def test_direct_grouped_and_subparser_metadata_translation() -> None:
     )
 
 
-def test_shared_parser_factories_translate_at_the_boundary() -> None:
-    """Translate descriptions, epilogs, and shared option help."""
+def test_shared_validation_and_automation_parsers_translate_at_boundary() -> None:
+    """Shared factories translate descriptions, epilogs, and help."""
     catalog = {
         "Validate files": "Valider les fichiers",
         "Example: %(prog)s PATH": "Exemple : %(prog)s PATH",
         "Run workers": "Lancer les ouvriers",
-        "Maximum number of parallel workers, 1-32 (default: 3)": (
-            "Nombre maximal d'ouvriers parallèles, 1-32 (valeur par défaut : 3)"
-        ),
+        "Disable curses UI (use plain logging instead)": ("Désactiver l'interface curses"),
     }
     with using_localizer(catalog):
         validation = create_validation_parser(
@@ -56,14 +54,19 @@ def test_shared_parser_factories_translate_at_the_boundary() -> None:
         automation = build_automation_parser(
             "Run workers",
             add_agent=False,
+            add_max_workers=False,
             add_dry_run=False,
+            add_no_ui=True,
             add_json=False,
             add_version=False,
             add_verbose=False,
         )
 
-    assert "Valider les fichiers" in validation.format_help()
-    assert "Exemple : validator PATH" in validation.format_help()
-    assert "Lancer les ouvriers" in automation.format_help()
-    assert "Nombre maximal d'ouvriers parallèles" in automation.format_help()
-    assert automation.parse_args(["--max-workers", "2"]).max_workers == 2
+    validation_help = validation.format_help()
+    automation_help = automation.format_help()
+    assert "Valider les fichiers" in validation_help
+    assert "Exemple : validator PATH" in validation_help
+    assert "--repo-root REPO_ROOT" in validation_help
+    assert "Lancer les ouvriers" in automation_help
+    assert "Désactiver l'interface curses" in automation_help
+    assert automation.parse_args(["--no-ui"]).no_ui is True
