@@ -1479,7 +1479,14 @@ class PipelineGitHub:
         if self._repo_slug is not None:
             if threads:
                 diff_result = self._gh(["pr", "diff", str(pr_number)], check=False)
-                threads = github_api._filter_comments_to_diff(threads, diff_result.stdout or "")
+                postable_threads = github_api._filter_comments_to_diff(
+                    threads, diff_result.stdout or ""
+                )
+                if len(postable_threads) != len(threads):
+                    raise RuntimeError(
+                        "review-thread batch contains an anchor outside the current PR diff"
+                    )
+                threads = postable_threads
             review_comments = [
                 {
                     "path": c["path"],

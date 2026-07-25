@@ -35,7 +35,8 @@ def test_terse_directive_leads_with_github_carveout() -> None:
     first_line = directive.lstrip().splitlines()[0]
     assert "GitHub-posted" in first_line
     assert "retain full detail" in first_line
-    assert "Verdict: <result>" in directive
+    assert "do not emit a textual approval or rejection line" in directive
+    assert "Verdict:" not in directive
 
 
 def test_plan_terminal_contract_replaces_the_legacy_textual_decision_line() -> None:

@@ -24,7 +24,7 @@ from hephaestus.automation.pipeline.work_item import ItemKind
 from hephaestus.automation.prompts.address_review import get_address_review_prompt
 from hephaestus.automation.prompts.implementation import get_impl_resume_feedback_prompt
 from hephaestus.automation.review_audit import ReviewAudit, parse_review_audit
-from hephaestus.automation.state_labels import ALL_IMPLEMENTATION_STATE_LABELS, STATE_SKIP
+from hephaestus.automation.state_labels import STATE_SKIP
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
@@ -1825,7 +1825,7 @@ class TestEvalVerdicts:
     def test_go_rechecks_human_threads_and_stands_down(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A late human thread clears implementation state and stands down."""
+        """A late human thread stands down without deleting unknown label state."""
         stage = PrReviewStage()
         github = FakeStageGitHub(by_severity=[(0, 0, 0), (0, 0, 1)])
         ctx = make_ctx(github=github)
@@ -1837,13 +1837,7 @@ class TestEvalVerdicts:
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.FINISH_FAIL
         assert result.note == "human_blocked"
-        assert github.mutation_log == [
-            (
-                "gh_issue_remove_labels",
-                (1001, tuple(ALL_IMPLEMENTATION_STATE_LABELS)),
-            ),
-            ("gh_issue_comment", (1001,)),
-        ]
+        assert github.mutation_log == [("gh_issue_comment", (1001,))]
         assert ("mark_pr_implementation_go", (1001,)) not in github.mutation_log
         assert ("arm_auto_merge", (1001,)) not in github.mutation_log
         assert "Automation stand-down" in github.comments[1001][0]
@@ -1863,13 +1857,14 @@ class TestEvalVerdicts:
         assert result == StageOutcome(Disposition.ADVANCE, "review audit; merge wait pending")
         assert github.mutation_log == [("mark_pr_implementation_go", (1001,))]
 
-    def test_go_with_human_thread_is_human_blocked_and_unlabeled(
+    def test_go_with_human_thread_is_human_blocked_without_label_mutation(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """GO + open human thread -> HUMAN_BLOCKED: finish failed, NO labels.
+        """GO + open human thread -> HUMAN_BLOCKED without label mutation.
 
-        The PR stays unlabeled (neither implementation-go nor no-go nor
-        skip): a human must act, automation may not resolve their thread.
+        A human may concurrently own either implementation-state label, and
+        GitHub offers no compare-and-set deletion.  Automation must stand down
+        rather than erase a state it cannot prove it owns.
         """
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(0, 1)])
@@ -1882,15 +1877,7 @@ class TestEvalVerdicts:
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.FINISH_FAIL
         assert result.note == "human_blocked"
-        # Both implementation-state labels are cleared and read back before
-        # the explanatory stand-down comment is posted.
-        assert github.mutation_log == [
-            (
-                "gh_issue_remove_labels",
-                (1001, tuple(ALL_IMPLEMENTATION_STATE_LABELS)),
-            ),
-            ("gh_issue_comment", (1001,)),
-        ]
+        assert github.mutation_log == [("gh_issue_comment", (1001,))]
 
     def test_failed_audit_with_human_thread_has_no_go_shaped_stand_down(
         self, make_ctx: Any, make_work_item: Any
@@ -2792,13 +2779,13 @@ class TestHumanBlockedComment:
             pytest.param((False, True), id="implementation-no-go"),
         ],
     )
-    def test_clears_existing_implementation_state_before_standing_down(
+    def test_preserves_existing_implementation_state_when_standing_down(
         self,
         make_ctx: Any,
         make_work_item: Any,
         starting_state: tuple[bool, bool],
     ) -> None:
-        """A human block clears either stale implementation-state label."""
+        """A human block never deletes a label whose owner is unknowable."""
         stage = PrReviewStage()
         github = FakeStageGitHub(
             unresolved=[(0, 1)],
@@ -2811,60 +2798,16 @@ class TestHumanBlockedComment:
         result = stage.step(item, ctx)
 
         assert result == StageOutcome(Disposition.FINISH_FAIL, "human_blocked")
-        assert github.pr_has_implementation_state_label(1001) == (False, False)
-        assert github.mutation_log == [
-            (
-                "gh_issue_remove_labels",
-                (1001, tuple(ALL_IMPLEMENTATION_STATE_LABELS)),
-            ),
-            ("gh_issue_comment", (1001,)),
-        ]
-
-    @pytest.mark.parametrize(
-        "readback",
-        [
-            pytest.param((True, False), id="implementation-go-remains"),
-            pytest.param((False, True), id="implementation-no-go-remains"),
-        ],
-    )
-    def test_does_not_claim_unlabeled_when_clear_readback_fails(
-        self,
-        make_ctx: Any,
-        make_work_item: Any,
-        readback: tuple[bool, bool],
-    ) -> None:
-        """A stale label after clearing prevents the stand-down comment."""
-        stage = PrReviewStage()
-        github = FakeStageGitHub(
-            unresolved=[(0, 1)],
-            pr_impl_state=readback,
-            pr_impl_readbacks=[readback],
-        )
-        ctx = make_ctx(github=github)
-        item = make_work_item(issue=33, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = _verdict("GO")
-
-        result = stage.step(item, ctx)
-
-        assert result == StageOutcome(
-            Disposition.FINISH_FAIL,
-            "implementation_state_clear_readback_failed",
-        )
-        assert github.mutation_log == [
-            (
-                "gh_issue_remove_labels",
-                (1001, tuple(ALL_IMPLEMENTATION_STATE_LABELS)),
-            )
-        ]
-        assert 1001 not in github.comments
+        assert github.pr_has_implementation_state_label(1001) == starting_state
+        assert github.mutation_log == [("gh_issue_comment", (1001,))]
 
     def test_comment_explains_blockage_before_finish_fail(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
         """The comment names the blocking human threads and the stand-down.
 
-        Journal-order oracle: the label clear precedes the comment, which
-        exists in the mutation_log before FINISH_FAIL is returned.
+        Journal-order oracle: the comment is the only mutation before
+        FINISH_FAIL is returned.
         """
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(0, 2)])
@@ -2877,17 +2820,11 @@ class TestHumanBlockedComment:
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.FINISH_FAIL
         assert result.note == "human_blocked"
-        assert github.mutation_log == [
-            (
-                "gh_issue_remove_labels",
-                (1001, tuple(ALL_IMPLEMENTATION_STATE_LABELS)),
-            ),
-            ("gh_issue_comment", (1001,)),
-        ]
+        assert github.mutation_log == [("gh_issue_comment", (1001,))]
         body = github.comments[1001][0]
         assert "2 unresolved review thread(s) opened by a human" in body
         assert "standing down" in body
-        assert "without an implementation-state label" in body
+        assert "without changing implementation-state labels" in body
 
     def test_comment_failure_is_non_fatal(self, make_ctx: Any, make_work_item: Any) -> None:
         """A failing comment write still finishes failed (never crashes)."""

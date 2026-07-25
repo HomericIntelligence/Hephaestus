@@ -1082,9 +1082,6 @@ Budget provenance (cross-check):
 - `pr_review_hard = 6` ←
  [`_review_phase.py MAX_REVIEW_ITERATIONS_HARD_CAP`](hephaestus/automation/_review_phase.py)
  (= 3 × 2, the progress-aware extension cap).
-- `blocked_address = 2` ←
- [`review_thread_resolver.py _BLOCKED_ADDRESS_MAX_ATTEMPTS`](hephaestus/automation/review_thread_resolver.py)
- (not a stage routing table row but an inner budget).
 - `clone = 2`, `plan = 2`, `plan_cycles = 2`, `implement = 2`,
  `test_fix = 1`, `merge =
  DEFAULT_DRIVE_GREEN_LOOPS = 5` ←

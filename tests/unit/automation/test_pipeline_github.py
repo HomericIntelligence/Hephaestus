@@ -1358,6 +1358,35 @@ class TestRepoScoping:
         assert posted == []
         assert any("repos/org/repo-a/pulls/7/reviews" in call for call in calls)
 
+    def test_repo_scoped_review_post_rejects_mixed_anchor_batch_before_write(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An invalid anchor must not leave a partially posted review batch."""
+        calls: list[list[str]] = []
+        diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+ok\n"
+
+        def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            if argv[:2] == ["pr", "diff"]:
+                return SimpleNamespace(stdout=diff)
+            raise AssertionError(f"unexpected GitHub write/query: {argv}")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        with pytest.raises(RuntimeError, match="anchor outside the current PR diff"):
+            adapter.post_review_threads(
+                7,
+                [
+                    {"path": "a.py", "line": 1, "side": "RIGHT", "body": "valid"},
+                    {"path": "a.py", "line": 2, "side": "RIGHT", "body": "stale"},
+                ],
+                "summary",
+            )
+
+        assert len(calls) == 1
+        assert calls[0][:3] == ["pr", "diff", "7"]
+
     def test_repo_scoped_review_post_warns_on_zero_matched_threads(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:

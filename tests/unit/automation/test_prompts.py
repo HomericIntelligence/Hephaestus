@@ -868,12 +868,13 @@ class TestImplLoopReviewRubric:
         out = self._build(0)
         assert "tests proportional to the production code" in out
 
-    def test_impl_loop_prompt_preserves_verdict_format(self) -> None:
-        """The trailing Grade/Verdict output format must remain intact (parser contract)."""
+    def test_impl_loop_prompt_uses_structural_audit_format(self) -> None:
+        """The loop reviewer emits structured facts, never a textual verdict."""
         for iteration in (0, 1, 2):
             out = self._build(iteration)
-            assert "Grade: <A|B|C|D|F>" in out
-            assert "Verdict: <GO|NOGO>" in out
+            assert '"grade": "A"' in out
+            assert '"comments": [' in out
+            assert "Verdict: <GO|NOGO>" not in out
 
     def test_impl_loop_prompt_states_context_model(self) -> None:
         """The impl-loop reviewer must declare TASK/PLAN/PLAN-REVIEW + diff context."""
@@ -884,12 +885,11 @@ class TestImplLoopReviewRubric:
         # It judges the diff and posts inline PR review threads.
         assert "inline PR review thread" in out
 
-    def test_impl_loop_verdict_contract_flags_omission(self) -> None:
-        """The strengthened GO/NOGO contract must flag a missing verdict line."""
+    def test_impl_loop_audit_contract_rejects_textual_decisions(self) -> None:
+        """The implementation-loop contract explicitly rejects textual decisions."""
         out = self._build(0)
-        assert "CONTRACT VIOLATION" in out
-        assert "Verdict: GO" in out
-        assert "Verdict: NOGO" in out
+        assert "Do not emit `Verdict:`" in out
+        assert "Verdict: NOGO" not in out
 
 
 class TestAddressReviewPrompt:

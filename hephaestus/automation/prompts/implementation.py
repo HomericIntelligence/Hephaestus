@@ -1,7 +1,7 @@
 """Implementation-phase prompts.
 
 Contains the canonical implementation prompt, the iteration-aware impl-loop
-review prompt, and the resume-after-NOGO feedback prompt.
+structural-audit prompt, and the resume-after-feedback prompt.
 """
 
 from ._review_rubric import (

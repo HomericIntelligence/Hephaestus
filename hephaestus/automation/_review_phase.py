@@ -54,11 +54,9 @@ from ._stage_context import StageMixin
 from .address_review import run_address_fix_session
 from .agent_config import pr_reviewer_claude_timeout
 from .claude_invoke import (
-    INFRA_ERROR_REVIEW_TEXT,
     SESSION_EXPIRED_PHRASES,
     detect_server_overload,
     invoke_claude_with_session,
-    parse_review_verdict,
 )
 from .claude_models import implementer_model, reviewer_model
 from .git_utils import (
@@ -77,7 +75,7 @@ from .github_api import (
 from .models import ImplementationState
 from .pr_reviewer import gather_impl_review_context, review_pr_inline
 from .prompts import get_impl_loop_review_prompt, get_impl_resume_feedback_prompt
-from .review_audit import ReviewAudit, render_review_audit
+from .review_audit import ReviewAudit, parse_review_audit, render_review_audit
 from .review_journal import is_plan_comment, is_plan_review_comment
 from .review_types import ReviewVerdict
 from .review_validator import validate_prior_comments_addressed
@@ -685,11 +683,12 @@ class ReviewPhase(StageMixin):
             review_text = render_review_audit(audit)
             verdict = _audit_verdict(audit)
         else:
-            # The no-PR implementation loop is a pre-PR compatibility path;
-            # it never writes implementation labels. Keep its historical
-            # reviewer result available to that local loop.
-            review_text = review_result
-            verdict = parse_review_verdict(review_text)
+            # The no-PR compatibility loop remains label-inert, but it uses
+            # the same structural audit format as PR review. Textual verdicts
+            # are never an authority or a loop-control input.
+            audit = parse_review_audit(review_result)
+            review_text = render_review_audit(audit)
+            verdict = _audit_verdict(audit)
         impl._save_review_log(issue_number, iteration, review_text)
         impl._log(
             "info",
@@ -1004,8 +1003,8 @@ class ReviewPhase(StageMixin):
         iteration: int,
         prior_review: str | None,
         advise_findings: str = "",
-    ) -> tuple[ReviewAudit | str, list[str]]:
-        """Run one in-loop review and return audit/text plus thread ids.
+    ) -> tuple[ReviewAudit, list[str]]:
+        """Run one in-loop review and return a structural audit plus thread ids.
 
         With a ``pr_number`` this folds in ``pr_reviewer``'s core
         (:func:`review_pr_inline`): a fresh per-iteration reviewer session posts
@@ -1015,7 +1014,8 @@ class ReviewPhase(StageMixin):
         diff (#28).
 
         Without a ``pr_number`` (dry-run / no PR) it falls back to the diff-only
-        reviewer (:meth:`_run_impl_review`) which posts nothing.
+        reviewer (:meth:`_run_impl_review`) which posts nothing and is parsed
+        into the same non-authoritative structural audit.
         """
         impl = self.impl
         if pr_number is None:
@@ -1030,7 +1030,7 @@ class ReviewPhase(StageMixin):
                 iteration=iteration,
                 prior_review=prior_review,
             )
-            return review_text, []
+            return parse_review_audit(review_text), []
 
         if self.options.dry_run:
             logger.info("[DRY RUN] Would run in-loop PR review for #%s", pr_number)
@@ -1468,16 +1468,13 @@ class ReviewPhase(StageMixin):
             # sessions against an exhausted quota either (issue #1528).
             _handle_reviewer_quota_or_overload(e, issue_number=issue_number, iteration=iteration)
             logger.error(
-                "#%s R%s: impl reviewer call failed: %s; recording ERROR (re-review next "
-                "loop, no skip/label) so an infra failure isn't mistaken for a NOGO",
+                "#%s R%s: impl reviewer call failed: %s; recording an invalid structural "
+                "audit (re-review next loop, no skip/label)",
                 issue_number,
                 iteration,
                 e,
             )
-            return (
-                f"Reviewer invocation failed at iteration {iteration}: {e}\n\n"
-                f"{INFRA_ERROR_REVIEW_TEXT}"
-            )
+            return f"Reviewer invocation failed at iteration {iteration}: {e}"
 
     def _collect_diff(self, worktree_path: Path, branch_name: str) -> str:
         """Return the cumulative diff of *branch_name* against ``origin/main``."""

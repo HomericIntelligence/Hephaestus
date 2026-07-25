@@ -117,9 +117,7 @@ P7 — POLA — Principle Of Least Astonishment.
     defaults, inconsistent naming, non-obvious side effects, silent
     failures, or behavior that contradicts the docstring/name.
 
-**Verdict floor (mandatory):** if ANY of P1–P7 reveals a critical or
-major finding, the verdict CANNOT be GO even if every other
-dimension scores A. Reviewer must explicitly downgrade and cite the
-offending principle by name (e.g. "Verdict: NOGO — P2/YAGNI: diff adds
-a config flag with no current consumer; P7/POLA: new flag's default
-inverts the existing convention.").
+**Finding floor (mandatory):** if ANY of P1–P7 reveals a critical or
+major finding, include it in the structural `comments` array and cite the
+offending principle by name. A finding is review evidence, never a textual
+approval or rejection.

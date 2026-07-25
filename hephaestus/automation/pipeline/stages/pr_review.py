@@ -43,8 +43,9 @@ contract):
   blocking automation threads (#1152). Any open HUMAN thread -> HUMAN_BLOCKED:
   an explanatory PR comment is posted [durable, before the outcome] naming the
   blocking human thread count and automation stands down, then finish failed
-  with the PR left UNLABELED (a human must act; automation may not resolve
-  their thread). Any open blocking automation thread -> no-go label and
+  without mutating implementation-state labels (a human must act; automation
+  cannot prove ownership of a concurrent label transition). Any open blocking
+  automation thread -> no-go label and
   address + re-review. A clean audit ->
   ``_write_go`` performs one final complete-thread live-read, requires a
   confirmed-unarmed live PR, and applies ``state:implementation-go``.
@@ -138,7 +139,7 @@ from hephaestus.automation.session_naming import (
     AGENT_IMPLEMENTER,
     AGENT_PR_REVIEWER,
 )
-from hephaestus.automation.state_labels import ALL_IMPLEMENTATION_STATE_LABELS, STATE_SKIP
+from hephaestus.automation.state_labels import STATE_SKIP
 
 from ..work_item import ItemKind
 from .base import (
@@ -1968,7 +1969,7 @@ class PrReviewStage(Stage):
             f"The implementation review cannot transition while {human_unresolved} "
             "unresolved review thread(s) opened by a human remain on this PR. "
             "Automation will not resolve human threads and cannot act on them, "
-            "so it is standing down: the PR is left without an implementation-state label and "
+            "so it is standing down without changing implementation-state labels; "
             "auto-merge stays unarmed. Once the human thread(s) are resolved, "
             "the next automation pass will re-review this PR."
         )
@@ -1985,41 +1986,18 @@ class PrReviewStage(Stage):
     def _handle_human_blocked(
         item: WorkItem, human_unresolved: int, ctx: StageContext
     ) -> StepResult:
-        """Clear implementation state and stand down only after readback."""
+        """Stand down without mutating labels whose current owner is unknowable.
+
+        GitHub exposes only unconditional label deletion.  A human or another
+        actor can write an implementation-state label after the thread read and
+        before this method could delete it, so neither a precondition read nor
+        a post-delete readback can prove that deletion is safe.  The terminal
+        human-thread outcome itself prevents this work item from advancing;
+        later runs lack this process's reviewed-head proof and must re-review.
+        """
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
         pr_number = item.pr
-        arm_outcome = PrReviewStage._require_reviewed_unarmed(item, ctx)
-        if arm_outcome is not None:
-            return arm_outcome
-        try:
-            ctx.github.remove_labels(pr_number, list(ALL_IMPLEMENTATION_STATE_LABELS))
-        except Exception as error:
-            logger.warning(
-                "pr_review: failed to clear implementation-state labels on human-blocked "
-                "PR #%d: %s",
-                pr_number,
-                error,
-            )
-            return StageOutcome(Disposition.FINISH_FAIL, "implementation_state_clear_failed")
-        try:
-            has_go, has_no_go = ctx.github.pr_has_implementation_state_label(pr_number)
-        except Exception as error:
-            logger.warning(
-                "pr_review: failed to verify cleared implementation-state labels on "
-                "human-blocked PR #%d: %s",
-                pr_number,
-                error,
-            )
-            return StageOutcome(
-                Disposition.FINISH_FAIL,
-                "implementation_state_clear_readback_failed",
-            )
-        if has_go or has_no_go:
-            return StageOutcome(
-                Disposition.FINISH_FAIL,
-                "implementation_state_clear_readback_failed",
-            )
         PrReviewStage._post_human_blocked_comment(pr_number, human_unresolved, ctx)
         return StageOutcome(Disposition.FINISH_FAIL, "human_blocked")
 

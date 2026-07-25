@@ -6,7 +6,7 @@ GitHub-posted review bodies, PR descriptions, and issue comments retain full det
 {% if terminal_output_contract is defined and terminal_output_contract -%}
 - {{ terminal_output_contract }}
 {% else -%}
-- Return verdicts as a single line: `Verdict: <result> | Reason: <one line>`.
+- Return concise, factual findings and reasons; do not emit a textual approval or rejection line.
 {% endif -%}
 - Prefer bullet lists over prose; cite `file.py:line` instead of quoting blocks; reference issue/PR numbers, not their bodies.
 - Do NOT exit early while a transient dependency needed for this task is still in progress. On permanent failures (4xx, auth errors, missing required reviews), return immediately with the failure reason.
