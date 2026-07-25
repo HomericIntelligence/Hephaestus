@@ -97,11 +97,14 @@ class TestStageQueue:
         second = WorkItem(repo="repo2", kind=ItemKind.ISSUE, issue=2)
         overflow = WorkItem(repo="repo3", kind=ItemKind.PR, pr=3)
 
-        assert q.offer(first) is True
-        assert q.offer(second) is True
+        first_offered = q.offer(first)
+        second_offered = q.offer(second)
+        assert first_offered is True
+        assert second_offered is True
         assert q.occupancy == 2
 
-        assert q.offer(overflow) is False
+        overflow_offered = q.offer(overflow)
+        assert overflow_offered is False
         assert q.occupancy == 2
         assert q.snapshot() == [first, second]
 
@@ -113,13 +116,19 @@ class TestStageQueue:
         rejected = WorkItem(repo="repo3", kind=ItemKind.PR, pr=3)
         admitted_later = WorkItem(repo="repo4", kind=ItemKind.REPO)
 
-        assert q.offer(first) is True
-        assert q.offer(second) is True
-        assert q.offer(rejected) is False
-        assert q.pop() == first
+        first_offered = q.offer(first)
+        second_offered = q.offer(second)
+        rejected_offered = q.offer(rejected)
+        assert first_offered is True
+        assert second_offered is True
+        assert rejected_offered is False
+        popped_first = q.pop()
+        assert popped_first == first
 
-        assert q.offer(admitted_later) is True
-        assert [q.pop(), q.pop()] == [second, admitted_later]
+        later_offered = q.offer(admitted_later)
+        assert later_offered is True
+        popped_items = [q.pop(), q.pop()]
+        assert popped_items == [second, admitted_later]
 
 
 class TestCompletionQueue:

@@ -41,7 +41,8 @@ class TestStageQueueLeases:
         assert lease.item is claimed_item
         assert source.snapshot() == [still_ready]
         assert source.occupancy == source.capacity == 2
-        assert source.offer(replacement) is False
+        replacement_offered = source.offer(replacement)
+        assert replacement_offered is False
 
     def test_restore_preserves_claimed_item_and_uses_remaining_capacity(self) -> None:
         """A lease reserves its item but does not serialize unused capacity."""
@@ -53,7 +54,8 @@ class TestStageQueueLeases:
 
         assert lease is not None
         later = _item("may-enter-before-restore")
-        assert source.offer(later) is True
+        later_offered = source.offer(later)
+        assert later_offered is True
         lease.restore()
 
         assert source.occupancy == 2
@@ -132,13 +134,16 @@ class TestStageQueueLeases:
         lease = source.claim()
 
         assert lease is not None
-        assert lease.handoff(destination) is True
+        handoff_succeeded = lease.handoff(destination)
+        assert handoff_succeeded is True
 
         assert source.occupancy == 0
-        assert source.offer(replacement) is True
+        replacement_offered = source.offer(replacement)
+        assert replacement_offered is True
         assert destination.occupancy == 1
         assert destination.snapshot() == [item]
-        assert destination.pop() is item
+        popped_item = destination.pop()
+        assert popped_item is item
         assert destination.occupancy == 0
 
     def test_full_destination_retains_source_lease_for_later_handoff(self) -> None:
@@ -152,20 +157,26 @@ class TestStageQueueLeases:
         lease = source.claim()
 
         assert lease is not None
-        assert lease.handoff(destination) is False
+        handoff_succeeded = lease.handoff(destination)
+        assert handoff_succeeded is False
         assert source.occupancy == source.capacity == 1
-        assert source.offer(_item("must-not-enter-while-leased")) is False
+        rejected_offer = source.offer(_item("must-not-enter-while-leased"))
+        assert rejected_offer is False
         assert destination.snapshot() == [destination_item]
 
-        assert destination.pop() is destination_item
-        assert lease.handoff(destination) is True
+        popped_destination_item = destination.pop()
+        assert popped_destination_item is destination_item
+        handoff_succeeded = lease.handoff(destination)
+        assert handoff_succeeded is True
         assert source.occupancy == 0
         assert destination.snapshot() == [item]
-        assert destination.pop() is item
+        popped_item = destination.pop()
+        assert popped_item is item
         assert destination.occupancy == 0
 
     def test_empty_claim_is_explicit(self) -> None:
         """An empty source queue reports no lease instead of raising or inventing work."""
         source = StageQueue(capacity=1)
 
-        assert source.claim() is None
+        lease = source.claim()
+        assert lease is None

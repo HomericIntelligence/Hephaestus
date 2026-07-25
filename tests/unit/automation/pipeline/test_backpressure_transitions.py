@@ -164,7 +164,8 @@ def test_full_next_stage_retains_completed_transition_until_retry(tmp_path: Path
     assert source_queue.occupancy == 1
 
     # Once the next stage opens, the coordinator retries the retained transition exactly once.
-    assert destination.pop() is blocker
+    popped_blocker = destination.pop()
+    assert popped_blocker is blocker
     coordinator._drain_queues()
 
     target_pushes = [
