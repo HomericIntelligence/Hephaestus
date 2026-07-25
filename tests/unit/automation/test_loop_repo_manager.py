@@ -31,14 +31,15 @@ from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
 class TestListOpenPrMeta:
     """Tests for open pull-request metadata discovery."""
 
-    def test_returns_sorted_author_metadata_from_paginated_rows(self) -> None:
-        pages = [
-            [{"number": 9, "user": {"login": "depbot", "type": "Bot"}}],
-            [{"number": 3, "user": {"login": "alice", "type": "User"}}],
+    def test_returns_sorted_author_metadata_from_compatibility_wrapper(self) -> None:
+        """The legacy list wrapper preserves its sorted materialized contract."""
+        page = [
+            {"number": 9, "user": {"login": "depbot", "type": "Bot"}},
+            {"number": 3, "user": {"login": "alice", "type": "User"}},
         ]
         with patch(
             "hephaestus.automation.loop_repo_manager.gh_call",
-            return_value=MagicMock(stdout=json.dumps(pages)),
+            return_value=MagicMock(stdout=json.dumps(page)),
         ) as mock_gh:
             result = loop_repo_manager._list_open_pr_meta("acme", "widget")
 
@@ -58,17 +59,15 @@ class TestListOpenPrMeta:
         ]
         assert mock_gh.call_args.args[0] == [
             "api",
-            "/repos/acme/widget/pulls?state=open&per_page=100",
-            "--paginate",
-            "--slurp",
+            "/repos/acme/widget/pulls?state=open&per_page=100&sort=created&direction=asc&page=1",
         ]
         assert mock_gh.call_args.kwargs["timeout"] == NETWORK_TIMEOUT
 
     def test_normalizes_malformed_user_metadata(self) -> None:
-        pages = [[{"number": 7, "user": "unexpected"}, {"number": 8, "user": None}]]
+        page = [{"number": 7, "user": "unexpected"}, {"number": 8, "user": None}]
         with patch(
             "hephaestus.automation.loop_repo_manager.gh_call",
-            return_value=MagicMock(stdout=json.dumps(pages)),
+            return_value=MagicMock(stdout=json.dumps(page)),
         ):
             result = loop_repo_manager._list_open_pr_meta("acme", "widget")
 
@@ -87,6 +86,35 @@ class TestListOpenPrMeta:
             pytest.raises(RuntimeError, match="failed to list open PRs"),
         ):
             loop_repo_manager._list_open_pr_meta("acme", "widget")
+
+    def test_iterator_reads_following_page_only_after_consuming_first(self) -> None:
+        """Runtime PR discovery never asks gh to prefetch/slurp all pages."""
+        pages = [
+            [
+                {"number": number, "user": {"login": "alice", "type": "User"}}
+                for number in range(1, 101)
+            ],
+            [{"number": 101, "user": {"login": "bob", "type": "User"}}],
+        ]
+        with patch(
+            "hephaestus.automation.loop_repo_manager.gh_call",
+            side_effect=[MagicMock(stdout=json.dumps(page)) for page in pages],
+        ) as mock_gh:
+            result = loop_repo_manager._iter_open_pr_meta("acme", "widget")
+            first = [next(result) for _ in range(100)]
+            assert mock_gh.call_count == 1
+            tail = list(result)
+
+        assert [entry["number"] for entry in first + tail] == list(range(1, 102))
+        assert mock_gh.call_args_list[0].args[0] == [
+            "api",
+            "/repos/acme/widget/pulls?state=open&per_page=100&sort=created&direction=asc&page=1",
+        ]
+        assert mock_gh.call_args_list[1].args[0] == [
+            "api",
+            "/repos/acme/widget/pulls?state=open&per_page=100&sort=created&direction=asc&page=2",
+        ]
+        assert all(call.kwargs["timeout"] == NETWORK_TIMEOUT for call in mock_gh.call_args_list)
 
 
 class TestListOpenIssueMeta:

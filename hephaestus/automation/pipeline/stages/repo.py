@@ -209,25 +209,25 @@ class RepoStage(Stage):
             include_bot_prs = bool(getattr(ctx.config, "include_bot_prs", True))
             include_all_authors = bool(getattr(ctx.config, "include_all_authors", False))
             try:
-                open_prs = _repo_manager._list_open_pr_meta(ctx.org, item.repo)
+                open_prs = _repo_manager._iter_open_pr_meta(ctx.org, item.repo)
                 viewer_login = "" if include_all_authors else _pr_discovery._resolve_viewer_login()
+                # Issue metadata now arrives lazily, so this preflight cannot
+                # know which PRs are linked without retaining an unbounded
+                # set. The loop never queues orphan PRs from this path; retain
+                # that safety boundary without materializing a coverage spill.
+                for pr in open_prs:
+                    if _drive_green_pr_is_in_scope(
+                        pr, include_bot_prs=include_bot_prs, viewer_login=viewer_login
+                    ):
+                        logger.info(
+                            "repo:%s: leaving PR #%d outside repository discovery "
+                            "until linked issue source provides requirements",
+                            item.repo,
+                            int(pr["number"]),
+                        )
             except Exception as exc:
                 logger.warning("repo:%s: PR discovery failed: %s", item.repo, exc)
                 return StageOutcome(Disposition.FINISH_FAIL, note=f"discovery failed: {exc}")
-            # Issue metadata now arrives lazily, so this preflight cannot
-            # know which PRs are linked without retaining an unbounded set.
-            # The loop never queues orphan PRs from this path; retain that
-            # safety boundary without materializing a coverage spill.
-            for pr in open_prs:
-                if _drive_green_pr_is_in_scope(
-                    pr, include_bot_prs=include_bot_prs, viewer_login=viewer_login
-                ):
-                    logger.info(
-                        "repo:%s: leaving PR #%d outside repository discovery "
-                        "until linked issue source provides requirements",
-                        item.repo,
-                        int(pr["number"]),
-                    )
 
         item.payload["_repo_issue_source"] = source
         return Continue(next_state="SOURCE")

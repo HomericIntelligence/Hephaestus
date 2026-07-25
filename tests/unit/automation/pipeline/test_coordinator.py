@@ -160,9 +160,7 @@ class TestQuiescence:
         monkeypatch.setattr(server_mod, "MetricsHTTPServer", FakeMetricsServer)
         monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
         coordinator = Coordinator(
-            PipelineConfig(
-                org="org", repos=["repo-a"], loops=1, projects_dir=tmp_path, metrics_port=9123
-            ),
+            PipelineConfig(org="org", repos=[], loops=1, projects_dir=tmp_path, metrics_port=9123),
             github=FakeStageGitHub(),
             pool=FakeWorkerPool(),
             install_signals=False,

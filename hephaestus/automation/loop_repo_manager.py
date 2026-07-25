@@ -223,57 +223,68 @@ def _list_open_issue_meta(org: str, repo: str) -> Iterator[dict[str, Any]]:
     return _iter_open_issue_meta(org, repo)
 
 
-def _list_open_pr_meta(org: str, repo: str) -> list[dict[str, Any]]:
-    """Return open PR numbers and author metadata, sorted ascending.
+def _iter_open_pr_meta(org: str, repo: str) -> Iterator[dict[str, Any]]:
+    """Yield open-PR metadata one REST page at a time.
 
-    Read-only helper for the pipeline repo stage's ``--drive-green-all``
-    orphan-PR discovery (#1817): PRs with no tracked issue are terminalized
-    without requirements context. Raises RuntimeError on failures so discovery
-    does not masquerade as a clean empty run.
+    The runtime ``--drive-green-all`` path consumes this cursor directly.  Do
+    not use ``gh api --paginate --slurp`` here: it accumulates every PR page
+    before the caller can apply bounded source admission.
     """
-    try:
-        out = gh_call(
-            [
-                "api",
-                f"/repos/{org}/{repo}/pulls?state=open&per_page=100",
-                "--paginate",
-                "--slurp",
-            ],
-            timeout=NETWORK_TIMEOUT,
-        )
-        pages = json.loads(out.stdout or "[]")
-        if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
-            raise ValueError("expected paginated pull response")
-    except (
-        subprocess.SubprocessError,
-        RuntimeError,
-        OSError,
-        ValueError,
-        json.JSONDecodeError,
-    ) as exc:
-        raise RuntimeError(f"failed to list open PRs for {org}/{repo}: {exc}") from exc
-    pulls: list[dict[str, Any]] = []
-    for page in pages:
-        for entry in page:
-            number = entry.get("number") if isinstance(entry, dict) else None
+    page = 1
+    while True:
+        try:
+            out = gh_call(
+                [
+                    "api",
+                    (
+                        f"/repos/{org}/{repo}/pulls?state=open&per_page=100"
+                        f"&sort=created&direction=asc&page={page}"
+                    ),
+                ],
+                timeout=NETWORK_TIMEOUT,
+            )
+            entries = json.loads(out.stdout or "[]")
+            if not isinstance(entries, list):
+                raise ValueError("expected pull-response array")
+        except (
+            subprocess.SubprocessError,
+            RuntimeError,
+            OSError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as exc:
+            raise RuntimeError(f"failed to list open PRs for {org}/{repo}: {exc}") from exc
+
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise RuntimeError(f"failed to list open PRs for {org}/{repo}: malformed PR entry")
+            number = entry.get("number")
             if not isinstance(number, int):
-                continue
+                raise RuntimeError(f"failed to list open PRs for {org}/{repo}: malformed PR number")
             raw_user = entry.get("user")
             user = raw_user if isinstance(raw_user, dict) else {}
             raw_state = entry.get("state")
             state = raw_state if isinstance(raw_state, str) else "open"
-            pulls.append(
-                {
-                    "number": number,
-                    "state": state.upper(),
-                    "isDraft": bool(entry.get("draft", False)),
-                    "user": {
-                        "login": user.get("login"),
-                        "type": user.get("type"),
-                    },
-                }
-            )
-    return sorted(pulls, key=lambda pr: pr["number"])
+            yield {
+                "number": number,
+                "state": state.upper(),
+                "isDraft": bool(entry.get("draft", False)),
+                "user": {"login": user.get("login"), "type": user.get("type")},
+            }
+
+        if len(entries) < 100:
+            return
+        page += 1
+
+
+def _list_open_pr_meta(org: str, repo: str) -> list[dict[str, Any]]:
+    """Materialize the bounded cursor for compatibility-only callers.
+
+    Pipeline runtime code must use :func:`_iter_open_pr_meta`; this legacy
+    wrapper remains for callers that specifically require a complete sorted
+    list.
+    """
+    return sorted(_iter_open_pr_meta(org, repo), key=lambda pr: pr["number"])
 
 
 def _list_open_issue_numbers(org: str, repo: str, *, dry_run: bool = False) -> list[int]:

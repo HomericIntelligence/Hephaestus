@@ -12,7 +12,7 @@ from hephaestus.automation.pipeline.coordinator import Coordinator, PipelineConf
 from hephaestus.automation.pipeline.queues import StageQueue
 from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
 from hephaestus.automation.pipeline.seeding import IssueFacts
-from hephaestus.automation.pipeline.work_item import WorkItem
+from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
@@ -166,3 +166,43 @@ def test_direct_issue_source_restarts_for_each_configured_loop(
     ]
     assert coordinator._loops_run == 2
     assert len(coordinator.ledger) == 2
+
+
+def test_direct_pr_seeds_are_source_pulled_and_lossless_at_capacity_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C+1 explicit PRs wait for admission instead of being silently dropped."""
+    events: list[tuple[str, int]] = []
+
+    class _DirectPrGitHub(FakeStageGitHub):
+        def find_issue_for_pr(self, pr_number: int) -> int | None:
+            events.append(("classify", pr_number))
+            return pr_number + 1000
+
+    monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda *_args: [])
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            prs=[701, 702],
+            loops=1,
+            parallel_repos=1,
+            max_workers=1,
+            projects_dir=tmp_path,
+        ),
+        github=_DirectPrGitHub(pr_impl_state=(True, False)),
+        pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+    coordinator.stages[StageName.MERGE_WAIT] = _ImmediatePassStage(events)
+
+    assert coordinator.run() == 0
+
+    assert events == [
+        ("classify", 701),
+        ("complete", 1701),
+        ("classify", 702),
+        ("complete", 1702),
+    ]
+    assert [item.pr for item in coordinator.items if item.kind is ItemKind.PR] == [701, 702]
+    assert coordinator._all_idle()

@@ -82,7 +82,8 @@ import signal
 import threading
 import time
 from collections import Counter, OrderedDict, deque
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, TypeAlias
@@ -375,6 +376,33 @@ class _DirectIssueSource:
 
 
 @dataclass
+class _DirectPrSource:
+    """One bounded cursor over the caller-provided explicit PR scope.
+
+    As with direct issues, a PR is classified only at a safe admission point.
+    This avoids retaining an eager list of potentially large review-context
+    payloads while one of the downstream review queues is saturated.
+    """
+
+    repo: str
+    prs: Iterator[int]
+
+
+@dataclass
+class _ActiveRepoIssueSource:
+    """One detached, bounded repository issue cursor owned by the coordinator.
+
+    Repository setup is a normal REPO-stage work item.  Once it has produced
+    this cursor, retaining that item would monopolize a REPO queue lease and
+    let one repository starve its peers.  The cursor registry keeps only this
+    minimal state and is capped by the global work window.
+    """
+
+    repo: str
+    source: RepoIssueSource
+
+
+@dataclass
 class _RepoEntrySource:
     """One bounded FIFO cursor over repository discovery entries.
 
@@ -484,7 +512,9 @@ class Coordinator:
         self._leases: dict[int, StageQueueLease] = {}
         self._pending_handoffs: dict[int, _PendingHandoff] = {}
         self._direct_issue_source: _DirectIssueSource | None = None
+        self._direct_pr_source: _DirectPrSource | None = None
         self._repo_entry_source: _RepoEntrySource | None = None
+        self._repo_issue_sources: deque[_ActiveRepoIssueSource] = deque()
         # A StageQueue's capacity only bounds that one stage.  This permit
         # set is the coordinator-wide admission budget: an item acquires one
         # permit on first entry and keeps it while it moves between queues,
@@ -804,6 +834,7 @@ class Coordinator:
                 self._drain_queues()
                 self._drain_repo_entry_source()
                 self._drain_repo_issue_sources()
+                self._drain_direct_pr_source()
                 self._drain_direct_issue_source()
                 if self._all_idle():
                     if not self._reseed_if_converged():
@@ -904,7 +935,9 @@ class Coordinator:
             and not self._leases
             and not self._pending_handoffs
             and self._direct_issue_source is None
+            and self._direct_pr_source is None
             and self._repo_entry_source is None
+            and not self._repo_issue_sources
         )
 
     @property
@@ -1365,70 +1398,82 @@ class Coordinator:
                 self._run_item(item)
             self._drain_pending_handoffs()
 
-    def _repo_source_can_admit(self, item: WorkItem) -> bool:
-        """Return whether a repo source can transfer its permit to one issue.
+    def _externalize_repo_issue_source(self, item: WorkItem, source: RepoIssueSource) -> bool:
+        """Retire setup work and enroll its cursor in the bounded fair registry.
 
-        The source itself is initially a normal live item.  Before admitting
-        its next classified child it relinquishes that permit, so C=1 can
-        make forward progress without a second slot.  Once a child owns the
-        sole permit, the source retains only its source-stage lease and waits
-        without holding an unbounded product buffer.
+        A repository cursor is not a pipeline work item: it carries no global
+        permit and no REPO-stage lease once checkout/setup finishes.  Keeping
+        those owners would both count as an extra live object and let the
+        first repository hold the REPO queue while its entire issue backlog
+        drains.  The registry holds at most C cursor objects and drains them
+        in FIFO rotation instead.
         """
-        source_owns_permit = id(item) in self._live_work_permit_ids
-        prospective_live = self.live_work_count - int(source_owns_permit)
-        return prospective_live < _work_window(self.config) and all(
+        if len(self._repo_issue_sources) >= _work_window(self.config):
+            return False
+
+        item.payload.pop("_repo_issue_source", None)
+        self._repo_issue_sources.append(_ActiveRepoIssueSource(repo=item.repo, source=source))
+        self._release_source_lease(item)
+        self._release_work_permit(item)
+        self._seen_item_ids.discard(id(item))
+        with suppress(ValueError):  # provisional item is normally tracked
+            self.items.remove(item)
+        self._record_event("repo_source_activate", item.repo, len(self._repo_issue_sources))
+        return True
+
+    def _repo_source_can_admit(self) -> bool:
+        """Return whether a detached repo cursor may classify and admit one issue."""
+        return self.live_work_count < _work_window(self.config) and all(
             self.queues[stage].can_offer() for stage in _DIRECT_ISSUE_ENTRY_STAGES
         )
 
     def _drain_repo_issue_sources(self) -> None:
-        """Pull at most one admitted issue from each active repository cursor.
-
-        ``RepoStage`` establishes a :class:`RepoIssueSource` after checkout
-        preparation.  The coordinator is the only queue owner, so it keeps
-        the source-stage lease while a single raw metadata row waits for
-        global capacity, transfers the source's permit to the child at
-        admission, and retries the same row on the next available slot.
-        """
-        for lease in list(self._leases.values()):
-            item = lease.item
-            if item.kind is not ItemKind.REPO or item.state != "SOURCE":
-                continue
-            source = item.payload.get("_repo_issue_source")
-            if not isinstance(source, RepoIssueSource):
-                continue
-            if id(item) in self._pending_handoffs:
-                continue
-            self._drain_repo_issue_source(item, source)
+        """Run one round-robin admission attempt for every active repo cursor."""
+        for _ in range(len(self._repo_issue_sources)):
+            active = self._repo_issue_sources.popleft()
+            if self._drain_repo_issue_source(active):
+                self._repo_issue_sources.append(active)
 
     def _drain_repo_issue_source(  # noqa: C901 - source lifecycle is intentionally linear
-        self, item: WorkItem, source: RepoIssueSource
-    ) -> None:
-        """Consume one repository source cursor until one child is admitted.
+        self, active: _ActiveRepoIssueSource
+    ) -> bool:
+        """Consume one detached repository cursor until one child is admitted.
 
         Exclusions (notably epics) need no child capacity and are consumed in
         order after their durable skip write.  An eligible pending row stays
         in ``source.pending`` until every possible entry queue and the global
         permit budget can accept it; no classified product is retained.
+
+        Returns:
+            ``True`` while this cursor remains active, otherwise ``False``
+            after normal exhaustion or a recorded discovery failure.
+
         """
-        ctx = self._ctx_for(item)
+        repo = active.repo
+        source = active.source
+        ctx = self._ctx_for_repo(repo)
         while True:
             metadata = source.pending
             if metadata is None:
                 try:
                     metadata = next(source.metadata)
                 except StopIteration:
-                    item.payload.pop("_repo_issue_source", None)
-                    self._finish(item, passed=True, reason=f"seeded:{source.seeded_count}")
-                    return
+                    self._record_event("repo_source_complete", repo, source.seeded_count)
+                    return False
                 except Exception as exc:
-                    logger.warning("repo:%s: discovery source failed: %s", item.repo, exc)
-                    item.payload.pop("_repo_issue_source", None)
-                    self._finish(item, passed=False, reason=f"discovery failed: {exc}")
-                    return
+                    logger.warning("repo:%s: discovery source failed: %s", repo, exc)
+                    self._record_repo_source_failure(repo, f"discovery failed: {exc}")
+                    return False
 
-            number = int(metadata["number"])
-            labels = list(metadata.get("labels") or [])
-            title = str(metadata.get("title") or "")
+            try:
+                number = int(metadata["number"])
+                labels = list(metadata.get("labels") or [])
+                title = str(metadata.get("title") or "")
+            except (KeyError, TypeError, ValueError) as exc:
+                self._record_repo_source_failure(
+                    repo, f"discovery failed: malformed metadata: {exc}"
+                )
+                return False
             # Metadata epics need no expensive issue fetch.  The durable
             # label write is completed before source consumption advances.
             if is_epic(labels, title):
@@ -1437,23 +1482,20 @@ class Coordinator:
                 except Exception as exc:
                     logger.warning(
                         "repo:%s: could not tag excluded epic #%d state:skip: %s",
-                        item.repo,
+                        repo,
                         number,
                         exc,
                     )
-                    item.payload.pop("_repo_issue_source", None)
-                    self._finish(item, passed=False, reason=f"epic skip tag failed: {exc}")
-                    return
-                logger.info(
-                    "repo:%s: #%d is an epic; tagged state:skip, excluded", item.repo, number
-                )
+                    self._record_repo_source_failure(repo, f"epic skip tag failed: {exc}")
+                    return False
+                logger.info("repo:%s: #%d is an epic; tagged state:skip, excluded", repo, number)
                 source.pending = None
                 self._progress = True
-                return
+                return True
 
-            if not self._repo_source_can_admit(item):
+            if not self._repo_source_can_admit():
                 source.pending = metadata
-                return
+                return True
 
             try:
                 facts = _seeding.seed_issue_from_github(number, ctx.github)
@@ -1466,12 +1508,9 @@ class Coordinator:
                 )
                 entry = replace(entry, stage=stage, reason=reason, passed=passed)
             except Exception as exc:
-                logger.warning(
-                    "repo:%s: issue #%d classification failed: %s", item.repo, number, exc
-                )
-                item.payload.pop("_repo_issue_source", None)
-                self._finish(item, passed=False, reason=f"discovery failed: {exc}")
-                return
+                logger.warning("repo:%s: issue #%d classification failed: %s", repo, number, exc)
+                self._record_repo_source_failure(repo, f"discovery failed: {exc}")
+                return False
 
             if entry.stage is None:
                 try:
@@ -1480,19 +1519,18 @@ class Coordinator:
                 except Exception as exc:
                     logger.warning(
                         "repo:%s: could not tag excluded epic #%d state:skip: %s",
-                        item.repo,
+                        repo,
                         number,
                         exc,
                     )
-                    item.payload.pop("_repo_issue_source", None)
-                    self._finish(item, passed=False, reason=f"epic skip tag failed: {exc}")
-                    return
-                logger.info("[%s] excluded: %s", item.repo, entry.reason)
+                    self._record_repo_source_failure(repo, f"epic skip tag failed: {exc}")
+                    return False
+                logger.info("[%s] excluded: %s", repo, entry.reason)
                 source.pending = None
                 self._progress = True
-                return
+                return True
 
-            new_item = self._entry_to_item(entry, item.repo)
+            new_item = self._entry_to_item(entry, repo)
             if new_item.stage is StageName.FINISHED and new_item.result is None:
                 new_item.result = ItemResult(
                     passed=entry.passed,
@@ -1502,21 +1540,25 @@ class Coordinator:
             elif new_item.stage is not StageName.REPO:
                 self._pass_work_count += 1
 
-            # This is the source-to-child permit transfer.  The source keeps
-            # its queue lease, but no longer consumes global live-work budget
-            # while the admitted child progresses through the pipeline.
-            self._release_work_permit(item)
             source.pending = None
             if self._push_item(new_item, new_item.stage, enter=True):
                 source.seeded_count += 1
                 self._progress = True
-                return
+                return True
             # The preflight covers capacity; a false push is therefore only
             # the existing idempotent duplicate guard.  Do not retain it in
             # a second source buffer.  The duplicate's live peer now governs
             # the next admission opportunity.
             self._progress = True
-            return
+            return True
+
+    def _record_repo_source_failure(self, repo: str, reason: str) -> None:
+        """Retain a bounded terminal failure after a detached cursor aborts."""
+        item = WorkItem(repo=repo, kind=ItemKind.REPO, stage=StageName.FINISHED)
+        item.result = ItemResult(passed=False, reason=reason, final_stage=StageName.REPO)
+        item.payload["entry_stage"] = StageName.REPO.value
+        self.items.append(item)
+        self._record_terminal_result(item)
 
     def _drain_implementation(self) -> None:
         """Drain the implementation queue under topo order + file-overlap gating.
@@ -1687,10 +1729,13 @@ class Coordinator:
                         and item.state == "SOURCE"
                         and isinstance(item.payload.get("_repo_issue_source"), RepoIssueSource)
                     ):
-                        # The source owns this repo's active queue lease.  It
-                        # is consumed only by _drain_repo_issue_sources(),
-                        # which admits no more than one classified issue at a
-                        # time and therefore cannot spin or spill products.
+                        source = item.payload["_repo_issue_source"]
+                        # Setup work has completed. Move only its bounded
+                        # cursor into the fair registry, releasing the REPO
+                        # lease and provisional permit so one repository
+                        # cannot monopolize the stage while it streams.
+                        if not self._externalize_repo_issue_source(item, source):
+                            logger.debug("repo:%s: waiting for a source-registry slot", item.repo)
                         return
                     continue
                 if isinstance(result, JobRequest):
@@ -2044,9 +2089,8 @@ class Coordinator:
         entries = _seeding.seed_from_cli([], [], [])
         self._begin_repo_entry_source(discovery_repos if not entries else [])
         default_repo = self.config.repos[0] if self.config.repos else ""
+        self._begin_direct_pr_source(default_repo)
         self._begin_direct_issue_source(default_repo)
-        if self.config.prs:
-            entries.extend(self._seed_direct_pr_scope(default_repo))
         pushed = 0
         for entry in entries:
             if entry.stage is None:
@@ -2066,7 +2110,12 @@ class Coordinator:
                 )
             if self._push_item(item, item.stage, enter=True):
                 pushed += 1
-        return pushed + self._drain_repo_entry_source() + self._drain_direct_issue_source()
+        return (
+            pushed
+            + self._drain_repo_entry_source()
+            + self._drain_direct_pr_source()
+            + self._drain_direct_issue_source()
+        )
 
     def _begin_repo_entry_source(self, repos: list[str]) -> None:
         """Initialize one FIFO source for this pass's repository discovery.
@@ -2089,6 +2138,7 @@ class Coordinator:
         while (
             self.live_work_count < _work_window(self.config)
             and self.queues[StageName.REPO].can_offer()
+            and len(self._repo_issue_sources) < _work_window(self.config)
         ):
             repo = source.pending
             if repo is None:
@@ -2115,6 +2165,12 @@ class Coordinator:
             return
         open_issues = _admission._filter_open_issues(repo, self.config.issues)
         self._direct_issue_source = _DirectIssueSource(repo=repo, issues=iter(open_issues))
+
+    def _begin_direct_pr_source(self, repo: str) -> None:
+        """Initialize one bounded cursor for this pass's ``--prs`` input."""
+        self._direct_pr_source = None
+        if self.config.prs:
+            self._direct_pr_source = _DirectPrSource(repo=repo, prs=iter(self.config.prs))
 
     def _direct_issue_queues_can_accept(self) -> bool:
         """Return whether one direct issue can be classified and enqueued now."""
@@ -2166,6 +2222,50 @@ class Coordinator:
             # source owns the coordinator thread, so a failed lifecycle push
             # can only be an idempotent duplicate; it never represents
             # saturation or a completion/shutdown fault.
+            if self._push_item(item, item.stage, enter=True):
+                pushed += 1
+        return pushed
+
+    def _drain_direct_pr_source(self) -> int:
+        """Pull explicit PRs into queues without an eager seed-entry spill.
+
+        Explicit PRs retain their historical precedence over explicit issues
+        when both flags are supplied.  As a source advances only after the
+        prior PR leaves the global live-work window, that precedence cannot
+        discard later PRs on a saturated queue.
+        """
+        source = self._direct_pr_source
+        if source is None:
+            return 0
+
+        pushed = 0
+        while self._direct_issue_queues_can_accept():
+            try:
+                pr = next(source.prs)
+            except StopIteration:
+                self._direct_pr_source = None
+                break
+
+            # The compatibility helper returns exactly one entry here; unlike
+            # the legacy call over ``config.prs`` it cannot retain a source
+            # sized list while waiting for capacity.
+            entry = self._seed_direct_pr_scope(source.repo, (pr,))[0]
+            if entry.stage is None:
+                logger.info("seed excluded: %s", entry.reason)
+                continue
+
+            item = self._entry_to_item(entry, source.repo)
+            if item.stage not in (StageName.REPO, StageName.FINISHED):
+                self._pass_work_count += 1
+            if item.stage is StageName.FINISHED and item.result is None:
+                item.result = ItemResult(
+                    passed=entry.passed,
+                    reason=entry.reason,
+                    final_stage=StageName.FINISHED,
+                )
+            # The common direct-entry admission predicate reserves every
+            # possible classifier target and the global permit. A failed push
+            # is therefore only an idempotent duplicate, not saturation.
             if self._push_item(item, item.stage, enter=True):
                 pushed += 1
         return pushed
@@ -2277,12 +2377,14 @@ class Coordinator:
         )
         return replace(entry, stage=stage, reason=reason, passed=passed)
 
-    def _seed_direct_pr_scope(self, repo: str) -> list[_seeding.SeedEntry]:
-        """Eagerly classify the (separate) explicit ``--prs`` scope."""
+    def _seed_direct_pr_scope(
+        self, repo: str, prs: Iterable[int] | None = None
+    ) -> list[_seeding.SeedEntry]:
+        """Classify explicit PRs for compatibility callers or a one-PR source pull."""
         github = self._ctx_for_repo(repo).github if repo else self.github
         entries: list[_seeding.SeedEntry] = []
         scope_stages = self.config.scope.stages if self.config.scope is not None else None
-        for pr in self.config.prs:
+        for pr in self.config.prs if prs is None else prs:
             issue_number = github.find_issue_for_pr(pr)
             if issue_number is None:
                 entries.append(

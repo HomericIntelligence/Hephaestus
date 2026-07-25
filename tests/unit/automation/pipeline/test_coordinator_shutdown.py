@@ -149,7 +149,11 @@ def _coordinator(
     install_signals: bool = False,
 ) -> Coordinator:
     config = PipelineConfig(
-        org="org", repos=["repo-a"], loops=1, projects_dir=tmp_path, grace_s=grace_s
+        org="org",
+        repos=["repo-a"] if seed else [],
+        loops=1,
+        projects_dir=tmp_path,
+        grace_s=grace_s,
     )
     monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: list(seed or []))
     coordinator = Coordinator(
@@ -288,7 +292,7 @@ class TestNormalTeardownExitSemantics:
     def _default_pool_coordinator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Coordinator:
         monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
         return Coordinator(
-            PipelineConfig(org="org", repos=["repo-a"], loops=1, projects_dir=tmp_path),
+            PipelineConfig(org="org", repos=[], loops=1, projects_dir=tmp_path),
             github=FakeStageGitHub(),
             install_signals=False,
         )

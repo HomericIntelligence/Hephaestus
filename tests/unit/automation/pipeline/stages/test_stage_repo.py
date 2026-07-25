@@ -227,7 +227,7 @@ class TestDiscover:
             loop_repo_manager_mod, "_iter_open_issue_meta", lambda org, repo: iter(meta)
         )
         monkeypatch.setattr(
-            loop_repo_manager_mod, "_list_open_pr_meta", lambda org, repo: open_prs or []
+            loop_repo_manager_mod, "_iter_open_pr_meta", lambda org, repo: iter(open_prs or [])
         )
         monkeypatch.setattr(seeding_mod, "seed_issue", lambda num: facts[num])
         monkeypatch.setattr(seeding_mod, "seed_issue_from_github", lambda num, github: facts[num])
@@ -275,7 +275,7 @@ class TestDiscover:
                 [{"number": 8, "labels": ["state:implementation-go"], "title": "x"}]
             ),
         )
-        monkeypatch.setattr(loop_repo_manager_mod, "_list_open_pr_meta", lambda org, repo: [])
+        monkeypatch.setattr(loop_repo_manager_mod, "_iter_open_pr_meta", lambda org, repo: iter([]))
         monkeypatch.setattr(
             seeding_mod,
             "seed_issue",
@@ -504,7 +504,7 @@ class TestDiscover:
         )
         monkeypatch.setattr(
             loop_repo_manager_mod,
-            "_list_open_pr_meta",
+            "_iter_open_pr_meta",
             lambda org, repo: (_ for _ in ()).throw(RuntimeError("pr list failed")),
         )
         repo_item.state = "DISCOVER"
