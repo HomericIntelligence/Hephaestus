@@ -89,6 +89,36 @@ class TestListOpenPrMeta:
             loop_repo_manager._list_open_pr_meta("acme", "widget")
 
 
+class TestListOpenIssueMeta:
+    """Tests for uncapped open-issue metadata discovery."""
+
+    def test_flattens_all_paginated_issue_pages_beyond_five_hundred(self) -> None:
+        """All-open mode must not silently truncate a repository at 500 issues."""
+        pages = [
+            [
+                {"number": number, "labels": [{"name": "bug"}], "title": f"Issue {number}"}
+                for number in range(1, 501)
+            ],
+            [{"number": 501, "labels": [], "title": "Issue 501"}],
+        ]
+        with patch(
+            "hephaestus.automation.loop_repo_manager.gh_call",
+            return_value=MagicMock(stdout=json.dumps(pages)),
+        ) as mock_gh:
+            result = loop_repo_manager._list_open_issue_meta("acme", "widget")
+
+        assert [entry["number"] for entry in result] == list(range(1, 502))
+        assert result[0] == {"number": 1, "labels": ["bug"], "title": "Issue 1"}
+        assert result[-1] == {"number": 501, "labels": [], "title": "Issue 501"}
+        assert mock_gh.call_args.args[0] == [
+            "api",
+            "/repos/acme/widget/issues?state=open&per_page=100",
+            "--paginate",
+            "--slurp",
+        ]
+        assert mock_gh.call_args.kwargs["timeout"] == NETWORK_TIMEOUT
+
+
 class TestDetectCwdRepo:
     """Tests for _detect_cwd_repo URL parsing logic."""
 
