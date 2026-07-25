@@ -81,7 +81,7 @@ import queue as queue_mod
 import signal
 import threading
 import time
-from collections import Counter
+from collections import Counter, OrderedDict, deque
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -119,7 +119,12 @@ from hephaestus.automation.pipeline.stages import (
 )
 from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARGV
 from hephaestus.automation.pipeline.stages.repo import RepoIssueSource, product_to_work_item
-from hephaestus.automation.pipeline.summary import RunStats, latest_logical_items, print_summary
+from hephaestus.automation.pipeline.summary import (
+    RunStats,
+    TerminalSummary,
+    latest_logical_items,
+    print_summary,
+)
 from hephaestus.automation.pipeline.work_item import (
     ItemKind,
     ItemResult,
@@ -159,6 +164,12 @@ _FAIL_BACK_CAP = sum(sum(route.budgets.values()) for route in ROUTES.values())
 
 _PROMPT_PREFLIGHT_TEMPLATE = "shared/untrusted_notice.j2"
 _PROMPT_PREFLIGHT_ERROR = "ERROR: Prompt templates missing or unreadable — reinstall: `uv sync`."
+
+# In-memory diagnostics are intentionally finite.  The durable JSONL stream,
+# when configured, remains a best-effort diagnostic artifact only; GitHub
+# state is still the restart authority.
+_DEFAULT_EVENT_LOG_CAPACITY = 1_024
+_DEFAULT_TERMINAL_DETAIL_CAPACITY = 128
 
 #: Downstream-first drain order: finish work before admitting new (epic
 #: #1809 "drain queues downstream-first (merge_wait -> ... -> repo)"; the
@@ -271,6 +282,10 @@ class PipelineConfig:
     # resilience capability directly.
     circuit_breaker_snapshot_provider: Callable[[], dict[str, dict[str, Any]]] | None = None
     event_log_path: Path | None = None
+    # Recent local diagnostic retention.  These limits intentionally do not
+    # alter the GitHub journal or restart behavior.
+    event_log_capacity: int = _DEFAULT_EVENT_LOG_CAPACITY
+    terminal_detail_capacity: int = _DEFAULT_TERMINAL_DETAIL_CAPACITY
     projects_dir: Path = field(default_factory=lambda: Path.home() / "Projects")
     # Optional exceptions to the normal ``projects_dir / repo`` checkout
     # layout.  The loop runner only sets an entry for a matching noncanonical
@@ -399,6 +414,10 @@ class Coordinator:
         self.config = config
         self.github = github
         self._github_factory = github_factory
+        if config.event_log_capacity < 1:
+            raise ValueError("event_log_capacity must be positive")
+        if config.terminal_detail_capacity < 1:
+            raise ValueError("terminal_detail_capacity must be positive")
         self.shutdown = threading.Event()
         # These latches are the control plane for the bounded completion
         # queue.  They carry no WorkItem/JobResult payload and therefore
@@ -461,7 +480,8 @@ class Coordinator:
         self.ledger: list[ItemResult] = []
         self.preserved: list[PreservedWorktree] = []
         self.items: list[WorkItem] = []
-        self.event_log: list[tuple[Any, ...]] = []
+        self._terminal_summary = TerminalSummary()
+        self.event_log: deque[tuple[Any, ...]] = deque(maxlen=config.event_log_capacity)
         self._event_log_disabled = False
         # Observability is opt-in.  Keep imports and all socket setup out of
         # the default construction path so the product layer retains its
@@ -536,7 +556,12 @@ class Coordinator:
             pre_pr_test_argv=config.pre_pr_test_argv,
             run_pre_pr_tests=config.run_pre_pr_tests,
         )
-        self._ctx_cache: dict[str, StageContext] = {}
+        # A context contains a GitHub accessor and path configuration but no
+        # mutable item state.  At most C items can be live, so an LRU of C is
+        # enough for concurrent work and prevents all-org discovery from
+        # retaining one accessor per repository.
+        self._ctx_cache: OrderedDict[str, StageContext] = OrderedDict()
+        self._ctx_cache_capacity = work_window
 
     # -- wiring ---------------------------------------------------------------
 
@@ -555,7 +580,9 @@ class Coordinator:
     def _ctx_for_repo(self, repo: str) -> StageContext:
         """Return the (cached, per-repo) StageContext for *repo*."""
         ctx = self._ctx_cache.get(repo)
-        if ctx is None:
+        if ctx is not None:
+            self._ctx_cache.move_to_end(repo)
+        else:
             root = _effective_repo_root(self.config, repo)
             ctx = StageContext(
                 config=self._stage_config,
@@ -574,6 +601,8 @@ class Coordinator:
                 budget_fn=self._budget_for,
                 event_fn=self._record_stage_event,
             )
+            if len(self._ctx_cache) >= self._ctx_cache_capacity:
+                self._ctx_cache.popitem(last=False)
             self._ctx_cache[repo] = ctx
         return ctx
 
@@ -796,7 +825,15 @@ class Coordinator:
                         "wall_s": stats.wall_s,
                     },
                 )
-                print_summary(summary_items, stats, preserved, json_out=self.config.json_out)
+                print_summary(
+                    summary_items,
+                    stats,
+                    preserved,
+                    json_out=self.config.json_out,
+                    terminal_summary=(
+                        self._terminal_summary if self._terminal_summary.total else None
+                    ),
+                )
             finally:
                 if self._metrics_server is not None:
                     self._metrics_server.stop()
@@ -831,9 +868,14 @@ class Coordinator:
             # not complete, so wrappers must classify it as cancellation even
             # if earlier work had already failed.
             return 130
+        if self._fatal:
+            return 1
+        if self._terminal_summary.total:
+            passing = self._terminal_summary.dispositions.get("pass", 0)
+            return 1 if passing < self._terminal_summary.total else 0
         effective_results = [item.result for item in self._effective_items() if item.result]
         results = effective_results or self.ledger
-        if self._fatal or any(not result.passed for result in results):
+        if any(not result.passed for result in results):
             return 1
         return 0
 
@@ -866,6 +908,47 @@ class Coordinator:
     def _release_work_permit(self, item: WorkItem) -> None:
         """Release *item*'s permit after the terminal sink has completed."""
         self._live_work_permit_ids.discard(id(item))
+
+    def _record_terminal_result(self, item: WorkItem) -> None:
+        """Aggregate one completed/resumable item and trim detailed retention.
+
+        The local result collections are an operator convenience, not recovery
+        state.  Keep only the configured newest completed details while a
+        constant-space aggregate preserves the full run's pass/fail/total
+        reporting and exit status.
+        """
+        if item.result is None or item.payload.get("_summary_recorded", False):
+            return
+        item.payload["_summary_recorded"] = True
+        self._terminal_summary.record(item)
+        self._seen_item_ids.discard(id(item))
+
+        # Move a completed item to the tail so the bounded window is ordered
+        # by terminal completion rather than by its initial seed time.  An
+        # item can be absent in narrow direct unit tests; runtime items are
+        # always tracked by _push_item first.
+        for index, candidate in enumerate(self.items):
+            if candidate is item:
+                self.items.pop(index)
+                self.items.append(item)
+                break
+
+        retained = self.config.terminal_detail_capacity
+        completed = [
+            index
+            for index, candidate in enumerate(self.items)
+            if candidate.payload.get("_summary_recorded", False)
+        ]
+        for index in reversed(completed[:-retained]):
+            self.items.pop(index)
+
+        # The sink may record a result before a cleanup job completes.  At
+        # most C such items can coexist, so these lists are bounded by N + C
+        # between records and by N after every terminal completion.
+        if len(self.ledger) > retained:
+            del self.ledger[:-retained]
+        if len(self.preserved) > retained:
+            del self.preserved[:-retained]
 
     # -- stage-queue leases -------------------------------------------------
 
@@ -1203,6 +1286,7 @@ class Coordinator:
             reason=f"resumable at {item.stage.value}",
             final_stage=item.stage,
         )
+        self._record_terminal_result(item)
         item.add_history_event(item.stage, item.state, note="interrupted; resumable")
         self._record_event("resumable", self._item_key(item), item.stage.value, item.state)
         logger.info(
@@ -1707,6 +1791,7 @@ class Coordinator:
         if item.stage is StageName.FINISHED:
             # Sink outcomes are terminal: the result is already recorded.
             self._record_event("done", self._item_key(item), outcome.note)
+            self._record_terminal_result(item)
             self._release_source_lease(item)
             self._release_work_permit(item)
             return
@@ -1796,6 +1881,7 @@ class Coordinator:
             if not item.payload.get("_recorded", False):
                 self.ledger.append(item.result)
                 item.payload["_recorded"] = True
+            self._record_terminal_result(item)
             self._release_source_lease(item)
             self._release_work_permit(item)
             return
