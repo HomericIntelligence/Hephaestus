@@ -288,6 +288,13 @@ class FakeStageGitHub(FakeGitHub):
                         ),
                         "automation_owned": not is_human,
                         "author": "hephaestus[bot]" if not is_human else "reviewer",
+                        "authors": ["hephaestus[bot]" if not is_human else "reviewer"],
+                        "comments": [
+                            {
+                                "author": "hephaestus[bot]" if not is_human else "reviewer",
+                                "body": posted_comment.get("body") or "finding",
+                            }
+                        ],
                     }
                 )
         return threads
@@ -296,14 +303,28 @@ class FakeStageGitHub(FakeGitHub):
         self._log("resolve_automation_threads", pr_number)
         return self._resolve_count
 
-    def resolve_advisory_threads(self, pr_number: int, thread_ids: list[str]) -> int:
+    def resolve_advisory_threads(
+        self,
+        pr_number: int,
+        thread_receipts: list[dict[str, Any]],
+        expected_head_sha: str,
+    ) -> int | None:
         """Resolve only the supplied advisory automation thread ids."""
+        del expected_head_sha
+        thread_ids = [str(receipt["id"]) for receipt in thread_receipts]
         self._log("resolve_advisory_threads", pr_number, tuple(thread_ids))
         self._resolved_review_threads.update(thread_ids)
         return len(thread_ids)
 
-    def resolve_validated_review_threads(self, pr_number: int, thread_ids: list[str]) -> int:
+    def resolve_validated_review_threads(
+        self,
+        pr_number: int,
+        thread_receipts: list[dict[str, Any]],
+        expected_head_sha: str,
+    ) -> int | None:
         """Resolve only the stage's durable process-owned thread receipts."""
+        del expected_head_sha
+        thread_ids = [str(receipt["id"]) for receipt in thread_receipts]
         self._log("resolve_validated_review_threads", pr_number, tuple(thread_ids))
         self._resolved_review_threads.update(thread_ids)
         return len(thread_ids)

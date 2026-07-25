@@ -1676,6 +1676,72 @@ class TestUnresolvedThreads:
         with pytest.raises(RuntimeError, match="api"):
             adapter.count_unresolved_threads(7)
 
+    @pytest.mark.parametrize(
+        "pr_state",
+        [
+            pytest.param(
+                {"state": "OPEN", "headRefOid": "b" * 40, "autoMergeRequest": None},
+                id="head-drift",
+            ),
+            pytest.param(
+                {
+                    "state": "OPEN",
+                    "headRefOid": "a" * 40,
+                    "autoMergeRequest": {"enabledAt": "now"},
+                },
+                id="auto-merge-armed",
+            ),
+        ],
+    )
+    def test_validated_thread_resolution_rechecks_expected_unarmed_head(
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        pr_state: dict[str, Any],
+    ) -> None:
+        """A mutation-time head/arm mismatch resolves no review thread."""
+        receipt = {
+            "id": "process-thread",
+            "comments": [{"author": "hephaestus[bot]", "body": "finding"}],
+        }
+        live = {**receipt, "automation_owned": True}
+        monkeypatch.setattr(adapter, "gh_pr_state", lambda _pr: pr_state)
+        monkeypatch.setattr(adapter, "list_unresolved_review_threads", lambda _pr: [live])
+        resolve = MagicMock()
+        monkeypatch.setattr(github_api_mod, "gh_pr_resolve_thread", resolve)
+
+        assert adapter.resolve_validated_review_threads(42, [receipt], "a" * 40) is None
+        resolve.assert_not_called()
+
+    def test_advisory_resolution_requires_unchanged_process_receipt(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A same-login reply changes the receipt even when ownership says bot."""
+        receipt = {
+            "id": "process-thread",
+            "body": "<!-- hephaestus-severity: nitpick -->\nfinding",
+            "comments": [{"author": "mvillmow", "body": "finding"}],
+        }
+        live = {
+            **receipt,
+            "automation_owned": True,
+            "comments": [
+                {"author": "mvillmow", "body": "finding"},
+                {"author": "mvillmow", "body": "human reply"},
+            ],
+        }
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_state",
+            lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
+        )
+        monkeypatch.setattr(adapter, "list_unresolved_review_threads", lambda _pr: [live])
+        resolve = MagicMock()
+        monkeypatch.setattr(github_api_mod, "gh_pr_resolve_thread", resolve)
+
+        assert adapter.resolve_advisory_threads(42, [receipt], "a" * 40) == 0
+        resolve.assert_not_called()
+
 
 class TestGhPrState:
     """The merge_wait single PR-state read (re-housed CIDriver._gh_pr_state)."""
@@ -1993,7 +2059,16 @@ class TestSeverityMarker:
 
         counts = adapter.count_unresolved_threads_by_severity(42)
         if counts == (0, 1, 0):
-            resolved = adapter.resolve_advisory_threads(42, ["corrupt_thread_id"])
+            resolved = adapter.resolve_advisory_threads(
+                42,
+                [
+                    {
+                        "id": "corrupt_thread_id",
+                        "comments": [{"author": "automation-bot", "body": "Finding"}],
+                    }
+                ],
+                "a" * 40,
+            )
             if resolved == 1:
                 adapter.mark_pr_implementation_go(42)
 
@@ -2045,11 +2120,28 @@ class TestSeverityMarker:
         }
         monkeypatch.setattr(adapter, "_unresolved_threads", lambda pr: [mixed_thread])
         monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "automation-bot")
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_state",
+            lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
+        )
         resolve = MagicMock()
         monkeypatch.setattr(github_api_mod, "gh_pr_resolve_thread", resolve)
 
         assert adapter.count_unresolved_threads_by_severity(42) == (0, 0, 1)
-        assert adapter.resolve_advisory_threads(42, ["mixed_thread_id"]) == 0
+        assert (
+            adapter.resolve_advisory_threads(
+                42,
+                [
+                    {
+                        "id": "mixed_thread_id",
+                        "comments": [{"author": "automation-bot", "body": "Nit"}],
+                    }
+                ],
+                "a" * 40,
+            )
+            == 0
+        )
         resolve.assert_not_called()
 
     def test_resolve_validated_threads_rechecks_fresh_automation_ownership(
@@ -2060,17 +2152,44 @@ class TestSeverityMarker:
             adapter,
             "list_unresolved_review_threads",
             lambda _pr: [
-                {"id": "process-only", "automation_owned": True},
-                {"id": "human-replied", "automation_owned": False},
+                {
+                    "id": "a-process-only",
+                    "automation_owned": True,
+                    "comments": [{"author": "automation-bot", "body": "one"}],
+                },
+                {
+                    "id": "z-human-replied",
+                    "automation_owned": False,
+                    "comments": [
+                        {"author": "automation-bot", "body": "two"},
+                        {"author": "reviewer", "body": "human reply"},
+                    ],
+                },
             ],
+        )
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_state",
+            lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
         )
         resolve = MagicMock()
         monkeypatch.setattr(github_api_mod, "gh_pr_resolve_thread", resolve)
 
         assert (
             adapter.resolve_validated_review_threads(
-                42, ["process-only", "human-replied", "not-live"]
+                42,
+                [
+                    {
+                        "id": "a-process-only",
+                        "comments": [{"author": "automation-bot", "body": "one"}],
+                    },
+                    {
+                        "id": "z-human-replied",
+                        "comments": [{"author": "automation-bot", "body": "two"}],
+                    },
+                ],
+                "a" * 40,
             )
-            == 1
+            == 0
         )
-        resolve.assert_called_once_with("process-only", dry_run=False)
+        resolve.assert_not_called()

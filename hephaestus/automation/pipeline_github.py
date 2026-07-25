@@ -172,6 +172,84 @@ def _thread_severity_is_blocking(thread: dict[str, Any]) -> bool:
     return severity is None or severity in BLOCKING_SEVERITIES
 
 
+def _durable_thread_id(thread: dict[str, Any]) -> str | None:
+    """Return a non-empty GraphQL review-thread id from one host fact."""
+    thread_id = thread.get("id") or thread.get("thread_id")
+    if not isinstance(thread_id, str):
+        return None
+    thread_id = thread_id.strip()
+    return thread_id or None
+
+
+def _thread_comment_signature(thread: dict[str, Any]) -> tuple[tuple[str, str], ...] | None:
+    """Return the complete participant/body proof for one thread receipt."""
+    comments = thread.get("comments")
+    if not isinstance(comments, list) or not comments:
+        return None
+    signature: list[tuple[str, str]] = []
+    for comment in comments:
+        if not isinstance(comment, dict):
+            return None
+        author = comment.get("author")
+        body = comment.get("body")
+        if not isinstance(author, str) or not author.strip() or not isinstance(body, str):
+            return None
+        signature.append((author.strip(), body))
+    return tuple(signature)
+
+
+def _receipt_map(thread_receipts: list[dict[str, Any]]) -> dict[str, dict[str, Any]] | None:
+    """Validate process-created immutable receipts before a thread mutation."""
+    receipts: dict[str, dict[str, Any]] = {}
+    for receipt in thread_receipts:
+        if not isinstance(receipt, dict):
+            return None
+        thread_id = _durable_thread_id(receipt)
+        if thread_id is None or thread_id in receipts or _thread_comment_signature(receipt) is None:
+            return None
+        receipts[thread_id] = receipt
+    return receipts
+
+
+def _is_open_unarmed_at_head(pr_state: dict[str, Any] | None, expected_head_sha: str) -> bool:
+    """Return whether one fresh state read proves the requested mutable head."""
+    return bool(
+        expected_head_sha
+        and isinstance(pr_state, dict)
+        and pr_state.get("state") == "OPEN"
+        and pr_state.get("autoMergeRequest") is None
+        and pr_state.get("headRefOid") == expected_head_sha
+    )
+
+
+def _matching_live_receipts(
+    threads: list[dict[str, Any]],
+    receipts: dict[str, dict[str, Any]],
+    *,
+    advisory_only: bool,
+) -> dict[str, dict[str, Any]] | None:
+    """Prove each requested receipt is still an identical complete live thread."""
+    live_by_id: dict[str, dict[str, Any]] = {}
+    for thread in threads:
+        if not isinstance(thread, dict):
+            return None
+        thread_id = _durable_thread_id(thread)
+        if thread_id is None or thread_id in live_by_id:
+            return None
+        live_by_id[thread_id] = thread
+    matched: dict[str, dict[str, Any]] = {}
+    for thread_id, receipt in receipts.items():
+        live = live_by_id.get(thread_id)
+        if (
+            live is None
+            or _thread_comment_signature(live) != _thread_comment_signature(receipt)
+            or (advisory_only and _thread_severity_is_blocking(live))
+        ):
+            return None
+        matched[thread_id] = live
+    return matched
+
+
 class PipelineGitHub:
     """Coordinator-owned GitHub accessor implementing ``StageGitHub``.
 
@@ -883,39 +961,87 @@ class PipelineGitHub:
                 resolved += 1
         return resolved
 
-    def resolve_advisory_threads(self, pr_number: int, thread_ids: list[str]) -> int:
-        """Resolve only fresh automation-owned non-blocking thread ids."""
-        if self._skip(f"resolve advisory threads on PR #{pr_number}"):
-            return 0
-        requested = {str(thread_id) for thread_id in thread_ids}
-        threads = self.list_unresolved_review_threads(pr_number)
-        resolved = 0
-        for thread in threads:
-            thread_id = str(thread.get("id") or "")
-            if (
-                thread_id in requested
-                and thread.get("automation_owned") is True
-                and not _thread_severity_is_blocking(thread)
-            ):
-                github_api.gh_pr_resolve_thread(thread_id, dry_run=self.dry_run)
-                resolved += 1
-        return resolved
+    def _resolve_process_thread_receipts(
+        self,
+        pr_number: int,
+        thread_receipts: list[dict[str, Any]],
+        expected_head_sha: str,
+        *,
+        advisory_only: bool,
+    ) -> int | None:
+        """Resolve unchanged receipts, revalidating the mutable PR before each write.
 
-    def resolve_validated_review_threads(self, pr_number: int, thread_ids: list[str]) -> int:
-        """Resolve only host-validated process receipts that remain automation-only."""
-        if self._skip(f"resolve validated review threads on PR #{pr_number}"):
+        A process receipt is the only proof that this loop created a thread.
+        Login names are deliberately not authority: a human may share the
+        authenticated account.  A ``None`` return is reserved for a changed,
+        closed, or newly armed PR, so the stage can discard its head proof and
+        restart instead of writing against a newer review target.
+        """
+        receipts = _receipt_map(thread_receipts)
+        if receipts is None:
             return 0
-        requested = {str(thread_id).strip() for thread_id in thread_ids if str(thread_id).strip()}
-        if not requested:
+        if not receipts or self._skip(f"resolve review threads on PR #{pr_number}"):
             return 0
-        threads = self.list_unresolved_review_threads(pr_number)
-        resolved = 0
-        for thread in threads:
-            thread_id = str(thread.get("id") or "").strip()
-            if thread_id in requested and thread.get("automation_owned") is True:
-                github_api.gh_pr_resolve_thread(thread_id, dry_run=self.dry_run)
-                resolved += 1
-        return resolved
+        # Validate the complete requested set before the first external
+        # mutation. This turns a reply to any receipt into an all-or-nothing
+        # no-write result rather than resolving an earlier sorted thread first.
+        if (
+            _matching_live_receipts(
+                self.list_unresolved_review_threads(pr_number),
+                receipts,
+                advisory_only=advisory_only,
+            )
+            is None
+        ):
+            return 0
+        for thread_id in sorted(receipts):
+            # Re-read full participant facts for each write. It closes a
+            # reply/change race after the all-or-nothing preflight above.
+            if (
+                _matching_live_receipts(
+                    self.list_unresolved_review_threads(pr_number),
+                    {thread_id: receipts[thread_id]},
+                    advisory_only=advisory_only,
+                )
+                is None
+            ):
+                return 0
+            # This state read is intentionally immediately adjacent to the
+            # external resolution mutation. GitHub exposes no conditional
+            # resolve-thread mutation, so every individual write gets its
+            # own fresh exact-head/open/unarmed proof.
+            if not _is_open_unarmed_at_head(self.gh_pr_state(pr_number), expected_head_sha):
+                return None
+            github_api.gh_pr_resolve_thread(thread_id, dry_run=self.dry_run)
+        return len(receipts)
+
+    def resolve_advisory_threads(
+        self,
+        pr_number: int,
+        thread_receipts: list[dict[str, Any]],
+        expected_head_sha: str,
+    ) -> int | None:
+        """Resolve only unchanged process-owned advisory-thread receipts."""
+        return self._resolve_process_thread_receipts(
+            pr_number,
+            thread_receipts,
+            expected_head_sha,
+            advisory_only=True,
+        )
+
+    def resolve_validated_review_threads(
+        self,
+        pr_number: int,
+        thread_receipts: list[dict[str, Any]],
+        expected_head_sha: str,
+    ) -> int | None:
+        """Resolve only validator-confirmed unchanged process-thread receipts."""
+        return self._resolve_process_thread_receipts(
+            pr_number,
+            thread_receipts,
+            expected_head_sha,
+            advisory_only=False,
+        )
 
     def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
         """Read shared PR state for seed, implementation, and merge_wait.

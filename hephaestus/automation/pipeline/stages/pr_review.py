@@ -314,8 +314,6 @@ def _thread_ids(entries: Any) -> set[str]:
 def _surviving_threads(
     threads: list[dict[str, Any]],
     validation_result: Any,
-    *,
-    retain_unaddressed_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Filter the round's reviewer threads through the validator's verdict.
 
@@ -357,10 +355,7 @@ def _surviving_threads(
             if not isinstance(entry, dict):
                 continue
             thread_id = str(entry.get("thread_id") or entry.get("id") or "")
-            if thread_id and (
-                thread_id in present_ids
-                or (retain_unaddressed_ids is not None and thread_id in retain_unaddressed_ids)
-            ):
+            if thread_id and thread_id in present_ids:
                 continue  # reviewer already re-raised it this round
             detail = (
                 str(entry.get("detail") or "").strip()
@@ -374,21 +369,14 @@ def _surviving_threads(
                     "side": "RIGHT",
                     "severity": "major",
                     "body": f"Reopened (prior round, still unaddressed): {detail}",
+                    # The live reconciliation below uses this host-presented
+                    # identity to suppress a replacement only when the old
+                    # receipt is still actually open. A stale validation
+                    # snapshot alone must never lose a finding.
+                    "prior_thread_id": thread_id,
                 }
             )
     return surviving
-
-
-def _validation_snapshot_ids(item: WorkItem) -> set[str]:
-    """Collect only well-formed host-read ids presented to this validation turn."""
-    facts = item.payload.get("validation_process_threads")
-    if not isinstance(facts, list):
-        return set()
-    return {
-        thread_id
-        for fact in facts
-        if isinstance(fact, dict) and (thread_id := _durable_thread_id(fact)) is not None
-    }
 
 
 def _is_postable_finding(thread: dict[str, Any]) -> bool:
@@ -481,7 +469,14 @@ def _process_thread_records(item: WorkItem) -> dict[str, dict[str, Any]] | None:
 def _live_process_threads(
     records: dict[str, dict[str, Any]], live_threads: list[dict[str, Any]]
 ) -> dict[str, dict[str, Any]] | None:
-    """Intersect process post receipts with the fresh, fully-read live set."""
+    """Return only fresh live threads that exactly still match process receipts.
+
+    A retained id is not enough to call a thread a live process receipt: a
+    human may have replied through the same login or otherwise changed it.
+    Callers use this helper for duplicate suppression, so returning only exact
+    participant/body matches ensures a validator finding is re-posted whenever
+    the prior thread was resolved or has ceased to be this process's receipt.
+    """
     live_by_id: dict[str, dict[str, Any]] = {}
     for thread in live_threads:
         if not isinstance(thread, dict):
@@ -490,7 +485,15 @@ def _live_process_threads(
         if thread_id is None or thread_id in live_by_id:
             return None
         live_by_id[thread_id] = thread
-    return {thread_id: live_by_id[thread_id] for thread_id in records if thread_id in live_by_id}
+    matched: dict[str, dict[str, Any]] = {}
+    for thread_id, receipt in records.items():
+        live = live_by_id.get(thread_id)
+        if live is None:
+            continue
+        receipt_signature = _thread_comment_signature(receipt)
+        if receipt_signature is not None and receipt_signature == _thread_comment_signature(live):
+            matched[thread_id] = live
+    return matched
 
 
 def _finding_key(thread: dict[str, Any]) -> tuple[str, int, str, str] | None:
@@ -526,6 +529,9 @@ def _without_duplicate_live_process_findings(
     }
     retained: list[dict[str, Any]] = []
     for finding in findings:
+        prior_thread_id = finding.get("prior_thread_id")
+        if isinstance(prior_thread_id, str) and prior_thread_id in live_process_threads:
+            continue
         key = _finding_key(finding)
         if key is not None and key in existing:
             continue
@@ -565,10 +571,10 @@ def _validator_resolution_ids(validation_result: Any, expected_ids: set[str]) ->
     return expected_ids - unaddressed
 
 
-def _safe_process_resolution_ids(
+def _safe_process_resolution_receipts(
     item: WorkItem, live_threads: list[dict[str, Any]]
-) -> list[str] | None:
-    """Return only live validator-confirmed ids with unchanged participants."""
+) -> list[dict[str, Any]] | None:
+    """Return only live validator-confirmed receipts with unchanged participants."""
     records = _process_thread_records(item)
     snapshot = item.payload.get("validation_process_threads", [])
     if records is None or not isinstance(snapshot, list):
@@ -587,18 +593,47 @@ def _safe_process_resolution_ids(
     live_process = _live_process_threads(records, live_threads)
     if live_process is None:
         return None
-    safe: list[str] = []
+    safe: list[dict[str, Any]] = []
     for thread_id in sorted(confirmed):
         record = records[thread_id]
         live = live_process.get(thread_id)
-        if live is None or not _thread_is_automation_owned(live):
+        if live is None:
             continue
         initial_signature = _thread_comment_signature(record)
         current_signature = _thread_comment_signature(live)
         if initial_signature is None or initial_signature != current_signature:
             continue
-        safe.append(thread_id)
+        safe.append(record)
     return safe
+
+
+def _safe_process_advisory_receipts(
+    item: WorkItem, live_threads: list[dict[str, Any]]
+) -> list[dict[str, Any]] | None:
+    """Prove every advisory thread is an unchanged receipt from this process.
+
+    Author logins are not evidence of authorship: a human can reply through
+    the same account as the automation host. Positive transitions therefore
+    accept advisory threads only when their complete participant/body facts
+    still exactly equal the host-read receipt recorded at post time.
+    """
+    records = _process_thread_records(item)
+    if records is None:
+        return None
+    receipts: list[dict[str, Any]] = []
+    for live in live_threads:
+        if _thread_is_blocking(live):
+            continue
+        thread_id = _durable_thread_id(live)
+        receipt = records.get(thread_id) if thread_id is not None else None
+        if (
+            receipt is None
+            or _thread_comment_signature(receipt) is None
+            or _thread_comment_signature(receipt) != _thread_comment_signature(live)
+        ):
+            return None
+        receipts.append(receipt)
+    return receipts
 
 
 def _thread_is_blocking(thread: dict[str, Any]) -> bool:
@@ -1210,18 +1245,13 @@ class PrReviewStage(Stage):
             item.payload["address_error"] = True
 
     @staticmethod
-    def _reconcile_process_threads_before_post(
-        item: WorkItem, ctx: StageContext, threads: list[dict[str, Any]]
-    ) -> list[dict[str, Any]] | StepResult:
-        """Resolve validated process receipts, then remove only duplicate findings."""
+    def _resolve_validated_process_threads(
+        item: WorkItem,
+        ctx: StageContext,
+    ) -> StepResult | None:
+        """Resolve only validator-confirmed process receipts on the reviewed head."""
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
-        records = _process_thread_records(item)
-        if records is None:
-            item.payload["review_audit_failure"] = True
-            return Continue(next_state=EVAL)
-        if not records:
-            return threads
         arm_outcome = PrReviewStage._require_reviewed_unarmed(item, ctx)
         if arm_outcome is not None:
             return arm_outcome
@@ -1235,18 +1265,51 @@ class PrReviewStage(Stage):
             )
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
-        resolution_ids = _safe_process_resolution_ids(item, current_live)
-        if resolution_ids:
-            try:
-                ctx.github.resolve_validated_review_threads(item.pr, resolution_ids)
-            except Exception as error:
-                logger.warning(
-                    "pr_review:%s: validated thread resolution failed (%s)",
-                    item.issue,
-                    type(error).__name__,
-                )
-                item.payload["review_audit_failure"] = True
-                return Continue(next_state=EVAL)
+        resolution_receipts = _safe_process_resolution_receipts(item, current_live)
+        if resolution_receipts is None:
+            item.payload["review_audit_failure"] = True
+            return Continue(next_state=EVAL)
+        if not resolution_receipts:
+            return None
+        expected_head_sha = str(item.payload.get("reviewed_pr_head_sha") or "")
+        try:
+            resolved = ctx.github.resolve_validated_review_threads(
+                item.pr,
+                resolution_receipts,
+                expected_head_sha,
+            )
+        except Exception as error:
+            logger.warning(
+                "pr_review:%s: validated thread resolution failed (%s)",
+                item.issue,
+                type(error).__name__,
+            )
+            item.payload["review_audit_failure"] = True
+            return Continue(next_state=EVAL)
+        if resolved is None:
+            item.payload.pop("reviewed_pr_head_sha", None)
+            return Continue(next_state=REVIEW_WAIT)
+        if resolved != len(resolution_receipts):
+            item.payload["review_audit_failure"] = True
+            return Continue(next_state=EVAL)
+        return None
+
+    @staticmethod
+    def _reconcile_process_threads_before_post(
+        item: WorkItem, ctx: StageContext, threads: list[dict[str, Any]]
+    ) -> list[dict[str, Any]] | StepResult:
+        """Resolve validated process receipts, then remove only duplicate findings."""
+        if item.pr is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        records = _process_thread_records(item)
+        if records is None:
+            item.payload["review_audit_failure"] = True
+            return Continue(next_state=EVAL)
+        if not records:
+            return threads
+        resolution_outcome = PrReviewStage._resolve_validated_process_threads(item, ctx)
+        if resolution_outcome is not None:
+            return resolution_outcome
         try:
             current_live = ctx.github.list_unresolved_review_threads(item.pr)
         except Exception as error:
@@ -1304,20 +1367,16 @@ class PrReviewStage(Stage):
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
         raw_threads = [dict(t) for t in item.payload.get("review_threads") or []]
-        threads = _surviving_threads(
-            raw_threads,
-            item.payload.get("validation_result"),
-            retain_unaddressed_ids=_validation_snapshot_ids(item),
-        )
+        threads = _surviving_threads(raw_threads, item.payload.get("validation_result"))
         item.payload["raw_review_threads"] = raw_threads
-        if any(not _is_postable_finding(thread) for thread in threads):
-            item.payload["review_audit_failure"] = True
-            return Continue(next_state=EVAL)
 
         reconciled = self._reconcile_process_threads_before_post(item, ctx, threads)
         if not isinstance(reconciled, list):
             return reconciled
         threads = reconciled
+        if any(not _is_postable_finding(thread) for thread in threads):
+            item.payload["review_audit_failure"] = True
+            return Continue(next_state=EVAL)
         # The surviving audit set is what gets posted. Classification and
         # addressing use the normalized live read-back installed below.
         item.payload["review_threads"] = threads
@@ -1990,16 +2049,19 @@ class PrReviewStage(Stage):
                 return no_go
             return Continue(next_state=REVIEW_WAIT)
         if advisory:
+            advisory_receipts = _safe_process_advisory_receipts(item, live_threads)
+            if advisory_receipts is None or len(advisory_receipts) != advisory:
+                return StageOutcome(Disposition.FINISH_FAIL, "advisory_threads_unresolvable")
             arm_outcome = PrReviewStage._require_reviewed_unarmed(item, ctx)
             if arm_outcome is not None:
                 return arm_outcome
-            advisory_ids = [
-                str(thread["id"])
-                for thread in live_threads
-                if thread.get("id") and _thread_is_automation_owned(thread)
-            ]
+            expected_head_sha = str(item.payload.get("reviewed_pr_head_sha") or "")
             try:
-                resolved = ctx.github.resolve_advisory_threads(pr_number, advisory_ids)
+                resolved = ctx.github.resolve_advisory_threads(
+                    pr_number,
+                    advisory_receipts,
+                    expected_head_sha,
+                )
                 refreshed = ctx.github.list_unresolved_review_threads(pr_number)
             except Exception as error:
                 logger.warning(
@@ -2008,6 +2070,9 @@ class PrReviewStage(Stage):
                     type(error).__name__,
                 )
                 return StageOutcome(Disposition.FINISH_FAIL, "review_threads_unavailable")
+            if resolved is None:
+                item.payload.pop("reviewed_pr_head_sha", None)
+                return Continue(next_state=REVIEW_WAIT)
             refreshed_blocking, refreshed_advisory, refreshed_human = _thread_counts(refreshed)
             if refreshed_human:
                 return PrReviewStage._handle_human_blocked(item, refreshed_human, ctx)
@@ -2016,7 +2081,7 @@ class PrReviewStage(Stage):
                 if no_go is not None:
                     return no_go
                 return Continue(next_state=REVIEW_WAIT)
-            if refreshed_advisory or resolved < len(advisory_ids):
+            if refreshed_advisory or resolved != len(advisory_receipts):
                 return StageOutcome(Disposition.FINISH_FAIL, "advisory_threads_unresolved")
             live_threads = refreshed
         arm_outcome = PrReviewStage._require_reviewed_unarmed(item, ctx)

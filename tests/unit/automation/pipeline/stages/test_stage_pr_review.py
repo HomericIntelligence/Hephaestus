@@ -1011,8 +1011,13 @@ class TestProcessOwnedReviewThreadLifecycle:
                 return [dict(thread) for thread in self.live]
 
             def resolve_validated_review_threads(
-                self, pr_number: int, thread_ids: list[str]
-            ) -> int:
+                self,
+                pr_number: int,
+                thread_receipts: list[dict[str, Any]],
+                expected_head_sha: str,
+            ) -> int | None:
+                del expected_head_sha
+                thread_ids = [str(receipt["id"]) for receipt in thread_receipts]
                 self._log("resolve_validated_review_threads", pr_number, tuple(thread_ids))
                 requested = set(thread_ids)
                 self.live = [thread for thread in self.live if thread["id"] not in requested]
@@ -1124,6 +1129,135 @@ class TestProcessOwnedReviewThreadLifecycle:
         assert isinstance(result.job, AgentJob)
         assert json.loads(result.job.prompt_kwargs["prior_comments_json"]) == [process]
 
+    def test_externally_resolved_unaddressed_receipt_is_reopened(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A vanished prior thread cannot suppress the validator's re-opened finding."""
+
+        class ExternallyResolvedGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__()
+                self.live: list[dict[str, Any]] = []
+                self.posted: list[dict[str, Any]] = []
+
+            def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+                del pr_number
+                return [dict(thread) for thread in self.live]
+
+            def post_review_threads(
+                self, pr_number: int, threads: list[dict[str, Any]], summary: str
+            ) -> list[str]:
+                del summary
+                self.posted = [dict(thread) for thread in threads]
+                posted_ids = [f"reopened-{index}" for index, _ in enumerate(threads)]
+                for thread_id, thread in zip(posted_ids, threads, strict=True):
+                    self.live.append(
+                        TestProcessOwnedReviewThreadLifecycle._thread(
+                            thread_id,
+                            int(thread["line"]),
+                            str(thread["body"]),
+                        )
+                    )
+                self._log("gh_pr_review_post", pr_number, "COMMENT")
+                return posted_ids
+
+        prior = self._thread("process-1", 3, "fix this")
+        github = ExternallyResolvedGitHub()
+        item = make_work_item(issue=1, pr=1001, state="POST")
+        item.payload.update(
+            {
+                "reviewed_pr_head_sha": "a" * 40,
+                "process_review_threads": [prior],
+                "validation_process_threads": [prior],
+                "validation_result": {
+                    "unaddressed": [
+                        {
+                            "thread_id": "process-1",
+                            "path": "a.py",
+                            "line": 3,
+                            "detail": "fix this",
+                        }
+                    ],
+                    "wont_fix": [],
+                },
+                "review_audit": ReviewAudit("F", "follow-up", (), "", valid=True),
+                "review_threads": [],
+            }
+        )
+
+        result = PrReviewStage().step(item, make_ctx(github=github))
+
+        assert result == Continue(next_state="DIFFICULTY_WAIT")
+        assert len(github.posted) == 1
+        assert github.posted[0]["body"] == "Reopened (prior round, still unaddressed): fix this"
+
+    def test_changed_unaddressed_receipt_is_reopened(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A reply makes an old receipt ineligible to suppress a re-open."""
+
+        class ChangedReceiptGitHub(FakeStageGitHub):
+            def __init__(self, live: list[dict[str, Any]]) -> None:
+                super().__init__()
+                self.live = live
+                self.posted: list[dict[str, Any]] = []
+
+            def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+                del pr_number
+                return [dict(thread) for thread in self.live]
+
+            def post_review_threads(
+                self, pr_number: int, threads: list[dict[str, Any]], summary: str
+            ) -> list[str]:
+                del summary
+                self.posted = [dict(thread) for thread in threads]
+                posted_ids = [f"reopened-{index}" for index, _ in enumerate(threads)]
+                for thread_id, thread in zip(posted_ids, threads, strict=True):
+                    self.live.append(
+                        TestProcessOwnedReviewThreadLifecycle._thread(
+                            thread_id,
+                            int(thread["line"]),
+                            str(thread["body"]),
+                        )
+                    )
+                self._log("gh_pr_review_post", pr_number, "COMMENT")
+                return posted_ids
+
+        prior = self._thread("process-1", 3, "fix this")
+        changed = dict(prior)
+        changed["comments"] = [
+            {"author": "hephaestus[bot]", "body": "fix this"},
+            {"author": "hephaestus[bot]", "body": "human follow-up"},
+        ]
+        github = ChangedReceiptGitHub([changed])
+        item = make_work_item(issue=1, pr=1001, state="POST")
+        item.payload.update(
+            {
+                "reviewed_pr_head_sha": "a" * 40,
+                "process_review_threads": [prior],
+                "validation_process_threads": [prior],
+                "validation_result": {
+                    "unaddressed": [
+                        {
+                            "thread_id": "process-1",
+                            "path": "a.py",
+                            "line": 3,
+                            "detail": "fix this",
+                        }
+                    ],
+                    "wont_fix": [],
+                },
+                "review_audit": ReviewAudit("F", "follow-up", (), "", valid=True),
+                "review_threads": [],
+            }
+        )
+
+        result = PrReviewStage().step(item, make_ctx(github=github))
+
+        assert result == Continue(next_state="DIFFICULTY_WAIT")
+        assert len(github.posted) == 1
+        assert github.posted[0]["body"] == "Reopened (prior round, still unaddressed): fix this"
+
     @pytest.mark.parametrize(
         ("pr_state", "validation_result", "authors"),
         [
@@ -1171,8 +1305,13 @@ class TestProcessOwnedReviewThreadLifecycle:
                 return [dict(thread) for thread in self.live]
 
             def resolve_validated_review_threads(
-                self, pr_number: int, thread_ids: list[str]
-            ) -> int:
+                self,
+                pr_number: int,
+                thread_receipts: list[dict[str, Any]],
+                expected_head_sha: str,
+            ) -> int | None:
+                del expected_head_sha
+                thread_ids = [str(receipt["id"]) for receipt in thread_receipts]
                 self._log("resolve_validated_review_threads", pr_number, tuple(thread_ids))
                 return len(thread_ids)
 
@@ -1206,6 +1345,51 @@ class TestProcessOwnedReviewThreadLifecycle:
         assert not any(
             name == "resolve_validated_review_threads" for name, _ in github.mutation_log
         )
+
+    def test_validated_resolution_guard_race_restarts_without_thread_write(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A mutation-time PR guard failure discards the stale review proof."""
+
+        class GuardRaceGitHub(FakeStageGitHub):
+            def __init__(self, live: dict[str, Any]) -> None:
+                super().__init__()
+                self.live = live
+
+            def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+                del pr_number
+                return [dict(self.live)]
+
+            def resolve_validated_review_threads(
+                self,
+                pr_number: int,
+                thread_receipts: list[dict[str, Any]],
+                expected_head_sha: str,
+            ) -> int | None:
+                del pr_number, thread_receipts, expected_head_sha
+                # The real adapter returns None when its immediately-before-
+                # mutation exact-head/open/unarmed read detects the race.
+                return None
+
+        process = self._thread("process-1", 3, "fix this")
+        github = GuardRaceGitHub(process)
+        item = make_work_item(issue=1, pr=1001, state="POST")
+        item.payload.update(
+            {
+                "reviewed_pr_head_sha": "a" * 40,
+                "process_review_threads": [process],
+                "validation_process_threads": [process],
+                "validation_result": {"unaddressed": [], "wont_fix": []},
+                "review_audit": ReviewAudit("A", "clean", (), "", valid=True),
+                "review_threads": [],
+            }
+        )
+
+        result = PrReviewStage().step(item, make_ctx(github=github))
+
+        assert result == Continue(next_state="REVIEW_WAIT")
+        assert "reviewed_pr_head_sha" not in item.payload
+        assert github.mutation_log == []
 
     def test_truncated_live_thread_facts_skip_validation_and_all_writes(
         self, make_ctx: Any, make_work_item: Any
@@ -1604,6 +1788,70 @@ class TestEvalVerdicts:
         assert github.mutation_log == []
 
     # Severity-aware GO gate tests (#1856)
+    def test_same_login_human_reply_to_process_advisory_thread_blocks_go(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A reply sharing the host login is not proof the process wrote it."""
+
+        class SameLoginReplyGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__()
+                self.live = {
+                    "id": "process-advisory",
+                    "path": "a.py",
+                    "line": 3,
+                    "side": "RIGHT",
+                    "severity": "nitpick",
+                    "body": "<!-- hephaestus-severity: nitpick -->\noriginal finding",
+                    # The production adapter sets this from current_login;
+                    # it is deliberately true despite the human reply.
+                    "automation_owned": True,
+                    "author": "mvillmow",
+                    "authors": ["mvillmow", "mvillmow"],
+                    "comments": [
+                        {"author": "mvillmow", "body": "original finding"},
+                        {"author": "mvillmow", "body": "human reply"},
+                    ],
+                }
+
+            def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+                del pr_number
+                return [dict(self.live)]
+
+            def resolve_advisory_threads(
+                self,
+                pr_number: int,
+                thread_receipts: list[dict[str, Any]],
+                expected_head_sha: str,
+            ) -> int | None:
+                del expected_head_sha
+                thread_ids = [str(receipt["id"]) for receipt in thread_receipts]
+                self._log("resolve_advisory_threads", pr_number, tuple(thread_ids))
+                return len(thread_ids)
+
+        stage = PrReviewStage()
+        github = SameLoginReplyGitHub()
+        item = make_work_item(issue=1, pr=1001, state="EVAL")
+        item.payload.update(
+            {
+                "review_verdict": _verdict("GO"),
+                "reviewed_pr_head_sha": "a" * 40,
+                "process_review_threads": [
+                    {
+                        **github.live,
+                        "authors": ["mvillmow"],
+                        "comments": [{"author": "mvillmow", "body": "original finding"}],
+                    }
+                ],
+            }
+        )
+
+        result = stage.step(item, make_ctx(github=github))
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "advisory_threads_unresolvable")
+        assert not any(name == "resolve_advisory_threads" for name, _ in github.mutation_log)
+        assert not any(name == "mark_pr_implementation_go" for name, _ in github.mutation_log)
+
     def test_go_with_only_minor_automation_thread_records_internal_go(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -1620,6 +1868,7 @@ class TestEvalVerdicts:
         ctx.config.enable_follow_up = False
         item = make_work_item(issue=1, pr=1001, state="EVAL")
         item.payload["review_verdict"] = _verdict("GO")
+        item.payload["process_review_threads"] = github.list_unresolved_review_threads(1001)
 
         result = stage.step(item, ctx)
 
@@ -1646,6 +1895,7 @@ class TestEvalVerdicts:
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, pr=1001, state="EVAL")
         item.payload["review_verdict"] = _verdict("GO")
+        item.payload["process_review_threads"] = github.list_unresolved_review_threads(1001)
 
         result = stage.step(item, ctx)
 
@@ -1696,7 +1946,14 @@ class TestEvalVerdicts:
                     }
                 ]
 
-            def resolve_advisory_threads(self, pr_number: int, thread_ids: list[str]) -> int:
+            def resolve_advisory_threads(
+                self,
+                pr_number: int,
+                thread_receipts: list[dict[str, Any]],
+                expected_head_sha: str,
+            ) -> int | None:
+                del expected_head_sha
+                thread_ids = [str(receipt["id"]) for receipt in thread_receipts]
                 self._log("resolve_advisory_threads", pr_number, tuple(thread_ids))
                 self.unknown_resolved = True
                 return len(thread_ids)

@@ -60,7 +60,7 @@ ALL_IMPLEMENTATION_STATE_LABELS = (STATE_IMPLEMENTATION_NO_GO, STATE_IMPLEMENTAT
 #: Manual override: when present on an issue OR its PR, automation normally
 #: skips that work item entirely (#1083). Unlike the plan/implementation state
 #: labels this is operator-applied (or auto-applied by the review loop when it
-#: exhausts its review budget without a GO — the budget starts at
+#: exhausts its review budget without clearing its structural review facts — the budget starts at
 #: MAX_REVIEW_ITERATIONS and extends up to MAX_REVIEW_ITERATIONS_HARD_CAP while
 #: the loop keeps making progress, #1554), and it is independent of all
 #: other state labels — so it deliberately lives outside the tuples above.
@@ -129,14 +129,14 @@ STATE_LABEL_SPECS: dict[str, dict[str, str]] = {
     STATE_IMPLEMENTATION_NO_GO: {
         "color": "d93f0b",  # red — blocked
         "description": (
-            "Implementation-reviewer's latest verdict was NOGO; implementer should revise."
+            "Current reviewed head has unresolved blocking implementation-review facts; revise."
         ),
     },
     STATE_IMPLEMENTATION_GO: {
         "color": "0e8a16",  # green — approved
         "description": (
-            "Implementation approved by reviewer; merge-wait still requires "
-            "the reviewed-head proof."
+            "Exact reviewed head has no unresolved blocking or human review facts; "
+            "merge-wait still requires the process-local reviewed-head proof."
         ),
     },
     STATE_SKIP: {
@@ -188,7 +188,7 @@ def is_plan_no_go(labels: Iterable[str]) -> bool:
 
 
 def is_implementation_go(labels: Iterable[str]) -> bool:
-    """Return ``True`` iff GO is the PR's sole implementation-state label."""
+    """Return ``True`` iff the PR carries the exclusive positive implementation label."""
     active = set(labels).intersection(ALL_IMPLEMENTATION_STATE_LABELS)
     return active == {STATE_IMPLEMENTATION_GO}
 

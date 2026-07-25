@@ -349,13 +349,15 @@ The required CI gate `pr-policy` and the PR reviewer enforce:
 
 `pr-policy` blocks PRs that fail those checks. The queue runs
 `$athena:pr-review` in its normal default profile when available, then applies
-`state:implementation-go` on GO. `merge_wait` verifies the process-local
-reviewed-head proof and stands by pending #2419; no queue stage mutates
-auto-merge.
-Normal review may collect CI/CD evidence and incorporate it into its binary
-verdict, but the loop does not change CI/CD. CI workflows and external
-artifacts never independently grant that authority. Branch protection and
-required reviews still govern whether GitHub merges the PR.
+`state:implementation-go` only after a structural audit, complete GitHub
+thread facts, and an exact reviewed-head/open/unarmed guard prove the positive
+transition. It confirms the exclusive label by readback. `merge_wait` verifies
+the process-local reviewed-head proof and stands by pending #2419; no queue
+stage mutates auto-merge. Review prose, grades, and model decision text are
+informational rather than authorization. Normal review may collect CI/CD
+evidence as context, but the loop does not change CI/CD. CI workflows and
+external artifacts never independently grant that authority. Branch protection
+and required reviews still govern whether GitHub merges the PR.
 
 ```bash
 # 1. Create feature branch
@@ -532,16 +534,19 @@ pool. Each agent job runs either **Claude Code** or **Codex**, chosen via the
 optional `--agent` CLI flag or auto-detected with a Claude preference when
 omitted (see `hephaestus.agents.runtime.add_agent_argument`).
 
-**Loop-owned approval policy:** `pr_review` invokes `$athena:pr-review` with
-its normal default behavior when available, otherwise uses its inline-review
-fallback. It posts inline findings and a final grade/GO-NOGO review; a GO
-applies `state:implementation-go`. Normal review may collect CI/CD evidence
-and incorporate it into its binary verdict, but the loop does not change CI/CD
-and no workflow, status, artifact, or lease independently authorizes it.
-The label is durable implementation-review state, not standalone merge
-authorization. `merge_wait` verifies the confirmed label plus the process-local
-reviewed-head proof and stands by pending #2419; no queue stage mutates
-auto-merge. See
+**Loop-owned implementation-state policy:** `pr_review` invokes
+`$athena:pr-review` with its normal default behavior when available, otherwise
+uses its inline-review fallback. It posts inline findings and an informational
+final audit summary. Only structural audit facts, a complete host-read thread
+snapshot, and a fresh exact-head/open/unarmed guard can select an implementation
+label; review prose, grades, and model decision text cannot. The positive label
+is written only when no unresolved blocking or human thread facts remain and
+is confirmed exclusive by readback. Normal review may collect CI/CD evidence as
+context, but the loop does not change CI/CD and no workflow, status, artifact,
+or lease independently authorizes it. The label is durable implementation-review
+state, not standalone merge authorization. `merge_wait` verifies the confirmed
+label plus the process-local reviewed-head proof and stands by pending #2419;
+no queue stage mutates auto-merge. See
 [`ADR-0014`](docs/adr/0014-confirmed-implementation-state-labels.md).
 
 | Queue stage | Module | Purpose |
@@ -636,7 +641,7 @@ review before merge.
 | `review_validator.py:_run_validation_session` | `Read,Glob,Grep` | Worktree validation of prior review comments; no write tools; GitHub updates stay in orchestrator code. |
 | `comment_difficulty.py:_run_classifier_session` | `Read,Glob,Grep` | Worktree comment classification; no write tools; result is parsed JSON only. |
 | `pr_review_core.py:_invoke_and_parse_review_session` | `Read,Glob,Grep,Bash,Skill,Agent,WebFetch` | Worktree PR analysis invokes the normal read-only `$athena:pr-review` workflow when available (or its inline fallback); the agent does not post reviews or mutate CI/CD. |
-| `pipeline/stages/pr_review.py:PrReviewStage._review_wait` | `Read,Glob,Grep,Bash,Skill,Agent,WebFetch` | The sole pipeline GO/NOGO review uses the read-only AgentJob policy and may invoke the normal read-only `$athena:pr-review` workflow; validation and difficulty jobs keep `Read,Glob,Grep`. |
+| `pipeline/stages/pr_review.py:PrReviewStage._review_wait` | `Read,Glob,Grep,Bash,Skill,Agent,WebFetch` | The sole pipeline structural PR audit uses the read-only AgentJob policy and may invoke the normal read-only `$athena:pr-review` workflow; validation and difficulty jobs keep `Read,Glob,Grep`. |
 | `_implement_phase.py:ImplementPhase._run_claude_impl_session` | `Read,Write,Edit,Glob,Grep,Bash` | Initial implementation runs in the isolated issue worktree and remains subject to review and branch protection. |
 | `_review_phase.py:ReviewPhase._resume_impl_with_feedback` | `Read,Write,Edit,Glob,Grep,Bash` | Review-feedback fixes resume the implementer in the isolated issue worktree and cannot bypass PR review or merge gates. |
 | `address_review_core.py:_invoke_address_fix_session` | `Read,Write,Edit,Glob,Grep,Bash,Task,Skill` | Review-thread fixes run in the isolated issue worktree; `Task`/`Skill` support per-comment sub-agents and skill-advisor routing. |
@@ -653,7 +658,7 @@ would run; no clone, worktree, rebase, or other Git mutation is executed.
 contract — enforced by the test suite — is that **all untrusted GitHub content**
 (issue bodies, PR diffs, reviewer comments, plan text) is wrapped with
 `_fence_untrusted()` using random nonces and accompanied by `_UNTRUSTED_NOTICE`.
-This prevents a hostile issue body from forging a verdict line or injecting
+This prevents a hostile issue body from forging a review-control line or injecting
 instructions that bypass the PR review loop. See the tests in
 `tests/unit/automation/test_prompts.py` for the regression coverage.
 
