@@ -1262,7 +1262,7 @@ class PipelineGitHub:
             return None
 
     def gh_pr_merge_readiness(self, pr_number: int) -> dict[str, Any] | None:
-        """Read operational readiness after a conditional normal merge returns 405.
+        """Read operational readiness before a conditional normal merge.
 
         This read classifies whether GitHub declined an otherwise valid merge
         because the PR is not ready, rather than treating CI/CD state as a

@@ -570,12 +570,13 @@ def make_ctx() -> Callable[..., StageContext]:
         dry_run: bool = False,
         github: FakeStageGitHub | None = None,
         paths: Any = None,
+        now_fn: Callable[[], float] | None = None,
         budget_fn: Callable[[str], int] | None = None,
         event_fn: Callable[[StageEvent], None] | None = None,
     ) -> StageContext:
         ticks = [0]
 
-        def now_fn() -> float:
+        def default_now_fn() -> float:
             ticks[0] += 1
             return 1000.0 + ticks[0]
 
@@ -585,7 +586,7 @@ def make_ctx() -> Callable[..., StageContext]:
             dry_run=dry_run,
             github=github if github is not None else FakeStageGitHub(),
             paths=paths if paths is not None else _Paths(),
-            now_fn=now_fn,
+            now_fn=now_fn if now_fn is not None else default_now_fn,
             budget_fn=budget_fn if budget_fn is not None else _budget_fn,
             event_fn=event_fn,
         )

@@ -5,11 +5,12 @@ remains blocked. The current queue verifies the label only with its
 current-process reviewed-head proof before every attempt. `merge_wait` may make
 a bounded sequence (default: five) of individual ordinary SHA-conditional REST
 squash-merge requests. Every request has fresh open-`main`, unarmed,
-exclusive-label, and reviewed-head admission. Only classified retryable HTTP
-405 readiness and unresolved transport ambiguity can timer-park another
-request. It does not invoke `gh pr merge`, create, disable, adopt, or poll
-native auto-merge, manage a merge queue, or use an administrator bypass. CI/CD
-is outside the loop.
+exclusive-label, and reviewed-head admission. Before a request it makes a
+bounded, read-only operational readiness wait (15 minutes per reviewed head)
+without spending a merge attempt. Readiness is not authorization: every actual
+request repeats the label, head, thread, and protection gates. It does not
+invoke `gh pr merge`, create, disable, adopt, or poll native auto-merge, manage
+a merge queue, or use an administrator bypass.
 
 ## Containment
 
