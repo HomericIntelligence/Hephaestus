@@ -97,6 +97,7 @@ def make_coordinator(
     seed_entries: list[list[SeedEntry]] | None = None,
     loops: int = 1,
     max_workers: int = 1,
+    parallel_repos: int = 1,
     dry_run: bool = False,
     serialize_file_overlap: bool = True,
     github: FakeStageGitHub | None = None,
@@ -108,6 +109,7 @@ def make_coordinator(
         repos=repos if repos is not None else ["repo-a"],
         loops=loops,
         max_workers=max_workers,
+        parallel_repos=parallel_repos,
         dry_run=dry_run,
         serialize_file_overlap=serialize_file_overlap,
         projects_dir=tmp_path,
@@ -302,7 +304,9 @@ class TestQuiescence:
             SeedEntry(kind="issue", identifier=1, stage=StageName.PLANNING, reason="poison"),
             SeedEntry(kind="issue", identifier=2, stage=StageName.PLAN_REVIEW, reason="ok"),
         ]
-        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch, seed_entries=[seed])
+        coordinator, _, _ = make_coordinator(
+            tmp_path, monkeypatch, seed_entries=[seed], parallel_repos=2
+        )
 
         class PoisonStage(StubStage):
             def step(self, item: WorkItem, ctx: Any) -> Any:
@@ -577,7 +581,9 @@ class TestAdmission:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """max_workers=1: the second same-repo item is not admitted."""
-        coordinator, pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=1)
+        coordinator, pool, _ = make_coordinator(
+            tmp_path, monkeypatch, max_workers=1, parallel_repos=2
+        )
         coordinator.stages[StageName.PLANNING] = StubStage(
             JobRequest(_agent_job(issue=1), on_done_state="VERIFY"),
             JobRequest(_agent_job(issue=2), on_done_state="VERIFY"),
@@ -591,10 +597,10 @@ class TestAdmission:
         assert coordinator.inflight_per_repo["repo-a"] == 1
         assert len(coordinator.queues[StageName.PLANNING]) == 1
 
-    def test_cap_is_per_repo_not_global(
+    def test_global_work_window_defers_second_repo_item(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Items of different repos are admitted independently."""
+        """The global work window caps in-flight jobs across repositories."""
         coordinator, pool, _ = make_coordinator(
             tmp_path, monkeypatch, repos=["repo-a", "repo-b"], max_workers=1
         )
@@ -603,13 +609,15 @@ class TestAdmission:
             JobRequest(_agent_job(repo="repo-b", issue=2), on_done_state="V"),
         )
         coordinator._push_item(_issue_item(1, repo="repo-a"), StageName.PLANNING, enter=True)
+        coordinator._drain_queues()
         coordinator._push_item(_issue_item(2, repo="repo-b"), StageName.PLANNING, enter=True)
-
         coordinator._drain_queues()
 
-        assert len(pool.submitted) == 2
+        assert len(pool.submitted) == 1
         assert coordinator.inflight_per_repo["repo-a"] == 1
-        assert coordinator.inflight_per_repo["repo-b"] == 1
+        assert coordinator.inflight_per_repo["repo-b"] == 0
+        queued_repos = [item.repo for item in coordinator.queues[StageName.PLANNING].snapshot()]
+        assert queued_repos == ["repo-b"]
 
 
 class TestRateBudget:
@@ -932,7 +940,9 @@ class TestImplementationAdmission:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """3+ copies of one issue: first dispatches, ALL later copies terminalize (#2057)."""
-        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        coordinator, _pool, _ = make_coordinator(
+            tmp_path, monkeypatch, max_workers=2, parallel_repos=2
+        )
         ran: list[int] = []
 
         class RecordingStage(StubStage):
@@ -1700,7 +1710,12 @@ class TestPipelineScopeWiring:
         )
 
     def _scoped_config(
-        self, tmp_path: Path, *, issues: list[int], force: bool = False
+        self,
+        tmp_path: Path,
+        *,
+        issues: list[int],
+        force: bool = False,
+        parallel_repos: int = 1,
     ) -> PipelineConfig:
 
         return PipelineConfig(
@@ -1708,6 +1723,7 @@ class TestPipelineScopeWiring:
             repos=["repo-a"],
             issues=issues,
             loops=1,
+            parallel_repos=parallel_repos,
             projects_dir=tmp_path,
             scope=PipelineScope(frozenset({StageName.PLANNING, StageName.PLAN_REVIEW})),
             force=force,
@@ -1790,7 +1806,7 @@ class TestPipelineScopeWiring:
             "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
             fake_filter,
         )
-        config = self._scoped_config(tmp_path, issues=[1, 2, 3])
+        config = self._scoped_config(tmp_path, issues=[1, 2, 3], parallel_repos=2)
         coordinator = Coordinator(config, github=gh, pool=FakeWorkerPool(), install_signals=False)
 
         assert coordinator._seed_pass() == 2
