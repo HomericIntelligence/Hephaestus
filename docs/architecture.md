@@ -589,7 +589,10 @@ A label alone never authorizes merge. `merge_wait` requires both the
 `state:implementation-go` label and a matching in-memory reviewed-head proof
 on an open `main`, confirmed-unarmed live PR with an exclusive GO label. A
 missing or drifted proof returns to review without a label mutation; a matching
-proof permits one SHA-conditional ordinary squash merge
+proof permits a bounded sequence (default: five) of individual
+SHA-conditional ordinary REST squash-merge requests. Fresh admission precedes
+every request; only retryable HTTP 405 readiness and unresolved transport
+ambiguity can timer-park a later request
 ([`merge_wait.py`](hephaestus/automation/pipeline/stages/merge_wait.py)).
 
 Plan-review labels are the sole durable authority. Review comments explain and
@@ -949,11 +952,16 @@ Architectural contract:
 ### 5.6 Merge wait
 
 Merge wait verifies a still-valid implementation approval against its
-in-memory reviewed-head proof, then issues one ordinary REST squash merge
-conditional on that SHA. Admission requires an open `main` PR, an explicitly
-unarmed record, and an exclusive implementation-GO label. It does not create,
-disable, adopt, or poll an auto-merge request; an existing request is external
-ownership and is left untouched.
+in-memory reviewed-head proof before each request. It may issue a bounded
+sequence (default: five) of individual ordinary REST squash-merge requests,
+each conditional on that SHA. Admission for every request requires an open
+`main` PR, an explicitly unarmed record, and an exclusive implementation-GO
+label. Only classified retryable HTTP 405 readiness and unresolved transport
+ambiguity can timer-park a later request. The direct adapter performs one
+request per call and never retries. Merge wait does not invoke `gh pr merge`,
+create, disable, adopt, or poll native auto-merge, manage a merge queue, or use
+an administrator bypass; an existing request is external ownership and is left
+untouched.
 
 #### Boundary diagram
 
@@ -997,9 +1005,12 @@ Architectural contract:
 - A current-process review proof is bound to the reviewed head commit.
 - Existing external merge ownership is preserved.
 - Missing or drifted proof returns approval to PR review with zero label writes.
-- A matching proof can submit exactly one SHA-conditional normal merge request.
-- HTTP 409, 405 readiness, and ambiguous transport responses are reconciled
-  with fresh lifecycle reads and the per-item merge budget.
+- A matching proof can submit a bounded sequence of individual
+  SHA-conditional normal REST merge requests, each only after fresh admission.
+- HTTP 409 is reconciled with fresh lifecycle reads. Only classified retryable
+  HTTP 405 readiness and unresolved transport ambiguity can timer-park another
+  request while the per-item merge budget remains; all other outcomes stop or
+  return to review as appropriate.
 
 ### 5.7 `finished`
 
