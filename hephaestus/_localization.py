@@ -16,8 +16,8 @@ _PERCENT_PLACEHOLDER = re.compile(
     %
     (?:\((?P<name>[^)]+)\))?
     [#0\- +]*
-    (?:\*|\d+)?
-    (?:\.(?:\*|\d+))?
+    (?P<width>\*|\d+)?
+    (?:\.(?P<precision>\*|\d+))?
     [hlL]?
     (?P<conversion>[diouxXeEfFgGcrsa%])
     """,
@@ -43,6 +43,10 @@ def _placeholder_signature(
         cursor = match.end()
         conversion = match.group("conversion")
         if conversion != "%":
+            if match.group("width") == "*":
+                positional.append("*")
+            if match.group("precision") == "*":
+                positional.append("*")
             name = match.group("name")
             if name is None:
                 positional.append(conversion)
