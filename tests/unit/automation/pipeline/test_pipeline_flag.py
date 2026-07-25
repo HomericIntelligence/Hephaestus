@@ -114,7 +114,7 @@ def test_build_pipeline_config_maps_cli_fields(dispatch: dict[str, MagicMock]) -
 
 
 def test_drive_green_all_maps_all_authors_and_bots(dispatch: dict[str, MagicMock]) -> None:
-    """The legacy drive-green-all flag keeps its broad discovery scope."""
+    """The legacy drive-green-all flag preserves its configuration mapping."""
     loop_runner.main(["--drive-green-all", "--dry-run"])
 
     (config,) = dispatch["run_pipeline"].call_args.args

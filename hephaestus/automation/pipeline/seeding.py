@@ -270,10 +270,11 @@ def classify_issue(facts: IssueFacts) -> Classification:
 
     # Routing logic: open PR path
     if facts.pr_is_open:
-        # The loop-owned approval label is the durable merge authorization.
-        # A restart sends it to merge_wait, which re-reads the live PR head
-        # before conditionally arming GitHub. No CI status or external review
-        # artifact is consulted.
+        # The loop-owned approval label records review eligibility, not durable
+        # merge authority.  A restart sends it to merge_wait, which confirms an
+        # unarmed PR before revoking a stale label and returning to review; a
+        # matching current-process proof stands by.  Pending #2419, no queue
+        # stage creates, disables, adopts, or polls automatic merge.
         if facts.pr_has_implementation_go:
             return (
                 StageName.MERGE_WAIT,

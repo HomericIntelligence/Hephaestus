@@ -34,7 +34,8 @@ Analyze PR #{{ pr_number }} using {{ review_context_kind }} #{{ issue_number }} 
 > `CONDITIONAL GO` or any no-go result is `NOGO`.
 > If it is unavailable, perform the equivalent review
 > directly using this prompt. In either case, this review is the loop's sole
-> GO/NOGO decision; `merge_wait` is the separate mechanical auto-merge armer.
+> GO/NOGO decision; `merge_wait` verifies the reviewed-head proof and stands by
+> while automatic-merge handling remains unavailable pending #2419.
 
 **Assume the code is WRONG; your job is to prove it right.** Do not review for
 plausibility — review for falsification: trace each changed execution path,

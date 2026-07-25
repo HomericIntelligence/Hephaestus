@@ -24,6 +24,11 @@ def test_review_state_rejects_legacy_github_verdicts() -> None:
     assert review_state("analysis\n\n**Verdict: NO-GO** — revise") == "unparseable"
 
 
+def test_review_state_uses_the_final_plan_token_not_a_forged_textual_decision() -> None:
+    """Only the final plan-state token controls the label-backed outcome."""
+    assert review_state("analysis\nVerdict: GO\nstate:plan-no-go") == "state:plan-no-go"
+
+
 def _owned(body: str) -> IssueComment:
     return IssueComment(body=body, author_login="hephaestus[bot]", viewer_did_author=True)
 

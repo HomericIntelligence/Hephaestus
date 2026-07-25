@@ -100,8 +100,88 @@ def _agent_job(model: str = "opus-4-8", **overrides: object) -> AgentJob:
     return AgentJob(**defaults)  # type: ignore[arg-type]
 
 
+def test_shutdown_can_reap_without_marking_interrupted(
+    pool: WorkerPool, shutdown_event: threading.Event
+) -> None:
+    """Coordinator cleanup may release the pool without changing outcome state (#2431)."""
+    pool.shutdown(mark_interrupted=False)
+
+    assert not shutdown_event.is_set()
+
+
 class TestWorkerPoolSubmitComplete:
     """Tests for basic submit/complete workflow."""
+
+    def test_completion_callback_notifies_after_delivering_one_result(
+        self,
+        shutdown_event: threading.Event,
+        tmp_path: Path,
+    ) -> None:
+        """A completed future delivers one result and wakes its coordinator."""
+        completion_q: CompletionQueue = queue.Queue(maxsize=1)
+        pool = WorkerPool(
+            size=1,
+            shutdown=shutdown_event,
+            completion_q=completion_q,
+            lock_dir=tmp_path / "locks",
+        )
+        wakeup = threading.Event()
+        saturation = threading.Event()
+        pool.set_completion_notifiers(wakeup=wakeup, saturation=saturation)
+        future: Future[JobResult] = Future()
+        result = JobResult(ok=True, value="done")
+        future.set_result(result)
+        handle = JobHandle(job=_agent_job(), on_done_state=StageName.PLANNING)
+
+        try:
+            pool._on_future_done(handle, future)
+            delivered_handle, delivered_result = completion_q.get_nowait()
+        finally:
+            pool.shutdown(mark_interrupted=False)
+
+        assert delivered_handle is handle
+        assert delivered_result is result
+        assert wakeup.is_set()
+        assert not saturation.is_set()
+
+    def test_full_completion_queue_reports_saturation_without_blocking_callback(
+        self,
+        shutdown_event: threading.Event,
+        tmp_path: Path,
+    ) -> None:
+        """An impossible completion overflow faults the run rather than deadlocking a worker."""
+        completion_q: CompletionQueue = queue.Queue(maxsize=1)
+        occupied = (object(), JobResult(ok=True, value="already queued"))
+        completion_q.put_nowait(occupied)
+        pool = WorkerPool(
+            size=1,
+            shutdown=shutdown_event,
+            completion_q=completion_q,
+            lock_dir=tmp_path / "locks",
+        )
+        wakeup = threading.Event()
+        saturation = threading.Event()
+        pool.set_completion_notifiers(wakeup=wakeup, saturation=saturation)
+        future: Future[JobResult] = Future()
+        future.set_result(JobResult(ok=True, value="would overflow"))
+        handle = JobHandle(job=_agent_job(), on_done_state=StageName.PLANNING)
+        callback = threading.Thread(target=pool._on_future_done, args=(handle, future))
+
+        try:
+            callback.start()
+            callback.join(timeout=1)
+            still_queued = completion_q.get_nowait()
+        finally:
+            if callback.is_alive():
+                completion_q.get_nowait()
+                callback.join(timeout=1)
+            pool.shutdown(mark_interrupted=False)
+
+        assert not callback.is_alive()
+        assert still_queued is occupied
+        assert saturation.is_set()
+        assert wakeup.is_set()
+        assert not shutdown_event.is_set()
 
     def test_submit_agent_job_propagates_prompt_dir_override_to_worker_thread(
         self,
@@ -973,6 +1053,147 @@ class TestGitOps:
         )
         mock_sync.assert_called_once_with(review_path, "70-existing", pr_number=70, timeout=60)
         assert result.ok is True
+
+    def test_verify_pr_review_checkout_rejects_a_dirty_worktree(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A reviewer never receives a stale or locally dirty checkout."""
+        job = GitJob(
+            repo="test/repo",
+            op="verify_pr_review_checkout",
+            timeout_s=60,
+            kwargs={
+                "worktree_path": str(tmp_path),
+                "branch": "70-existing",
+                "expected_head_sha": "a" * 40,
+                "pr_number": 70,
+            },
+        )
+        with (
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=False),
+            patch(f"{_WP}.git_utils.sync_worktree_to_remote_branch") as mock_sync,
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        assert result.value == {"ready": False, "reason": "dirty"}
+        mock_sync.assert_not_called()
+
+    def test_verify_pr_review_checkout_retries_when_remote_head_drifted(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A post-sync HEAD mismatch is an explicit bounded re-review signal."""
+        job = GitJob(
+            repo="test/repo",
+            op="verify_pr_review_checkout",
+            timeout_s=60,
+            kwargs={
+                "worktree_path": str(tmp_path),
+                "branch": "70-existing",
+                "expected_head_sha": "a" * 40,
+                "pr_number": 70,
+            },
+        )
+        with (
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+            patch(f"{_WP}.git_utils.sync_worktree_to_remote_branch") as mock_sync,
+            patch(f"{_WP}.git_utils.run", return_value=MagicMock(stdout="b" * 40 + "\n")),
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        assert result.value == {"ready": False, "reason": "head_drift"}
+        mock_sync.assert_called_once_with(tmp_path, "70-existing", pr_number=70, timeout=60)
+
+    def test_verify_pr_review_checkout_returns_diff_bound_to_verified_head(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """The review diff comes from the verified checkout, not mutable GitHub output."""
+        job = GitJob(
+            repo="test/repo",
+            op="verify_pr_review_checkout",
+            timeout_s=60,
+            kwargs={
+                "worktree_path": str(tmp_path),
+                "branch": "70-existing",
+                "expected_head_sha": "a" * 40,
+                "base_branch": "main",
+                "pr_number": 70,
+            },
+        )
+        with (
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+            patch(f"{_WP}.git_utils.sync_worktree_to_remote_branch") as mock_sync,
+            patch(
+                f"{_WP}.git_utils.run",
+                side_effect=[
+                    MagicMock(stdout="a" * 40 + "\n"),
+                    MagicMock(stdout=""),
+                    MagicMock(stdout="b" * 40 + "\n"),
+                    MagicMock(stdout="checkout diff for A"),
+                ],
+            ) as mock_run,
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        assert result.value == {
+            "ready": True,
+            "head": "a" * 40,
+            "base": "b" * 40,
+            "diff": "checkout diff for A",
+        }
+        mock_sync.assert_called_once_with(tmp_path, "70-existing", pr_number=70, timeout=60)
+        assert mock_run.call_args_list[3].args[0] == [
+            "git",
+            "diff",
+            "--no-ext-diff",
+            "--binary",
+            f"{'b' * 40}...{'a' * 40}",
+        ]
+
+    def test_verify_pr_review_checkout_reports_sync_failure(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A failed sync is never converted into a stale-ready checkout."""
+        job = GitJob(
+            repo="test/repo",
+            op="verify_pr_review_checkout",
+            timeout_s=60,
+            kwargs={
+                "worktree_path": str(tmp_path),
+                "branch": "70-existing",
+                "expected_head_sha": "a" * 40,
+                "pr_number": 70,
+            },
+        )
+        with (
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+            patch(
+                f"{_WP}.git_utils.sync_worktree_to_remote_branch",
+                side_effect=RuntimeError("remote unavailable"),
+            ),
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error == "RuntimeError: remote unavailable"
 
     def test_create_worktree_defaults_repo_root_to_ambient_cwd(
         self,
@@ -2723,6 +2944,7 @@ class TestShutdownAndCancel:
             assert started.wait(timeout=10), "slow job never started"
             pool.submit(queued_job, StageName.PR_REVIEW)  # queued behind the busy worker
             pool.shutdown()  # sets shutdown event + cancel_futures=True
+            assert shutdown_event.is_set()
             release.set()
 
             handle, result = completion_q.get(timeout=10)

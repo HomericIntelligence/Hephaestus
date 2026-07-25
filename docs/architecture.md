@@ -58,20 +58,30 @@ in §5.1, which tags `state:skip` on epics before any other durable mutation.
  into the same queue and the loop reconverges
  ([`_park_resumable`](hephaestus/automation/pipeline/coordinator.py),
  [`_finalize_resumable`](hephaestus/automation/pipeline/coordinator.py)).
-- **One automatic merge authority per head.** `state:implementation-go` is
- applied only by `pr_review._eval`, which is the sole positive merge
- authorization. Once applied, `merge_wait` revalidates the label and live PR
- head immediately before it arms, records that head only after its conditional
- arm succeeds, and rechecks it on every owned poll. A drifted owned arm is
- deferred before the stale approval is revoked and the item returns to fresh
- review; externally armed PRs are never adopted or changed
- ([`pr_review.py`](hephaestus/automation/pipeline/stages/pr_review.py),
+- **Reviewed-head proof, no queue merge mutation.** `state:implementation-go`
+ is applied only by `pr_review._eval`, which is the sole stage authorized to
+ write the label. Before the reviewer runs, `pr_review` snapshots the GitHub
+ review inputs and its head SHA, then requires a clean local checkout at that
+ exact SHA. The resulting in-memory proof is rechecked against a confirmed,
+ unarmed live PR before the label is written. `merge_wait` consumes that proof
+ but currently stands by; no queue stage creates, disables, adopts, or polls
+ an auto-merge request pending the separately reviewed #2419 conditional
+ merge path ([`pr_review.py`](hephaestus/automation/pipeline/stages/pr_review.py),
+ [`worker_pool.py`](hephaestus/automation/pipeline/worker_pool.py),
  [`merge_wait.py`](hephaestus/automation/pipeline/stages/merge_wait.py)).
 - **Globally bounded budgets.** Stages count retries on `_on_job_done` so
  `agent_error` retries consume the same per-item budget as ordinary
  attempts; cross-stage regression cycles terminate in finite steps
  ([`_FAIL_BACK_CAP`](hephaestus/automation/pipeline/coordinator.py),
  [`ROUTES`](hephaestus/automation/pipeline/routing.py)).
+- **Globally bounded live work.** The coordinator admits at most
+ `C = max(1, parallel_repos × max_workers)` nonterminal work items at once.
+ A work permit remains with an item while it is queued, leased, running,
+ timer-parked, or waiting for a full destination queue; it is released only
+ after the finished sink records the terminal result
+ ([`_work_window`](hephaestus/automation/pipeline/coordinator.py),
+ [`Coordinator._push_item`](hephaestus/automation/pipeline/coordinator.py),
+ [`Coordinator._release_work_permit`](hephaestus/automation/pipeline/coordinator.py)).
 
 ### Non-goals
 
@@ -132,7 +142,6 @@ flowchart LR
     implementation -. "agent_error" .-> implementation
     pr_review -. "agent_error" .-> implementation
     implementation -. "already_implementation_go_pr" .-> merge_wait
-    merge_wait -. "arm_confirm_failed" .-> merge_wait
 ```
 
 Every back-edge in the diagram is **named** in
@@ -149,7 +158,8 @@ The main thread (coordinator) OWNS:
 - all routing and disposition semantics ([`_route`](hephaestus/automation/pipeline/coordinator.py))
 - every GitHub API mutation, through
  [`StageGitHub`](hephaestus/automation/pipeline/stages/base.py)
- (label writes, comment upserts, PR create/auto-merge)
+ (label writes, comment upserts, and PR creation; the queue does not mutate
+ auto-merge)
 It NEVER launches agents, builds/tests or git/network operations. It never
 sleeps — wakeups are the timer's responsibility.
 The single worker pool ([`WorkerPool`](hephaestus/automation/pipeline/worker_pool.py))
@@ -169,14 +179,23 @@ thread lock, outer) **and**
 [`_interruptible_file_lock`](hephaestus/automation/pipeline/worker_pool.py)
 (cross-process flock, inner). Worktrees share `.git`, so two concurrent
 operations on the same checkout would race.
-The only cross-thread channel is
+The only cross-thread **payload** channel is the bounded
 [`CompletionQueue`](hephaestus/automation/pipeline/queues.py)
-(`queue.Queue[(JobHandle, JobResult)]`); its blocking
-`get(timeout=…)` is the loop's idle sleep
-([`_wait_for_completion`](hephaestus/automation/pipeline/coordinator.py)).
-Poll interval = [`_IDLE_POLL_S = 1.0`](hephaestus/automation/pipeline/coordinator.py).
-Pool size = `parallel_repos × max_workers`
-([`WorkerPool(size=…)`](hephaestus/automation/pipeline/worker_pool.py)).
+(`queue.Queue[(JobHandle, JobResult)]`, capacity `C`). A separate
+`threading.Event` latch is control-plane-only: workers set it after a
+non-blocking completion publish, and signal handlers set it to wake an idle
+coordinator. Neither writes a sentinel into the completion queue or blocks on
+queue capacity
+([`WorkerPool._on_future_done`](hephaestus/automation/pipeline/worker_pool.py),
+[`Coordinator._wait_for_completion`](hephaestus/automation/pipeline/coordinator.py),
+[`Coordinator._wake_completion_wait`](hephaestus/automation/pipeline/coordinator.py)).
+The idle coordinator may wait on that event for its bounded poll interval
+([`_IDLE_POLL_S = 1.0`](hephaestus/automation/pipeline/coordinator.py)); it
+does not make a producer or signal handler wait. Pool size = `parallel_repos × max_workers`.
+Each stage-queue capacity and the
+completion-queue capacity are `C = max(1, parallel_repos × max_workers)`
+([`_work_window`](hephaestus/automation/pipeline/coordinator.py),
+[`WorkerPool(size=…)`](hephaestus/automation/pipeline/worker_pool.py)).
 
 ### Ticks
 
@@ -203,14 +222,19 @@ tick does, in order:
  ([`_DRAIN_ORDER`](hephaestus/automation/pipeline/coordinator.py)).
  Implementation drains separately to enforce dependency topo-order
  and file-overlap serialization; other queues drain with the per-repo
- in-flight cap ([`_drain_implementation`](hephaestus/automation/pipeline/coordinator.py),
+ in-flight cap. Pending destination-first handoffs are retried before and
+ between drains, and bounded direct/repository sources are admitted only at
+ safe capacity points ([`_drain_implementation`](hephaestus/automation/pipeline/coordinator.py),
  [`_drain_queues`](hephaestus/automation/pipeline/coordinator.py),
+ [`_drain_pending_handoffs`](hephaestus/automation/pipeline/coordinator.py),
+ [`_drain_repo_issue_sources`](hephaestus/automation/pipeline/coordinator.py),
  [`_admit`](hephaestus/automation/pipeline/coordinator.py)).
 6. **Idle-or-loop check** — if all queues + timers + in-flight are empty,
  re-seed up to `--loops` and either exit on zero work or continue
  ([`_all_idle`](hephaestus/automation/pipeline/coordinator.py),
  [`_reseed_if_converged`](hephaestus/automation/pipeline/coordinator.py)).
- Otherwise block on [`completion_q`](hephaestus/automation/pipeline/coordinator.py).
+ Otherwise wait on the completion/signal latch and drain the bounded
+ completion queue.
 A defensive step watchdog ([`_STEP_WATCHDOG_S = 15.0`](hephaestus/automation/pipeline/coordinator.py))
 warns when any `stage.step()` call exceeds ~15 s. 5 s proved too tight in
 practice: routine repo-stage steps (clone + label reads over the network)
@@ -248,6 +272,62 @@ protocol, then returns `StageOutcome(…)`. The coordinator's
 [`_route`](hephaestus/automation/pipeline/coordinator.py) applies the
 disposition to the queue.
 
+### Global capacity, leases, and source cursors
+
+Let `C = max(1, parallel_repos × max_workers)`. `C` is a global live-work
+window, not a per-stage concurrency target. Every stage queue and the
+completion queue have capacity `C`, while the coordinator holds one global
+permit for every nonterminal `WorkItem`. Consequently, seven stage queues do
+not permit `7C` simultaneous work items: an item holds the same permit as it
+moves through the pipeline and releases it only after `finished` records its
+outcome.
+
+Queue draining claims an item through a
+[`StageQueueLease`](hephaestus/automation/pipeline/queues.py). The lease keeps
+the source queue slot occupied while a stage runs. A transition is
+destination-first: the destination must accept the item before the source
+lease is released and the item stage/history/result are changed. When the
+destination is full, the coordinator retains exactly one pending handoff on
+that source lease and retries it after downstream drains. The completed stage
+action is therefore not replayed, and a full destination is ordinary
+backpressure rather than a spill list, shutdown, or failure
+([`StageQueueLease.handoff`](hephaestus/automation/pipeline/queues.py),
+[`Coordinator._handoff_item`](hephaestus/automation/pipeline/coordinator.py),
+[`Coordinator._drain_pending_handoffs`](hephaestus/automation/pipeline/coordinator.py)).
+Leases carry stable FIFO tickets, so multiple ready items can be claimed and
+run concurrently up to `C`; a retry restores ahead of later-admitted work
+without serializing the whole stage.
+
+Intake is also source-driven rather than an eager list of classified products:
+
+- Explicit `--issues` and `--prs` use one cursor each. The coordinator
+  classifies the next value only after every possible entry queue and the
+  global live-work window can accept it; unadmitted caller input remains in
+  the iterator, not in a `SeedEntry` or `WorkItem` spill buffer.
+- Repository intake uses a FIFO repository source. Once a repo has prepared
+  its checkout, its `RepoIssueSource` retains at most one pending metadata row
+  and one fetched GitHub page. The coordinator keeps at most `C` active repo
+  sources and gives each one admission attempt per FIFO round-robin, so a large
+  repository cannot monopolize discovery.
+- Organization repositories and linked-issue metadata use REST pages of at
+  most 100 rows. Pagination continues until the short terminal page; there is
+  no `gh ... --limit 500` discovery cap. An organization invocation passes a
+  resettable paged repository iterator directly to the FIFO source; it never
+  materializes the organization's names in CLI scope resolution or pipeline
+  configuration. Each active repository cursor consumes issue metadata lazily.
+  Repository
+  discovery does not pre-scan open-PR pages: PR review context enters through
+  the linked issue's classification. An orphan PR has no issue requirements
+  and remains outside this source; an explicit `--prs` scope can select one
+  for fail-closed direct evaluation, but cannot supply missing requirements.
+
+The implementation is in
+[`Coordinator._drain_direct_issue_source`](hephaestus/automation/pipeline/coordinator.py),
+[`Coordinator._drain_repo_entry_source`](hephaestus/automation/pipeline/coordinator.py),
+[`Coordinator._drain_repo_issue_sources`](hephaestus/automation/pipeline/coordinator.py),
+[`RepoIssueSource`](hephaestus/automation/pipeline/stages/repo.py), and
+[`loop_repo_manager`](hephaestus/automation/loop_repo_manager.py).
+
 ### Non-blocking retry / timer-park contract
 
 Stages never sleep — the coordinator's timer heap owns every delay.
@@ -260,6 +340,13 @@ key and parks the item on the heap
 A missing key means "retry on the next drain tick" (no delay).
 [`BACKOFF_CAP_S = 60`](hephaestus/automation/pipeline/stages/base.py) is
 shared by every stage that uses the legacy exponential poll delay.
+Timer parking releases the source-stage lease but retains the item's global
+work permit. On expiry, the timer heap remains the item's owner until its
+stage queue accepts it; an occupied stage queue leaves the expired entry at
+the heap head for a later tick. That is bounded backpressure, not an overflow
+or a reason to repeat the delayed stage action
+([`_timer_park`](hephaestus/automation/pipeline/coordinator.py),
+[`_wake_timers`](hephaestus/automation/pipeline/coordinator.py)).
 
 ### Interrupt semantics
 
@@ -276,10 +363,17 @@ end-of-run summary lists them under `RESUMABLE at <stage>`. Resume is
 label/PR/worktree reconstruction: rerunning the same scoped command
 re-seeds each item into the correct entry queue. There is no persisted
 queue snapshot.
+The signal handler only sets the shutdown and wake latches; it never writes
+to, or waits on, the bounded completion queue. Completion-queue saturation is
+an internal invariant violation: the worker callback records a latch without
+blocking or spilling, the coordinator fails the run, and still-live work is
+finalized resumably. It does not set `shutdown` and does not turn into exit
+code 130 ([`WorkerPool._on_future_done`](hephaestus/automation/pipeline/worker_pool.py),
+[`Coordinator._drain_completions`](hephaestus/automation/pipeline/coordinator.py)).
 
 ### Exit codes
 
-- `130` — interrupted run.
+- `130` — interrupted by SIGINT, SIGTERM, or SIGHUP.
 - `1` — any effective item failed, skipped, blocked; or the coordinator hit a fatal error.
 - `0` — clean run.
 [`_exit_code`](hephaestus/automation/pipeline/coordinator.py) deliberately
@@ -378,8 +472,9 @@ cross-stage cycles terminate even if a stage has a budget bookkeeping bug
 
 The single per-item record moving through the queue. Thread-safety is by
 construction: a `WorkItem` and its `StageQueue` are only ever touched by
-the coordinator thread; the single cross-thread channel is
-[`CompletionQueue`](hephaestus/automation/pipeline/queues.py).
+the coordinator thread; the only cross-thread payload channel is the bounded
+[`CompletionQueue`](hephaestus/automation/pipeline/queues.py). Event latches
+carry wake/fault signals only, never `WorkItem` or `JobResult` payloads.
 Key fields:
 
 - `repo`, `kind` ([`ItemKind`](hephaestus/automation/pipeline/work_item.py)) —
@@ -405,8 +500,9 @@ Key fields:
 - `result` ([`ItemResult`](hephaestus/automation/pipeline/work_item.py)) —
  final `passed / reason / final_stage` written by
  [`_finish`](hephaestus/automation/pipeline/coordinator.py).
-- `armed` — `bool` set on a confirmed drive-green arm
- ([`_arm`](hephaestus/automation/pipeline/stages/merge_wait.py)).
+- `armed` — compatibility field retained on the work item. The current
+ [`merge_wait`](hephaestus/automation/pipeline/stages/merge_wait.py) stage
+ does not set it because the queue does not arm auto-merge.
 - `worktree`, `branch` — populated by [`implementation`](hephaestus/automation/pipeline/stages/implementation.py).
 
 ### [§`StageName`](hephaestus/automation/pipeline/routing.py)
@@ -456,8 +552,8 @@ absolute operator state:
 | `state:plan-no-go` | planner-scope| [`plan_review._eval`](hephaestus/automation/pipeline/stages/plan_review.py) |
 | `state:plan-go` | planner-scope| [`plan_review._eval`](hephaestus/automation/pipeline/stages/plan_review.py) |
 | `state:plan-blocked` | planner-scope| [`plan_review._eval`](hephaestus/automation/pipeline/stages/plan_review.py) |
-| `state:implementation-no-go` | review-scope | [`pr_review._eval`](hephaestus/automation/pipeline/stages/pr_review.py), or owned-arm head-drift containment in [`merge_wait`](hephaestus/automation/pipeline/stages/merge_wait.py) |
-| `state:implementation-go` | review-scope | [`pr_review._eval`](hephaestus/automation/pipeline/stages/pr_review.py) — **sole positive authorization** |
+| `state:implementation-no-go` | review-scope | [`pr_review._eval`](hephaestus/automation/pipeline/stages/pr_review.py) |
+| `state:implementation-go` | review-scope | [`pr_review._eval`](hephaestus/automation/pipeline/stages/pr_review.py) — **sole authority** |
 | `state:skip` | absolute | operator / exhaustion in [`pr_review`](hephaestus/automation/pipeline/stages/pr_review.py) / [`implementation`](hephaestus/automation/pipeline/stages/implementation.py) |
 
 Every **stage-issued** `state:skip` durable write (the `pr_review` and
@@ -491,17 +587,23 @@ implementation-go : 4
 state:skip : NO RANK (excluded from rank compare)
 ```
 
-A label alone never authorizes merge. `merge_wait` revalidates the
-`state:implementation-go` label and live PR head immediately before arming,
-then compares every owned poll with the head it recorded after a successful
-arm. On drift it verifies deferral, revokes the stale label through the
-review-state protocol, clears local ownership evidence, and requires fresh
-review before another arm.
+A label alone never authorizes merge. `merge_wait` requires both the
+`state:implementation-go` label and a matching in-memory reviewed-head proof
+on a confirmed, unarmed live PR. A missing or drifted proof is contained by
+returning to review only after a fresh unarmed read permits stale-label
+revocation; a matching proof currently reaches a safe standby outcome pending
+issue #2419 ([`merge_wait.py`](hephaestus/automation/pipeline/stages/merge_wait.py)).
 
 Plan-review labels are the sole durable authority. Review comments explain and
 audit a decision but never authorize a transition, block a stage, or backfill a
 missing label. Comment markers locate actor-owned journal artifacts only;
 foreign marker text is ignored.
+
+Likewise, prose such as `Verdict: GO` or `Verdict: NOGO` is reviewer output,
+not durable routing authority. A reviewer may propose a label from that
+analysis, but the coordinator advances only after the relevant GitHub
+`state:*` mutation succeeds and is confirmed. On restart, seeding reads the
+labels and PR state, not verdict text.
 
 ---
 
@@ -537,15 +639,17 @@ resume.
 
 ### 5.1 Repo intake
 
-Repo intake discovers candidate work, records exclusions, and routes each
-eligible issue or pull request to the stage implied by its durable state.
+Repo intake discovers candidate work through a bounded source, records
+exclusions, and routes each eligible issue or pull request to the stage implied
+by its durable state.
 
 #### Boundary diagram
 
 ```mermaid
 flowchart LR
-    Repository --> Discover --> Classify
-    Classify -->|"eligible"| WorkItems["Routed work items"]
+    Repository --> Discover --> Source["Bounded issue source"]
+    Source --> Classify
+    Classify -->|"eligible"| WorkItems["One routed work item"]
     Classify -->|"excluded"| DurableSkip["Durable skip state"]
     WorkItems --> Queues["Downstream queues"]
     DurableSkip --> Complete
@@ -559,12 +663,14 @@ stateDiagram-v2
     Prepare --> Discover: repository available
     Prepare --> Prepare: transient failure
     Prepare --> Failed: retry limit reached
-    Discover --> Classify: candidates loaded
+    Discover --> Source: source initialized
+    Source --> Classify: one candidate admitted
     Discover --> Failed: discovery failed
     Classify --> RecordExclusions: exclusions found
     Classify --> Dispatch: no exclusions
     RecordExclusions --> Dispatch: exclusions durable
-    Dispatch --> Complete: eligible items routed
+    Dispatch --> Source: next candidate
+    Source --> Complete: cursor exhausted
     Complete --> [*]
     Failed --> [*]
 ```
@@ -574,6 +680,10 @@ Architectural contract:
 - Exclusions become durable before excluded work leaves the queue.
 - Discovery never writes planning, review, implementation, or merge verdicts.
 - Failure of the repository item does not fabricate outcomes for its issues.
+- Runtime repository discovery does not eagerly build `products` or downstream
+  `WorkItem` lists. It fetches one issue page at a time, holds at most one
+  pending metadata row per active repository cursor, and drains active cursors
+  in FIFO round-robin order.
 
 ### 5.2 Planning
 
@@ -769,7 +879,7 @@ stateDiagram-v2
 Architectural contract:
 
 - One issue maps to one active implementation pull request.
-- Auto-merge remains disabled while review is pending.
+- The queue observes but never mutates auto-merge while review is pending.
 - Implementation never writes `state:implementation-go`.
 - Missing approval returns to plan review; unsafe or exhausted work terminates
   without approval.
@@ -797,9 +907,13 @@ flowchart LR
 
 ```mermaid
 stateDiagram-v2
-    [*] --> ContainMerge
-    ContainMerge --> Review: auto-merge disabled
-    ContainMerge --> Failed: merge control unavailable
+    [*] --> VerifyUnarmed
+    VerifyUnarmed --> Review: open, complete, and unarmed
+    VerifyUnarmed --> OperatorOwned: external arm or incomplete state
+    Review --> Checkout: GitHub snapshot captured
+    Checkout --> Review: clean checkout matches snapshot head
+    Checkout --> RetryReview: checkout or head drift
+    RetryReview --> Review: bounded retry
     Review --> Validate: review produced
     Review --> RetryReview: invalid output
     RetryReview --> Review: retry available
@@ -827,25 +941,29 @@ Architectural contract:
 - Every implementation review is posted to the pull request.
 - Actionable findings use durable inline threads and severity.
 - Prior rounds remain visible in the PR timeline.
-- Blocking findings produce `state:implementation-nogo`; only a clean review
+- Blocking findings produce `state:implementation-no-go`; only a clean review
   produces `state:implementation-go`.
 - Human-owned findings stop automation with an explanatory PR comment.
-- This stage never arms auto-merge.
+- The review proof is a fresh GitHub snapshot plus a clean checkout at that
+  snapshot's head; it exists only in the current process.
+- No queue stage arms, disables, adopts, or polls auto-merge.
 
 ### 5.6 Merge wait
 
-Merge wait turns a still-valid implementation approval into a head-bound
-auto-merge request and observes only the request it created. It does not take
-ownership of merge requests created by another actor.
+Merge wait verifies a still-valid implementation approval against its
+in-memory reviewed-head proof and then stands by. Until #2419 supplies a
+separately reviewed conditional normal-merge path, it does not create,
+disable, adopt, or poll an auto-merge request. An existing request is treated
+as external ownership and is left untouched.
 
 #### Boundary diagram
 
 ```mermaid
 flowchart LR
-    Approved["Approved PR head"] --> Verify --> Arm["Head-bound auto-merge"]
-    Arm --> Observe
-    Observe --> Merged
-    Observe --> Operator["External or ambiguous ownership"]
+    Approved["Approval label + reviewed-head proof"] --> Verify
+    Verify --> StandBy["Safe standby pending #2419"]
+    Verify --> Review["Missing or drifted proof"]
+    Verify --> Operator["External or ambiguous ownership"]
     Merged --> Learn["Optional learning"] --> Finished
 ```
 
@@ -858,14 +976,12 @@ stateDiagram-v2
     Inspect --> Failed: closed or unavailable
     Inspect --> OperatorOwned: externally armed
     Inspect --> PRReview: approval missing
-    Inspect --> Arm: approval and head valid
-    Arm --> Poll: armed by this run
-    Arm --> Failed: arm rejected or head changed
-    Poll --> Poll: open, still armed, and reviewed head unchanged
-    Poll --> PRReview: owned head drift contained
-    Poll --> Learn: merged
-    Poll --> Failed: closed, arm lost, or containment failed
-    Poll --> OperatorOwned: ownership ambiguous
+    Inspect --> Verify: approval label present
+    Verify --> StandBy: matching reviewed head and unarmed PR
+    Verify --> PRReview: missing or drifted proof after safe label revocation
+    Verify --> OperatorOwned: externally armed or ownership ambiguous
+    Verify --> Failed: incomplete or unavailable state
+    StandBy --> [*]
     Learn --> Complete: disabled or recorded
     Learn --> Failed: durable outcome ambiguous
     Complete --> [*]
@@ -876,13 +992,12 @@ stateDiagram-v2
 
 Architectural contract:
 
-- Merge authorization is bound to the reviewed head commit.
+- A current-process review proof is bound to the reviewed head commit.
 - Existing external merge ownership is preserved.
-- An owned arm whose head drifts is verified deferred before its stale approval
-  is revoked; only then does it return to PR review before a new arm.
-- Missing current-run head evidence follows the same fail-closed containment.
+- Missing or drifted proof returns approval to PR review only after a fresh,
+  confirmed-unarmed read permits label revocation.
+- A matching proof stands by pending the #2419 conditional merge path.
 - Ambiguous merge or learning state stops for operator inspection.
-- Polling is timer-driven and consumes no review or implementation revision.
 
 ### 5.7 `finished`
 
@@ -938,7 +1053,7 @@ budgets. Every `routes.py` row and every doc row MUST agree.
 | `plan_review` | `IMPLEMENTATION` | `nogo` → `PLANNING`; `plan_cycles_exhausted` → `FINISHED`; `*` → `PLANNING` | `plan_review_iter = 3`, `plan_cycles = 2` |
 | `implementation` | `PR_REVIEW` | `plan_not_go` → `PLAN_REVIEW`; `already_implementation_go_pr` → `MERGE_WAIT`; `*` → `FINISHED` | `implement = 2`, `test_fix = 1` |
 | `pr_review` | `MERGE_WAIT` | `agent_error` → `IMPLEMENTATION`; `human_blocked` → `FINISHED`; `exhaustion` → `FINISHED`; `*` → `PR_REVIEW` | `pr_review_iter = 3`, `pr_review_hard = 6` |
-| `merge_wait` | `FINISHED` | `head_drift` / `not_implementation_go` → `PR_REVIEW`; `closed` → `FINISHED`; `*` → `FINISHED` | `merge = DEFAULT_DRIVE_GREEN_LOOPS = 5` |
+| `merge_wait` | `FINISHED` | `not_implementation_go`, `reviewed_head_missing`, or `reviewed_head_drift` → `PR_REVIEW`; `closed` → `FINISHED`; `*` → `FINISHED` | — (no queue-stage budget) |
 | `finished` | `FINISHED` | — (terminal) | — |
 
 Budget provenance (cross-check):
@@ -959,7 +1074,8 @@ Budget provenance (cross-check):
  [`loop_runner.py LoopConfig.drive_green_loops`](hephaestus/automation/loop_runner.py).
 - `merge = 5` (CLI default for `--drive-green-loops`,
  [`DEFAULT_DRIVE_GREEN_LOOPS`](hephaestus/automation/pipeline/routing.py))
- is the pre-merge poll budget mirrored by the merge-wait coordination.
+ is retained routing compatibility metadata for the legacy drive-green CLI;
+ the queue `merge_wait` stage does not poll or consume this budget.
 All per-item-lifetime counters live in
 [`WorkItem.attempts`](hephaestus/automation/pipeline/work_item.py);
 they are NEVER reset when an item re-enters a stage, so cross-stage
@@ -1022,18 +1138,24 @@ BEFORE the exclusion is honored
 
 ### Seeding and re-seed scope
 
-- `--repos` seeds one repo item per named repository
- ([`seed_from_cli`](hephaestus/automation/pipeline/seeding.py)).
-- `--issues` seeds issue-scoped items through the classifier and routes
- them past the durable-label-based decision.
-- `--prs` routes direct PRs by merge/close state then impl label.
-- `--org` expands to non-fork, non-archived repository seeds
- ([`loop_runner.py`](hephaestus/automation/loop_runner.py)).
+- `--repos` is consumed by a FIFO repository cursor; it creates repo work only
+ when both the REPO queue and the global live-work window have capacity.
+- `--issues` and `--prs` are direct bounded cursors. Each value is classified
+ only when its eventual entry queue is guaranteed to accept it, so a large
+ CLI scope is not converted into an eager seed list. `--prs` is the explicit
+ route for a PR that is not reached from linked-issue discovery.
+- `--org` is a resettable, paged GitHub REST repository source. It filters the
+ `archived` and `fork` response fields before each name enters the FIFO source;
+ repository names are not materialized up front. Linked-issue discovery uses
+ 100-row REST pages rather than a 500-item
+ CLI limit; it does not bulk-scan every open PR
+ ([`loop_repo_manager.py`](hephaestus/automation/loop_repo_manager.py)).
 When `--issues` or `--prs` is set, the resolved `--repos` list is used
 ONLY for context — repo discovery is NOT enqueued, so a scoped run
 cannot reconstruct every open issue in the repo (deliberate scope
 isolation).
-After `coordinator._seed_pass`, if all queues + timers + in-flight are empty,
+After `coordinator._seed_pass`, if all queues, active leases, source cursors,
+timers, and in-flight jobs are empty,
 [`_reseed_if_converged`](hephaestus/automation/pipeline/coordinator.py)
 re-seeds up to `--loops` and either exits on a zero-work pass or
 continues.
@@ -1042,9 +1164,12 @@ continues.
 
 The queue is in-memory: a restart re-seeds normally through the ordinary
 [`classifier`](hephaestus/automation/pipeline/seeding.py) and does not recover
-per-run merge-wait ownership. Other-run auto-merge arms are
-[blocked without adoption, mutation, or re-arming](hephaestus/automation/pipeline/stages/merge_wait.py)
-by the restarted run; they require operator handling.
+the process-local reviewed-head proof. A direct PR seed or restart therefore
+cannot use a durable implementation-GO label by itself: merge wait first
+requires a confirmed-unarmed read, then returns the PR to review after safely
+revoking a stale label. Other-run auto-merge requests are
+[blocked without adoption or mutation](hephaestus/automation/pipeline/stages/merge_wait.py)
+and require operator handling.
 
 ---
 
@@ -1064,10 +1189,9 @@ mutations.
  `resume_session_id`, when set for a direct runner, selects its persisted
  session instead of creating a fresh one; its returned id is carried in the
  `JobResult` and persisted by the coordinator under the job's logical role.
- `sandbox = "workspace-write"` (default) or `"read-only"`
- (implementation review only); `expected_head_sha` — when set, the worker
- refuses to dispatch the agent unless the local `git rev-parse HEAD`
- equals this remote-reviewed SHA and the worktree is clean.
+ `sandbox = "workspace-write"` (default) or `"read-only"` (including PR
+ review). The agent job has no head-SHA field; the checkout barrier runs before
+ it as a `verify_pr_review_checkout` Git job.
  `sandbox = "read-only"` activates `allowed_tools = "Read,Glob,Grep"`
  and `permission_mode = "dontAsk"` on the Claude call site.
 - [`BuildTestJob`](hephaestus/automation/pipeline/jobs.py) — subprocess
@@ -1075,8 +1199,12 @@ mutations.
  coordinator constructs them from vetted templates
  (`PRE_PR_TEST_ARGV` for the pre-PR test gate).
 - [`GitJob`](hephaestus/automation/pipeline/jobs.py) — `op ∈ {clone,
- sync_checkout, create_worktree, remove_worktree, rebase, push, commit_push}`,
- validated by `__post_init__`.
+ sync_checkout, create_worktree, verify_pr_review_checkout, remove_worktree,
+ rebase, push, commit_push}`, validated by `__post_init__`. Before a PR-review
+ agent job, `verify_pr_review_checkout` receives the worktree path, branch,
+ expected snapshot SHA, and PR number. The worker rejects a dirty checkout,
+ synchronizes the branch, requires `git rev-parse HEAD` to equal that SHA, and
+ checks cleanliness again ([`_git_verify_pr_review_checkout`](hephaestus/automation/pipeline/worker_pool.py)).
 - [`CompactJob`](hephaestus/automation/pipeline/jobs.py) — a best-effort
  `/compact` turn for a persisted Claude, Codex, or Pi session; it never blocks
  the retry lifecycle.
@@ -1085,8 +1213,8 @@ mutations.
 
 [`JobResult.ok = False, value = None, error`](hephaestus/automation/pipeline/jobs.py)
 on any failure (return code != 0, `subprocess.TimeoutExpired`,
-exception). Stdout/stderr tails trimmed to 4 KiB for the JSONL event
-log; error message truncated to 500 chars.
+exception). Stdout/stderr tails are trimmed to 4 KiB in the `JobResult`;
+the error message is truncated to 500 chars.
 
 ### Completion contract
 
@@ -1099,6 +1227,15 @@ that escapes `future.result()` (exception + process-control escapes
 `worker_crash` result so a non-cancelled submit never silently loses
 its completion. Only futures cancelled before starting emit no
 completion (the coordinator synthesizes those).
+
+The completion queue is bounded to `C`, and the worker callback uses
+`put_nowait`. Under the global permit invariant, every in-flight job has a
+reserved completion slot. If that invariant is ever violated, the callback
+sets a saturation latch and wakes the coordinator; it neither blocks nor keeps
+an overflow buffer. The coordinator treats that latch as a fatal internal
+fault and preserves remaining in-flight items as resumable work. Signal
+handlers use the same wake mechanism but only a real OS signal sets shutdown
+and selects exit code 130.
 
 ### Per-repo lock layering
 
@@ -1208,6 +1345,23 @@ the constructor so the default construction path keeps its zero-I/O
 import contract
 ([`Coordinator.__init__`](hephaestus/automation/pipeline/coordinator.py)).
 
+### Bounded diagnostics and non-authoritative JSONL
+
+The coordinator retains only finite local diagnostic state: the in-memory
+event deque defaults to 1,024 records, detailed terminal items/ledger/
+preserved-worktree entries default to 128, and the per-repository stage-context
+cache is an LRU capped at `C`. A constant-space terminal summary still
+aggregates the entire run's pass/fail totals after older details are trimmed
+([`PipelineConfig.event_log_capacity`](hephaestus/automation/pipeline/coordinator.py),
+[`PipelineConfig.terminal_detail_capacity`](hephaestus/automation/pipeline/coordinator.py),
+[`Coordinator._record_terminal_result`](hephaestus/automation/pipeline/coordinator.py)).
+
+When `event_log_path` is configured, the coordinator also appends diagnostic
+records to JSONL. That file is best-effort: an I/O failure logs a
+warning and disables further JSONL writes without changing pipeline routing.
+It is not a queue snapshot or recovery journal. GitHub labels, comments, and
+PR state remain the only restart authority.
+
 ### Gauges
 
 [`_emit_observability_tick`](hephaestus/automation/pipeline/coordinator.py)
@@ -1235,8 +1389,8 @@ terminate a production automation loop.
 [`AlertTracker.observe(snapshot)`](hephaestus/observability/alerts.py) is
 called once per tick with the coordinator's
 [`_observability_snapshot`](hephaestus/automation/pipeline/coordinator.py).
-Emitted events drive `hephaestus_pipeline_alert_active` and a durable
-`alert_<fired|resolved>` event log entry.
+Emitted events drive `hephaestus_pipeline_alert_active` and a best-effort
+`alert_<fired|resolved>` diagnostic event-log entry.
 
 - **Default trigger**: queue-depth threshold is read from
  [`PipelineConfig.alert_queue_depth_threshold`](hephaestus/automation/pipeline/coordinator.py)
@@ -1252,6 +1406,11 @@ Emitted events drive `hephaestus_pipeline_alert_active` and a durable
 - **Failure-mode safety**: alerts are emitted only from measured queue
  depths and circuit-breaker snapshots, never from worker pool internal
  liveness (so a slow worker never causes an alert).
+
+Queue depth measures ready backlog, not a queue fault: a full stage queue is
+normal backpressure while a lease, timer, or source cursor retains ownership.
+Completion saturation is instead an invariant-breaking fatal error and is not
+represented as ordinary queue-depth pressure.
 
 ### Health endpoint
 
@@ -1304,7 +1463,7 @@ retirement conditions are satisfied.
 | Compatibility path | Retirement gate |
 |---|---|
 | `legacy_issue_impl_go_fallback` | After #2055 is deployed, a complete supported-repository seed pass reports zero fallback observations. |
-| `already_implementation_go_pr` and `not_implementation_go` | After #2055 reconstructs eligibility from head-bound review proof and supported repositories contain zero open legacy implementation-GO PRs. |
+| `already_implementation_go_pr` and `not_implementation_go` | After reviewed-head proof is present for every eligible current-process PR and supported repositories contain zero open legacy implementation-GO PRs. |
 
 ---
 
@@ -1320,7 +1479,7 @@ Exit-code priority is:
 
 | Priority | Code | Meaning |
 |---|---:|---|
-| 1 | `130` | The run was interrupted; this takes priority over other outcomes. |
+| 1 | `130` | SIGINT, SIGTERM, or SIGHUP interrupted the run; this takes priority over other outcomes. |
 | 2 | `1` | At least one effective item failed, skipped, or blocked. |
 | 3 | `0` | Every effective item completed successfully. |
 
@@ -1338,8 +1497,9 @@ Exit-code priority is:
 - **StageQueue** — FIFO queue for one
  [`StageName`](hephaestus/automation/pipeline/routing.py), owned only
  by the coordinator. [`queues.py`](hephaestus/automation/pipeline/queues.py).
-- **CompletionQueue** — the only cross-thread channel
- (`queue.Queue[(JobHandle, JobResult)]`).
+- **CompletionQueue** — the bounded cross-thread payload channel
+ (`queue.Queue[(JobHandle, JobResult)]`, capacity `C`). Event latches carry
+ wake and saturation signals without queue payloads.
  [`queues.py`](hephaestus/automation/pipeline/queues.py).
 - **Durable journal** — GitHub labels, comments, PR state, and
  `ArmingStateStore` records. Restart reconstruction reads this;
@@ -1353,11 +1513,11 @@ Exit-code priority is:
  short-circuit through earlier stages when it carries a later-stage
  label. Never equality.
 - **Head-bound** — an artifact or check whose correctness depends on
- matching the live `headRefOid` of the PR. `merge_wait` captures the
- head SHA at arm time and polls it; a head drift between ARM and POLL
- on a still-live owned arm is contained by verified deferral, stale-approval
- revocation, and fresh PR review. Only a failed containment mutation is
- terminal; a vanished or externally owned arm remains operator-owned.
+ matching the live `headRefOid` of the PR. `pr_review` creates its
+ process-local proof only after a GitHub snapshot and a clean checkout agree
+ on that SHA; it rechecks the proof before writing the GO label. `merge_wait`
+ compares that proof with the confirmed-unarmed live PR and stands by pending
+ #2419 rather than arming or polling auto-merge.
 - **Skip-reason marker** — the `<!-- hephaestus-state-skip-reason -->` HTML-comment marker ([`SKIP_REASON_MARKER`](hephaestus/automation/state_labels.py)) that prefixes every `state:skip` reason-comment body produced by [`format_skip_reason_comment`](hephaestus/automation/state_labels.py), so a repo reader can deterministically trace the automated skip reason.
 - **File-system loader** — the Jinja `FileSystemLoader` resolved from `__file__`-relative paths in [`prompts/catalog.py`](hephaestus/prompts/catalog.py); deliberately NOT `PackageLoader` to avoid importlib editable-install staleness (#2308).
 - **Conflict-resolution request** — the [`ConflictResolutionRequest`](hephaestus/automation/_review_conflict_resolver.py) immutable context consumed by the cohesive [`ReviewConflictResolver`](hephaestus/automation/_review_conflict_resolver.py) unit split out of `_review_phase.py` (#2209).

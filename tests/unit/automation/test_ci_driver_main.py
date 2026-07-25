@@ -100,7 +100,7 @@ def test_main_prs_scope_disables_drive_green_all() -> None:
 
 
 def test_main_discovery_mode_enables_drive_green_all() -> None:
-    """No --issues/--prs enables the coordinator's repo-wide PR sweep."""
+    """No --issues/--prs retains the linked-issue discovery compatibility flag."""
     captured = _run_main_capturing_config(["--dry-run"])
 
     config = captured["config"]
@@ -126,7 +126,7 @@ def test_main_discovery_mode_enables_drive_green_all() -> None:
 def test_main_threads_drive_green_filter_flags(
     argv: list[str], include_bot_prs: bool, include_all_authors: bool
 ) -> None:
-    """CLI discovery flags reach the pipeline configuration unchanged."""
+    """CLI compatibility fields reach the pipeline configuration unchanged."""
     config = _run_main_capturing_config(argv)["config"]
 
     assert config.include_bot_prs is include_bot_prs

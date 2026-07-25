@@ -246,9 +246,10 @@ def gh_pr_create(
     1. *body* must contain a literal ``Closes #N`` line.
     2. Every commit on *branch* (vs *base*) must be cryptographically signed.
 
-    ``auto_merge`` is retained for API compatibility but ignored: only
-    ``MergeWaitStage`` may conditionally arm after loop-owned PR review
-    in-loop review handoff.
+    ``auto_merge`` is retained for API compatibility but ignored.  It does not
+    give this legacy helper or its callers automatic-merge authority.  Pending
+    the separately reviewed #2419 path, queue stages do not create, disable,
+    adopt, or poll automatic-merge requests.
 
     The CI gate (``.github/workflows/_required.yml`` job ``pr-policy``) and the
     PR review prompt re-check the same three properties, so a slip past one
@@ -258,8 +259,8 @@ def gh_pr_create(
         branch: Branch name
         title: PR title
         body: PR description
-        auto_merge: Deprecated compatibility flag; ignored because this is not
-            the label-gated MergeWaitStage armer.
+        auto_merge: Deprecated compatibility flag; ignored.  Queue
+            automatic-merge handling is unavailable pending #2419.
         base: Base branch to compare against for signed-commit validation
 
     Returns:

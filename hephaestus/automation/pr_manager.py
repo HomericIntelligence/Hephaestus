@@ -733,10 +733,11 @@ def pr_has_implementation_state_label(pr_number: int) -> tuple[bool, bool]:
 
 
 def enable_auto_merge_after_implementation_go(pr_number: int) -> None:
-    """Refuse legacy direct arming; MergeWaitStage is the sole armer."""
+    """Refuse legacy direct arming while queue auto-merge is unavailable."""
     ensure_pr_auto_merge_deferred(pr_number)
     raise RuntimeError(
-        f"refusing to arm auto-merge for PR #{pr_number}: only MergeWaitStage may arm"
+        f"refusing to arm auto-merge for PR #{pr_number}: "
+        "queue auto-merge handling is unavailable pending #2419"
     )
 
 
@@ -928,8 +929,8 @@ def ensure_pr_created(
         issue_number: Issue number
         branch_name: Git branch name
         worktree_path: Path to worktree
-        auto_merge: Deprecated compatibility flag; ignored because only
-            MergeWaitStage may conditionally arm after PR review.
+        auto_merge: Deprecated compatibility flag; ignored.  Queue
+            automatic-merge handling is unavailable pending #2419.
         status_tracker: StatusTracker instance for slot updates (optional)
         slot_id: Worker slot ID for status updates
         agent: Selected implementation agent for generated PR metadata.
@@ -1036,8 +1037,8 @@ def create_pr(
     Args:
         issue_number: Issue number
         branch_name: Git branch name
-        auto_merge: Deprecated compatibility flag; ignored because only
-            MergeWaitStage may conditionally arm after PR review.
+        auto_merge: Deprecated compatibility flag; ignored.  Queue
+            automatic-merge handling is unavailable pending #2419.
         agent: Selected implementation agent for generated PR metadata.
         base: Base branch used for changed-file and commit context.
         worktree_path: Optional worktree path used to invoke the lightweight

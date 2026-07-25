@@ -31,9 +31,21 @@ SENTINEL = "Output discipline (token budget)"
 
 def test_terse_directive_leads_with_github_carveout() -> None:
     """Carve-out MUST be the first non-blank line so brevity never truncates pr-policy artifacts."""
-    first_line = get_terse_output_directive().lstrip().splitlines()[0]
+    directive = get_terse_output_directive()
+    first_line = directive.lstrip().splitlines()[0]
     assert "GitHub-posted" in first_line
     assert "retain full detail" in first_line
+    assert "Verdict: <result>" in directive
+
+
+def test_plan_terminal_contract_replaces_the_legacy_textual_decision_line() -> None:
+    """The shared directive supports label-only plan-review terminal output."""
+    directive = get_terse_output_directive(
+        terminal_output_contract="End with the plan-state label only."
+    )
+    assert SENTINEL in directive
+    assert "End with the plan-state label only." in directive
+    assert "Verdict:" not in directive
 
 
 # Each lambda's kwargs match the exact signature read from the source at plan

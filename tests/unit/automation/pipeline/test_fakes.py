@@ -132,6 +132,12 @@ class TestFakeWorkerPool:
         fake.shutdown()
         assert fake.shutdown_event.is_set()
 
+    def test_shutdown_without_interrupt_keeps_event_clear(self) -> None:
+        """Explicit ordinary teardown matches the real pool's new API."""
+        fake = FakeWorkerPool()
+        fake.shutdown(mark_interrupted=False)
+        assert not fake.shutdown_event.is_set()
+
 
 class TestFakeGitHub:
     """FakeGitHub mirrors the real mutator surface and logs every mutation."""

@@ -84,7 +84,6 @@ _MUTATOR_CASES = [
     ),
     ("mark_pr_implementation_go", (7,), "pr_manager", "mark_pr_implementation_go"),
     ("mark_pr_implementation_no_go", (7,), "pr_manager", "mark_pr_implementation_no_go"),
-    ("defer_auto_merge", (7,), "pr_manager", "ensure_pr_auto_merge_deferred"),
     ("post_review_threads", (7, [], "sum"), "github_api", "gh_pr_review_post"),
     ("skip_epics", ({5: ["epic"]},), "github_api", "skip_epics"),
     ("ensure_state_labels", (), "github_api", "_ensure_labels_exist"),
@@ -117,6 +116,14 @@ class TestMutatorMapping:
         name: str,
     ) -> None:
         mock = _patch_target(monkeypatch, owner, name)
+        if method == "mark_pr_implementation_go":
+            monkeypatch.setattr(
+                adapter, "pr_has_implementation_state_label", lambda _pr: (True, False)
+            )
+        elif method == "mark_pr_implementation_no_go":
+            monkeypatch.setattr(
+                adapter, "pr_has_implementation_state_label", lambda _pr: (False, True)
+            )
 
         getattr(adapter, method)(*args)
 
@@ -707,18 +714,9 @@ class TestRepoScoping:
                 "--repo",
                 "org/repo-a",
             ],
-            [
-                "pr",
-                "view",
-                "5",
-                "--json",
-                "state,autoMergeRequest",
-                "--repo",
-                "org/repo-a",
-            ],
         ]
 
-    def test_repo_scoped_pr_lookup_contains_every_same_head_pr(
+    def test_repo_scoped_pr_lookup_reads_all_head_prs_without_mutating_them(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Repo-scoped discovery contains every head PR before selecting main."""
@@ -732,17 +730,7 @@ class TestRepoScoping:
                             {"number": 6, "state": "OPEN", "baseRefName": "release"},
                         ]
                     )
-                ),
-                SimpleNamespace(
-                    returncode=0,
-                    stdout=json.dumps({"state": "OPEN", "autoMergeRequest": None}),
-                    stderr="",
-                ),
-                SimpleNamespace(
-                    returncode=0,
-                    stdout=json.dumps({"state": "OPEN", "autoMergeRequest": None}),
-                    stderr="",
-                ),
+                )
             ]
         )
 
@@ -754,17 +742,13 @@ class TestRepoScoping:
 
         adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
         assert adapter.find_pr_for_issue(5) == 5
-        assert [call[:3] for call in calls[1:]] == [
-            ["pr", "view", "5"],
-            ["pr", "view", "6"],
-        ]
+        assert len(calls) == 1
 
-    def test_repo_scoped_pr_lookup_contains_later_siblings_after_a_failure(
+    def test_repo_scoped_pr_lookup_returns_all_siblings_without_auto_merge_mutation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A failed sibling readback cannot stop later same-head containment."""
+        """Discovery is read-only; a sibling cannot trigger a merge mutation."""
         adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
-        deferred: list[int] = []
 
         monkeypatch.setattr(
             github_api_mod,
@@ -772,22 +756,12 @@ class TestRepoScoping:
             lambda _branch, _runner: [(5, "main"), (6, "release")],
         )
 
-        def defer(pr_number: int) -> None:
-            deferred.append(pr_number)
-            if pr_number == 5:
-                raise RuntimeError("PR #5 remains armed")
-
-        monkeypatch.setattr(adapter, "defer_auto_merge", defer)
-
-        with pytest.raises(RuntimeError, match="PR #5 remains armed"):
-            adapter._contain_open_prs_for_branch("branch")
-
-        assert deferred == [5, 6]
+        assert adapter._open_prs_for_branch("branch") == [(5, "main"), (6, "release")]
 
     def test_repo_scoped_lookup_contains_valid_prs_before_rejecting_malformed_discovery(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A malformed sibling cannot prevent repo-scoped containment of a valid PR."""
+        """Malformed discovery still fails closed without mutating a valid PR."""
         calls: list[list[str]] = []
 
         def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
@@ -801,25 +775,20 @@ class TestRepoScoping:
                         ]
                     )
                 )
-            assert argv[:2] == ["pr", "view"]
-            return SimpleNamespace(
-                returncode=0,
-                stdout=json.dumps({"state": "OPEN", "autoMergeRequest": None}),
-                stderr="",
-            )
+            raise AssertionError(f"unexpected gh invocation: {argv}")
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
         adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
 
         with pytest.raises(RuntimeError, match="could not verify existing PR state"):
-            adapter._contain_open_prs_for_branch("branch")
+            adapter._open_prs_for_branch("branch")
 
-        assert [call[:3] for call in calls[1:]] == [["pr", "view", "5"]]
+        assert len(calls) == 1
 
     def test_repo_scoped_closing_pr_lookup_contains_every_fallback_head_sibling(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A noncanonical ``Closes`` fallback contains every PR on its head."""
+        """A noncanonical ``Closes`` fallback selects a sibling without arm changes."""
         calls: list[list[str]] = []
 
         def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
@@ -841,12 +810,6 @@ class TestRepoScoping:
                 return SimpleNamespace(stdout=json.dumps([{"number": 8, "body": "Closes #7\n"}]))
             if argv[:3] == ["pr", "view", "8"] and "headRefName" in argv:
                 return SimpleNamespace(stdout=json.dumps({"headRefName": "legacy-7-head"}))
-            if argv[:2] == ["pr", "view"] and "state,autoMergeRequest" in argv:
-                return SimpleNamespace(
-                    returncode=0,
-                    stdout=json.dumps({"state": "OPEN", "autoMergeRequest": None}),
-                    stderr="",
-                )
             raise AssertionError(f"unexpected gh invocation: {argv}")
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
@@ -854,12 +817,7 @@ class TestRepoScoping:
         adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
         assert adapter.find_pr_for_issue(7) == 8
 
-        contained = [
-            call[2]
-            for call in calls
-            if call[:2] == ["pr", "view"] and "state,autoMergeRequest" in call
-        ]
-        assert contained == ["8", "9"]
+        assert not any("state,autoMergeRequest" in call for call in calls)
 
     def test_repo_scoped_pr_lookup_rejects_empty_successful_output(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1218,165 +1176,45 @@ class TestRepoReviewThreadsForReview:
 
 
 class TestRepoScopedAutoMerge:
-    """Repo-scoped auto-merge mutations are idempotent under racing workers."""
+    """The pipeline adapter intentionally exposes no auto-merge mutators."""
 
-    def test_defer_auto_merge_disables_and_reads_back(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        calls: list[tuple[list[str], dict[str, object]]] = []
+    def test_pipeline_adapter_has_no_auto_merge_mutation_surface(self, tmp_path: Path) -> None:
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
 
-        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
-            calls.append((argv, kwargs))
-            if (
-                argv[:2] == ["pr", "view"]
-                and len([call for call, _ in calls if call[:2] == ["pr", "view"]]) == 1
-            ):
-                return SimpleNamespace(
-                    stdout=json.dumps({"state": "OPEN", "autoMergeRequest": {"enabledAt": "now"}})
-                )
-            if argv[:2] == ["pr", "view"]:
-                return SimpleNamespace(
-                    stdout=json.dumps({"state": "OPEN", "autoMergeRequest": None})
-                )
-            return SimpleNamespace(stdout="", returncode=0, stderr="")
-
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
-
-        pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).defer_auto_merge(7)
-
-        assert calls == [
-            (
-                [
-                    "pr",
-                    "view",
-                    "7",
-                    "--json",
-                    "state,autoMergeRequest",
-                    "--repo",
-                    "org/repo-a",
-                ],
-                {"check": False},
-            ),
-            (
-                ["pr", "merge", "7", "--disable-auto", "--repo", "org/repo-a"],
-                {"check": False},
-            ),
-            (
-                [
-                    "pr",
-                    "view",
-                    "7",
-                    "--json",
-                    "state,autoMergeRequest",
-                    "--repo",
-                    "org/repo-a",
-                ],
-                {"check": False},
-            ),
-        ]
-
-    def test_defer_auto_merge_rejects_open_pr_that_remains_armed(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A failed disable read-back is surfaced to the calling stage."""
-
-        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
-            del argv, kwargs
-            return SimpleNamespace(
-                stdout=json.dumps({"state": "OPEN", "autoMergeRequest": {"enabledAt": "now"}})
-            )
-
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
-
-        with pytest.raises(RuntimeError, match="could not verify auto-merge disabled"):
-            pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).defer_auto_merge(7)
-
-    def test_defer_auto_merge_rejects_unreadable_pr_state(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A failed GitHub read cannot be interpreted as a safely terminal PR."""
-
-        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
-            del argv, kwargs
-            return SimpleNamespace(stdout="", returncode=1)
-
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
-
-        with pytest.raises(RuntimeError, match="could not verify auto-merge disabled"):
-            pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).defer_auto_merge(7)
-
-    def test_defer_auto_merge_rejects_an_incomplete_open_pr_state(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The queue adapter requires the arm field before treating OPEN as safe."""
-        monkeypatch.setattr(
-            pg,
-            "gh_call",
-            lambda _argv, **_kwargs: SimpleNamespace(stdout=json.dumps({"state": "OPEN"})),
-        )
-
-        with pytest.raises(RuntimeError, match="could not verify auto-merge disabled"):
-            pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).defer_auto_merge(7)
-
-    def test_arm_auto_merge_uses_scoped_squash_auto_merge(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        calls: list[tuple[list[str], dict[str, object]]] = []
-
-        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
-            calls.append((argv, kwargs))
-            return SimpleNamespace(stdout="", returncode=1, stderr="already enabled")
-
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
-
-        expected_head = "a" * 40
-        pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).arm_auto_merge(7, expected_head)
-
-        assert calls == [
-            (
-                [
-                    "pr",
-                    "merge",
-                    "7",
-                    "--auto",
-                    "--squash",
-                    "--match-head-commit",
-                    expected_head,
-                    "--repo",
-                    "org/repo-a",
-                ],
-                {},
-            )
-        ]
+        assert not hasattr(adapter, "arm_auto_merge")
+        assert not hasattr(adapter, "defer_auto_merge")
 
 
 class TestCreatePr:
     """create_pr: idempotent reuse, given-body create, dry-run neutral."""
 
-    def test_reuses_existing_open_pr(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    def test_repo_scoped_reuses_existing_open_pr(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(adapter, "_find_pr_for_issue", lambda issue, state: 77)
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        monkeypatch.setattr(adapter, "_open_prs_for_branch", lambda branch: [])
+        monkeypatch.setattr(adapter, "find_pr_for_issue", lambda issue: 77)
         create = _patch_target(monkeypatch, "github_api", "gh_pr_create")
 
         assert adapter.create_pr(5, "branch", "t", "b") == 77
         create.assert_not_called()
 
-    def test_creates_with_given_title_and_body(
+    def test_unscoped_create_fails_closed_without_legacy_helper(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """NOT pr_manager.ensure_pr_created — the stage's composed body wins."""
-        monkeypatch.setattr(adapter, "_find_pr_for_issue", lambda issue, state: None)
-        create = MagicMock(return_value=88)
+        """PR creation cannot delegate to the legacy auto-merge-capable path."""
+        create = MagicMock()
         monkeypatch.setattr(github_api_mod, "gh_pr_create", create)
 
-        assert adapter.create_pr(5, "branch", "title", "body\n\nCloses #5") == 88
-        create.assert_called_once_with("branch", "title", "body\n\nCloses #5")
+        with pytest.raises(RuntimeError, match="repo-scoped"):
+            adapter.create_pr(5, "branch", "title", "body\n\nCloses #5")
 
-    def test_dry_run_returns_zero(
-        self, dry_adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(dry_adapter, "_find_pr_for_issue", lambda issue, state: None)
+        create.assert_not_called()
+
+    def test_dry_run_returns_zero(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        dry_adapter = pg.PipelineGitHub("org", repo="repo-a", dry_run=True, repo_root=tmp_path)
+        monkeypatch.setattr(dry_adapter, "_open_prs_for_branch", lambda branch: [])
+        monkeypatch.setattr(dry_adapter, "find_pr_for_issue", lambda issue: None)
         create = _patch_target(monkeypatch, "github_api", "gh_pr_create")
 
         assert dry_adapter.create_pr(5, "b", "t", "x") == 0
@@ -1429,23 +1267,13 @@ class TestCreatePr:
                         ]
                     )
                 )
-            if argv[:2] == ["pr", "view"] and "state,autoMergeRequest" in argv:
-                return SimpleNamespace(
-                    returncode=0,
-                    stdout=json.dumps({"state": "OPEN", "autoMergeRequest": None}),
-                    stderr="",
-                )
             raise AssertionError(f"unexpected gh invocation: {argv}")
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
 
         adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
         assert adapter.create_pr(7, "custom-branch", "title", "body\n\nCloses #7") == 9
-        assert [
-            call[2]
-            for call in calls
-            if call[:2] == ["pr", "view"] and "state,autoMergeRequest" in call
-        ] == ["8", "9"]
+        assert not any("state,autoMergeRequest" in call for call in calls)
 
     @pytest.mark.parametrize(
         "stdout",
@@ -1524,13 +1352,7 @@ class TestReadSurface:
     def test_unscoped_pr_lookup_contains_every_same_head_pr(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The optional unscoped accessor must use the same all-head guard."""
-        deferred: list[int] = []
-        monkeypatch.setattr(
-            pr_manager_mod,
-            "ensure_pr_auto_merge_deferred",
-            lambda pr_number: deferred.append(pr_number),
-        )
+        """The optional unscoped accessor discovers siblings read-only."""
         monkeypatch.setattr(
             pg,
             "gh_call",
@@ -1545,7 +1367,6 @@ class TestReadSurface:
         )
 
         assert adapter.find_pr_for_issue(5) == 5
-        assert deferred == [5, 6]
 
     def test_find_issue_for_pr_parses_exact_closes_line(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1577,18 +1398,24 @@ class TestReadSurface:
 
         assert issue is None
 
-    def test_pr_review_context_reads_body_and_complete_diff(
+    def test_pr_review_context_reads_metadata_for_a_checkout_bound_diff(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The review stage gets authoritative inputs rather than empty defaults."""
+        """The checkout barrier, not mutable GitHub diff output, supplies the diff."""
         calls: list[list[str]] = []
 
         def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
             calls.append(argv)
             if argv[:2] == ["pr", "view"]:
-                return SimpleNamespace(stdout=json.dumps({"body": "Closes #1899\n"}))
-            if argv[:2] == ["pr", "diff"]:
-                return SimpleNamespace(stdout="diff --git a/a.py b/a.py\n+new\n")
+                return SimpleNamespace(
+                    stdout=json.dumps(
+                        {
+                            "body": "Closes #1899\n",
+                            "headRefOid": "a" * 40,
+                            "baseRefName": "main",
+                        }
+                    )
+                )
             raise AssertionError(f"unexpected gh invocation: {argv}")
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
@@ -1598,13 +1425,50 @@ class TestReadSurface:
         )
 
         assert context == {
-            "pr_diff": "diff --git a/a.py b/a.py\n+new\n",
             "pr_description": "Closes #1899\n",
+            "pr_head_sha": "a" * 40,
+            "pr_base_branch": "main",
         }
         assert calls == [
-            ["pr", "view", "1984", "--json", "body", "--repo", "org/repo-a"],
-            ["pr", "diff", "1984", "--repo", "org/repo-a"],
+            [
+                "pr",
+                "view",
+                "1984",
+                "--json",
+                "body,headRefOid,baseRefName",
+                "--repo",
+                "org/repo-a",
+            ],
         ]
+
+    def test_pr_review_context_does_not_request_mutable_remote_diff(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An A -> B -> A race cannot pair B's remote diff with proof for A."""
+        calls: list[list[str]] = []
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            return SimpleNamespace(
+                stdout=json.dumps(
+                    {
+                        "body": "Closes #1899",
+                        "headRefOid": "a" * 40,
+                        "baseRefName": "main",
+                    }
+                )
+            )
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        context = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).pr_review_context(
+            1984
+        )
+
+        assert context is not None
+        assert context["pr_head_sha"] == "a" * 40
+        assert "pr_diff" not in context
+        assert all(argv[:2] != ["pr", "diff"] for argv in calls)
 
     def test_pr_manager_implementation_label_read(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch

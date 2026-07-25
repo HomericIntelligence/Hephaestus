@@ -222,6 +222,8 @@ class TestROUTES:
                     "closed": StageName.FINISHED,
                     "head_drift": StageName.PR_REVIEW,
                     "not_implementation_go": StageName.PR_REVIEW,
+                    "reviewed_head_missing": StageName.PR_REVIEW,
+                    "reviewed_head_drift": StageName.PR_REVIEW,
                     "*": StageName.FINISHED,
                 },
                 budgets={"merge": routing.DEFAULT_DRIVE_GREEN_LOOPS},

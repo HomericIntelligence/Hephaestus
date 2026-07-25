@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import queue as queue_mod
 import shlex
 import shutil
 import subprocess
@@ -323,6 +324,8 @@ class WorkerPool:
         )
         self._shutdown = shutdown
         self._completion_q = completion_q
+        self._completion_wakeup: threading.Event | None = None
+        self._completion_saturation: threading.Event | None = None
         self._repo_locks: dict[str, _RepoLockEntry] = {}
         self._repo_locks_guard = threading.Lock()
         self._lock_dir = lock_dir
@@ -345,6 +348,24 @@ class WorkerPool:
                 entry.users -= 1
                 if entry.users == 0 and self._repo_locks.get(repo) is entry:
                     self._repo_locks.pop(repo, None)
+
+    def set_completion_notifiers(
+        self,
+        *,
+        wakeup: threading.Event,
+        saturation: threading.Event,
+    ) -> None:
+        """Bind coordinator-owned completion wake and saturation latches.
+
+        The coordinator creates these latches before it submits work.  A
+        successful non-blocking completion write wakes its event loop; an
+        impossible full completion queue instead latches a fatal coordinator
+        fault.  The callback deliberately has no overflow buffer: retaining
+        the owning item in the coordinator's in-flight registry makes it
+        resumable during that fatal teardown.
+        """
+        self._completion_wakeup = wakeup
+        self._completion_saturation = saturation
 
     def submit(
         self,
@@ -377,17 +398,21 @@ class WorkerPool:
         future.add_done_callback(lambda f: self._on_future_done(handle, f))
         return handle
 
-    def shutdown(self) -> None:
+    def shutdown(self, *, mark_interrupted: bool = True) -> None:
         """Shut down the pool.
 
-        Sets the shutdown event, cancels pending futures, and SIGTERMs every
-        in-flight agent process group. ``executor.shutdown(cancel_futures=True)``
-        only cancels UN-STARTED futures; a job already blocked in a ``claude``
-        subprocess would keep running and pin its non-daemon worker thread
-        (holding the interpreter open at exit — the #2059 leak). Terminating the
-        tracked process groups frees those workers promptly.
+        When ``mark_interrupted`` is true, sets the shutdown event before
+        cancelling pending futures and SIGTERMing every in-flight agent process
+        group. Coordinators pass false for ordinary ``finally`` cleanup so
+        releasing pool resources cannot reclassify a completed run as a signal
+        interruption. ``executor.shutdown(cancel_futures=True)`` only cancels
+        UN-STARTED futures; a job already blocked in a ``claude`` subprocess
+        would keep running and pin its non-daemon worker thread (holding the
+        interpreter open at exit — the #2059 leak). Terminating tracked process
+        groups frees those workers promptly.
         """
-        self._shutdown.set()
+        if mark_interrupted:
+            self._shutdown.set()
         self._executor.shutdown(wait=False, cancel_futures=True)
         subprocess_registry.terminate_all()
 
@@ -434,7 +459,24 @@ class WorkerPool:
                 error=f"worker_crash: {type(exc).__name__}: {exc!s}"[:_ERR_MAX],
                 worker_id=worker_id,
             )
-        self._completion_q.put((handle, result))
+        try:
+            self._completion_q.put_nowait((handle, result))
+        except queue_mod.Full:
+            # With the coordinator's global C-in-flight invariant, a C-sized
+            # completion queue cannot fill before a worker has a slot to
+            # publish.  Treat a violation as an internal fault rather than
+            # blocking this callback forever.  There is intentionally no
+            # unbounded spill structure: finalization retains the in-flight
+            # WorkItem as RESUMABLE for the next run.
+            logger.error("completion queue saturated; refusing to block worker callback")
+            if self._completion_saturation is not None:
+                self._completion_saturation.set()
+            if self._completion_wakeup is not None:
+                self._completion_wakeup.set()
+            return
+
+        if self._completion_wakeup is not None:
+            self._completion_wakeup.set()
 
     def _run(
         self,
@@ -736,6 +778,9 @@ class WorkerPool:
         """
         if job.op == "create_worktree":
             return self._git_create_worktree(job)
+
+        elif job.op == "verify_pr_review_checkout":
+            return self._git_verify_pr_review_checkout(job)
 
         elif job.op == "remove_worktree":
             return self._git_remove_worktree(job)
@@ -1046,6 +1091,64 @@ class WorkerPool:
                 "diff": diff,
             },
         )
+
+    @staticmethod
+    def _git_verify_pr_review_checkout(job: GitJob) -> JobResult:
+        """Synchronize a clean review checkout and bind it to one PR head.
+
+        The review snapshot comes from GitHub before this job.  A remote move
+        while synchronizing is not an error to paper over: the stage refreshes
+        a new snapshot and retries a bounded number of times without sending an
+        agent job for the stale input.
+        """
+        worktree = Path(str(job.kwargs.get("worktree_path") or ""))
+        branch = str(job.kwargs.get("branch") or "")
+        expected_head = str(job.kwargs.get("expected_head_sha") or "")
+        base_branch = str(job.kwargs.get("base_branch") or "main")
+        pr_number = job.kwargs.get("pr_number")
+        if not worktree.is_dir() or not branch or not expected_head or not base_branch:
+            return JobResult(
+                ok=False,
+                error="review checkout requires worktree, branch, base branch, and head",
+            )
+        if not git_utils.is_clean_working_tree(worktree, timeout=job.timeout_s):
+            return JobResult(ok=True, value={"ready": False, "reason": "dirty"})
+        git_utils.sync_worktree_to_remote_branch(
+            worktree,
+            branch,
+            pr_number=int(pr_number) if pr_number is not None else None,
+            timeout=job.timeout_s,
+        )
+        head = git_utils.run(
+            ["git", "rev-parse", "HEAD"], cwd=worktree, timeout=job.timeout_s
+        ).stdout.strip()
+        if head != expected_head:
+            return JobResult(ok=True, value={"ready": False, "reason": "head_drift"})
+        if not git_utils.is_clean_working_tree(worktree, timeout=job.timeout_s):
+            return JobResult(ok=True, value={"ready": False, "reason": "dirty"})
+        # Build the prompt diff from the checkout only after it is proven to
+        # be the head captured above.  ``gh pr diff`` is mutable and cannot
+        # distinguish an A -> B -> A head race from a stable A snapshot.
+        git_utils.run(
+            ["git", "fetch", "origin", "--", base_branch],
+            cwd=worktree,
+            timeout=job.timeout_s,
+        )
+        base = git_utils.run(
+            ["git", "rev-parse", f"origin/{base_branch}"],
+            cwd=worktree,
+            timeout=job.timeout_s,
+        ).stdout.strip()
+        if not base:
+            return JobResult(ok=False, error="review checkout base ref unavailable")
+        diff = git_utils.run(
+            ["git", "diff", "--no-ext-diff", "--binary", f"{base}...{head}"],
+            cwd=worktree,
+            timeout=job.timeout_s,
+        ).stdout
+        if not isinstance(diff, str):
+            return JobResult(ok=False, error="review checkout diff unavailable")
+        return JobResult(ok=True, value={"ready": True, "head": head, "base": base, "diff": diff})
 
     def _git_remove_worktree(self, job: GitJob) -> JobResult:
         """Remove a worktree by known path, or fall back to manager state."""

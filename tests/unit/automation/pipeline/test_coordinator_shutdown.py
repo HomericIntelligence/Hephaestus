@@ -149,7 +149,11 @@ def _coordinator(
     install_signals: bool = False,
 ) -> Coordinator:
     config = PipelineConfig(
-        org="org", repos=["repo-a"], loops=1, projects_dir=tmp_path, grace_s=grace_s
+        org="org",
+        repos=["repo-a"] if seed else [],
+        loops=1,
+        projects_dir=tmp_path,
+        grace_s=grace_s,
     )
     monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: list(seed or []))
     coordinator = Coordinator(
@@ -210,7 +214,7 @@ class TestInterruptSemantics:
         seed = [SeedEntry(kind="issue", identifier=3, stage=StageName.IMPLEMENTATION, reason="r")]
         _capture_signal_handlers(monkeypatch)
         coordinator = _coordinator(tmp_path, monkeypatch, seed=seed, install_signals=True)
-        pool = SecondSignalPool()
+        pool = SecondSignalPool(shutdown=coordinator.shutdown)
         coordinator.pool = pool
         coordinator.completion_q = pool.completion_q
         stage = JobRequestingStage()
@@ -219,6 +223,7 @@ class TestInterruptSemantics:
         exit_code = coordinator.run()
 
         assert exit_code == 130
+        assert coordinator.shutdown.is_set()
         assert len(pool.submitted) == 1
         assert pool.shutdown_event.is_set()
         assert stage.job_done_calls == 0
@@ -268,13 +273,52 @@ class TestInterruptSemantics:
         assert coordinator.shutdown.is_set()
         assert coordinator._grace_deadline is not None
         assert coordinator._immediate is False
-        assert not coordinator.completion_q.empty()
+        assert coordinator._completion_wakeup.is_set()
+        assert coordinator.completion_q.empty()
         coordinator._drain_completions()
         assert coordinator.completion_q.empty()
+        assert not coordinator._completion_wakeup.is_set()
 
         handler(signal_mod.SIGTERM, None)
         assert coordinator._immediate is True
-        assert not coordinator.completion_q.empty()
+        assert coordinator._completion_wakeup.is_set()
+        assert coordinator.completion_q.empty()
+
+
+class TestNormalTeardownExitSemantics:
+    """Ordinary pool cleanup must not manufacture an interrupt outcome (#2431)."""
+
+    @staticmethod
+    def _default_pool_coordinator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Coordinator:
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
+        return Coordinator(
+            PipelineConfig(org="org", repos=[], loops=1, projects_dir=tmp_path),
+            github=FakeStageGitHub(),
+            install_signals=False,
+        )
+
+    def test_clean_real_pool_run_exits_zero_without_interruption(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A default WorkerPool cleanup cannot turn a clean run into exit 130."""
+        coordinator = self._default_pool_coordinator(tmp_path, monkeypatch)
+
+        assert coordinator.run() == 0
+        assert not coordinator.shutdown.is_set()
+
+    def test_fatal_real_pool_run_exits_failure_without_interruption(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A fatal path remains a domain failure rather than a false interrupt."""
+        coordinator = self._default_pool_coordinator(tmp_path, monkeypatch)
+
+        def boom() -> None:
+            raise RuntimeError("expected test failure")
+
+        monkeypatch.setattr(coordinator, "_seed_pass", boom)
+
+        assert coordinator.run() == 1
+        assert not coordinator.shutdown.is_set()
 
 
 def _classify_from_fake(
@@ -483,10 +527,7 @@ class TestCrashMatrixJournal:
         assert outcome.disposition.value == "advance"
         assert item.pr is not None
         assert item.pr in gh.prs
-        assert [name for name, _ in gh.mutation_log[-2:]] == [
-            "gh_pr_create",
-            "defer_auto_merge",
-        ]
+        assert gh.mutation_log[-1][0] == "gh_pr_create"
 
         # CRASH before the push to the pr_review queue.
         entry = _classify_from_fake(gh, 4, open_pr=item.pr)
