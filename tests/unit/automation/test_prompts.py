@@ -789,6 +789,15 @@ class TestPlanLoopReviewRubric:
         out = self._build(2)
         assert self._FULL_SWEEP_MARKER in out
 
+    def test_plan_loop_r2_sweep_preserves_the_required_plan_state_label(self) -> None:
+        """The shared sweep never replaces the plan loop's terminal contract."""
+        out = self._build(2)
+
+        assert "do NOT introduce an additional terminal token" in out
+        assert "the output format required by the surrounding prompt" in out
+        for label in ("state:plan-go", "state:plan-no-go", "state:plan-blocked"):
+            assert label in out
+
     def test_plan_loop_prompt_all_iterations_contain_seven_principles(self) -> None:
         """Every iteration's prompt embeds all seven principle markers."""
         for iteration in (0, 1, 2):

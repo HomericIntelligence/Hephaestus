@@ -2692,6 +2692,55 @@ class TestFullWalks:
 class TestNoGoLabel:
     """M2: state:implementation-no-go is durably written on NOGO rounds."""
 
+    def test_post_write_auto_merge_arm_blocks_without_rollback(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An arm appearing after the NO-GO write is never overwritten again."""
+
+        class ArmedAfterWriteGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__()
+                self._states = [
+                    {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
+                    {
+                        "state": "OPEN",
+                        "headRefOid": "a" * 40,
+                        "autoMergeRequest": {"enabledAt": "now"},
+                    },
+                ]
+
+            def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
+                del pr_number
+                return self._states.pop(0)
+
+        item = make_work_item(issue=36, pr=1001, state="EVAL")
+        item.payload["reviewed_pr_head_sha"] = "a" * 40
+        github = ArmedAfterWriteGitHub()
+
+        assert PrReviewStage._write_no_go(item, make_ctx(github=github)) == StageOutcome(
+            Disposition.BLOCKED, "auto_merge_already_armed"
+        )
+        assert github.mutation_log == [("mark_pr_implementation_no_go", (1001,))]
+
+    def test_post_write_external_go_fails_closed_without_rollback(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An external GO write after our precheck cannot authorize NO-GO flow."""
+
+        class GoAfterWriteGitHub(FakeStageGitHub):
+            def mark_pr_implementation_no_go(self, pr_number: int) -> None:
+                super().mark_pr_implementation_no_go(pr_number)
+                self._pr_impl_state = (True, False)
+
+        item = make_work_item(issue=37, pr=1001, state="EVAL")
+        item.payload["reviewed_pr_head_sha"] = "a" * 40
+        github = GoAfterWriteGitHub()
+
+        assert PrReviewStage._write_no_go(item, make_ctx(github=github)) == StageOutcome(
+            Disposition.FINISH_FAIL, "implementation_no_go_readback_failed"
+        )
+        assert github.mutation_log == [("mark_pr_implementation_no_go", (1001,))]
+
     def test_no_go_written_on_every_nogo_round(self, make_ctx: Any, make_work_item: Any) -> None:
         """Two NOGO rounds record NO-GO twice (per-round, before each loop)."""
         stage = PrReviewStage()

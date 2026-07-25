@@ -1919,7 +1919,13 @@ class PrReviewStage(Stage):
 
     @staticmethod
     def _write_no_go(item: WorkItem, ctx: StageContext) -> StepResult | None:
-        """Durably mark NO-GO after exact-head and exclusive-label checks."""
+        """Durably mark NO-GO after fresh exact-head and label checks.
+
+        Label writes have no compare-and-set operation.  Re-read the live PR
+        state and exclusive implementation labels after the write, and never
+        attempt a compensating mutation if that proof is lost: a concurrent
+        actor may own the current state by then.
+        """
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
         pr_number = item.pr
@@ -1935,6 +1941,9 @@ class PrReviewStage(Stage):
                 error,
             )
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_no_go_label_failed")
+        post_write_guard = PrReviewStage._require_reviewed_unarmed(item, ctx)
+        if post_write_guard is not None:
+            return post_write_guard
         try:
             has_go, has_no_go = ctx.github.pr_has_implementation_state_label(pr_number)
         except Exception as error:
@@ -2025,7 +2034,8 @@ class PrReviewStage(Stage):
             f"{automation_unresolved} automation-created review thread(s) remain open on this "
             "PR. GitHub does not provide a conditional thread-resolution mutation, so "
             "automation will not resolve a thread after a read that could race a human reply. "
-            "The PR is marked `state:implementation-no-go` and remains unarmed. A human must "
+            "The PR is marked `state:implementation-no-go`; automation does not arm auto-merge. "
+            "A human must "
             "verify the fixes and resolve the thread(s); a fresh automation pass can then "
             "re-review the current head."
         )

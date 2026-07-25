@@ -604,11 +604,13 @@ audit a decision but never authorize a transition, block a stage, or backfill a
 missing label. Comment markers locate actor-owned journal artifacts only;
 foreign marker text is ignored.
 
-Likewise, prose such as `Verdict: GO` or `Verdict: NOGO` is reviewer output,
-not durable routing authority. A reviewer may propose a label from that
-analysis, but the coordinator advances only after the relevant GitHub
-`state:*` mutation succeeds and is confirmed. On restart, seeding reads the
-labels and PR state, not verdict text.
+Implementation reviewers emit a structural audit, not a textual decision.
+The host derives any implementation-state transition from that audit and
+current GitHub facts, then confirms the relevant GitHub `state:*` label. Text
+such as `Verdict: GO` or `Verdict: NOGO` is rejected as an implementation
+review decision and cannot authorize, block, or backfill a transition. Plan
+review instead ends with its explicit `state:plan-*` journal token. On restart,
+seeding reads labels and PR state, never reviewer decision prose.
 
 ---
 
