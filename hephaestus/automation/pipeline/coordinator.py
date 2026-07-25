@@ -458,11 +458,6 @@ class Coordinator:
         # only after the finished sink completes.  The set is therefore
         # bounded by ``_work_window(config)``, not by the number of stages.
         self._live_work_permit_ids: set[int] = set()
-        # Implementation claims an entire bounded round to derive topo order.
-        # Source retries in that round stay leased until all deferred peers can
-        # be restored in their original FIFO order.
-        self._implementation_round_item_ids: set[int] | None = None
-        self._implementation_round_source_retries: set[int] = set()
         self.ledger: list[ItemResult] = []
         self.preserved: list[PreservedWorktree] = []
         self.items: list[WorkItem] = []
@@ -873,9 +868,9 @@ class Coordinator:
 
     # -- stage-queue leases -------------------------------------------------
 
-    def _claim_item(self, stage_name: StageName) -> WorkItem | None:
+    def _claim_item(self, stage_name: StageName, *, index: int = 0) -> WorkItem | None:
         """Claim one ready item while retaining its source-stage capacity."""
-        lease = self.queues[stage_name].claim()
+        lease = self.queues[stage_name].claim_at(index)
         if lease is None:
             return None
         item = lease.item
@@ -898,21 +893,16 @@ class Coordinator:
     def _release_source_lease(self, item: WorkItem) -> bool:
         """Release an active lease when work leaves every stage queue.
 
-        ``StageQueueLease`` intentionally exposes only restore or
-        destination-first handoff.  Timers and terminal sink completion are
-        neither, so restore to the source front and immediately remove that
-        same item.  This is not queue draining: it is the one coordinator
-        escape hatch into a timer/terminal ledger and preserves FIFO for all
-        remaining ready items.
+        Timers and terminal sink completion are neither source restores nor
+        destination-first handoffs.  The external owner takes responsibility
+        for the item, so release its source slot directly without disturbing a
+        different queue head selected ahead of it by topo scheduling.
         """
         self._pending_handoffs.pop(id(item), None)
         lease = self._leases.pop(id(item), None)
         if lease is None:
             return False
-        lease.restore()
-        released = self.queues[item.stage].pop()
-        if released is not item:  # pragma: no cover - queue ownership invariant
-            raise RuntimeError("lease restored a different work item")
+        lease.release()
         return True
 
     def _activate_handoff(
@@ -1295,101 +1285,90 @@ class Coordinator:
         q = self.queues[StageName.IMPLEMENTATION]
         if not len(q):
             return
-        # Take bounded source leases for the whole ready round before deriving
-        # the topological order. A raw ``pop`` would make a completed item
-        # ownerless while it is routed; when PR review is full that used to
-        # poison an already-completed implementation action instead of
-        # retaining its source slot for a pending handoff.
-        claimed_items: list[WorkItem] = []
-        for _ in range(len(q)):
-            item = self._claim_item(StageName.IMPLEMENTATION)
-            if item is None:  # pragma: no cover - coordinator-thread atomicity
-                break
-            claimed_items.append(item)
-        items = self._dedup_implementation_items(claimed_items)
-        self._implementation_round_item_ids = {id(item) for item in items}
-        self._implementation_round_source_retries.clear()
-        ran: set[int] = set()
-        try:
-            issue_items, ambiguous = self._index_issue_items(items)
-            infos = [
-                IssueInfo(
-                    number=number,
-                    title=str(item.payload.get("issue_title", "")),
-                    dependencies=list(item.payload.get("dependencies", [])),
-                )
+        # Derive topology from a bounded snapshot, then lease only the chosen
+        # item. A raw pop makes that item ownerless; claiming every item would
+        # violate the one-active-lease FIFO invariant. ``claim_at`` keeps a
+        # selected dependency's original restore position when it retries.
+        for duplicate in self._implementation_duplicates(q.snapshot()):
+            if not self._claim_selected_implementation_item(duplicate):
+                return
+            logger.warning(
+                "implementation %s#%s already queued; dropping duplicate work item",
+                duplicate.repo,
+                duplicate.issue,
+            )
+            self._finish(
+                duplicate,
+                passed=True,
+                reason=f"{duplicate.repo}#{duplicate.issue} superseded by queued duplicate",
+            )
+            if id(duplicate) in self._leases:
+                return
+
+        items = q.snapshot()
+        issue_items, ambiguous = self._index_issue_items(items)
+        infos = [
+            IssueInfo(
+                number=number,
+                title=str(item.payload.get("issue_title", "")),
+                dependencies=list(item.payload.get("dependencies", [])),
+            )
+            for number, item in issue_items.items()
+        ]
+        ordered = _admission.order_for_implementation(infos)
+        dispatch = ordered
+        if self.config.serialize_file_overlap and self.config.max_workers > 1 and len(ordered) > 1:
+            # Resolve each issue's owning repo from its own WorkItem: the queue is
+            # keyed by stage, so one round can hold issues from several repos (#1795).
+            repo_of = {
+                number: (self.config.org, item.repo)
                 for number, item in issue_items.items()
-            ]
-            ordered = _admission.order_for_implementation(infos)
-            dispatch = ordered
-            if (
-                self.config.serialize_file_overlap
-                and self.config.max_workers > 1
-                and len(ordered) > 1
-            ):
-                # Resolve each issue's owning repo from its own WorkItem: the queue is
-                # keyed by stage, so one round can hold issues from several repos (#1795).
-                repo_of = {
-                    number: (self.config.org, item.repo)
-                    for number, item in issue_items.items()
-                    if item.repo
-                }
-                dispatch, deferred = _admission._select_non_overlapping(ordered, repo_of=repo_of)
-                for number in deferred:
-                    logger.info("implementation #%s deferred (file overlap)", number)
-            # Cross-repo same-number items bypass the number-keyed gates and dispatch
-            # directly — they are distinct work that the ordering model cannot rank.
-            dispatch_items = [issue_items[number] for number in dispatch]
-            dispatch_items.extend(it for group in ambiguous.values() for it in group)
-            for item in dispatch_items:
-                if self.shutdown.is_set() or not self._admit(item):
-                    continue  # source lease is restored below
-                ran.add(id(item))
-                self._record_event("drain", StageName.IMPLEMENTATION.value, self._item_key(item))
-                self._run_item(item)
-        finally:
-            # Preserve original queue order for deferred / non-admitted /
-            # non-issue items, plus no-delay retries from this round. Each
-            # lease restores to the queue front, so release all source returns
-            # in reverse original order.
-            source_returns = {id(it) for it in items if id(it) not in ran}
-            source_returns.update(self._implementation_round_source_retries)
-            for it in reversed(claimed_items):
-                if id(it) in source_returns:
-                    self._restore_source_lease(it)
-            self._implementation_round_item_ids = None
-            self._implementation_round_source_retries.clear()
+                if item.repo
+            }
+            dispatch, deferred = _admission._select_non_overlapping(ordered, repo_of=repo_of)
+            for number in deferred:
+                logger.info("implementation #%s deferred (file overlap)", number)
+        # Cross-repo same-number items bypass the number-keyed gates and dispatch
+        # directly — they are distinct work that the ordering model cannot rank.
+        dispatch_items = [issue_items[number] for number in dispatch]
+        dispatch_items.extend(it for group in ambiguous.values() for it in group)
+        for item in dispatch_items:
+            if self.shutdown.is_set() or not self._admit(item):
+                continue
+            if not self._claim_selected_implementation_item(item):
+                continue
+            self._record_event("drain", StageName.IMPLEMENTATION.value, self._item_key(item))
+            self._run_item(item)
+            # A job, timer, or full-destination handoff retains the only
+            # implementation lease. Wait until it routes before selecting the
+            # next topo item.
+            if id(item) in self._leases:
+                return
 
-    def _dedup_implementation_items(self, items: list[WorkItem]) -> list[WorkItem]:
-        """Drop transient duplicate work items, keyed by ``(repo, issue)`` (#2057).
-
-        A retry/fail-back can re-enqueue an issue while a prior copy is still
-        queued, so the round may briefly hold two items for the same
-        ``(repo, issue)``. Keep the first-queued and terminalize the rest as
-        superseded (was a hard assert that crashed the whole run, #1952). Keyed
-        by ``(repo, issue)`` so a cross-repo same-number pair (``A#71``/``B#71``)
-        is preserved as distinct work. ``issue is None`` items never dedup.
-        """
+    @staticmethod
+    def _implementation_duplicates(items: list[WorkItem]) -> list[WorkItem]:
+        """Return non-first queued duplicates keyed by ``(repo, issue)`` (#2057)."""
         seen: set[tuple[str, int]] = set()
-        deduped: list[WorkItem] = []
-        for it in items:
-            if it.issue is None:
-                deduped.append(it)
+        duplicates: list[WorkItem] = []
+        for item in items:
+            if item.issue is None:
                 continue
-            key = (it.repo, it.issue)
+            key = (item.repo, item.issue)
             if key in seen:
-                logger.warning(
-                    "implementation %s#%s already queued; dropping duplicate work item",
-                    it.repo,
-                    it.issue,
-                )
-                self._finish(
-                    it, passed=True, reason=f"{it.repo}#{it.issue} superseded by queued duplicate"
-                )
-                continue
-            seen.add(key)
-            deduped.append(it)
-        return deduped
+                duplicates.append(item)
+            else:
+                seen.add(key)
+        return duplicates
+
+    def _claim_selected_implementation_item(self, item: WorkItem) -> bool:
+        """Claim *item* at its current position, preserving FIFO retry order."""
+        for index, queued in enumerate(self.queues[StageName.IMPLEMENTATION].snapshot()):
+            if queued is item:
+                claimed = self._claim_item(StageName.IMPLEMENTATION, index=index)
+                if claimed is not item:  # pragma: no cover - coordinator-thread invariant
+                    raise RuntimeError("implementation queue selected a different item")
+                return True
+        return False
 
     @staticmethod
     def _index_issue_items(
@@ -1609,15 +1588,6 @@ class Coordinator:
         """
         delay = item.payload.pop("retry_delay_s", None)
         if delay is None:
-            if (
-                self._implementation_round_item_ids is not None
-                and id(item) in self._implementation_round_item_ids
-            ):
-                # The implementation drain has leased a complete bounded
-                # round for topo ordering. Keep this retry's source lease
-                # until every deferred peer can be restored FIFO below.
-                self._implementation_round_source_retries.add(id(item))
-                return
             if not self._restore_source_lease(item):
                 self._push_item(item, item.stage, enter=False)
         elif self.config.dry_run:

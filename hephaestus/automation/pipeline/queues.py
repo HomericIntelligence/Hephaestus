@@ -28,10 +28,11 @@ class StageQueueLease:
     retry after the destination makes capacity available.
     """
 
-    def __init__(self, source: StageQueue, item: WorkItem) -> None:
+    def __init__(self, source: StageQueue, item: WorkItem, restore_index: int = 0) -> None:
         """Create an active lease owned by *source* for *item*."""
         self._source = source
         self.item = item
+        self._restore_index = restore_index
         self._active = True
 
     def restore(self) -> None:
@@ -43,7 +44,7 @@ class StageQueueLease:
         if not self._active:
             return
 
-        self._source._restore_lease(self.item)
+        self._source._restore_lease(self.item, self._restore_index)
         self._active = False
 
     def handoff(self, destination: StageQueue) -> bool:
@@ -59,6 +60,20 @@ class StageQueueLease:
         self._source._release_lease()
         self._active = False
         return True
+
+    def release(self) -> None:
+        """Release a lease when an external owner takes the item.
+
+        Timers and the terminal ledger are neither source restores nor stage
+        handoffs. Their coordinator-owned containers take responsibility for
+        the item after this method returns, while the source slot becomes
+        available without disturbing another ready item's FIFO position.
+        """
+        if not self._active:
+            return
+
+        self._source._release_lease()
+        self._active = False
 
 
 class StageQueue:
@@ -153,16 +168,28 @@ class StageQueue:
         # A lease can restore its item to the front.  Serializing claims keeps
         # that restoration ahead of every item that was already ready, rather
         # than reversing two independently restored leases.
-        if self._held or not self._items:
+        return self.claim_at(0)
+
+    def claim_at(self, index: int) -> StageQueueLease | None:
+        """Claim one ready item at *index* while preserving its retry position.
+
+        Implementation's topological scheduler may need to execute a
+        dependency that is ready behind the FIFO head. A selected lease still
+        serializes every other claim, and restoring it returns the item to the
+        exact position it occupied when claimed.
+        """
+        if self._held or not 0 <= index < len(self._items):
             return None
 
+        item = self._items[index]
+        del self._items[index]
         self._held += 1
-        return StageQueueLease(self, self._items.popleft())
+        return StageQueueLease(self, item, restore_index=index)
 
-    def _restore_lease(self, item: WorkItem) -> None:
-        """Restore one active lease at the front without changing occupancy."""
+    def _restore_lease(self, item: WorkItem, index: int = 0) -> None:
+        """Restore one active lease at its claimed position without opening capacity."""
         self._held -= 1
-        self._items.appendleft(item)
+        self._items.insert(index, item)
 
     def _release_lease(self) -> None:
         """Release one active lease after its item was admitted elsewhere."""

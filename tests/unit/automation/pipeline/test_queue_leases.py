@@ -80,6 +80,42 @@ class TestStageQueueLeases:
 
         assert source.snapshot() == [first, second, third]
 
+    def test_selected_claim_restores_the_original_queue_position(self) -> None:
+        """Topo scheduling may lease a non-head item without reordering a retry."""
+        source = StageQueue(capacity=3)
+        first = _item("first")
+        selected = _item("selected")
+        third = _item("third")
+        for item in (first, selected, third):
+            source.push(item)
+
+        lease = source.claim_at(1)
+
+        assert lease is not None
+        assert lease.item is selected
+        assert source.snapshot() == [first, third]
+        assert source.claim() is None
+
+        lease.restore()
+
+        assert source.snapshot() == [first, selected, third]
+
+    def test_selected_claim_release_does_not_remove_the_queue_head(self) -> None:
+        """A timer can take selected work without accidentally popping a peer."""
+        source = StageQueue(capacity=2)
+        first = _item("first")
+        selected = _item("selected")
+        source.push(first)
+        source.push(selected)
+
+        lease = source.claim_at(1)
+
+        assert lease is not None
+        lease.release()
+
+        assert source.snapshot() == [first]
+        assert source.occupancy == 1
+
     def test_successful_handoff_releases_source_and_enqueues_item_once(self) -> None:
         """A successful handoff frees only the source reservation it transfers."""
         source = StageQueue(capacity=1)
