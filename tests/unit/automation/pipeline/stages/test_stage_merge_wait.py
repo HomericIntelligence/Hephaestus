@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from hephaestus.automation.pipeline.routing import Disposition, StageName
 from hephaestus.automation.pipeline.stages import ConditionalMergeResult, Continue, StageOutcome
 from hephaestus.automation.pipeline.stages.merge_wait import MergeWaitStage
@@ -225,6 +227,71 @@ def test_ambiguous_transport_head_drift_fails_back_without_label_mutation(
     assert github.mutation_log == []
 
 
+def test_ambiguous_transport_retries_only_after_delayed_same_head_read(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A same-head ambiguity earns one timer retry, never an in-step re-PUT."""
+    github = _ConditionalGitHub(
+        states=[_open_pr(), _open_pr()],
+        merge_results=[
+            ConditionalMergeResult(
+                status=None,
+                body=None,
+                transport_error=True,
+                malformed=False,
+                dry_run=False,
+            )
+        ],
+    )
+    item = _reviewed_item(make_work_item)
+
+    result = MergeWaitStage().step(item, make_ctx(github=github, budget_fn=lambda _route: 2))
+
+    assert result == StageOutcome(Disposition.RETRY, "merge_not_ready")
+    assert item.attempts["merge"] == 1
+    assert item.payload["retry_delay_s"] == 1.0
+    assert github.merge_attempts == [(12, "a" * 40)]
+    assert github.mutation_log == []
+
+
+def test_ambiguous_transport_with_unreadable_reconciliation_is_terminal(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A transport ambiguity cannot retry when the confirming read is unavailable."""
+    github = _ConditionalGitHub(
+        states=[_open_pr(), None],
+        merge_results=[
+            ConditionalMergeResult(
+                status=None,
+                body=None,
+                transport_error=True,
+                malformed=False,
+                dry_run=False,
+            )
+        ],
+    )
+
+    result = MergeWaitStage().step(_reviewed_item(make_work_item), make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.FINISH_FAIL, "pr_state_unavailable")
+    assert github.merge_attempts == [(12, "a" * 40)]
+    assert github.mutation_log == []
+
+
+def test_restarted_merge_without_process_local_proof_fails_back_without_put(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A restarted process never reconstructs authority from durable labels alone."""
+    github = _ConditionalGitHub(states=[_open_pr()])
+    item = make_work_item(stage=StageName.MERGE_WAIT, pr=12, state=MERGE)
+
+    result = MergeWaitStage().step(item, make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.FAIL_BACK, "reviewed_head_missing")
+    assert github.merge_attempts == []
+    assert github.mutation_log == []
+
+
 def test_409_head_drift_fails_back_without_label_mutation(
     make_ctx: Any, make_work_item: Any
 ) -> None:
@@ -272,6 +339,63 @@ def test_405_retry_is_timer_parked_only_while_merge_budget_remains(
     assert result == StageOutcome(Disposition.RETRY, "merge_not_ready")
     assert item.payload["retry_delay_s"] == 1.0
     assert github.merge_attempts == [(12, "a" * 40)]
+
+
+@pytest.mark.parametrize("merge_state_status", ["CONFLICTING", "DIRTY"])
+def test_405_conflicting_or_dirty_readiness_is_terminal(
+    make_ctx: Any, make_work_item: Any, merge_state_status: str
+) -> None:
+    """Conflict-like GitHub readiness states are not retried as transient readiness."""
+    github = _ConditionalGitHub(
+        states=[_open_pr()],
+        merge_results=[
+            ConditionalMergeResult(
+                status=405,
+                body={"message": "not ready"},
+                transport_error=False,
+                malformed=False,
+                dry_run=False,
+            )
+        ],
+        readiness={
+            "state": "OPEN",
+            "headRefOid": "a" * 40,
+            "autoMergeRequest": None,
+            "baseRefName": "main",
+            "mergeable": "CONFLICTING",
+            "mergeStateStatus": merge_state_status,
+        },
+    )
+
+    result = MergeWaitStage().step(_reviewed_item(make_work_item), make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_conflicting")
+    assert github.merge_attempts == [(12, "a" * 40)]
+    assert github.mutation_log == []
+
+
+def test_409_reconciliation_external_arm_blocks_without_label_mutation(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A fresh external arm after a 409 blocks the run without trying to revoke it."""
+    github = _ConditionalGitHub(
+        states=[_open_pr(), _open_pr(auto_merge_request={"enabledAt": "external"})],
+        merge_results=[
+            ConditionalMergeResult(
+                status=409,
+                body={"message": "head changed"},
+                transport_error=False,
+                malformed=False,
+                dry_run=False,
+            )
+        ],
+    )
+
+    result = MergeWaitStage().step(_reviewed_item(make_work_item), make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
+    assert github.merge_attempts == [(12, "a" * 40)]
+    assert github.mutation_log == []
 
 
 def test_label_loss_or_non_main_base_prevents_the_conditional_request(

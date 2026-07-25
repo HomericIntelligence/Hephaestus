@@ -248,6 +248,62 @@ class TestRetryDelayConsumption:
         coordinator._drain_queues()
         assert github.puts == 2
 
+    def test_merge_wait_transport_ambiguity_timer_reentry_is_bounded(
+        self, clocked: tuple[Coordinator, FakeClock]
+    ) -> None:
+        """An unknown PUT result gets delayed retries and exactly consumes the budget."""
+
+        class AmbiguousGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__(
+                    pr_impl_state=(True, False),
+                    learn_terminal=True,
+                    pr_state={
+                        "state": "OPEN",
+                        "headRefOid": "a" * 40,
+                        "baseRefName": "main",
+                        "autoMergeRequest": None,
+                    },
+                )
+                self.puts = 0
+
+            def merge_pr_if_head(self, pr_number: int, reviewed_sha: str) -> ConditionalMergeResult:
+                self.puts += 1
+                return ConditionalMergeResult(status=None, body=None, transport_error=True)
+
+        coordinator, clock = clocked
+        github = AmbiguousGitHub()
+        coordinator.github = github
+        coordinator._ctx_cache.clear()
+        coordinator.config.budget_overrides["merge"] = 2
+        item = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=89,
+            pr=12,
+            stage=StageName.MERGE_WAIT,
+            state="MERGE",
+            payload={"reviewed_pr_head_sha": "a" * 40},
+        )
+
+        coordinator._run_item(item)
+
+        assert github.puts == 1
+        assert item.attempts["merge"] == 1
+        assert len(coordinator.timers) == 1
+        clock.now += 2.0
+        coordinator._wake_timers()
+        coordinator._drain_queues()
+
+        assert github.puts == 2
+        assert item.attempts["merge"] == 2
+        assert item.result is not None
+        assert item.result.reason == "merge_attempts_exhausted"
+        assert coordinator.timers == []
+        coordinator._wake_timers()
+        coordinator._drain_queues()
+        assert github.puts == 2
+
 
 class TestStepWatchdog:
     """WARN when a stage.step breaches the <~15s protocol contract."""

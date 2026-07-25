@@ -501,9 +501,6 @@ Key fields:
 - `result` ([`ItemResult`](hephaestus/automation/pipeline/work_item.py)) —
  final `passed / reason / final_stage` written by
  [`_finish`](hephaestus/automation/pipeline/coordinator.py).
-- `armed` — compatibility field retained on the work item. The current
- [`merge_wait`](hephaestus/automation/pipeline/stages/merge_wait.py) stage
- does not set it because the queue does not arm auto-merge.
 - `worktree`, `branch` — populated by [`implementation`](hephaestus/automation/pipeline/stages/implementation.py).
 
 ### [§`StageName`](hephaestus/automation/pipeline/routing.py)

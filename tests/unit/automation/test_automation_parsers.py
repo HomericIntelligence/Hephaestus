@@ -581,7 +581,8 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             5,
             help_text=(
                 "Compatibility iteration bound for the historical drive-green CLI; current "
-                "merge-wait safely stands by and does not arm or poll auto-merge "
+                "merge-wait conditionally merges reviewed heads and does not manage "
+                "native auto-merge "
                 "(default: 5; replaces --max-merge-attempts)."
             ),
         ),

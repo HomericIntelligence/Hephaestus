@@ -260,7 +260,8 @@ def gh_pr_create(
         title: PR title
         body: PR description
         auto_merge: Deprecated compatibility flag; ignored.  Queue
-            automatic-merge handling is unavailable pending #2419.
+        native auto-merge is prohibited; merge-wait conditionally merges
+        reviewed heads after final admission.
         base: Base branch to compare against for signed-commit validation
 
     Returns:

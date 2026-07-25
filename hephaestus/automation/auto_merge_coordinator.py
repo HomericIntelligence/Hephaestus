@@ -240,7 +240,7 @@ class AutoMergeCoordinator:
         )
 
     def enable_auto_merge(self, pr_number: int, is_bot_pr: bool = False) -> bool:
-        """Refuse legacy automatic arming while queue auto-merge is unavailable.
+        """Refuse legacy automatic arming; merge-wait owns conditional merging.
 
         The queue pipeline is the production entry point, but compatibility
         callers must be fail-closed too: a stale implementation-GO label must
@@ -252,7 +252,7 @@ class AutoMergeCoordinator:
             return False
         logger.error(
             "Refusing legacy auto-merge arm for PR #%s; "
-            "queue handling is unavailable pending #2419",
+            "native auto-merge is prohibited and merge-wait uses a conditional normal merge",
             pr_number,
         )
         return False
