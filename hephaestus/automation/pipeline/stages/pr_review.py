@@ -31,29 +31,28 @@ contract):
   fresh implementation pass starts a new review cycle (keyed on
   ``attempts["implement"]``). ``attempts["pr_review_hard"]`` audits the
   extension rounds (rounds past the soft cap).
-- Rounds advance in EVAL and ONLY for real verdicts (GO/NOGO/AMBIGUOUS).
-  ERROR and missing verdicts never burn a round or touch labels
+- Rounds advance in EVAL and ONLY for valid structural review audits.
+  Missing or malformed audits never burn a round or touch labels
   (#911/#1554/#1794); they RETRY, bounded in-stage by
   ``payload["review_error_retries"]`` (cap :data:`REVIEW_ERROR_RETRY_CAP`
-  consecutive failures, reset on any real verdict — the plan_review
+  consecutive failures, reset on any valid audit — the plan_review
   pattern). At the cap the item fails back ``agent_error`` (routes to
   implementation: a fresh implement pass, bounded by the ``implement``
   budget, is the doc's designated agent-error recovery).
-- EVAL verdict semantics (re-housed ``_evaluate_go_verdict``): a GO stands
-  only with ZERO unresolved threads (#1152). GO + open HUMAN thread ->
-  HUMAN_BLOCKED: an explanatory PR comment is posted [durable, before the
-  outcome] naming the blocking human thread count and that automation
-  stands down, then finish failed with the PR left UNLABELED (a human must
-  act; automation may not resolve their thread). GO + open automation
-  thread -> downgraded to NOGO (address + re-review). Clean GO ->
+- EVAL structural-audit semantics: eligibility requires ZERO unresolved
+  blocking automation threads (#1152). Any open HUMAN thread -> HUMAN_BLOCKED:
+  an explanatory PR comment is posted [durable, before the outcome] naming the
+  blocking human thread count and automation stands down, then finish failed
+  with the PR left UNLABELED (a human must act; automation may not resolve
+  their thread). Any open blocking automation thread -> no-go label and
+  address + re-review. A clean audit ->
   ``_write_go`` performs one final human-thread live-read, requires a
   confirmed-unarmed live PR, and applies ``state:implementation-go``.
   The checkout GitJob-proven reviewed head accompanies that label;
   ``merge_wait`` verifies it and stands by pending #2419. Every
-  real non-GO round durably writes ``state:implementation-no-go`` (doc
-  section 5 owned label, "NOGO verdict, before retry/regress"; legacy
-  ``_apply_impl_review_verdict`` -> ``mark_pr_implementation_no_go``
-  :248) before looping/regressing, non-fatally. Exhaustion -> durably
+  real blocking round durably writes ``state:implementation-no-go`` (doc
+  section 5 owned label, before retry/regress) before looping/regressing,
+  non-fatally. Exhaustion -> durably
   apply ``state:skip`` [durable] -> SKIP.
 - Downgraded-GO cost (DELIBERATE 2-round divergence from legacy): legacy
   downgraded a GO with open automation threads and ran the address step in
@@ -88,26 +87,18 @@ contract):
   implementation GATE consumes the ``implement`` budget on re-adoption —
   the cross-stage ping-pong bound (M1). ``review_error_retries`` is reset
   by ``on_enter`` on each fresh implementation cycle.
-- Zero-thread NOGO (``_handle_zero_thread_nogo``) is the ONE exception to
-  the agent_error fail-back above: it retries in-stage (bounded by
-  ``REVIEW_ERROR_RETRY_CAP``, no round burned), but at the cap it escalates
-  directly with ``state:skip`` instead of failing back. A NOGO with no
-  postable/unresolved thread is often a deterministic reviewer verdict
-  (prose-only, no line-anchored findings); failing back would re-adopt the
-  same PR through implementation with nothing new to address, exhausting
-  the ``implement`` budget for a dead end the retry could never resolve
-  (#2079).
 - Prompt functions (imported, never re-authored):
   ``prompts/pr_review.py get_pr_review_analysis_prompt`` /
   ``get_review_validation_prompt`` / ``get_comment_difficulty_prompt``,
   ``prompts/implementation.py get_impl_resume_feedback_prompt`` (fresh-PR
   address path), and ``prompts/address_review.py get_address_review_prompt``
   (existing-PR address path).
-- Verdict and structured comments are parsed IN-WORKER (carried as the
-  review job's ``parse`` callable; symbol-scoped zero-I/O exemption mirrors
-  plan_review's). REVIEW_WAIT clears all stale round-scoped payload at
-  submission so a failed later round can never replay an earlier round's
-  verdict or threads.
+- The structural audit is parsed IN-WORKER (carried as the review job's
+  ``parse`` callable; symbol-scoped zero-I/O exemption mirrors plan_review's).
+  REVIEW_WAIT clears all stale round-scoped payload at submission so a failed
+  later round can never replay an earlier audit or threads. Grades, summaries,
+  and supplemental feedback are informational; only confirmed GitHub
+  implementation-state label transitions control downstream admission.
 """
 
 from __future__ import annotations
@@ -117,7 +108,6 @@ import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from html import escape
 from typing import Any, cast
 
 from hephaestus.automation.agent_config import (
@@ -127,13 +117,19 @@ from hephaestus.automation.agent_config import (
     pr_reviewer_claude_timeout,
     reviewer_model,
 )
-from hephaestus.automation.claude_invoke import parse_review_verdict
 from hephaestus.automation.prompts.address_review import get_address_review_prompt
 from hephaestus.automation.prompts.implementation import get_impl_resume_feedback_prompt
 from hephaestus.automation.prompts.pr_review import (
+    BLOCKING_SEVERITIES,
+    VALID_SEVERITIES,
     get_comment_difficulty_prompt,
     get_pr_review_analysis_prompt,
     get_review_validation_prompt,
+)
+from hephaestus.automation.review_audit import (
+    ReviewAudit,
+    parse_review_audit,
+    render_review_audit,
 )
 from hephaestus.automation.session_naming import (
     AGENT_ADDRESS_REVIEW,
@@ -143,7 +139,6 @@ from hephaestus.automation.session_naming import (
 )
 from hephaestus.automation.state_labels import STATE_SKIP
 
-from ..events import PrReviewZeroThreadNogoEvent, ZeroThreadNogoAction
 from ..work_item import ItemKind
 from .base import (
     GIT_JOB_TIMEOUT_S,
@@ -176,22 +171,14 @@ _JSON_RESPONSE_BLOCK_RE = re.compile(
 
 @dataclass(frozen=True)
 class _ParsedReviewResponse:
-    """Reviewer verdict plus its structured inline comments."""
+    """Structural reviewer audit parsed inside the worker."""
 
-    verdict: Any
-    comments: tuple[dict[str, Any], ...]
+    audit: ReviewAudit
 
 
 def _parse_review_response(response: str) -> _ParsedReviewResponse:
-    """Preserve both the prose verdict and fenced JSON comments from a review."""
-    matches = _JSON_RESPONSE_BLOCK_RE.findall(response)
-    try:
-        parsed = json.loads(matches[-1]) if matches else {}
-    except json.JSONDecodeError:
-        parsed = {}
-    raw_comments = parsed.get("comments", []) if isinstance(parsed, dict) else []
-    comments = tuple(dict(comment) for comment in raw_comments if isinstance(comment, dict))
-    return _ParsedReviewResponse(parse_review_verdict(response), comments)
+    """Parse the review's strict structural audit without reading prose decisions."""
+    return _ParsedReviewResponse(parse_review_audit(response))
 
 
 # In-memory mini-states (stage-local strings, never GitHub labels).
@@ -236,21 +223,19 @@ def _review_context_kind(item: WorkItem) -> str:
     return "PR" if item.payload.get("review_context_kind") == "PR" else "issue"
 
 
-#: Max CONSECUTIVE reviewer-infrastructure failures (ERROR verdicts or
+#: Max CONSECUTIVE reviewer-infrastructure failures (malformed audits or
 #: failed/valueless review jobs) tolerated before failing back
 #: ``agent_error``. Bounds the in-stage ERROR retry loop without burning
 #: ``pr_review_iter`` or stamping labels (#911/#1554; mirrors
-#: plan_review.REVIEW_ERROR_RETRY_CAP). Reset whenever a real verdict
-#: arrives.
+#: plan_review.REVIEW_ERROR_RETRY_CAP). Reset whenever a valid audit arrives.
 REVIEW_ERROR_RETRY_CAP = 2
 REVIEW_CHECKOUT_RETRY_CAP = 2
-
-_ZERO_THREAD_NOGO_MARKER = "<!-- hephaestus-pr-review-zero-thread-nogo -->"
-_NO_STRUCTURED_SUMMARY = "No structured reviewer summary was provided."
 
 #: Round-scoped payload keys cleared at REVIEW_WAIT submission so a failed
 #: later round can never replay an earlier round's results.
 _ROUND_PAYLOAD_KEYS = (
+    "review_audit",
+    "review_feedback",
     "review_verdict",
     "review_text",
     "review_failed",
@@ -264,6 +249,7 @@ _ROUND_PAYLOAD_KEYS = (
     "push_no_commit",
     "no_commit_retry_done",
     "unaddressed_findings",
+    "review_audit_failure",
 )
 
 
@@ -366,10 +352,78 @@ def _surviving_threads(
                 {
                     "path": entry.get("path") or "",
                     "line": entry.get("line"),
+                    "side": "RIGHT",
+                    "severity": "major",
                     "body": f"Reopened (prior round, still unaddressed): {detail}",
                 }
             )
     return surviving
+
+
+def _is_postable_finding(thread: dict[str, Any]) -> bool:
+    """Return whether a structured finding has a durable inline-thread shape."""
+    return (
+        isinstance(thread.get("path"), str)
+        and bool(thread["path"].strip())
+        and isinstance(thread.get("line"), int)
+        and not isinstance(thread.get("line"), bool)
+        and thread["line"] > 0
+        and thread.get("side") == "RIGHT"
+        and str(thread.get("severity", "")).lower() in VALID_SEVERITIES
+        and isinstance(thread.get("body"), str)
+        and bool(thread["body"].strip())
+    )
+
+
+def _thread_is_automation_owned(thread: dict[str, Any]) -> bool:
+    """Classify a fresh GitHub thread by its durable author facts."""
+    if isinstance(thread.get("automation_owned"), bool):
+        return bool(thread["automation_owned"])
+    authors: set[str] = set()
+    for key in ("author", "authors"):
+        value = thread.get(key)
+        if isinstance(value, str):
+            authors.add(value.strip())
+        elif isinstance(value, list):
+            authors.update(str(author).strip() for author in value if str(author).strip())
+    for comment in thread.get("comments", []):
+        if isinstance(comment, dict) and comment.get("author"):
+            authors.add(str(comment["author"]).strip())
+    return bool(
+        authors
+        & {
+            "github-actions[bot]",
+            "hephaestus[bot]",
+        }
+    )
+
+
+def _thread_is_blocking(thread: dict[str, Any]) -> bool:
+    """Recover the durable blocking severity from a fresh thread fact."""
+    severity = str(thread.get("severity") or "").strip().lower()
+    if severity in VALID_SEVERITIES:
+        return severity in BLOCKING_SEVERITIES
+    body = str(thread.get("body") or "")
+    for line in body.splitlines():
+        marker = "<!-- hephaestus-severity:"
+        stripped = line.strip()
+        if stripped.startswith(marker) and stripped.endswith("-->"):
+            recovered = stripped[len(marker) : -3].strip().lower()
+            return recovered in BLOCKING_SEVERITIES
+    return True
+
+
+def _thread_counts(threads: list[dict[str, Any]]) -> tuple[int, int, int]:
+    """Return fresh ``(blocking automation, advisory automation, human)`` counts."""
+    blocking = advisory = human = 0
+    for thread in threads:
+        if not _thread_is_automation_owned(thread):
+            human += 1
+        elif _thread_is_blocking(thread):
+            blocking += 1
+        else:
+            advisory += 1
+    return blocking, advisory, human
 
 
 class PrReviewStage(Stage):
@@ -625,7 +679,7 @@ class PrReviewStage(Stage):
                 ),
                 "review_context_kind": _review_context_kind(item),
             },
-            parse=_parse_review_response,  # verdict and inline comments parsed in-worker
+            parse=_parse_review_response,  # structural audit parsed in-worker
             descr="review",
         )
         item.payload["review_job_pending"] = True
@@ -771,6 +825,10 @@ class PrReviewStage(Stage):
             # means the address turn was a phantom fix — EVAL must NOT treat
             # the round as addressed.
             item.payload["push_no_commit"] = not bool(result.value)
+            # A new commit invalidates the proof that authorized the previous
+            # review. The next review checkout must establish a new head
+            # binding before any label transition is considered.
+            item.payload.pop("reviewed_pr_head_sha", None)
             return
 
         if is_review_result and result.value is not None:
@@ -823,16 +881,18 @@ class PrReviewStage(Stage):
 
     @staticmethod
     def _store_review_result(item: WorkItem, value: object) -> None:
-        """Persist one parsed or compatibility reviewer result."""
+        """Persist one structural reviewer result."""
         if isinstance(value, _ParsedReviewResponse):
-            item.payload["review_verdict"] = value.verdict
-            item.payload["review_text"] = value.verdict.raw
-            item.payload["review_threads"] = [dict(comment) for comment in value.comments]
+            item.payload["review_audit"] = value.audit
+            item.payload["review_feedback"] = value.audit.raw_feedback
+            item.payload["review_threads"] = [dict(comment) for comment in value.audit.findings]
             return
-        # Keep direct stage callers and persisted prior results compatible;
-        # only live AgentJob results use the paired parser.
-        item.payload["review_verdict"] = value
-        item.payload["review_text"] = getattr(value, "raw", str(value))
+        if isinstance(value, ReviewAudit):
+            item.payload["review_audit"] = value
+            item.payload["review_feedback"] = value.raw_feedback
+            item.payload["review_threads"] = [dict(comment) for comment in value.findings]
+            return
+        item.payload["review_audit_failure"] = True
 
     @staticmethod
     def _on_direct_pr_worktree_done(item: WorkItem, result: JobResult) -> None:
@@ -860,8 +920,8 @@ class PrReviewStage(Stage):
         """Record the state-specific failure outcome for a non-git agent job."""
         logger.warning("pr_review:%s: job failed: %s", item.issue, result.error)
         if item.state == REVIEW_WAIT:
-            # EVAL treats the missing verdict as a reviewer-infrastructure
-            # ERROR; the flag lets VALIDATE_WAIT skip the dead round.
+            # EVAL treats the missing audit as reviewer infrastructure failure;
+            # the flag lets VALIDATE_WAIT skip the dead round.
             item.payload["review_failed"] = True
         elif item.state in (ADDRESS_WAIT, PUSH_WAIT):
             item.payload["address_error"] = True
@@ -874,29 +934,53 @@ class PrReviewStage(Stage):
         ``payload["review_threads"]``) are first filtered through the
         validation job's verdict (:func:`_surviving_threads`, m1): wont_fix
         findings are dropped, unaddressed prior findings are re-opened.
-        Zero open automation threads skip the address leg straight to EVAL
-        (the legacy zero-thread guard — nothing to classify or address).
+        Zero open blocking automation threads skip the address leg straight to
+        EVAL; advisory threads are handled only by the final explicit resolver.
         """
         if item.pr is None:  # guarded by step(); kept for restart safety
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
-        verdict = self._ensure_graded_verdict(item.payload.get("review_verdict"))
-        item.payload["review_verdict"] = verdict
-        item.payload["review_text"] = verdict.raw
+        audit = item.payload.get("review_audit")
+        if not isinstance(audit, ReviewAudit) or not audit.valid:
+            item.payload["review_audit_failure"] = True
+            return Continue(next_state=EVAL)
         raw_threads = [dict(t) for t in item.payload.get("review_threads") or []]
         threads = _surviving_threads(raw_threads, item.payload.get("validation_result"))
         item.payload["raw_review_threads"] = raw_threads
         # The surviving set is what gets posted, classified, and addressed.
         item.payload["review_threads"] = threads
-        posted = ctx.github.post_review_threads(
-            item.pr,
-            list(threads),
-            self._final_review_comment(verdict, verdict.raw),
-        )
+        if any(not _is_postable_finding(thread) for thread in threads):
+            item.payload["review_audit_failure"] = True
+            return Continue(next_state=EVAL)
+        try:
+            posted = list(
+                ctx.github.post_review_threads(
+                    item.pr,
+                    list(threads),
+                    self._final_review_comment(audit),
+                )
+            )
+            live_threads = ctx.github.list_unresolved_review_threads(item.pr)
+        except Exception as error:
+            logger.warning(
+                "pr_review:%s: review finding publication/read-back failed (%s)",
+                item.issue,
+                type(error).__name__,
+            )
+            item.payload["review_audit_failure"] = True
+            return Continue(next_state=EVAL)
+        live_ids = {str(thread.get("id")) for thread in live_threads if thread.get("id")}
+        if len(posted) != len(threads) or any(not thread_id for thread_id in posted):
+            item.payload["review_audit_failure"] = True
+            return Continue(next_state=EVAL)
+        if any(str(thread_id) not in live_ids for thread_id in posted):
+            item.payload["review_audit_failure"] = True
+            return Continue(next_state=EVAL)
         item.payload["posted_thread_ids"] = posted
-        automation_unresolved, human_unresolved = ctx.github.count_unresolved_threads(item.pr)
-        item.payload["unresolved_auto"] = automation_unresolved
+        item.payload["unresolved_threads"] = [dict(thread) for thread in live_threads]
+        blocking_auto, minor_auto, human_unresolved = _thread_counts(live_threads)
+        item.payload["unresolved_auto"] = blocking_auto + minor_auto
         item.payload["unresolved_human"] = human_unresolved
-        if automation_unresolved == 0:
+        if blocking_auto == 0:
             return Continue(next_state=EVAL)
         return Continue(next_state=DIFFICULTY_WAIT)
 
@@ -935,7 +1019,6 @@ class PrReviewStage(Stage):
                 item.issue,
             )
             return self._fail_back_agent_error(item)
-        verdict = item.payload.get("review_verdict")
         if item.payload.get("existing_pr"):
             job = AgentJob(
                 repo=item.repo,
@@ -975,20 +1058,19 @@ class PrReviewStage(Stage):
             prompt_kwargs={
                 "issue_number": item.issue,
                 "prev_iteration": item.payload.get("pr_review_round", 0),
-                "verdict": getattr(verdict, "verdict", "NOGO"),
-                "review_text": item.payload.get("review_text", ""),
+                "review_feedback": item.payload.get("review_feedback", ""),
             },
             descr="address",
         )
         return JobRequest(job, on_done_state=PUSH_WAIT)
 
-    def _eval(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """EVAL [M]: re-housed ``_evaluate_go_verdict`` + the budget gate.
+    def _eval(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901 - state-machine gate
+        """EVAL [M]: apply the structural-audit gate and review budget.
 
         Every durable write below happens BEFORE the outcome that causes a
         queue push. The round counters (lifetime ``attempts`` audit trail
         and cycle-relative ``payload`` gate) advance here, and only for real
-        verdicts — never for ERROR or missing verdicts (#911/#1554/#1794).
+        audits — never for malformed or missing audits (#911/#1554/#1794).
         """
         if item.pr is None:  # guarded by step(); kept for restart safety
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
@@ -1007,26 +1089,71 @@ class PrReviewStage(Stage):
         if no_commit_retry is not None:
             return no_commit_retry
 
-        verdict = payload.get("review_verdict")
-        if verdict is None or verdict.is_error:
-            return self._handle_error_verdict(item, verdict)
-        verdict = self._ensure_graded_verdict(verdict)
-        payload["review_verdict"] = verdict
-        payload["review_text"] = verdict.raw
+        audit = payload.get("review_audit")
+        # A structural object under the old fixture key is an internal
+        # compatibility representation, not legacy prose. Textual verdict
+        # objects remain deliberately inert and cannot reach a label write.
+        if not isinstance(audit, ReviewAudit) and isinstance(
+            payload.get("review_verdict"), ReviewAudit
+        ):
+            audit = payload.get("review_verdict")
+        if payload.pop("review_audit_failure", False) or not isinstance(audit, ReviewAudit):
+            return self._handle_error_verdict(
+                item, ReviewAudit(None, "", (), "", valid=False)
+            )
+        if not audit.valid:
+            return self._handle_error_verdict(item, audit)
+        if not item.payload.get("reviewed_pr_head_sha"):
+            # Addressing a finding or pushing a new commit clears the prior
+            # head proof. A fresh negative transition may still be based on
+            # durable blocking-thread facts, but a clean result must return
+            # through REVIEW_WAIT so its positive label is bound to a fresh
+            # checkout/review.
+            try:
+                live_threads = ctx.github.list_unresolved_review_threads(item.pr)
+            except Exception:
+                return self._compact_before_next_review(item, ctx)
+            blocking, _, human = _thread_counts(live_threads)
+            if not blocking and not human:
+                return self._compact_before_next_review(item, ctx)
+            bind_outcome = self._bind_current_head_for_negative(item, ctx)
+            if bind_outcome is not None:
+                return bind_outcome
+            if human:
+                return PrReviewStage._handle_human_blocked(item, human, ctx)
+            payload["review_error_retries"] = 0
+            round_done = payload.get("pr_review_round", 0) + 1
+            payload["pr_review_round"] = round_done
+            item.attempts["pr_review_iter"] = item.attempts.get("pr_review_iter", 0) + 1
+            return self._handle_non_go(
+                item,
+                ctx,
+                audit,
+                blocking,
+                blocking,
+                round_done,
+                ctx.budget("pr_review_iter"),
+                ctx.budget("pr_review_hard"),
+            )
 
         # Fresh counts AFTER the address/push leg, split by severity so a GO is
         # downgraded only by BLOCKING automation threads (#1856 / re-introduced #1554).
-        blocking_auto, minor_auto, human_unresolved = (
-            ctx.github.count_unresolved_threads_by_severity(item.pr)
-        )
+        try:
+            live_threads = ctx.github.list_unresolved_review_threads(item.pr)
+        except Exception as error:
+            logger.warning(
+                "pr_review:%s: fresh review-thread read failed (%s)",
+                item.issue,
+                type(error).__name__,
+            )
+            return self._handle_error_verdict(item, None)
+        item.payload["unresolved_threads"] = [dict(thread) for thread in live_threads]
+        blocking_auto, minor_auto, human_unresolved = _thread_counts(live_threads)
         automation_unresolved = blocking_auto + minor_auto  # progress-trail parity (#1554)
         unresolved = automation_unresolved + human_unresolved
 
-        if self._is_zero_thread_nogo(verdict, payload, unresolved):
-            return self._handle_zero_thread_nogo(item, ctx, verdict)
-
-        # Real verdict: this round counts. Reset the consecutive-failure
-        # cap; advance the cycle-relative gate and the lifetime audit trail.
+        # A valid structural audit is a real review result. Grade, summary,
+        # and supplemental feedback never select the implementation state.
         payload["review_error_retries"] = 0
         round_done = payload.get("pr_review_round", 0) + 1
         payload["pr_review_round"] = round_done
@@ -1037,22 +1164,21 @@ class PrReviewStage(Stage):
             # Audit trail of progress-earned extension rounds (4..hard_cap).
             item.attempts["pr_review_hard"] = item.attempts.get("pr_review_hard", 0) + 1
 
-        if verdict.is_go and human_unresolved:
-            # Unchanged human-blocked guard (pr_review.py:690-701).
+        if human_unresolved:
             logger.info(
-                "pr_review:%d: GO blocked by %d human thread(s); finishing (unlabeled)",
+                "pr_review:%d: audit blocked by %d human thread(s); finishing (unlabeled)",
                 item.issue,
                 human_unresolved,
             )
-            return self._handle_human_blocked(item.pr, human_unresolved, ctx)
+            return PrReviewStage._handle_human_blocked(item, human_unresolved, ctx)
 
-        if verdict.is_go and blocking_auto == 0:
+        if blocking_auto == 0:
             return self._handle_clean_go(item, ctx, minor_auto)
 
         return self._handle_non_go(
             item,
             ctx,
-            verdict,
+            audit,
             automation_unresolved,
             unresolved,
             round_done,
@@ -1074,7 +1200,7 @@ class PrReviewStage(Stage):
         """Persist a non-GO round and choose its bounded retry or terminal route."""
         if item.pr is None or item.issue is None:  # guarded by _eval; type narrowing
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
-        guard_outcome = self._write_no_go(item.pr, ctx)
+        guard_outcome = self._write_no_go(item, ctx)
         if guard_outcome is not None:
             return guard_outcome
         # #1554 parity (m2): the progress trail counts AUTOMATION threads
@@ -1090,7 +1216,7 @@ class PrReviewStage(Stage):
             logger.info(
                 "pr_review:%d: %s (round %d/%d, %d unresolved); re-reviewing",
                 item.issue,
-                verdict.verdict,
+                "structured audit",
                 round_done,
                 soft_cap,
                 unresolved,
@@ -1140,151 +1266,6 @@ class PrReviewStage(Stage):
             return Continue(next_state=COMPACT_REVIEWER_WAIT)
         return Continue(next_state=REVIEW_WAIT)
 
-    @staticmethod
-    def _is_zero_thread_nogo(verdict: Any, payload: dict[str, Any], total_unresolved: int) -> bool:
-        """Return whether an explicit NOGO has no durable actionable threads."""
-        return (
-            getattr(verdict, "verdict", "").upper() == "NOGO"
-            and total_unresolved == 0
-            and not payload.get("posted_thread_ids")
-        )
-
-    @staticmethod
-    def _structured_review_summary(raw: object) -> str:
-        """Extract and bound the final JSON summary without exposing raw prose."""
-        if not isinstance(raw, str):
-            return _NO_STRUCTURED_SUMMARY
-        blocks = re.findall(r"```(?:json)?\s*(.*?)```", raw, flags=re.DOTALL | re.IGNORECASE)
-        for candidate in reversed(blocks):
-            try:
-                parsed = json.loads(candidate.strip())
-            except (json.JSONDecodeError, ValueError):
-                continue
-            summary = parsed.get("summary") if isinstance(parsed, dict) else None
-            if isinstance(summary, str) and (compact := " ".join(summary.split())):
-                escaped = escape(compact, quote=False)
-                return escaped if len(escaped) <= 200 else f"{escaped[:197]}..."
-        return _NO_STRUCTURED_SUMMARY
-
-    def _handle_zero_thread_nogo(
-        self, item: WorkItem, ctx: StageContext, verdict: Any
-    ) -> Continue | StageOutcome:
-        """Persist the anomaly, retry fresh, then escalate rather than fail back.
-
-        A zero-thread NOGO can be a transient parse/tooling artifact (worth a
-        bounded fresh-review retry) or a deliberate reviewer verdict with no
-        line-anchored findings, which is deterministic: re-review cannot
-        change it. Fail-back would re-adopt the same PR through
-        implementation with nothing concrete to address, exhausting the
-        ``implement`` budget for a dead end (#2079). Once the retry cap is
-        exhausted, escalate directly with ``state:skip`` instead — matching
-        the existing exhaustion convention at :func:`_eval`'s hard-cap path
-        and never re-entering implementation for an unchanged input.
-        """
-        if item.pr is None:
-            return self._fail_back_agent_error(item)
-        pr_number = item.pr
-        retries = int(item.payload.get("review_error_retries", 0)) + 1
-        item.payload["review_error_retries"] = retries
-        action = (
-            ZeroThreadNogoAction.RETRY_FRESH_REVIEW
-            if retries <= REVIEW_ERROR_RETRY_CAP
-            else ZeroThreadNogoAction.ESCALATE_SKIP
-        )
-        artifact_written = self._upsert_zero_thread_nogo_comment(
-            item,
-            ctx,
-            summary=self._structured_review_summary(getattr(verdict, "raw", "")),
-            retry_attempt=retries,
-            action=action,
-        )
-        ctx.emit_event(
-            PrReviewZeroThreadNogoEvent(
-                repo=item.repo,
-                issue=_issue_number(item),
-                pr=pr_number,
-                completed_rounds=int(item.payload.get("pr_review_round", 0)),
-                retry_attempt=retries,
-                retry_cap=REVIEW_ERROR_RETRY_CAP,
-                action=action,
-                artifact_written=artifact_written,
-            )
-        )
-        if action is ZeroThreadNogoAction.RETRY_FRESH_REVIEW:
-            logger.warning(
-                "pr_review:%s: zero-thread NOGO; retry %d/%d without consuming a round",
-                item.issue,
-                retries,
-                REVIEW_ERROR_RETRY_CAP,
-            )
-            return Continue(next_state=REVIEW_WAIT)
-        logger.error(
-            "pr_review:%s: zero-thread NOGO retry cap exhausted with the same "
-            "artifactless verdict; escalating %s (re-adopting cannot fix a "
-            "deterministic input)",
-            item.issue,
-            STATE_SKIP,
-        )
-        arm_outcome = self._require_confirmed_unarmed(pr_number, ctx)
-        if arm_outcome is not None:
-            return arm_outcome
-        write_skip_label(
-            _issue_number(item),
-            ctx,
-            f"the reviewer returned NOGO with zero actionable review threads "
-            f"{retries} time(s) in a row on PR #{pr_number}; the input is "
-            f"deterministic, so re-review cannot change the verdict (#2079). "
-            f"See the review-anomaly comment on the PR for the reviewer's "
-            f"summary; push new commits, then remove this label to re-enter "
-            f"the loop.",
-        )
-        return StageOutcome(Disposition.SKIP, "zero_thread_nogo_exhausted")
-
-    @staticmethod
-    def _upsert_zero_thread_nogo_comment(
-        item: WorkItem,
-        ctx: StageContext,
-        *,
-        summary: str,
-        retry_attempt: int,
-        action: ZeroThreadNogoAction,
-    ) -> bool:
-        """Upsert one bounded PR artifact describing the anomaly."""
-        if item.pr is None:
-            return False
-        pr_number = item.pr
-        action_text = (
-            "A fresh reviewer invocation will be requested without consuming a review round."
-            if action is ZeroThreadNogoAction.RETRY_FRESH_REVIEW
-            else (
-                "The reviewer retry cap is exhausted with the same artifactless verdict on "
-                "every attempt; automation is standing down (`state:skip`) instead of "
-                "re-adopting this PR through implementation, since a deterministic verdict "
-                "cannot be changed by re-review."
-            )
-        )
-        body = (
-            f"{_ZERO_THREAD_NOGO_MARKER}\n"
-            "**Automated PR review anomaly: NOGO without actionable threads.**\n\n"
-            f"Reviewer summary:\n> {summary}\n\n"
-            "No postable or unresolved review thread accompanied this verdict, so "
-            "`state:implementation-no-go` is not being applied. "
-            f"{action_text}\n\n"
-            f"Artifactless reviewer attempt: {retry_attempt}/{REVIEW_ERROR_RETRY_CAP}."
-        )
-        try:
-            artifact_written = ctx.github.upsert_pr_comment(
-                pr_number, _ZERO_THREAD_NOGO_MARKER, body
-            )
-        except Exception as error:
-            logger.warning(
-                "pr_review:%s: failed to upsert zero-thread NOGO artifact (%s)",
-                item.issue,
-                type(error).__name__,
-            )
-            return False
-        return artifact_written
-
     def _handle_address_error(self, item: WorkItem) -> StageOutcome | None:
         """Fail back hard address/push errors with explicit retry cleanup."""
         payload = item.payload
@@ -1313,17 +1294,9 @@ class PrReviewStage(Stage):
         """Resolve advisory threads, apply review GO, and route onward."""
         if item.pr is None or item.issue is None:  # guarded by caller; narrowing
             return self._fail_back_agent_error(item)
-        if minor_auto:
-            # Automation owns these waved minor/nitpick threads; resolve them so
-            # required_review_thread_resolution does not re-block at merge_wait.
-            logger.info(
-                "pr_review:%d: GO with %d advisory minor thread(s); resolving before merge wait",
-                item.issue,
-                minor_auto,
-            )
-            ctx.github.resolve_automation_threads(item.pr)
+        del minor_auto
         logger.info(
-            "pr_review:%d: clean GO; advancing PR #%d to merge wait",
+            "pr_review:%d: clean structural audit; advancing PR #%d to merge wait",
             item.issue,
             item.pr,
         )
@@ -1390,7 +1363,7 @@ class PrReviewStage(Stage):
 
         """
         payload = item.payload
-        reason = "no verdict found" if verdict is None else "reviewer error"
+        reason = "no review audit found" if verdict is None else "review audit format failure"
         retries = payload.get("review_error_retries", 0) + 1
         payload["review_error_retries"] = retries
         if retries > REVIEW_ERROR_RETRY_CAP:
@@ -1433,13 +1406,52 @@ class PrReviewStage(Stage):
         return StageOutcome(Disposition.FAIL_BACK, "agent_error")
 
     @staticmethod
-    def _require_confirmed_unarmed(pr_number: int, ctx: StageContext) -> StageOutcome | None:
-        """Read the live PR immediately before a stage-side mutation.
+    def _require_reviewed_unarmed(item: WorkItem, ctx: StageContext) -> StageOutcome | None:
+        """Verify the live unarmed PR is the exact head reviewed this round.
 
         No pipeline stage owns auto-merge. A non-null or unreadable request is
         consequently an external or ambiguous state, so this method is a
-        strict non-mutation boundary.
+        strict non-mutation boundary. A missing or changed head invalidates
+        the in-memory review proof and sends the item back through REVIEW_WAIT.
         """
+        if item.pr is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        pr_number = item.pr
+        pr_state = ctx.github.gh_pr_state(pr_number)
+        if pr_state is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unavailable")
+        if pr_state.get("autoMergeRequest") is not None:
+            return StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
+        if not _is_confirmed_open_unarmed(pr_state):
+            return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unverified")
+        reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
+        live_head = str(pr_state.get("headRefOid") or "")
+        if not reviewed_head or not live_head or reviewed_head != live_head:
+            item.payload.pop("reviewed_pr_head_sha", None)
+            return Continue(next_state=REVIEW_WAIT)
+        return None
+
+    @staticmethod
+    def _bind_current_head_for_negative(item: WorkItem, ctx: StageContext) -> StageOutcome | None:
+        """Bind the current open head for a negative-only transition."""
+        if item.pr is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        state = ctx.github.gh_pr_state(item.pr)
+        if state is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unavailable")
+        if state.get("autoMergeRequest") is not None:
+            return StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
+        if not _is_confirmed_open_unarmed(state):
+            return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unverified")
+        head = str(state.get("headRefOid") or "")
+        if not head:
+            return StageOutcome(Disposition.FINISH_FAIL, "pr_head_unavailable")
+        item.payload["reviewed_pr_head_sha"] = head
+        return None
+
+    @staticmethod
+    def _require_confirmed_unarmed(pr_number: int, ctx: StageContext) -> StageOutcome | None:
+        """Verify a live PR is open and unarmed before an unrelated mutation."""
         pr_state = ctx.github.gh_pr_state(pr_number)
         if pr_state is None:
             return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unavailable")
@@ -1450,19 +1462,34 @@ class PrReviewStage(Stage):
         return None
 
     @staticmethod
-    def _write_no_go(pr_number: int, ctx: StageContext) -> StageOutcome | None:
-        """Durably mark implementation NO-GO after a fresh unarmed read."""
-        arm_outcome = PrReviewStage._require_confirmed_unarmed(pr_number, ctx)
+    def _write_no_go(item: WorkItem, ctx: StageContext) -> StageOutcome | None:
+        """Durably mark NO-GO after exact-head and exclusive-label checks."""
+        if item.pr is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        pr_number = item.pr
+        arm_outcome = PrReviewStage._require_reviewed_unarmed(item, ctx)
         if arm_outcome is not None:
             return arm_outcome
         try:
             ctx.github.mark_pr_implementation_no_go(pr_number)
         except Exception as error:
             logger.warning(
-                "pr_review: failed to mark PR #%d implementation-no-go (non-fatal): %s",
+                "pr_review: failed to mark PR #%d implementation-no-go: %s",
                 pr_number,
                 error,
             )
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_no_go_label_failed")
+        try:
+            has_go, has_no_go = ctx.github.pr_has_implementation_state_label(pr_number)
+        except Exception as error:
+            logger.warning(
+                "pr_review: failed to verify PR #%d implementation-no-go: %s",
+                pr_number,
+                error,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_no_go_readback_failed")
+        if has_go or not has_no_go:
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_no_go_readback_failed")
         return None
 
     @staticmethod
@@ -1502,17 +1529,20 @@ class PrReviewStage(Stage):
 
     @staticmethod
     def _handle_human_blocked(
-        pr_number: int, human_unresolved: int, ctx: StageContext
+        item: WorkItem, human_unresolved: int, ctx: StageContext
     ) -> StageOutcome:
         """Record a stand-down only for a confirmed-unarmed PR."""
-        arm_outcome = PrReviewStage._require_confirmed_unarmed(pr_number, ctx)
+        if item.pr is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        pr_number = item.pr
+        arm_outcome = PrReviewStage._require_reviewed_unarmed(item, ctx)
         if arm_outcome is not None:
             return arm_outcome
         PrReviewStage._post_human_blocked_comment(pr_number, human_unresolved, ctx)
         return StageOutcome(Disposition.FINISH_FAIL, "human_blocked")
 
     @staticmethod
-    def _write_go(item: WorkItem, ctx: StageContext) -> StepResult:
+    def _write_go(item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901 - label gate and readbacks
         """Apply GO only to the exact live head reviewed in this process.
 
         Args:
@@ -1526,7 +1556,16 @@ class PrReviewStage(Stage):
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
         pr_number = item.pr
-        _, _, human_unresolved = ctx.github.count_unresolved_threads_by_severity(pr_number)
+        try:
+            live_threads = ctx.github.list_unresolved_review_threads(pr_number)
+        except Exception as error:
+            logger.warning(
+                "pr_review: final review-thread read failed on PR #%d (%s)",
+                pr_number,
+                type(error).__name__,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "review_threads_unavailable")
+        blocking, advisory, human_unresolved = _thread_counts(live_threads)
         if human_unresolved:
             logger.info(
                 "pr_review: clean GO recheck found %d late human thread(s) on PR #%d; "
@@ -1534,69 +1573,61 @@ class PrReviewStage(Stage):
                 human_unresolved,
                 pr_number,
             )
-            arm_outcome = PrReviewStage._require_confirmed_unarmed(pr_number, ctx)
-            if arm_outcome is not None:
-                return arm_outcome
-            PrReviewStage._post_human_blocked_comment(pr_number, human_unresolved, ctx)
-            return StageOutcome(Disposition.FINISH_FAIL, "human_blocked")
-
-        pr_state = ctx.github.gh_pr_state(pr_number)
-        if pr_state is None:
-            return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unavailable")
-        if pr_state.get("autoMergeRequest") is not None:
-            return StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
-        if not _is_confirmed_open_unarmed(pr_state):
-            return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unverified")
-        reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
-        live_head = str(pr_state.get("headRefOid") or "")
-        if not reviewed_head or not live_head:
-            item.payload.pop("reviewed_pr_head_sha", None)
+            return PrReviewStage._handle_human_blocked(item, human_unresolved, ctx)
+        if blocking:
+            no_go = PrReviewStage._write_no_go(item, ctx)
+            if no_go is not None:
+                return no_go
             return Continue(next_state=REVIEW_WAIT)
-        if reviewed_head != live_head:
+        if advisory:
+            advisory_ids = [
+                str(thread["id"])
+                for thread in live_threads
+                if thread.get("id") and _thread_is_automation_owned(thread)
+            ]
             try:
-                ctx.github.mark_pr_implementation_no_go(pr_number)
+                resolved = ctx.github.resolve_advisory_threads(pr_number, advisory_ids)
+                refreshed = ctx.github.list_unresolved_review_threads(pr_number)
             except Exception as error:
-                logger.error("pr_review: failed to revoke stale GO on PR #%d: %s", pr_number, error)
-                return StageOutcome(Disposition.FINISH_FAIL, "implementation_no_go_label_failed")
-            item.payload.pop("reviewed_pr_head_sha", None)
-            return Continue(next_state=REVIEW_WAIT)
+                logger.warning(
+                    "pr_review: advisory-thread resolution/read-back failed on PR #%d (%s)",
+                    pr_number,
+                    type(error).__name__,
+                )
+                return StageOutcome(Disposition.FINISH_FAIL, "review_threads_unavailable")
+            refreshed_blocking, refreshed_advisory, refreshed_human = _thread_counts(refreshed)
+            if refreshed_human:
+                return PrReviewStage._handle_human_blocked(item, refreshed_human, ctx)
+            if refreshed_blocking:
+                no_go = PrReviewStage._write_no_go(item, ctx)
+                if no_go is not None:
+                    return no_go
+                return Continue(next_state=REVIEW_WAIT)
+            if refreshed_advisory or resolved < len(advisory_ids):
+                return StageOutcome(Disposition.FINISH_FAIL, "advisory_threads_unresolved")
+            live_threads = refreshed
+        arm_outcome = PrReviewStage._require_reviewed_unarmed(item, ctx)
+        if arm_outcome is not None:
+            return arm_outcome
         try:
             ctx.github.mark_pr_implementation_go(pr_number)
         except Exception as error:
             logger.error("pr_review: failed to mark PR #%d implementation-go: %s", pr_number, error)
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_label_failed")
-        return StageOutcome(Disposition.ADVANCE, "review GO; merge wait pending")
+        try:
+            has_go, has_no_go = ctx.github.pr_has_implementation_state_label(pr_number)
+        except Exception as error:
+            logger.warning(
+                "pr_review: failed to verify PR #%d implementation-go: %s",
+                pr_number,
+                error,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_readback_failed")
+        if not has_go or has_no_go:
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_readback_failed")
+        return StageOutcome(Disposition.ADVANCE, "review audit; merge wait pending")
 
     @staticmethod
-    def _final_review_comment(verdict: Any, review_text: object) -> str:
-        """Build the final review comment with total grade and GO/NOGO."""
-        prose = str(review_text).strip() if review_text is not None else ""
-        # Tests and recovery paths can supply a verdict object without its
-        # parsed grade while retaining the original reviewer prose.  Preserve
-        # the grade the reviewer actually reported whenever it is available.
-        grade = getattr(verdict, "grade", None) or parse_review_verdict(prose).grade or "ungraded"
-        decision = getattr(verdict, "verdict", None) or "ERROR"
-        return (
-            "## Automated PR review\n\n"
-            f"Total grade: {grade}\n\n"
-            f"Verdict: {decision}\n\n"
-            f"{prose or _NO_STRUCTURED_SUMMARY}"
-        )
-
-    @staticmethod
-    def _ensure_graded_verdict(verdict: Any) -> Any:
-        """Return a grade-bearing verdict, failing closed on malformed output.
-
-        The final GitHub review is an auditable grade plus GO/NOGO decision.
-        A reviewer response that omits the grade therefore cannot authorize a
-        GO: it is recorded as a synthetic F/NOGO with the reason preserved in
-        the final review prose.
-        """
-        if getattr(verdict, "grade", None):
-            return verdict
-        raw = str(getattr(verdict, "raw", "")).strip()
-        return parse_review_verdict(
-            (f"{raw}\n\n" if raw else "")
-            + "Grade: F\nVerdict: NOGO\n\n"
-            + "The reviewer response omitted its required grade, so this review is treated as NOGO."
-        )
+    def _final_review_comment(audit: ReviewAudit) -> str:
+        """Build an audit-only review comment; labels carry eligibility."""
+        return render_review_audit(audit)

@@ -24,6 +24,7 @@ from hephaestus.automation.protocol import (
     PLAN_CANONICAL_MARKER,
     PLAN_REVIEW_CANONICAL_MARKER,
 )
+from hephaestus.automation.review_audit import ReviewAudit
 
 
 class TestHandleReviewerQuotaOrOverload:
@@ -212,7 +213,8 @@ class TestRunImplReviewStepPromptTooLong:
             )
 
         assert thread_ids == []
-        assert "In-loop reviewer invocation failed" in review_text
+        assert isinstance(review_text, ReviewAudit)
+        assert "In-loop reviewer invocation failed" in review_text.raw_feedback
 
     def test_generic_error_still_recorded_as_plain_error(self, tmp_path: Path) -> None:
         """A non-prompt_too_long failure keeps the original generic ERROR message."""
@@ -237,5 +239,6 @@ class TestRunImplReviewStepPromptTooLong:
             )
 
         assert thread_ids == []
-        assert "In-loop reviewer invocation failed" in review_text
-        assert "prompt_too_long" not in review_text
+        assert isinstance(review_text, ReviewAudit)
+        assert "In-loop reviewer invocation failed" in review_text.raw_feedback
+        assert "prompt_too_long" not in review_text.raw_feedback

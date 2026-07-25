@@ -7,20 +7,19 @@ limit / quota was hit (HTTP 429). Grounded in
 
 ## Symptom
 
-- A stage emits `Verdict: ERROR` — an **infrastructure-failure** sentinel,
-  **not** a `NOGO`. `claude_invoke.py` reserves `"ERROR"` for
-  reviewer-infrastructure failures and keeps it *deliberately distinct from*
-  `"NOGO"` so the loop does not mistake "the reviewer never ran" for "the code
-  is bad."
+- A stage records a malformed/missing structural review audit — an
+  **infrastructure-failure** condition, not a negative implementation review.
+  The queue leaves implementation labels untouched so it does not mistake
+  "the reviewer never produced a valid audit" for "the code is bad."
 - Stderr/output carries `429` / quota / rate-limit phrasing, wrapped as a
   `ClaudeUsageCapError`.
 - The issue is left **unlabeled and not skipped** — a quota cap is not a stuck
   work item, so the loop does not apply `state:skip` for it.
 
-## ERROR ≠ NOGO
+## Review failure is not implementation no-go
 
-This is the single most important distinction: a `Verdict: ERROR` from a quota
-cap means the reviewer/implementer **never got to run**, not that your change
+This is the single most important distinction: a quota cap means the
+reviewer/implementer **never produced a valid audit**, not that your change
 failed review. Do not treat it as a `state:implementation-no-go`. There is
 nothing to fix in the code — only the quota to wait out.
 

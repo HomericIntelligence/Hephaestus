@@ -137,6 +137,8 @@ class FakeStageGitHub(FakeGitHub):
         )
         self._learn_terminal = learn_terminal
         self._resolve_count = resolve_count
+        self._resolved_review_threads: set[str] = set()
+        self._posted_thread_ids: dict[int, list[str]] = {}
         self.learn_results: dict[int, bool] = {}
         self.learn_claims: set[int] = set()
 
@@ -233,9 +235,49 @@ class FakeStageGitHub(FakeGitHub):
             return self._by_severity.pop(0)
         return self._by_severity[0]
 
+    def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+        """Return scripted fresh review-thread facts for label-gate tests."""
+        blocking, advisory, human = self.count_unresolved_threads_by_severity(pr_number)
+        posted = list(self._posted_thread_ids.get(pr_number, []))
+        threads: list[dict[str, Any]] = []
+        cursor = 0
+        for count, is_human, severity in (
+            (blocking, False, "major"),
+            (advisory, False, "nitpick"),
+            (human, True, "major"),
+        ):
+            for _ in range(count):
+                thread_id = (
+                    posted[cursor]
+                    if cursor < len(posted)
+                    else f"live-thread-{pr_number}-{cursor}"
+                )
+                cursor += 1
+                if thread_id in self._resolved_review_threads:
+                    continue
+                threads.append(
+                    {
+                        "id": thread_id,
+                        "path": "a.py",
+                        "line": cursor,
+                        "side": "RIGHT",
+                        "severity": severity,
+                        "body": f"<!-- hephaestus-severity: {severity} -->\nfinding",
+                        "automation_owned": not is_human,
+                        "author": "hephaestus[bot]" if not is_human else "reviewer",
+                    }
+                )
+        return threads
+
     def resolve_automation_threads(self, pr_number: int) -> int:
         self._log("resolve_automation_threads", pr_number)
         return self._resolve_count
+
+    def resolve_advisory_threads(self, pr_number: int, thread_ids: list[str]) -> int:
+        """Resolve only the supplied advisory automation thread ids."""
+        self._log("resolve_advisory_threads", pr_number, tuple(thread_ids))
+        self._resolved_review_threads.update(thread_ids)
+        return len(thread_ids)
 
     # -- mutator surface used by the stages ----------------------------------
     # Coordinator-neutral names (the pipeline architecture guard forbids
@@ -333,14 +375,18 @@ class FakeStageGitHub(FakeGitHub):
         self, pr_number: int, threads: list[dict[str, Any]], summary: str
     ) -> list[str]:
         """Mirror the coordinator thread post (delegates to gh_pr_review_post)."""
-        return self.gh_pr_review_post(pr_number, threads, summary)
+        ids = self.gh_pr_review_post(pr_number, threads, summary)
+        self._posted_thread_ids[pr_number] = list(ids)
+        return ids
 
     def mark_pr_implementation_go(self, pr_number: int) -> None:
         """Mirror pr_manager.mark_pr_implementation_go (records mutation)."""
+        self._pr_impl_state = (True, False)
         self._log("mark_pr_implementation_go", pr_number)
 
     def mark_pr_implementation_no_go(self, pr_number: int) -> None:
         """Mirror pr_manager.mark_pr_implementation_no_go (records mutation)."""
+        self._pr_impl_state = (False, True)
         self._log("mark_pr_implementation_no_go", pr_number)
 
     def post_pr_comment(self, pr_number: int, body: str) -> None:

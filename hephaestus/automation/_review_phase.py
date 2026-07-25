@@ -72,27 +72,28 @@ from .git_utils import (
 )
 from .github_api import (
     gh_current_login,
-    gh_issue_add_labels,
-    gh_issue_upsert_comment,
     gh_pr_list_unresolved_threads,
 )
 from .models import ImplementationState
-from .pr_manager import (
-    ensure_pr_auto_merge_deferred,
-    mark_pr_implementation_no_go,
-)
 from .pr_reviewer import gather_impl_review_context, review_pr_inline
 from .prompts import get_impl_loop_review_prompt, get_impl_resume_feedback_prompt
+from .review_audit import ReviewAudit, render_review_audit
 from .review_journal import is_plan_comment, is_plan_review_comment
+from .review_types import ReviewVerdict
 from .review_validator import validate_prior_comments_addressed
 from .session_naming import AGENT_IMPLEMENTER, current_trunk_githash  # noqa: F401
 from .state.review import _fetch_issue_comments_graphql
-from .state_labels import SKIP_REASON_MARKER, STATE_SKIP, format_skip_reason_comment
 
 if TYPE_CHECKING:
     from ._stage_context import StageContext
 
 logger = logging.getLogger(__name__)
+
+
+def _audit_verdict(audit: ReviewAudit) -> ReviewVerdict:
+    """Adapt structural audit facts for the non-authoritative legacy loop."""
+    verdict = "AMBIGUOUS" if not audit.valid else "GO" if not audit.findings else "NOGO"
+    return ReviewVerdict(grade=audit.grade, verdict=verdict, raw=audit.raw_feedback)
 
 # Base review-budget: a loop that is NOT making progress (a stuck or oscillating
 # reviewer) terminates after this many iterations and is tagged ``state:skip``.
@@ -219,9 +220,8 @@ class ReviewPhase(StageMixin):
                 session_id=session_id,
                 worktree_path=worktree_path,
                 issue_number=issue_number,
-                review_text=feedback,
+                review_feedback=feedback,
                 prev_iteration=-1,
-                verdict="CONFLICT",
                 state=state,
             ),
             commit_changes=lambda: self._commit_if_changes(issue_number, worktree_path),
@@ -457,48 +457,14 @@ class ReviewPhase(StageMixin):
         record a converged failure; internal GO labels remain reserved for the
         pipeline PR-review stage.
         """
-        impl = self.impl
-        try:
-            ensure_pr_auto_merge_deferred(pr_number)
-        except Exception as exc:
-            impl._log(
-                "error",
-                f"{issue_ref(issue_number)}: could not verify auto-merge disabled for "
-                f"{pr_ref(pr_number)}: {exc}",
-                thread_id,
-            )
-            mark_pr_implementation_no_go(pr_number)
-            return
-        if last_verdict in ("ERROR", "HUMAN_BLOCKED"):
-            reason = (
-                "reviewer-infrastructure error"
-                if last_verdict == "ERROR"
-                else "unresolved human review thread(s)"
-            )
-            impl._log(
-                "warning",
-                f"{issue_ref(issue_number)}: implementation review blocked by {reason}; "
-                f"leaving {pr_ref(pr_number)} unlabeled for re-review "
-                "(no implementation go/no-go label, auto-merge unchanged)",
-                thread_id,
-            )
-            return
-        if last_verdict == "GO":
-            impl._log(
-                "info",
-                f"{issue_ref(issue_number)}: implementation review reached internal GO; "
-                f"auto-merge remains disabled for {pr_ref(pr_number)} pending PR review",
-                thread_id,
-            )
-            return
-        else:
-            mark_pr_implementation_no_go(pr_number)
-            impl._log(
-                "warning",
-                f"{issue_ref(issue_number)}: implementation review did not reach GO; "
-                f"auto-merge remains disabled for {pr_ref(pr_number)}",
-                thread_id,
-            )
+        del pr_number
+        reason = last_verdict or "no structural audit"
+        self.impl._log(
+            "info",
+            f"{issue_ref(issue_number)}: compatibility review recorded {reason}; "
+            "implementation labels and merge authorization remain untouched",
+            thread_id,
+        )
 
     # ------------------------------------------------------------------
     # Prior-thread validation
@@ -613,9 +579,7 @@ class ReviewPhase(StageMixin):
             # Downgrade to NOGO so the address step (below) fixes and resolves
             # them, and the next iteration re-reviews to confirm.
             # ``go_blocked_by_automation`` forces the address step to run even
-            # though this GO pass may have posted no new threads (otherwise the
-            # zero-thread guard would skip it and the loop would spin
-            # GO→downgrade to exhaustion).
+            # though this audit pass may have posted no new threads.
             impl._log(
                 "info",
                 f"{pr_ref(pr_number)}: reviewer said GO but "
@@ -697,12 +661,12 @@ class ReviewPhase(StageMixin):
         )
 
         # Review step: a fresh reviewer session posts inline PR threads and
-        # returns its verdict text. ``prior_review`` carries the previous
-        # iteration's critique forward as reviewer context.
+        # returns a structural audit. ``prior_review`` carries only bounded
+        # informational context forward; it cannot select implementation state.
         if slot_id is not None:
             review_ref = pr_ref(pr_number) if pr_number is not None else issue_ref(issue_number)
             self.status_tracker.update_slot(slot_id, f"{review_ref}: reviewing impl [R{iteration}]")
-        review_text, posted_thread_ids = impl._run_impl_review_step(
+        review_result, posted_thread_ids = impl._run_impl_review_step(
             issue_number=issue_number,
             issue_title=issue_title,
             issue_body=issue_body,
@@ -713,12 +677,20 @@ class ReviewPhase(StageMixin):
             prior_review=prior_review,
             advise_findings=advise_findings,
         )
+        if isinstance(review_result, ReviewAudit):
+            audit = review_result
+            review_text = render_review_audit(audit)
+            verdict = _audit_verdict(audit)
+        else:
+            # The no-PR implementation loop is a pre-PR compatibility path;
+            # it never writes implementation labels. Keep its historical
+            # reviewer result available to that local loop.
+            review_text = review_result
+            verdict = parse_review_verdict(review_text)
         impl._save_review_log(issue_number, iteration, review_text)
-
-        verdict = parse_review_verdict(review_text)
         impl._log(
             "info",
-            f"{issue_ref(issue_number)} R{iteration}: Verdict={verdict.verdict} "
+            f"{issue_ref(issue_number)} R{iteration}: structural result={verdict.verdict} "
             f"Grade={verdict.grade or '?'} threads={len(posted_thread_ids)} "
             f"reopened={len(reopened)}",
             thread_id,
@@ -936,86 +908,20 @@ class ReviewPhase(StageMixin):
         last_verdict: str | None,
         iterations_run: int,
     ) -> None:
-        """Apply the post-loop labeling/skip policy for the final verdict.
+        """Record compatibility-loop completion without publishing authority.
 
-        #1083 Bug 2 / #1085 C3: the loop must reach an explicit GO to be
-        considered converged. Apply ``state:skip`` only on TRUE iteration
-        exhaustion — ran all MAX_REVIEW_ITERATIONS without a GO — NOT on a single
-        non-GO (including AMBIGUOUS) outcome. Per the pr-review-loop skill
-        (verified-ci), a zero-thread AMBIGUOUS/NO-GO pass no longer ends the loop
-        early (it re-reviews), so a transient garbage review gets
-        MAX_REVIEW_ITERATIONS chances instead of stranding a fixable PR after R0.
-        ``last_verdict`` is None only when there was no PR to review (dry-run /
-        no-PR path).
-
-        ERROR (reviewer-infrastructure failure — API 400, timeout, crash) is NOT
-        a real verdict: the reviewer never actually judged the code, so an
-        exhausted run that ended in ERROR must NOT be skipped (#911 / PR #1069).
-        Neither ERROR nor HUMAN_BLOCKED (GO blocked by an open human thread) is a
-        converged failure, so neither applies state:skip — both leave the PR
-        unlabeled for re-review / human action.
+        The queue ``pr_review`` stage is the only implementation-review writer.
+        This legacy phase may retain its local structural result for logging and
+        address-loop control, but it never writes implementation or skip labels.
         """
-        # A2-003: Surface AMBIGUOUS verdict distinctly so operators can triage
-        # without inspecting raw log files. #1554: the loop may run beyond the
-        # base budget when it keeps making progress, so anchor on ">=" rather
-        # than "==" — an extended run that still ended non-GO must warn too.
-        if last_verdict == "AMBIGUOUS" or (
-            iterations_run >= MAX_REVIEW_ITERATIONS and last_verdict not in (None, "GO")
-        ):
-            logger.warning(
-                "#%d: review loop ended without clear GO — "
-                "final verdict=%r after %d iteration(s); "
-                "PR created but manual review is recommended",
-                issue_number,
-                last_verdict,
-                iterations_run,
-            )
-
-        exhausted = iterations_run >= MAX_REVIEW_ITERATIONS and last_verdict not in (
-            "GO",
-            "ERROR",
-            "HUMAN_BLOCKED",
+        del pr_number
+        logger.info(
+            "#%d: compatibility review completed with result=%r after %d iteration(s); "
+            "GitHub implementation labels remain untouched",
+            issue_number,
+            last_verdict,
+            iterations_run,
         )
-        if (
-            pr_number is not None
-            and last_verdict is not None
-            and exhausted
-            and not self.options.dry_run
-        ):
-            logger.info(
-                "#%d: review loop ended without GO (verdict=%r, iterations=%d) — applying %s",
-                issue_number,
-                last_verdict,
-                iterations_run,
-                STATE_SKIP,
-            )
-            with contextlib.suppress(Exception):
-                gh_issue_add_labels(issue_number, [STATE_SKIP])
-                gh_issue_upsert_comment(
-                    issue_number,
-                    SKIP_REASON_MARKER,
-                    format_skip_reason_comment(
-                        f"the PR review loop ended without GO "
-                        f"(verdict={last_verdict!r} after {iterations_run} "
-                        f"iteration(s)); push commits addressing the review, "
-                        f"then remove this label to re-enter the loop."
-                    ),
-                )
-        elif last_verdict == "ERROR":
-            logger.warning(
-                "#%d: review loop ended in reviewer-infrastructure ERROR after %d "
-                "iteration(s) — leaving PR unlabeled for re-review (no %s)",
-                issue_number,
-                iterations_run,
-                STATE_SKIP,
-            )
-        elif last_verdict == "HUMAN_BLOCKED":
-            logger.warning(
-                "#%d: review reached GO but is blocked by unresolved human review "
-                "thread(s) — leaving PR unlabeled for human resolution (no %s)",
-                issue_number,
-                STATE_SKIP,
-            )
 
     def _count_unresolved_threads_blocking_go(
         self,
@@ -1026,10 +932,10 @@ class ReviewPhase(StageMixin):
     ) -> tuple[int, int]:
         """Count unresolved review threads that block a GO, by ownership.
 
-        A GO verdict may NOT stand while ANY review thread is unresolved — not
+        A clean structural audit may NOT stand while ANY review thread is unresolved — not
         even an automation-owned one. The earlier implementation bulk-resolved
         automation threads here so a GO could converge immediately; that was
-        wrong (#1152). A reviewer can emit ``Verdict: GO`` in the SAME pass that
+        wrong (#1152). A reviewer can post findings in the SAME pass that
         posts new inline findings, and force-resolving those "automation-owned"
         threads accepted the GO without the implementer ever addressing them or
         a subsequent review verifying the fix. The GO label must only be earned
@@ -1094,13 +1000,13 @@ class ReviewPhase(StageMixin):
         iteration: int,
         prior_review: str | None,
         advise_findings: str = "",
-    ) -> tuple[str, list[str]]:
-        """Run one in-loop review and return ``(review_text, posted_thread_ids)``.
+    ) -> tuple[ReviewAudit | str, list[str]]:
+        """Run one in-loop review and return audit/text plus thread ids.
 
         With a ``pr_number`` this folds in ``pr_reviewer``'s core
         (:func:`review_pr_inline`): a fresh per-iteration reviewer session posts
-        INLINE PR review threads and returns its summary text (carrying the
-        ``Grade:`` / ``Verdict:`` line). The reviewer context includes the TASK
+        INLINE PR review threads and returns its structural audit. The reviewer
+        context includes the TASK
         (issue title + body), the PLAN and PLAN_REVIEW comments, and the impl
         diff (#28).
 
@@ -1124,7 +1030,13 @@ class ReviewPhase(StageMixin):
 
         if self.options.dry_run:
             logger.info("[DRY RUN] Would run in-loop PR review for #%s", pr_number)
-            return "Grade: A\nVerdict: GO\n", []
+            return ReviewAudit(
+                grade=None,
+                summary="No structured reviewer summary was provided.",
+                findings=(),
+                raw_feedback="[DRY RUN] in-loop review skipped",
+                valid=False,
+            ), []
 
         diff_text = impl._collect_diff(worktree_path, branch_name)
         plan_text, plan_review_text = self.runner._fetch_plan_and_review(issue_number)
@@ -1164,9 +1076,14 @@ class ReviewPhase(StageMixin):
                     issue_number,
                     iteration,
                 )
-                return (
-                    f"In-loop reviewer invocation failed at iteration {iteration}: {e}\n\n"
-                    f"{INFRA_ERROR_REVIEW_TEXT}"
+                return ReviewAudit(
+                    grade=None,
+                    summary="No structured reviewer summary was provided.",
+                    findings=(),
+                    raw_feedback=(
+                        f"In-loop reviewer invocation failed at iteration {iteration}: {e}"
+                    ),
+                    valid=False,
                 ), []
             logger.error(
                 "#%s R%s: in-loop PR review failed: %s; recording ERROR (re-review next "
@@ -1175,9 +1092,12 @@ class ReviewPhase(StageMixin):
                 iteration,
                 e,
             )
-            return (
-                f"In-loop reviewer invocation failed at iteration {iteration}: {e}\n\n"
-                f"{INFRA_ERROR_REVIEW_TEXT}"
+            return ReviewAudit(
+                grade=None,
+                summary="No structured reviewer summary was provided.",
+                findings=(),
+                raw_feedback=f"In-loop reviewer invocation failed at iteration {iteration}: {e}",
+                valid=False,
             ), []
 
     def _run_address_review_step(
@@ -1366,9 +1286,8 @@ class ReviewPhase(StageMixin):
         session_id: str | None,
         worktree_path: Path,
         issue_number: int,
-        review_text: str,
+        review_feedback: str,
         prev_iteration: int,
-        verdict: str,
         state: ImplementationState | None = None,
     ) -> bool:
         """Resume the impl session and feed reviewer feedback as the next prompt."""
@@ -1376,8 +1295,7 @@ class ReviewPhase(StageMixin):
         prompt = get_impl_resume_feedback_prompt(
             issue_number=issue_number,
             prev_iteration=prev_iteration,
-            verdict=verdict,
-            review_text=review_text,
+            review_feedback=review_feedback,
         )
         if uses_direct_agent_runner(self.options.agent):
             try:

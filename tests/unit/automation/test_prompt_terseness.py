@@ -74,7 +74,7 @@ PROMPT_BUILDERS = [
         prior_review=None,
     ),
     lambda: get_impl_resume_feedback_prompt(
-        issue_number=1, prev_iteration=0, verdict="NOGO", review_text=""
+        issue_number=1, prev_iteration=0, review_feedback=""
     ),
     lambda: get_pr_review_analysis_prompt(pr_number=1, issue_number=1),
     lambda: get_review_validation_prompt(pr_number=1, issue_number=1, prior_comments_json="[]"),

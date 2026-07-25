@@ -101,16 +101,17 @@ class TestPRReviewAnalysisPrompt:
         assert "--ci-free" not in out
         assert "normal default behavior" in out
         assert "Do not return the skill's raw report" in out
-        assert "CONDITIONAL GO" in out
+        assert "structural review-audit JSON" in out
         assert "pr-policy" not in out
         assert "CI Status" not in out
         assert "merge_wait" in out
         assert "independent secondary review" not in out
         assert "eligible for secondary review" not in out
         assert "$athena:pr-review" in (prompts.get_pr_review_analysis_prompt.__doc__ or "")
-        # The code-quality verdict contract stays intact.
-        assert "Verdict: NOGO" in out
-        assert "Verdict: GO" in out
+        assert "Verdict: GO" not in out
+        assert "Verdict: NOGO" not in out
+        assert '"grade": "A"' in out
+        assert '"comments": [' in out
 
     def test_nitpicks_suppressed_by_default(self) -> None:
         """#1083: by default the reviewer must be told to OMIT nitpick comments."""
@@ -182,9 +183,9 @@ class TestPRReviewAnalysisPrompt:
             '{"path": "...", "line": 1, "side": "RIGHT", "severity": "minor", "body": "..."}'
         ) in out
         assert '"comments": [' in out
-        assert '"summary": "..."}' in out
+        assert '"summary": "...", "comments": [' in out
         # The LGTM example must appear verbatim.
-        assert '{"comments": [], "summary": "LGTM"}' in out
+        assert '{"grade": "A", "summary": "LGTM", "comments": []}' in out
         # The last fenced code block in the prompt must be the JSON block — the
         # parser takes the LAST one. Verify the closing ``` after the JSON
         # block is the final fence in the prompt.

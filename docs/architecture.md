@@ -594,16 +594,16 @@ returning to review only after a fresh unarmed read permits stale-label
 revocation; a matching proof currently reaches a safe standby outcome pending
 issue #2419 ([`merge_wait.py`](hephaestus/automation/pipeline/stages/merge_wait.py)).
 
-Plan-review labels are the sole durable authority. Review comments explain and
-audit a decision but never authorize a transition, block a stage, or backfill a
-missing label. Comment markers locate actor-owned journal artifacts only;
-foreign marker text is ignored.
+State labels are the sole durable authority for their respective stages.
+Review comments explain and audit a decision but never authorize a transition,
+block a stage, or backfill a missing label. Comment markers locate actor-owned
+journal artifacts only; foreign marker text is ignored.
 
-Likewise, prose such as `Verdict: GO` or `Verdict: NOGO` is reviewer output,
-not durable routing authority. A reviewer may propose a label from that
-analysis, but the coordinator advances only after the relevant GitHub
-`state:*` mutation succeeds and is confirmed. On restart, seeding reads the
-labels and PR state, not verdict text.
+Implementation review emits a structural audit (grade, summary, and durable
+inline findings). Its prose and audit fields are informational; the queue
+advances only after the relevant GitHub `state:implementation-go` or
+`state:implementation-no-go` mutation succeeds and is confirmed. On restart,
+seeding reads labels and PR state, not review output.
 
 ---
 

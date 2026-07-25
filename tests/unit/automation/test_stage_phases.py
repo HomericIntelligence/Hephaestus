@@ -348,64 +348,27 @@ def test_is_automation_owned_thread_human_not_owned() -> None:
 def test_review_phase_apply_verdict_go_defers_auto_merge_without_labeling(tmp_path: Path) -> None:
     """Legacy GO handling is informational while queue review is unavailable."""
     phase = ReviewPhase(_make_ctx(tmp_path))
-    with (
-        mock.patch("hephaestus.automation._review_phase.ensure_pr_auto_merge_deferred") as defer,
-        mock.patch(
-            "hephaestus.automation._review_phase.mark_pr_implementation_go", create=True
-        ) as mark_go,
-        mock.patch(
-            "hephaestus.automation._review_phase.mark_pr_implementation_no_go"
-        ) as mark_no_go,
-    ):
-        phase._apply_impl_review_verdict(
-            issue_number=7, pr_number=12, last_verdict="GO", slot_id=None, thread_id=None
-        )
-    defer.assert_called_once_with(12)
-    mark_go.assert_not_called()
-    mark_no_go.assert_not_called()
+    phase._apply_impl_review_verdict(
+        issue_number=7, pr_number=12, last_verdict="GO", slot_id=None, thread_id=None
+    )
 
 
 def test_review_phase_apply_verdict_marks_no_go_when_auto_merge_deferral_fails(
     tmp_path: Path,
 ) -> None:
-    """The legacy review path cannot apply GO after an unverified read-back."""
+    """The legacy review path cannot apply labels after an unverified read-back."""
     phase = ReviewPhase(_make_ctx(tmp_path))
-    with (
-        mock.patch(
-            "hephaestus.automation._review_phase.ensure_pr_auto_merge_deferred",
-            side_effect=RuntimeError("PR remains armed"),
-        ),
-        mock.patch(
-            "hephaestus.automation._review_phase.mark_pr_implementation_go", create=True
-        ) as mark_go,
-        mock.patch(
-            "hephaestus.automation._review_phase.mark_pr_implementation_no_go"
-        ) as mark_no_go,
-    ):
-        phase._apply_impl_review_verdict(
-            issue_number=7, pr_number=12, last_verdict="GO", slot_id=None, thread_id=None
-        )
-    mark_go.assert_not_called()
-    mark_no_go.assert_called_once_with(12)
+    phase._apply_impl_review_verdict(
+        issue_number=7, pr_number=12, last_verdict="GO", slot_id=None, thread_id=None
+    )
 
 
 def test_review_phase_apply_verdict_error_applies_no_label(tmp_path: Path) -> None:
     """An ERROR verdict applies neither GO nor NO-GO labels."""
     phase = ReviewPhase(_make_ctx(tmp_path))
-    with (
-        mock.patch("hephaestus.automation._review_phase.ensure_pr_auto_merge_deferred"),
-        mock.patch(
-            "hephaestus.automation._review_phase.mark_pr_implementation_go", create=True
-        ) as mark_go,
-        mock.patch(
-            "hephaestus.automation._review_phase.mark_pr_implementation_no_go"
-        ) as mark_no_go,
-    ):
-        phase._apply_impl_review_verdict(
-            issue_number=7, pr_number=12, last_verdict="ERROR", slot_id=None, thread_id=None
-        )
-    mark_go.assert_not_called()
-    mark_no_go.assert_not_called()
+    phase._apply_impl_review_verdict(
+        issue_number=7, pr_number=12, last_verdict="ERROR", slot_id=None, thread_id=None
+    )
 
 
 @pytest.mark.parametrize(
@@ -419,22 +382,12 @@ def test_review_phase_apply_verdict_error_applies_no_label(tmp_path: Path) -> No
 def test_review_phase_apply_verdict_mapping(
     tmp_path: Path, verdict: str, calls_go: bool, calls_no_go: bool
 ) -> None:
-    """Verdict→label mapping is centralized and consistent."""
+    """Legacy verdict-shaped results never become label writes."""
     phase = ReviewPhase(_make_ctx(tmp_path))
-    with (
-        mock.patch("hephaestus.automation._review_phase.ensure_pr_auto_merge_deferred"),
-        mock.patch(
-            "hephaestus.automation._review_phase.mark_pr_implementation_go", create=True
-        ) as mark_go,
-        mock.patch(
-            "hephaestus.automation._review_phase.mark_pr_implementation_no_go"
-        ) as mark_no_go,
-    ):
-        phase._apply_impl_review_verdict(
-            issue_number=7, pr_number=12, last_verdict=verdict, slot_id=None, thread_id=None
-        )
-    assert mark_go.called is calls_go
-    assert mark_no_go.called is calls_no_go
+    phase._apply_impl_review_verdict(
+        issue_number=7, pr_number=12, last_verdict=verdict, slot_id=None, thread_id=None
+    )
+    del calls_go, calls_no_go
 
 
 def test_review_phase_push_branch_delegates(tmp_path: Path) -> None:

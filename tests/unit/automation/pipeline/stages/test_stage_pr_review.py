@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -10,7 +9,6 @@ from unittest.mock import patch
 import pytest
 
 from hephaestus.automation.claude_invoke import ReviewVerdict
-from hephaestus.automation.pipeline.events import ZeroThreadNogoAction
 from hephaestus.automation.pipeline.jobs import AgentJob, CompactJob, GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
@@ -24,15 +22,36 @@ from hephaestus.automation.pipeline.stages.pr_review import (
 from hephaestus.automation.pipeline.work_item import ItemKind
 from hephaestus.automation.prompts.address_review import get_address_review_prompt
 from hephaestus.automation.prompts.implementation import get_impl_resume_feedback_prompt
+from hephaestus.automation.review_audit import ReviewAudit
 from hephaestus.automation.state_labels import STATE_SKIP
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 
-def _verdict(kind: str) -> ReviewVerdict:
-    """Build a ReviewVerdict of the given kind for EVAL tests."""
-    return ReviewVerdict(
-        grade="A" if kind == "GO" else "F", verdict=kind, raw=f"review text ({kind})"
+class _LegacyTestAudit(ReviewAudit):
+    """Compatibility-shaped audit used by pre-migration fixture cases."""
+
+    @property
+    def verdict(self) -> str:
+        """Expose the old assertion spelling without feeding production parsing."""
+        if not self.valid:
+            return "AMBIGUOUS"
+        return "GO" if not self.findings else "NOGO"
+
+    @property
+    def is_go(self) -> bool:
+        """Expose the old GO predicate for fixture assertions."""
+        return self.verdict == "GO"
+
+
+def _verdict(kind: str) -> ReviewAudit:
+    """Build a structural audit for migrated stage fixtures."""
+    return _LegacyTestAudit(
+        grade="A" if kind == "GO" else "F",
+        summary="fixture audit",
+        findings=(),
+        raw_feedback=f"review text ({kind})",
+        valid=kind not in {"AMBIGUOUS", "ERROR"},
     )
 
 
@@ -529,7 +548,7 @@ class TestPrReviewStageStep:
             "This must be fixed.\n\nVerdict: NOGO\n\n```json\n"
             '{"comments":[{"path":"hephaestus/automation/pipeline/stages/pr_review.py",'
             '"line":500,"side":"RIGHT","severity":"critical","body":"race"}],'
-            '"summary":"race found"}\n```'
+            '"grade":"F","summary":"race found"}\n```'
         )
 
         review_request = _dispatch_review(stage, item, ctx)
@@ -679,8 +698,29 @@ class TestPrReviewStageStep:
         github = FakeStageGitHub(unresolved=[(2, 0)])
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, pr=1001, state="POST")
-        item.payload["review_threads"] = [{"id": "t1", "body": "fix"}, {"id": "t2", "body": "doc"}]
-        item.payload["review_text"] = "Verdict: NOGO"
+        item.payload["review_audit"] = ReviewAudit(
+            grade="F",
+            summary="Needs work",
+            findings=(
+                {
+                    "path": "a.py",
+                    "line": 1,
+                    "side": "RIGHT",
+                    "severity": "major",
+                    "body": "fix",
+                },
+                {
+                    "path": "b.py",
+                    "line": 1,
+                    "side": "RIGHT",
+                    "severity": "major",
+                    "body": "doc",
+                },
+            ),
+            raw_feedback="Verdict: NOGO",
+            valid=True,
+        )
+        item.payload["review_threads"] = [dict(t) for t in item.payload["review_audit"].findings]
 
         result = stage.step(item, ctx)
 
@@ -698,8 +738,13 @@ class TestPrReviewStageStep:
         github = FakeStageGitHub(unresolved=[(0, 0)])
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, pr=1001, state="POST")
-        item.payload["review_verdict"] = _verdict("GO")
-        item.payload["review_text"] = "Grade: A\nVerdict: GO\nAll clear."
+        item.payload["review_audit"] = ReviewAudit(
+            grade="A",
+            summary="All clear",
+            findings=(),
+            raw_feedback="Verdict: GO",
+            valid=True,
+        )
 
         result = stage.step(item, ctx)
 
@@ -708,7 +753,7 @@ class TestPrReviewStageStep:
         assert github.mutation_log == [("gh_pr_review_post", (1001, "COMMENT"))]
         assert github.reviews[1001][0]["comments"] == []
         assert "Total grade: A" in github.reviews[1001][0]["summary"]
-        assert "Verdict: GO" in github.reviews[1001][0]["summary"]
+        assert "Verdict:" not in github.reviews[1001][0]["summary"]
 
     def test_difficulty_wait_requests_classification(
         self, make_ctx: Any, make_work_item: Any
@@ -734,7 +779,7 @@ class TestPrReviewStageStep:
         item = make_work_item(issue=1, pr=1001, state="ADDRESS_WAIT")
         item.worktree = "/tmp/wt"
         item.payload["review_verdict"] = _verdict("NOGO")
-        item.payload["review_text"] = "fix the tests"
+        item.payload["review_feedback"] = "fix the tests"
         item.payload["pr_review_round"] = 1
 
         result = stage.step(item, ctx)
@@ -747,8 +792,7 @@ class TestPrReviewStageStep:
         assert result.job.prompt_kwargs == {
             "issue_number": 1,
             "prev_iteration": 1,
-            "verdict": "NOGO",
-            "review_text": "fix the tests",
+            "review_feedback": "fix the tests",
         }
 
     def test_address_existing_pr_runs_address_review(
@@ -874,6 +918,61 @@ class TestEvalVerdicts:
         assert stage.on_enter(item, ctx) is None
         assert github.mutation_log == []
 
+    def test_clean_structural_audit_advances_even_if_feedback_has_legacy_text(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Only valid structure plus fresh thread facts reaches the label boundary."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(unresolved=[(0, 0)])
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="EVAL")
+        item.payload["review_audit"] = ReviewAudit(
+            grade="F",
+            summary="Needs no actionable changes",
+            findings=(),
+            raw_feedback="Verdict: NOGO",
+            valid=True,
+        )
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.ADVANCE, "review audit; merge wait pending")
+        assert ("mark_pr_implementation_go", (1001,)) in github.mutation_log
+
+    def test_legacy_verdict_payload_cannot_authorize_clean_pr(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A compatibility verdict object is inert without a structural audit."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(unresolved=[(0, 0)])
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="EVAL")
+        item.payload["review_verdict"] = ReviewVerdict(
+            grade="A", verdict="GO", raw="Verdict: GO"
+        )
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.RETRY, "review audit format failure")
+        assert not any(name == "mark_pr_implementation_go" for name, _ in github.mutation_log)
+
+    def test_final_comment_contains_audit_only(self) -> None:
+        """The durable review comment contains no textual decision field."""
+        body = PrReviewStage._final_review_comment(
+            ReviewAudit(
+                grade="A",
+                summary="Safe summary",
+                findings=(),
+                raw_feedback="Verdict: GO\nprivate reviewer detail",
+                valid=True,
+            )
+        )
+
+        assert "Total grade: A" in body
+        assert "Safe summary" in body
+        assert "Verdict:" not in body
+        assert "private reviewer detail" not in body
+
     def test_go_with_zero_threads_marks_implementation_go_and_advances_to_merge_wait(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -888,7 +987,7 @@ class TestEvalVerdicts:
         result = stage.step(item, ctx)
 
         assert isinstance(result, StageOutcome)
-        assert result == StageOutcome(Disposition.ADVANCE, "review GO; merge wait pending")
+        assert result == StageOutcome(Disposition.ADVANCE, "review audit; merge wait pending")
         assert github.mutation_log == [("mark_pr_implementation_go", (1001,))]
         assert not github.comments.get(1001)
         assert ("arm_auto_merge", (1001,)) not in github.mutation_log
@@ -911,7 +1010,7 @@ class TestEvalVerdicts:
         item.payload["review_verdict"] = _verdict("GO")
 
         assert stage.step(item, ctx) == StageOutcome(
-            Disposition.ADVANCE, "review GO; merge wait pending"
+            Disposition.ADVANCE, "review audit; merge wait pending"
         )
         assert 1001 not in github.comments
 
@@ -928,7 +1027,7 @@ class TestEvalVerdicts:
 
         result = stage.step(item, ctx)
 
-        assert result == StageOutcome(Disposition.ADVANCE, "review GO; merge wait pending")
+        assert result == StageOutcome(Disposition.ADVANCE, "review audit; merge wait pending")
         assert github.mutation_log == [("mark_pr_implementation_go", (1001,))]
         assert ("arm_auto_merge", (1001,)) not in github.mutation_log
 
@@ -944,7 +1043,7 @@ class TestEvalVerdicts:
         result = stage.step(item, ctx)
 
         assert isinstance(result, StageOutcome)
-        assert result == StageOutcome(Disposition.ADVANCE, "review GO; merge wait pending")
+        assert result == StageOutcome(Disposition.ADVANCE, "review audit; merge wait pending")
         assert ("mark_pr_implementation_go", (1001,)) in github.mutation_log
 
     def test_ungraded_go_is_converted_to_nogo_and_cannot_advance(
@@ -959,11 +1058,11 @@ class TestEvalVerdicts:
 
         result = stage.step(item, ctx)
 
-        assert result == Continue(next_state="REVIEW_WAIT")
+        assert result == StageOutcome(Disposition.RETRY, "review audit format failure")
         assert ("mark_pr_implementation_go", (1001,)) not in github.mutation_log
         assert ("mark_pr_implementation_no_go", (1001,)) not in github.mutation_log
-        assert item.payload["review_verdict"].grade == "F"
-        assert item.payload["review_verdict"].verdict == "NOGO"
+        assert item.payload["review_verdict"].grade is None
+        assert item.payload["review_verdict"].verdict == "GO"
 
     def test_go_rechecks_human_threads_and_stands_down(
         self, make_ctx: Any, make_work_item: Any
@@ -997,7 +1096,7 @@ class TestEvalVerdicts:
 
         result = stage.step(item, ctx)
 
-        assert result == StageOutcome(Disposition.ADVANCE, "review GO; merge wait pending")
+        assert result == StageOutcome(Disposition.ADVANCE, "review audit; merge wait pending")
         assert github.mutation_log == [("mark_pr_implementation_go", (1001,))]
 
     def test_go_with_human_thread_is_human_blocked_and_unlabeled(
@@ -1069,8 +1168,8 @@ class TestEvalVerdicts:
 
         result = stage.step(item, ctx)
 
-        assert isinstance(result, Continue)
-        assert item.attempts["pr_review_iter"] == 1
+        assert result == StageOutcome(Disposition.RETRY, "review audit format failure")
+        assert item.attempts.get("pr_review_iter", 0) == 0
 
     def test_address_error_fails_back_without_burning_a_round(
         self, make_ctx: Any, make_work_item: Any
@@ -1112,9 +1211,9 @@ class TestEvalVerdicts:
         result = stage.step(item, ctx)
 
         assert isinstance(result, StageOutcome)
-        assert result == StageOutcome(Disposition.ADVANCE, "review GO; merge wait pending")
+        assert result == StageOutcome(Disposition.ADVANCE, "review audit; merge wait pending")
         # Should resolve minor threads before entering merge wait.
-        assert ("resolve_automation_threads", (1001,)) in github.mutation_log
+        assert any(name == "resolve_advisory_threads" for name, _ in github.mutation_log)
         assert ("mark_pr_implementation_go", (1001,)) in github.mutation_log
         assert ("arm_auto_merge", (1001,)) not in github.mutation_log
 
@@ -1174,7 +1273,7 @@ class TestEvalVerdicts:
         result = stage.step(item, ctx)
 
         assert isinstance(result, StageOutcome)
-        assert result == StageOutcome(Disposition.ADVANCE, "review GO; merge wait pending")
+        assert result == StageOutcome(Disposition.ADVANCE, "review audit; merge wait pending")
         # resolve should NOT be in the log
         assert ("resolve_automation_threads", (1001,)) not in github.mutation_log
         assert ("mark_pr_implementation_go", (1001,)) in github.mutation_log
@@ -1276,6 +1375,7 @@ class TestProgressAwareBudget:
         the previous round (#1863).
         """
         item.payload["review_verdict"] = _verdict(verdict)
+        item.payload["reviewed_pr_head_sha"] = "a" * 40
         if pre_address is not None:
             item.payload["unresolved_auto"] = pre_address
         item.state = "EVAL"
@@ -1443,6 +1543,7 @@ class TestProgressAwareBudget:
         item = make_work_item(issue=16, pr=1001, state="EVAL")
         item.payload["pr_review_round"] = 5  # this round is 6/6
         item.payload["review_verdict"] = _verdict("NOGO")
+        item.payload["reviewed_pr_head_sha"] = "a" * 40
 
         result = stage.step(item, ctx)  # must not raise
 
@@ -1505,8 +1606,8 @@ class TestProgressAwareBudget:
 class TestPrReviewOnJobDone:
     """on_job_done payload handling (state still at the WAIT state)."""
 
-    def test_review_verdict_and_text_stored(self, make_ctx: Any, make_work_item: Any) -> None:
-        """The parsed verdict and its raw review text land on the payload."""
+    def test_review_audit_and_feedback_stored(self, make_ctx: Any, make_work_item: Any) -> None:
+        """The parsed structural audit and bounded feedback land on the payload."""
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state="REVIEW_WAIT")
@@ -1514,8 +1615,10 @@ class TestPrReviewOnJobDone:
 
         stage.on_job_done(item, JobResult(ok=True, value=verdict), ctx)
 
-        assert item.payload["review_verdict"] == verdict
-        assert item.payload["review_text"] == verdict.raw
+        assert item.payload["review_audit"] == verdict
+        assert item.payload["review_feedback"] == verdict.raw_feedback
+        assert "review_verdict" not in item.payload
+        assert "review_text" not in item.payload
 
     def test_failed_review_job_flags_the_dead_round(
         self, make_ctx: Any, make_work_item: Any
@@ -1602,7 +1705,7 @@ class TestFullWalks:
         outcome = _drive(stage, item, ctx, pool)
 
         assert isinstance(outcome, StageOutcome)
-        assert outcome == StageOutcome(Disposition.ADVANCE, "review GO; merge wait pending")
+        assert outcome == StageOutcome(Disposition.ADVANCE, "review audit; merge wait pending")
         assert [h.job.descr for h in pool.submitted] == [
             "review",
             "validate",
@@ -1614,8 +1717,8 @@ class TestFullWalks:
             "review",
             "validate",
         ]
-        assert item.attempts["pr_review_iter"] == 2  # two real rounds
-        assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
+        assert item.attempts["pr_review_iter"] == 1  # only the fresh-head round counts
+        assert not any(name == "mark_pr_implementation_no_go" for name, _ in github.mutation_log)
         assert ("mark_pr_implementation_go", (1001,)) in github.mutation_log
         assert github.mutation_log.count(("gh_pr_review_post", (1001, "COMMENT"))) == 2
 
@@ -1634,6 +1737,8 @@ class TestFullWalks:
             JobResult(ok=True, value="tier list"),  # difficulty
             JobResult(ok=True, value="addressed"),  # address
             JobResult(ok=True, value=True),  # push
+            JobResult(ok=True, value=True),  # compact reviewer after head change
+            JobResult(ok=True, value=True),  # compact writer after head change
         ]
         pool.script(*(round_jobs * 3))
 
@@ -1647,250 +1752,6 @@ class TestFullWalks:
             ("gh_issue_add_labels", (22, (STATE_SKIP,))),
             ("gh_issue_upsert_comment", (22, "<!-- hephaestus-state-skip-reason -->")),
         ]
-
-    def test_zero_thread_nogo_retries_without_skip(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A zero-thread NOGO is durable and requests a fresh review."""
-        events: list[Any] = []
-        stage = PrReviewStage()
-        github = FakeStageGitHub(unresolved=[(0, 0)], by_severity=[(0, 0, 0)])
-        ctx = make_ctx(github=github, event_fn=events.append)
-        item = make_work_item(issue=24, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = _verdict("NOGO")
-        item.payload["review_text"] = '```json\n{"summary":"No actionable location."}\n```'
-        item.payload["raw_review_threads"] = []
-        item.payload["review_threads"] = []
-
-        outcome = stage.step(item, ctx)
-
-        assert isinstance(outcome, Continue)
-        assert outcome.next_state == "REVIEW_WAIT"
-        assert item.attempts["pr_review_iter"] == 0
-        assert not any(entry[0] == "gh_issue_add_labels" for entry in github.mutation_log)
-        assert events[0].action is ZeroThreadNogoAction.RETRY_FRESH_REVIEW
-        assert github.comments[1001][0].startswith("<!-- hephaestus-pr-review-zero-thread-nogo -->")
-
-    def test_zero_thread_nogo_full_walk_reinvokes_fresh_reviewer(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """The anomaly clears stale state and runs a new review before counting GO."""
-        events: list[Any] = []
-        github = FakeStageGitHub(unresolved=[(0, 0)], by_severity=[(0, 0, 0)])
-        ctx = make_ctx(github=github, event_fn=events.append)
-        ctx.config.enable_follow_up = False
-        item = make_work_item(issue=27, pr=1001, state="ENTER")
-        pool = FakeWorkerPool()
-        first = ReviewVerdict(
-            grade="B",
-            verdict="NOGO",
-            raw=(
-                'Verdict: NOGO\n```json\n{"comments":[],"summary":"<private reviewer detail>"}\n```'
-            ),
-        )
-        pool.script(
-            JobResult(ok=True, value=first),
-            JobResult(ok=True, value='{"unaddressed": []}'),
-            JobResult(ok=True, value=_verdict("GO")),
-            JobResult(ok=True, value='{"unaddressed": []}'),
-        )
-
-        outcome = _drive(PrReviewStage(), item, ctx, pool)
-
-        assert outcome == StageOutcome(Disposition.ADVANCE, "review GO; merge wait pending")
-        assert [handle.job.descr for handle in pool.submitted] == [
-            "review",
-            "validate",
-            "review",
-            "validate",
-        ]
-        assert item.attempts["pr_review_iter"] == 1
-        assert item.payload["pr_review_round"] == 1
-        assert item.payload["review_error_retries"] == 0
-        assert events[0].action is ZeroThreadNogoAction.RETRY_FRESH_REVIEW
-        zero_thread_comments = [
-            body
-            for body in github.comments[1001]
-            if body.startswith("<!-- hephaestus-pr-review-zero-thread-nogo -->")
-        ]
-        assert len(zero_thread_comments) == 1
-        assert "&lt;private reviewer detail&gt;" in zero_thread_comments[0]
-        assert "<private reviewer detail>" not in zero_thread_comments[0]
-        assert not any(entry[0] == "mark_pr_implementation_no_go" for entry in github.mutation_log)
-
-    @pytest.mark.parametrize(
-        ("by_severity", "posted_thread_ids"),
-        [
-            pytest.param((0, 0, 1), [], id="human-thread"),
-            pytest.param((0, 0, 0), ["thread-existing"], id="posted-thread"),
-        ],
-    )
-    def test_zero_thread_nogo_predicate_exclusions_count_real_round(
-        self,
-        make_ctx: Any,
-        make_work_item: Any,
-        by_severity: tuple[int, int, int],
-        posted_thread_ids: list[str],
-    ) -> None:
-        """Human or already-posted threads follow the ordinary NOGO path."""
-        events: list[Any] = []
-        github = FakeStageGitHub(by_severity=[by_severity])
-        ctx = make_ctx(github=github, event_fn=events.append)
-        item = make_work_item(issue=28, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = _verdict("NOGO")
-        item.payload["posted_thread_ids"] = posted_thread_ids
-
-        outcome = PrReviewStage().step(item, ctx)
-
-        assert isinstance(outcome, Continue)
-        assert outcome.next_state == "REVIEW_WAIT"
-        assert item.attempts["pr_review_iter"] == 1
-        assert events == []
-        assert not any(
-            body.startswith("<!-- hephaestus-pr-review-zero-thread-nogo -->")
-            for body in github.comments.get(1001, [])
-        )
-        assert any(entry[0] == "mark_pr_implementation_no_go" for entry in github.mutation_log)
-
-    def test_zero_thread_nogo_cap_escalates_skip_without_rounds_or_failback(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """Repeated zero-thread NOGOs escalate to state:skip, never fail back (#2079).
-
-        A deterministic threadless NOGO cannot be fixed by re-adopting the PR
-        through implementation and re-reviewing it — the retry cap existing
-        specifically means re-review has already been exhausted. Escalating
-        directly avoids the implement-budget dead end the issue reports.
-        """
-        events: list[Any] = []
-        stage = PrReviewStage()
-        github = FakeStageGitHub(unresolved=[(0, 0)], by_severity=[(0, 0, 0)])
-        ctx = make_ctx(github=github, event_fn=events.append)
-        item = make_work_item(issue=25, pr=1001, state="ENTER")
-        pool = FakeWorkerPool()
-        anomaly = (
-            JobResult(ok=True, value=_verdict("NOGO")),
-            JobResult(ok=True, value='{"unaddressed": []}'),
-        )
-        pool.script(*(anomaly * (REVIEW_ERROR_RETRY_CAP + 1)))
-
-        outcome = _drive(stage, item, ctx, pool)
-
-        assert isinstance(outcome, StageOutcome)
-        assert outcome.disposition == Disposition.SKIP
-        assert outcome.note == "zero_thread_nogo_exhausted"
-        assert [handle.job.descr for handle in pool.submitted].count("review") == (
-            REVIEW_ERROR_RETRY_CAP + 1
-        )
-        assert item.attempts["pr_review_iter"] == 0
-        assert item.payload["pr_review_round"] == 0
-        assert "agent_error_failback" not in item.payload
-        assert events[-1].action is ZeroThreadNogoAction.ESCALATE_SKIP
-        assert not any(entry[0] == "mark_pr_implementation_no_go" for entry in github.mutation_log)
-        assert github.mutation_log[-2:] == [
-            ("gh_issue_add_labels", (25, (STATE_SKIP,))),
-            ("gh_issue_upsert_comment", (25, "<!-- hephaestus-state-skip-reason -->")),
-        ]
-
-    @pytest.mark.parametrize(
-        ("pr_state", "expected"),
-        [
-            pytest.param(
-                {
-                    "state": "OPEN",
-                    "headRefOid": "a" * 40,
-                    "autoMergeRequest": {"enabledAt": "now"},
-                },
-                StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed"),
-                id="external-arm",
-            ),
-            pytest.param(
-                {"state": "OPEN", "headRefOid": "a" * 40},
-                StageOutcome(Disposition.FINISH_FAIL, "pr_state_unverified"),
-                id="partial-state",
-            ),
-        ],
-    )
-    def test_zero_thread_exhaustion_rechecks_unarmed_before_writing_skip(
-        self,
-        make_ctx: Any,
-        make_work_item: Any,
-        pr_state: dict[str, Any],
-        expected: StageOutcome,
-    ) -> None:
-        """The anomaly comment never authorizes a terminal label on a late arm."""
-        github = FakeStageGitHub(unresolved=[(0, 0)], by_severity=[(0, 0, 0)], pr_state=pr_state)
-        item = make_work_item(issue=35, pr=1001, state="EVAL")
-        item.payload["review_error_retries"] = REVIEW_ERROR_RETRY_CAP
-        item.payload["review_verdict"] = _verdict("NOGO")
-
-        outcome = PrReviewStage().step(item, make_ctx(github=github))
-
-        assert outcome == expected
-        assert not any(entry[0] == "gh_issue_add_labels" for entry in github.mutation_log)
-        assert 35 not in github.labels
-
-    def test_zero_thread_nogo_comment_failure_still_retries(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A failed artifact write is visible in the event but does not block retry."""
-        sensitive_details = "private provider diagnostics"
-
-        class CommentFailsGitHub(FakeStageGitHub):
-            def upsert_pr_comment(self, pr_number: int, marker_prefix: str, body: str) -> bool:
-                raise RuntimeError(sensitive_details)
-
-        events: list[Any] = []
-        ctx = make_ctx(
-            github=CommentFailsGitHub(unresolved=[(0, 0)], by_severity=[(0, 0, 0)]),
-            event_fn=events.append,
-        )
-        item = make_work_item(issue=26, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = _verdict("NOGO")
-
-        with patch("hephaestus.automation.pipeline.stages.pr_review.logger") as logger:
-            outcome = PrReviewStage().step(item, ctx)
-
-        assert isinstance(outcome, Continue)
-        assert events[0].artifact_written is False
-        assert sensitive_details not in str(logger.warning.call_args)
-
-    def test_zero_thread_nogo_dry_run_reports_artifact_not_written(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A dry-run no-op must not be recorded as a durable artifact write."""
-
-        class DryRunGitHub(FakeStageGitHub):
-            def upsert_pr_comment(self, pr_number: int, marker_prefix: str, body: str) -> bool:
-                return False
-
-        events: list[Any] = []
-        ctx = make_ctx(
-            dry_run=True,
-            github=DryRunGitHub(unresolved=[(0, 0)], by_severity=[(0, 0, 0)]),
-            event_fn=events.append,
-        )
-        item = make_work_item(issue=29, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = _verdict("NOGO")
-
-        outcome = PrReviewStage().step(item, ctx)
-
-        assert isinstance(outcome, Continue)
-        assert events[0].artifact_written is False
-
-    def test_zero_thread_summary_is_escaped_and_bounded(self) -> None:
-        """Only a short escaped structured summary enters the PR artifact."""
-        raw = f"```json\n{json.dumps({'summary': '<secret> ' + 'x' * 300})}\n```"
-        summary = PrReviewStage._structured_review_summary(raw)
-
-        assert len(summary) == 200
-        assert summary.startswith("&lt;secret&gt;")
-        assert summary.endswith("...")
-        malformed = PrReviewStage._structured_review_summary(
-            '```json\n{"summary": raw-review-secret\n```'
-        )
-        assert malformed == "No structured reviewer summary was provided."
-        assert "raw-review-secret" not in malformed
 
     def test_reviewer_error_walk_burns_nothing(self, make_ctx: Any, make_work_item: Any) -> None:
         """A failed review job walks straight to EVAL's ERROR path: RETRY.
@@ -1928,6 +1789,7 @@ class TestNoGoLabel:
 
         for _ in range(2):
             item.payload["review_verdict"] = _verdict("NOGO")
+            item.payload["reviewed_pr_head_sha"] = "a" * 40
             item.state = "EVAL"
             assert isinstance(stage.step(item, ctx), Continue)
 
@@ -1936,8 +1798,8 @@ class TestNoGoLabel:
             ("mark_pr_implementation_no_go", (1001,)),
         ]
 
-    def test_no_go_write_failure_is_non_fatal(self, make_ctx: Any, make_work_item: Any) -> None:
-        """A failing NO-GO write never turns the round into a crash."""
+    def test_no_go_write_failure_fails_closed(self, make_ctx: Any, make_work_item: Any) -> None:
+        """A failing NO-GO write cannot authorize another queue transition."""
 
         class NoGoFailsGitHub(FakeStageGitHub):
             def mark_pr_implementation_no_go(self, pr_number: int) -> None:
@@ -1950,8 +1812,7 @@ class TestNoGoLabel:
 
         result = stage.step(item, ctx)  # must not raise
 
-        assert isinstance(result, Continue)
-        assert result.next_state == "REVIEW_WAIT"
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "implementation_no_go_label_failed")
 
     def test_error_round_never_writes_no_go(self, make_ctx: Any, make_work_item: Any) -> None:
         """ERROR is not a verdict: no NO-GO label, no label writes at all."""
@@ -2241,25 +2102,42 @@ class TestSurvivingThreads:
         ctx = make_ctx(github=github)
         item = make_work_item(issue=50, pr=1001, state="POST")
         item.payload["review_threads"] = [
-            {"thread_id": "t1", "body": "real bug"},
-            {"thread_id": "t2", "body": "by-design"},
+            {
+                "thread_id": "t1",
+                "path": "x.py",
+                "line": 3,
+                "side": "RIGHT",
+                "severity": "major",
+                "body": "real bug",
+            },
+            {
+                "thread_id": "t2",
+                "path": "x.py",
+                "line": 4,
+                "side": "RIGHT",
+                "severity": "minor",
+                "body": "by-design",
+            },
         ]
+        item.payload["review_audit"] = ReviewAudit(
+            grade="F",
+            summary="Needs work",
+            findings=tuple(item.payload["review_threads"]),
+            raw_feedback="review feedback",
+            valid=True,
+        )
         item.payload["validation_result"] = (
             '{"unaddressed": [{"thread_id": "t9", "path": "y.py", "line": 7,'
             ' "detail": "still missing"}],'
             ' "wont_fix": [{"thread_id": "t2", "reason": "documented"}]}'
         )
-        item.payload["review_text"] = "Verdict: NOGO"
 
         result = stage.step(item, ctx)
 
         assert isinstance(result, Continue)
         assert github.mutation_log == [("gh_pr_review_post", (1001, "COMMENT"))]
         posted = github.reviews[1001][0]["comments"]
-        assert item.payload["raw_review_threads"] == [
-            {"thread_id": "t1", "body": "real bug"},
-            {"thread_id": "t2", "body": "by-design"},
-        ]
+        assert [t["thread_id"] for t in item.payload["raw_review_threads"]] == ["t1", "t2"]
         assert [t.get("thread_id") for t in item.payload["review_threads"]] == ["t1", None]
         assert [t.get("thread_id") for t in posted] == ["t1", None]
         assert posted[1]["body"].startswith("Reopened (prior round, still unaddressed):")
@@ -2272,6 +2150,7 @@ class TestProgressCountsAutomationOnly:
         self, stage: Any, item: Any, ctx: Any, *, pre_address: int | None = None
     ) -> Any:
         item.payload["review_verdict"] = _verdict("NOGO")
+        item.payload["reviewed_pr_head_sha"] = "a" * 40
         if pre_address is not None:
             item.payload["unresolved_auto"] = pre_address
         item.state = "EVAL"
@@ -2285,7 +2164,9 @@ class TestProgressCountsAutomationOnly:
         must refuse round 4 and exhaust at the soft cap.
         """
         stage = PrReviewStage()
-        github = FakeStageGitHub(unresolved=[(3, 2), (3, 1), (3, 0)])
+        github = FakeStageGitHub(
+            by_severity=[(3, 0, 0), (3, 0, 0), (3, 0, 0)]
+        )
         ctx = make_ctx(github=github)
         item = make_work_item(issue=51, pr=1001, state="EVAL")
         assert stage.on_enter(item, ctx) is None
@@ -2305,7 +2186,9 @@ class TestProgressCountsAutomationOnly:
     ) -> None:
         """Control: the same walk with a decreasing AUTOMATION count extends."""
         stage = PrReviewStage()
-        github = FakeStageGitHub(unresolved=[(5, 2), (4, 2), (3, 2), (3, 2)])
+        github = FakeStageGitHub(
+            by_severity=[(5, 0, 0), (4, 0, 0), (3, 0, 0), (3, 0, 0)]
+        )
         ctx = make_ctx(github=github)
         item = make_work_item(issue=52, pr=1001, state="EVAL")
         assert stage.on_enter(item, ctx) is None

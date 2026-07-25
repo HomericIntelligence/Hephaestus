@@ -152,15 +152,14 @@ def get_dirty_reused_worktree_prompt(
 
 
 def get_impl_resume_feedback_prompt(
-    *, issue_number: int, prev_iteration: int, verdict: str, review_text: str
+    *, issue_number: int, prev_iteration: int, review_feedback: str
 ) -> str:
-    """Build the prompt sent via ``claude --resume`` to iterate on impl after NoGo.
+    """Build the prompt sent via ``claude --resume`` with review feedback.
 
     Args:
         issue_number: GitHub issue number.
-        prev_iteration: Iteration index of the review that produced *review_text*.
-        verdict: ``"NOGO"`` or ``"AMBIGUOUS"``.
-        review_text: Full reviewer output from the previous iteration.
+        prev_iteration: Iteration index of the review that produced the feedback.
+        review_feedback: Bounded reviewer feedback and structural findings.
 
     Returns:
         Prompt text to feed into the resumed implementer session.
@@ -170,7 +169,11 @@ def get_impl_resume_feedback_prompt(
         "implementation/resume_feedback.j2",
         issue_number=issue_number,
         prev_iteration=prev_iteration,
-        verdict=verdict,
-        review_text=review_text,
-        terse_output_directive=get_terse_output_directive(),
+        review_feedback=review_feedback,
+        terse_output_directive=get_terse_output_directive(
+            terminal_output_contract=(
+                "Summarize the implementation changes and tests performed; do not emit "
+                "a review decision token."
+            )
+        ),
     )

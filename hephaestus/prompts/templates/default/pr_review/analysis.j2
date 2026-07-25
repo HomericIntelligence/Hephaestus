@@ -28,20 +28,19 @@ Analyze PR #{{ pr_number }} using {{ review_context_kind }} #{{ issue_number }} 
 > If `$athena:pr-review` appears in your available skills, invoke it now with
 > its normal default behavior. Do not ask the skill to modify its CI/CD review
 > behavior.
-> Do not return the skill's raw report. After it completes, translate its
-> actionable findings into the mandatory JSON comments below and map its
-> result to this binary gate: only an unconditional `GO` is `GO`; a
-> `CONDITIONAL GO` or any no-go result is `NOGO`.
+> Do not return the skill's raw report. After it completes, translate every
+> material finding into the mandatory structured comments below and retain a
+> bounded summary for the informational audit comment.
 > If it is unavailable, perform the equivalent review
-> directly using this prompt. In either case, this review is the loop's sole
-> GO/NOGO decision; `merge_wait` verifies the reviewed-head proof and stands by
-> while automatic-merge handling remains unavailable pending #2419.
+> directly using this prompt. The review output is informational: only the
+> confirmed GitHub implementation-state label transition can authorize
+> `merge_wait`.
 
 **Assume the code is WRONG; your job is to prove it right.** Do not review for
 plausibility — review for falsification: trace each changed execution path,
 verify the tests actually exercise the change (and would FAIL if the change
 were broken), and actively hunt for the input, state, or sequence that breaks
-it. Conclude GO only after that hunt comes up empty.
+it. Conclude that the changed code is ready only after that hunt comes up empty.
 
 Review the PR for correctness, completeness, and code quality. Identify any issues that should
 be addressed as inline review comments.
@@ -56,22 +55,15 @@ Classify each inline comment with a `severity`:
 
 {{ nitpick_directive }}
 
-**Output format (verdict contract — MANDATORY):**
-The review prose + inline comments explain *why*; the grade and verdict are
-the final review summary. Write your analysis in prose, then end your response
-with exactly one grade line and one verdict line below (the parser reads the
-final Grade/Verdict summary):
-
-Grade: A-F
-Verdict: GO — Code is correct, complete, and ready for merge_wait.
-Verdict: NOGO — A fundamental code problem must be fixed first (explain in the review).
-
-After the verdict line, emit a single fenced JSON block:
+**Output format (structural audit contract — MANDATORY):**
+Write concise analysis as needed, then end with exactly one fenced JSON block.
+Do not emit `Verdict:` or any other textual decision line. The implementation
+state is selected only by the queue after fresh GitHub thread and head checks.
 
 ```json
-{"comments": [
+{"grade": "A", "summary": "...", "comments": [
   {"path": "...", "line": 1, "side": "RIGHT", "severity": "minor", "body": "..."}
-], "summary": "..."}
+]}
 ```
 
 Rules for the JSON block:
@@ -81,7 +73,7 @@ Rules for the JSON block:
   - `side`: always `"RIGHT"` for new code
   - `severity`: one of `"critical"`, `"major"`, `"minor"`, `"nitpick"` (see above)
   - `body`: the review comment text (string)
-- `summary`: overall review verdict, max 200 characters.
-- If there are no inline comments AND the code is acceptable, emit:
-  `{"comments": [], "summary": "LGTM"}`
+- `grade`: one of `A`, `B`, `C`, `D`, `E`, or `F`.
+- `summary`: bounded informational review summary, max 200 characters.
+- If there are no inline comments, emit `{"grade": "A", "summary": "LGTM", "comments": []}`.
 - Emit only one JSON block, at the very end of your response (the parser takes the LAST one).

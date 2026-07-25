@@ -224,7 +224,7 @@ def build_test_fix_prompt(issue_number: int, prev_iteration: int, test_output: s
 
     Reuses :func:`get_impl_resume_feedback_prompt` verbatim (doc section 4
     step 7: "resume with test-failure feedback"), with the test failure
-    framed as the NOGO review text the resume template expects.
+    framed as supplemental implementation feedback.
 
     Args:
         issue_number: GitHub issue number being implemented.
@@ -235,14 +235,13 @@ def build_test_fix_prompt(issue_number: int, prev_iteration: int, test_output: s
         The resume prompt carrying the test-failure feedback block.
 
     """
-    review_text = PromptCatalog.current().render(
+    review_feedback = PromptCatalog.current().render(
         "implementation/test_failure_review.j2", test_output=test_output
     )
     return get_impl_resume_feedback_prompt(
         issue_number=issue_number,
         prev_iteration=prev_iteration,
-        verdict="NOGO",
-        review_text=review_text,
+        review_feedback=review_feedback,
     )
 
 

@@ -816,6 +816,14 @@ class PipelineGitHub:
                 human += 1
         return (blocking, minor, human)
 
+    def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+        """Return fresh unresolved threads with durable ownership facts."""
+        threads = self._unresolved_threads(pr_number)
+        current_login = github_api.gh_current_login()
+        for thread in threads:
+            thread["automation_owned"] = _is_automation_owned_thread(thread, current_login)
+        return threads
+
     def resolve_automation_threads(self, pr_number: int) -> int:
         """Resolve unresolved AUTOMATION-owned threads; return the count (#1856).
 
@@ -831,6 +839,24 @@ class PipelineGitHub:
         for t in threads:
             if _is_automation_owned_thread(t, current_login) and t.get("id"):
                 github_api.gh_pr_resolve_thread(str(t["id"]), dry_run=self.dry_run)
+                resolved += 1
+        return resolved
+
+    def resolve_advisory_threads(self, pr_number: int, thread_ids: list[str]) -> int:
+        """Resolve only fresh automation-owned non-blocking thread ids."""
+        if self._skip(f"resolve advisory threads on PR #{pr_number}"):
+            return 0
+        requested = {str(thread_id) for thread_id in thread_ids}
+        threads = self.list_unresolved_review_threads(pr_number)
+        resolved = 0
+        for thread in threads:
+            thread_id = str(thread.get("id") or "")
+            if (
+                thread_id in requested
+                and thread.get("automation_owned") is True
+                and not _thread_severity_is_blocking(thread)
+            ):
+                github_api.gh_pr_resolve_thread(thread_id, dry_run=self.dry_run)
                 resolved += 1
         return resolved
 

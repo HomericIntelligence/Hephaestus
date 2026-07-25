@@ -242,8 +242,16 @@ class StageGitHub(Protocol):
         """Return (blocking_automation, minor_automation, human) unresolved counts (#1856)."""
         ...
 
+    def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+        """Return fresh unresolved review-thread facts, including ownership."""
+        ...
+
     def resolve_automation_threads(self, pr_number: int) -> int:
         """Resolve unresolved automation-owned review threads; return the count (#1856)."""
+        ...
+
+    def resolve_advisory_threads(self, pr_number: int, thread_ids: list[str]) -> int:
+        """Resolve only the supplied fresh automation-owned advisory threads."""
         ...
 
     def create_pr(self, issue_number: int, branch: str, title: str, body: str) -> int:
