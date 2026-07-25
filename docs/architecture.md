@@ -434,10 +434,9 @@ mapping or `finished(fail)` rather than raising `KeyError`.
 ### Closed-schema stage events
 
 Stage-originated JSONL events use the closed schema in
-[`events.py`](hephaestus/automation/pipeline/events.py). `encode_stage_event`
-rejects raw reviewer text, GitHub bodies and arbitrary event objects.
-The only event type currently defined is
-[`PrReviewZeroThreadNogoEvent`](hephaestus/automation/pipeline/events.py).
+[`events.py`](hephaestus/automation/pipeline/events.py). The event surface is
+intentionally minimal: `encode_stage_event` currently rejects every event, so
+no stage event can carry reviewer text, GitHub bodies, or authorization facts.
 
 ### Scope trimming
 
@@ -496,8 +495,9 @@ Key fields:
  transition gates require a fresh GitHub read; cached labels never authorize
  advancement.
 - `payload` — `dict[str, Any]`. The stage-local scratchpad for cross-step
- handoff (`retry_delay_s`, `*_verdict`, base-captured `base_branch`,
- reviewer text, etc.).
+ handoff (`retry_delay_s`, base-captured `base_branch`, validated audit facts,
+ and process-owned thread receipts). It is not a durable authorization
+ channel.
 - `result` ([`ItemResult`](hephaestus/automation/pipeline/work_item.py)) —
  final `passed / reason / final_stage` written by
  [`_finish`](hephaestus/automation/pipeline/coordinator.py).
