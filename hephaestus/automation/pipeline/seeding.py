@@ -141,7 +141,6 @@ class SeedEntry:
             planner/reviewer/implementer prompts.
         issue_body: Issue body copied into the issue WorkItem payload for
             planner/reviewer/implementer prompts.
-        pr_diff: Complete PR diff copied into a direct PR review payload.
         pr_description: PR body copied into a direct PR review payload.
         passed: Terminal result for entries clamped directly to ``finished``.
         skip_tag_obligation: Durable write that must complete before this
@@ -157,7 +156,6 @@ class SeedEntry:
     issue_number: int | None = None
     issue_title: str = ""
     issue_body: str = ""
-    pr_diff: str = ""
     pr_description: str = ""
     passed: bool = True
     skip_tag_obligation: EpicSkipTagObligation | None = None
