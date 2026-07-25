@@ -2825,6 +2825,7 @@ class TestHumanBlockedComment:
         assert "2 unresolved review thread(s) opened by a human" in body
         assert "standing down" in body
         assert "without changing implementation-state labels" in body
+        assert "Automation does not arm auto-merge" in body
 
     def test_comment_failure_is_non_fatal(self, make_ctx: Any, make_work_item: Any) -> None:
         """A failing comment write still finishes failed (never crashes)."""

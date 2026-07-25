@@ -1969,8 +1969,8 @@ class PrReviewStage(Stage):
             f"The implementation review cannot transition while {human_unresolved} "
             "unresolved review thread(s) opened by a human remain on this PR. "
             "Automation will not resolve human threads and cannot act on them, "
-            "so it is standing down without changing implementation-state labels; "
-            "auto-merge stays unarmed. Once the human thread(s) are resolved, "
+            "so it is standing down without changing implementation-state labels. "
+            "Automation does not arm auto-merge. Once the human thread(s) are resolved, "
             "the next automation pass will re-review this PR."
         )
         try:

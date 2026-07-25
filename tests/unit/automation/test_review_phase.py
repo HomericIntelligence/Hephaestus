@@ -27,6 +27,61 @@ from hephaestus.automation.protocol import (
 from hephaestus.automation.review_audit import ReviewAudit
 
 
+class TestAuditVerdict:
+    """The legacy no-PR loop treats advisory structural audits as informational."""
+
+    def test_advisory_findings_do_not_block_the_legacy_loop(self) -> None:
+        audit = ReviewAudit(
+            grade="B",
+            summary="Advisory cleanup only.",
+            findings=(
+                {
+                    "path": "hephaestus/example.py",
+                    "line": 1,
+                    "side": "RIGHT",
+                    "severity": "minor",
+                    "body": "Consider clarifying this name.",
+                },
+                {
+                    "path": "hephaestus/example.py",
+                    "line": 2,
+                    "side": "RIGHT",
+                    "severity": "nitpick",
+                    "body": "Optional style cleanup.",
+                },
+            ),
+            raw_feedback="",
+            valid=True,
+        )
+
+        assert _review_phase._audit_verdict(audit).verdict == "GO"
+
+    def test_blocking_or_unknown_finding_blocks_the_legacy_loop(self) -> None:
+        for severity in ("critical", "major", "unknown"):
+            audit = ReviewAudit(
+                grade="C",
+                summary="Requires action.",
+                findings=(
+                    {
+                        "path": "hephaestus/example.py",
+                        "line": 1,
+                        "side": "RIGHT",
+                        "severity": severity,
+                        "body": "Fix this.",
+                    },
+                ),
+                raw_feedback="",
+                valid=True,
+            )
+
+            assert _review_phase._audit_verdict(audit).verdict == "NOGO"
+
+    def test_invalid_audit_remains_ambiguous(self) -> None:
+        audit = ReviewAudit("F", "No structured audit.", (), "raw", valid=False)
+
+        assert _review_phase._audit_verdict(audit).verdict == "AMBIGUOUS"
+
+
 class TestHandleReviewerQuotaOrOverload:
     """Unit tests for the shared quota/overload handler."""
 

@@ -75,6 +75,7 @@ from .github_api import (
 from .models import ImplementationState
 from .pr_reviewer import gather_impl_review_context, review_pr_inline
 from .prompts import get_impl_loop_review_prompt, get_impl_resume_feedback_prompt
+from .prompts.pr_review import BLOCKING_SEVERITIES, VALID_SEVERITIES
 from .review_audit import ReviewAudit, parse_review_audit, render_review_audit
 from .review_journal import is_plan_comment, is_plan_review_comment
 from .review_types import ReviewVerdict
@@ -90,7 +91,13 @@ logger = logging.getLogger(__name__)
 
 def _audit_verdict(audit: ReviewAudit) -> ReviewVerdict:
     """Adapt structural audit facts for the non-authoritative legacy loop."""
-    verdict = "AMBIGUOUS" if not audit.valid else "GO" if not audit.findings else "NOGO"
+    has_blocking_finding = any(
+        not isinstance(severity := finding.get("severity"), str)
+        or severity.lower() not in VALID_SEVERITIES
+        or severity.lower() in BLOCKING_SEVERITIES
+        for finding in audit.findings
+    )
+    verdict = "AMBIGUOUS" if not audit.valid else "NOGO" if has_blocking_finding else "GO"
     return ReviewVerdict(grade=audit.grade, verdict=verdict, raw=audit.raw_feedback)
 
 
