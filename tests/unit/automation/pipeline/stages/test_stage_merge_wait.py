@@ -169,6 +169,78 @@ def test_readiness_wake_rechecks_the_head_before_a_conditional_merge(
     assert github.merge_attempts == []
 
 
+def test_readiness_wake_fails_closed_when_a_thread_appears_while_ci_is_pending(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A timer wake rejects a newly unresolved thread before re-parking."""
+
+    class ThreadAppearsDuringReadinessWaitGitHub(_ConditionalGitHub):
+        def __init__(self) -> None:
+            super().__init__(
+                readiness={
+                    **_open_pr(),
+                    "mergeable": "MERGEABLE",
+                    "mergeStateStatus": "BLOCKED",
+                }
+            )
+            self.thread_reads = 0
+
+        def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, object]]:
+            del pr_number
+            self.thread_reads += 1
+            if self.thread_reads == 1:
+                return []
+            return [{"id": "late-thread", "automation_owned": True}]
+
+    github = ThreadAppearsDuringReadinessWaitGitHub()
+    item = _reviewed_item(make_work_item)
+    stage = MergeWaitStage()
+    ctx = make_ctx(github=github)
+
+    assert stage.step(item, ctx) == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
+    assert stage.step(item, ctx) == StageOutcome(
+        Disposition.FINISH_FAIL,
+        "unresolved_review_threads",
+    )
+    assert github.merge_attempts == []
+
+
+def test_readiness_wake_fails_closed_when_conversation_protection_is_removed(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A timer wake rejects a branch-policy change before re-parking."""
+
+    class ProtectionRemovedDuringReadinessWaitGitHub(_ConditionalGitHub):
+        def __init__(self) -> None:
+            super().__init__(
+                readiness={
+                    **_open_pr(),
+                    "mergeable": "MERGEABLE",
+                    "mergeStateStatus": "BLOCKED",
+                }
+            )
+            self.policy_reads = 0
+
+        def base_branch_requires_conversation_resolution(
+            self, pr_number: int, base_branch: str
+        ) -> bool:
+            self.policy_reads += 1
+            assert super().base_branch_requires_conversation_resolution(pr_number, base_branch)
+            return self.policy_reads == 1
+
+    github = ProtectionRemovedDuringReadinessWaitGitHub()
+    item = _reviewed_item(make_work_item)
+    stage = MergeWaitStage()
+    ctx = make_ctx(github=github)
+
+    assert stage.step(item, ctx) == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
+    assert stage.step(item, ctx) == StageOutcome(
+        Disposition.FINISH_FAIL,
+        "conversation_resolution_required",
+    )
+    assert github.merge_attempts == []
+
+
 def test_minute_scale_readiness_wait_merges_once_when_github_becomes_ready(
     make_ctx: Any, make_work_item: Any
 ) -> None:

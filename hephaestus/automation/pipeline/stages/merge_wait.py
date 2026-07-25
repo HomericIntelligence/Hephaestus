@@ -103,6 +103,17 @@ class MergeWaitStage(Stage):
         base_branch = pr_state.get("baseRefName")
         if not isinstance(base_branch, str) or not base_branch:
             return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unverified")
+        # A readiness wait only observes ordinary CI/mergeability state; it
+        # must not postpone admission failures.  Recheck both live
+        # conversation facts on every timer wake before parking again so an
+        # unresolved thread or weakened protection fails closed promptly.
+        safety_admission = self._admit_conversation_safety(
+            item.pr,
+            base_branch,
+            ctx,
+        )
+        if safety_admission is not None:
+            return safety_admission
         readiness_wait = self._wait_for_readiness(item, ctx)
         if readiness_wait is not None:
             return readiness_wait
@@ -117,18 +128,11 @@ class MergeWaitStage(Stage):
         base_branch = pr_state.get("baseRefName")
         if not isinstance(base_branch, str) or not base_branch:
             return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unverified")
-        thread_admission = self._admit_no_unresolved_threads(item.pr, ctx)
-        if thread_admission is not None:
-            return thread_admission
+        safety_admission = self._admit_conversation_safety(item.pr, base_branch, ctx)
+        if safety_admission is not None:
+            return safety_admission
         if item.attempts["merge"] >= ctx.budget("merge"):
             return StageOutcome(Disposition.FINISH_FAIL, "merge_attempts_exhausted")
-        protection_admission = self._admit_conversation_resolution(
-            item.pr,
-            base_branch,
-            ctx,
-        )
-        if protection_admission is not None:
-            return protection_admission
         item.attempts["merge"] += 1
         result = ctx.github.merge_pr_if_head(item.pr, reviewed_head)
         return self._reconcile_merge_request(item, ctx, result)
@@ -180,6 +184,16 @@ class MergeWaitStage(Stage):
             )
             return StageOutcome(Disposition.FINISH_FAIL, "unresolved_review_threads")
         return None
+
+    @staticmethod
+    def _admit_conversation_safety(
+        pr_number: int, base_branch: str, ctx: StageContext
+    ) -> StageOutcome | None:
+        """Confirm local threads and server protection before waiting or merging."""
+        thread_admission = MergeWaitStage._admit_no_unresolved_threads(pr_number, ctx)
+        if thread_admission is not None:
+            return thread_admission
+        return MergeWaitStage._admit_conversation_resolution(pr_number, base_branch, ctx)
 
     @staticmethod
     def _admit_conversation_resolution(
