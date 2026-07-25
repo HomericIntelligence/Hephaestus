@@ -59,6 +59,8 @@ def _placeholder_signature(
             positional.append(conversion)
         else:
             named.append((name, conversion))
+    if positional and named:
+        raise ValueError("cannot mix positional and named placeholders")
     return tuple(positional), tuple(sorted(named))
 
 
