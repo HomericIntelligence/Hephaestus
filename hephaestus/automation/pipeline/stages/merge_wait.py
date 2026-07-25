@@ -362,12 +362,19 @@ class MergeWaitStage(Stage):
         reviewed_head = item.payload.get("reviewed_pr_head_sha")
         if not isinstance(reviewed_head, str) or not reviewed_head:
             return StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_state_invalid")
-        if item.payload.get("merge_readiness_head_sha") != reviewed_head:
+        proof_generation = item.payload.get("reviewed_pr_proof_generation", 0)
+        if isinstance(proof_generation, bool) or not isinstance(proof_generation, int):
+            return StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_state_invalid")
+        if (
+            item.payload.get("merge_readiness_head_sha") != reviewed_head
+            or item.payload.get("merge_readiness_proof_generation") != proof_generation
+        ):
             # A fresh review creates a new process-local proof. Do not carry a
-            # prior head's operational waiting deadline onto that new proof.
+            # prior proof's operational waiting deadline onto that new proof.
             item.payload.pop("merge_readiness_deadline_s", None)
             item.payload.pop("merge_readiness_polls", None)
             item.payload["merge_readiness_head_sha"] = reviewed_head
+            item.payload["merge_readiness_proof_generation"] = proof_generation
 
         deadline = item.payload.get("merge_readiness_deadline_s")
         polls = item.payload.get("merge_readiness_polls", 0)

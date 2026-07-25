@@ -28,8 +28,8 @@ boundary and does not inherit an old head's deadline after fresh review.
    conversation-resolution protection.
 3. A readiness wait has a 15-minute monotonic deadline and 5-second
    exponential cadence capped at 60 seconds. The deadline is keyed to the
-   current reviewed head and resets only when fresh review establishes a new
-   proof.
+   current reviewed-head proof and resets only when fresh review establishes a
+   new proof, including for an unchanged head.
 4. Readiness polling makes no conditional merge request and does not consume
    the merge-attempt budget. That budget still bounds actual conditional
    requests and transport-ambiguity retries. If it is already exhausted, the

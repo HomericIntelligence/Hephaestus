@@ -231,7 +231,9 @@ class TestRetryDelayConsumption:
             state="MERGE",
             payload={
                 "reviewed_pr_head_sha": "a" * 40,
+                "reviewed_pr_proof_generation": 0,
                 "merge_readiness_head_sha": "a" * 40,
+                "merge_readiness_proof_generation": 0,
                 "merge_readiness_deadline_s": 1001.0,
                 "merge_readiness_polls": 17,
             },

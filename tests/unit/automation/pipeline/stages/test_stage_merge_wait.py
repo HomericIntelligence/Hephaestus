@@ -147,6 +147,28 @@ def test_readiness_waits_before_the_first_conditional_merge(
     assert github.merge_attempts == [(12, "a" * 40)]
 
 
+def test_readiness_wake_rechecks_the_head_before_a_conditional_merge(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A head change during the timer wait returns to fresh review without a PUT."""
+    blocked = {**_open_pr(), "mergeable": "MERGEABLE", "mergeStateStatus": "BLOCKED"}
+    ready = {**_open_pr(), "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"}
+    github = _ConditionalGitHub(
+        states=[_open_pr(), _open_pr(), _open_pr("b" * 40)],
+        readiness=[blocked, ready],
+    )
+    item = _reviewed_item(make_work_item)
+    stage = MergeWaitStage()
+    ctx = make_ctx(github=github)
+
+    assert stage.step(item, ctx) == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
+
+    result = stage.step(item, ctx)
+
+    assert result == StageOutcome(Disposition.FAIL_BACK, "reviewed_head_drift")
+    assert github.merge_attempts == []
+
+
 def test_minute_scale_readiness_wait_merges_once_when_github_becomes_ready(
     make_ctx: Any, make_work_item: Any
 ) -> None:
@@ -748,6 +770,40 @@ def test_readiness_wait_resets_its_deadline_for_a_fresh_reviewed_head(
 
     assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
     assert item.payload["merge_readiness_head_sha"] == fresh_head
+    assert item.payload["merge_readiness_deadline_s"] == 1000.0
+    assert item.payload["merge_readiness_polls"] == 1
+    assert github.merge_attempts == []
+
+
+def test_readiness_wait_resets_for_a_fresh_proof_of_the_same_head(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """Fresh review of unchanged code receives a fresh bounded wait window."""
+    github = _ConditionalGitHub(
+        readiness={
+            **_open_pr(),
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "BLOCKED",
+        }
+    )
+    item = _reviewed_item(make_work_item)
+    item.payload.update(
+        {
+            "reviewed_pr_proof_generation": 2,
+            "merge_readiness_head_sha": "a" * 40,
+            "merge_readiness_proof_generation": 1,
+            "merge_readiness_deadline_s": 1.0,
+            "merge_readiness_polls": 17,
+        }
+    )
+
+    result = MergeWaitStage().step(
+        item,
+        make_ctx(github=github, now_fn=lambda: 100.0),
+    )
+
+    assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
+    assert item.payload["merge_readiness_proof_generation"] == 2
     assert item.payload["merge_readiness_deadline_s"] == 1000.0
     assert item.payload["merge_readiness_polls"] == 1
     assert github.merge_attempts == []

@@ -66,7 +66,7 @@ in §5.1, which tags `state:skip` on epics before any other durable mutation.
  unarmed live PR before the label is written. `merge_wait` uses that same
  active-run proof before every request in a bounded sequence (default: five)
  of SHA-conditional ordinary REST squash merges. Before a request, it may make
- a bounded read-only readiness wait (15 minutes per reviewed head) without
+ a bounded read-only readiness wait (15 minutes per fresh reviewed-head proof) without
  spending a merge attempt; readiness is not authorization, and each request
  still has fresh open/`main`/unarmed/exclusive-GO admission.
  The direct adapter makes one request per call and never retries. No queue
@@ -596,7 +596,7 @@ on an open `main`, confirmed-unarmed live PR with an exclusive GO label. A
 missing or drifted proof returns to review without a label mutation; a matching
 proof permits a bounded sequence (default: five) of individual
 SHA-conditional ordinary REST squash-merge requests. Before a request, a
-read-only, per-reviewed-head readiness wait may park for up to 15 minutes;
+read-only, per-fresh-reviewed-head-proof readiness wait may park for up to 15 minutes;
 readiness never authorizes merging, and fresh admission precedes every request
 ([`merge_wait.py`](hephaestus/automation/pipeline/stages/merge_wait.py)).
 
@@ -1031,7 +1031,7 @@ Architectural contract:
 - Missing or drifted proof returns approval to PR review with zero label writes.
 - A matching proof can submit a bounded sequence of individual
   SHA-conditional normal REST merge requests, each only after fresh admission.
-- Read-only readiness polling may wait up to 15 minutes per reviewed head
+- Read-only readiness polling may wait up to 15 minutes per fresh reviewed-head proof
   without spending the request budget or authorizing a merge. HTTP 409,
   transport ambiguity, and every actual request remain subject to fresh
   lifecycle, head, label, thread, and protection checks.
@@ -1115,7 +1115,7 @@ Budget provenance (cross-check):
  [`DEFAULT_DRIVE_GREEN_LOOPS`](hephaestus/automation/pipeline/routing.py))
  bounds queue `merge_wait` conditional requests and transport-ambiguity
  retries. Operational readiness waits use a separate 15-minute monotonic
- deadline keyed to the current reviewed head.
+ deadline keyed to the current reviewed-head proof.
 All per-item-lifetime counters live in
 [`WorkItem.attempts`](hephaestus/automation/pipeline/work_item.py);
 they are NEVER reset when an item re-enters a stage, so cross-stage
