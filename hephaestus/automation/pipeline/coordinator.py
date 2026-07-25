@@ -82,7 +82,7 @@ import signal
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, TypeAlias
@@ -171,6 +171,21 @@ _DRAIN_ORDER: tuple[StageName, ...] = (
     StageName.PLAN_REVIEW,
     StageName.PLANNING,
     StageName.REPO,
+)
+
+# An explicit issue can classify into any of these queues.  The source cursor
+# classifies only when every possible destination can accept one item, so the
+# classification result never needs an unbounded spill buffer while it waits
+# for a full stage queue.
+_DIRECT_ISSUE_ENTRY_STAGES: frozenset[StageName] = frozenset(
+    {
+        StageName.PLANNING,
+        StageName.PLAN_REVIEW,
+        StageName.IMPLEMENTATION,
+        StageName.PR_REVIEW,
+        StageName.MERGE_WAIT,
+        StageName.FINISHED,
+    }
 )
 
 StageStepResult: TypeAlias = Continue | JobRequest | StageOutcome
@@ -331,6 +346,19 @@ class _PendingHandoff:
     result: ItemResult | None = None
 
 
+@dataclass
+class _DirectIssueSource:
+    """One bounded cursor over the caller-provided explicit issue scope.
+
+    The cursor stores no classified :class:`SeedEntry` or :class:`WorkItem`.
+    Classification happens only after all possible direct-entry queues can
+    accept an item, allowing the resulting item to enter immediately.
+    """
+
+    repo: str
+    issues: Iterator[int]
+
+
 def _effective_repo_root(config: PipelineConfig, repo: str) -> Path:
     """Resolve *repo* to its explicit checkout or conventional projects path."""
     return Path(config.repo_roots.get(repo, Path(config.projects_dir) / repo))
@@ -422,6 +450,7 @@ class Coordinator:
         # single intent attached to that lease, never by an overflow queue.
         self._leases: dict[int, StageQueueLease] = {}
         self._pending_handoffs: dict[int, _PendingHandoff] = {}
+        self._direct_issue_source: _DirectIssueSource | None = None
         self.ledger: list[ItemResult] = []
         self.preserved: list[PreservedWorktree] = []
         self.items: list[WorkItem] = []
@@ -722,6 +751,12 @@ class Coordinator:
                     self._wait_for_completion(timeout=0.2)
                     continue
                 self._drain_queues()
+                self._drain_direct_issue_source()
+                if self._direct_issue_source is not None:
+                    # The explicit scope is a live source, not a fully
+                    # materialized seed batch.  Pull it again immediately
+                    # after normal draining instead of treating it as idle.
+                    continue
                 if self._all_idle():
                     if not self._reseed_if_converged():
                         break
@@ -807,6 +842,7 @@ class Coordinator:
             and not self.in_flight
             and not self._leases
             and not self._pending_handoffs
+            and self._direct_issue_source is None
         )
 
     # -- stage-queue leases -------------------------------------------------
@@ -1659,8 +1695,9 @@ class Coordinator:
         discovery_repos = [] if self.config.issues or self.config.prs else self.config.repos
         entries = _seeding.seed_from_cli(discovery_repos, [], [])
         default_repo = self.config.repos[0] if self.config.repos else ""
-        if self.config.issues or self.config.prs:
-            entries.extend(self._seed_direct_scope(default_repo))
+        self._begin_direct_issue_source(default_repo)
+        if self.config.prs:
+            entries.extend(self._seed_direct_pr_scope(default_repo))
         pushed = 0
         for entry in entries:
             if entry.stage is None:
@@ -1678,6 +1715,64 @@ class Coordinator:
                 item.result = ItemResult(
                     passed=entry.passed, reason=entry.reason, final_stage=StageName.FINISHED
                 )
+            self._push_item(item, item.stage, enter=True)
+            pushed += 1
+        return pushed + self._drain_direct_issue_source()
+
+    def _begin_direct_issue_source(self, repo: str) -> None:
+        """Initialize one bounded cursor for this pass's ``--issues`` input."""
+        self._direct_issue_source = None
+        if not self.config.issues:
+            return
+        open_issues = _admission._filter_open_issues(repo, self.config.issues)
+        self._direct_issue_source = _DirectIssueSource(repo=repo, issues=iter(open_issues))
+
+    def _direct_issue_queues_can_accept(self) -> bool:
+        """Return whether any direct issue can be classified and enqueued now."""
+        return all(self.queues[stage].can_offer() for stage in _DIRECT_ISSUE_ENTRY_STAGES)
+
+    def _drain_direct_issue_source(self) -> int:
+        """Pull explicit issues directly into queues without a seed spill buffer.
+
+        An issue is classified only after its eventual destination is
+        guaranteed to have capacity.  The loop fills immediately available
+        capacity, then leaves the remaining caller-owned iterator live until
+        normal queue draining creates another safe admission point.
+        """
+        source = self._direct_issue_source
+        if source is None:
+            return 0
+
+        pushed = 0
+        while self._direct_issue_queues_can_accept():
+            try:
+                issue = next(source.issues)
+            except StopIteration:
+                self._direct_issue_source = None
+                break
+
+            entry = self._seed_direct_issue_entry(source.repo, issue)
+            if entry.stage is None:
+                # Epic tagging is the one sanctioned seeding write.  Complete
+                # it before honoring the source exclusion, exactly as the
+                # ordinary seed path does.
+                if entry.skip_tag_obligation is not None:
+                    self.github.skip_epics({entry.skip_tag_obligation.issue: []})
+                logger.info("seed excluded: %s", entry.reason)
+                continue
+
+            item = self._entry_to_item(entry, source.repo)
+            if item.stage not in (StageName.REPO, StageName.FINISHED):
+                self._pass_work_count += 1
+            if item.stage is StageName.FINISHED and item.result is None:
+                item.result = ItemResult(
+                    passed=entry.passed,
+                    reason=entry.reason,
+                    final_stage=StageName.FINISHED,
+                )
+            # ``_direct_issue_queues_can_accept`` covers every possible
+            # classifier result and this method owns the coordinator thread,
+            # so the ordinary lifecycle push cannot overflow here.
             self._push_item(item, item.stage, enter=True)
             pushed += 1
         return pushed
@@ -1763,22 +1858,37 @@ class Coordinator:
         return stage, reason, True
 
     def _seed_direct_scope(self, repo: str) -> list[_seeding.SeedEntry]:
-        """Seed explicit ``--issues`` / ``--prs`` through the target repo accessor."""
+        """Classify direct entries for legacy direct-classifier callers.
+
+        Runtime seeding never materializes the explicit issue scope here;
+        :meth:`_drain_direct_issue_source` owns its bounded cursor.  This
+        compatibility helper remains for direct classifier tests.
+        """
+        entries: list[_seeding.SeedEntry] = []
+        issue_numbers = _admission._filter_open_issues(repo, self.config.issues)
+        for issue in issue_numbers:
+            entries.append(self._seed_direct_issue_entry(repo, issue))
+        entries.extend(self._seed_direct_pr_scope(repo))
+        return entries
+
+    def _seed_direct_issue_entry(self, repo: str, issue: int) -> _seeding.SeedEntry:
+        """Classify one direct issue through its target repository accessor."""
+        github = self._ctx_for_repo(repo).github if repo else self.github
+        scope_stages = self.config.scope.stages if self.config.scope is not None else None
+        facts = _seeding.seed_issue_from_github(issue, github)
+        if STATE_PLAN_BLOCKED in facts.labels:
+            github.ensure_blocked_audit(issue)
+        entry = _seeding.seed_entry_from_facts(facts)
+        stage, reason, passed = self._scope_seed_decision(
+            issue, entry.stage, entry.reason, scope_stages
+        )
+        return replace(entry, stage=stage, reason=reason, passed=passed)
+
+    def _seed_direct_pr_scope(self, repo: str) -> list[_seeding.SeedEntry]:
+        """Eagerly classify the (separate) explicit ``--prs`` scope."""
         github = self._ctx_for_repo(repo).github if repo else self.github
         entries: list[_seeding.SeedEntry] = []
         scope_stages = self.config.scope.stages if self.config.scope is not None else None
-        requested_issues = list(self.config.issues)
-        issue_numbers = requested_issues
-        if issue_numbers:
-            issue_numbers = _admission._filter_open_issues(repo, issue_numbers)
-        for issue in issue_numbers:
-            facts = _seeding.seed_issue_from_github(issue, github)
-            if STATE_PLAN_BLOCKED in facts.labels:
-                github.ensure_blocked_audit(issue)
-            entry = _seeding.seed_entry_from_facts(facts)
-            stage, reason = entry.stage, entry.reason
-            stage, reason, passed = self._scope_seed_decision(issue, stage, reason, scope_stages)
-            entries.append(replace(entry, stage=stage, reason=reason, passed=passed))
         for pr in self.config.prs:
             issue_number = github.find_issue_for_pr(pr)
             if issue_number is None:

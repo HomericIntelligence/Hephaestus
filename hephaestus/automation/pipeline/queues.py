@@ -110,6 +110,15 @@ class StageQueue:
         if not self.offer(item):
             raise OverflowError("StageQueue is full")
 
+    def can_offer(self) -> bool:
+        """Return whether :meth:`offer` can append one new item now.
+
+        A claimed item retains the source queue's FIFO ownership until it is
+        restored or handed off.  New producers must not insert behind that
+        held item, even if the numeric capacity has remaining room.
+        """
+        return not self._held and self.occupancy < self._capacity
+
     def offer(self, item: WorkItem) -> bool:
         """Append an item when capacity is available.
 
@@ -122,7 +131,7 @@ class StageQueue:
         # A held lease may need to return to the front of this queue.  Do not
         # admit newer work ahead of it, even when the numeric bound has spare
         # capacity; admission resumes only once every lease is released.
-        if self._held or self.occupancy >= self._capacity:
+        if not self.can_offer():
             return False
 
         self._items.append(item)

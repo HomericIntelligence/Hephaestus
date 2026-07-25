@@ -114,3 +114,55 @@ def test_direct_issue_seeds_are_source_pulled_and_lossless_at_capacity_one(
     assert coordinator._all_idle()
     assert observed_occupancies
     assert max(observed_occupancies) <= 1
+
+
+def test_direct_issue_source_restarts_for_each_configured_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bounded cursor is recreated, rather than exhausted, on re-seeding."""
+    events: list[tuple[str, int]] = []
+
+    def classify_direct_issue(issue: int, github: Any) -> IssueFacts:
+        del github
+        events.append(("classify", issue))
+        return IssueFacts(
+            number=issue,
+            title=f"Issue {issue}",
+            body="",
+            is_epic=False,
+            labels={"state:needs-plan"},
+            pr_number=None,
+            pr_is_open=False,
+            pr_is_merged=False,
+        )
+
+    monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda *_args: [])
+    monkeypatch.setattr(seeding_mod, "seed_issue_from_github", classify_direct_issue)
+    monkeypatch.setattr(
+        "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
+        lambda _repo, issues: issues,
+    )
+
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            issues=[101],
+            loops=2,
+            projects_dir=tmp_path,
+        ),
+        github=FakeStageGitHub(labels=["state:needs-plan"]),
+        pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+    coordinator.stages[StageName.PLANNING] = _ImmediatePassStage(events)
+
+    assert coordinator.run() == 0
+    assert events == [
+        ("classify", 101),
+        ("complete", 101),
+        ("classify", 101),
+        ("complete", 101),
+    ]
+    assert coordinator._loops_run == 2
+    assert len(coordinator.ledger) == 2
