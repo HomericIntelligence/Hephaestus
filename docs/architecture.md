@@ -65,9 +65,10 @@ in §5.1, which tags `state:skip` on epics before any other durable mutation.
  exact SHA. The resulting in-memory proof is rechecked against a confirmed,
  unarmed live PR before the label is written. `merge_wait` uses that same
  active-run proof before every request in a bounded sequence (default: five)
- of SHA-conditional ordinary REST squash merges. Each request has fresh
- open/`main`/unarmed/exclusive-GO admission; only classified retryable HTTP 405
- readiness and unresolved transport ambiguity can timer-park a later request.
+ of SHA-conditional ordinary REST squash merges. Before a request, it may make
+ a bounded read-only readiness wait (15 minutes per reviewed head) without
+ spending a merge attempt; readiness is not authorization, and each request
+ still has fresh open/`main`/unarmed/exclusive-GO admission.
  The direct adapter makes one request per call and never retries. No queue
  stage invokes `gh pr merge`, creates, disables, adopts, or polls native
  auto-merge, manages a merge queue, or uses an administrator bypass
@@ -594,9 +595,9 @@ A label alone never authorizes merge. `merge_wait` requires both the
 on an open `main`, confirmed-unarmed live PR with an exclusive GO label. A
 missing or drifted proof returns to review without a label mutation; a matching
 proof permits a bounded sequence (default: five) of individual
-SHA-conditional ordinary REST squash-merge requests. Fresh admission precedes
-every request; only retryable HTTP 405 readiness and unresolved transport
-ambiguity can timer-park a later request
+SHA-conditional ordinary REST squash-merge requests. Before a request, a
+read-only, per-reviewed-head readiness wait may park for up to 15 minutes;
+readiness never authorizes merging, and fresh admission precedes every request
 ([`merge_wait.py`](hephaestus/automation/pipeline/stages/merge_wait.py)).
 
 Plan-review labels are the sole durable authority. Review comments explain and
@@ -967,9 +968,10 @@ in-memory reviewed-head proof before each request. It may issue a bounded
 sequence (default: five) of individual ordinary REST squash-merge requests,
 each conditional on that SHA. Admission for every request requires an open
 `main` PR, an explicitly unarmed record, and an exclusive implementation-GO
-label. Only classified retryable HTTP 405 readiness and unresolved transport
-ambiguity can timer-park a later request. The direct adapter performs one
-request per call and never retries. Merge wait does not invoke `gh pr merge`,
+label. A read-only readiness wait may park for up to 15 minutes per reviewed
+head before a request, without consuming the merge budget or authorizing a
+merge. The direct adapter performs one request per call and never retries.
+Merge wait does not invoke `gh pr merge`,
 create, disable, adopt, or poll native auto-merge, manage a merge queue, or use
 an administrator bypass; an existing request is external ownership and is left
 untouched.
@@ -1001,8 +1003,9 @@ stateDiagram-v2
     Verify --> Failed: incomplete or unavailable state
     Merge --> Complete: 200 merged and lifecycle confirms
     Merge --> PRReview: 409 or ambiguous lifecycle head drift
-    Merge --> Retry: 405 readiness or safe ambiguous retry
-    Retry --> Merge: timer and budget available
+    Verify --> Retry: readiness pending
+    Merge --> Retry: 405 race or safe ambiguous retry
+    Retry --> Verify: timer (readiness deadline) or transport retry
     Learn --> Complete: disabled or recorded
     Learn --> Failed: durable outcome ambiguous
     Complete --> [*]
@@ -1018,10 +1021,10 @@ Architectural contract:
 - Missing or drifted proof returns approval to PR review with zero label writes.
 - A matching proof can submit a bounded sequence of individual
   SHA-conditional normal REST merge requests, each only after fresh admission.
-- HTTP 409 is reconciled with fresh lifecycle reads. Only classified retryable
-  HTTP 405 readiness and unresolved transport ambiguity can timer-park another
-  request while the per-item merge budget remains; all other outcomes stop or
-  return to review as appropriate.
+- Read-only readiness polling may wait up to 15 minutes per reviewed head
+  without spending the request budget or authorizing a merge. HTTP 409,
+  transport ambiguity, and every actual request remain subject to fresh
+  lifecycle, head, label, thread, and protection checks.
 
 ### 5.7 `finished`
 
@@ -1095,7 +1098,9 @@ Budget provenance (cross-check):
  [`loop_runner.py LoopConfig.drive_green_loops`](hephaestus/automation/loop_runner.py).
 - `merge = 5` (CLI default for `--drive-green-loops`,
  [`DEFAULT_DRIVE_GREEN_LOOPS`](hephaestus/automation/pipeline/routing.py))
- bounds queue `merge_wait` conditional requests and timer retries.
+ bounds queue `merge_wait` conditional requests and transport-ambiguity
+ retries. Operational readiness waits use a separate 15-minute monotonic
+ deadline keyed to the current reviewed head.
 All per-item-lifetime counters live in
 [`WorkItem.attempts`](hephaestus/automation/pipeline/work_item.py);
 they are NEVER reset when an item re-enters a stage, so cross-stage

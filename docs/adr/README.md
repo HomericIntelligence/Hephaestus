@@ -27,4 +27,5 @@ numbered, and listed here.
 | [0012](0012-loop-owned-pr-review-approval.md) | Loop-owned Athena PR-review approval | Accepted (historical; superseded by 0014) |
 | [0013](0013-backup-and-disaster-recovery-policy.md) | Tiered backup and disaster-recovery policy | Accepted |
 | [0014](0014-conditional-normal-merge.md) | Conditional normal merge after loop-owned review | Accepted (historical; superseded by 0015) |
-| [0015](0015-bounded-conditional-merge-retries.md) | Bounded conditional merge retries | Accepted |
+| [0015](0015-bounded-conditional-merge-retries.md) | Bounded conditional merge retries | Accepted (historical; superseded by 0016) |
+| [0016](0016-bounded-operational-merge-readiness.md) | Bounded operational merge-readiness wait | Accepted |

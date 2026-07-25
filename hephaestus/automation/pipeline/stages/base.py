@@ -346,7 +346,7 @@ class StageGitHub(Protocol):
         ...
 
     def gh_pr_merge_readiness(self, pr_number: int) -> dict[str, Any] | None:
-        """Read operational normal-merge readiness after an HTTP 405 response."""
+        """Read operational normal-merge readiness without granting authorization."""
         pass
 
     def base_branch_requires_conversation_resolution(
