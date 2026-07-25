@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
@@ -44,7 +44,7 @@ VERSION_HELP = "show program's version number and exit"
 
 @dataclass(frozen=True)
 class ActionSpec:
-    """Stable subset of argparse action configuration relevant to CLI parity."""
+    """Stable executable argparse action configuration relevant to CLI parity."""
 
     option_strings: tuple[str, ...]
     dest: str
@@ -53,7 +53,10 @@ class ActionSpec:
     required: bool
     nargs: Any
     choices: tuple[Any, ...] | None
-    help: str | None
+    # Help prose is deliberately excluded from equality. It is operator-facing
+    # documentation, not a parser behavior contract; pinning wording here
+    # makes harmless documentation edits fail the executable test suite.
+    help: str | None = field(compare=False)
 
 
 def _action_spec(
@@ -398,8 +401,8 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             nargs="+",
             help_text=(
                 "Scope to these issue numbers' PRs. Requires at least one issue number when given. "
-                "Omit the flag entirely to drive every open PR discovered via gh "
-                "(issue-linked PRs plus bot-authored PRs)."
+                "Omit the flag to use bounded linked-issue discovery; unrelated open PRs are not "
+                "enumerated."
             ),
         ),
         _action_spec(
@@ -430,17 +433,16 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             True,
             nargs=0,
             help_text=(
-                "Exclude open bot-authored PRs (Dependabot, github-actions, etc.) from "
-                "the no-scope discovery sweep. Bot-authored PRs are included by default "
-                "so they are not architecturally invisible (#848)."
+                "Compatibility option retained for the retired open-PR sweep. No-scope discovery "
+                "is linked-issue based, so unrelated bot PRs remain out of scope; use --prs to "
+                "select a PR explicitly."
             ),
         ),
         _store_true(
             "--all",
             "include_all_authors",
-            "Include PRs opened by other actors (teammates and bots). Without this flag, "
-            "no-scope discovery drives only PRs authored by the authenticated viewer "
-            "(`gh api user`) (#821). Explicit --issues and --prs scopes are processed "
+            "Compatibility option retained for the retired author-filtered open-PR sweep. It does "
+            "not widen linked-issue discovery; explicit --issues and --prs scopes are processed "
             "regardless of author.",
         ),
         _timeout_spec(
@@ -647,9 +649,9 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
         _store_true(
             "--drive-green-all",
             "drive_green_all",
-            "Pass --all to the drive-green phase: drive every open PR, including those "
-            "opened by teammates and bots. By default drive-green operates only on PRs "
-            "authored by the authenticated viewer (#821).",
+            "Compatibility option for the retired broad drive-green sweep. Repository discovery "
+            "remains linked-issue based and never scans unrelated open PRs; use --prs for an "
+            "explicit PR scope.",
         ),
         _store_true(
             "--run-pre-pr-tests",

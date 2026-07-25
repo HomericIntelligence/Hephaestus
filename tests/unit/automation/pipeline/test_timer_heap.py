@@ -46,7 +46,7 @@ def clocked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Coordinato
         SimpleNamespace(monotonic=clock.monotonic, time=lambda: clock.now),
     )
     monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
-    config = PipelineConfig(org="org", repos=["repo-a"], projects_dir=tmp_path)
+    config = PipelineConfig(org="org", repos=["repo-a"], parallel_repos=3, projects_dir=tmp_path)
     coordinator = Coordinator(
         config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
     )
@@ -59,6 +59,46 @@ def _item(issue: int, stage: StageName = StageName.PR_REVIEW) -> WorkItem:
 
 class TestTimerHeap:
     """Ordering, seq tie-break, and expiry-only waking."""
+
+    def test_expired_timer_keeps_ownership_until_full_stage_accepts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """C=1 does not drop an expired timer when its source stage is full."""
+        clock = FakeClock()
+        monkeypatch.setattr(
+            coordinator_mod,
+            "time",
+            SimpleNamespace(monotonic=clock.monotonic, time=lambda: clock.now),
+        )
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
+        coordinator = Coordinator(
+            PipelineConfig(org="org", repos=["repo-a"], projects_dir=tmp_path),
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        waiting = _item(1)
+        # Park a genuinely admitted item so it owns the sole global permit.
+        # Inject the blocker directly to model a stale/corrupt full stage:
+        # normal permit accounting cannot create a second live item at C=1,
+        # but timer re-entry must still retain ownership instead of losing it.
+        coordinator._push_item(waiting, StageName.PR_REVIEW, enter=True)
+        assert coordinator._claim_item(StageName.PR_REVIEW) is waiting
+        coordinator._timer_park(waiting, 0.0)
+        blocker = _item(2)
+        coordinator.queues[StageName.PR_REVIEW].push(blocker)
+
+        coordinator._wake_timers()
+
+        # The timer remains its owner; no overflow, loss, or duplicate occurs.
+        assert [entry[2] for entry in coordinator.timers] == [waiting]
+        assert coordinator.queues[StageName.PR_REVIEW].snapshot() == [blocker]
+
+        coordinator.queues[StageName.PR_REVIEW].pop()
+        coordinator._wake_timers()
+
+        assert coordinator.timers == []
+        assert coordinator.queues[StageName.PR_REVIEW].snapshot() == [waiting]
 
     def test_earliest_timer_wakes_first(self, clocked: tuple[Coordinator, FakeClock]) -> None:
         """Wake order follows wake_ts, not insertion order."""

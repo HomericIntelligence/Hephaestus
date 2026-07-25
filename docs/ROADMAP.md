@@ -12,7 +12,7 @@ Remediation of the strict 2026-05-28 audit findings (`audit-finding` issues) con
 
 2. **Automation Pipeline Hardening** — Stabilizing the queue-based
    plan → implement → review pipeline (Epic #1809): drive-green loop
-   behavior, orphan-PR recovery, epic/skip-tag scoping, and restoring
+   behavior, linked-issue PR recovery, epic/skip-tag scoping, and restoring
    the reviewed-head interlock while `merge_wait` safely stands by on a
    confirmed-unarmed PR pending the separately reviewed #2419 merge path.
 

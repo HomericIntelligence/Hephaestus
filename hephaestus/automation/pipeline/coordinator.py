@@ -6,8 +6,10 @@ The coordinator runs on the process main thread and owns all seven stage
 queues, the timer heap, the in-flight registry, all routing, and (through the
 :class:`~hephaestus.automation.pipeline_github.PipelineGitHub` accessor) every
 GitHub API mutation. A single worker pool executes agent, build/test, and
-git/network jobs; the ONLY cross-thread channel is the completion queue, whose
-blocking ``get(timeout=...)`` doubles as the loop's idle sleep.
+git/network jobs; the ONLY cross-thread data channel is the completion queue.
+A separate event latch wakes the idle loop for both accepted completions and
+signals, so neither a worker callback nor a signal handler can block on a
+full queue.
 
 Per tick (epic #1809 "Coordinator event loop"):
 
@@ -79,8 +81,9 @@ import queue as queue_mod
 import signal
 import threading
 import time
-from collections import Counter
-from collections.abc import Callable
+from collections import Counter, OrderedDict, deque
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, TypeAlias
@@ -91,7 +94,7 @@ from hephaestus.automation.models import IssueInfo
 from hephaestus.automation.pipeline import admission as _admission, seeding as _seeding
 from hephaestus.automation.pipeline.events import StageEvent, encode_stage_event
 from hephaestus.automation.pipeline.jobs import AgentJob, JobHandle, JobResult
-from hephaestus.automation.pipeline.queues import CompletionQueue, StageQueue
+from hephaestus.automation.pipeline.queues import CompletionQueue, StageQueue, StageQueueLease
 from hephaestus.automation.pipeline.routing import (
     PIPELINE_ORDER,
     ROUTES,
@@ -116,15 +119,20 @@ from hephaestus.automation.pipeline.stages import (
     StageGitHub,
 )
 from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARGV
-from hephaestus.automation.pipeline.stages.repo import product_to_work_item
-from hephaestus.automation.pipeline.summary import RunStats, latest_logical_items, print_summary
+from hephaestus.automation.pipeline.stages.repo import RepoIssueSource, product_to_work_item
+from hephaestus.automation.pipeline.summary import (
+    RunStats,
+    TerminalSummary,
+    latest_logical_items,
+    print_summary,
+)
 from hephaestus.automation.pipeline.work_item import (
     ItemKind,
     ItemResult,
     PreservedWorktree,
     WorkItem,
 )
-from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_GO, STATE_PLAN_BLOCKED
+from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_GO, STATE_PLAN_BLOCKED, is_epic
 from hephaestus.prompts import PromptCatalog
 
 logger = logging.getLogger(__name__)
@@ -155,10 +163,15 @@ _MAX_STEPS_PER_TICK = 100
 #: cycles terminate even if a stage's own bookkeeping has a bug.
 _FAIL_BACK_CAP = sum(sum(route.budgets.values()) for route in ROUTES.values())
 
-_WAKE_HANDLE = object()
-
 _PROMPT_PREFLIGHT_TEMPLATE = "shared/untrusted_notice.j2"
 _PROMPT_PREFLIGHT_ERROR = "ERROR: Prompt templates missing or unreadable — reinstall: `uv sync`."
+
+# In-memory diagnostics are intentionally finite.  The durable JSONL stream,
+# when configured, remains a best-effort diagnostic artifact only; GitHub
+# state is still the restart authority.
+_DEFAULT_EVENT_LOG_CAPACITY = 1_024
+_DEFAULT_TERMINAL_DETAIL_CAPACITY = 128
+_SOURCE_REGISTRY_RETRY_DELAY_S = 0.05
 
 #: Downstream-first drain order: finish work before admitting new (epic
 #: #1809 "drain queues downstream-first (merge_wait -> ... -> repo)"; the
@@ -171,6 +184,21 @@ _DRAIN_ORDER: tuple[StageName, ...] = (
     StageName.PLAN_REVIEW,
     StageName.PLANNING,
     StageName.REPO,
+)
+
+# An explicit issue can classify into any of these queues.  The source cursor
+# classifies only when every possible destination can accept one item, so the
+# classification result never needs an unbounded spill buffer while it waits
+# for a full stage queue.
+_DIRECT_ISSUE_ENTRY_STAGES: frozenset[StageName] = frozenset(
+    {
+        StageName.PLANNING,
+        StageName.PLAN_REVIEW,
+        StageName.IMPLEMENTATION,
+        StageName.PR_REVIEW,
+        StageName.MERGE_WAIT,
+        StageName.FINISHED,
+    }
 )
 
 StageStepResult: TypeAlias = Continue | JobRequest | StageOutcome
@@ -215,6 +243,11 @@ class PipelineConfig:
 
     org: str
     repos: list[str]
+    # An org-wide invocation supplies a fresh paged source per pass instead
+    # of materializing every repository in ``repos``.  The callable keeps
+    # source state out of the durable configuration and makes reseeds restart
+    # discovery from GitHub, which remains the sole routing authority.
+    repo_source_factory: Callable[[], Iterator[str]] | None = None
     issues: list[int] = field(default_factory=list)
     prs: list[int] = field(default_factory=list)
     loops: int = 1
@@ -256,6 +289,10 @@ class PipelineConfig:
     # resilience capability directly.
     circuit_breaker_snapshot_provider: Callable[[], dict[str, dict[str, Any]]] | None = None
     event_log_path: Path | None = None
+    # Recent local diagnostic retention.  These limits intentionally do not
+    # alter the GitHub journal or restart behavior.
+    event_log_capacity: int = _DEFAULT_EVENT_LOG_CAPACITY
+    terminal_detail_capacity: int = _DEFAULT_TERMINAL_DETAIL_CAPACITY
     projects_dir: Path = field(default_factory=lambda: Path.home() / "Projects")
     # Optional exceptions to the normal ``projects_dir / repo`` checkout
     # layout.  The loop runner only sets an entry for a matching noncanonical
@@ -272,6 +309,11 @@ class PipelineConfig:
     # when True, issues already at-or-past ``state:plan-go`` are re-routed to
     # PLANNING instead of being classified past the scope (and thus skipped).
     force: bool = False
+
+
+def _work_window(config: PipelineConfig) -> int:
+    """Return the global bound for all nonterminal pipeline work."""
+    return max(1, config.parallel_repos * config.max_workers)
 
 
 @dataclass
@@ -306,6 +348,78 @@ class _Paths:
     repo_root: Path
     worktree: Path
     projects_dir: Path
+
+
+@dataclass(frozen=True)
+class _PendingHandoff:
+    """A completed route retained by its source-stage lease.
+
+    ``StageQueueLease`` keeps the source slot occupied until the destination
+    accepts the item.  The coordinator records only the next intent here; it
+    deliberately does not mutate ``WorkItem.stage``, ``state``, history, or a
+    terminal result until that destination-first admission succeeds.  There
+    can be at most one pending handoff per active lease, so this is bounded by
+    the fixed capacity of the coordinator's stage queues rather than acting as
+    a spill buffer.
+    """
+
+    target: StageName
+    enter: bool
+    result: ItemResult | None = None
+
+
+@dataclass
+class _DirectIssueSource:
+    """One bounded cursor over the caller-provided explicit issue scope.
+
+    The cursor stores no classified :class:`SeedEntry` or :class:`WorkItem`.
+    Classification happens only after all possible direct-entry queues can
+    accept an item, allowing the resulting item to enter immediately.
+    """
+
+    repo: str
+    issues: Iterator[int]
+
+
+@dataclass
+class _DirectPrSource:
+    """One bounded cursor over the caller-provided explicit PR scope.
+
+    As with direct issues, a PR is classified only at a safe admission point.
+    This avoids retaining an eager list of potentially large review-context
+    payloads while one of the downstream review queues is saturated.
+    """
+
+    repo: str
+    prs: Iterator[int]
+
+
+@dataclass
+class _ActiveRepoIssueSource:
+    """One detached, bounded repository issue cursor owned by the coordinator.
+
+    Repository setup is a normal REPO-stage work item.  Once it has produced
+    this cursor, retaining that item would monopolize a REPO queue lease and
+    let one repository starve its peers.  The cursor registry keeps only this
+    minimal state and is capped by the global work window.
+    """
+
+    repo: str
+    source: RepoIssueSource
+
+
+@dataclass
+class _RepoEntrySource:
+    """One bounded FIFO cursor over repository discovery entries.
+
+    A REPO-stage lease remains with the active repository through its issue
+    cursor, so this source advances only when both the global permit and the
+    REPO queue admit the next repository. ``pending`` is a defensive single
+    retry slot; it never becomes a repository spill list.
+    """
+
+    repos: Iterator[str]
+    pending: str | None = None
 
 
 def _effective_repo_root(config: PipelineConfig, repo: str) -> Path:
@@ -348,32 +462,83 @@ class Coordinator:
         self.config = config
         self.github = github
         self._github_factory = github_factory
+        if config.event_log_capacity < 1:
+            raise ValueError("event_log_capacity must be positive")
+        if config.terminal_detail_capacity < 1:
+            raise ValueError("terminal_detail_capacity must be positive")
         self.shutdown = threading.Event()
-        self.completion_q: CompletionQueue = queue_mod.Queue()
+        # These latches are the control plane for the bounded completion
+        # queue.  They carry no WorkItem/JobResult payload and therefore
+        # cannot become a second, unbounded completion buffer.
+        self._completion_wakeup = threading.Event()
+        self._completion_saturation = threading.Event()
+        work_window = _work_window(config)
+        self.completion_q: CompletionQueue = queue_mod.Queue(maxsize=work_window)
         if pool is None:
             # Imported here, not module-top: WorkerPool is the pipeline's one
             # I/O-capable module and tests never need it.
             from hephaestus.automation.pipeline.worker_pool import WorkerPool
 
             pool = WorkerPool(
-                size=max(1, config.parallel_repos * config.max_workers),
+                size=work_window,
                 shutdown=self.shutdown,
                 completion_q=self.completion_q,
             )
         else:
-            # Share channels with an injected pool when it exposes them.
-            if getattr(pool, "completion_q", None) is not None:
-                self.completion_q = pool.completion_q
+            # The coordinator owns the cross-thread transport.  An injected
+            # unbounded fake queue is replaced; a differently bounded queue
+            # is rejected so it cannot silently weaken the global capacity.
+            injected_completion_q = getattr(pool, "completion_q", None)
+            injected_maxsize = getattr(injected_completion_q, "maxsize", 0)
+            if isinstance(injected_maxsize, int) and (
+                injected_maxsize > 0 and injected_maxsize != work_window
+            ):
+                raise ValueError(
+                    "injected completion queue capacity must match the coordinator work window"
+                )
+            # Test doubles conventionally expose ``completion_q`` while the
+            # production WorkerPool keeps the channel private. Rebind both
+            # shapes so an injected real pool cannot publish into the stale
+            # queue supplied to its constructor.
+            pool.completion_q = self.completion_q
+            if hasattr(pool, "_completion_q"):
+                pool._completion_q = self.completion_q
         self.pool: Any = pool
+        set_completion_notifiers = getattr(pool, "set_completion_notifiers", None)
+        if callable(set_completion_notifiers):
+            set_completion_notifiers(
+                wakeup=self._completion_wakeup,
+                saturation=self._completion_saturation,
+            )
 
-        self.queues: dict[StageName, StageQueue] = {name: StageQueue() for name in StageName}
+        self.queues: dict[StageName, StageQueue] = {
+            name: StageQueue(work_window) for name in StageName
+        }
         self.timers: list[tuple[float, int, WorkItem]] = []
         self.in_flight: dict[JobHandle, WorkItem] = {}
         self.inflight_per_repo: Counter[str] = Counter()
+        # A normal (non-implementation) drain claims instead of popping.  The
+        # active lease reserves its source capacity while an item executes or
+        # waits for a worker completion.  A pending route is represented by a
+        # single intent attached to that lease, never by an overflow queue.
+        self._leases: dict[int, StageQueueLease] = {}
+        self._pending_handoffs: dict[int, _PendingHandoff] = {}
+        self._direct_issue_source: _DirectIssueSource | None = None
+        self._direct_pr_source: _DirectPrSource | None = None
+        self._repo_entry_source: _RepoEntrySource | None = None
+        self._repo_issue_sources: deque[_ActiveRepoIssueSource] = deque()
+        # A StageQueue's capacity only bounds that one stage.  This permit
+        # set is the coordinator-wide admission budget: an item acquires one
+        # permit on first entry and keeps it while it moves between queues,
+        # leases, in-flight jobs, timers, and a retained handoff.  It releases
+        # only after the finished sink completes.  The set is therefore
+        # bounded by ``_work_window(config)``, not by the number of stages.
+        self._live_work_permit_ids: set[int] = set()
         self.ledger: list[ItemResult] = []
         self.preserved: list[PreservedWorktree] = []
         self.items: list[WorkItem] = []
-        self.event_log: list[tuple[Any, ...]] = []
+        self._terminal_summary = TerminalSummary()
+        self.event_log: deque[tuple[Any, ...]] = deque(maxlen=config.event_log_capacity)
         self._event_log_disabled = False
         # Observability is opt-in.  Keep imports and all socket setup out of
         # the default construction path so the product layer retains its
@@ -448,7 +613,12 @@ class Coordinator:
             pre_pr_test_argv=config.pre_pr_test_argv,
             run_pre_pr_tests=config.run_pre_pr_tests,
         )
-        self._ctx_cache: dict[str, StageContext] = {}
+        # A context contains a GitHub accessor and path configuration but no
+        # mutable item state.  At most C items can be live, so an LRU of C is
+        # enough for concurrent work and prevents all-org discovery from
+        # retaining one accessor per repository.
+        self._ctx_cache: OrderedDict[str, StageContext] = OrderedDict()
+        self._ctx_cache_capacity = work_window
 
     # -- wiring ---------------------------------------------------------------
 
@@ -467,7 +637,9 @@ class Coordinator:
     def _ctx_for_repo(self, repo: str) -> StageContext:
         """Return the (cached, per-repo) StageContext for *repo*."""
         ctx = self._ctx_cache.get(repo)
-        if ctx is None:
+        if ctx is not None:
+            self._ctx_cache.move_to_end(repo)
+        else:
             root = _effective_repo_root(self.config, repo)
             ctx = StageContext(
                 config=self._stage_config,
@@ -486,6 +658,8 @@ class Coordinator:
                 budget_fn=self._budget_for,
                 event_fn=self._record_stage_event,
             )
+            if len(self._ctx_cache) >= self._ctx_cache_capacity:
+                self._ctx_cache.popitem(last=False)
             self._ctx_cache[repo] = ctx
         return ctx
 
@@ -630,8 +804,8 @@ class Coordinator:
             )
 
     def _wake_completion_wait(self) -> None:
-        """Wake the coordinator if it is blocked in completion_q.get()."""
-        self.completion_q.put((_WAKE_HANDLE, JobResult(ok=False, interrupted=True, error="wake")))
+        """Wake the coordinator without writing a sentinel into its bounded queue."""
+        self._completion_wakeup.set()
 
     # -- run loop ---------------------------------------------------------------
 
@@ -648,6 +822,7 @@ class Coordinator:
                 {
                     "org": self.config.org,
                     "repos": self.config.repos,
+                    "repo_source": "streamed" if self.config.repo_source_factory else "explicit",
                     "issues": self.config.issues,
                     "prs": self.config.prs,
                     "loops": self.config.loops,
@@ -670,6 +845,10 @@ class Coordinator:
                     self._wait_for_completion(timeout=0.2)
                     continue
                 self._drain_queues()
+                self._drain_repo_entry_source()
+                self._drain_repo_issue_sources()
+                self._drain_direct_pr_source()
+                self._drain_direct_issue_source()
                 if self._all_idle():
                     if not self._reseed_if_converged():
                         break
@@ -706,7 +885,15 @@ class Coordinator:
                         "wall_s": stats.wall_s,
                     },
                 )
-                print_summary(summary_items, stats, preserved, json_out=self.config.json_out)
+                print_summary(
+                    summary_items,
+                    stats,
+                    preserved,
+                    json_out=self.config.json_out,
+                    terminal_summary=(
+                        self._terminal_summary if self._terminal_summary.total else None
+                    ),
+                )
             finally:
                 if self._metrics_server is not None:
                     self._metrics_server.stop()
@@ -741,19 +928,220 @@ class Coordinator:
             # not complete, so wrappers must classify it as cancellation even
             # if earlier work had already failed.
             return 130
+        if self._fatal:
+            return 1
+        if self._terminal_summary.total:
+            passing = self._terminal_summary.dispositions.get("pass", 0)
+            return 1 if passing < self._terminal_summary.total else 0
         effective_results = [item.result for item in self._effective_items() if item.result]
         results = effective_results or self.ledger
-        if self._fatal or any(not result.passed for result in results):
+        if any(not result.passed for result in results):
             return 1
         return 0
 
     def _all_idle(self) -> bool:
-        """Return True when queues, timer heap, and in-flight map are all empty."""
+        """Return True when no ready, leased, timed, or in-flight work remains."""
         return (
             all(len(q) == 0 for q in self.queues.values())
             and not self.timers
             and not self.in_flight
+            and not self._leases
+            and not self._pending_handoffs
+            and self._direct_issue_source is None
+            and self._direct_pr_source is None
+            and self._repo_entry_source is None
+            and not self._repo_issue_sources
         )
+
+    @property
+    def live_work_count(self) -> int:
+        """Return the number of nonterminal work permits currently held."""
+        return len(self._live_work_permit_ids)
+
+    def _try_acquire_work_permit(self, item: WorkItem) -> bool:
+        """Reserve one global live-work slot for a newly admitted item."""
+        item_id = id(item)
+        if item_id in self._live_work_permit_ids:
+            return True
+        if self.live_work_count >= _work_window(self.config):
+            return False
+        self._live_work_permit_ids.add(item_id)
+        return True
+
+    def _release_work_permit(self, item: WorkItem) -> None:
+        """Release *item*'s permit after the terminal sink has completed."""
+        self._live_work_permit_ids.discard(id(item))
+
+    def _record_terminal_result(self, item: WorkItem) -> None:
+        """Aggregate one completed/resumable item and trim detailed retention.
+
+        The local result collections are an operator convenience, not recovery
+        state.  Keep only the configured newest completed details while a
+        constant-space aggregate preserves the full run's pass/fail/total
+        reporting and exit status.
+        """
+        if item.result is None or item.payload.get("_summary_recorded", False):
+            return
+        item.payload["_summary_recorded"] = True
+        self._terminal_summary.record(item)
+        self._seen_item_ids.discard(id(item))
+
+        # Move a completed item to the tail so the bounded window is ordered
+        # by terminal completion rather than by its initial seed time.  An
+        # item can be absent in narrow direct unit tests; runtime items are
+        # always tracked by _push_item first.
+        for index, candidate in enumerate(self.items):
+            if candidate is item:
+                self.items.pop(index)
+                self.items.append(item)
+                break
+
+        retained = self.config.terminal_detail_capacity
+        completed = [
+            index
+            for index, candidate in enumerate(self.items)
+            if candidate.payload.get("_summary_recorded", False)
+        ]
+        for index in reversed(completed[:-retained]):
+            self.items.pop(index)
+
+        # The sink may record a result before a cleanup job completes.  At
+        # most C such items can coexist, so these lists are bounded by N + C
+        # between records and by N after every terminal completion.
+        if len(self.ledger) > retained:
+            del self.ledger[:-retained]
+        if len(self.preserved) > retained:
+            del self.preserved[:-retained]
+
+    # -- stage-queue leases -------------------------------------------------
+
+    def _claim_item(self, stage_name: StageName, *, index: int = 0) -> WorkItem | None:
+        """Claim one ready item while retaining its source-stage capacity."""
+        lease = self.queues[stage_name].claim_at(index)
+        if lease is None:
+            return None
+        item = lease.item
+        item_id = id(item)
+        if item_id in self._leases:  # pragma: no cover - internal invariant
+            lease.restore()
+            raise RuntimeError(f"duplicate active lease for {self._item_key(item)}")
+        self._leases[item_id] = lease
+        return item
+
+    def _restore_source_lease(self, item: WorkItem) -> bool:
+        """Return an active item lease to its source queue without a transition."""
+        self._pending_handoffs.pop(id(item), None)
+        lease = self._leases.pop(id(item), None)
+        if lease is None:
+            return False
+        lease.restore()
+        return True
+
+    def _release_source_lease(self, item: WorkItem) -> bool:
+        """Release an active lease when work leaves every stage queue.
+
+        Timers and terminal sink completion are neither source restores nor
+        destination-first handoffs.  The external owner takes responsibility
+        for the item, so release its source slot directly without disturbing a
+        different queue head selected ahead of it by topo scheduling.
+        """
+        self._pending_handoffs.pop(id(item), None)
+        lease = self._leases.pop(id(item), None)
+        if lease is None:
+            return False
+        lease.release()
+        return True
+
+    def _activate_handoff(
+        self,
+        item: WorkItem,
+        target: StageName,
+        *,
+        enter: bool,
+        result: ItemResult | None,
+    ) -> None:
+        """Publish a route only after its destination accepted the item."""
+        item.stage = target
+        if enter:
+            item.state = "ENTER"
+            item.payload["_enter_pending"] = True
+            item.add_history_event(target, item.state, note="enqueued")
+        if result is not None:
+            item.result = result
+        self._record_event("push", target.value, self._item_key(item))
+
+    def _handoff_item(
+        self,
+        item: WorkItem,
+        target: StageName,
+        *,
+        enter: bool,
+        result: ItemResult | None = None,
+    ) -> bool:
+        """Route an item destination-first, retaining a full-target intent.
+
+        Direct unit-test calls do not own a source lease and retain the
+        historical push behavior.  Normal drains always carry a lease, so a
+        full destination only records a bounded intent and the completed
+        stage action is never replayed.
+        """
+        lease = self._leases.get(id(item))
+        if lease is None:
+            if result is not None:
+                item.result = result
+            self._push_item(item, target, enter=enter)
+            return True
+
+        if target is item.stage:
+            # RETRY to the source is a restore, not a self-handoff: a held
+            # lease deliberately blocks its source's ``offer`` method.
+            if result is not None:  # pragma: no cover - terminal target is FINISHED
+                raise RuntimeError("terminal result cannot route to the source stage")
+            return self._restore_source_lease(item)
+
+        if lease.handoff(self.queues[target]):
+            self._leases.pop(id(item), None)
+            self._pending_handoffs.pop(id(item), None)
+            self._activate_handoff(item, target, enter=enter, result=result)
+            self._progress = True
+            return True
+
+        pending = _PendingHandoff(target=target, enter=enter, result=result)
+        existing = self._pending_handoffs.setdefault(id(item), pending)
+        if existing != pending:  # pragma: no cover - no item can route twice while leased
+            raise RuntimeError(f"conflicting pending handoff for {self._item_key(item)}")
+        self._record_event(
+            "handoff_pending",
+            item.stage.value,
+            target.value,
+            self._item_key(item),
+        )
+        return False
+
+    def _drain_pending_handoffs(self) -> None:
+        """Retry every retained route whose destination may have opened."""
+        for item_id, pending in list(self._pending_handoffs.items()):
+            lease = self._leases.get(item_id)
+            if lease is None:  # pragma: no cover - defensive bookkeeping repair
+                self._pending_handoffs.pop(item_id, None)
+                continue
+            item = lease.item
+            if not lease.handoff(self.queues[pending.target]):
+                continue
+            self._leases.pop(item_id, None)
+            self._pending_handoffs.pop(item_id, None)
+            self._activate_handoff(
+                item,
+                pending.target,
+                enter=pending.enter,
+                result=pending.result,
+            )
+            self._record_event(
+                "handoff_retry",
+                item.stage.value,
+                self._item_key(item),
+            )
+            self._progress = True
 
     def _grace_exceeded(self) -> bool:
         """Return True when a graceful shutdown has outlived its grace window."""
@@ -791,7 +1179,9 @@ class Coordinator:
         for stage_name in _DRAIN_ORDER:
             q = self.queues[stage_name]
             if len(q):
-                item = q.pop()
+                item = self._claim_item(stage_name)
+                if item is None:  # pragma: no cover - len/claim are coordinator-thread atomic
+                    continue
                 logger.error(
                     "pipeline stalled with no in-flight work; "
                     "force-running %s item %s; inflight_per_repo=%s",
@@ -806,6 +1196,10 @@ class Coordinator:
 
     def _timer_park(self, item: WorkItem, delay_s: float) -> None:
         """Park *item* on the timer heap for ``delay_s`` seconds."""
+        # A timer is outside every stage queue.  Release a normal drain's
+        # source lease before parking so its capacity is not stranded while
+        # preserving the timer's single owner for the work item.
+        self._release_source_lease(item)
         wake = time.monotonic() + max(0.0, delay_s)
         heapq.heappush(self.timers, (wake, self._seq, item))
         self._seq += 1
@@ -813,37 +1207,52 @@ class Coordinator:
         self._record_event("timer_park", item.stage.value, self._item_key(item), delay_s)
 
     def _wake_timers(self) -> None:
-        """Move every expired timer entry back into its stage queue."""
+        """Move expired timer entries back only after their stage accepts them.
+
+        The timer heap owns an item until its stage queue accepts it.  An
+        expired entry whose stage is at capacity remains at the heap head for a
+        later tick; it is ordinary bounded backpressure, not a pipeline fault.
+        """
         now = time.monotonic()
         while self.timers and self.timers[0][0] <= now:
-            _, _, item = heapq.heappop(self.timers)
+            _, _, item = self.timers[0]
+            if not self._push_item(item, item.stage, enter=False, defer_if_full=True):
+                return
+            heapq.heappop(self.timers)
             self._progress = True
-            self._push_item(item, item.stage, enter=False)
 
     # -- completions ----------------------------------------------------------
 
     def _drain_completions(self) -> None:
         """Drain ALL ready completions without blocking."""
+        # Clear before inspection.  A callback that publishes between this
+        # clear and the final get_nowait() either has its result drained now
+        # (leaving a harmless set latch) or sets the latch for the next wait.
+        self._completion_wakeup.clear()
         while True:
             try:
                 handle, result = self.completion_q.get_nowait()
             except queue_mod.Empty:
-                return
-            if handle is _WAKE_HANDLE:
-                self._record_event("wake", "completion_q")
-                continue
+                break
             self._handle_completion(handle, result)
 
+        if self._completion_saturation.is_set():
+            # This cannot occur when the C-in-flight invariant holds: each
+            # active job has one reserved slot in the C-sized completion
+            # queue.  A WorkerPool callback never blocks or spills when that
+            # invariant is violated; fail the run and finalize its still-live
+            # item resumably instead.  Crucially, this is not a signal.
+            self._record_event("completion_saturation")
+            raise RuntimeError("completion queue saturated")
+
     def _wait_for_completion(self, timeout: float) -> None:
-        """Block up to *timeout* for one completion; handle it if one arrives."""
-        try:
-            handle, result = self.completion_q.get(timeout=timeout)
-        except queue_mod.Empty:
-            return
-        if handle is _WAKE_HANDLE:
-            self._record_event("wake", "completion_q")
-            return
-        self._handle_completion(handle, result)
+        """Wait for a completion, a saturation fault, or a signal wake latch."""
+        # A test double may synchronously enqueue without owning the notifier;
+        # avoid an unnecessary idle wait in that compatible case.  Production
+        # callbacks set the event after every accepted completion.
+        if self.completion_q.empty() and not self._completion_saturation.is_set():
+            self._completion_wakeup.wait(timeout=timeout)
+        self._drain_completions()
 
     def _handle_completion(self, handle: JobHandle, result: JobResult) -> None:
         """Route one completed job back to its item.
@@ -934,11 +1343,13 @@ class Coordinator:
         seeding reconstruction resumes exactly here with no shutdown
         bookkeeping.
         """
+        self._release_source_lease(item)
         item.result = ItemResult(
             passed=False,
             reason=f"resumable at {item.stage.value}",
             final_stage=item.stage,
         )
+        self._record_terminal_result(item)
         item.add_history_event(item.stage, item.state, note="interrupted; resumable")
         self._record_event("resumable", self._item_key(item), item.stage.value, item.state)
         logger.info(
@@ -975,22 +1386,216 @@ class Coordinator:
 
     def _drain_queues(self) -> None:
         """Drain queues downstream-first with admission control."""
+        # A transition that previously found a full target owns its source
+        # lease.  Retry it before ordinary draining, then again after each
+        # stage: draining a target can open exactly the slot it needs.
+        self._drain_pending_handoffs()
         for stage_name in _DRAIN_ORDER:
             if self.shutdown.is_set():
                 return
             if stage_name is StageName.IMPLEMENTATION:
                 self._drain_implementation()
+                self._drain_pending_handoffs()
                 continue
             q = self.queues[stage_name]
             for _ in range(len(q)):
                 if self.shutdown.is_set():
                     return
-                item = q.pop()
+                item = self._claim_item(stage_name)
+                if item is None:  # pragma: no cover - len/claim are coordinator-thread atomic
+                    break
                 if not self._admit(item):
-                    q.push(item)
+                    self._restore_source_lease(item)
                     continue
                 self._record_event("drain", stage_name.value, self._item_key(item))
                 self._run_item(item)
+            self._drain_pending_handoffs()
+
+    def _externalize_repo_issue_source(self, item: WorkItem, source: RepoIssueSource) -> bool:
+        """Retire setup work and enroll its cursor in the bounded fair registry.
+
+        A repository cursor is not a pipeline work item: it carries no global
+        permit and no REPO-stage lease once checkout/setup finishes.  Keeping
+        those owners would both count as an extra live object and let the
+        first repository hold the REPO queue while its entire issue backlog
+        drains.  The registry holds at most C cursor objects and drains them
+        in FIFO rotation instead.
+        """
+        if len(self._repo_issue_sources) >= _work_window(self.config):
+            return False
+
+        item.payload.pop("_repo_issue_source", None)
+        self._repo_issue_sources.append(_ActiveRepoIssueSource(repo=item.repo, source=source))
+        self._release_source_lease(item)
+        self._release_work_permit(item)
+        self._seen_item_ids.discard(id(item))
+        with suppress(ValueError):  # provisional item is normally tracked
+            self.items.remove(item)
+        self._record_event("repo_source_activate", item.repo, len(self._repo_issue_sources))
+        return True
+
+    def _repo_source_slots_used(self) -> int:
+        """Return active cursors plus every live REPO setup reservation.
+
+        A repository setup item becomes a detached cursor after ``SOURCE``.
+        Reserve that future cursor slot from its first queue admission through
+        terminalization so a later setup item cannot strand at ``SOURCE``
+        merely because earlier setups filled the registry first.
+        """
+        candidates: dict[int, WorkItem] = {}
+        for queue in self.queues.values():
+            for item in queue.snapshot():
+                candidates[id(item)] = item
+        for _wake, _sequence, item in self.timers:
+            candidates[id(item)] = item
+        for item in self.in_flight.values():
+            candidates[id(item)] = item
+        for lease in self._leases.values():
+            candidates[id(lease.item)] = lease.item
+        reservations = sum(
+            item.kind is ItemKind.REPO and id(item) in self._live_work_permit_ids
+            for item in candidates.values()
+        )
+        return len(self._repo_issue_sources) + reservations
+
+    def _repo_source_can_admit(self) -> bool:
+        """Return whether a detached repo cursor may classify and admit one issue."""
+        return self.live_work_count < _work_window(self.config) and all(
+            self.queues[stage].can_offer() for stage in _DIRECT_ISSUE_ENTRY_STAGES
+        )
+
+    def _drain_repo_issue_sources(self) -> None:
+        """Run one round-robin admission attempt for every active repo cursor."""
+        for _ in range(len(self._repo_issue_sources)):
+            active = self._repo_issue_sources.popleft()
+            if self._drain_repo_issue_source(active):
+                self._repo_issue_sources.append(active)
+
+    def _drain_repo_issue_source(  # noqa: C901 - source lifecycle is intentionally linear
+        self, active: _ActiveRepoIssueSource
+    ) -> bool:
+        """Consume one detached repository cursor until one child is admitted.
+
+        Exclusions (notably epics) need no child capacity and are consumed in
+        order after their durable skip write.  An eligible pending row stays
+        in ``source.pending`` until every possible entry queue and the global
+        permit budget can accept it; no classified product is retained.
+
+        Returns:
+            ``True`` while this cursor remains active, otherwise ``False``
+            after normal exhaustion or a recorded discovery failure.
+
+        """
+        repo = active.repo
+        source = active.source
+        ctx = self._ctx_for_repo(repo)
+        while True:
+            metadata = source.pending
+            if metadata is None:
+                try:
+                    metadata = next(source.metadata)
+                except StopIteration:
+                    self._record_event("repo_source_complete", repo, source.seeded_count)
+                    return False
+                except Exception as exc:
+                    logger.warning("repo:%s: discovery source failed: %s", repo, exc)
+                    self._record_repo_source_failure(repo, f"discovery failed: {exc}")
+                    return False
+
+            try:
+                number = int(metadata["number"])
+                labels = list(metadata.get("labels") or [])
+                title = str(metadata.get("title") or "")
+            except (KeyError, TypeError, ValueError) as exc:
+                self._record_repo_source_failure(
+                    repo, f"discovery failed: malformed metadata: {exc}"
+                )
+                return False
+            # Metadata epics need no expensive issue fetch.  The durable
+            # label write is completed before source consumption advances.
+            if is_epic(labels, title):
+                try:
+                    ctx.github.skip_epics({number: labels})
+                except Exception as exc:
+                    logger.warning(
+                        "repo:%s: could not tag excluded epic #%d state:skip: %s",
+                        repo,
+                        number,
+                        exc,
+                    )
+                    self._record_repo_source_failure(repo, f"epic skip tag failed: {exc}")
+                    return False
+                logger.info("repo:%s: #%d is an epic; tagged state:skip, excluded", repo, number)
+                source.pending = None
+                self._progress = True
+                return True
+
+            if not self._repo_source_can_admit():
+                source.pending = metadata
+                return True
+
+            try:
+                facts = _seeding.seed_issue_from_github(number, ctx.github)
+                if STATE_PLAN_BLOCKED in facts.labels:
+                    ctx.github.ensure_blocked_audit(number)
+                entry = _seeding.seed_entry_from_facts(facts)
+                scope_stages = self.config.scope.stages if self.config.scope is not None else None
+                stage, reason, passed = self._scope_seed_decision(
+                    number, entry.stage, entry.reason, scope_stages
+                )
+                entry = replace(entry, stage=stage, reason=reason, passed=passed)
+            except Exception as exc:
+                logger.warning("repo:%s: issue #%d classification failed: %s", repo, number, exc)
+                self._record_repo_source_failure(repo, f"discovery failed: {exc}")
+                return False
+
+            if entry.stage is None:
+                try:
+                    if entry.skip_tag_obligation is not None:
+                        ctx.github.skip_epics({entry.skip_tag_obligation.issue: []})
+                except Exception as exc:
+                    logger.warning(
+                        "repo:%s: could not tag excluded epic #%d state:skip: %s",
+                        repo,
+                        number,
+                        exc,
+                    )
+                    self._record_repo_source_failure(repo, f"epic skip tag failed: {exc}")
+                    return False
+                logger.info("[%s] excluded: %s", repo, entry.reason)
+                source.pending = None
+                self._progress = True
+                return True
+
+            new_item = self._entry_to_item(entry, repo)
+            if new_item.stage is StageName.FINISHED and new_item.result is None:
+                new_item.result = ItemResult(
+                    passed=entry.passed,
+                    reason=entry.reason,
+                    final_stage=StageName.FINISHED,
+                )
+            elif new_item.stage is not StageName.REPO:
+                self._pass_work_count += 1
+
+            source.pending = None
+            if self._push_item(new_item, new_item.stage, enter=True):
+                source.seeded_count += 1
+                self._progress = True
+                return True
+            # The preflight covers capacity; a false push is therefore only
+            # the existing idempotent duplicate guard.  Do not retain it in
+            # a second source buffer.  The duplicate's live peer now governs
+            # the next admission opportunity.
+            self._progress = True
+            return True
+
+    def _record_repo_source_failure(self, repo: str, reason: str) -> None:
+        """Retain a bounded terminal failure after a detached cursor aborts."""
+        item = WorkItem(repo=repo, kind=ItemKind.REPO, stage=StageName.FINISHED)
+        item.result = ItemResult(passed=False, reason=reason, final_stage=StageName.REPO)
+        item.payload["entry_stage"] = StageName.REPO.value
+        self.items.append(item)
+        self._record_terminal_result(item)
 
     def _drain_implementation(self) -> None:
         """Drain the implementation queue under topo order + file-overlap gating.
@@ -1014,7 +1619,26 @@ class Coordinator:
         q = self.queues[StageName.IMPLEMENTATION]
         if not len(q):
             return
-        items = self._dedup_implementation_items([q.pop() for _ in range(len(q))])
+        # Derive topology from a bounded snapshot, then lease only selected
+        # items. A raw pop makes an item ownerless; each lease preserves its
+        # original FIFO ticket while other ready work may still dispatch.
+        for duplicate in self._implementation_duplicates(q.snapshot()):
+            if not self._claim_selected_implementation_item(duplicate):
+                return
+            logger.warning(
+                "implementation %s#%s already queued; dropping duplicate work item",
+                duplicate.repo,
+                duplicate.issue,
+            )
+            self._finish(
+                duplicate,
+                passed=True,
+                reason=f"{duplicate.repo}#{duplicate.issue} superseded by queued duplicate",
+            )
+            if id(duplicate) in self._leases:
+                return
+
+        items = q.snapshot()
         issue_items, ambiguous = self._index_issue_items(items)
         infos = [
             IssueInfo(
@@ -1037,52 +1661,42 @@ class Coordinator:
             dispatch, deferred = _admission._select_non_overlapping(ordered, repo_of=repo_of)
             for number in deferred:
                 logger.info("implementation #%s deferred (file overlap)", number)
-        ran: set[int] = set()
         # Cross-repo same-number items bypass the number-keyed gates and dispatch
         # directly — they are distinct work that the ordering model cannot rank.
         dispatch_items = [issue_items[number] for number in dispatch]
         dispatch_items.extend(it for group in ambiguous.values() for it in group)
         for item in dispatch_items:
             if self.shutdown.is_set() or not self._admit(item):
-                continue  # stays queued (re-pushed below)
-            ran.add(id(item))
+                continue
+            if not self._claim_selected_implementation_item(item):
+                continue
             self._record_event("drain", StageName.IMPLEMENTATION.value, self._item_key(item))
             self._run_item(item)
-        # Preserve original queue order for deferred / non-admitted / non-issue items.
-        for it in items:
-            if id(it) not in ran:
-                q.push(it)
 
-    def _dedup_implementation_items(self, items: list[WorkItem]) -> list[WorkItem]:
-        """Drop transient duplicate work items, keyed by ``(repo, issue)`` (#2057).
-
-        A retry/fail-back can re-enqueue an issue while a prior copy is still
-        queued, so the round may briefly hold two items for the same
-        ``(repo, issue)``. Keep the first-queued and terminalize the rest as
-        superseded (was a hard assert that crashed the whole run, #1952). Keyed
-        by ``(repo, issue)`` so a cross-repo same-number pair (``A#71``/``B#71``)
-        is preserved as distinct work. ``issue is None`` items never dedup.
-        """
+    @staticmethod
+    def _implementation_duplicates(items: list[WorkItem]) -> list[WorkItem]:
+        """Return non-first queued duplicates keyed by ``(repo, issue)`` (#2057)."""
         seen: set[tuple[str, int]] = set()
-        deduped: list[WorkItem] = []
-        for it in items:
-            if it.issue is None:
-                deduped.append(it)
+        duplicates: list[WorkItem] = []
+        for item in items:
+            if item.issue is None:
                 continue
-            key = (it.repo, it.issue)
+            key = (item.repo, item.issue)
             if key in seen:
-                logger.warning(
-                    "implementation %s#%s already queued; dropping duplicate work item",
-                    it.repo,
-                    it.issue,
-                )
-                self._finish(
-                    it, passed=True, reason=f"{it.repo}#{it.issue} superseded by queued duplicate"
-                )
-                continue
-            seen.add(key)
-            deduped.append(it)
-        return deduped
+                duplicates.append(item)
+            else:
+                seen.add(key)
+        return duplicates
+
+    def _claim_selected_implementation_item(self, item: WorkItem) -> bool:
+        """Claim *item* at its current position, preserving FIFO retry order."""
+        for index, queued in enumerate(self.queues[StageName.IMPLEMENTATION].snapshot()):
+            if queued is item:
+                claimed = self._claim_item(StageName.IMPLEMENTATION, index=index)
+                if claimed is not item:  # pragma: no cover - coordinator-thread invariant
+                    raise RuntimeError("implementation queue selected a different item")
+                return True
+        return False
 
     @staticmethod
     def _index_issue_items(
@@ -1115,7 +1729,9 @@ class Coordinator:
 
     def _admit(self, item: WorkItem) -> bool:
         """Admission control: per-repo in-flight cap (O(1) Counter lookup)."""
-        return self.inflight_per_repo[item.repo] < max(1, self.config.max_workers)
+        return len(self.in_flight) < _work_window(self.config) and self.inflight_per_repo[
+            item.repo
+        ] < max(1, self.config.max_workers)
 
     # -- item execution -----------------------------------------------------
 
@@ -1139,6 +1755,25 @@ class Coordinator:
                 if isinstance(result, Continue):
                     item.state = result.next_state
                     item.add_history_event(item.stage, item.state)
+                    if (
+                        item.kind is ItemKind.REPO
+                        and item.state == "SOURCE"
+                        and isinstance(item.payload.get("_repo_issue_source"), RepoIssueSource)
+                    ):
+                        source = item.payload["_repo_issue_source"]
+                        # Setup work has completed. Move only its bounded
+                        # cursor into the fair registry, releasing the REPO
+                        # lease and provisional permit so one repository
+                        # cannot monopolize the stage while it streams.
+                        if not self._externalize_repo_issue_source(item, source):
+                            # Admission reserves a registry slot before a
+                            # setup item enters REPO. This fallback preserves
+                            # liveness for an injected/custom queue that
+                            # violates that invariant: a bounded timer owns
+                            # the item until a cursor slot becomes free.
+                            logger.debug("repo:%s: waiting for a source-registry slot", item.repo)
+                            self._timer_park(item, _SOURCE_REGISTRY_RETRY_DELAY_S)
+                        return
                     continue
                 if isinstance(result, JobRequest):
                     if self.config.dry_run:
@@ -1255,6 +1890,9 @@ class Coordinator:
         if item.stage is StageName.FINISHED:
             # Sink outcomes are terminal: the result is already recorded.
             self._record_event("done", self._item_key(item), outcome.note)
+            self._record_terminal_result(item)
+            self._release_source_lease(item)
+            self._release_work_permit(item)
             return
 
         if disposition is Disposition.ADVANCE:
@@ -1263,7 +1901,7 @@ class Coordinator:
             if target is StageName.FINISHED:
                 self._finish(item, passed=True, reason=outcome.note or "advance")
             else:
-                self._push_item(item, target, enter=True)
+                self._handoff_item(item, target, enter=True)
             return
 
         if disposition is Disposition.RETRY:
@@ -1298,7 +1936,8 @@ class Coordinator:
         """
         delay = item.payload.pop("retry_delay_s", None)
         if delay is None:
-            self._push_item(item, item.stage, enter=False)
+            if not self._restore_source_lease(item):
+                self._push_item(item, item.stage, enter=False)
         elif self.config.dry_run:
             self._finish(
                 item, passed=False, reason=f"[dry-run] would wait {delay}s: {outcome.note}"
@@ -1331,18 +1970,22 @@ class Coordinator:
         if target is StageName.FINISHED:
             self._finish(item, passed=False, reason=outcome.note or "fail_back")
         else:
-            self._push_item(item, target, enter=True)
+            self._handoff_item(item, target, enter=True)
 
     def _finish(self, item: WorkItem, *, passed: bool, reason: str) -> None:
         """Set the item's result and hand it to the finished sink."""
-        item.result = ItemResult(passed=passed, reason=reason, final_stage=item.stage)
         if item.stage is StageName.FINISHED:
             # Poisoned inside the sink: record directly, never re-queue.
+            item.result = ItemResult(passed=passed, reason=reason, final_stage=item.stage)
             if not item.payload.get("_recorded", False):
                 self.ledger.append(item.result)
                 item.payload["_recorded"] = True
+            self._record_terminal_result(item)
+            self._release_source_lease(item)
+            self._release_work_permit(item)
             return
-        self._push_item(item, StageName.FINISHED, enter=True)
+        result = ItemResult(passed=passed, reason=reason, final_stage=item.stage)
+        self._handoff_item(item, StageName.FINISHED, enter=True, result=result)
 
     def _seed_products(self, item: WorkItem) -> None:
         """Push a terminal repo item's discovered products into entry queues."""
@@ -1380,9 +2023,20 @@ class Coordinator:
         for it in self.in_flight.values():
             if it.kind is ItemKind.ISSUE and it.issue is not None:
                 keys.add((it.repo, it.issue))
+        for lease in self._leases.values():
+            it = lease.item
+            if it.kind is ItemKind.ISSUE and it.issue is not None:
+                keys.add((it.repo, it.issue))
         return keys
 
-    def _push_item(self, item: WorkItem, stage: StageName, enter: bool) -> None:
+    def _push_item(
+        self,
+        item: WorkItem,
+        stage: StageName,
+        enter: bool,
+        *,
+        defer_if_full: bool = False,
+    ) -> bool:
         """Push *item* into *stage*'s queue (the single push chokepoint).
 
         Every durable GitHub mutation for this transition already happened
@@ -1394,26 +2048,51 @@ class Coordinator:
         exercised. Object identity (``_seen_item_ids``) distinguishes a new item
         from an already-tracked item re-pushing itself on timer/retry/fail-back/
         advance, which must always be allowed through.
+
+        ``defer_if_full`` makes bounded capacity an ordinary backpressure
+        result rather than an exception. It is reserved for timer wake-ups,
+        whose heap entry must remain the item's owner until the stage accepts
+        it. All ordinary callers retain the strict overflow invariant.
+
+        Returns:
+            ``True`` when the queue accepted the item; ``False`` when a
+            duplicate seed was skipped or a deferred queue is full.
+
         """
+        is_new_item = id(item) not in self._seen_item_ids
         if (
-            id(item) not in self._seen_item_ids
+            is_new_item
             and item.kind is ItemKind.ISSUE
             and item.issue is not None
             and (item.repo, item.issue) in self._live_issue_keys()
         ):
             logger.info("seed skipped: #%s already queued/in-flight in %s", item.issue, item.repo)
-            return
+            return False
+        if is_new_item and not self._try_acquire_work_permit(item):
+            logger.debug(
+                "global live-work capacity reached (%d); deferring %s",
+                _work_window(self.config),
+                self._item_key(item),
+            )
+            return False
+        acquired_permit = is_new_item
+        if not self.queues[stage].offer(item):
+            if acquired_permit:
+                self._release_work_permit(item)
+            if defer_if_full:
+                return False
+            raise OverflowError("StageQueue is full")
         item.stage = stage
         if enter:
             item.state = "ENTER"
             item.payload["_enter_pending"] = True
             item.add_history_event(stage, item.state, note="enqueued")
-        if id(item) not in self._seen_item_ids:
+        if is_new_item:
             self._seen_item_ids.add(id(item))
             self.items.append(item)
             item.payload.setdefault("entry_stage", stage.value)
-        self.queues[stage].push(item)
         self._record_event("push", stage.value, self._item_key(item))
+        return True
 
     @staticmethod
     def _item_key(item: WorkItem) -> str:
@@ -1433,12 +2112,22 @@ class Coordinator:
             The number of items pushed (repo seeds included).
 
         """
+        # A reseed pass creates fresh WorkItems for the same logical issues.
+        # Keep final status semantics aligned with _effective_items(): the
+        # latest pass supersedes earlier attempts without retaining an
+        # unbounded logical-identity map in the terminal aggregate.
+        self._terminal_summary.reset()
         self._pass_work_count = 0
         discovery_repos = [] if self.config.issues or self.config.prs else self.config.repos
-        entries = _seeding.seed_from_cli(discovery_repos, [], [])
+        # Repository discovery is a source, not a list of pre-built
+        # ``SeedEntry``/``WorkItem`` values.  Keep the legacy empty call so
+        # direct test seams and any non-repository synthetic entries retain
+        # their established contract; production returns no entries here.
+        entries = _seeding.seed_from_cli([], [], [])
+        self._begin_repo_entry_source(discovery_repos if not entries else [])
         default_repo = self.config.repos[0] if self.config.repos else ""
-        if self.config.issues or self.config.prs:
-            entries.extend(self._seed_direct_scope(default_repo))
+        self._begin_direct_pr_source(default_repo)
+        self._begin_direct_issue_source(default_repo)
         pushed = 0
         for entry in entries:
             if entry.stage is None:
@@ -1456,8 +2145,173 @@ class Coordinator:
                 item.result = ItemResult(
                     passed=entry.passed, reason=entry.reason, final_stage=StageName.FINISHED
                 )
-            self._push_item(item, item.stage, enter=True)
+            if self._push_item(item, item.stage, enter=True):
+                pushed += 1
+        return (
+            pushed
+            + self._drain_repo_entry_source()
+            + self._drain_direct_pr_source()
+            + self._drain_direct_issue_source()
+        )
+
+    def _begin_repo_entry_source(self, repos: list[str]) -> None:
+        """Initialize one FIFO source for this pass's repository discovery.
+
+        Strict source-order fairness is intentional: an active repository
+        holds its REPO-stage lease until its bounded issue cursor finishes, so
+        the next repository is admitted only after that stage slot is free.
+        This prevents both an unbounded source spill and starvation from
+        repeatedly retrying a later repository ahead of an earlier one.
+        """
+        if self.config.repo_source_factory is not None:
+            self._repo_entry_source = _RepoEntrySource(repos=self.config.repo_source_factory())
+        elif repos:
+            self._repo_entry_source = _RepoEntrySource(repos=iter(repos))
+        else:
+            self._repo_entry_source = None
+
+    def _drain_repo_entry_source(self) -> int:
+        """Admit repository discovery items from the FIFO source when safe."""
+        source = self._repo_entry_source
+        if source is None:
+            return 0
+
+        pushed = 0
+        while (
+            self.live_work_count < _work_window(self.config)
+            and self.queues[StageName.REPO].can_offer()
+            and self._repo_source_slots_used() < _work_window(self.config)
+        ):
+            repo = source.pending
+            if repo is None:
+                try:
+                    repo = next(source.repos)
+                except StopIteration:
+                    self._repo_entry_source = None
+                    break
+                except Exception as exc:
+                    raise RuntimeError(f"repository discovery source failed: {exc}") from exc
+            item = WorkItem(repo=repo, kind=ItemKind.REPO, stage=StageName.REPO)
+            if not self._push_item(item, StageName.REPO, enter=True):
+                # The coordinator is single-threaded and the predicate above
+                # reserves both capacities. Retain exactly one retry value if
+                # an injected/custom queue declines unexpectedly.
+                source.pending = repo
+                break
+            source.pending = None
             pushed += 1
+        return pushed
+
+    def _begin_direct_issue_source(self, repo: str) -> None:
+        """Initialize one bounded cursor for this pass's ``--issues`` input."""
+        self._direct_issue_source = None
+        if not self.config.issues:
+            return
+        open_issues = _admission._filter_open_issues(repo, self.config.issues)
+        self._direct_issue_source = _DirectIssueSource(repo=repo, issues=iter(open_issues))
+
+    def _begin_direct_pr_source(self, repo: str) -> None:
+        """Initialize one bounded cursor for this pass's ``--prs`` input."""
+        self._direct_pr_source = None
+        if self.config.prs:
+            self._direct_pr_source = _DirectPrSource(repo=repo, prs=iter(self.config.prs))
+
+    def _direct_issue_queues_can_accept(self) -> bool:
+        """Return whether one direct issue can be classified and enqueued now."""
+        return self.live_work_count < _work_window(self.config) and all(
+            self.queues[stage].can_offer() for stage in _DIRECT_ISSUE_ENTRY_STAGES
+        )
+
+    def _drain_direct_issue_source(self) -> int:
+        """Pull explicit issues directly into queues without a seed spill buffer.
+
+        An issue is classified only after its eventual destination is
+        guaranteed to have capacity.  The loop fills immediately available
+        capacity, then leaves the remaining caller-owned iterator live until
+        normal queue draining creates another safe admission point.
+        """
+        source = self._direct_issue_source
+        if source is None:
+            return 0
+
+        pushed = 0
+        while self._direct_issue_queues_can_accept():
+            try:
+                issue = next(source.issues)
+            except StopIteration:
+                self._direct_issue_source = None
+                break
+
+            entry = self._seed_direct_issue_entry(source.repo, issue)
+            if entry.stage is None:
+                # Epic tagging is the one sanctioned seeding write.  Complete
+                # it before honoring the source exclusion, exactly as the
+                # ordinary seed path does.
+                if entry.skip_tag_obligation is not None:
+                    self.github.skip_epics({entry.skip_tag_obligation.issue: []})
+                logger.info("seed excluded: %s", entry.reason)
+                continue
+
+            item = self._entry_to_item(entry, source.repo)
+            if item.stage not in (StageName.REPO, StageName.FINISHED):
+                self._pass_work_count += 1
+            if item.stage is StageName.FINISHED and item.result is None:
+                item.result = ItemResult(
+                    passed=entry.passed,
+                    reason=entry.reason,
+                    final_stage=StageName.FINISHED,
+                )
+            # ``_direct_issue_queues_can_accept`` covers every possible
+            # classifier result and the coordinator-wide permit budget. This
+            # source owns the coordinator thread, so a failed lifecycle push
+            # can only be an idempotent duplicate; it never represents
+            # saturation or a completion/shutdown fault.
+            if self._push_item(item, item.stage, enter=True):
+                pushed += 1
+        return pushed
+
+    def _drain_direct_pr_source(self) -> int:
+        """Pull explicit PRs into queues without an eager seed-entry spill.
+
+        Explicit PRs retain their historical precedence over explicit issues
+        when both flags are supplied.  As a source advances only after the
+        prior PR leaves the global live-work window, that precedence cannot
+        discard later PRs on a saturated queue.
+        """
+        source = self._direct_pr_source
+        if source is None:
+            return 0
+
+        pushed = 0
+        while self._direct_issue_queues_can_accept():
+            try:
+                pr = next(source.prs)
+            except StopIteration:
+                self._direct_pr_source = None
+                break
+
+            # The compatibility helper returns exactly one entry here; unlike
+            # the legacy call over ``config.prs`` it cannot retain a source
+            # sized list while waiting for capacity.
+            entry = self._seed_direct_pr_scope(source.repo, (pr,))[0]
+            if entry.stage is None:
+                logger.info("seed excluded: %s", entry.reason)
+                continue
+
+            item = self._entry_to_item(entry, source.repo)
+            if item.stage not in (StageName.REPO, StageName.FINISHED):
+                self._pass_work_count += 1
+            if item.stage is StageName.FINISHED and item.result is None:
+                item.result = ItemResult(
+                    passed=entry.passed,
+                    reason=entry.reason,
+                    final_stage=StageName.FINISHED,
+                )
+            # The common direct-entry admission predicate reserves every
+            # possible classifier target and the global permit. A failed push
+            # is therefore only an idempotent duplicate, not saturation.
+            if self._push_item(item, item.stage, enter=True):
+                pushed += 1
         return pushed
 
     def _clamp_seed_stage_to_scope(
@@ -1541,23 +2395,40 @@ class Coordinator:
         return stage, reason, True
 
     def _seed_direct_scope(self, repo: str) -> list[_seeding.SeedEntry]:
-        """Seed explicit ``--issues`` / ``--prs`` through the target repo accessor."""
+        """Classify direct entries for legacy direct-classifier callers.
+
+        Runtime seeding never materializes the explicit issue scope here;
+        :meth:`_drain_direct_issue_source` owns its bounded cursor.  This
+        compatibility helper remains for direct classifier tests.
+        """
+        entries: list[_seeding.SeedEntry] = []
+        issue_numbers = _admission._filter_open_issues(repo, self.config.issues)
+        for issue in issue_numbers:
+            entries.append(self._seed_direct_issue_entry(repo, issue))
+        entries.extend(self._seed_direct_pr_scope(repo))
+        return entries
+
+    def _seed_direct_issue_entry(self, repo: str, issue: int) -> _seeding.SeedEntry:
+        """Classify one direct issue through its target repository accessor."""
+        github = self._ctx_for_repo(repo).github if repo else self.github
+        scope_stages = self.config.scope.stages if self.config.scope is not None else None
+        facts = _seeding.seed_issue_from_github(issue, github)
+        if STATE_PLAN_BLOCKED in facts.labels:
+            github.ensure_blocked_audit(issue)
+        entry = _seeding.seed_entry_from_facts(facts)
+        stage, reason, passed = self._scope_seed_decision(
+            issue, entry.stage, entry.reason, scope_stages
+        )
+        return replace(entry, stage=stage, reason=reason, passed=passed)
+
+    def _seed_direct_pr_scope(
+        self, repo: str, prs: Iterable[int] | None = None
+    ) -> list[_seeding.SeedEntry]:
+        """Classify explicit PRs for compatibility callers or a one-PR source pull."""
         github = self._ctx_for_repo(repo).github if repo else self.github
         entries: list[_seeding.SeedEntry] = []
         scope_stages = self.config.scope.stages if self.config.scope is not None else None
-        requested_issues = list(self.config.issues)
-        issue_numbers = requested_issues
-        if issue_numbers:
-            issue_numbers = _admission._filter_open_issues(repo, issue_numbers)
-        for issue in issue_numbers:
-            facts = _seeding.seed_issue_from_github(issue, github)
-            if STATE_PLAN_BLOCKED in facts.labels:
-                github.ensure_blocked_audit(issue)
-            entry = _seeding.seed_entry_from_facts(facts)
-            stage, reason = entry.stage, entry.reason
-            stage, reason, passed = self._scope_seed_decision(issue, stage, reason, scope_stages)
-            entries.append(replace(entry, stage=stage, reason=reason, passed=passed))
-        for pr in self.config.prs:
+        for pr in self.config.prs if prs is None else prs:
             issue_number = github.find_issue_for_pr(pr)
             if issue_number is None:
                 entries.append(
@@ -1718,6 +2589,23 @@ class Coordinator:
         item.payload["entry_reason"] = entry.reason
         return item
 
+    def _has_pending_seed_source(self) -> bool:
+        """Return whether this pass still owns an unclassified input cursor.
+
+        A source may have admitted no issue yet, so ``_pass_work_count`` alone
+        cannot distinguish a converged pass from one awaiting its first safe
+        queue slot.  Sources themselves remain bounded: one direct cursor,
+        one repository-entry cursor, and at most C active repo cursors.
+        """
+        return any(
+            (
+                self._repo_entry_source is not None,
+                bool(self._repo_issue_sources),
+                self._direct_issue_source is not None,
+                self._direct_pr_source is not None,
+            )
+        )
+
     def _reseed_if_converged(self) -> bool:
         """Re-seed after full drain; False = stop (loops or zero-work exit).
 
@@ -1729,7 +2617,7 @@ class Coordinator:
         if self._loops_run >= self.config.loops:
             logger.info("loop budget exhausted (%d/%d)", self._loops_run, self.config.loops)
             return False
-        if self._pass_work_count == 0:
+        if self._pass_work_count == 0 and not self._has_pending_seed_source():
             logger.info(
                 "zero-work convergence: pass %d produced no actionable items; exiting early",
                 self._loops_run,
@@ -1738,7 +2626,7 @@ class Coordinator:
         self._loops_run += 1
         logger.info("re-seeding: loop %d/%d", self._loops_run, self.config.loops)
         self._seed_pass()
-        return self._pass_work_count > 0
+        return self._pass_work_count > 0 or self._has_pending_seed_source()
 
     # -- shutdown ---------------------------------------------------------------
 
@@ -1810,7 +2698,12 @@ class Coordinator:
                 continue
             leftovers.extend(q.snapshot())
         leftovers.extend(self.in_flight.values())
+        leftovers.extend(lease.item for lease in self._leases.values())
+        seen: set[int] = set()
         for item in leftovers:
+            if id(item) in seen:
+                continue
+            seen.add(id(item))
             if item.result is None:
                 self._park_resumable(item)
 

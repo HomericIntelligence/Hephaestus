@@ -293,16 +293,14 @@ class CIDriverOptions(VerboseParallelWorkerOptionsBase):
     enable_ui: bool = True
     max_fix_iterations: int = 1  # number of fix attempts before giving up
     force_merge_on_stall: bool = False  # attempt squash-merge fallback if auto-merge fails
-    # When True, _discover_prs unions the issue-driven set with every open
-    # bot-authored PR on the repo (#848). Bot PRs (Dependabot, github-actions,
-    # etc.) carry no ``Closes #N`` link so they are architecturally invisible
-    # to issue-driven discovery; without this they leak forever.
+    # Retained compatibility option for the retired open-PR sweep. Linked-issue
+    # discovery can reach a bot-authored PR only when a discovered issue links
+    # to it; unrelated bot PRs remain out of scope.
     include_bot_prs: bool = True
-    # When False (default, #821), discovery is restricted to PRs whose
-    # author.login matches the authenticated `gh api user` viewer login.
-    # Set True via the CLI's --all flag to drive every open PR (teammates'
-    # and bots' included). Issue-scoped lookups (`--issues N`) bypass this
-    # filter — they always resolve to the matching PR regardless of author.
+    # Retained compatibility option for the retired author-filtered open-PR
+    # sweep. Queue repository discovery is linked-issue based and does not
+    # enumerate unrelated open PRs; explicit `--issues` / `--prs` scopes are
+    # resolved regardless of author.
     include_all_authors: bool = False
     # When True (default), _drive_issue first attempts a mechanical ``git
     # rebase`` onto the base branch for PRs that are behind/conflicting, pushing
