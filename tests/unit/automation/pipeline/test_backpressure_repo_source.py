@@ -145,6 +145,67 @@ def test_repo_issue_source_is_lossless_and_ordered_at_capacity_one(
     assert coordinator._all_idle()
 
 
+def test_repo_entries_are_source_pulled_in_order_at_capacity_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C+1 repositories wait at one FIFO cursor instead of being dropped.
+
+    A repository source holds the sole REPO-stage lease through its bounded
+    issue cursor.  The next configured repository is therefore admitted only
+    after that source has drained, preserving source order without creating an
+    unbounded list of repo ``WorkItem`` instances.
+    """
+    events: list[tuple[str, int]] = []
+    metadata = {
+        "repo-a": [{"number": 101, "labels": ["state:needs-plan"], "title": "first"}],
+        "repo-b": [{"number": 201, "labels": ["state:needs-plan"], "title": "second"}],
+    }
+
+    def classify(issue: int, github: Any) -> IssueFacts:
+        del github
+        events.append(("classify", issue))
+        return _facts(issue)
+
+    monkeypatch.setattr(
+        loop_repo_manager,
+        "_iter_open_issue_meta",
+        lambda _org, repo: iter(metadata[repo]),
+    )
+    monkeypatch.setattr(seeding_mod, "seed_issue_from_github", classify)
+
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo-a", "repo-b"],
+            loops=1,
+            parallel_repos=1,
+            max_workers=1,
+            dry_run=True,
+            projects_dir=tmp_path,
+        ),
+        github=FakeStageGitHub(labels=["state:needs-plan"]),
+        pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+    coordinator.stages[StageName.PLANNING] = _ImmediatePassStage(events)
+
+    assert coordinator.run() == 0
+
+    assert events == [
+        ("classify", 101),
+        ("complete", 101),
+        ("classify", 201),
+        ("complete", 201),
+    ]
+    assert [item.repo for item in coordinator.items if item.kind is ItemKind.REPO] == [
+        "repo-a",
+        "repo-b",
+    ]
+    assert [item.issue for item in coordinator.items if item.kind is ItemKind.ISSUE] == [101, 201]
+    assert coordinator.live_work_count == 0
+    assert coordinator._all_idle()
+
+
 def test_repo_source_tags_epic_before_exclusion_and_next_issue_admission(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

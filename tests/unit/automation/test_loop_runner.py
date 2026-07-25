@@ -10,6 +10,7 @@ seams that remain here.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -229,8 +230,9 @@ def test_gh_list_repos_filters_forks_and_archived() -> None:
     # Odysseus is included — no name-based filtering (issue #814).
     assert sorted(names) == ["Odysseus", "keep"]
     invoked_argv = mock_gh_call.call_args[0][0]
-    assert "--no-archived" in invoked_argv
-    assert "name,isArchived,isFork" in invoked_argv
+    assert invoked_argv[0] == "api"
+    assert "per_page=100" in invoked_argv[1]
+    assert "type=all" in invoked_argv[1]
 
 
 def test_gh_list_repos_passes_network_timeout() -> None:
@@ -241,6 +243,40 @@ def test_gh_list_repos_passes_network_timeout() -> None:
         )
         loop_runner._gh_list_repos("MyOrg")
     assert mock_gh_call.call_args.kwargs["timeout"] == NETWORK_TIMEOUT
+
+
+def test_gh_list_repos_pages_beyond_the_former_two_hundred_cap() -> None:
+    """Organization discovery reads bounded pages without silently truncating."""
+    first_page = [
+        {"name": f"repo-{number:03d}", "isFork": False, "isArchived": False}
+        for number in range(100)
+    ]
+    second_page = [
+        {"name": "repo-100", "isFork": False, "isArchived": False},
+        {"name": "fork", "isFork": True, "isArchived": False},
+    ]
+    with patch(
+        "hephaestus.automation.loop_repo_manager.gh_call",
+        side_effect=[
+            subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=json.dumps(first_page), stderr=""
+            ),
+            subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=json.dumps(second_page), stderr=""
+            ),
+        ],
+    ) as mock_gh_call:
+        names = loop_runner._gh_list_repos("MyOrg")
+
+    assert names == [f"repo-{number:03d}" for number in range(100)] + ["repo-100"]
+    assert mock_gh_call.call_args_list[0].args[0] == [
+        "api",
+        "/orgs/MyOrg/repos?per_page=100&type=all&sort=full_name&direction=asc&page=1",
+    ]
+    assert mock_gh_call.call_args_list[1].args[0] == [
+        "api",
+        "/orgs/MyOrg/repos?per_page=100&type=all&sort=full_name&direction=asc&page=2",
+    ]
 
 
 def test_gh_list_repos_timeout_raises_systemexit() -> None:
@@ -335,6 +371,27 @@ def test_resolve_org_and_repos_org_named() -> None:
     assert org == "ExplicitOrg"
     assert repos == ["x"]
     mock_detect.assert_not_called()
+
+
+def test_resolve_org_and_repos_org_preserves_discovery_order_without_issue_scan() -> None:
+    """--org passes repository names to the coordinator without backlog sorting."""
+    args = loop_runner._parse_args(["--org", "ExplicitOrg"])
+    with (
+        patch(
+            "hephaestus.automation.loop_runner._gh_list_repos",
+            return_value=["alpha", "beta"],
+        ),
+        patch(
+            "hephaestus.automation.loop_runner._sort_repos_by_open_count",
+            side_effect=AssertionError("--org must not enumerate each repo's issue metadata"),
+        ) as mock_sort,
+    ):
+        org, repos, err = loop_runner._resolve_org_and_repos(args)
+
+    assert err is None
+    assert org == "ExplicitOrg"
+    assert repos == ["alpha", "beta"]
+    mock_sort.assert_not_called()
 
 
 def test_resolve_org_and_repos_dry_run_never_tags_discovered_epics() -> None:

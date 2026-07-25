@@ -374,6 +374,20 @@ class _DirectIssueSource:
     issues: Iterator[int]
 
 
+@dataclass
+class _RepoEntrySource:
+    """One bounded FIFO cursor over repository discovery entries.
+
+    A REPO-stage lease remains with the active repository through its issue
+    cursor, so this source advances only when both the global permit and the
+    REPO queue admit the next repository. ``pending`` is a defensive single
+    retry slot; it never becomes a repository spill list.
+    """
+
+    repos: Iterator[str]
+    pending: str | None = None
+
+
 def _effective_repo_root(config: PipelineConfig, repo: str) -> Path:
     """Resolve *repo* to its explicit checkout or conventional projects path."""
     return Path(config.repo_roots.get(repo, Path(config.projects_dir) / repo))
@@ -470,6 +484,7 @@ class Coordinator:
         self._leases: dict[int, StageQueueLease] = {}
         self._pending_handoffs: dict[int, _PendingHandoff] = {}
         self._direct_issue_source: _DirectIssueSource | None = None
+        self._repo_entry_source: _RepoEntrySource | None = None
         # A StageQueue's capacity only bounds that one stage.  This permit
         # set is the coordinator-wide admission budget: an item acquires one
         # permit on first entry and keeps it while it moves between queues,
@@ -787,6 +802,7 @@ class Coordinator:
                     self._wait_for_completion(timeout=0.2)
                     continue
                 self._drain_queues()
+                self._drain_repo_entry_source()
                 self._drain_repo_issue_sources()
                 self._drain_direct_issue_source()
                 if self._all_idle():
@@ -888,6 +904,7 @@ class Coordinator:
             and not self._leases
             and not self._pending_handoffs
             and self._direct_issue_source is None
+            and self._repo_entry_source is None
         )
 
     @property
@@ -2020,7 +2037,12 @@ class Coordinator:
         self._terminal_summary.reset()
         self._pass_work_count = 0
         discovery_repos = [] if self.config.issues or self.config.prs else self.config.repos
-        entries = _seeding.seed_from_cli(discovery_repos, [], [])
+        # Repository discovery is a source, not a list of pre-built
+        # ``SeedEntry``/``WorkItem`` values.  Keep the legacy empty call so
+        # direct test seams and any non-repository synthetic entries retain
+        # their established contract; production returns no entries here.
+        entries = _seeding.seed_from_cli([], [], [])
+        self._begin_repo_entry_source(discovery_repos if not entries else [])
         default_repo = self.config.repos[0] if self.config.repos else ""
         self._begin_direct_issue_source(default_repo)
         if self.config.prs:
@@ -2044,7 +2066,47 @@ class Coordinator:
                 )
             if self._push_item(item, item.stage, enter=True):
                 pushed += 1
-        return pushed + self._drain_direct_issue_source()
+        return pushed + self._drain_repo_entry_source() + self._drain_direct_issue_source()
+
+    def _begin_repo_entry_source(self, repos: list[str]) -> None:
+        """Initialize one FIFO source for this pass's repository discovery.
+
+        Strict source-order fairness is intentional: an active repository
+        holds its REPO-stage lease until its bounded issue cursor finishes, so
+        the next repository is admitted only after that stage slot is free.
+        This prevents both an unbounded source spill and starvation from
+        repeatedly retrying a later repository ahead of an earlier one.
+        """
+        self._repo_entry_source = _RepoEntrySource(repos=iter(repos)) if repos else None
+
+    def _drain_repo_entry_source(self) -> int:
+        """Admit repository discovery items from the FIFO source when safe."""
+        source = self._repo_entry_source
+        if source is None:
+            return 0
+
+        pushed = 0
+        while (
+            self.live_work_count < _work_window(self.config)
+            and self.queues[StageName.REPO].can_offer()
+        ):
+            repo = source.pending
+            if repo is None:
+                try:
+                    repo = next(source.repos)
+                except StopIteration:
+                    self._repo_entry_source = None
+                    break
+            item = WorkItem(repo=repo, kind=ItemKind.REPO, stage=StageName.REPO)
+            if not self._push_item(item, StageName.REPO, enter=True):
+                # The coordinator is single-threaded and the predicate above
+                # reserves both capacities. Retain exactly one retry value if
+                # an injected/custom queue declines unexpectedly.
+                source.pending = repo
+                break
+            source.pending = None
+            pushed += 1
+        return pushed
 
     def _begin_direct_issue_source(self, repo: str) -> None:
         """Initialize one bounded cursor for this pass's ``--issues`` input."""

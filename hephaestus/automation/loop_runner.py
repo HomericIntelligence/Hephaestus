@@ -616,12 +616,12 @@ def _resolve_org_and_repos(
         candidates = _gh_list_repos(org)
         if not candidates:
             return (org, [], "No repos returned from gh repo list — possible rate limit.")
-        LOG.info("Sorting %d repos by open-issue count ...", len(candidates))
-        if args.dry_run:
-            repos = _sort_repos_by_open_count(org, candidates, dry_run=True)
-        else:
-            repos = _sort_repos_by_open_count(org, candidates)
-        return (org, repos, None)
+        LOG.info(
+            "Discovered %d repos in deterministic full-name order; "
+            "issue discovery begins in the bounded pipeline source.",
+            len(candidates),
+        )
+        return (org, candidates, None)
 
     # Branch 4: no flags — default to cwd repo
     detected_org, detected_repo = _detect_cwd_repo()

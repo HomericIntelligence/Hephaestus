@@ -87,34 +87,53 @@ def _detect_cwd_repo() -> tuple[str | None, str | None]:
 
 
 def _gh_list_repos(org: str) -> list[str]:
-    """Return non-archived, non-fork repos for ``org``."""
-    try:
-        out = gh_call(
-            [
-                "repo",
-                "list",
-                org,
-                "--no-archived",
-                "--json",
-                "name,isArchived,isFork",
-                "--limit",
-                "200",
-            ],
-            timeout=NETWORK_TIMEOUT,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise SystemExit(f"gh repo list {org} timed out after {exc.timeout}s") from exc
-    except subprocess.CalledProcessError as exc:
-        raise SystemExit(
-            f"gh repo list {org} failed (rc={exc.returncode}): {(exc.stderr or '').strip()}"
-        ) from exc
-    try:
-        entries = json.loads(out.stdout or "[]")
-    except json.JSONDecodeError as exc:
-        raise SystemExit(f"gh repo list returned invalid JSON: {exc}") from exc
-    return [
-        e["name"] for e in entries if not e.get("isArchived", False) and not e.get("isFork", False)
-    ]
+    """Return non-archived, non-fork repos for ``org`` one page at a time.
+
+    ``gh repo list --limit`` silently caps organization discovery.  Requesting
+    an explicit REST page bounds the response held in memory and lets an
+    organization larger than that historical cap reach the coordinator.  The
+    coordinator then admits the returned names through its bounded repository
+    source; this helper deliberately does *not* inspect issue backlogs.
+    """
+    repos: list[str] = []
+    page = 1
+    while True:
+        try:
+            out = gh_call(
+                [
+                    "api",
+                    (
+                        f"/orgs/{org}/repos?per_page=100&type=all&sort=full_name"
+                        f"&direction=asc&page={page}"
+                    ),
+                ],
+                timeout=NETWORK_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise SystemExit(f"gh repo list {org} timed out after {exc.timeout}s") from exc
+        except subprocess.CalledProcessError as exc:
+            raise SystemExit(
+                f"gh repo list {org} failed (rc={exc.returncode}): {(exc.stderr or '').strip()}"
+            ) from exc
+        try:
+            entries = json.loads(out.stdout or "[]")
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"gh repo list returned invalid JSON: {exc}") from exc
+        if not isinstance(entries, list):
+            raise SystemExit("gh repo list returned a JSON value other than an array")
+
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise SystemExit("gh repo list returned a malformed repository entry")
+            name = entry.get("name")
+            if not isinstance(name, str) or not name:
+                raise SystemExit("gh repo list returned a repository entry without a name")
+            if not entry.get("isArchived", False) and not entry.get("isFork", False):
+                repos.append(name)
+
+        if len(entries) < 100:
+            return repos
+        page += 1
 
 
 def _iter_open_issue_meta(org: str, repo: str) -> Iterator[dict[str, Any]]:
