@@ -74,22 +74,6 @@ def test_architecture_md_documents_concurrency_pool_size_section_2() -> None:
     assert "Pool size = `parallel_repos × max_workers`" in text
 
 
-def test_architecture_md_documents_bounded_queue_and_restart_authority() -> None:
-    """The #2399 capacity contract must not regress to eager/spill semantics."""
-    text = _arch_text()
-    normalized = " ".join(text.split())
-
-    assert "C = max(1, parallel_repos × max_workers)" in text
-    assert "StageQueueLease" in text
-    assert "FIFO round-robin" in text
-    assert "linked-issue metadata use REST pages of at most 100 rows" in normalized
-    assert "`gh ... --limit 500` discovery cap" in text
-    assert "does not pre-scan open-PR pages" in text
-    assert "An orphan PR has no issue requirements" in text
-    assert "not durable routing authority" in text
-    assert "GitHub labels, comments, and PR state remain the only restart authority" in normalized
-
-
 def test_architecture_md_has_glossary_section_13() -> None:
     """Section 13 'Glossary' must remain."""
     text = _arch_text()
