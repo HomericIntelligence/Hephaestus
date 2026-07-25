@@ -77,10 +77,16 @@ class TestTimerHeap:
             pool=FakeWorkerPool(),
             install_signals=False,
         )
-        blocker = _item(2)
         waiting = _item(1)
-        coordinator._push_item(blocker, StageName.PR_REVIEW, enter=True)
+        # Park a genuinely admitted item so it owns the sole global permit.
+        # Inject the blocker directly to model a stale/corrupt full stage:
+        # normal permit accounting cannot create a second live item at C=1,
+        # but timer re-entry must still retain ownership instead of losing it.
+        coordinator._push_item(waiting, StageName.PR_REVIEW, enter=True)
+        assert coordinator._claim_item(StageName.PR_REVIEW) is waiting
         coordinator._timer_park(waiting, 0.0)
+        blocker = _item(2)
+        coordinator.queues[StageName.PR_REVIEW].push(blocker)
 
         coordinator._wake_timers()
 

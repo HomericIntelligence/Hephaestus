@@ -888,10 +888,14 @@ class TestImplementationAdmission:
         implementation = StubStage(StageOutcome(Disposition.ADVANCE, "PR opened"))
         coordinator.stages[StageName.IMPLEMENTATION] = implementation
 
-        blocker = _issue_item(22, StageName.PR_REVIEW)
         item = _issue_item(21, StageName.IMPLEMENTATION)
-        coordinator._push_item(blocker, StageName.PR_REVIEW, enter=True)
         coordinator._push_item(item, StageName.IMPLEMENTATION, enter=True)
+        # The global C=1 invariant prevents ordinary admission of both the
+        # implementation item and a review blocker.  Inject a stale full
+        # destination to exercise the defensive lossless-handoff path: it
+        # must retain the source lease rather than poison a completed action.
+        blocker = _issue_item(22, StageName.PR_REVIEW)
+        coordinator.queues[StageName.PR_REVIEW].push(blocker)
 
         coordinator._drain_implementation()
 
