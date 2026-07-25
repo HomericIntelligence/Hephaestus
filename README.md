@@ -296,7 +296,7 @@ The package currently installs 49 console scripts from `[project.scripts]`.
 | `hephaestus-agent-stage` | Run one Claude or Codex automation stage with prompt and skill context |
 | `hephaestus-ensure-state-labels` | Idempotently provision the planning labels (`state:needs-plan`, `state:plan-no-go`, `state:plan-go`, and `state:plan-blocked`) on one or more repos |
 | `hephaestus-audit-prs` | Audit ALL open PRs in one coordinator agent invocation |
-| `hephaestus-drive-prs-green` | Review open PRs and wait for their required branch-protection checks through the pr_review/merge_wait pipeline slice |
+| `hephaestus-drive-prs-green` | Review directly scoped PRs or PRs linked from discovered issues through the pr_review/merge_wait pipeline slice; it does not sweep unrelated open PRs |
 
 #### Private Pi provider setup
 

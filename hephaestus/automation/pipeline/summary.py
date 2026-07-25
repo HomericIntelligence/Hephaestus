@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections import Counter
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from hephaestus.automation.pipeline.work_item import ItemKind, PreservedWorktree, WorkItem
 from hephaestus.cli.utils import emit_json_status
@@ -114,6 +115,43 @@ def _disposition_bucket(item: WorkItem) -> str:
     return cell.split(":")[0].split(" ")[0].lower()
 
 
+@dataclass
+class TerminalSummary:
+    """Constant-space aggregates for terminal pipeline outcomes.
+
+    The coordinator may retain only a recent bounded window of detailed
+    :class:`WorkItem` objects during an all-organization run.  This accumulator
+    preserves the run-wide counts needed for the final status and aggregate
+    summary without becoming a second per-item ledger.
+    """
+
+    total: int = 0
+    _dispositions: Counter[str] = field(default_factory=Counter)
+    _per_stage: Counter[str] = field(default_factory=Counter)
+
+    def record(self, item: WorkItem) -> None:
+        """Add one terminal or resumable item outcome to the aggregate."""
+        self.total += 1
+        self._dispositions[_disposition_bucket(item)] += 1
+        self._per_stage[item.stage.value] += 1
+
+    def reset(self) -> None:
+        """Start a fresh reseed-pass aggregate without retaining item identities."""
+        self.total = 0
+        self._dispositions.clear()
+        self._per_stage.clear()
+
+    @property
+    def dispositions(self) -> dict[str, int]:
+        """Return a stable copy of counts grouped by disposition."""
+        return dict(sorted(self._dispositions.items()))
+
+    @property
+    def per_stage(self) -> dict[str, int]:
+        """Return a stable copy of counts grouped by final stage."""
+        return dict(sorted(self._per_stage.items()))
+
+
 def _json_message(exit_code: int) -> str:
     """Map a pipeline exit code to its JSON summary message."""
     if exit_code == 130:
@@ -142,14 +180,18 @@ def print_summary(
     preserved: list[PreservedWorktree],
     *,
     json_out: bool,
+    terminal_summary: TerminalSummary | None = None,
 ) -> None:
     """Log the end-of-run summary; emit the JSON envelope when requested.
 
     Args:
-        items: Every work item the run ever queued (results attached).
+        items: Recent detailed work items (results attached).
         stats: Aggregate run statistics (exit code, loops, agent time, wall).
         preserved: ``(repo, issue_number, worktree_path)`` tuples for failed items.
         json_out: Emit the machine-readable ``emit_json_status`` envelope.
+        terminal_summary: Optional constant-space aggregate for all terminal
+            outcomes.  When supplied, it controls aggregate counts while
+            ``items`` remains the bounded detailed reporting window.
 
     """
     items = latest_logical_items(items)
@@ -165,16 +207,26 @@ def print_summary(
     for item in items:
         logger.info("%s", _item_row(item))
 
-    dispositions: dict[str, int] = {}
-    per_stage: dict[str, int] = {}
-    for item in items:
-        dispositions[_disposition_bucket(item)] = dispositions.get(_disposition_bucket(item), 0) + 1
-        per_stage[item.stage.value] = per_stage.get(item.stage.value, 0) + 1
+    if terminal_summary is None:
+        dispositions: dict[str, int] = {}
+        per_stage: dict[str, int] = {}
+        for item in items:
+            dispositions[_disposition_bucket(item)] = (
+                dispositions.get(_disposition_bucket(item), 0) + 1
+            )
+            per_stage[item.stage.value] = per_stage.get(item.stage.value, 0) + 1
+        total_items = len(items)
+    else:
+        dispositions = terminal_summary.dispositions
+        per_stage = terminal_summary.per_stage
+        total_items = terminal_summary.total
 
     logger.info("")
     logger.info("=== Aggregates ===")
-    logger.info("  items: %d  dispositions: %s", len(items), dict(sorted(dispositions.items())))
+    logger.info("  items: %d  dispositions: %s", total_items, dict(sorted(dispositions.items())))
     logger.info("  per-stage: %s", dict(sorted(per_stage.items())))
+    if terminal_summary is not None and total_items > len(items):
+        logger.info("  detailed terminal rows retained: %d of %d", len(items), total_items)
     logger.info(
         "  agent jobs: %d (%.1fs total)  loops: %d  wall: %.1fs  interrupted: %s",
         stats.agent_job_count,

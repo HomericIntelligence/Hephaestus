@@ -28,17 +28,61 @@ from hephaestus.automation.loop_repo_manager import (
 from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
 
 
+class TestOrgRepoSource:
+    """Bounded organization-repository source contracts."""
+
+    def test_pages_are_fetched_only_when_the_prior_page_is_consumed(self) -> None:
+        first_page = [
+            {"name": f"repo-{number:03d}", "fork": False, "archived": False}
+            for number in range(100)
+        ]
+        second_page = [{"name": "repo-100", "fork": False, "archived": False}]
+        with patch(
+            "hephaestus.automation.loop_repo_manager.gh_call",
+            side_effect=[
+                MagicMock(stdout=json.dumps(first_page)),
+                MagicMock(stdout=json.dumps(second_page)),
+            ],
+        ) as mock_gh:
+            source = loop_repo_manager._iter_gh_repos("acme")
+            first = [next(source) for _ in range(100)]
+            assert mock_gh.call_count == 1
+            tail = list(source)
+
+        assert first + tail == [f"repo-{number:03d}" for number in range(100)] + ["repo-100"]
+        assert mock_gh.call_args_list[1].args[0][-1].endswith("page=2")
+
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            {"name": "missing-flags"},
+            {"name": "not-a-bool", "fork": "false", "archived": False},
+            {"name": "not-a-bool", "fork": False, "archived": 0},
+        ],
+    )
+    def test_rejects_malformed_rest_repository_flags(self, entry: dict[str, object]) -> None:
+        with (
+            patch(
+                "hephaestus.automation.loop_repo_manager.gh_call",
+                return_value=MagicMock(stdout=json.dumps([entry])),
+            ),
+            pytest.raises(RuntimeError, match="malformed flags"),
+        ):
+            list(loop_repo_manager._iter_gh_repos("acme"))
+
+
 class TestListOpenPrMeta:
     """Tests for open pull-request metadata discovery."""
 
-    def test_returns_sorted_author_metadata_from_paginated_rows(self) -> None:
-        pages = [
-            [{"number": 9, "user": {"login": "depbot", "type": "Bot"}}],
-            [{"number": 3, "user": {"login": "alice", "type": "User"}}],
+    def test_returns_sorted_author_metadata_from_compatibility_wrapper(self) -> None:
+        """The legacy list wrapper preserves its sorted materialized contract."""
+        page = [
+            {"number": 9, "user": {"login": "depbot", "type": "Bot"}},
+            {"number": 3, "user": {"login": "alice", "type": "User"}},
         ]
         with patch(
             "hephaestus.automation.loop_repo_manager.gh_call",
-            return_value=MagicMock(stdout=json.dumps(pages)),
+            return_value=MagicMock(stdout=json.dumps(page)),
         ) as mock_gh:
             result = loop_repo_manager._list_open_pr_meta("acme", "widget")
 
@@ -58,17 +102,15 @@ class TestListOpenPrMeta:
         ]
         assert mock_gh.call_args.args[0] == [
             "api",
-            "/repos/acme/widget/pulls?state=open&per_page=100",
-            "--paginate",
-            "--slurp",
+            "/repos/acme/widget/pulls?state=open&per_page=100&sort=created&direction=asc&page=1",
         ]
         assert mock_gh.call_args.kwargs["timeout"] == NETWORK_TIMEOUT
 
     def test_normalizes_malformed_user_metadata(self) -> None:
-        pages = [[{"number": 7, "user": "unexpected"}, {"number": 8, "user": None}]]
+        page = [{"number": 7, "user": "unexpected"}, {"number": 8, "user": None}]
         with patch(
             "hephaestus.automation.loop_repo_manager.gh_call",
-            return_value=MagicMock(stdout=json.dumps(pages)),
+            return_value=MagicMock(stdout=json.dumps(page)),
         ):
             result = loop_repo_manager._list_open_pr_meta("acme", "widget")
 
@@ -87,6 +129,87 @@ class TestListOpenPrMeta:
             pytest.raises(RuntimeError, match="failed to list open PRs"),
         ):
             loop_repo_manager._list_open_pr_meta("acme", "widget")
+
+    def test_iterator_reads_following_page_only_after_consuming_first(self) -> None:
+        """Runtime PR discovery never asks gh to prefetch/slurp all pages."""
+        pages = [
+            [
+                {"number": number, "user": {"login": "alice", "type": "User"}}
+                for number in range(1, 101)
+            ],
+            [{"number": 101, "user": {"login": "bob", "type": "User"}}],
+        ]
+        with patch(
+            "hephaestus.automation.loop_repo_manager.gh_call",
+            side_effect=[MagicMock(stdout=json.dumps(page)) for page in pages],
+        ) as mock_gh:
+            result = loop_repo_manager._iter_open_pr_meta("acme", "widget")
+            first = [next(result) for _ in range(100)]
+            assert mock_gh.call_count == 1
+            tail = list(result)
+
+        assert [entry["number"] for entry in first + tail] == list(range(1, 102))
+        assert mock_gh.call_args_list[0].args[0] == [
+            "api",
+            "/repos/acme/widget/pulls?state=open&per_page=100&sort=created&direction=asc&page=1",
+        ]
+        assert mock_gh.call_args_list[1].args[0] == [
+            "api",
+            "/repos/acme/widget/pulls?state=open&per_page=100&sort=created&direction=asc&page=2",
+        ]
+        assert all(call.kwargs["timeout"] == NETWORK_TIMEOUT for call in mock_gh.call_args_list)
+
+
+class TestListOpenIssueMeta:
+    """Tests for uncapped open-issue metadata discovery."""
+
+    def test_yields_page_at_a_time_without_paginate_or_slurp(self) -> None:
+        """The cursor pulls the next page only after the current page is consumed."""
+        pages = [
+            [
+                {"number": number, "labels": [{"name": "bug"}], "title": f"Issue {number}"}
+                for number in range(1, 101)
+            ],
+            [{"number": 101, "labels": [], "title": "Issue 101"}],
+        ]
+        with patch(
+            "hephaestus.automation.loop_repo_manager.gh_call",
+            side_effect=[MagicMock(stdout=json.dumps(page)) for page in pages],
+        ) as mock_gh:
+            result = loop_repo_manager._iter_open_issue_meta("acme", "widget")
+            first = [next(result) for _ in range(100)]
+            assert mock_gh.call_count == 1
+            tail = list(result)
+
+        assert [entry["number"] for entry in first + tail] == list(range(1, 102))
+        assert first[0] == {"number": 1, "labels": ["bug"], "title": "Issue 1"}
+        assert tail[-1] == {"number": 101, "labels": [], "title": "Issue 101"}
+        assert mock_gh.call_args_list[0].args[0] == [
+            "api",
+            "/repos/acme/widget/issues?state=open&per_page=100&sort=created&direction=asc&page=1",
+        ]
+        assert mock_gh.call_args_list[1].args[0] == [
+            "api",
+            "/repos/acme/widget/issues?state=open&per_page=100&sort=created&direction=asc&page=2",
+        ]
+        assert all(call.kwargs["timeout"] == NETWORK_TIMEOUT for call in mock_gh.call_args_list)
+
+    @pytest.mark.parametrize(
+        "page",
+        [
+            {"not": "a list"},
+            [{"number": "not-an-int", "labels": [], "title": "broken"}],
+            [{"number": 1, "labels": ["not-an-object"], "title": "broken"}],
+        ],
+    )
+    def test_fails_closed_on_malformed_page(self, page: object) -> None:
+        """A malformed page cannot masquerade as an empty repository."""
+        with patch(
+            "hephaestus.automation.loop_repo_manager.gh_call",
+            return_value=MagicMock(stdout=json.dumps(page)),
+        ):
+            with pytest.raises(RuntimeError, match="failed to list open issues"):
+                list(loop_repo_manager._iter_open_issue_meta("acme", "widget"))
 
 
 class TestDetectCwdRepo:
@@ -391,7 +514,7 @@ class TestListOpenIssueNumbersEpicTagging:
             {"number": 82, "title": "Fix bug", "labels": ["bug"]},
         ]
         with (
-            patch.object(loop_repo_manager, "_list_open_issue_meta", return_value=meta),
+            patch.object(loop_repo_manager, "_list_open_issue_meta", return_value=iter(meta)),
             patch.object(loop_repo_manager, "skip_epics") as mock_skip,
         ):
             kept = loop_repo_manager._list_open_issue_numbers("MyOrg", "Proteus")
@@ -401,7 +524,7 @@ class TestListOpenIssueNumbersEpicTagging:
     def test_no_epics_means_no_label_write(self) -> None:
         meta = [{"number": 82, "title": "Fix bug", "labels": ["bug"]}]
         with (
-            patch.object(loop_repo_manager, "_list_open_issue_meta", return_value=meta),
+            patch.object(loop_repo_manager, "_list_open_issue_meta", return_value=iter(meta)),
             patch.object(loop_repo_manager, "skip_epics") as mock_skip,
         ):
             kept = loop_repo_manager._list_open_issue_numbers("MyOrg", "Proteus")

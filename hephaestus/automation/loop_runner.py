@@ -33,6 +33,7 @@ import logging
 import os
 import subprocess
 import sys
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,6 +49,7 @@ from hephaestus.automation.loop_repo_manager import (
     _clone_missing_repos as _clone_missing_repos,
     _detect_cwd_repo as _detect_cwd_repo,
     _gh_list_repos as _gh_list_repos,
+    _iter_gh_repos as _iter_gh_repos,
     _resolve_repo_dir as _resolve_repo_dir,
     _sort_repos_by_open_count as _sort_repos_by_open_count,
 )
@@ -210,6 +212,8 @@ class LoopConfig:
     dry_run: bool = False
     no_advise: bool = False
     nitpick: bool = False
+    # Retained CLI/config compatibility option. It does not expand the queue's
+    # linked-issue repository discovery into an unrelated open-PR sweep.
     drive_green_all: bool = False
     run_pre_pr_tests: bool = False
     # ``model`` is the catch-all applied to every phase when set; per-phase
@@ -330,10 +334,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--drive-green-all",
         action="store_true",
         help=(
-            "Pass --all to the drive-green phase: drive every open PR, "
-            "including those opened by teammates and bots. By default "
-            "drive-green operates only on PRs authored by the authenticated "
-            "viewer (#821)."
+            "Compatibility option for the retired broad drive-green sweep. "
+            "Repository discovery remains linked-issue based and never scans "
+            "unrelated open PRs; use --prs for an explicit PR scope."
         ),
     )
     p.add_argument(
@@ -398,6 +401,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "Enumerate non-fork, non-archived repos in a GitHub org. "
             "Pass `--org NAME` for a specific org, or `--org` alone to auto-detect "
             "the org from the current repo's git remote. "
+            "With --issues or --prs, also pass exactly one --repos REPO. "
             "Default (no flag): run only for the current repo."
         ),
     )
@@ -506,7 +510,9 @@ def _pipeline_scope_for_phases(phases: tuple[str, ...]) -> PipelineScope | None:
         raise SystemExit(str(exc)) from exc
 
 
-def _pipeline_event_log_path(projects_dir: Path, repos: list[str]) -> Path | None:
+def _pipeline_event_log_path(
+    projects_dir: Path, repos: list[str], *, has_repo_source: bool = False
+) -> Path | None:
     """Return the default durable event-log path for a loop invocation.
 
     The coordinator writes ``run_start`` before repo discovery. Keeping the
@@ -514,7 +520,7 @@ def _pipeline_event_log_path(projects_dir: Path, repos: list[str]) -> Path | Non
     ``projects_dir / repo`` early, which would look like a cloned checkout to
     the repo stage.
     """
-    if not repos:
+    if not repos and not has_repo_source:
         return None
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return Path(DEFAULT_STATE_DIR) / f"pipeline-events-{stamp}-{os.getpid()}.jsonl"
@@ -580,14 +586,20 @@ def _resolve_org_and_repos(
 
     Precedence:
       1. ``--repos`` given → use it; org from cwd (preferred) or ``--org NAME``.
-      2. ``--org NAME`` (explicit) → enumerate non-fork repos in NAME.
-      3. ``--org`` (no arg) → detect org from cwd; enumerate non-fork repos.
+      2. ``--org NAME`` (explicit) → stream non-fork repos in NAME.
+      3. ``--org`` (no arg) → detect org from cwd; stream non-fork repos.
       4. (no flags) → use only the cwd repo + its org.
 
     Returns ``("", [], "<reason>")`` on error so ``main()`` can log and exit.
     """
     # Branch 1: explicit --repos
     if args.repos:
+        if (args.issues or args.prs) and len(args.repos) != 1:
+            return (
+                "",
+                [],
+                "--issues/--prs require exactly one repository via --repos REPO.",
+            )
         detected_org, _ = _detect_cwd_repo()
         explicit_org = args.org if isinstance(args.org, str) else None
         org = explicit_org or detected_org
@@ -612,16 +624,22 @@ def _resolve_org_and_repos(
             org = detected_org
         else:
             org = args.org
-        LOG.info("Discovering repos in %s ...", org)
-        candidates = _gh_list_repos(org)
-        if not candidates:
-            return (org, [], "No repos returned from gh repo list — possible rate limit.")
-        LOG.info("Sorting %d repos by open-issue count ...", len(candidates))
-        if args.dry_run:
-            repos = _sort_repos_by_open_count(org, candidates, dry_run=True)
-        else:
-            repos = _sort_repos_by_open_count(org, candidates)
-        return (org, repos, None)
+        # The coordinator owns a resettable, paged source for an org-wide
+        # run. Do not enumerate every repository here merely to construct the
+        # pipeline configuration; that would recreate the eager O(org) spill
+        # this wrapper is meant to avoid.
+        if not args.issues and not args.prs:
+            LOG.info("Streaming repositories in %s through the bounded pipeline source ...", org)
+            return (org, [], None)
+
+        # Issue and PR numbers are repository-local.  Refuse the ambiguous
+        # combination instead of materializing an entire organization and
+        # silently choosing its first repository as the direct-scope target.
+        return (
+            org,
+            [],
+            "--org with --issues/--prs requires exactly one --repos REPO scope.",
+        )
 
     # Branch 4: no flags — default to cwd repo
     detected_org, detected_repo = _detect_cwd_repo()
@@ -637,7 +655,12 @@ def _resolve_org_and_repos(
 
 
 def _build_pipeline_config(
-    args: argparse.Namespace, cfg: LoopConfig, org: str, repos: list[str]
+    args: argparse.Namespace,
+    cfg: LoopConfig,
+    org: str,
+    repos: list[str],
+    *,
+    repo_source_factory: Callable[[], Iterator[str]] | None = None,
 ) -> PipelineConfig:
     """Build a PipelineConfig from the parsed args and LoopConfig.
 
@@ -664,6 +687,7 @@ def _build_pipeline_config(
     return PipelineConfig(
         org=org,
         repos=repos,
+        repo_source_factory=repo_source_factory,
         issues=cfg.issues,
         prs=cfg.prs,
         loops=cfg.loops,
@@ -690,7 +714,9 @@ def _build_pipeline_config(
         serialize_file_overlap=cfg.serialize_file_overlap,
         metrics_port=cfg.metrics_port,
         circuit_breaker_snapshot_provider=circuit_breaker_snapshot_provider,
-        event_log_path=_pipeline_event_log_path(cfg.projects_dir, repos),
+        event_log_path=_pipeline_event_log_path(
+            cfg.projects_dir, repos, has_repo_source=repo_source_factory is not None
+        ),
         projects_dir=cfg.projects_dir,
         repo_roots=cfg.repo_roots,
         json_out=args.json,
@@ -763,7 +789,12 @@ def _error_exit(args: argparse.Namespace, message: str, json_message: str | None
 
 
 def _dispatch_pipeline(
-    args: argparse.Namespace, cfg: LoopConfig, org: str, repos: list[str]
+    args: argparse.Namespace,
+    cfg: LoopConfig,
+    org: str,
+    repos: list[str],
+    *,
+    repo_source_factory: Callable[[], Iterator[str]] | None = None,
 ) -> int:
     """Run the queue-based pipeline and return its exit code.
 
@@ -781,11 +812,19 @@ def _dispatch_pipeline(
         The pipeline's exit code.
 
     """
-    if not cfg.dry_run:
+    if not cfg.dry_run and repos:
         _preflight_token_scopes(cfg.org, repos[0])
     from hephaestus.automation.pipeline.coordinator import run_pipeline
 
-    return run_pipeline(_build_pipeline_config(args, cfg, org, repos))
+    return run_pipeline(
+        _build_pipeline_config(
+            args,
+            cfg,
+            org,
+            repos,
+            repo_source_factory=repo_source_factory,
+        )
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -805,6 +844,14 @@ def main(argv: list[str] | None = None) -> int:
         return _error_exit(args, err)
 
     projects_dir = resolve_projects_dir(args.projects_dir, prefer_cwd_parent=True)
+    streaming_org_scope = args.org is not None and not args.repos and not (args.issues or args.prs)
+    root_scope_repos = repos
+    if streaming_org_scope:
+        cwd_org, cwd_repo = _detect_cwd_repo()
+        if cwd_repo and cwd_org and cwd_org.casefold() == org.casefold():
+            # Preserve the current checkout for its matching repository even
+            # though the streamed source has not yet yielded that name.
+            root_scope_repos = [cwd_repo]
     cfg = LoopConfig(
         loops=args.loops,
         max_workers=args.max_workers,
@@ -831,7 +878,7 @@ def main(argv: list[str] | None = None) -> int:
         gh_global_burst=args.gh_global_burst,
         org=org,
         projects_dir=projects_dir,
-        repo_roots=_current_checkout_repo_roots(args, org, repos, projects_dir),
+        repo_roots=_current_checkout_repo_roots(args, org, root_scope_repos, projects_dir),
         # A non-positive --phase-timeout explicitly disables the bound; any
         # positive value (including the env-overridable default) applies it.
         phase_timeout_s=(
@@ -840,10 +887,15 @@ def main(argv: list[str] | None = None) -> int:
         metrics_port=args.metrics_port,
     )
 
-    if not repos:
+    org_repo_source = (lambda: _iter_gh_repos(org)) if streaming_org_scope else None
+
+    if not repos and org_repo_source is None:
         return _error_exit(args, "Repo list is empty; nothing to do.", "empty repo list")
 
-    LOG.info("Repos to process: %s", " ".join(repos))
+    if org_repo_source is not None:
+        LOG.info("Repos to process: streamed from organization %s", org)
+    else:
+        LOG.info("Repos to process: %s", " ".join(repos))
     LOG.info(
         "Loops: %d | Max workers: %d | Parallel repos: %d | Agent: %s | Dry run: %s",
         cfg.loops,
@@ -861,7 +913,13 @@ def main(argv: list[str] | None = None) -> int:
     from hephaestus.utils.terminal import install_sigtstp_only
 
     install_sigtstp_only()
-    return _dispatch_pipeline(args, cfg, org, repos)
+    return _dispatch_pipeline(
+        args,
+        cfg,
+        org,
+        repos,
+        repo_source_factory=org_repo_source,
+    )
 
 
 if __name__ == "__main__":

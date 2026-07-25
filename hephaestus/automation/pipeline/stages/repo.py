@@ -2,7 +2,7 @@
 
 Binding contract: docs/architecture.md §5.1 "repo".
 
-States: ENTER -> CLONE_WAIT -> DISCOVER -> SEEDED.
+States: ENTER -> CLONE_WAIT -> DISCOVER -> SOURCE.
 
 Steps:
 
@@ -14,16 +14,12 @@ Steps:
    checkout. Both operations are logged-skipped under dry-run — the
    coordinator's ``_submit`` asserts no job is ever submitted in dry-run.
    Budget ``clone`` = 2; exhaustion -> finished(fail).
-3. [M] DISCOVER: list issues (read-only ``_list_open_issue_meta``), dedup,
-   ``partition_epics`` -> tag epics ``state:skip`` via
-   ``ctx.github.skip_epics`` [durable, BEFORE excluding], classify each kept
-   issue via the REUSED :func:`~..seeding.seed_issue` /
-   :func:`~..seeding.classify_issue`, and (``--drive-green-all``) route
-   open PRs with a linked tracked issue to PR review.
-4. [M] SEEDED: expose the classified products in
-   ``item.payload["products"]`` — the coordinator (queue owner) performs the
-   actual queue pushes when routing the repo item — and finish
-   ``FINISH_PASS(seeded:N)``. The repo item is terminal.
+3. [M] DISCOVER: initialize one page-at-a-time metadata cursor. It never
+   materializes a list of classified products.
+4. [M] SOURCE: the coordinator transfers the bounded cursor to its fair
+   C-capped registry, then admits one metadata row only when an issue can own
+   a live-work permit. Epics are tagged ``state:skip`` [durable, BEFORE
+   excluding].
 
 Discovery seams (``_repo_manager`` / ``_seeding`` module attributes) mirror
 the ``loop_runner._admission`` seam pattern so unit tests patch the reads
@@ -33,12 +29,12 @@ without network I/O.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hephaestus.automation import loop_repo_manager as _repo_manager, pr_discovery as _pr_discovery
-from hephaestus.automation.pipeline import seeding as _seeding
-from hephaestus.automation.state_labels import STATE_PLAN_BLOCKED, partition_epics
+from hephaestus.automation import loop_repo_manager as _repo_manager
 
 from .base import (
     GIT_JOB_TIMEOUT_S,
@@ -59,24 +55,6 @@ from .base import (
 logger = logging.getLogger(__name__)
 
 
-def _drive_green_pr_is_in_scope(
-    pr: dict[str, Any], *, include_bot_prs: bool, viewer_login: str
-) -> bool:
-    """Return whether an orphan PR is eligible and belongs to author scope."""
-    if not _pr_discovery.pr_needs_loop_review(pr):
-        return False
-    if not include_bot_prs and _pr_discovery._is_bot_pr_author(pr):
-        return False
-    if not _pr_discovery._is_viewer_authored(pr, viewer_login):
-        if (pr.get("user") or {}).get("login") is None:
-            logger.warning(
-                "PR #%s has no user.login; skipping under author filter (#821)",
-                pr.get("number"),
-            )
-        return False
-    return True
-
-
 def _repo_checkout_path(item: WorkItem, ctx: StageContext) -> Path:
     """Return the effective local checkout path for the repo item.
 
@@ -89,43 +67,23 @@ def _repo_checkout_path(item: WorkItem, ctx: StageContext) -> Path:
     return projects_dir / item.repo if repo_root == projects_dir else repo_root
 
 
-def _tag_epics(repo: str, ctx: StageContext, epics_labels: dict[int, list[str]]) -> None:
-    """Write epic skip labels and log the resulting durable exclusions."""
-    ctx.github.skip_epics(epics_labels)
-    for number in epics_labels:
-        logger.info("repo:%s: #%d is an epic; tagged state:skip, excluded", repo, number)
+@dataclass
+class RepoIssueSource:
+    """Bounded discovery cursor retained by the coordinator after repo setup.
 
+    ``pending`` holds at most the one metadata row whose possible issue entry
+    is waiting for a coordinator-owned queue slot.  The iterator itself holds
+    at most one fetched GitHub page.  In particular, this object never stores
+    a classified ``SeedEntry``/``WorkItem`` product list.
+    """
 
-def _partition_and_tag_epics(
-    repo: str, ctx: StageContext, issues_meta: list[dict[str, Any]]
-) -> tuple[list[int], list[int]]:
-    """Return issue partitions after durably tagging every discovered epic."""
-    kept, epics = partition_epics(issues_meta)
-    if not epics:
-        return kept, epics
-    epic_set = set(epics)
-    epics_labels = {
-        int(metadata["number"]): list(metadata.get("labels") or [])
-        for metadata in issues_meta
-        if int(metadata["number"]) in epic_set
-    }
-    _tag_epics(repo, ctx, epics_labels)
-    return kept, epics
-
-
-def _repair_blocked_audit(facts: _seeding.IssueFacts, ctx: StageContext) -> None:
-    """Repair an interrupted BLOCKED explanation before excluding the issue."""
-    if STATE_PLAN_BLOCKED in facts.labels:
-        ctx.github.ensure_blocked_audit(facts.number)
+    metadata: Iterator[dict[str, Any]]
+    pending: dict[str, Any] | None = None
+    seeded_count: int = 0
 
 
 class RepoStage(Stage):
-    """Repo discovery and classification stage (the pipeline's sole producer).
-
-    Products are ``(kind, identifier, stage, reason, facts)`` tuples staged
-    in ``item.payload["products"]``; the coordinator turns them into
-    :class:`WorkItem` pushes because stage code never touches queues.
-    """
+    """Repo discovery stage that initializes the coordinator-owned source."""
 
     kind = StageName.REPO
 
@@ -163,14 +121,11 @@ class RepoStage(Stage):
         if item.state == "DISCOVER":
             return self._discover(item, ctx)
 
-        if item.state == "SEEDED":
-            seeded_count = item.payload.get("seeded_count")
-            if seeded_count is None:
-                seeded_count = sum(
-                    1 for p in item.payload.get("products", []) if p.get("stage") is not None
-                )
-            seeded = int(seeded_count)
-            return StageOutcome(Disposition.FINISH_PASS, note=f"seeded:{seeded}")
+        if item.state == "SOURCE":
+            # Coordinator._run_item externalizes this cursor into its fair
+            # registry. Returning Continue retains stage-protocol compatibility
+            # for direct unit calls while avoiding an eager product list.
+            return Continue(next_state="SOURCE")
 
         return StageOutcome(Disposition.FINISH_FAIL, note=f"unknown state: {item.state}")
 
@@ -221,89 +176,21 @@ class RepoStage(Stage):
         return JobRequest(job=job, on_done_state="DISCOVER")
 
     def _discover(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """[M] List, dedup, tag-then-exclude epics, classify, stage products."""
+        """[M] Initialize a bounded metadata source; do not classify eagerly."""
         try:
-            meta = _repo_manager._list_open_issue_meta(ctx.org, item.repo)
+            source = RepoIssueSource(_repo_manager._iter_open_issue_meta(ctx.org, item.repo))
         except Exception as exc:
             logger.warning("repo:%s: discovery failed: %s", item.repo, exc)
             return StageOutcome(Disposition.FINISH_FAIL, note=f"discovery failed: {exc}")
 
-        # Dedup while preserving listing order.
-        seen: set[int] = set()
-        deduped: list[dict[str, Any]] = []
-        for entry in meta:
-            number = int(entry["number"])
-            if number in seen:
-                continue
-            seen.add(number)
-            deduped.append(entry)
+        # ``--drive-green-all`` does not pre-scan unrelated PRs here. Orphan
+        # PRs have no linked issue requirements, and consuming their complete
+        # page stream would add unbounded latency without producing an
+        # admissible source item. Linked PR review context enters only through
+        # this repository's bounded issue cursor.
 
-        # Epic tagging: the ONE sanctioned seeding write, durable and BEFORE
-        # the exclusion is final (doc row "Epic tagging is the one seeding
-        # write; done BEFORE excluding").
-        try:
-            kept, epics = _partition_and_tag_epics(item.repo, ctx, deduped)
-        except Exception as exc:
-            logger.warning("repo:%s: could not tag excluded epics state:skip: %s", item.repo, exc)
-            return StageOutcome(Disposition.FINISH_FAIL, note=f"epic skip tag failed: {exc}")
-
-        products: list[dict[str, Any]] = [
-            {
-                "kind": "issue",
-                "number": num,
-                "stage": None,
-                "reason": f"epic #{num} excluded",
-            }
-            for num in epics
-        ]
-        covered_prs: set[int] = set()
-        for num in kept:
-            facts = _seeding.seed_issue_from_github(num, ctx.github)
-            _repair_blocked_audit(facts, ctx)
-            stage, reason = _seeding.classify_issue(facts)
-            if facts.pr_number is not None:
-                covered_prs.add(facts.pr_number)
-            products.append(
-                {
-                    "kind": "issue",
-                    "number": num,
-                    "stage": stage,
-                    "reason": reason,
-                    "pr": facts.pr_number if facts.pr_is_open else None,
-                    "labels": sorted(facts.labels),
-                    "title": facts.title,
-                    "body": facts.body,
-                }
-            )
-
-        # --drive-green-all: only linked PRs can be reviewed. Orphans have no
-        # requirements context and must remain outside the automation loop.
-        if getattr(ctx.config, "drive_green_all", False):
-            include_bot_prs = bool(getattr(ctx.config, "include_bot_prs", True))
-            include_all_authors = bool(getattr(ctx.config, "include_all_authors", False))
-            try:
-                open_prs = _repo_manager._list_open_pr_meta(ctx.org, item.repo)
-                viewer_login = "" if include_all_authors else _pr_discovery._resolve_viewer_login()
-            except Exception as exc:
-                logger.warning("repo:%s: PR discovery failed: %s", item.repo, exc)
-                return StageOutcome(Disposition.FINISH_FAIL, note=f"discovery failed: {exc}")
-            for pr in open_prs:
-                pr_number = int(pr["number"])
-                if pr_number in covered_prs:
-                    continue
-                if not _drive_green_pr_is_in_scope(
-                    pr, include_bot_prs=include_bot_prs, viewer_login=viewer_login
-                ):
-                    continue
-                logger.info(
-                    "repo:%s: skipping orphan PR #%d; no linked issue supplies requirements",
-                    item.repo,
-                    pr_number,
-                )
-
-        item.payload["products"] = products
-        item.payload["seeded_count"] = sum(1 for p in products if p.get("stage") is not None)
-        return Continue(next_state="SEEDED")
+        item.payload["_repo_issue_source"] = source
+        return Continue(next_state="SOURCE")
 
     def on_job_done(self, item: WorkItem, result: JobResult, ctx: StageContext) -> None:
         """Record checkout preparation success/failure (state still CLONE_WAIT).

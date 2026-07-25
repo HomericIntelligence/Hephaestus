@@ -5,8 +5,8 @@ pipeline (`hephaestus.automation.pipeline`): the metrics it exports, the alert
 rules it evaluates, the Service Level Objectives (SLOs) those metrics measure,
 and who owns responding to a fired alert.
 
-It closes the Section 9 audit finding (issue #2153): the pipeline already wrote
-structured JSONL events and served a local `/metrics` + `/health` endpoint, but
+It closes the Section 9 audit finding (issue #2153): the pipeline already emits
+structured JSONL diagnostic events and serves a local `/metrics` + `/health` endpoint, but
 job outcomes and stall state were not exported, and no document defined the
 metric catalog, alert ownership, or SLOs.
 
@@ -32,13 +32,17 @@ are constructed only when a metrics port is configured.
 - **`/health`** serves the JSON snapshot returned by the coordinator's
   `_health_snapshot`: the same lifecycle fields as the metrics, plus a
   top-level `status` of `ok` (running) or `stopping` (shutdown requested).
-- **Structured event log (JSONL).** When a loop runs, the coordinator writes a
-  durable JSONL event log (default:
+- **Structured event log (JSONL).** When a loop runs, the coordinator can append
+  a best-effort JSONL diagnostic log (default:
   `build/.issue_implementer/pipeline-events-<timestamp>-<pid>.jsonl`, set via
   `PipelineConfig.event_log_path`). Each metrics tick appends a
   `metrics_snapshot` record, and every alert transition appends an
   `alert_fired` or `alert_resolved` record carrying the alert `name`,
-  `severity`, and `message`. These are the lines to cite when escalating.
+  `severity`, and `message`. Local JSONL and the in-memory event window are
+  diagnostic only: a write failure disables further JSONL writes without
+  changing routing, and restart always reconstructs from GitHub labels,
+  comments, and PR state rather than this file. These are useful lines to cite
+  when escalating, not a durable authority.
 
 The alert queue-depth threshold is configurable via
 `PipelineConfig.alert_queue_depth_threshold` (default `100`); the stall
@@ -67,7 +71,7 @@ points at the emission chokepoint in `coordinator.py`.
 
 Alert rules read **only** live coordinator snapshot data — there are no
 speculative rules. `hephaestus/observability/alerts.py` evaluates the current
-snapshot each tick, and `AlertTracker` emits a durable transition (an
+snapshot each tick, and `AlertTracker` emits a diagnostic transition (an
 `alert_fired` / `alert_resolved` JSONL event and an update to
 `hephaestus_pipeline_alert_active`) only when a condition changes state, so a
 persistent degradation never produces repeated event spam.
@@ -75,7 +79,7 @@ persistent degradation never produces repeated event spam.
 | Alert | Severity | Condition | Owner | Runbook |
 | --- | --- | --- | --- | --- |
 | `circuit_breaker_open` | critical | Any circuit breaker in the snapshot reports `state == "open"`. | repository maintainer | [`docs/runbooks/automation-loop-crash.md`](runbooks/automation-loop-crash.md) |
-| `queue_depth_exceeds` | warning | Any stage queue depth exceeds `alert_queue_depth_threshold` (default `100`). | repository maintainer | [`docs/runbooks/ci-driver-stall.md`](runbooks/ci-driver-stall.md) |
+| `queue_depth_exceeds` | warning | Any stage queue's ready backlog exceeds `alert_queue_depth_threshold` (default `100`). Full queues are ordinary backpressure, not a completion fault. | repository maintainer | [`docs/runbooks/ci-driver-stall.md`](runbooks/ci-driver-stall.md) |
 | `pipeline_stalled` | warning | `stalled_ticks` reaches the stall threshold (default `3`) — drain ticks with no progress. | repository maintainer | [`docs/runbooks/ci-driver-stall.md`](runbooks/ci-driver-stall.md) |
 
 ## SLOs

@@ -97,6 +97,7 @@ def make_coordinator(
     seed_entries: list[list[SeedEntry]] | None = None,
     loops: int = 1,
     max_workers: int = 1,
+    parallel_repos: int = 1,
     dry_run: bool = False,
     serialize_file_overlap: bool = True,
     github: FakeStageGitHub | None = None,
@@ -108,6 +109,7 @@ def make_coordinator(
         repos=repos if repos is not None else ["repo-a"],
         loops=loops,
         max_workers=max_workers,
+        parallel_repos=parallel_repos,
         dry_run=dry_run,
         serialize_file_overlap=serialize_file_overlap,
         projects_dir=tmp_path,
@@ -158,9 +160,7 @@ class TestQuiescence:
         monkeypatch.setattr(server_mod, "MetricsHTTPServer", FakeMetricsServer)
         monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
         coordinator = Coordinator(
-            PipelineConfig(
-                org="org", repos=["repo-a"], loops=1, projects_dir=tmp_path, metrics_port=9123
-            ),
+            PipelineConfig(org="org", repos=[], loops=1, projects_dir=tmp_path, metrics_port=9123),
             github=FakeStageGitHub(),
             pool=FakeWorkerPool(),
             install_signals=False,
@@ -213,7 +213,11 @@ class TestQuiescence:
     ) -> None:
         """A repo seed's products traverse their entry stages into the ledger."""
         seed = [SeedEntry(kind="repo", identifier="repo-a", stage=StageName.REPO, reason="seed")]
-        coordinator, pool, _ = make_coordinator(tmp_path, monkeypatch, seed_entries=[seed])
+        # The repo item and its one actionable product are both live until
+        # each reaches the finished sink.
+        coordinator, pool, _ = make_coordinator(
+            tmp_path, monkeypatch, seed_entries=[seed], max_workers=2
+        )
 
         class ProducingRepoStage(StubStage):
             def step(self, item: WorkItem, ctx: Any) -> Any:
@@ -302,7 +306,9 @@ class TestQuiescence:
             SeedEntry(kind="issue", identifier=1, stage=StageName.PLANNING, reason="poison"),
             SeedEntry(kind="issue", identifier=2, stage=StageName.PLAN_REVIEW, reason="ok"),
         ]
-        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch, seed_entries=[seed])
+        coordinator, _, _ = make_coordinator(
+            tmp_path, monkeypatch, seed_entries=[seed], parallel_repos=2
+        )
 
         class PoisonStage(StubStage):
             def step(self, item: WorkItem, ctx: Any) -> Any:
@@ -545,7 +551,10 @@ class TestDrainOrder:
 
     def test_downstream_first(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """merge_wait drains before review, planning, and repo."""
-        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+        # This test intentionally fills four distinct stages before draining;
+        # the coordinator-wide permit budget must be large enough to admit
+        # that four-item fixture.
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch, max_workers=4)
         for stage in (
             StageName.PLANNING,
             StageName.MERGE_WAIT,
@@ -577,7 +586,9 @@ class TestAdmission:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """max_workers=1: the second same-repo item is not admitted."""
-        coordinator, pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=1)
+        coordinator, pool, _ = make_coordinator(
+            tmp_path, monkeypatch, max_workers=1, parallel_repos=2
+        )
         coordinator.stages[StageName.PLANNING] = StubStage(
             JobRequest(_agent_job(issue=1), on_done_state="VERIFY"),
             JobRequest(_agent_job(issue=2), on_done_state="VERIFY"),
@@ -591,25 +602,38 @@ class TestAdmission:
         assert coordinator.inflight_per_repo["repo-a"] == 1
         assert len(coordinator.queues[StageName.PLANNING]) == 1
 
-    def test_cap_is_per_repo_not_global(
+    def test_global_work_window_defers_second_repo_item(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Items of different repos are admitted independently."""
+        """The global work window caps jobs across repositories and stage queues.
+
+        With C=1, a second item in a different stage cannot be admitted while
+        the first is in flight. The global permit rejects it before the worker
+        admission check, rather than allowing one item per stage queue.
+        """
         coordinator, pool, _ = make_coordinator(
             tmp_path, monkeypatch, repos=["repo-a", "repo-b"], max_workers=1
         )
-        coordinator.stages[StageName.PLANNING] = StubStage(
+        coordinator.stages[StageName.MERGE_WAIT] = StubStage(
             JobRequest(_agent_job(repo="repo-a", issue=1), on_done_state="V"),
+        )
+        coordinator.stages[StageName.PR_REVIEW] = StubStage(
             JobRequest(_agent_job(repo="repo-b", issue=2), on_done_state="V"),
         )
-        coordinator._push_item(_issue_item(1, repo="repo-a"), StageName.PLANNING, enter=True)
-        coordinator._push_item(_issue_item(2, repo="repo-b"), StageName.PLANNING, enter=True)
-
+        assert (
+            coordinator._push_item(_issue_item(1, repo="repo-a"), StageName.MERGE_WAIT, enter=True)
+            is True
+        )
+        assert (
+            coordinator._push_item(_issue_item(2, repo="repo-b"), StageName.PR_REVIEW, enter=True)
+            is False
+        )
         coordinator._drain_queues()
 
-        assert len(pool.submitted) == 2
+        assert len(pool.submitted) == 1
         assert coordinator.inflight_per_repo["repo-a"] == 1
-        assert coordinator.inflight_per_repo["repo-b"] == 1
+        assert coordinator.inflight_per_repo["repo-b"] == 0
+        assert coordinator.queues[StageName.PR_REVIEW].snapshot() == []
 
 
 class TestRateBudget:
@@ -848,6 +872,73 @@ class TestFailBackRouting:
 class TestImplementationAdmission:
     """Topological order + file-overlap reuse for the implementation queue."""
 
+    def test_full_downstream_retains_implementation_lease_until_handoff(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """C=1 keeps a completed implementation item leased when review is full.
+
+        Implementation has its own topological drain, so it must claim through
+        the same lease protocol as every other stage.  Popping the source queue
+        directly drops that ownership: a full PR-review queue then turns an
+        already-completed implementation action into a poisoned terminal item.
+        """
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch)
+        implementation = StubStage(StageOutcome(Disposition.ADVANCE, "PR opened"))
+        coordinator.stages[StageName.IMPLEMENTATION] = implementation
+
+        item = _issue_item(21, StageName.IMPLEMENTATION)
+        coordinator._push_item(item, StageName.IMPLEMENTATION, enter=True)
+        # The global C=1 invariant prevents ordinary admission of both the
+        # implementation item and a review blocker.  Inject a stale full
+        # destination to exercise the defensive lossless-handoff path: it
+        # must retain the source lease rather than poison a completed action.
+        blocker = _issue_item(22, StageName.PR_REVIEW)
+        coordinator.queues[StageName.PR_REVIEW].push(blocker)
+
+        coordinator._drain_implementation()
+
+        assert implementation.calls == [("enter", 21), ("step", 21)]
+        assert coordinator.queues[StageName.PR_REVIEW].snapshot() == [blocker]
+        assert len(coordinator.queues[StageName.IMPLEMENTATION]) == 0
+        assert coordinator.queues[StageName.IMPLEMENTATION].occupancy == 1
+        assert coordinator._leases[id(item)].item is item
+        assert coordinator._pending_handoffs[id(item)].target is StageName.PR_REVIEW
+        assert item.result is None
+
+        # Re-draining while the destination remains full must not re-run the
+        # completed implementation action.
+        coordinator._drain_implementation()
+        assert implementation.calls == [("enter", 21), ("step", 21)]
+
+        coordinator.queues[StageName.PR_REVIEW].pop()
+        coordinator._drain_pending_handoffs()
+
+        assert coordinator.queues[StageName.PR_REVIEW].snapshot() == [item]
+        assert id(item) not in coordinator._leases
+        assert id(item) not in coordinator._pending_handoffs
+        assert item.stage is StageName.PR_REVIEW
+
+    def test_retry_and_overlap_deferral_preserve_implementation_fifo_order(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A source retry remains ahead of a later overlap-deferred item."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        coordinator.stages[StageName.IMPLEMENTATION] = StubStage(
+            StageOutcome(Disposition.RETRY, "retry next tick")
+        )
+        retrying = _issue_item(21, StageName.IMPLEMENTATION)
+        deferred = _issue_item(22, StageName.IMPLEMENTATION)
+        coordinator._push_item(retrying, StageName.IMPLEMENTATION, enter=True)
+        coordinator._push_item(deferred, StageName.IMPLEMENTATION, enter=True)
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.admission._select_non_overlapping",
+            lambda issues, repo_of=None: (issues[:1], issues[1:]),
+        )
+
+        coordinator._drain_implementation()
+
+        assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == [retrying, deferred]
+
     def test_duplicate_issue_numbers_collapse_to_first_queued(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -932,7 +1023,9 @@ class TestImplementationAdmission:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """3+ copies of one issue: first dispatches, ALL later copies terminalize (#2057)."""
-        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        coordinator, _pool, _ = make_coordinator(
+            tmp_path, monkeypatch, max_workers=2, parallel_repos=2
+        )
         ran: list[int] = []
 
         class RecordingStage(StubStage):
@@ -1247,6 +1340,7 @@ class TestDurableEventLog:
             PipelineConfig(
                 org="org",
                 repos=["repo-a"],
+                max_workers=2,
                 projects_dir=tmp_path,
                 metrics_port=9123,
             ),
@@ -1700,7 +1794,12 @@ class TestPipelineScopeWiring:
         )
 
     def _scoped_config(
-        self, tmp_path: Path, *, issues: list[int], force: bool = False
+        self,
+        tmp_path: Path,
+        *,
+        issues: list[int],
+        force: bool = False,
+        parallel_repos: int = 1,
     ) -> PipelineConfig:
 
         return PipelineConfig(
@@ -1708,6 +1807,7 @@ class TestPipelineScopeWiring:
             repos=["repo-a"],
             issues=issues,
             loops=1,
+            parallel_repos=parallel_repos,
             projects_dir=tmp_path,
             scope=PipelineScope(frozenset({StageName.PLANNING, StageName.PLAN_REVIEW})),
             force=force,
@@ -1790,7 +1890,7 @@ class TestPipelineScopeWiring:
             "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
             fake_filter,
         )
-        config = self._scoped_config(tmp_path, issues=[1, 2, 3])
+        config = self._scoped_config(tmp_path, issues=[1, 2, 3], parallel_repos=2)
         coordinator = Coordinator(config, github=gh, pool=FakeWorkerPool(), install_signals=False)
 
         assert coordinator._seed_pass() == 2

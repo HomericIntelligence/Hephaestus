@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import queue as queue_mod
 import shlex
 import shutil
 import subprocess
@@ -323,6 +324,8 @@ class WorkerPool:
         )
         self._shutdown = shutdown
         self._completion_q = completion_q
+        self._completion_wakeup: threading.Event | None = None
+        self._completion_saturation: threading.Event | None = None
         self._repo_locks: dict[str, _RepoLockEntry] = {}
         self._repo_locks_guard = threading.Lock()
         self._lock_dir = lock_dir
@@ -345,6 +348,24 @@ class WorkerPool:
                 entry.users -= 1
                 if entry.users == 0 and self._repo_locks.get(repo) is entry:
                     self._repo_locks.pop(repo, None)
+
+    def set_completion_notifiers(
+        self,
+        *,
+        wakeup: threading.Event,
+        saturation: threading.Event,
+    ) -> None:
+        """Bind coordinator-owned completion wake and saturation latches.
+
+        The coordinator creates these latches before it submits work.  A
+        successful non-blocking completion write wakes its event loop; an
+        impossible full completion queue instead latches a fatal coordinator
+        fault.  The callback deliberately has no overflow buffer: retaining
+        the owning item in the coordinator's in-flight registry makes it
+        resumable during that fatal teardown.
+        """
+        self._completion_wakeup = wakeup
+        self._completion_saturation = saturation
 
     def submit(
         self,
@@ -438,7 +459,24 @@ class WorkerPool:
                 error=f"worker_crash: {type(exc).__name__}: {exc!s}"[:_ERR_MAX],
                 worker_id=worker_id,
             )
-        self._completion_q.put((handle, result))
+        try:
+            self._completion_q.put_nowait((handle, result))
+        except queue_mod.Full:
+            # With the coordinator's global C-in-flight invariant, a C-sized
+            # completion queue cannot fill before a worker has a slot to
+            # publish.  Treat a violation as an internal fault rather than
+            # blocking this callback forever.  There is intentionally no
+            # unbounded spill structure: finalization retains the in-flight
+            # WorkItem as RESUMABLE for the next run.
+            logger.error("completion queue saturated; refusing to block worker callback")
+            if self._completion_saturation is not None:
+                self._completion_saturation.set()
+            if self._completion_wakeup is not None:
+                self._completion_wakeup.set()
+            return
+
+        if self._completion_wakeup is not None:
+            self._completion_wakeup.set()
 
     def _run(
         self,
