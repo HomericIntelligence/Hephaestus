@@ -12,7 +12,8 @@ Entry routing (the binding contract is the classification table in
 
 - ``state:skip`` or epic → excluded (stage ``None``, logged)
 - PR merged → finished (pass, idempotent)
-- Open PR + at-or-past ``state:implementation-go`` → merge_wait
+- Open PR + PR-level ``state:implementation-go`` → merge_wait
+- Open PR + issue-level ``state:implementation-go`` → pr_review (legacy fallback)
 - Open PR, no impl-GO → pr_review (existing-PR path)
 - No PR, at-or-past ``state:plan-go`` → implementation
 - No PR, ``state:plan-no-go`` → planning (amend path)

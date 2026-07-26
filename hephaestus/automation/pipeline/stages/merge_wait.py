@@ -5,6 +5,16 @@ one ordinary REST squash merge only after it observes the exact active-run
 reviewed head, an exclusive implementation-GO label, an open ``main`` PR, and
 an explicitly absent auto-merge request. It never enables, disables, adopts,
 or polls native auto-merge.
+
+The implemented mini-state graph is:
+
+- Open PR: ``ENTER -> MERGE``, subject to the live implementation-GO check.
+- Already-merged PR: ``ENTER -> MERGE -> LEARN_WAIT -> MW_FINISH``,
+  preserving exactly-once post-merge learning.
+
+Dirty or blocked recovery is not a dormant compatibility branch here. Issue
+#2055 must introduce any such transition explicitly behind current,
+head-bound approval proof.
 """
 
 from __future__ import annotations

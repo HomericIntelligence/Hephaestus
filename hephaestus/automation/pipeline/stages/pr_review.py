@@ -13,10 +13,9 @@ contract):
 
 - States: ENTER -> REVIEW_WAIT -> VALIDATE_WAIT -> POST -> DIFFICULTY_WAIT
   -> ADDRESS_WAIT -> PUSH_WAIT -> EVAL -> COMPACT_REVIEWER_WAIT
-  -> COMPACT_WRITER_WAIT -> REVIEW_WAIT
-  or terminal
-  advance to ``merge_wait``. The legacy follow-up mini-states have been
-  retired (#2140); a clean GO advances to ``merge_wait`` from EVAL.
+  -> COMPACT_WRITER_WAIT -> REVIEW_WAIT or terminal advance to ``merge_wait``.
+  The legacy follow-up mini-states have been retired (#2140); a clean GO
+  advances to ``merge_wait`` from EVAL.
 - Budgets: ``pr_review_iter`` = 3 (soft cap), ``pr_review_hard`` = 6 (hard
   cap; rounds 4-6 are admitted ONLY while the unresolved-thread count
   strictly decreases — the #1554 progress-aware extension, legacy
