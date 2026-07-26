@@ -505,7 +505,7 @@ class StageContext:
     event_fn: Callable[[StageEvent], None] | None = None
 
     def now(self) -> float:
-        """Return the current time in seconds since epoch (injectable for tests)."""
+        """Return the injected stage clock value (monotonic in the coordinator)."""
         if self.now_fn is not None:
             return self.now_fn()
         return time.time()
