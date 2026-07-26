@@ -26,6 +26,7 @@ GIT_OPS: frozenset[str] = frozenset(
         "rebase",
         "push",
         "commit_push",
+        "release_branch_reservation",
     }
 )
 

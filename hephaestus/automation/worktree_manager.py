@@ -65,6 +65,11 @@ def _looks_like_sha(ref: str) -> bool:
     return len(ref) >= 7 and all(ch in "0123456789abcdefABCDEF" for ch in ref)
 
 
+def _is_full_commit_sha(ref: str) -> bool:
+    """Return whether ``ref`` is a full SHA-1 or SHA-256 commit id."""
+    return len(ref) in (40, 64) and all(ch in "0123456789abcdef" for ch in ref)
+
+
 class WorktreeDirtyError(Exception):
     """Raised when a worktree cannot be removed because it contains uncommitted changes."""
 
@@ -242,6 +247,8 @@ class WorktreeManager:
         branch_name: str | None = None,
         *,
         refresh_base: bool = False,
+        base_sha: str | None = None,
+        remote_branch_reserved: bool = False,
         isolated: bool = False,
         timeout: int | None = None,
     ) -> Path:
@@ -256,6 +263,12 @@ class WorktreeManager:
                 so each issue branches off the latest trunk; no-op when the base
                 is explicitly pinned. Default False preserves prior behavior for
                 all other callers (review, address-review, ci-driver).
+            base_sha: Exact synchronized base commit for a direct CLI scope.
+                It rejects all worktree/branch reuse and is incompatible with
+                ``refresh_base`` so a source cursor cannot silently move from
+                its bootstrap snapshot to a newer remote head.
+            remote_branch_reserved: Require the caller to have atomically
+                reserved the direct-scope branch on ``origin`` at ``base_sha``.
             isolated: When True, create an in-root detached checkout instead of
                 reusing another worktree that holds ``branch_name``. PR review
                 uses this so a preserved writer checkout is never
@@ -272,55 +285,43 @@ class WorktreeManager:
         with self.lock:
             isolated_key = f"review-pr-{issue_number}"
             worktree_key: int | str = isolated_key if isolated else issue_number
-            if worktree_key in self.worktrees:
-                logger.warning("Worktree for issue #%s already exists", issue_number)
-                return self.worktrees[worktree_key]
-
-            if refresh_base:
-                self.refresh_base_branch(timeout=timeout)
-
             if branch_name is None:
                 branch_name = f"{issue_number}-auto"
-
             worktree_path = self.base_dir / (isolated_key if isolated else f"issue-{issue_number}")
-
-            # Reuse, don't collide: git forbids the same branch in two worktrees.
-            # When ``branch_name`` is already checked out elsewhere (e.g. a PR
-            # resolved to its real head branch ``708-auto-impl`` which the
-            # issue-708 worktree already holds), ``git worktree add`` would fail
-            # with "already used by worktree at ..." (exit 128). Return that
-            # existing worktree and register it under this issue; the caller then
-            # syncs it to the PR head (fetch + reset --hard origin/<branch>).
-            existing = (
-                None if isolated else self._worktree_holding_branch(branch_name, timeout=timeout)
-            )
-            if existing is not None and existing != worktree_path:
-                logger.info(
-                    "Branch %s already checked out at %s — reusing that worktree for issue #%s",
-                    branch_name,
-                    existing,
-                    issue_number,
-                )
-                self.worktrees[worktree_key] = existing
-                return existing
-
-            if self._reuse_existing_dirty_worktree(
-                issue_number,
-                worktree_key,
-                worktree_path,
-                timeout=timeout,
+            if base_sha is not None and (
+                refresh_base
+                or isolated
+                or not remote_branch_reserved
+                or not _is_full_commit_sha(base_sha)
             ):
-                return worktree_path
-
-            # Remove existing clean worktree directory if present. Dirty
-            # registered worktrees are reused above; non-worktree paths with
-            # unknown contents fail closed there instead of being removed.
-            if worktree_path.exists():
-                logger.warning("Removing existing worktree directory: %s", worktree_path)
-                self._remove_worktree_path_forcefully(worktree_path, timeout=timeout)
+                raise RuntimeError("direct scope base pin invalid")
+            if base_sha is None and remote_branch_reserved:
+                raise RuntimeError("direct scope reservation requires a base pin")
+            if base_sha is None and (
+                existing := self._reuse_or_clear_normal_worktree(
+                    issue_number=issue_number,
+                    worktree_key=worktree_key,
+                    worktree_path=worktree_path,
+                    branch_name=branch_name,
+                    isolated=isolated,
+                    refresh_base=refresh_base,
+                    timeout=timeout,
+                )
+            ):
+                return existing
 
             try:
                 with file_lock(self._git_metadata_lock_path()):
+                    self._validate_direct_scope_worktree_request(
+                        base_sha=base_sha,
+                        remote_branch_reserved=remote_branch_reserved,
+                        refresh_base=refresh_base,
+                        isolated=isolated,
+                        worktree_key=worktree_key,
+                        worktree_path=worktree_path,
+                        branch_name=branch_name,
+                        timeout=timeout,
+                    )
                     try:
                         if isolated:
                             self._add_isolated_worktree_for_branch(
@@ -332,12 +333,14 @@ class WorktreeManager:
                             self._add_worktree_for_branch(
                                 worktree_path,
                                 branch_name,
+                                base_sha=base_sha,
                                 refresh_base=refresh_base,
                                 timeout=timeout,
                             )
                     except Exception:
                         self.worktrees.pop(worktree_key, None)
-                        self._remove_worktree_path_forcefully(worktree_path, timeout=timeout)
+                        if base_sha is None:
+                            self._remove_worktree_path_forcefully(worktree_path, timeout=timeout)
                         raise
                 self.worktrees[worktree_key] = worktree_path
                 logger.info("Created worktree for issue #%s at %s", issue_number, worktree_path)
@@ -345,6 +348,88 @@ class WorktreeManager:
 
             except Exception as e:
                 raise RuntimeError(f"Failed to create worktree: {e}") from e
+
+    def _reuse_or_clear_normal_worktree(
+        self,
+        *,
+        issue_number: int,
+        worktree_key: int | str,
+        worktree_path: Path,
+        branch_name: str,
+        isolated: bool,
+        refresh_base: bool,
+        timeout: int | None,
+    ) -> Path | None:
+        """Reuse normal worktrees or clear a known-clean path before creation."""
+        if worktree_key in self.worktrees:
+            logger.warning("Worktree for issue #%s already exists", issue_number)
+            return self.worktrees[worktree_key]
+        if refresh_base:
+            self.refresh_base_branch(timeout=timeout)
+        existing = None if isolated else self._worktree_holding_branch(branch_name, timeout=timeout)
+        if existing is not None and existing != worktree_path:
+            logger.info(
+                "Branch %s already checked out at %s — reusing that worktree for issue #%s",
+                branch_name,
+                existing,
+                issue_number,
+            )
+            self.worktrees[worktree_key] = existing
+            return existing
+        if self._reuse_existing_dirty_worktree(
+            issue_number,
+            worktree_key,
+            worktree_path,
+            timeout=timeout,
+        ):
+            return worktree_path
+        if worktree_path.exists():
+            logger.warning("Removing existing worktree directory: %s", worktree_path)
+            self._remove_worktree_path_forcefully(worktree_path, timeout=timeout)
+        return None
+
+    def _validate_direct_scope_worktree_request(
+        self,
+        *,
+        base_sha: str | None,
+        remote_branch_reserved: bool,
+        refresh_base: bool,
+        isolated: bool,
+        worktree_key: int | str,
+        worktree_path: Path,
+        branch_name: str,
+        timeout: int | None,
+    ) -> None:
+        """Reject direct-scope inputs that could reuse or move a pinned base."""
+        if base_sha is None:
+            return
+        if refresh_base or not remote_branch_reserved or not _is_full_commit_sha(base_sha):
+            raise RuntimeError("direct scope base pin invalid")
+        if isolated:
+            raise RuntimeError("direct scope base pin cannot create an isolated worktree")
+        if worktree_key in self.worktrees:
+            raise RuntimeError("direct scope refuses stale worktree reuse")
+        if (
+            worktree_path.exists()
+            or self._worktree_holding_branch(branch_name, timeout=timeout) is not None
+            or self._direct_scope_local_branch_exists(branch_name, timeout=timeout)
+        ):
+            raise RuntimeError("direct scope refuses stale branch or worktree reuse")
+
+    def _direct_scope_local_branch_exists(self, branch_name: str, *, timeout: int | None) -> bool:
+        """Return whether a local branch exists, propagating lookup failures."""
+        local = run(
+            ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch_name}"],
+            cwd=self.repo_root,
+            capture_output=True,
+            check=False,
+            **_timeout_kw(timeout),
+        )
+        if local.returncode == 0:
+            return True
+        if local.returncode != 1:
+            raise RuntimeError(f"cannot verify local branch {branch_name!r}")
+        return False
 
     def _add_isolated_worktree_for_branch(
         self,
@@ -430,6 +515,7 @@ class WorktreeManager:
         worktree_path: Path,
         branch_name: str,
         *,
+        base_sha: str | None = None,
         refresh_base: bool = False,
         timeout: int | None = None,
     ) -> None:
@@ -453,7 +539,13 @@ class WorktreeManager:
             timeout: Optional timeout in seconds for each git command.
 
         """
-        if self._local_branch_exists(branch_name, timeout=timeout):
+        if base_sha is not None:
+            run(
+                ["git", "worktree", "add", "-b", branch_name, str(worktree_path), base_sha],
+                cwd=self.repo_root,
+                **_timeout_kw(timeout),
+            )
+        elif self._local_branch_exists(branch_name, timeout=timeout):
             self._refresh_stale_local_branch_if_safe(branch_name, timeout=timeout)
             logger.info("Branch %s already exists, reusing it", branch_name)
             run(

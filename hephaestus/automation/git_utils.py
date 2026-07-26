@@ -286,6 +286,162 @@ def push_branch(branch_name: str, worktree_path: Path, *, timeout: int | None = 
         raise RuntimeError(f"Failed to push branch {branch_name}: {e}") from e
 
 
+def reserve_remote_branch_if_absent(
+    branch_name: str,
+    base_sha: str,
+    repo_root: Path,
+    *,
+    timeout: int | None = None,
+) -> None:
+    """Atomically create ``origin/<branch_name>`` at ``base_sha`` only when absent.
+
+    A direct CLI scope needs a server-side ownership proof before an agent can
+    begin writing its deterministic implementation branch.  An empty
+    ``--force-with-lease`` expectation makes the receive-pack reject a branch
+    that appeared after the caller's local inspection.
+    """
+    try:
+        run(
+            [
+                "git",
+                "push",
+                f"--force-with-lease=refs/heads/{branch_name}:",
+                "origin",
+                f"{base_sha}:refs/heads/{branch_name}",
+            ],
+            cwd=repo_root,
+            **_timeout_kw(timeout),
+        )
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(f"Failed to reserve direct-scope branch {branch_name}: {exc}") from exc
+
+
+def push_branch_if_remote_matches(
+    branch_name: str,
+    expected_remote_sha: str,
+    worktree_path: Path,
+    *,
+    timeout: int | None = None,
+) -> None:
+    """Push only an expected fast-forward of a direct-scope reservation.
+
+    The ancestry check prevents a locally rewritten branch from becoming a
+    forced update.  The explicit server-side lease then rejects any human or
+    competing writer that changed the reservation after admission.
+    """
+    ancestry = run(
+        ["git", "merge-base", "--is-ancestor", expected_remote_sha, "HEAD"],
+        cwd=worktree_path,
+        check=False,
+        **_timeout_kw(timeout),
+    )
+    if ancestry.returncode != 0:
+        raise RuntimeError(
+            f"Direct-scope branch {branch_name} is not a fast-forward of its reservation"
+        )
+    try:
+        run(
+            [
+                "git",
+                "push",
+                f"--force-with-lease=refs/heads/{branch_name}:{expected_remote_sha}",
+                "origin",
+                f"HEAD:refs/heads/{branch_name}",
+            ],
+            cwd=worktree_path,
+            **_timeout_kw(timeout),
+        )
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(f"Failed to publish direct-scope branch {branch_name}: {exc}") from exc
+
+
+def delete_reserved_branch_if_unchanged(
+    branch_name: str,
+    expected_remote_sha: str,
+    repo_root: Path,
+    *,
+    timeout: int | None = None,
+) -> bool:
+    """Delete an unused direct-scope reservation only while it remains ours.
+
+    A stale lease is expected when an external writer took ownership after the
+    reservation.  It is reported as ``False`` only after a follow-up ref read
+    confirms that the remote no longer points to our expected SHA.  Transport
+    and authentication failures raise so callers can retry rather than
+    mistaking an unreachable reservation for a safe ownership loss.
+    """
+    try:
+        run(
+            [
+                "git",
+                "push",
+                f"--force-with-lease=refs/heads/{branch_name}:{expected_remote_sha}",
+                "origin",
+                f":refs/heads/{branch_name}",
+            ],
+            cwd=repo_root,
+            **_timeout_kw(timeout),
+        )
+        return True
+    except subprocess.CalledProcessError as exc:
+        try:
+            observed = run(
+                ["git", "ls-remote", "--refs", "origin", f"refs/heads/{branch_name}"],
+                cwd=repo_root,
+                **_timeout_kw(timeout),
+            ).stdout.split()
+        except subprocess.CalledProcessError as probe_exc:
+            raise RuntimeError(
+                f"Failed to release direct-scope branch {branch_name}; "
+                "could not verify the remote reservation"
+            ) from probe_exc
+        if not observed or observed[0] != expected_remote_sha:
+            logger.warning(
+                "Direct-scope branch %s changed before its reservation could be released",
+                branch_name,
+            )
+            return False
+        raise RuntimeError(
+            f"Failed to release direct-scope branch {branch_name}; "
+            "remote reservation remains unchanged"
+        ) from exc
+
+
+def delete_local_branch_if_unchanged(
+    branch_name: str,
+    expected_sha: str,
+    repo_root: Path,
+    *,
+    timeout: int | None = None,
+) -> bool:
+    """Delete a local no-op branch only if it is still at ``expected_sha``.
+
+    The caller holds the shared worktree-metadata lock. It first verifies the
+    expected ref value, then uses ``git branch -d`` rather than plumbing ref
+    deletion: Git refuses to delete a branch attached to any worktree. A
+    changed, absent, or checked-out branch is a safe ``False`` result.
+    """
+    ref = f"refs/heads/{branch_name}"
+    observed = run(
+        ["git", "show-ref", "--verify", "--hash", ref],
+        cwd=repo_root,
+        check=False,
+        **_timeout_kw(timeout),
+    )
+    if observed.returncode == 1 or observed.stdout.strip() != expected_sha:
+        return False
+    try:
+        run(["git", "branch", "-d", branch_name], cwd=repo_root, **_timeout_kw(timeout))
+        return True
+    except subprocess.CalledProcessError as exc:
+        detail = f"{exc.stdout or ''}\n{exc.stderr or ''}".lower()
+        if "checked out" in detail or "not fully merged" in detail:
+            return False
+        raise RuntimeError(
+            f"Failed to release local direct-scope branch {branch_name}; ref remains unchanged"
+        ) from exc
+
+
 def push_head_to_branch(
     branch_name: str, worktree_path: Path, *, timeout: int | None = None
 ) -> None:

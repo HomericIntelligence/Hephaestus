@@ -90,6 +90,14 @@ def _item(issue: int = 1, stage: StageName = StageName.PLANNING) -> WorkItem:
     return WorkItem(repo="repo-a", kind=ItemKind.ISSUE, issue=issue, stage=stage, state="ENTER")
 
 
+def _complete_direct_scope_bootstrap(coordinator: Coordinator) -> None:
+    """Advance the clone-plus-sync gate before inspecting direct entries."""
+    coordinator._seed_pass()
+    coordinator._drain_queues()
+    coordinator._drain_completions()
+    coordinator._drain_completions()
+
+
 class TestWiring:
     """Constructor and run_pipeline production wiring."""
 
@@ -701,7 +709,7 @@ class TestSeedingEdges:
         )
         coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
 
-        coordinator._seed_pass()
+        _complete_direct_scope_bootstrap(coordinator)
 
         assert created == [("target-repo", tmp_path / "target-repo")]
         item = coordinator.queues[StageName.MERGE_WAIT].snapshot()[0]
@@ -745,7 +753,7 @@ class TestSeedingEdges:
         )
         coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
 
-        coordinator._seed_pass()
+        _complete_direct_scope_bootstrap(coordinator)
 
         assert created == [("target-repo", tmp_path / "target-repo")]
         item = coordinator.queues[StageName.MERGE_WAIT].snapshot()[0]
@@ -783,7 +791,7 @@ class TestSeedingEdges:
         )
         coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
 
-        coordinator._seed_pass()
+        _complete_direct_scope_bootstrap(coordinator)
 
         item = coordinator.queues[StageName.PR_REVIEW].snapshot()[0]
         assert item.repo == "target-repo"

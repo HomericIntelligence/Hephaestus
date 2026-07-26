@@ -11,7 +11,9 @@ Steps:
    and ledger ownership stay with the coordinator).
 2. [W:G] CLEANUP: remove the implementation worktree on pass; on fail, preserve that writer
    worktree for debugging and record it in the preserved list the end-of-run
-   summary prints.
+   summary prints. A direct-scope no-op is the exception: its remote reservation
+   has already been released, so cleanup attempts a non-forced removal of its
+   known-clean worktree and local branch; a late dirty edit is preserved.
 
 Verdicts: terminal — no outgoing routes (the coordinator drops the item
 when the sink emits its final outcome).
@@ -37,8 +39,15 @@ from .base import (
     StepResult,
     WorkItem,
 )
+from .repo import (
+    DIRECT_SCOPE_LOCAL_BRANCH_CLEANUP_KEY,
+    DIRECT_SCOPE_RESERVATION_KEY,
+    is_full_commit_sha,
+)
 
 logger = logging.getLogger(__name__)
+
+_RESERVATION_RELEASE_RETRY_CAP = 2
 
 
 class FinishedStage(Stage):
@@ -113,11 +122,62 @@ class FinishedStage(Stage):
 
     def _cleanup(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Clean or preserve the writer worktree."""
+        reservation = item.payload.get(DIRECT_SCOPE_RESERVATION_KEY)
+        if not item.payload.get("_direct_scope_reservation_release_attempted", False):
+            if isinstance(reservation, dict):
+                branch_name = reservation.get("branch")
+                base_sha = reservation.get("base_sha")
+                if isinstance(branch_name, str) and is_full_commit_sha(base_sha):
+                    # The branch contains no coordinator-published commit.
+                    # Release only if its remote ref is still the exact base
+                    # we reserved, so a later human/concurrent writer is
+                    # never deleted.  This also runs for failed items whose
+                    # writer worktree is deliberately preserved.
+                    attempts = int(
+                        item.payload.get("_direct_scope_reservation_release_attempts", 0)
+                    )
+                    if attempts < _RESERVATION_RELEASE_RETRY_CAP:
+                        item.payload["_direct_scope_reservation_release_attempts"] = attempts + 1
+                        item.payload["_direct_scope_reservation_release_inflight"] = True
+                        return JobRequest(
+                            job=GitJob(
+                                repo=item.repo,
+                                op="release_branch_reservation",
+                                timeout_s=GIT_JOB_TIMEOUT_S,
+                                kwargs={
+                                    "branch": branch_name,
+                                    "base_sha": base_sha,
+                                    "repo_root": str(ctx.paths.repo_root),
+                                },
+                                descr=f"release unused direct-scope branch {branch_name}",
+                            ),
+                            on_done_state="CLEANUP",
+                        )
+                    logger.warning(
+                        "finished:%s: could not release direct-scope reservation after %d attempts",
+                        item.issue or item.repo,
+                        attempts,
+                    )
+                else:
+                    logger.warning(
+                        "finished:%s: invalid direct-scope reservation receipt; "
+                        "not releasing branch",
+                        item.issue or item.repo,
+                    )
+            item.payload["_direct_scope_reservation_release_attempted"] = True
+
         if not item.worktree:
             return Continue(next_state="DONE")
 
         passed = bool(item.result and item.result.passed)
-        if not passed:
+        local_cleanup = item.payload.get(DIRECT_SCOPE_LOCAL_BRANCH_CLEANUP_KEY)
+        is_direct_noop = (
+            isinstance(local_cleanup, dict)
+            and isinstance(local_cleanup.get("branch"), str)
+            and bool(local_cleanup["branch"])
+            and is_full_commit_sha(local_cleanup.get("base_sha"))
+        )
+        if not passed and not is_direct_noop:
             entry = (item.repo, item.issue or item.pr or 0, item.worktree)
             if entry not in self._preserved:
                 self._preserved.append(entry)
@@ -132,17 +192,24 @@ class FinishedStage(Stage):
             logger.info("[dry-run] would remove worktree %s", item.worktree)
             return Continue(next_state="DONE")
 
+        kwargs: dict[str, object] = {
+            "worktree_path": item.worktree,
+            "repo_root": str(ctx.paths.repo_root),
+            # A no-op direct scope is known-clean at commit/push time, but a
+            # human may edit it before this terminal cleanup runs. Refuse to
+            # discard that late edit; on failure the worktree is preserved.
+            "force": not is_direct_noop,
+        }
+        if is_direct_noop:
+            kwargs["local_branch_cleanup"] = local_cleanup
+            item.payload["_direct_scope_noop_cleanup_inflight"] = True
         job = GitJob(
             repo=item.repo,
             op="remove_worktree",
             timeout_s=GIT_JOB_TIMEOUT_S,
             # Use the concrete worktree path: the cleanup worker constructs a
             # fresh WorktreeManager, so its in-memory issue map is empty.
-            kwargs={
-                "worktree_path": item.worktree,
-                "repo_root": str(ctx.paths.repo_root),
-                "force": True,
-            },
+            kwargs=kwargs,
             descr=f"remove worktree {item.worktree}",
         )
         return JobRequest(job=job, on_done_state="DONE")
@@ -156,9 +223,38 @@ class FinishedStage(Stage):
             ctx: Stage context.
 
         """
+        if item.payload.pop("_direct_scope_reservation_release_inflight", False):
+            if result.ok:
+                item.payload["_direct_scope_reservation_release_attempted"] = True
+                item.payload.pop(DIRECT_SCOPE_RESERVATION_KEY, None)
+                if result.value is False:
+                    logger.warning(
+                        "finished:%s: direct-scope reservation changed and was not released",
+                        item.issue or item.repo,
+                    )
+            elif (
+                item.payload.get("_direct_scope_reservation_release_attempts", 0)
+                >= _RESERVATION_RELEASE_RETRY_CAP
+            ):
+                item.payload["_direct_scope_reservation_release_attempted"] = True
+                logger.warning(
+                    "finished:%s: direct-scope reservation release failed after retries: %s",
+                    item.issue or item.repo,
+                    result.error,
+                )
+            return
         if not result.ok:
+            if item.payload.pop("_direct_scope_noop_cleanup_inflight", False):
+                entry = (item.repo, item.issue or item.pr or 0, item.worktree)
+                if entry not in self._preserved:
+                    self._preserved.append(entry)
             logger.warning(
                 "finished:%s: worktree cleanup failed (non-fatal): %s",
                 item.issue or item.repo,
                 result.error,
+            )
+        elif isinstance(result.value, dict) and result.value.get("local_branch_deleted") is False:
+            logger.warning(
+                "finished:%s: local direct-scope branch changed and was not deleted",
+                item.issue or item.repo,
             )

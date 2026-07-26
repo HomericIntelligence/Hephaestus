@@ -72,13 +72,21 @@ def _facts(
 
 
 class TestOnEnterAndCloneStates:
-    """Steps 1-2: ensure_state_labels [M], clone [W:G] with budget 2."""
+    """Checkout proof precedes label setup and discovery."""
 
-    def test_on_enter_ensures_state_labels(self, repo_item: WorkItem, repo_ctx: Any) -> None:
+    def test_labels_are_deferred_until_checkout_is_verified(
+        self, repo_item: WorkItem, repo_ctx: Any
+    ) -> None:
         stage = RepoStage()
 
         assert stage.on_enter(repo_item, repo_ctx) is None
+        assert repo_ctx.github.mutation_log == []
 
+        repo_item.state = "LABELS"
+        result = stage.step(repo_item, repo_ctx)
+
+        assert isinstance(result, Continue)
+        assert result.next_state == "DISCOVER"
         assert ("ensure_state_labels", ()) in repo_ctx.github.mutation_log
 
     def test_enter_state_advances_to_clone_wait(self, repo_item: WorkItem, repo_ctx: Any) -> None:
@@ -102,7 +110,7 @@ class TestOnEnterAndCloneStates:
             "repo": "test-org/repo-a",
             "dest": str(tmp_path / "repo-a"),
         }
-        assert result.on_done_state == "DISCOVER"
+        assert result.on_done_state == "CLONE_WAIT"
 
     def test_existing_checkout_submits_sync_job_before_discovery(
         self, repo_item: WorkItem, repo_ctx: Any, tmp_path: Path
@@ -120,7 +128,30 @@ class TestOnEnterAndCloneStates:
             "repo": "test-org/repo-a",
             "dest": str(tmp_path / "repo-a"),
         }
-        assert result.on_done_state == "DISCOVER"
+        assert result.on_done_state == "CLONE_WAIT"
+
+    def test_successful_clone_requires_follow_up_sync_before_labels(
+        self, repo_item: WorkItem, repo_ctx: Any
+    ) -> None:
+        """A new clone cannot reach labels or discovery without a sync proof."""
+        repo_item.state = "CLONE_WAIT"
+        stage = RepoStage()
+
+        clone = stage.step(repo_item, repo_ctx)
+        assert isinstance(clone, JobRequest)
+        assert isinstance(clone.job, GitJob)
+        assert clone.job.op == "clone"
+
+        stage.on_job_done(repo_item, JobResult(ok=True), repo_ctx)
+        sync = stage.step(repo_item, repo_ctx)
+        assert isinstance(sync, JobRequest)
+        assert isinstance(sync.job, GitJob)
+        assert sync.job.op == "sync_checkout"
+
+        stage.on_job_done(repo_item, JobResult(ok=True), repo_ctx)
+        ready = stage.step(repo_item, repo_ctx)
+        assert isinstance(ready, Continue)
+        assert ready.next_state == "LABELS"
 
     def test_explicit_existing_repo_root_submits_sync_job(
         self, repo_item: WorkItem, tmp_path: Path, make_ctx: Callable[..., Any]
@@ -152,7 +183,7 @@ class TestOnEnterAndCloneStates:
         result = RepoStage().step(repo_item, ctx)
 
         assert isinstance(result, Continue)
-        assert result.next_state == "DISCOVER"
+        assert result.next_state == "LABELS"
 
     def test_existing_checkout_is_not_synchronized_in_dry_run(
         self,
@@ -170,7 +201,7 @@ class TestOnEnterAndCloneStates:
         result = RepoStage().step(repo_item, ctx)
 
         assert isinstance(result, Continue)
-        assert result.next_state == "DISCOVER"
+        assert result.next_state == "LABELS"
         assert "[dry-run] would synchronize test-org/repo-a" in caplog.text
 
     def test_clone_failure_retries_within_budget(self, repo_item: WorkItem, repo_ctx: Any) -> None:
@@ -201,11 +232,13 @@ class TestOnEnterAndCloneStates:
     def test_clone_success_records_nothing(self, repo_item: WorkItem, repo_ctx: Any) -> None:
         stage = RepoStage()
         repo_item.state = "CLONE_WAIT"
+        repo_item.payload["checkout_op"] = "sync_checkout"
 
         stage.on_job_done(repo_item, JobResult(ok=True), repo_ctx)
 
         assert repo_item.attempts["clone"] == 0
         assert "clone_failed" not in repo_item.payload
+        assert repo_item.payload["checkout_verified"] is True
 
 
 class TestDiscover:
