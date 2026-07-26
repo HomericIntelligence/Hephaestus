@@ -390,8 +390,15 @@ class TestWorktreeManager:
         assert any(a[:2] == ["git", "fetch"] and "768-auto-impl" in a for a in argvs)
         # The worktree-add must use origin/<branch>, NOT the base branch.
         add_argv = next(a for a in argvs if a[:3] == ["git", "worktree", "add"])
-        assert "origin/768-auto-impl" in add_argv
-        assert "origin/main" not in add_argv
+        assert add_argv == [
+            "git",
+            "worktree",
+            "add",
+            "-b",
+            "768-auto-impl",
+            str(manager.base_dir / "issue-768"),
+            "origin/768-auto-impl",
+        ]
 
     def test_create_worktree_falls_back_to_base_when_no_remote_branch(
         self, worktree_mocks: Any, tmp_path: Any
@@ -1216,9 +1223,9 @@ class TestCreateWorktreeBranchCollision:
                 "git",
                 "worktree",
                 "add",
-                str(worktree_path),
                 "-b",
                 "1577-auto-impl",
+                str(worktree_path),
                 "origin/1577-auto-impl",
             ]
         assert "proceeding with current branch head" in caplog.text
