@@ -287,6 +287,33 @@ class TestPrReviewStageStep:
         assert result.on_done_state == REVIEW_CHECKOUT_WAIT
         assert "reviewed_pr_head_sha" not in item.payload
 
+    def test_checkout_barrier_renews_the_proof_for_an_unchanged_head(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A new review pass gets a distinct proof even when its SHA is unchanged."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(
+            pr_review_context={
+                "pr_diff": "diff --git a/a.py b/a.py\n+new\n",
+                "pr_description": "Closes #1",
+                "pr_head_sha": "a" * 40,
+            }
+        )
+        item = make_work_item(issue=1, pr=1001, state="REVIEW_WAIT")
+        item.worktree = "/tmp/repo/review-worktree"
+        item.branch = "review-branch"
+        item.payload.update(
+            {
+                "reviewed_pr_head_sha": "a" * 40,
+                "reviewed_pr_proof_generation": 7,
+            }
+        )
+
+        _dispatch_review(stage, item, make_ctx(github=github))
+
+        assert item.payload["reviewed_pr_head_sha"] == "a" * 40
+        assert item.payload["reviewed_pr_proof_generation"] == 8
+
     def test_review_uses_checkout_diff_not_mutable_remote_context(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

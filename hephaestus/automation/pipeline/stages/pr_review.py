@@ -897,6 +897,10 @@ class PrReviewStage(Stage):
             return StageOutcome(Disposition.FINISH_FAIL, "review_checkout_head_drift")
         item.payload.pop("review_checkout_retries", None)
         item.payload["reviewed_pr_head_sha"] = expected_head
+        prior_generation = item.payload.get("reviewed_pr_proof_generation", 0)
+        if isinstance(prior_generation, bool) or not isinstance(prior_generation, int):
+            prior_generation = 0
+        item.payload["reviewed_pr_proof_generation"] = prior_generation + 1
         return self._submit_review_job(item, ctx)
 
     def _submit_review_job(self, item: WorkItem, ctx: StageContext) -> JobRequest:
