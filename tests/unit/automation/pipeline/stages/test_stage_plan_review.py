@@ -1068,28 +1068,55 @@ class TestPlanReviewStageOnJobDone:
             stage.on_job_done(item, result, ctx)
 
         assert "review_verdict" not in item.payload
-        assert all("stderr tail:" not in message for message in caplog.messages)
+        assert caplog.messages == ["plan_review:3: job failed: reviewer crashed"]
 
-    def test_failed_result_logs_stderr_diagnostic(
+    def test_failed_result_logs_safe_stderr_diagnostic(
         self, make_ctx: Any, make_work_item: Any, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """A failed review exposes its bounded worker diagnostic to operators."""
+        """A failed review exposes a useful, log-safe diagnostic to operators."""
         stage = PlanReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=3, state="REVIEW_WAIT")
+        secret = f"{'token'}=known-test-value"
         result = JobResult(
             ok=False,
             error="rc=1",
-            stderr_tail="stream disconnected before completion",
+            stderr_tail=(
+                "stream disconnected before completion\n"
+                f"{secret}\x1b[31mhttps://example.test/problem"
+            ),
         )
 
         with caplog.at_level("WARNING", logger=plan_review.__name__):
             stage.on_job_done(item, result, ctx)
 
         assert any(
-            "job failed: rc=1; stderr tail: stream disconnected before completion" in message
+            "job failed: rc=1; diagnostic: backend response stream disconnected" in message
             for message in caplog.messages
         )
+        assert secret not in caplog.text
+        assert "\x1b[31m" not in caplog.text
+        assert "https://example.test/problem" not in caplog.text
+
+    def test_failed_result_classifies_unknown_stderr_without_logging_it(
+        self, make_ctx: Any, make_work_item: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Unknown subprocess output has a stable safe diagnostic instead of raw text."""
+        stage = PlanReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=3, state="REVIEW_WAIT")
+        secret = f"{'password'}=known-test-value"
+        result = JobResult(ok=False, error="rc=1", stderr_tail=f"{secret}\n\x1b[31munknown")
+
+        with caplog.at_level("WARNING", logger=plan_review.__name__):
+            stage.on_job_done(item, result, ctx)
+
+        assert any(
+            "job failed: rc=1; diagnostic: agent subprocess reported diagnostic output" in message
+            for message in caplog.messages
+        )
+        assert secret not in caplog.text
+        assert "\x1b[31m" not in caplog.text
 
 
 class TestDurableWriteOrdering:

@@ -134,6 +134,20 @@ _PLAN_REVIEW_LABELS = {
 }
 
 
+def _safe_agent_failure_diagnostic(stderr_tail: str) -> str | None:
+    """Classify agent stderr for logs without exposing subprocess output."""
+    text = stderr_tail.strip().casefold()
+    if not text:
+        return None
+    if "stream disconnected" in text or "error sending request" in text:
+        return "backend response stream disconnected"
+    if "rate limit" in text or "usage cap" in text or "429" in text:
+        return "provider rate limit"
+    if "connection" in text or "network" in text or "timed out" in text:
+        return "transient transport failure"
+    return "agent subprocess reported diagnostic output"
+
+
 def parse_plan_review_verdict(text: str) -> ReviewVerdict:
     """Parse the one exact state label that terminates a plan review."""
     state = parse_plan_review_state(text)
@@ -711,13 +725,13 @@ class PlanReviewStage(Stage):
 
         """
         if not result.ok:
-            stderr_tail = result.stderr_tail.strip()
-            if stderr_tail:
+            diagnostic = _safe_agent_failure_diagnostic(result.stderr_tail)
+            if diagnostic:
                 logger.warning(
-                    "plan_review:%s: job failed: %s; stderr tail: %s",
+                    "plan_review:%s: job failed: %s; diagnostic: %s",
                     item.issue,
                     result.error,
-                    stderr_tail,
+                    diagnostic,
                 )
             else:
                 logger.warning("plan_review:%s: job failed: %s", item.issue, result.error)
