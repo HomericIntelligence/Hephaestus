@@ -1780,7 +1780,10 @@ class TestPipelineScopeWiring:
         config = self._scoped_config(tmp_path, issues=[1, 2, 3], parallel_repos=2)
         coordinator = Coordinator(config, github=gh, pool=FakeWorkerPool(), install_signals=False)
 
-        assert coordinator._seed_pass() == 2
+        assert coordinator._seed_pass() == 1
+        coordinator._drain_queues()
+        coordinator._drain_completions()
+        coordinator._drain_completions()
         assert [item.issue for item in coordinator.items] == [1, 3]
         assert gh.issue_json_calls == [1, 3]
 

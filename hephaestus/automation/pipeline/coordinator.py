@@ -173,6 +173,13 @@ _DEFAULT_EVENT_LOG_CAPACITY = 1_024
 _DEFAULT_TERMINAL_DETAIL_CAPACITY = 128
 _SOURCE_REGISTRY_RETRY_DELAY_S = 0.05
 
+#: Payload marker for the internal setup item that gates an explicit
+#: ``--issues`` / ``--prs`` cursor.  It is intentionally not a pipeline stage:
+#: a scoped invocation may omit REPO from its work stages, but it must still
+#: prove that the one reusable checkout is a clean default branch before any
+#: source read, label mutation, or agent job starts.
+_DIRECT_SCOPE_BOOTSTRAP_KEY = "_direct_scope_bootstrap"
+
 #: Downstream-first drain order: finish work before admitting new (epic
 #: #1809 "drain queues downstream-first (merge_wait -> ... -> repo)"; the
 #: finished sink drains first of all so results are recorded promptly).
@@ -525,6 +532,7 @@ class Coordinator:
         self._pending_handoffs: dict[int, _PendingHandoff] = {}
         self._direct_issue_source: _DirectIssueSource | None = None
         self._direct_pr_source: _DirectPrSource | None = None
+        self._direct_scope_bootstrap_pending = False
         self._repo_entry_source: _RepoEntrySource | None = None
         self._repo_issue_sources: deque[_ActiveRepoIssueSource] = deque()
         # A StageQueue's capacity only bounds that one stage.  This permit
@@ -1868,6 +1876,9 @@ class Coordinator:
 
     def _route(self, item: WorkItem, outcome: StageOutcome) -> None:
         """Apply the Disposition -> action table (plan #1817)."""
+        if item.stage is StageName.REPO and item.payload.get(_DIRECT_SCOPE_BOOTSTRAP_KEY, False):
+            self._route_direct_scope_bootstrap(item, outcome)
+            return
         route = self._routes.get(item.stage)
         if route is None:
             # A stage absent from this run's (possibly scope-trimmed) route
@@ -1925,6 +1936,51 @@ class Coordinator:
         # FINISH_FAIL (exhaustive over Disposition)
         self._finish(item, passed=False, reason=outcome.note or "fail")
 
+    def _route_direct_scope_bootstrap(self, item: WorkItem, outcome: StageOutcome) -> None:
+        """Activate direct cursors only after their checkout proof succeeds.
+
+        A partial pipeline scope deliberately omits ``REPO`` from its route
+        table.  This internal setup item therefore has its own tiny terminal
+        protocol instead of widening the operator-selected stage scope.  It
+        never reaches an agent-capable stage unless the repo stage completed
+        clone-plus-sync and then prepared the label vocabulary.
+        """
+        if outcome.disposition is Disposition.RETRY:
+            self._route_retry(item, outcome)
+            return
+        if outcome.disposition is not Disposition.FINISH_PASS:
+            self._direct_scope_bootstrap_pending = False
+            self._finish(
+                item,
+                passed=False,
+                reason=outcome.note or "direct scope checkout preparation failed",
+            )
+            return
+
+        try:
+            self._begin_direct_pr_source(item.repo)
+            self._begin_direct_issue_source(item.repo)
+        except Exception as exc:
+            self._direct_scope_bootstrap_pending = False
+            logger.warning(
+                "direct scope for %s could not initialize after sync: %s", item.repo, exc
+            )
+            self._finish(item, passed=False, reason=f"direct scope initialization failed: {exc}")
+            return
+
+        # A successful bootstrap is coordinator plumbing, not an issue/repo
+        # result.  Free its sole bounded slot before admitting the first
+        # direct entry, mirroring successful REPO-source externalization.
+        self._release_source_lease(item)
+        self._release_work_permit(item)
+        self._direct_scope_bootstrap_pending = False
+        self._seen_item_ids.discard(id(item))
+        with suppress(ValueError):
+            self.items.remove(item)
+        self._record_event("direct_scope_ready", item.repo)
+        self._drain_direct_pr_source()
+        self._drain_direct_issue_source()
+
     def _route_retry(self, item: WorkItem, outcome: StageOutcome) -> None:
         """Apply the RETRY row: heap-park on a recorded delay, else next tick.
 
@@ -1974,6 +2030,8 @@ class Coordinator:
 
     def _finish(self, item: WorkItem, *, passed: bool, reason: str) -> None:
         """Set the item's result and hand it to the finished sink."""
+        if item.stage is StageName.REPO and item.payload.get(_DIRECT_SCOPE_BOOTSTRAP_KEY, False):
+            self._direct_scope_bootstrap_pending = False
         if item.stage is StageName.FINISHED:
             # Poisoned inside the sink: record directly, never re-queue.
             item.result = ItemResult(passed=passed, reason=reason, final_stage=item.stage)
@@ -2118,7 +2176,8 @@ class Coordinator:
         # unbounded logical-identity map in the terminal aggregate.
         self._terminal_summary.reset()
         self._pass_work_count = 0
-        discovery_repos = [] if self.config.issues or self.config.prs else self.config.repos
+        has_direct_scope = bool(self.config.issues or self.config.prs)
+        discovery_repos = [] if has_direct_scope else self.config.repos
         # Repository discovery is a source, not a list of pre-built
         # ``SeedEntry``/``WorkItem`` values.  Keep the legacy empty call so
         # direct test seams and any non-repository synthetic entries retain
@@ -2126,8 +2185,6 @@ class Coordinator:
         entries = _seeding.seed_from_cli([], [], [])
         self._begin_repo_entry_source(discovery_repos if not entries else [])
         default_repo = self.config.repos[0] if self.config.repos else ""
-        self._begin_direct_pr_source(default_repo)
-        self._begin_direct_issue_source(default_repo)
         pushed = 0
         for entry in entries:
             if entry.stage is None:
@@ -2147,12 +2204,33 @@ class Coordinator:
                 )
             if self._push_item(item, item.stage, enter=True):
                 pushed += 1
+        if has_direct_scope:
+            pushed += self._begin_direct_scope_bootstrap(default_repo)
+        else:
+            self._begin_direct_pr_source(default_repo)
+            self._begin_direct_issue_source(default_repo)
         return (
             pushed
             + self._drain_repo_entry_source()
-            + self._drain_direct_pr_source()
-            + self._drain_direct_issue_source()
+            + (0 if has_direct_scope else self._drain_direct_pr_source())
+            + (0 if has_direct_scope else self._drain_direct_issue_source())
         )
+
+    def _begin_direct_scope_bootstrap(self, repo: str) -> int:
+        """Enqueue the one checkout proof required by an explicit CLI scope."""
+        self._direct_scope_bootstrap_pending = True
+        if not repo:
+            self._direct_scope_bootstrap_pending = False
+            item = WorkItem(repo="", kind=ItemKind.REPO, stage=StageName.FINISHED)
+            item.result = ItemResult(
+                passed=False,
+                reason="explicit --issues/--prs scope requires exactly one repository",
+                final_stage=StageName.FINISHED,
+            )
+            return int(self._push_item(item, StageName.FINISHED, enter=True))
+        item = WorkItem(repo=repo, kind=ItemKind.REPO, stage=StageName.REPO)
+        item.payload[_DIRECT_SCOPE_BOOTSTRAP_KEY] = True
+        return int(self._push_item(item, StageName.REPO, enter=True))
 
     def _begin_repo_entry_source(self, repos: list[str]) -> None:
         """Initialize one FIFO source for this pass's repository discovery.
@@ -2601,6 +2679,7 @@ class Coordinator:
                 bool(self._repo_issue_sources),
                 self._direct_issue_source is not None,
                 self._direct_pr_source is not None,
+                self._direct_scope_bootstrap_pending,
             )
         )
 
