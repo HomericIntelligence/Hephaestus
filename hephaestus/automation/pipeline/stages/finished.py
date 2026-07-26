@@ -11,7 +11,9 @@ Steps:
    and ledger ownership stay with the coordinator).
 2. [W:G] CLEANUP: remove the implementation worktree on pass; on fail, preserve that writer
    worktree for debugging and record it in the preserved list the end-of-run
-   summary prints.
+   summary prints. A direct-scope no-op is the exception: its remote reservation
+   has already been released, so cleanup attempts a non-forced removal of its
+   known-clean worktree and local branch; a late dirty edit is preserved.
 
 Verdicts: terminal — no outgoing routes (the coordinator drops the item
 when the sink emits its final outcome).
@@ -168,7 +170,14 @@ class FinishedStage(Stage):
             return Continue(next_state="DONE")
 
         passed = bool(item.result and item.result.passed)
-        if not passed:
+        local_cleanup = item.payload.get(DIRECT_SCOPE_LOCAL_BRANCH_CLEANUP_KEY)
+        is_direct_noop = (
+            isinstance(local_cleanup, dict)
+            and isinstance(local_cleanup.get("branch"), str)
+            and bool(local_cleanup["branch"])
+            and is_full_commit_sha(local_cleanup.get("base_sha"))
+        )
+        if not passed and not is_direct_noop:
             entry = (item.repo, item.issue or item.pr or 0, item.worktree)
             if entry not in self._preserved:
                 self._preserved.append(entry)
@@ -186,11 +195,14 @@ class FinishedStage(Stage):
         kwargs: dict[str, object] = {
             "worktree_path": item.worktree,
             "repo_root": str(ctx.paths.repo_root),
-            "force": True,
+            # A no-op direct scope is known-clean at commit/push time, but a
+            # human may edit it before this terminal cleanup runs. Refuse to
+            # discard that late edit; on failure the worktree is preserved.
+            "force": not is_direct_noop,
         }
-        local_cleanup = item.payload.get(DIRECT_SCOPE_LOCAL_BRANCH_CLEANUP_KEY)
-        if isinstance(local_cleanup, dict):
+        if is_direct_noop:
             kwargs["local_branch_cleanup"] = local_cleanup
+            item.payload["_direct_scope_noop_cleanup_inflight"] = True
         job = GitJob(
             repo=item.repo,
             op="remove_worktree",
@@ -232,6 +244,10 @@ class FinishedStage(Stage):
                 )
             return
         if not result.ok:
+            if item.payload.pop("_direct_scope_noop_cleanup_inflight", False):
+                entry = (item.repo, item.issue or item.pr or 0, item.worktree)
+                if entry not in self._preserved:
+                    self._preserved.append(entry)
             logger.warning(
                 "finished:%s: worktree cleanup failed (non-fatal): %s",
                 item.issue or item.repo,

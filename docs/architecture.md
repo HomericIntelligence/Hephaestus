@@ -1060,6 +1060,7 @@ stateDiagram-v2
     RECORD --> CLEANUP: result recorded
     CLEANUP --> DONE: remove passed workspace
     CLEANUP --> DONE: preserve failed workspace
+    CLEANUP --> DONE: non-forced direct no-op cleanup
     CLEANUP --> DONE: no workspace
     DONE --> [*]
 ```
@@ -1067,7 +1068,11 @@ stateDiagram-v2
 Architectural contract:
 
 - A terminal result is recorded once.
-- Failed workspaces are preserved for diagnosis.
+- Failed workspaces are preserved for diagnosis, except a direct-scope no-op
+  whose remote reservation was released: its known-clean worktree and local
+  branch receive a non-forced cleanup so a later direct run is not blocked by
+  stale deterministic state. A late dirty edit makes that cleanup fail and
+  preserves the worktree instead.
 - Successful temporary workspaces are removed when safe.
 - Cleanup failure never rewrites the underlying result.
 

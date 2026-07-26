@@ -45,6 +45,8 @@ class _RecordingPool(FakeWorkerPool):
         self._events = events
 
     def submit(self, job: Any, on_done_state: Any, **kwargs: Any) -> Any:
+        if isinstance(job, GitJob) and job.op == "clone":
+            self._events.append("clone")
         if isinstance(job, GitJob) and job.op == "sync_checkout":
             self._events.append("sync")
         return super().submit(job, on_done_state, **kwargs)
@@ -116,6 +118,45 @@ def test_explicit_scope_syncs_before_labels_and_classification(
 
     assert coordinator.run() == 0
     assert events[:3] == ["sync", "labels", "classify"]
+
+
+def test_missing_direct_scope_checkout_clones_then_syncs_before_classification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing direct-scope checkout is synchronized before it is admitted."""
+    events: list[str] = []
+    pool = _RecordingPool(events)
+    github = _RecordingGitHub(events)
+
+    def classify(issue: int, github_arg: Any) -> IssueFacts:
+        del github_arg
+        events.append("classify")
+        return _facts(issue)
+
+    monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda *_args: [])
+    monkeypatch.setattr(seeding_mod, "seed_issue_from_github", classify)
+    monkeypatch.setattr(
+        "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
+        lambda _repo, issues: list(issues),
+    )
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            issues=[101],
+            projects_dir=tmp_path,
+            scope=PipelineScope(frozenset({StageName.PLANNING, StageName.PLAN_REVIEW})),
+        ),
+        github=github,
+        pool=pool,
+        install_signals=False,
+    )
+    coordinator.stages[StageName.PLANNING] = _ImmediatePassStage()
+
+    assert coordinator.run() == 0
+    assert events[:4] == ["clone", "sync", "labels", "classify"]
+    issue_item = next(item for item in coordinator.items if item.issue == 101)
+    assert issue_item.payload["_direct_scope_base_sha"] == "a" * 40
 
 
 def test_direct_issue_carries_the_bootstrap_checkout_pin(

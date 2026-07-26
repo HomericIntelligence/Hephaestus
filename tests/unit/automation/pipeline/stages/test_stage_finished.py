@@ -274,6 +274,51 @@ class TestCleanup:
             "base_sha": "a" * 40,
         }
 
+    def test_failed_direct_noop_removes_clean_worktree_and_local_branch(
+        self, stage: FinishedStage, make_ctx: Any
+    ) -> None:
+        """A skipped no-op must not strand the deterministic local branch."""
+        ctx = make_ctx()
+        item = _item(passed=False, worktree="/wt/issue-42", state="CLEANUP")
+        item.payload["_direct_scope_local_branch_cleanup"] = {
+            "branch": "42-auto-impl",
+            "base_sha": "a" * 40,
+        }
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.op == "remove_worktree"
+        assert result.job.kwargs == {
+            "worktree_path": "/wt/issue-42",
+            "repo_root": str(ctx.paths.repo_root),
+            "force": False,
+            "local_branch_cleanup": {
+                "branch": "42-auto-impl",
+                "base_sha": "a" * 40,
+            },
+        }
+
+    def test_failed_direct_noop_preserves_worktree_when_safe_cleanup_fails(
+        self,
+        stage: FinishedStage,
+        preserved: list[tuple[str, int, str]],
+        make_ctx: Any,
+    ) -> None:
+        """A late human edit blocks no-op cleanup without being discarded."""
+        item = _item(passed=False, worktree="/wt/issue-42", state="CLEANUP")
+        item.payload["_direct_scope_local_branch_cleanup"] = {
+            "branch": "42-auto-impl",
+            "base_sha": "a" * 40,
+        }
+
+        result = stage.step(item, make_ctx())
+        assert isinstance(result, JobRequest)
+        stage.on_job_done(item, JobResult(ok=False, error="worktree contains changes"), make_ctx())
+
+        assert preserved == [("repo-a", 42, "/wt/issue-42")]
+
     def test_pr_only_failure_preserves_pr_number(
         self,
         stage: FinishedStage,
