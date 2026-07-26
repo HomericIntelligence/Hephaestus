@@ -82,6 +82,7 @@ __all__ = [
     "JobHandle",
     "JobRequest",
     "JobResult",
+    "ProcessThreadResolutionResult",
     "Stage",
     "StageContext",
     "StageEvent",
@@ -121,6 +122,14 @@ class ConditionalMergeResult:
     transport_error: bool = False
     malformed: bool = False
     dry_run: bool = False
+
+
+@dataclass(frozen=True)
+class ProcessThreadResolutionResult:
+    """The fail-closed outcome of reconciling durable process review receipts."""
+
+    resolved_thread_ids: tuple[str, ...] = ()
+    blocked_thread_ids: tuple[str, ...] = ()
 
 
 @runtime_checkable
@@ -251,9 +260,10 @@ class StageGitHub(Protocol):
 
         Mirrors ``_review_phase._count_unresolved_threads_blocking_go``
         (#1152): the pr_review EVAL gate — a GO only stands with zero of
-        both; open human threads yield HUMAN_BLOCKED, while open automation
-        threads require a human verification/reply/resolution handoff. This
-        read never resolves a GitHub thread.
+        both; open human threads yield HUMAN_BLOCKED. A pipeline-created
+        automation thread may be replied to and resolved only through the
+        receipt-scoped revalidation operation below; every other open thread
+        remains a human handoff. This read never resolves a GitHub thread.
         """
         ...
 
@@ -317,6 +327,17 @@ class StageGitHub(Protocol):
         process resolution therefore fails closed rather than treating a
         same-login human reply as automation-owned.
         """
+        ...
+
+    def reply_and_resolve_process_review_threads(
+        self,
+        pr_number: int,
+        *,
+        reviewed_head_sha: str,
+        receipts: list[dict[str, Any]],
+        dispositions: dict[str, str],
+    ) -> ProcessThreadResolutionResult:
+        """Reply then resolve exact, freshly revalidated process-owned receipts."""
         ...
 
     def mark_pr_implementation_go(self, pr_number: int) -> None:

@@ -55,25 +55,32 @@ def test_thread_lookup_failure_requires_human_intervention(tmp_path: Path) -> No
     assert result.error == "review_threads_unavailable"
 
 
-def test_automation_sources_contain_no_review_thread_resolution_mutator() -> None:
-    """No active automation source may resolve a GitHub review thread."""
+def test_only_pipeline_adapter_may_resolve_a_process_review_thread() -> None:
+    """Stages cannot access a generic GitHub thread-resolution mutation."""
     repo = Path(__file__).resolve().parents[3]
     targets = [
         path
         for path in sorted((repo / "hephaestus/automation").rglob("*.py"))
         if "__pycache__" not in path.parts
     ]
-    forbidden = (
-        "resolve" + "ReviewThread",
-        "gh_pr_" + "resolve_thread",
-        "mutation " + "ResolveThread",
-    )
-
-    offenders = {
+    resolve_token = "resolve" + "ReviewThread"
+    generic_tokens = ("gh_pr_" + "resolve_thread", "mutation " + "ResolveThread")
+    resolve_offenders = {
         str(path.relative_to(repo)): token
         for path in targets
-        for token in forbidden
+        for token in (resolve_token,)
+        if token in path.read_text(encoding="utf-8")
+    }
+    generic_offenders = {
+        str(path.relative_to(repo)): token
+        for path in targets
+        for token in generic_tokens
         if token in path.read_text(encoding="utf-8")
     }
 
-    assert offenders == {}
+    assert resolve_offenders == {"hephaestus/automation/pipeline_github.py": resolve_token}
+    assert generic_offenders == {}
+    adapter_source = (repo / "hephaestus/automation/pipeline_github.py").read_text(encoding="utf-8")
+    assert adapter_source.index("addPullRequestReviewThreadReply") < adapter_source.index(
+        resolve_token
+    )

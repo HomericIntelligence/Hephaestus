@@ -455,12 +455,17 @@ def _is_process_thread_receipt(raw: dict[str, Any]) -> bool:
     """Return whether one post-time receipt proves exactly one created comment."""
     review_id = raw.get("review_id")
     comments = raw.get("comments")
+    initial = comments[0] if isinstance(comments, list) and len(comments) == 1 else None
     return bool(
         _durable_thread_id(raw)
         and isinstance(review_id, str)
         and review_id.strip()
         and isinstance(comments, list)
         and len(comments) == 1
+        and isinstance(initial, dict)
+        and isinstance(initial.get("id"), str)
+        and initial["id"].strip()
+        and initial.get("review_id") == review_id
         and _thread_comment_signature(raw) is not None
     )
 
@@ -479,6 +484,62 @@ def _process_thread_records(item: WorkItem) -> dict[str, dict[str, Any]] | None:
             return None
         records[thread_id] = raw
     return records
+
+
+def _handled_process_receipts(
+    item: WorkItem,
+) -> tuple[list[dict[str, Any]], dict[str, str]] | None:
+    """Return strictly validated receipts the validator marked as handled.
+
+    The validator never expands mutation scope: every id must be a host-read
+    receipt that was presented to that validation job.  Missing or malformed
+    validation output therefore leaves the existing human handoff intact.
+    """
+    records = _process_thread_records(item)
+    validation_threads = item.payload.get("validation_process_threads")
+    parsed = _parse_validation_result(item.payload.get("validation_result"))
+    if records is None or not isinstance(validation_threads, list) or parsed is None:
+        return None
+    unaddressed = parsed.get("unaddressed")
+    wont_fix = parsed.get("wont_fix")
+    if not isinstance(unaddressed, list) or not isinstance(wont_fix, list):
+        return None
+    validation_ids: list[str] = []
+    for thread in validation_threads:
+        if not isinstance(thread, dict):
+            return None
+        thread_id = _durable_thread_id(thread)
+        if thread_id is None or thread_id not in records:
+            return None
+        if _thread_comment_signature(thread) != _thread_comment_signature(records[thread_id]):
+            return None
+        validation_ids.append(thread_id)
+    if len(validation_ids) != len(set(validation_ids)):
+        return None
+    unaddressed_ids = _thread_ids(unaddressed)
+    wont_fix_ids = _thread_ids(wont_fix)
+    known_ids = set(validation_ids)
+    if (
+        not unaddressed_ids.issubset(known_ids)
+        or not wont_fix_ids.issubset(known_ids)
+        or unaddressed_ids & wont_fix_ids
+    ):
+        return None
+    reviewed_head = item.payload.get("reviewed_pr_head_sha")
+    dispositions = {
+        thread_id: "addressed"
+        for thread_id in validation_ids
+        if (
+            thread_id not in unaddressed_ids
+            and thread_id not in wont_fix_ids
+            and isinstance(reviewed_head, str)
+            and reviewed_head.strip()
+            and isinstance(records[thread_id].get("created_head_sha"), str)
+            and records[thread_id]["created_head_sha"].strip()
+            and records[thread_id]["created_head_sha"] != reviewed_head
+        )
+    }
+    return ([records[thread_id] for thread_id in dispositions], dispositions)
 
 
 def _live_process_threads(
@@ -1171,11 +1232,10 @@ class PrReviewStage(Stage):
     ) -> list[dict[str, Any]] | StepResult:
         """Suppress duplicate findings and hand live process threads to a human.
 
-        GitHub's review-thread mutation accepts only a thread id.  A fresh
-        read cannot make a subsequent resolution safe because a human reply
-        can arrive between those two API calls.  Open process threads therefore
-        remain a GitHub-human gate even when a validator says their code change
-        is addressed; a fresh run can proceed after a human resolves them.
+        Guarded receipt reconciliation runs immediately before this helper.
+        Any process thread still live here was unaddressed, changed, or not
+        provably process-owned, so it remains a GitHub-human gate. A fresh run
+        can proceed after a human resolves it or a new exact receipt is made.
         """
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
@@ -1216,6 +1276,11 @@ class PrReviewStage(Stage):
         adapter returns each process-created thread only after proving its
         sole initial comment and owning review identity.
         """
+        if not post_receipts:
+            return _process_thread_records(item) is not None
+        created_head = item.payload.get("reviewed_pr_head_sha")
+        if not isinstance(created_head, str) or not created_head.strip():
+            return False
         new_records: dict[str, dict[str, Any]] = {}
         for receipt in post_receipts:
             if not isinstance(receipt, dict):
@@ -1223,7 +1288,7 @@ class PrReviewStage(Stage):
             thread_id = _durable_thread_id(receipt)
             if thread_id is None or thread_id in new_records:
                 return False
-            new_records[thread_id] = dict(receipt)
+            new_records[thread_id] = {**receipt, "created_head_sha": created_head}
         if any(not _is_process_thread_receipt(receipt) for receipt in new_records.values()):
             return False
         records = _process_thread_records(item)
@@ -1234,7 +1299,7 @@ class PrReviewStage(Stage):
         item.payload["process_review_threads"] = [*records.values(), *new_records.values()]
         return True
 
-    def _post(self, item: WorkItem, ctx: StageContext) -> StepResult:
+    def _post(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901
         """POST [M]: durably post SURVIVING threads, refresh unresolved counts.
 
         The thread post is the round's durable write (doc step 3). The
@@ -1256,6 +1321,43 @@ class PrReviewStage(Stage):
         raw_threads = [dict(t) for t in item.payload.get("review_threads") or []]
         threads = _surviving_threads(raw_threads, item.payload.get("validation_result"))
         item.payload["raw_review_threads"] = raw_threads
+
+        handled = _handled_process_receipts(item)
+        if handled is not None:
+            receipts, dispositions = handled
+            if dispositions:
+                reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
+                if not reviewed_head:
+                    item.payload["review_audit_failure"] = True
+                    return Continue(next_state=EVAL)
+                try:
+                    resolution = ctx.github.reply_and_resolve_process_review_threads(
+                        item.pr,
+                        reviewed_head_sha=reviewed_head,
+                        receipts=receipts,
+                        dispositions=dispositions,
+                    )
+                except Exception as error:
+                    logger.warning(
+                        "pr_review:%s: process review-thread reconciliation failed (%s)",
+                        item.issue,
+                        type(error).__name__,
+                    )
+                    item.payload["review_audit_failure"] = True
+                    return Continue(next_state=EVAL)
+                resolved_ids = set(getattr(resolution, "resolved_thread_ids", ()))
+                blocked_ids = set(getattr(resolution, "blocked_thread_ids", ()))
+                if resolved_ids != set(dispositions) or blocked_ids:
+                    return PrReviewStage._handle_automation_threads_requiring_human_resolution(
+                        item,
+                        len(dispositions),
+                        ctx,
+                    )
+                item.payload["process_review_threads"] = [
+                    receipt
+                    for receipt in item.payload.get("process_review_threads", [])
+                    if _durable_thread_id(receipt) not in resolved_ids
+                ]
 
         reconciled = self._reconcile_process_threads_before_post(item, ctx, threads)
         if not isinstance(reconciled, list):
@@ -2016,12 +2118,12 @@ class PrReviewStage(Stage):
         automation_unresolved: int,
         ctx: StageContext,
     ) -> StepResult:
-        """Record a fail-closed handoff for open loop-created review threads.
+        """Record a fail-closed handoff for open threads outside the receipt scope.
 
-        GitHub's thread-resolution mutation has no compare-and-set input: it
-        accepts only a thread id, so an immediately preceding receipt read cannot prevent a
-        concurrent human reply from being resolved.  The loop consequently
-        records NO-GO and leaves each thread for a human to verify and resolve.
+        The guarded adapter may reply and resolve only immutable receipts it
+        revalidates immediately before each mutation. Any remaining thread is
+        unaddressed, human-owned, changed, or otherwise unprovable and must
+        remain a human gate.
         """
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
@@ -2032,8 +2134,8 @@ class PrReviewStage(Stage):
             "**Automation stand-down: unresolved automation review thread(s) require "
             "human resolution.**\n\n"
             f"{automation_unresolved} automation-created review thread(s) remain open on this "
-            "PR. GitHub does not provide a conditional thread-resolution mutation, so "
-            "automation will not resolve a thread after a read that could race a human reply. "
+            "PR outside the immutable process-receipt scope. The guarded loop could not prove "
+            "that a reply and resolution would leave human activity untouched. "
             "The PR is marked `state:implementation-no-go`; automation does not arm auto-merge. "
             "A human must "
             "verify the fixes and resolve the thread(s); a fresh automation pass can then "

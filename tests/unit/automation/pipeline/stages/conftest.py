@@ -19,6 +19,7 @@ from hephaestus.automation.pipeline.events import StageEvent
 from hephaestus.automation.pipeline.routing import ROUTES, StageName
 from hephaestus.automation.pipeline.stages import (
     ConditionalMergeResult,
+    ProcessThreadResolutionResult,
     StageContext,
     StageGitHub,
 )
@@ -415,12 +416,29 @@ class FakeStageGitHub(FakeGitHub):
                 "author": "hephaestus[bot]",
                 "authors": ["hephaestus[bot]"],
                 "comments": [
-                    {"author": "hephaestus[bot]", "body": str(thread.get("body") or "finding")}
+                    {
+                        "id": f"comment-{thread_id}",
+                        "author": "hephaestus[bot]",
+                        "body": str(thread.get("body") or "finding"),
+                        "review_id": review_id,
+                    }
                 ],
                 "review_id": review_id,
             }
             for thread_id, thread in zip(ids, threads, strict=True)
         ]
+
+    def reply_and_resolve_process_review_threads(
+        self,
+        pr_number: int,
+        *,
+        reviewed_head_sha: str,
+        receipts: list[dict[str, Any]],
+        dispositions: dict[str, str],
+    ) -> ProcessThreadResolutionResult:
+        """Fail closed by default; resolution-specific tests opt in explicitly."""
+        del pr_number, reviewed_head_sha, receipts
+        return ProcessThreadResolutionResult(blocked_thread_ids=tuple(sorted(dispositions)))
 
     def mark_pr_implementation_go(self, pr_number: int) -> None:
         """Mirror pr_manager.mark_pr_implementation_go (records mutation)."""
