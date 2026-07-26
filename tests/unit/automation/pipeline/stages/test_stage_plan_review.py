@@ -1058,17 +1058,20 @@ class TestPlanReviewStageOnJobDone:
     def test_failed_result_without_stderr_is_not_stored_or_noisy(
         self, make_ctx: Any, make_work_item: Any, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """A failed review without a diagnostic keeps the concise legacy log."""
+        """A failed review without stderr logs only a safe generic error."""
         stage = PlanReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=3, state="REVIEW_WAIT")
-        result = JobResult(ok=False, error="reviewer crashed")
+        secret = f"{'token'}=known-test-value"
+        result = JobResult(ok=False, error=f"RuntimeError: {secret}\n\x1b[31m")
 
         with caplog.at_level("WARNING", logger=plan_review.__name__):
             stage.on_job_done(item, result, ctx)
 
         assert "review_verdict" not in item.payload
-        assert caplog.messages == ["plan_review:3: job failed: reviewer crashed"]
+        assert caplog.messages == ["plan_review:3: job failed: agent job failed"]
+        assert secret not in caplog.text
+        assert "\x1b[31m" not in caplog.text
 
     def test_failed_result_logs_safe_stderr_diagnostic(
         self, make_ctx: Any, make_work_item: Any, caplog: pytest.LogCaptureFixture
@@ -1091,7 +1094,7 @@ class TestPlanReviewStageOnJobDone:
             stage.on_job_done(item, result, ctx)
 
         assert any(
-            "job failed: rc=1; diagnostic: backend response stream disconnected" in message
+            "job failed: exit code 1; diagnostic: backend response stream disconnected"
             for message in caplog.messages
         )
         assert secret not in caplog.text
@@ -1112,11 +1115,42 @@ class TestPlanReviewStageOnJobDone:
             stage.on_job_done(item, result, ctx)
 
         assert any(
-            "job failed: rc=1; diagnostic: agent subprocess reported diagnostic output" in message
+            "job failed: exit code 1; diagnostic: agent subprocess reported diagnostic output"
             for message in caplog.messages
         )
         assert secret not in caplog.text
         assert "\x1b[31m" not in caplog.text
+
+    @pytest.mark.parametrize(
+        ("stderr_tail", "expected_diagnostic"),
+        [
+            ("provider returned 429 rate limit", "provider rate limit"),
+            ("network connection timed out", "transient transport failure"),
+        ],
+    )
+    def test_failed_result_classifies_known_safe_diagnostics(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        caplog: pytest.LogCaptureFixture,
+        stderr_tail: str,
+        expected_diagnostic: str,
+    ) -> None:
+        """Known provider failures retain distinct fixed diagnostic classes."""
+        stage = PlanReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=3, state="REVIEW_WAIT")
+
+        with caplog.at_level("WARNING", logger=plan_review.__name__):
+            stage.on_job_done(
+                item,
+                JobResult(ok=False, error="rc=1", stderr_tail=stderr_tail),
+                ctx,
+            )
+
+        assert caplog.messages == [
+            f"plan_review:3: job failed: exit code 1; diagnostic: {expected_diagnostic}"
+        ]
 
 
 class TestDurableWriteOrdering:

@@ -148,6 +148,21 @@ def _safe_agent_failure_diagnostic(stderr_tail: str) -> str | None:
     return "agent subprocess reported diagnostic output"
 
 
+def _safe_agent_failure_reason(error: str | None) -> str:
+    """Render an agent failure reason for logs without exposing error text."""
+    if error == "timeout":
+        return "agent timed out"
+    if error == "circuit_open":
+        return "agent circuit is open"
+    if error == "interrupted_before_start":
+        return "agent job was interrupted before start"
+    if error is not None and error.startswith("rc="):
+        returncode = error.removeprefix("rc=")
+        if returncode.lstrip("-").isdigit() and returncode != "":
+            return f"exit code {returncode}"
+    return "agent job failed"
+
+
 def parse_plan_review_verdict(text: str) -> ReviewVerdict:
     """Parse the one exact state label that terminates a plan review."""
     state = parse_plan_review_state(text)
@@ -725,16 +740,17 @@ class PlanReviewStage(Stage):
 
         """
         if not result.ok:
+            reason = _safe_agent_failure_reason(result.error)
             diagnostic = _safe_agent_failure_diagnostic(result.stderr_tail)
             if diagnostic:
                 logger.warning(
                     "plan_review:%s: job failed: %s; diagnostic: %s",
                     item.issue,
-                    result.error,
+                    reason,
                     diagnostic,
                 )
             else:
-                logger.warning("plan_review:%s: job failed: %s", item.issue, result.error)
+                logger.warning("plan_review:%s: job failed: %s", item.issue, reason)
             return
 
         if result.value is not None:
