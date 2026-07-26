@@ -968,6 +968,248 @@ class TestGitOps:
         assert result.ok is True
         assert result.value == str(tmp_path / "wt")
 
+    def test_direct_pinned_worktree_rejects_checkout_head_drift(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A direct-scope worktree never falls back when its checkout moved."""
+        pinned_sha = "a" * 40
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 7,
+                "branch_name": "7-auto",
+                "repo_root": str(tmp_path),
+                "refresh_base": False,
+                "base_sha": pinned_sha,
+            },
+        )
+        instance = MagicMock()
+        instance.create_worktree.return_value = tmp_path / "wt"
+        with (
+            patch(f"{_WP}.WorktreeManager", return_value=instance) as mock_manager,
+            patch(
+                f"{_WP}.git_utils.run",
+                return_value=subprocess.CompletedProcess([], 0, stdout="b" * 40 + "\n"),
+            ),
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error == "direct scope checkout pin mismatch"
+        mock_manager.assert_not_called()
+
+    def test_direct_pinned_worktree_reserves_remote_branch_before_agent_admission(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A direct scope creates a server-side branch lease before returning a worktree."""
+        pinned_sha = "a" * 40
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 7,
+                "branch_name": "7-auto",
+                "repo_root": str(tmp_path),
+                "refresh_base": False,
+                "base_sha": pinned_sha,
+            },
+        )
+        instance = MagicMock()
+        instance.create_worktree.return_value = tmp_path / "wt"
+        with (
+            patch(f"{_WP}.WorktreeManager", return_value=instance),
+            patch(
+                f"{_WP}.git_utils.run",
+                return_value=subprocess.CompletedProcess([], 0, stdout=pinned_sha + "\n"),
+            ),
+            patch(f"{_WP}.git_utils.reserve_remote_branch_if_absent") as reserve,
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        reserve.assert_called_once_with("7-auto", pinned_sha, tmp_path, timeout=60)
+        assert result.value == {
+            "path": str(tmp_path / "wt"),
+            "direct_scope_reservation": {
+                "branch": "7-auto",
+                "base_sha": pinned_sha,
+            },
+        }
+
+    def test_direct_pinned_worktree_releases_reservation_when_no_worktree_is_created(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A manager no-op cannot leave the server-side reservation behind."""
+        pinned_sha = "a" * 40
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 7,
+                "branch_name": "7-auto",
+                "repo_root": str(tmp_path),
+                "refresh_base": False,
+                "base_sha": pinned_sha,
+            },
+        )
+        instance = MagicMock()
+        instance.create_worktree.return_value = None
+        with (
+            patch(f"{_WP}.WorktreeManager", return_value=instance),
+            patch(
+                f"{_WP}.git_utils.run",
+                return_value=subprocess.CompletedProcess([], 0, stdout=pinned_sha + "\n"),
+            ),
+            patch(f"{_WP}.git_utils.reserve_remote_branch_if_absent"),
+            patch(
+                f"{_WP}.git_utils.delete_reserved_branch_if_unchanged", return_value=True
+            ) as release,
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error == "worktree manager returned no worktree"
+        release.assert_called_once_with("7-auto", pinned_sha, tmp_path, timeout=60)
+
+    def test_direct_worktree_rollback_failure_preserves_reservation_receipt(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A retryable early rollback failure remains recoverable in Finished."""
+        pinned_sha = "a" * 40
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 7,
+                "branch_name": "7-auto",
+                "repo_root": str(tmp_path),
+                "refresh_base": False,
+                "base_sha": pinned_sha,
+            },
+        )
+        instance = MagicMock()
+        instance.create_worktree.side_effect = RuntimeError("disk failure")
+        with (
+            patch(f"{_WP}.WorktreeManager", return_value=instance),
+            patch(
+                f"{_WP}.git_utils.run",
+                return_value=subprocess.CompletedProcess([], 0, stdout=pinned_sha + "\n"),
+            ),
+            patch(f"{_WP}.git_utils.reserve_remote_branch_if_absent"),
+            patch(
+                f"{_WP}.git_utils.delete_reserved_branch_if_unchanged",
+                side_effect=RuntimeError("network unavailable"),
+            ),
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.value == {
+            "direct_scope_reservation": {"branch": "7-auto", "base_sha": pinned_sha}
+        }
+
+    def test_direct_worktree_rollback_timeout_preserves_reservation_receipt(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A transport timeout must reach Finished's bounded release protocol."""
+        pinned_sha = "a" * 40
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 7,
+                "branch_name": "7-auto",
+                "repo_root": str(tmp_path),
+                "refresh_base": False,
+                "base_sha": pinned_sha,
+            },
+        )
+        instance = MagicMock()
+        instance.create_worktree.side_effect = RuntimeError("disk failure")
+        with (
+            patch(f"{_WP}.WorktreeManager", return_value=instance),
+            patch(
+                f"{_WP}.git_utils.run",
+                return_value=subprocess.CompletedProcess([], 0, stdout=pinned_sha + "\n"),
+            ),
+            patch(f"{_WP}.git_utils.reserve_remote_branch_if_absent"),
+            patch(
+                f"{_WP}.git_utils.delete_reserved_branch_if_unchanged",
+                side_effect=subprocess.TimeoutExpired(["git", "push"], 60),
+            ),
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.value == {
+            "direct_scope_reservation": {"branch": "7-auto", "base_sha": pinned_sha}
+        }
+
+    def test_direct_pinned_worktree_fails_before_agent_admission_when_reservation_loses_race(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A concurrent remote branch owner fails the worktree job closed."""
+        pinned_sha = "a" * 40
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 7,
+                "branch_name": "7-auto",
+                "repo_root": str(tmp_path),
+                "refresh_base": False,
+                "base_sha": pinned_sha,
+            },
+        )
+        instance = MagicMock()
+        instance.create_worktree.return_value = tmp_path / "wt"
+        with (
+            patch(f"{_WP}.WorktreeManager", return_value=instance),
+            patch(
+                f"{_WP}.git_utils.run",
+                return_value=subprocess.CompletedProcess([], 0, stdout=pinned_sha + "\n"),
+            ),
+            patch(
+                f"{_WP}.git_utils.reserve_remote_branch_if_absent",
+                side_effect=RuntimeError("remote branch already exists"),
+            ),
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert "remote branch already exists" in (result.error or "")
+
     def test_create_worktree_syncs_adopted_clean_branch(
         self,
         pool: WorkerPool,
@@ -1328,6 +1570,38 @@ class TestGitOps:
         )
         assert result.ok is True
 
+    def test_remove_worktree_conditionally_releases_noop_local_branch(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """The branch delete runs only after its worktree is removed and pruned."""
+        pin = "a" * 40
+        job = GitJob(
+            repo="test/repo",
+            op="remove_worktree",
+            timeout_s=60,
+            kwargs={
+                "worktree_path": str(tmp_path / "issue-7"),
+                "repo_root": str(tmp_path),
+                "force": True,
+                "local_branch_cleanup": {"branch": "7-auto", "base_sha": pin},
+            },
+        )
+        with (
+            patch(f"{_WP}.git_utils.run"),
+            patch(
+                f"{_WP}.git_utils.delete_local_branch_if_unchanged", return_value=True
+            ) as release,
+        ):
+            pool.submit(job, StageName.FINISHED)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        assert result.value == {"local_branch_deleted": True}
+        release.assert_called_once_with("7-auto", pin, tmp_path, timeout=60)
+
     @pytest.mark.parametrize("rebase_clean", [True, False])
     def test_rebase_dispatch_propagates_bool(
         self,
@@ -1378,6 +1652,35 @@ class TestGitOps:
         mock_push.assert_called_once_with(cwd=Path("/tmp/wt"), branch="7-auto", timeout=60)
         assert result.ok is True
 
+    def test_release_branch_reservation_dispatches_conditional_delete(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """Terminal cleanup reports a stale reservation without force-deleting it."""
+        pin = "a" * 40
+        job = GitJob(
+            repo="test/repo",
+            op="release_branch_reservation",
+            timeout_s=60,
+            kwargs={
+                "branch": "7-auto",
+                "base_sha": pin,
+                "repo_root": str(tmp_path),
+            },
+        )
+        with patch(
+            "hephaestus.automation.git_utils.delete_reserved_branch_if_unchanged",
+            return_value=False,
+        ) as release:
+            pool.submit(job, StageName.FINISHED)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        assert result.value is False
+        release.assert_called_once_with("7-auto", pin, tmp_path, timeout=60)
+
     def test_commit_push_extracts_explicit_keys(
         self,
         pool: WorkerPool,
@@ -1415,6 +1718,75 @@ class TestGitOps:
         mock_push.assert_called_once_with("5-auto", tmp_path, timeout=60)
         assert result.ok is True
         assert result.value is True  # value carries commit_if_changes' bool
+
+    def test_direct_scope_commit_push_requires_unchanged_remote_reservation(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """Direct scopes publish only through the server-side reservation lease."""
+        pin = "a" * 40
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 5,
+                "worktree_path": tmp_path,
+                "branch": "5-auto",
+                "agent": "claude",
+                "expected_remote_sha": pin,
+            },
+        )
+        with (
+            patch("hephaestus.automation.git_utils.commit_if_changes", return_value=True),
+            patch("hephaestus.automation.git_utils.push_branch_if_remote_matches") as strict_push,
+            patch("hephaestus.automation.git_utils.push_branch") as normal_push,
+        ):
+            pool.submit(job, StageName.IMPLEMENTATION)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        strict_push.assert_called_once_with("5-auto", pin, tmp_path, timeout=60)
+        normal_push.assert_not_called()
+
+    def test_direct_scope_no_commit_releases_unchanged_reservation(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """An unused reservation is conditionally deleted instead of blocking reruns."""
+        pin = "a" * 40
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 5,
+                "worktree_path": tmp_path,
+                "branch": "5-auto",
+                "agent": "claude",
+                "expected_remote_sha": pin,
+            },
+        )
+        with (
+            patch("hephaestus.automation.git_utils.commit_if_changes", return_value=False),
+            patch(
+                "hephaestus.automation.git_utils.run",
+                return_value=subprocess.CompletedProcess([], 0, stdout="0\n"),
+            ),
+            patch("hephaestus.automation.git_utils.delete_reserved_branch_if_unchanged") as release,
+            patch("hephaestus.automation.git_utils.push_branch") as normal_push,
+        ):
+            pool.submit(job, StageName.IMPLEMENTATION)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        assert result.value is False
+        release.assert_called_once_with("5-auto", pin, tmp_path, timeout=60)
+        normal_push.assert_not_called()
 
     def test_commit_push_value_false_does_not_push_when_nothing_committed(
         self,
@@ -1601,9 +1973,13 @@ class TestGitOps:
                 subprocess.CompletedProcess([], 0, stdout="main\n"),
                 subprocess.CompletedProcess([], 0, stdout="main\n"),
                 subprocess.CompletedProcess([], 0),
+                subprocess.CompletedProcess([], 0, stdout=""),
+                subprocess.CompletedProcess([], 0, stdout="main\n"),
                 subprocess.CompletedProcess([], 0, stdout="0\t1\n"),
                 subprocess.CompletedProcess([], 0),
-                subprocess.CompletedProcess([], 0, stdout="new-head\nnew-head\n"),
+                subprocess.CompletedProcess([], 0, stdout=""),
+                subprocess.CompletedProcess([], 0, stdout="main\n"),
+                subprocess.CompletedProcess([], 0, stdout="a" * 40 + "\n" + "a" * 40 + "\n"),
             ]
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
@@ -1689,6 +2065,27 @@ class TestGitOps:
                 env=ANY,
             ),
             call(
+                [
+                    "git",
+                    "-c",
+                    "core.fsmonitor=false",
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=all",
+                ],
+                cwd=checkout,
+                timeout=120,
+                env=ANY,
+            ),
+            call(
+                ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+                cwd=checkout,
+                check=False,
+                log_errors=False,
+                timeout=120,
+                env=ANY,
+            ),
+            call(
                 ["git", "rev-list", "--left-right", "--count", "HEAD...origin/main"],
                 cwd=checkout,
                 timeout=120,
@@ -1712,6 +2109,27 @@ class TestGitOps:
                 env=ANY,
             ),
             call(
+                [
+                    "git",
+                    "-c",
+                    "core.fsmonitor=false",
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=all",
+                ],
+                cwd=checkout,
+                timeout=120,
+                env=ANY,
+            ),
+            call(
+                ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+                cwd=checkout,
+                check=False,
+                log_errors=False,
+                timeout=120,
+                env=ANY,
+            ),
+            call(
                 ["git", "rev-parse", "HEAD", "origin/main"],
                 cwd=checkout,
                 timeout=120,
@@ -1720,6 +2138,43 @@ class TestGitOps:
         ]
         assert (checkout / ".git" / ".hephaestus-git-metadata.lock").is_file()
         assert result.ok is True
+        assert result.value == "a" * 40
+
+    def test_sync_checkout_rechecks_clean_state_after_fetch_before_merge(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A checkout dirtied during sync is rejected before fast-forwarding it."""
+        checkout = tmp_path / "checkout"
+        checkout.mkdir()
+        job = GitJob(
+            repo="test/repo",
+            op="sync_checkout",
+            timeout_s=120,
+            kwargs={"repo": "owner/name", "dest": str(checkout)},
+        )
+        with patch("hephaestus.automation.git_utils.run") as mock_run:
+            mock_run.side_effect = [
+                subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
+                subprocess.CompletedProcess([], 0, stdout=""),
+                subprocess.CompletedProcess([], 0, stdout="main\n"),
+                subprocess.CompletedProcess([], 0, stdout="main\n"),
+                subprocess.CompletedProcess([], 0),
+                subprocess.CompletedProcess([], 0, stdout=" M concurrent-change.py\n"),
+            ]
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert "checkout is dirty" in (result.error or "")
+        argvs = [call.args[0] for call in mock_run.call_args_list]
+        assert ["git", "rev-list", "--left-right", "--count", "HEAD...origin/main"] not in argvs
+        assert not any(
+            argv[:3] == ["git", "-c", f"core.hooksPath={os.devnull}"] and "merge" in argv
+            for argv in argvs
+        )
 
     def test_sync_checkout_rejects_dirty_worktree_before_fetching(
         self,
@@ -1926,9 +2381,13 @@ class TestGitOps:
                 subprocess.CompletedProcess([], 0, stdout="main\n"),
                 subprocess.CompletedProcess([], 0, stdout="main\n"),
                 subprocess.CompletedProcess([], 0),
+                subprocess.CompletedProcess([], 0, stdout=""),
+                subprocess.CompletedProcess([], 0, stdout="main\n"),
                 subprocess.CompletedProcess([], 0, stdout="0\t1\n"),
                 subprocess.CompletedProcess([], 0),
-                subprocess.CompletedProcess([], 0, stdout="new-head\nnew-head\n"),
+                subprocess.CompletedProcess([], 0, stdout=""),
+                subprocess.CompletedProcess([], 0, stdout="main\n"),
+                subprocess.CompletedProcess([], 0, stdout="a" * 40 + "\n" + "a" * 40 + "\n"),
             ]
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
@@ -2002,7 +2461,8 @@ class TestGitOps:
             timeout=120,
             env=ANY,
         )
-        for git_call in (mock_run.call_args_list[index] for index in (0, 1, 2, 4, 5, 6, 7)):
+        git_call_indices = (0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11)
+        for git_call in (mock_run.call_args_list[index] for index in git_call_indices):
             assert git_call.kwargs["env"]["GIT_TERMINAL_PROMPT"] == "0"
             assert "GIT_DIR" not in git_call.kwargs["env"]
             assert git_call.kwargs["env"]["GIT_NO_REPLACE_OBJECTS"] == "1"
@@ -2411,12 +2871,20 @@ class TestGitOps:
 
         assert result.ok is False
         assert result.error == "lock_timeout"
-        assert mock_run.call_args_list[-1] == call(
-            [_trusted_gh_executable(), "api", "repos/owner/name", "--jq", ".default_branch"],
-            cwd=checkout,
-            timeout=0,
-            env=ANY,
-        )
+        assert mock_run.call_args_list == [
+            call(
+                ["git", "config", "--null", "--list"],
+                cwd=checkout,
+                timeout=0,
+                env=ANY,
+            ),
+            call(
+                ["git", "rev-parse", "--git-path", "info/grafts"],
+                cwd=checkout,
+                timeout=0,
+                env=ANY,
+            ),
+        ]
 
     def test_sync_checkout_rejects_local_commits_ahead_of_remote(
         self,
@@ -2440,6 +2908,8 @@ class TestGitOps:
                 subprocess.CompletedProcess([], 0, stdout="main\n"),
                 subprocess.CompletedProcess([], 0, stdout="main\n"),
                 subprocess.CompletedProcess([], 0),
+                subprocess.CompletedProcess([], 0, stdout=""),
+                subprocess.CompletedProcess([], 0, stdout="main\n"),
                 subprocess.CompletedProcess([], 0, stdout="1\t0\n"),
             ]
             pool.submit(job, StageName.REPO)
@@ -2510,6 +2980,8 @@ class TestGitOps:
                 subprocess.CompletedProcess([], 0, stdout="main\n"),
                 subprocess.CompletedProcess([], 0, stdout="main\n"),
                 subprocess.CompletedProcess([], 0),
+                subprocess.CompletedProcess([], 0, stdout=""),
+                subprocess.CompletedProcess([], 0, stdout="main\n"),
                 subprocess.CompletedProcess([], 0, stdout="0\t1\n"),
                 subprocess.CompletedProcess([], 1),
             ]
@@ -2541,8 +3013,12 @@ class TestGitOps:
                 subprocess.CompletedProcess([], 0, stdout="main\n"),
                 subprocess.CompletedProcess([], 0, stdout="main\n"),
                 subprocess.CompletedProcess([], 0),
+                subprocess.CompletedProcess([], 0, stdout=""),
+                subprocess.CompletedProcess([], 0, stdout="main\n"),
                 subprocess.CompletedProcess([], 0, stdout="0\t1\n"),
                 subprocess.CompletedProcess([], 0),
+                subprocess.CompletedProcess([], 0, stdout=""),
+                subprocess.CompletedProcess([], 0, stdout="main\n"),
                 subprocess.CompletedProcess([], 0, stdout="old-head\nnew-head\n"),
             ]
             pool.submit(job, StageName.REPO)

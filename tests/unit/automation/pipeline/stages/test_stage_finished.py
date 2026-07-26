@@ -177,6 +177,103 @@ class TestCleanup:
 
         assert preserved == [("repo-a", 42, "/wt/issue-42")]
 
+    def test_failed_direct_scope_releases_unused_reservation_before_preserving_worktree(
+        self,
+        stage: FinishedStage,
+        preserved: list[tuple[str, int, str]],
+        make_ctx: Any,
+    ) -> None:
+        """A terminal failure cannot strand a deterministic branch at its base SHA."""
+        ctx = make_ctx()
+        item = _item(passed=False, worktree="/wt/issue-42", state="CLEANUP")
+        item.payload["_direct_scope_reservation"] = {
+            "branch": "42-auto-impl",
+            "base_sha": "a" * 40,
+        }
+
+        release = stage.step(item, ctx)
+
+        assert isinstance(release, JobRequest)
+        assert isinstance(release.job, GitJob)
+        assert release.job.op == "release_branch_reservation"
+        assert release.job.kwargs == {
+            "branch": "42-auto-impl",
+            "base_sha": "a" * 40,
+            "repo_root": str(ctx.paths.repo_root),
+        }
+        assert release.on_done_state == "CLEANUP"
+
+        stage.on_job_done(item, JobResult(ok=True, value=True), ctx)
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, Continue) and result.next_state == "DONE"
+        assert preserved == [("repo-a", 42, "/wt/issue-42")]
+
+    def test_passed_direct_scope_releases_before_removing_worktree(
+        self, stage: FinishedStage, make_ctx: Any
+    ) -> None:
+        """The release runs for every unpublished direct item, including a passing no-op."""
+        ctx = make_ctx()
+        item = _item(passed=True, worktree="/wt/issue-42", state="CLEANUP")
+        item.payload["_direct_scope_reservation"] = {
+            "branch": "42-auto-impl",
+            "base_sha": "a" * 40,
+        }
+
+        first = stage.step(item, ctx)
+        assert isinstance(first, JobRequest)
+        assert isinstance(first.job, GitJob)
+        assert first.job.op == "release_branch_reservation"
+
+        stage.on_job_done(item, JobResult(ok=True, value=True), ctx)
+        second = stage.step(item, ctx)
+
+        assert isinstance(second, JobRequest)
+        assert isinstance(second.job, GitJob)
+        assert second.job.op == "remove_worktree"
+
+    def test_failed_reservation_release_retries_before_terminal_cleanup(
+        self, stage: FinishedStage, make_ctx: Any
+    ) -> None:
+        """An operational lease failure is retried instead of being misclassified as stale."""
+        ctx = make_ctx()
+        item = _item(passed=True, worktree="/wt/issue-42", state="CLEANUP")
+        item.payload["_direct_scope_reservation"] = {
+            "branch": "42-auto-impl",
+            "base_sha": "a" * 40,
+        }
+
+        first = stage.step(item, ctx)
+        assert isinstance(first, JobRequest)
+        stage.on_job_done(item, JobResult(ok=False, error="network unavailable"), ctx)
+
+        second = stage.step(item, ctx)
+
+        assert isinstance(second, JobRequest)
+        assert isinstance(second.job, GitJob)
+        assert second.job.op == "release_branch_reservation"
+
+    def test_noop_local_branch_cleanup_is_coupled_to_worktree_removal(
+        self, stage: FinishedStage, make_ctx: Any
+    ) -> None:
+        """A direct no-op removes its local deterministic branch after detaching it."""
+        ctx = make_ctx()
+        item = _item(passed=True, worktree="/wt/issue-42", state="CLEANUP")
+        item.payload["_direct_scope_local_branch_cleanup"] = {
+            "branch": "42-auto-impl",
+            "base_sha": "a" * 40,
+        }
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.op == "remove_worktree"
+        assert result.job.kwargs["local_branch_cleanup"] == {
+            "branch": "42-auto-impl",
+            "base_sha": "a" * 40,
+        }
+
     def test_pr_only_failure_preserves_pr_number(
         self,
         stage: FinishedStage,

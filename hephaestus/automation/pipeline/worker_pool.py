@@ -21,6 +21,7 @@ from contextlib import ExitStack, contextmanager
 from contextvars import copy_context
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import TypeGuard
 
 from hephaestus.agents.runtime import resolve_agent, resume_agent_session, run_agent_session
 from hephaestus.automation import claude_invoke, git_utils, subprocess_registry
@@ -92,6 +93,15 @@ _TRUSTED_GH_CANDIDATES = (
     Path("/usr/bin/gh"),
 )
 _TRUSTED_GH_ROOTS = (Path("/opt/homebrew"), Path("/usr/local"), Path("/usr"))
+
+
+def _is_full_commit_sha(value: object) -> TypeGuard[str]:
+    """Return whether ``value`` is a full SHA-1 or SHA-256 commit id."""
+    return bool(
+        isinstance(value, str)
+        and len(value) in (40, 64)
+        and all(character in "0123456789abcdef" for character in value)
+    )
 
 
 def _controlled_git_env() -> dict[str, str]:
@@ -799,6 +809,29 @@ class WorkerPool:
         elif job.op == "commit_push":
             return self._git_commit_push(job)
 
+        elif job.op == "release_branch_reservation":
+            branch_name = str(job.kwargs.get("branch") or "")
+            base_sha = job.kwargs.get("base_sha")
+            repo_root_value = job.kwargs.get("repo_root")
+            repo_root = Path(str(repo_root_value)) if repo_root_value else None
+            if (
+                not branch_name
+                or not _is_full_commit_sha(base_sha)
+                or repo_root is None
+                or not repo_root.is_dir()
+            ):
+                return JobResult(
+                    ok=False,
+                    error="release_branch_reservation requires branch, base_sha, and repo_root",
+                )
+            released = git_utils.delete_reserved_branch_if_unchanged(
+                branch_name,
+                base_sha,
+                repo_root,
+                timeout=job.timeout_s,
+            )
+            return JobResult(ok=True, value=released)
+
         elif job.op == "clone":
             # gh repo clone <repo> <dest>
             repo = str(job.kwargs.get("repo") or "")
@@ -831,17 +864,36 @@ class WorkerPool:
         checkout = Path(dest)
         if not checkout.is_dir():
             return JobResult(ok=False, error=f"checkout does not exist: {checkout}")
-
-        # ``git config --list`` uses the effective repository configuration,
-        # including a linked worktree's ``config.worktree``.  It must precede
-        # origin/status because either command can observe a poisoned setting.
+        # This read-only security preflight must run before acquiring a lock
+        # below: creating a lock file can otherwise create ``.git`` in a
+        # malformed directory and change how the preflight probes it.
         if preflight_error := _checkout_preflight_error(checkout, job.timeout_s):
             return JobResult(ok=False, error=preflight_error)
 
+        metadata_lock = WorktreeManager.git_metadata_lock_path(checkout)
+        with _interruptible_file_lock(
+            metadata_lock,
+            shutdown=self._shutdown,
+            timeout_s=job.timeout_s,
+        ):
+            return self._sync_checkout_locked(
+                checkout=checkout,
+                expected_repo=expected_repo,
+                timeout_s=job.timeout_s,
+            )
+
+    def _sync_checkout_locked(
+        self,
+        *,
+        checkout: Path,
+        expected_repo: str,
+        timeout_s: int,
+    ) -> JobResult:
+        """Validate and synchronize one checkout while its metadata lock is held."""
         origin = git_utils.run(
             ["git", "remote", "get-url", "origin"],
             cwd=checkout,
-            timeout=job.timeout_s,
+            timeout=timeout_s,
             env=_controlled_git_env(),
         ).stdout.strip()
         normalized_origin = origin.rstrip("/").removesuffix(".git")
@@ -866,31 +918,29 @@ class WorkerPool:
                 "--untracked-files=all",
             ],
             cwd=checkout,
-            timeout=job.timeout_s,
+            timeout=timeout_s,
             env=_controlled_git_env(),
         )
         if status.stdout.strip():
             return JobResult(ok=False, error=f"checkout is dirty: {checkout}")
-
         branch_result = git_utils.run(
             ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
             cwd=checkout,
             check=False,
             log_errors=False,
-            timeout=job.timeout_s,
+            timeout=timeout_s,
             env=_controlled_git_env(),
         )
         branch = branch_result.stdout.strip()
         if branch_result.returncode != 0 or not branch:
             return JobResult(ok=False, error=f"checkout is detached: {checkout}")
-
         gh_command = _trusted_gh_executable()
         if gh_command is None:
             return JobResult(ok=False, error="required GitHub executable is unavailable")
         default_branch = git_utils.run(
             [gh_command, "api", f"repos/{expected_repo}", "--jq", ".default_branch"],
             cwd=checkout,
-            timeout=job.timeout_s,
+            timeout=timeout_s,
             env=_controlled_git_env(),
         ).stdout.strip()
         if not default_branch:
@@ -899,23 +949,48 @@ class WorkerPool:
             return JobResult(
                 ok=False,
                 error=(
-                    f"checkout is not on its default branch {default_branch}: "
-                    f"currently on {branch or 'detached HEAD'}"
+                    f"checkout is not on its default branch {default_branch}: currently on {branch}"
                 ),
             )
+        return self._fast_forward_checkout(
+            checkout=checkout,
+            default_branch=default_branch,
+            gh_command=gh_command,
+            timeout_s=timeout_s,
+        )
 
-        metadata_lock = WorktreeManager.git_metadata_lock_path(checkout)
-        with _interruptible_file_lock(
-            metadata_lock,
-            shutdown=self._shutdown,
-            timeout_s=job.timeout_s,
-        ):
-            return self._fast_forward_checkout(
-                checkout=checkout,
-                default_branch=default_branch,
-                gh_command=gh_command,
-                timeout_s=job.timeout_s,
-            )
+    @staticmethod
+    def _checkout_state_error(*, checkout: Path, default_branch: str, timeout_s: int) -> str | None:
+        """Return the clean-default-branch validation error, if any."""
+        status = git_utils.run(
+            [
+                "git",
+                "-c",
+                "core.fsmonitor=false",
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+            ],
+            cwd=checkout,
+            timeout=timeout_s,
+            env=_controlled_git_env(),
+        )
+        if status.stdout.strip():
+            return f"checkout is dirty: {checkout}"
+        branch_result = git_utils.run(
+            ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+            cwd=checkout,
+            check=False,
+            log_errors=False,
+            timeout=timeout_s,
+            env=_controlled_git_env(),
+        )
+        branch = branch_result.stdout.strip()
+        if branch_result.returncode != 0 or not branch:
+            return f"checkout is detached: {checkout}"
+        if branch != default_branch:
+            return f"checkout is not on its default branch {default_branch}: currently on {branch}"
+        return None
 
     @staticmethod
     def _fast_forward_checkout(
@@ -971,6 +1046,12 @@ class WorkerPool:
             timeout=timeout_s,
             env=_controlled_git_env(),
         )
+        if validation_error := WorkerPool._checkout_state_error(
+            checkout=checkout,
+            default_branch=default_branch,
+            timeout_s=timeout_s,
+        ):
+            return JobResult(ok=False, error=validation_error)
         relation = git_utils.run(
             [
                 "git",
@@ -1017,6 +1098,12 @@ class WorkerPool:
                 ok=False,
                 error=(f"checkout cannot fast-forward {default_branch} to origin/{default_branch}"),
             )
+        if validation_error := WorkerPool._checkout_state_error(
+            checkout=checkout,
+            default_branch=default_branch,
+            timeout_s=timeout_s,
+        ):
+            return JobResult(ok=False, error=validation_error)
         synced_heads = git_utils.run(
             ["git", "rev-parse", "HEAD", f"origin/{default_branch}"],
             cwd=checkout,
@@ -1028,7 +1115,13 @@ class WorkerPool:
                 ok=False,
                 error=f"checkout did not reach origin/{default_branch}: {checkout}",
             )
-        return JobResult(ok=True)
+        synced_head = synced_heads[0]
+        if not _is_full_commit_sha(synced_head):
+            return JobResult(
+                ok=False,
+                error=f"checkout returned malformed default-branch SHA: {checkout}",
+            )
+        return JobResult(ok=True, value=synced_head)
 
     def _git_create_worktree(self, job: GitJob) -> JobResult:
         """Create a worktree and optionally sync an adopted PR branch."""
@@ -1037,25 +1130,153 @@ class WorkerPool:
         pr_number = kwargs.pop("pr_number", None)
         repo_root_kwarg = kwargs.pop("repo_root", None)
         repo_root = Path(repo_root_kwarg) if repo_root_kwarg else get_repo_root()
+        direct_setup = self._prepare_direct_scope_worktree(
+            kwargs=kwargs,
+            sync_to_remote=sync_to_remote,
+            repo_root=repo_root,
+            timeout_s=job.timeout_s,
+        )
+        if isinstance(direct_setup, JobResult):
+            return direct_setup
+        base_sha, branch_name = direct_setup
         base_dir = repo_root / "build" / ".worktrees"
-        manager = WorktreeManager(base_dir=base_dir, repo_root=repo_root)
-        created = manager.create_worktree(**kwargs, timeout=job.timeout_s)
+        if isinstance(base_sha, str):
+            manager = WorktreeManager(
+                base_dir=base_dir,
+                base_branch=base_sha,
+                repo_root=repo_root,
+            )
+        else:
+            manager = WorktreeManager(base_dir=base_dir, repo_root=repo_root)
+        if base_sha is not None:
+            kwargs["base_sha"] = base_sha
+            kwargs["remote_branch_reserved"] = True
+        try:
+            created = manager.create_worktree(**kwargs, timeout=job.timeout_s)
+        except Exception as exc:
+            if base_sha is not None:
+                return self._rollback_direct_scope_reservation(
+                    branch_name=branch_name,
+                    base_sha=base_sha,
+                    repo_root=repo_root,
+                    timeout_s=job.timeout_s,
+                    error=f"worktree creation failed: {exc}",
+                )
+            raise
+        return self._finalize_created_worktree(
+            created=created,
+            base_sha=base_sha,
+            branch_name=branch_name,
+            repo_root=repo_root,
+            repo=job.repo,
+            sync_to_remote=sync_to_remote,
+            pr_number=pr_number,
+            timeout_s=job.timeout_s,
+        )
+
+    @staticmethod
+    def _release_direct_scope_reservation(
+        branch_name: str,
+        base_sha: str | None,
+        repo_root: Path,
+        *,
+        timeout_s: int,
+    ) -> bool:
+        """Conditionally release a direct reservation, or no-op for normal worktrees."""
+        return base_sha is None or git_utils.delete_reserved_branch_if_unchanged(
+            branch_name,
+            base_sha,
+            repo_root,
+            timeout=timeout_s,
+        )
+
+    def _rollback_direct_scope_reservation(
+        self,
+        *,
+        branch_name: str,
+        base_sha: str,
+        repo_root: Path,
+        timeout_s: int,
+        error: str,
+    ) -> JobResult:
+        """Release an early reservation or preserve its receipt for Finished."""
+        try:
+            released = self._release_direct_scope_reservation(
+                branch_name, base_sha, repo_root, timeout_s=timeout_s
+            )
+        except (RuntimeError, subprocess.TimeoutExpired) as exc:
+            return JobResult(
+                ok=False,
+                value={"direct_scope_reservation": {"branch": branch_name, "base_sha": base_sha}},
+                error=f"{error}; reservation rollback failed: {exc}",
+            )
+        if not released:
+            return JobResult(
+                ok=False,
+                error=f"{error}; direct scope reservation changed before it could be released",
+            )
+        return JobResult(ok=False, error=error)
+
+    def _finalize_created_worktree(
+        self,
+        *,
+        created: Path | None,
+        base_sha: str | None,
+        branch_name: str,
+        repo_root: Path,
+        repo: str,
+        sync_to_remote: bool,
+        pr_number: object,
+        timeout_s: int,
+    ) -> JobResult:
+        """Validate a created worktree and attach a direct reservation receipt."""
         if created is None:
+            if base_sha is not None:
+                return self._rollback_direct_scope_reservation(
+                    branch_name=branch_name,
+                    base_sha=base_sha,
+                    repo_root=repo_root,
+                    timeout_s=timeout_s,
+                    error="worktree manager returned no worktree",
+                )
+            # Non-direct callers retain the legacy no-op success contract.
             return JobResult(ok=True)
         worktree_path = Path(created)
         if repo_root not in worktree_path.parents and worktree_path != repo_root:
+            error = (
+                f"worktree {worktree_path} escaped resolved repo root {repo_root} "
+                f"for job.repo={repo!r}"
+            )
+            if base_sha is not None:
+                return self._rollback_direct_scope_reservation(
+                    branch_name=branch_name,
+                    base_sha=base_sha,
+                    repo_root=repo_root,
+                    timeout_s=timeout_s,
+                    error=error,
+                )
             return JobResult(
                 ok=False,
-                error=(
-                    f"worktree {worktree_path} escaped resolved repo root {repo_root} "
-                    f"for job.repo={job.repo!r}"
-                ),
+                error=error,
             )
-        branch_name = str(kwargs.get("branch_name") or "")
         if not sync_to_remote:
+            if base_sha is not None:
+                return JobResult(
+                    ok=True,
+                    value={
+                        "path": str(worktree_path),
+                        "direct_scope_reservation": {
+                            "branch": branch_name,
+                            "base_sha": base_sha,
+                        },
+                    },
+                )
             return JobResult(ok=True, value=str(worktree_path))
 
-        dirty = not git_utils.is_clean_working_tree(worktree_path, timeout=job.timeout_s)
+        if pr_number is not None and not isinstance(pr_number, (int, str)):
+            return JobResult(ok=False, error="worktree sync received an invalid PR number")
+
+        dirty = not git_utils.is_clean_working_tree(worktree_path, timeout=timeout_s)
         status = ""
         diff = ""
         if dirty:
@@ -1064,14 +1285,14 @@ class WorkerPool:
                 cwd=worktree_path,
                 capture_output=True,
                 check=False,
-                timeout=job.timeout_s,
+                timeout=timeout_s,
             )
             diff_result = git_utils.run(
                 ["git", "diff"],
                 cwd=worktree_path,
                 capture_output=True,
                 check=False,
-                timeout=job.timeout_s,
+                timeout=timeout_s,
             )
             status = status_result.stdout or ""
             diff = diff_result.stdout or ""
@@ -1079,8 +1300,8 @@ class WorkerPool:
             git_utils.sync_worktree_to_remote_branch(
                 worktree_path,
                 branch_name,
-                pr_number=int(pr_number) if pr_number is not None else None,
-                timeout=job.timeout_s,
+                pr_number=int(pr_number) if isinstance(pr_number, (int, str)) else None,
+                timeout=timeout_s,
             )
         return JobResult(
             ok=True,
@@ -1091,6 +1312,38 @@ class WorkerPool:
                 "diff": diff,
             },
         )
+
+    @staticmethod
+    def _prepare_direct_scope_worktree(
+        *,
+        kwargs: dict[str, object],
+        sync_to_remote: bool,
+        repo_root: Path,
+        timeout_s: int,
+    ) -> tuple[str | None, str] | JobResult:
+        """Validate and atomically reserve a direct-scope implementation branch."""
+        base_sha = kwargs.pop("base_sha", None)
+        branch_name = str(kwargs.get("branch_name") or "")
+        if base_sha is None:
+            return None, branch_name
+        if sync_to_remote or bool(kwargs.get("refresh_base", False)):
+            return JobResult(ok=False, error="direct scope base pin invalid")
+        if not _is_full_commit_sha(base_sha):
+            return JobResult(ok=False, error="direct scope base pin invalid")
+        checkout_head = git_utils.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo_root, timeout=timeout_s
+        ).stdout.strip()
+        if checkout_head != base_sha:
+            return JobResult(ok=False, error="direct scope checkout pin mismatch")
+        if not branch_name:
+            return JobResult(ok=False, error="direct scope branch name is missing")
+        git_utils.reserve_remote_branch_if_absent(
+            branch_name,
+            base_sha,
+            repo_root,
+            timeout=timeout_s,
+        )
+        return base_sha, branch_name
 
     @staticmethod
     def _git_verify_pr_review_checkout(job: GitJob) -> JobResult:
@@ -1155,16 +1408,37 @@ class WorkerPool:
         if job.kwargs.get("worktree_path"):
             worktree_path = Path(str(job.kwargs["worktree_path"]))
             repo_root = Path(str(job.kwargs.get("repo_root") or get_repo_root()))
-            cmd = ["git", "worktree", "remove", str(worktree_path)]
-            if job.kwargs.get("force"):
-                cmd.append("--force")
-            git_utils.run(cmd, cwd=repo_root, timeout=job.timeout_s)
-            git_utils.run(
-                ["git", "worktree", "prune"],
-                cwd=repo_root,
-                check=False,
-                timeout=job.timeout_s,
-            )
+            # This is the same lock create_worktree takes. Keep it across
+            # removal, prune, and local cleanup so pipeline workers cannot
+            # attach the branch between those operations. The final
+            # ``git branch -d`` check also refuses an externally checked-out
+            # branch.
+            with file_lock(WorktreeManager.git_metadata_lock_path(repo_root)):
+                cmd = ["git", "worktree", "remove", str(worktree_path)]
+                if job.kwargs.get("force"):
+                    cmd.append("--force")
+                git_utils.run(cmd, cwd=repo_root, timeout=job.timeout_s)
+                git_utils.run(
+                    ["git", "worktree", "prune"],
+                    cwd=repo_root,
+                    check=False,
+                    timeout=job.timeout_s,
+                )
+                local_cleanup = job.kwargs.get("local_branch_cleanup")
+                if local_cleanup is not None:
+                    if not isinstance(local_cleanup, dict):
+                        return JobResult(ok=False, error="local branch cleanup receipt is invalid")
+                    branch_name = local_cleanup.get("branch")
+                    expected_sha = local_cleanup.get("base_sha")
+                    if not isinstance(branch_name, str) or not _is_full_commit_sha(expected_sha):
+                        return JobResult(ok=False, error="local branch cleanup receipt is invalid")
+                    deleted = git_utils.delete_local_branch_if_unchanged(
+                        branch_name,
+                        expected_sha,
+                        repo_root,
+                        timeout=job.timeout_s,
+                    )
+                    return JobResult(ok=True, value={"local_branch_deleted": deleted})
             return JobResult(ok=True)
         fallback_root = Path(str(job.kwargs.get("repo_root") or get_repo_root()))
         manager = WorktreeManager(repo_root=fallback_root)
@@ -1200,11 +1474,16 @@ class WorkerPool:
             allowed_paths=job.kwargs.get("allowed_paths"),
             timeout=job.timeout_s,
         )
+        branch = str(job.kwargs.get("branch") or "")
         if not changed:
-            branch = str(job.kwargs.get("branch") or "")
-            if not branch or not git_utils.has_unpushed_commits(
-                branch, Path(worktree_path), timeout=job.timeout_s
-            ):
+            publish_state = self._commit_push_requires_publish(
+                job=job,
+                branch=branch,
+                worktree_path=Path(worktree_path),
+            )
+            if isinstance(publish_state, JobResult):
+                return publish_state
+            if not publish_state:
                 return JobResult(ok=True, value=False)
             status = git_utils.run(
                 ["git", "status", "--porcelain"],
@@ -1214,13 +1493,66 @@ class WorkerPool:
             )
             if status.stdout.strip():
                 return JobResult(ok=False, error="commit_push left uncommitted changes")
-        branch = str(job.kwargs.get("branch", "HEAD"))
+        branch = branch or "HEAD"
+        expected_remote_sha = job.kwargs.get("expected_remote_sha")
+        if expected_remote_sha is not None and not _is_full_commit_sha(expected_remote_sha):
+            return JobResult(ok=False, error="direct scope base pin invalid")
         if bool(job.kwargs.get("publish_detached_head", False)):
             git_utils.push_head_to_branch(
                 branch,
                 Path(worktree_path),
                 timeout=job.timeout_s,
             )
+        elif isinstance(expected_remote_sha, str):
+            git_utils.push_branch_if_remote_matches(
+                branch,
+                expected_remote_sha,
+                Path(worktree_path),
+                timeout=job.timeout_s,
+            )
         else:
             git_utils.push_branch(branch, Path(worktree_path), timeout=job.timeout_s)
         return JobResult(ok=True, value=True)
+
+    @staticmethod
+    def _commit_push_requires_publish(
+        *, job: GitJob, branch: str, worktree_path: Path
+    ) -> bool | JobResult:
+        """Return whether a clean worktree still needs coordinator-owned publication."""
+        expected_remote_sha = job.kwargs.get("expected_remote_sha")
+        if expected_remote_sha is None:
+            return bool(
+                branch
+                and git_utils.has_unpushed_commits(
+                    branch,
+                    worktree_path,
+                    timeout=job.timeout_s,
+                )
+            )
+        if not _is_full_commit_sha(expected_remote_sha):
+            return JobResult(ok=False, error="direct scope base pin invalid")
+        if not branch:
+            return JobResult(ok=False, error="direct scope branch name is missing")
+        ahead = git_utils.run(
+            ["git", "rev-list", "--count", f"{expected_remote_sha}..HEAD"],
+            cwd=worktree_path,
+            capture_output=True,
+            check=False,
+            timeout=job.timeout_s,
+        )
+        if ahead.returncode != 0:
+            return JobResult(ok=False, error="cannot verify direct scope branch ancestry")
+        if ahead.stdout.strip() != "0":
+            return True
+        released = git_utils.delete_reserved_branch_if_unchanged(
+            branch,
+            expected_remote_sha,
+            worktree_path,
+            timeout=job.timeout_s,
+        )
+        if not released:
+            return JobResult(
+                ok=False,
+                error="direct scope reservation changed before it could be released",
+            )
+        return False

@@ -165,6 +165,101 @@ class TestWorktreeManager:
 
         assert lock_paths == [manager.repo_root / ".git" / ".hephaestus-git-metadata.lock"]
 
+    def test_direct_scope_worktree_uses_the_exact_verified_sha(
+        self, worktree_mocks: Any, tmp_path: Any
+    ) -> None:
+        """Direct scopes create a fresh branch from their bootstrap SHA only."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+        pin = "a" * 40
+
+        with (
+            patch.object(manager, "_worktree_holding_branch", return_value=None),
+            patch.object(manager, "_direct_scope_local_branch_exists", return_value=False),
+        ):
+            result = manager.create_worktree(
+                2460,
+                "2460-auto-impl",
+                base_sha=pin,
+                remote_branch_reserved=True,
+            )
+
+        assert result == manager.base_dir / "issue-2460"
+        assert worktree_mocks.run.call_args.args[0] == [
+            "git",
+            "worktree",
+            "add",
+            "-b",
+            "2460-auto-impl",
+            str(result),
+            pin,
+        ]
+
+    def test_direct_scope_rejects_refresh_before_any_git_mutation(
+        self, worktree_mocks: Any, tmp_path: Any
+    ) -> None:
+        """A direct pin is never refreshed into a different base revision."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+
+        with pytest.raises(RuntimeError, match="direct scope base pin invalid"):
+            manager.create_worktree(2463, "2463-auto-impl", base_sha="a" * 40, refresh_base=True)
+
+        worktree_mocks.run.assert_not_called()
+
+    def test_direct_scope_propagates_local_branch_probe_failure(
+        self, worktree_mocks: Any, tmp_path: Any
+    ) -> None:
+        """A direct scope never treats an unavailable local probe as absent."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        worktree_mocks.run.side_effect = [
+            Mock(returncode=1, stdout=""),
+            subprocess.TimeoutExpired(["git", "ls-remote"], timeout=5),
+        ]
+        manager = WorktreeManager()
+
+        with (
+            patch.object(manager, "_worktree_holding_branch", return_value=None),
+            pytest.raises(RuntimeError, match="Failed to create worktree"),
+        ):
+            manager.create_worktree(
+                2461,
+                "2461-auto-impl",
+                base_sha="a" * 40,
+                remote_branch_reserved=True,
+            )
+
+        assert all("worktree add" not in call.args[0] for call in worktree_mocks.run.call_args_list)
+
+    def test_direct_scope_preserves_concurrently_created_worktree_on_add_failure(
+        self, worktree_mocks: Any, tmp_path: Any
+    ) -> None:
+        """A loser of the direct creation race never removes the winner's worktree."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+        worktree_path = manager.base_dir / "issue-2462"
+
+        def concurrent_creator(path: Path, *_: Any, **__: Any) -> None:
+            path.mkdir(parents=True)
+            raise RuntimeError("branch was created by another process")
+
+        with (
+            patch.object(manager, "_worktree_holding_branch", return_value=None),
+            patch.object(manager, "_direct_scope_local_branch_exists", return_value=False),
+            patch.object(manager, "_add_worktree_for_branch", side_effect=concurrent_creator),
+            pytest.raises(RuntimeError, match="Failed to create worktree"),
+        ):
+            manager.create_worktree(
+                2462,
+                "2462-auto-impl",
+                base_sha="a" * 40,
+                remote_branch_reserved=True,
+            )
+
+        assert worktree_path.exists()
+        argvs = [call.args[0] for call in worktree_mocks.run.call_args_list]
+        assert ["git", "worktree", "remove", "--force", str(worktree_path)] not in argvs
+
     def test_create_worktree_default_branch_name(self, worktree_mocks: Any, tmp_path: Any) -> None:
         """Test worktree creation with default branch name."""
         worktree_mocks.repo_root.return_value = tmp_path

@@ -15,6 +15,8 @@ from hephaestus.automation.git_utils import (
     _remove_untracked_files_tracked_by_ref,
     clear_repo_caches,
     commit_if_changes,
+    delete_local_branch_if_unchanged,
+    delete_reserved_branch_if_unchanged,
     ensure_branch_commit_metadata,
     get_current_branch,
     get_repo_info,
@@ -22,9 +24,11 @@ from hephaestus.automation.git_utils import (
     is_clean_working_tree,
     issue_auto_impl_branch_name,
     push_branch,
+    push_branch_if_remote_matches,
     push_current_branch_with_lease_on_divergence,
     push_head_to_branch,
     rebase_worktree_onto,
+    reserve_remote_branch_if_absent,
     run,
     safe_git_fetch,
     sync_worktree_to_remote_branch,
@@ -370,6 +374,159 @@ class TestPushBranch:
             cwd=tmp_path,
             timeout=42,
         )
+
+
+class TestDirectScopeBranchReservation:
+    """Atomic server-side ownership checks for direct-scope implementation branches."""
+
+    def test_reserve_requires_remote_branch_to_be_absent(
+        self, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        pin = "a" * 40
+
+        reserve_remote_branch_if_absent("2452-auto-impl", pin, tmp_path, timeout=42)
+
+        git_utils_mocks.run.assert_called_once_with(
+            [
+                "git",
+                "push",
+                "--force-with-lease=refs/heads/2452-auto-impl:",
+                "origin",
+                f"{pin}:refs/heads/2452-auto-impl",
+            ],
+            cwd=tmp_path,
+            timeout=42,
+        )
+
+    def test_strict_publish_requires_expected_remote_sha(
+        self, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        pin = "a" * 40
+        git_utils_mocks.run.side_effect = [
+            Mock(returncode=0),
+            Mock(returncode=0),
+        ]
+
+        push_branch_if_remote_matches("2452-auto-impl", pin, tmp_path, timeout=42)
+
+        assert git_utils_mocks.run.call_args_list[0].args[0] == [
+            "git",
+            "merge-base",
+            "--is-ancestor",
+            pin,
+            "HEAD",
+        ]
+        assert git_utils_mocks.run.call_args_list[1].args[0] == [
+            "git",
+            "push",
+            f"--force-with-lease=refs/heads/2452-auto-impl:{pin}",
+            "origin",
+            "HEAD:refs/heads/2452-auto-impl",
+        ]
+
+    def test_strict_publish_rejects_non_fast_forward_local_branch(
+        self, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        git_utils_mocks.run.return_value = Mock(returncode=1)
+
+        with pytest.raises(RuntimeError, match="not a fast-forward"):
+            push_branch_if_remote_matches("2452-auto-impl", "a" * 40, tmp_path)
+
+        assert git_utils_mocks.run.call_count == 1
+
+    def test_release_requires_the_original_reservation_sha(
+        self, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        pin = "a" * 40
+
+        delete_reserved_branch_if_unchanged("2452-auto-impl", pin, tmp_path, timeout=42)
+
+        git_utils_mocks.run.assert_called_once_with(
+            [
+                "git",
+                "push",
+                f"--force-with-lease=refs/heads/2452-auto-impl:{pin}",
+                "origin",
+                ":refs/heads/2452-auto-impl",
+            ],
+            cwd=tmp_path,
+            timeout=42,
+        )
+
+    def test_release_reports_confirmed_remote_ownership_loss_without_force_deleting(
+        self, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """Only a post-failure ref mismatch is a safe, non-retryable stale lease."""
+        pin = "a" * 40
+        git_utils_mocks.run.side_effect = [
+            subprocess.CalledProcessError(1, ["git", "push"]),
+            Mock(stdout=("b" * 40) + "\trefs/heads/2452-auto-impl\n"),
+        ]
+
+        released = delete_reserved_branch_if_unchanged("2452-auto-impl", pin, tmp_path)
+
+        assert released is False
+        assert git_utils_mocks.run.call_args_list[1].args[0] == [
+            "git",
+            "ls-remote",
+            "--refs",
+            "origin",
+            "refs/heads/2452-auto-impl",
+        ]
+
+    def test_release_raises_when_remote_still_has_our_reservation(
+        self, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A transport error cannot be silently treated as a released branch."""
+        pin = "a" * 40
+        git_utils_mocks.run.side_effect = [
+            subprocess.CalledProcessError(1, ["git", "push"]),
+            Mock(stdout=pin + "\trefs/heads/2452-auto-impl\n"),
+        ]
+
+        with pytest.raises(RuntimeError, match="reservation remains unchanged"):
+            delete_reserved_branch_if_unchanged("2452-auto-impl", pin, tmp_path)
+
+    def test_local_release_uses_exact_old_value_compare_and_delete(
+        self, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A direct no-op deletes only its still-expected local branch."""
+        pin = "a" * 40
+        git_utils_mocks.run.side_effect = [Mock(returncode=0, stdout=pin), Mock()]
+
+        released = delete_local_branch_if_unchanged("2452-auto-impl", pin, tmp_path, timeout=42)
+
+        assert released is True
+        assert git_utils_mocks.run.call_args_list[0].args[0] == [
+            "git",
+            "show-ref",
+            "--verify",
+            "--hash",
+            "refs/heads/2452-auto-impl",
+        ]
+        git_utils_mocks.run.assert_called_with(
+            ["git", "branch", "-d", "2452-auto-impl"],
+            cwd=tmp_path,
+            timeout=42,
+        )
+
+    def test_local_release_refuses_a_branch_checked_out_elsewhere(
+        self, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """The final Git command enforces Git's checked-out-branch protection."""
+        pin = "a" * 40
+        git_utils_mocks.run.side_effect = [
+            Mock(returncode=0, stdout=pin),
+            subprocess.CalledProcessError(
+                1,
+                ["git", "branch", "-d", "2452-auto-impl"],
+                stderr="error: Cannot delete branch '2452-auto-impl' checked out at '/tmp/other'",
+            ),
+        ]
+
+        released = delete_local_branch_if_unchanged("2452-auto-impl", pin, tmp_path)
+
+        assert released is False
 
 
 class TestPushDetachedHead:

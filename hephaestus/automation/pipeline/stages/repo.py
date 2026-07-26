@@ -33,7 +33,7 @@ import logging
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 from hephaestus.automation import loop_repo_manager as _repo_manager
 
@@ -54,6 +54,30 @@ from .base import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Direct CLI scopes bootstrap one reusable checkout before any source reads.
+# The SHA travels only with that bootstrap's cursors; normal repository
+# discovery retains per-issue fresh-trunk semantics.
+DIRECT_SCOPE_BOOTSTRAP_KEY = "_direct_scope_bootstrap"
+DIRECT_SCOPE_BASE_SHA_KEY = "_direct_scope_base_sha"
+# A direct-scope worker returns this receipt only after it has atomically
+# reserved the remote implementation branch.  It remains on the item until a
+# coordinator-owned push publishes a commit or the Finished stage releases the
+# still-unused reservation.
+DIRECT_SCOPE_RESERVATION_KEY = "_direct_scope_reservation"
+# The remote reservation is already released after a direct no-op.  Finished
+# uses this receipt to compare-and-delete the now-detached local branch only
+# after removing its worktree.
+DIRECT_SCOPE_LOCAL_BRANCH_CLEANUP_KEY = "_direct_scope_local_branch_cleanup"
+
+
+def is_full_commit_sha(value: object) -> TypeGuard[str]:
+    """Return whether ``value`` is a full SHA-1 or SHA-256 commit id."""
+    return bool(
+        isinstance(value, str)
+        and len(value) in (40, 64)
+        and all(character in "0123456789abcdef" for character in value)
+    )
 
 
 def _repo_checkout_path(item: WorkItem, ctx: StageContext) -> Path:
@@ -121,7 +145,7 @@ class RepoStage(Stage):
 
         if item.state == "LABELS":
             ctx.github.ensure_state_labels()
-            if item.payload.get("_direct_scope_bootstrap", False):
+            if item.payload.get(DIRECT_SCOPE_BOOTSTRAP_KEY, False):
                 return StageOutcome(
                     Disposition.FINISH_PASS,
                     note="direct scope checkout synchronized",
@@ -225,6 +249,16 @@ class RepoStage(Stage):
                 item.payload["checkout_cloned"] = True
                 logger.info("repo:%s: clone completed; verifying checkout", item.repo)
             elif operation == "sync_checkout":
+                if item.payload.get(DIRECT_SCOPE_BOOTSTRAP_KEY, False):
+                    if not is_full_commit_sha(result.value):
+                        item.attempts["clone"] = item.attempts.get("clone", 0) + 1
+                        item.payload["clone_failed"] = True
+                        logger.warning(
+                            "repo:%s: direct scope sync returned no validated default-branch SHA",
+                            item.repo,
+                        )
+                        return
+                    item.payload[DIRECT_SCOPE_BASE_SHA_KEY] = result.value
                 item.payload["checkout_verified"] = True
                 logger.info("repo:%s: checkout preparation completed", item.repo)
             else:  # pragma: no cover - every checkout JobRequest records its operation

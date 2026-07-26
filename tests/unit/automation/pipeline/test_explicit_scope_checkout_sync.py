@@ -118,6 +118,41 @@ def test_explicit_scope_syncs_before_labels_and_classification(
     assert events[:3] == ["sync", "labels", "classify"]
 
 
+def test_direct_issue_carries_the_bootstrap_checkout_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An issue cursor preserves the exact default-branch SHA it was admitted under."""
+    checkout = tmp_path / "repo-a"
+    checkout.mkdir()
+    pin = "a" * 40
+    pool = FakeWorkerPool()
+    pool.script(JobResult(ok=True, value=pin))
+    github = FakeStageGitHub(labels=["state:needs-plan"])
+
+    monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda *_args: [])
+    monkeypatch.setattr(
+        "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
+        lambda _repo, issues: list(issues),
+    )
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            issues=[101],
+            projects_dir=tmp_path,
+            scope=PipelineScope(frozenset({StageName.PLANNING})),
+        ),
+        github=github,
+        pool=pool,
+        install_signals=False,
+    )
+    coordinator.stages[StageName.PLANNING] = _ImmediatePassStage()
+
+    assert coordinator.run() == 0
+    issue_item = next(item for item in coordinator.items if item.issue == 101)
+    assert issue_item.payload["_direct_scope_base_sha"] == pin
+
+
 def test_explicit_pr_scope_syncs_before_labels_and_pr_classification(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
