@@ -153,6 +153,11 @@ _IDLE_POLL_S = 1.0
 #: Number of fully stalled idle ticks before the coordinator force-runs work.
 _STALL_TICKS_BEFORE_FORCE = 3
 
+# Host-owned work-item payload key for the immutable plan-file snapshot that
+# admitted a queued implementation job.  It is consumed at submission and is
+# never sourced from GitHub content.
+_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD = "_implementation_file_claims"
+
 #: Upper bound on Continue-transitions per _run_item call (defensive: a stage
 #: that never yields a JobRequest/StageOutcome would otherwise spin forever).
 _MAX_STEPS_PER_TICK = 100
@@ -516,6 +521,10 @@ class Coordinator:
         }
         self.timers: list[tuple[float, int, WorkItem]] = []
         self.in_flight: dict[JobHandle, WorkItem] = {}
+        # Known implementation plans retain their repository-scoped file
+        # claims for the lifetime of the submitted job.  Never reconstruct
+        # this from mutable issue comments during later drain rounds (#2451).
+        self._inflight_implementation_claims: dict[JobHandle, set[_admission.PlanFileClaim]] = {}
         self.inflight_per_repo: Counter[str] = Counter()
         # A normal (non-implementation) drain claims instead of popping.  The
         # active lease reserves its source capacity while an item executes or
@@ -1262,6 +1271,7 @@ class Coordinator:
         """
         self._progress = True
         item = self.in_flight.pop(handle, None)
+        self._inflight_implementation_claims.pop(handle, None)
         if item is None:
             self._record_event(
                 "complete_unknown",
@@ -1602,9 +1612,9 @@ class Coordinator:
 
         REUSES :func:`admission.order_for_implementation` (dependencies
         first) and :func:`admission._select_non_overlapping` (defer plans
-        touching the same files while a peer is dispatched, #1623 — only
-        engaged when real parallelism is possible, mirroring the legacy
-        ``serialize_file_overlap`` gate).
+        touching the same files while a peer is queued or already executing,
+        #1623/#2451 — only engaged when real parallelism is possible,
+        mirroring the legacy ``serialize_file_overlap`` gate).
 
         The queue is STAGE-keyed, so one drain round can hold issues from
         several repos (#1795), and dependency ordering runs across the whole
@@ -1639,6 +1649,29 @@ class Coordinator:
                 return
 
         items = q.snapshot()
+        # A snapshot belongs only to the drain that selected it.  Anything
+        # still queued after an admission/capacity deferral is re-evaluated on
+        # its next drain, rather than carrying an unsubmitted old reservation.
+        for queued_item in items:
+            queued_item.payload.pop(_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD, None)
+        dispatch_items, submission_claims = self._select_implementation_dispatch(items)
+        for item in dispatch_items:
+            if self.shutdown.is_set() or not self._admit(item):
+                continue
+            if not self._claim_selected_implementation_item(item):
+                continue
+            # Preserve the exact immutable snapshot used by the overlap gate.
+            # A plan comment can change between admission and submission, but
+            # it must not change the reservation that made this item eligible.
+            if (claims := submission_claims.get(id(item))) is not None:
+                item.payload[_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD] = set(claims)
+            self._record_event("drain", StageName.IMPLEMENTATION.value, self._item_key(item))
+            self._run_item(item)
+
+    def _select_implementation_dispatch(
+        self, items: list[WorkItem]
+    ) -> tuple[list[WorkItem], dict[int, set[_admission.PlanFileClaim]]]:
+        """Order queued work and reserve immutable snapshots for this drain."""
         issue_items, ambiguous = self._index_issue_items(items)
         infos = [
             IssueInfo(
@@ -1650,7 +1683,8 @@ class Coordinator:
         ]
         ordered = _admission.order_for_implementation(infos)
         dispatch = ordered
-        if self.config.serialize_file_overlap and self.config.max_workers > 1 and len(ordered) > 1:
+        selected_claims: dict[int, set[_admission.PlanFileClaim]] = {}
+        if self.config.serialize_file_overlap and self.config.max_workers > 1 and ordered:
             # Resolve each issue's owning repo from its own WorkItem: the queue is
             # keyed by stage, so one round can hold issues from several repos (#1795).
             repo_of = {
@@ -1658,20 +1692,37 @@ class Coordinator:
                 for number, item in issue_items.items()
                 if item.repo
             }
-            dispatch, deferred = _admission._select_non_overlapping(ordered, repo_of=repo_of)
+            inflight_claims = self._active_implementation_file_claims()
+            selection_kwargs: dict[str, Any] = {
+                "repo_of": repo_of,
+                "selected_claims": selected_claims,
+            }
+            if inflight_claims:
+                selection_kwargs["initial_claims"] = inflight_claims
+            dispatch, deferred = _admission._select_non_overlapping(ordered, **selection_kwargs)
             for number in deferred:
                 logger.info("implementation #%s deferred (file overlap)", number)
-        # Cross-repo same-number items bypass the number-keyed gates and dispatch
-        # directly — they are distinct work that the ordering model cannot rank.
         dispatch_items = [issue_items[number] for number in dispatch]
-        dispatch_items.extend(it for group in ambiguous.values() for it in group)
-        for item in dispatch_items:
-            if self.shutdown.is_set() or not self._admit(item):
-                continue
-            if not self._claim_selected_implementation_item(item):
-                continue
-            self._record_event("drain", StageName.IMPLEMENTATION.value, self._item_key(item))
-            self._run_item(item)
+        submission_claims = {
+            id(issue_items[number]): set(claims) for number, claims in selected_claims.items()
+        }
+        # Cross-repo same-number items bypass only the number-keyed dependency
+        # ordering.  They still need their own repo-scoped overlap admission;
+        # otherwise a same-number collision could evade active reservations.
+        if self.config.serialize_file_overlap and self.config.max_workers > 1:
+            claimed = self._active_implementation_file_claims()
+            for claims in selected_claims.values():
+                claimed.update(claims)
+            ambiguous_items, ambiguous_claims = self._select_ambiguous_implementation_items(
+                ambiguous, claimed
+            )
+            dispatch_items.extend(ambiguous_items)
+            submission_claims.update(ambiguous_claims)
+        else:
+            # Cross-repo same-number items are distinct work even though the
+            # shared issue-number dependency model cannot rank them (#2057).
+            dispatch_items.extend(it for group in ambiguous.values() for it in group)
+        return dispatch_items, submission_claims
 
     @staticmethod
     def _implementation_duplicates(items: list[WorkItem]) -> list[WorkItem]:
@@ -1687,6 +1738,61 @@ class Coordinator:
             else:
                 seen.add(key)
         return duplicates
+
+    def _active_implementation_file_claims(self) -> set[_admission.PlanFileClaim]:
+        """Return the immutable plan claims held by active implementation jobs."""
+        claims: set[_admission.PlanFileClaim] = set()
+        for active_claims in self._inflight_implementation_claims.values():
+            claims.update(active_claims)
+        return claims
+
+    def _select_ambiguous_implementation_items(
+        self,
+        ambiguous: dict[int, list[WorkItem]],
+        claimed: set[_admission.PlanFileClaim],
+    ) -> tuple[list[WorkItem], dict[int, set[_admission.PlanFileClaim]]]:
+        """Apply file-overlap admission to cross-repo same-number items.
+
+        Dependency order cannot represent these items under its number-only
+        keys, but file paths are repository-scoped and must still honour both
+        active reservations and earlier selections from this drain.
+        """
+        dispatch: list[WorkItem] = []
+        snapshots: dict[int, set[_admission.PlanFileClaim]] = {}
+        for group in ambiguous.values():
+            for item in group:
+                if item.issue is None:  # defensive: index construction excludes this case
+                    continue
+                repo = (self.config.org, item.repo)
+                planned = _admission._fetch_planned_files(item.issue, repo=repo)
+                item_claims = {(repo, path) for path in planned} if planned else set()
+                if item_claims and (item_claims & claimed):
+                    logger.info(
+                        "implementation %s#%s deferred (file overlap)", item.repo, item.issue
+                    )
+                    continue
+                claimed.update(item_claims)
+                # Preserve an empty snapshot too: unknown plans fail open,
+                # but must not be fetched again after being admitted.
+                snapshots[id(item)] = set(item_claims)
+                dispatch.append(item)
+        return dispatch, snapshots
+
+    def _capture_implementation_file_claims(self, item: WorkItem) -> set[_admission.PlanFileClaim]:
+        """Return the immutable claims reserved for an implementation submission.
+
+        The parallel admission gate places its exact selection snapshot in the
+        host-owned payload.  Serial and overlap-opt-out submissions retain the
+        established one-time, fail-open lookup behavior.
+        """
+        if item.stage is not StageName.IMPLEMENTATION or item.issue is None:
+            return set()
+        selected = item.payload.pop(_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD, None)
+        if selected is not None:
+            return set(selected)
+        repo = (self.config.org, item.repo)
+        planned = _admission._fetch_planned_files(item.issue, repo=repo)
+        return {(repo, path) for path in planned} if planned else set()
 
     def _claim_selected_implementation_item(self, item: WorkItem) -> bool:
         """Claim *item* at its current position, preserving FIFO retry order."""
@@ -1841,6 +1947,7 @@ class Coordinator:
             if self.config.phase_timeout_s and self.config.phase_timeout_s > 0:
                 # --phase-timeout bounds each AGENT JOB, not a phase subprocess.
                 job = replace(job, timeout_s=int(self.config.phase_timeout_s))
+        implementation_claims = self._capture_implementation_file_claims(item)
         handle = self.pool.submit(
             job,
             request.on_done_state,
@@ -1848,6 +1955,8 @@ class Coordinator:
             claim_stage=item.stage.value,
         )
         self.in_flight[handle] = item
+        if implementation_claims:
+            self._inflight_implementation_claims[handle] = implementation_claims
         self.inflight_per_repo[item.repo] += 1
         self._record_event(
             "submit",
@@ -2684,6 +2793,7 @@ class Coordinator:
         for item in list(self.in_flight.values()):
             self._park_resumable(item)
         self.in_flight.clear()
+        self._inflight_implementation_claims.clear()
         self.inflight_per_repo.clear()
 
     def _finalize_resumable(self) -> None:
