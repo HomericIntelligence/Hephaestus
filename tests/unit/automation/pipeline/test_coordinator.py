@@ -1266,8 +1266,12 @@ class TestImplementationAdmission:
                 return JobRequest(_agent_job(item.repo, item.issue or 0), StageName.IMPLEMENTATION)
 
         coordinator.stages[StageName.IMPLEMENTATION] = SubmittingStage()
-        coordinator._push_item(_issue_item(21, StageName.IMPLEMENTATION), StageName.IMPLEMENTATION)
-        coordinator._push_item(_issue_item(22, StageName.IMPLEMENTATION), StageName.IMPLEMENTATION)
+        coordinator._push_item(
+            _issue_item(21, StageName.IMPLEMENTATION), StageName.IMPLEMENTATION, enter=True
+        )
+        coordinator._push_item(
+            _issue_item(22, StageName.IMPLEMENTATION), StageName.IMPLEMENTATION, enter=True
+        )
         fetches: list[int] = []
 
         def _planned_files(issue: int, repo: tuple[str, str] | None = None) -> set[str] | None:
