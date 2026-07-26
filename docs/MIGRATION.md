@@ -1,15 +1,14 @@
 # Migration Guide
 
-> **Status (as of 2026-07-17):** The latest released version is **0.10.0** (tag-driven
+> **Historical status for v0.10.0 (as of 2026-07-24):** The latest released version is **0.10.0** (tag-driven
 > via hatch-vcs). **1.0 has not been released yet** — the section below is the
 > *forthcoming* 1.0 migration guidance, published ahead of the cut so consumers can
 > prepare. 0.10.0's headline change is the queue pipeline's reviewed-head review
 > interlock: `pr_review` writes `state:implementation-go` only for the current
 > process's reviewed head. `merge_wait` revalidates that proof before every
 > individual SHA-conditional normal REST squash-merge request on a
-> confirmed-unarmed PR. It may make a bounded sequence (default: five); only
-> retryable HTTP 405 readiness and unresolved transport ambiguity can
-> timer-park a later request. No queue stage invokes `gh pr merge`, arms native
+> confirmed-unarmed PR. The merge budget (default: five) still bounds actual
+> requests and transport-ambiguity retries. No queue stage invokes `gh pr merge`, arms native
 > auto-merge, manages a merge queue, or uses an administrator bypass. There are
 > **no breaking changes
 > to the documented public API** from 0.9.x: upgrading requires no code changes for
@@ -18,7 +17,16 @@
 > note `--max-merge-attempts` was replaced by `--drive-green-loops` (default 5). The `Development Status ::
 > 5 - Production/Stable` classifier in `pyproject.toml` reflects the maturity of the
 > stable public API surface, not a 1.0 tag; the package remains tag-driven and is
-> currently on the 0.9.x series.
+> currently on the 0.10.x series.
+
+## Current main (unreleased; post-v0.10.0)
+
+The 15-minute operational readiness wait described below is new on current main
+and is not part of the released 0.10.0 behavior.
+
+Before a request, `merge_wait` may wait up to 15 minutes for operational GitHub
+readiness without spending a merge attempt; readiness is not authorization, and the
+exact-head/label admission is repeated before every request.
 
 ## 0.x → 1.0 (forthcoming — not yet released)
 

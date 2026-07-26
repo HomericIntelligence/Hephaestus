@@ -367,7 +367,7 @@ class StageGitHub(Protocol):
         ...
 
     def gh_pr_merge_readiness(self, pr_number: int) -> dict[str, Any] | None:
-        """Read operational normal-merge readiness after an HTTP 405 response."""
+        """Read operational normal-merge readiness without granting authorization."""
         pass
 
     def base_branch_requires_conversation_resolution(
@@ -505,7 +505,7 @@ class StageContext:
     event_fn: Callable[[StageEvent], None] | None = None
 
     def now(self) -> float:
-        """Return the current time in seconds since epoch (injectable for tests)."""
+        """Return the injected stage clock value (monotonic in the coordinator)."""
         if self.now_fn is not None:
             return self.now_fn()
         return time.time()

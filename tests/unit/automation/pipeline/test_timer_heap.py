@@ -184,10 +184,10 @@ class TestRetryDelayConsumption:
         assert item.state == "POLL"
         assert item.payload.get("_enter_pending") is not True
 
-    def test_merge_wait_timer_reentry_is_bounded_without_duplicate_puts(
+    def test_merge_wait_readiness_timer_reentry_is_bounded_without_conditional_puts(
         self, clocked: tuple[Coordinator, FakeClock]
     ) -> None:
-        """Each timer wake earns one new attempt and exhaustion parks no duplicate."""
+        """A readiness wait reaches its deadline without spending a merge attempt."""
 
         class NotReadyGitHub(FakeStageGitHub):
             def __init__(self) -> None:
@@ -229,24 +229,31 @@ class TestRetryDelayConsumption:
             pr=12,
             stage=StageName.MERGE_WAIT,
             state="MERGE",
-            payload={"reviewed_pr_head_sha": "a" * 40},
+            payload={
+                "reviewed_pr_head_sha": "a" * 40,
+                "reviewed_pr_proof_generation": 0,
+                "merge_readiness_head_sha": "a" * 40,
+                "merge_readiness_proof_generation": 0,
+                "merge_readiness_deadline_s": 1001.0,
+                "merge_readiness_polls": 17,
+            },
         )
 
         coordinator._run_item(item)
 
-        assert github.puts == 1
+        assert github.puts == 0
         assert len(coordinator.timers) == 1
         clock.now += 2.0
         coordinator._wake_timers()
         coordinator._drain_queues()
 
-        assert github.puts == 2
+        assert github.puts == 0
         assert item.result is not None
-        assert item.result.reason == "merge_attempts_exhausted"
+        assert item.result.reason == "merge_readiness_timeout"
         assert coordinator.timers == []
         coordinator._wake_timers()
         coordinator._drain_queues()
-        assert github.puts == 2
+        assert github.puts == 0
 
     def test_merge_wait_transport_ambiguity_timer_reentry_is_bounded(
         self, clocked: tuple[Coordinator, FakeClock]
@@ -270,6 +277,16 @@ class TestRetryDelayConsumption:
             def merge_pr_if_head(self, pr_number: int, reviewed_sha: str) -> ConditionalMergeResult:
                 self.puts += 1
                 return ConditionalMergeResult(status=None, body=None, transport_error=True)
+
+            def gh_pr_merge_readiness(self, pr_number: int) -> dict[str, Any] | None:
+                return {
+                    "state": "OPEN",
+                    "headRefOid": "a" * 40,
+                    "baseRefName": "main",
+                    "autoMergeRequest": None,
+                    "mergeable": "MERGEABLE",
+                    "mergeStateStatus": "CLEAN",
+                }
 
         coordinator, clock = clocked
         github = AmbiguousGitHub()

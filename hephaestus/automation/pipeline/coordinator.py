@@ -673,6 +673,7 @@ class Coordinator:
                     worktree=root,
                     projects_dir=Path(self.config.projects_dir),
                 ),
+                now_fn=time.monotonic,
                 budget_fn=self._budget_for,
                 event_fn=self._record_stage_event,
             )
