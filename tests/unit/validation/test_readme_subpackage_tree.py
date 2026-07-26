@@ -6,6 +6,8 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PACKAGE_DIR = REPO_ROOT / "hephaestus"
 README = REPO_ROOT / "README.md"
@@ -15,7 +17,7 @@ NAVIGATION_HEADING = "## Repository navigation"
 NAVIGATION_EXCLUSIONS = {
     "README.md": "The navigation index lives in README.md, so a self-link adds no value.",
 }
-LINK_TARGET_RE = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
+TABLE_TARGET_RE = re.compile(r"^\|\s*\[[^\]]+\]\(([^)]+)\)\s*\|", re.MULTILINE)
 TREE_MARKER_RE = re.compile(r"^\s*(?:├──|└──|(?:\|--|`--|\+--)\s+\S)")
 
 
@@ -52,14 +54,54 @@ def _navigation_section() -> str:
     return section
 
 
-def _local_navigation_targets() -> list[str]:
-    """Return normalized local link targets from the navigation section."""
-    targets: list[str] = []
-    for raw_target in LINK_TARGET_RE.findall(_navigation_section()):
-        target = raw_target.strip().strip("<>").split("#", 1)[0].rstrip("/")
-        if target and not target.startswith("/") and "://" not in target:
-            targets.append(target.removeprefix("./"))
-    return targets
+def _navigation_table_targets(section: str | None = None) -> list[str]:
+    """Return normalized targets from the navigation table's Path column only."""
+    if section is None:
+        section = _navigation_section()
+    return [
+        raw_target.strip().strip("<>").split("#", 1)[0].rstrip("/").removeprefix("./")
+        for raw_target in TABLE_TARGET_RE.findall(section)
+    ]
+
+
+def _assert_exact_root_navigation_inventory(targets: list[str]) -> None:
+    """Require navigation rows to be the exact tracked root-path inventory."""
+    non_root_targets = sorted(
+        target
+        for target in targets
+        if not target or target in {".", ".."} or len(Path(target).parts) != 1
+    )
+    assert not non_root_targets, (
+        "README repository navigation must use direct top-level targets, not nested "
+        f"or invalid paths: {non_root_targets}"
+    )
+
+    expected = _tracked_top_level_entries() - set(NAVIGATION_EXCLUSIONS)
+    actual = set(targets)
+    missing = sorted(expected - actual)
+    stale = sorted(actual - expected)
+    assert actual == expected, (
+        "README repository navigation must be the exact tracked root-path inventory; "
+        f"missing={missing}, stale={stale}"
+    )
+
+
+def _assert_targets_resolve_within_repository(
+    targets: list[str], repository_root: Path = REPO_ROOT
+) -> None:
+    """Require every navigation target to resolve to an existing in-repository path."""
+    root = repository_root.resolve()
+    escaped: list[str] = []
+    missing: list[str] = []
+    for target in targets:
+        resolved = (root / target).resolve()
+        if not resolved.is_relative_to(root):
+            escaped.append(target)
+        elif not resolved.exists():
+            missing.append(target)
+
+    assert not escaped, f"README repository navigation escapes the repository: {escaped}"
+    assert not missing, f"README repository navigation has broken links: {missing}"
 
 
 def test_navigation_exclusion_policy_is_explicit() -> None:
@@ -68,23 +110,52 @@ def test_navigation_exclusion_policy_is_explicit() -> None:
     assert all(reason.strip() for reason in NAVIGATION_EXCLUSIONS.values())
 
 
-def test_navigation_covers_every_tracked_top_level_entry() -> None:
-    """Every tracked root file or directory is linked regardless of extension."""
+def test_navigation_table_is_exact_tracked_root_inventory() -> None:
+    """Each tracked root entry has one direct navigation-table target."""
     tracked = _tracked_top_level_entries()
     exclusions = set(NAVIGATION_EXCLUSIONS)
     assert exclusions <= tracked
 
-    linked = {target.split("/", 1)[0] for target in _local_navigation_targets()}
-    missing = sorted(tracked - exclusions - linked)
-    assert not missing, f"README repository navigation omits tracked root entries: {missing}"
+    _assert_exact_root_navigation_inventory(_navigation_table_targets())
 
 
-def test_navigation_links_resolve() -> None:
-    """Every local target in the repository-navigation section exists."""
-    missing = sorted(
-        target for target in _local_navigation_targets() if not (REPO_ROOT / target).exists()
+def test_navigation_table_targets_resolve_inside_repository() -> None:
+    """Every local navigation-table target resolves inside the repository."""
+    _assert_targets_resolve_within_repository(_navigation_table_targets())
+
+
+def test_navigation_inventory_rejects_stale_or_nested_table_targets() -> None:
+    """A nested or stale table target cannot masquerade as a root entry."""
+    expected = _tracked_top_level_entries() - set(NAVIGATION_EXCLUSIONS)
+
+    nested_targets = _navigation_table_targets(
+        "\n".join(
+            f"| [entry]({target}) | test target |"
+            for target in [*sorted(expected - {"hephaestus"}), "hephaestus/automation"]
+        )
     )
-    assert not missing, f"README repository navigation has broken links: {missing}"
+    with pytest.raises(AssertionError, match="direct top-level targets"):
+        _assert_exact_root_navigation_inventory(nested_targets)
+
+    stale_targets = _navigation_table_targets(
+        "\n".join(
+            f"| [entry]({target}) | test target |"
+            for target in [*sorted(expected - {"AGENTS.md"}), "obsolete-root.md"]
+        )
+    )
+    with pytest.raises(AssertionError, match="exact tracked root-path inventory"):
+        _assert_exact_root_navigation_inventory(stale_targets)
+
+
+def test_navigation_target_validation_rejects_repository_escape(tmp_path: Path) -> None:
+    """A relative target that resolves above the checkout is rejected."""
+    repository_root = tmp_path / "repository"
+    repository_root.mkdir()
+    escaped_target = "../../../outside"
+    (tmp_path / "outside").touch()
+
+    with pytest.raises(AssertionError, match="escapes the repository"):
+        _assert_targets_resolve_within_repository([escaped_target], repository_root)
 
 
 def test_navigation_replaces_hand_maintained_directory_tree() -> None:
