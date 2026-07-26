@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeAlias
 
 from hephaestus.automation.dependency_resolver import CyclicDependencyError, DependencyResolver
 from hephaestus.automation.github_api import (
@@ -52,6 +52,11 @@ LOG = logging.getLogger(__name__)
 # concurrently, falling back to pre-#1623 behavior (acceptable tradeoff for regex tightness).
 _PLAN_FILE_RE = re.compile(r"`([A-Za-z0-9_][A-Za-z0-9_./-]*/[A-Za-z0-9_./-]+\.[A-Za-z0-9_]+)`")
 _PLAN_FILE_SECTION_RE = re.compile(r"^#{2,}\s+Files to (Modify|Create)\b", re.IGNORECASE)
+
+# A source path only conflicts with work in the same repository.  The
+# implementation queue is shared across repositories, so a bare path string
+# would incorrectly serialize independent ``repo-a`` and ``repo-b`` changes.
+PlanFileClaim: TypeAlias = tuple[tuple[str, str] | None, str]
 
 
 def _parse_planned_files(plan_body: str) -> set[str]:
@@ -110,17 +115,24 @@ def _fetch_planned_files(issue: int, repo: tuple[str, str] | None = None) -> set
 
 
 def _select_non_overlapping(
-    issues: list[int], repo_of: Mapping[int, tuple[str, str]] | None = None
+    issues: list[int],
+    repo_of: Mapping[int, tuple[str, str]] | None = None,
+    *,
+    initial_claims: set[PlanFileClaim] | None = None,
+    selected_claims: dict[int, set[PlanFileClaim]] | None = None,
 ) -> tuple[list[int], list[int]]:
     """Partition *issues* into (dispatch_now, defer_next_round).
 
     Greedy first-fit in the given order: an issue whose parsed plan file set
-    intersects the union of already-claimed files is deferred. Unknown file set
-    (no plan / parse failure) claims NO files and is always dispatched
-    (fail-open). The first issue always dispatches, so a whole batch can never
-    be deferred (liveness). Performs one serial GraphQL comment fetch per issue;
-    only invoked in multi-worker rounds (guarded at the call site), so the cost
-    is bounded by the issue count already being processed that round.
+    intersects the union of already-claimed files in the same repository is
+    deferred. ``initial_claims`` carries plans belonging to implementation
+    items that were dispatched by an earlier drain and are still in flight.
+    Unknown file set (no plan / parse failure) claims NO files and is always dispatched
+    (fail-open). When active work already owns a conflicting known path, every
+    queued item may defer until that work completes. Performs one serial
+    GraphQL comment fetch per issue; only invoked in multi-worker rounds
+    (guarded at the call site), so the cost is bounded by the issue count
+    already being processed that round.
 
     Args:
         issues: The issue numbers to partition, in dispatch-priority order.
@@ -129,27 +141,42 @@ def _select_non_overlapping(
             by stage rather than by repo, so one round can legitimately hold
             issues from several repositories. An issue missing from the mapping
             falls back to ambient-CWD resolution (#1795).
+        initial_claims: Repository-scoped plan-file claims owned by in-flight
+            implementation jobs.  They reserve paths before queued jobs are
+            considered, closing the gap between drain rounds.
+        selected_claims: Optional host-owned sink populated with the exact
+            plan snapshot that admitted each dispatched issue.  The
+            coordinator reuses those claims when submitting the job, so an
+            editable plan comment cannot change the reservation after the
+            overlap decision.
 
     Returns:
         A ``(dispatch, defer)`` tuple of issue-number lists (order preserved).
 
     """
     repo_of = repo_of or {}
-    claimed: set[str] = set()
+    claimed: set[PlanFileClaim] = set(initial_claims or ())
     dispatch: list[int] = []
     defer: list[int] = []
     for issue in issues:
-        planned = _fetch_planned_files(issue, repo=repo_of.get(issue))
-        if planned and (planned & claimed):
+        repo = repo_of.get(issue)
+        planned = _fetch_planned_files(issue, repo=repo)
+        claims = {(repo, path) for path in planned} if planned else set()
+        if claims and (claims & claimed):
             LOG.info(
                 "issue #%s deferred: plan files %s overlap in-flight peers",
                 issue,
-                sorted(planned & claimed),
+                sorted(path for _repo, path in claims & claimed),
             )
             defer.append(issue)
             continue
-        if planned:
-            claimed |= planned
+        if claims:
+            claimed |= claims
+        if selected_claims is not None:
+            # Preserve even an empty snapshot.  It proves this drain selected
+            # the issue fail-open and prevents submission from re-reading a
+            # mutable plan comment after the overlap decision.
+            selected_claims[issue] = set(claims)
         dispatch.append(issue)
     return dispatch, defer
 
@@ -228,6 +255,7 @@ def _filter_open_issues(repo: str, issue_numbers: list[int]) -> list[int]:
 
 
 __all__ = [
+    "PlanFileClaim",
     "_fetch_planned_files",
     "_filter_open_issues",
     "_parse_planned_files",
