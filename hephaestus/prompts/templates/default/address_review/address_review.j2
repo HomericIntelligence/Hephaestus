@@ -4,8 +4,10 @@ You are the COORDINATOR for fixing code in response to the review threads on PR 
 
 This runs IN-LOOP as part of the implement stage — it is no longer a separate
 pipeline phase. You are fixing the underlying code concerns raised against the
-current diff. These GitHub threads live on the PR, not on the issue, and must
-remain open for a human to verify, reply if appropriate, and resolve.
+current diff. These GitHub threads live on the PR, not on the issue. Do not
+reply to or resolve them yourself: only the coordinator may close an exact,
+process-owned receipt after a fresh validation and revalidation; every other
+thread remains a human gate.
 
 **Working Directory:** {{ worktree_path }}
 
@@ -18,7 +20,7 @@ remain open for a human to verify, reply if appropriate, and resolve.
 {{ threads_json_block }}
 
 The block above is a JSON array where each element has:
-- `thread_id`: GitHub GraphQL node ID used for the human-resolution handoff
+- `thread_id`: GitHub GraphQL node ID used for the coordinator's guarded receipt handoff
 - `path`: file path relative to repo root
 - `line`: line number (integer or null)
 - `body`: the reviewer's comment text
@@ -99,5 +101,6 @@ Rules for the JSON block:
 - Only include threads genuinely fixed. Leave unaddressable threads out of `addressed`.
 - Emit only one JSON block, at the very end of your response (the parser takes the LAST one).
 - Do not attempt to reply to or resolve a GitHub thread. Your code-fix claim is
-  recorded by the coordinator; a human then verifies the diff, replies if
-  appropriate, and resolves the thread.
+  recorded by the coordinator; it may reply and resolve only its immutable,
+  revalidated process-owned receipt. Human or changed threads remain open for
+  a human to verify and resolve.
