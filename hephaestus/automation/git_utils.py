@@ -725,9 +725,10 @@ def sync_worktree_to_remote_branch(
 
     This runs in two steps in ``cwd``:
 
-    1. ``git fetch <remote> <branch>`` — updates the remote-tracking ref so the
-       reset has a current target. If that branch ref is unavailable and
-       ``pr_number`` is supplied, fetch GitHub's ``refs/pull/N/head`` instead.
+    1. ``git fetch <remote> +refs/heads/<branch>:refs/remotes/<remote>/<branch>``
+       — materializes the remote-tracking ref so the reset has a current
+       target. If that branch ref is unavailable and ``pr_number`` is supplied,
+       fetch GitHub's ``refs/pull/N/head`` instead.
     2. ``git reset --hard <remote>/<branch>`` (or ``FETCH_HEAD`` for the pull
        ref fallback) moves HEAD to the PR's actual head.
 
@@ -749,8 +750,13 @@ def sync_worktree_to_remote_branch(
 
     """
     logger.info("Syncing worktree at %s to %s/%s before agent run", cwd, remote, branch)
+    tracking_ref = f"refs/remotes/{remote}/{branch}"
     try:
-        run(["git", "fetch", remote, branch], cwd=cwd, **_timeout_kw(timeout))
+        run(
+            ["git", "fetch", remote, f"+refs/heads/{branch}:{tracking_ref}"],
+            cwd=cwd,
+            **_timeout_kw(timeout),
+        )
     except subprocess.CalledProcessError as error:
         if pr_number is None or not _is_missing_remote_ref_error(error):
             raise
