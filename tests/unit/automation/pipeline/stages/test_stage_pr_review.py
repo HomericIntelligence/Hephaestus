@@ -9,7 +9,6 @@ from unittest.mock import patch
 
 import pytest
 
-from hephaestus.automation.claude_invoke import ReviewVerdict
 from hephaestus.automation.pipeline.jobs import AgentJob, CompactJob, GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import (
@@ -36,30 +35,25 @@ from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 
-class _LegacyTestAudit(ReviewAudit):
-    """Compatibility-shaped audit used by pre-migration fixture cases."""
-
-    @property
-    def verdict(self) -> str:
-        """Expose the old assertion spelling without feeding production parsing."""
-        if not self.valid:
-            return "AMBIGUOUS"
-        return "GO" if not self.findings else "NOGO"
-
-    @property
-    def is_go(self) -> bool:
-        """Expose the old GO predicate for fixture assertions."""
-        return self.verdict == "GO"
-
-
-def _verdict(kind: str) -> ReviewAudit:
-    """Build a structural audit for migrated stage fixtures."""
-    return _LegacyTestAudit(
-        grade="A" if kind == "GO" else "F",
+def _valid_audit() -> ReviewAudit:
+    """Build a valid structured audit for stage fixtures."""
+    return ReviewAudit(
+        grade="A",
         summary="fixture audit",
         findings=(),
-        raw_feedback=f"review text ({kind})",
-        valid=kind not in {"AMBIGUOUS", "ERROR"},
+        raw_feedback="fixture review text",
+        valid=True,
+    )
+
+
+def _invalid_audit() -> ReviewAudit:
+    """Build a malformed structured audit for failure-path fixtures."""
+    return ReviewAudit(
+        grade=None,
+        summary="",
+        findings=(),
+        raw_feedback="fixture review text",
+        valid=False,
     )
 
 
@@ -517,7 +511,7 @@ class TestPrReviewStageStep:
         ctx = make_ctx(github=FakeStageGitHub(unresolved=[(3, 0)]))
         item = make_work_item(issue=1, pr=1001, state="EVAL")
         item.worktree = "/tmp/review-worktree"
-        item.payload["review_verdict"] = _verdict("NOGO")
+        item.payload["review_audit"] = _valid_audit()
 
         result = stage.step(item, ctx)
 
@@ -565,14 +559,14 @@ class TestPrReviewStageStep:
         )
         item = make_work_item(issue=1, pr=1001, state="EVAL")
         item.worktree = "/tmp/review-worktree"
-        item.payload["review_verdict"] = _verdict("NOGO")
+        item.payload["review_audit"] = _valid_audit()
 
         assert stage.step(item, ctx) == Continue(next_state="COMPACT_REVIEWER_WAIT")
 
-    def test_review_parse_posts_structured_nogo_comments_and_routes_to_remediation(
+    def test_review_parse_posts_structured_comments_and_routes_to_remediation(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """Structured NOGO comments survive the worker boundary and are actionable."""
+        """Structured comments survive the worker boundary and are actionable."""
         events: list[Any] = []
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(1, 0)], by_severity=[(1, 0, 0)])
@@ -580,7 +574,7 @@ class TestPrReviewStageStep:
         item = make_work_item(issue=1, pr=1001, state="REVIEW_WAIT")
         item.worktree = "/tmp/wt"
         response = (
-            "This must be fixed.\n\nVerdict: NOGO\n\n```json\n"
+            "This must be fixed.\n\nReviewer prose is untrusted.\n\n```json\n"
             '{"comments":[{"path":"hephaestus/automation/pipeline/stages/pr_review.py",'
             '"line":500,"side":"RIGHT","severity":"critical","body":"race"}],'
             '"grade":"F","summary":"race found"}\n```'
@@ -668,7 +662,7 @@ class TestPrReviewStageStep:
         item = make_work_item(issue=4, pr=1001, state="REVIEW_WAIT")
         item.payload.update(
             {
-                "review_verdict": _verdict("NOGO"),
+                "review_audit": _valid_audit(),
                 "review_text": "stale",
                 "review_threads": [{"id": "t1"}],
                 "raw_review_threads": [{"id": "raw-t1"}],
@@ -685,7 +679,7 @@ class TestPrReviewStageStep:
 
         assert isinstance(result, JobRequest)
         for key in (
-            "review_verdict",
+            "review_audit",
             "review_text",
             "review_threads",
             "raw_review_threads",
@@ -754,7 +748,7 @@ class TestPrReviewStageStep:
                     "body": "doc",
                 },
             ),
-            raw_feedback="Verdict: NOGO",
+            raw_feedback="Reviewer prose is untrusted.",
             valid=True,
         )
         item.payload["review_threads"] = [dict(t) for t in item.payload["review_audit"].findings]
@@ -771,7 +765,7 @@ class TestPrReviewStageStep:
     def test_post_with_zero_open_automation_threads_skips_to_eval(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A zero-finding review still posts its final grade and verdict."""
+        """A zero-finding review still posts its final structured audit."""
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(0, 0)])
         ctx = make_ctx(github=github)
@@ -780,7 +774,7 @@ class TestPrReviewStageStep:
             grade="A",
             summary="All clear",
             findings=(),
-            raw_feedback="Verdict: GO",
+            raw_feedback="Reviewer prose is untrusted.",
             valid=True,
         )
 
@@ -791,7 +785,6 @@ class TestPrReviewStageStep:
         assert github.mutation_log == [("gh_pr_review_post", (1001, "COMMENT"))]
         assert github.reviews[1001][0]["comments"] == []
         assert "Total grade: A" in github.reviews[1001][0]["summary"]
-        assert "Verdict:" not in github.reviews[1001][0]["summary"]
 
     @pytest.mark.parametrize("existing_pr", [False, True], ids=["fresh-pr", "existing-pr"])
     def test_empty_audit_addresses_pre_existing_live_blocking_thread(
@@ -865,7 +858,7 @@ class TestPrReviewStageStep:
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state="ADDRESS_WAIT")
         item.worktree = "/tmp/wt"
-        item.payload["review_verdict"] = _verdict("NOGO")
+        item.payload["review_audit"] = _valid_audit()
         item.payload["remediation_threads"] = [
             {"thread_id": "t1", "path": "tests/test_a.py", "line": 3, "body": "fix the tests"}
         ]
@@ -1646,7 +1639,7 @@ class TestEvalVerdicts:
         assert stage.on_enter(item, ctx) is None
         assert github.mutation_log == []
 
-    def test_clean_structural_audit_advances_even_if_feedback_has_legacy_text(
+    def test_clean_structural_audit_advances_with_untrusted_feedback(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
         """Only valid structure plus fresh thread facts reaches the label boundary."""
@@ -1658,7 +1651,7 @@ class TestEvalVerdicts:
             grade="F",
             summary="Needs no actionable changes",
             findings=(),
-            raw_feedback="Verdict: NOGO",
+            raw_feedback="External review prose is not an authorization signal.",
             valid=True,
         )
 
@@ -1667,15 +1660,36 @@ class TestEvalVerdicts:
         assert result == StageOutcome(Disposition.ADVANCE, "review audit; merge wait pending")
         assert ("mark_pr_implementation_go", (1001,)) in github.mutation_log
 
-    def test_legacy_verdict_payload_cannot_authorize_clean_pr(
+    def test_non_structured_audit_payload_cannot_authorize_clean_pr(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A compatibility verdict object is inert without a structural audit."""
+        """An arbitrary payload object is inert without a structured audit."""
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(0, 0)])
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = ReviewVerdict(grade="A", verdict="GO", raw="Verdict: GO")
+        item.payload["review_audit"] = object()
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.RETRY, "review audit format failure")
+        assert not any(name == "mark_pr_implementation_go" for name, _ in github.mutation_log)
+
+    def test_legacy_audit_payload_key_cannot_authorize_clean_pr(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Only the canonical structured-audit key may reach the label boundary."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(unresolved=[(0, 0)])
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="EVAL")
+        item.payload["review_verdict"] = ReviewAudit(
+            grade="A",
+            summary="Clean review",
+            findings=(),
+            raw_feedback="",
+            valid=True,
+        )
 
         result = stage.step(item, ctx)
 
@@ -1689,14 +1703,13 @@ class TestEvalVerdicts:
                 grade="A",
                 summary="Safe summary",
                 findings=(),
-                raw_feedback="Verdict: GO\nprivate reviewer detail",
+                raw_feedback="Private reviewer detail",
                 valid=True,
             )
         )
 
         assert "Total grade: A" in body
         assert "Safe summary" in body
-        assert "Verdict:" not in body
         assert "private reviewer detail" not in body
 
     def test_go_with_zero_threads_marks_implementation_go_and_advances_to_merge_wait(
@@ -1708,7 +1721,7 @@ class TestEvalVerdicts:
         ctx = make_ctx(github=github)
         ctx.config.enable_follow_up = False
         item = make_work_item(issue=1, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = _verdict("GO")
+        item.payload["review_audit"] = _valid_audit()
 
         result = stage.step(item, ctx)
 
@@ -1753,7 +1766,7 @@ class TestEvalVerdicts:
         github = ThreadAddedDuringGoGitHub()
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = _verdict("GO")
+        item.payload["review_audit"] = _valid_audit()
 
         result = stage.step(item, ctx)
 
@@ -1783,7 +1796,7 @@ class TestEvalVerdicts:
         ctx = make_ctx(github=github)
         ctx.config.enable_follow_up = False
         item = make_work_item(issue=1, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = _verdict("GO")
+        item.payload["review_audit"] = _valid_audit()
 
         assert stage.step(item, ctx) == StageOutcome(
             Disposition.ADVANCE, "review audit; merge wait pending"
@@ -1799,7 +1812,7 @@ class TestEvalVerdicts:
         ctx = make_ctx(github=github)
         ctx.config.enable_follow_up = False
         item = make_work_item(issue=1, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = _verdict("GO")
+        item.payload["review_audit"] = _valid_audit()
 
         result = stage.step(item, ctx)
 
@@ -1814,7 +1827,7 @@ class TestEvalVerdicts:
         ctx = make_ctx(github=github)
         ctx.config.enable_follow_up = False
         item = make_work_item(issue=1, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = _verdict("GO")
+        item.payload["review_audit"] = _valid_audit()
 
         result = stage.step(item, ctx)
 
@@ -1841,7 +1854,7 @@ class TestEvalVerdicts:
         )
         ctx = make_ctx(github=github)
         item = make_work_item(issue=36, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = _verdict("GO")
+        item.payload["review_audit"] = _valid_audit()
         item.payload["reviewed_pr_head_sha"] = "a" * 40
 
         result = stage.step(item, ctx)
@@ -1874,7 +1887,7 @@ class TestEvalVerdicts:
         stage = PrReviewStage()
         github = PostWriteDriftGitHub()
         item = make_work_item(issue=36, pr=1001, state="EVAL")
-        item.payload.update({"review_verdict": _verdict("GO"), "reviewed_pr_head_sha": "a" * 40})
+        item.payload.update({"review_audit": _valid_audit(), "reviewed_pr_head_sha": "a" * 40})
 
         result = stage.step(item, make_ctx(github=github))
 
@@ -1912,7 +1925,7 @@ class TestEvalVerdicts:
         stage = PrReviewStage()
         github = ExternalGoAfterPushGitHub()
         item = make_work_item(issue=38, pr=1001, state="EVAL")
-        item.payload.update({"review_verdict": _verdict("GO"), "reviewed_pr_head_sha": "a" * 40})
+        item.payload.update({"review_audit": _valid_audit(), "reviewed_pr_head_sha": "a" * 40})
 
         result = stage.step(item, make_ctx(github=github))
 
@@ -1946,7 +1959,7 @@ class TestEvalVerdicts:
         stage = PrReviewStage()
         github = PostWriteArmGitHub()
         item = make_work_item(issue=37, pr=1001, state="EVAL")
-        item.payload.update({"review_verdict": _verdict("GO"), "reviewed_pr_head_sha": "a" * 40})
+        item.payload.update({"review_audit": _valid_audit(), "reviewed_pr_head_sha": "a" * 40})
 
         result = stage.step(item, make_ctx(github=github))
 
@@ -1954,23 +1967,23 @@ class TestEvalVerdicts:
         assert github.pr_has_implementation_state_label(1001) == (True, False)
         assert not any(name == "gh_issue_remove_labels" for name, _ in github.mutation_log)
 
-    def test_ungraded_go_is_converted_to_nogo_and_cannot_advance(
+    def test_invalid_structured_audit_cannot_advance(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A malformed GO cannot apply implementation-go or reach merge wait."""
+        """A malformed audit cannot apply a state label or reach merge wait."""
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(0, 0)])
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = ReviewVerdict(grade=None, verdict="GO", raw="Verdict: GO")
+        item.payload["review_audit"] = _invalid_audit()
 
         result = stage.step(item, ctx)
 
         assert result == StageOutcome(Disposition.RETRY, "review audit format failure")
         assert ("mark_pr_implementation_go", (1001,)) not in github.mutation_log
         assert ("mark_pr_implementation_no_go", (1001,)) not in github.mutation_log
-        assert item.payload["review_verdict"].grade is None
-        assert item.payload["review_verdict"].verdict == "GO"
+        assert item.payload["review_audit"].grade is None
+        assert item.payload["review_audit"].valid is False
 
     def test_go_rechecks_human_threads_and_stands_down(
         self, make_ctx: Any, make_work_item: Any
@@ -1980,7 +1993,7 @@ class TestEvalVerdicts:
         github = FakeStageGitHub(by_severity=[(0, 0, 0), (0, 0, 1)])
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = _verdict("GO")
+        item.payload["review_audit"] = _valid_audit()
 
         result = stage.step(item, ctx)
 
@@ -2000,7 +2013,7 @@ class TestEvalVerdicts:
         github = FakeStageGitHub(unresolved=[(0, 0)])
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = _verdict("GO")
+        item.payload["review_audit"] = _valid_audit()
 
         result = stage.step(item, ctx)
 
@@ -2020,7 +2033,7 @@ class TestEvalVerdicts:
         github = FakeStageGitHub(unresolved=[(0, 1)])
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = _verdict("GO")
+        item.payload["review_audit"] = _valid_audit()
 
         result = stage.step(item, ctx)
 
@@ -2060,7 +2073,7 @@ class TestEvalVerdicts:
         github = FakeStageGitHub(unresolved=[(2, 0)])
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = _verdict("GO")
+        item.payload["review_audit"] = _valid_audit()
 
         result = stage.step(item, ctx)
 
@@ -2078,7 +2091,7 @@ class TestEvalVerdicts:
         github = FakeStageGitHub(unresolved=[(3, 0)])
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = _verdict("NOGO")
+        item.payload["review_audit"] = _valid_audit()
 
         result = stage.step(item, ctx)
 
@@ -2094,7 +2107,7 @@ class TestEvalVerdicts:
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = _verdict("AMBIGUOUS")
+        item.payload["review_audit"] = _invalid_audit()
 
         result = stage.step(item, ctx)
 
@@ -2110,7 +2123,7 @@ class TestEvalVerdicts:
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, pr=1001, state="EVAL")
         item.payload["address_error"] = True
-        item.payload["review_verdict"] = _verdict("NOGO")
+        item.payload["review_audit"] = _valid_audit()
 
         result = stage.step(item, ctx)
 
@@ -2157,7 +2170,7 @@ class TestEvalVerdicts:
         item = make_work_item(issue=1, pr=1001, state="EVAL")
         item.payload.update(
             {
-                "review_verdict": _verdict("GO"),
+                "review_audit": _valid_audit(),
                 "reviewed_pr_head_sha": "a" * 40,
                 "process_review_threads": [
                     {
@@ -2187,7 +2200,7 @@ class TestEvalVerdicts:
         ctx = make_ctx(github=github)
         ctx.config.enable_follow_up = False
         item = make_work_item(issue=1, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = _verdict("GO")
+        item.payload["review_audit"] = _valid_audit()
         item.payload["process_review_threads"] = github.list_unresolved_review_threads(1001)
 
         result = stage.step(item, ctx)
@@ -2214,7 +2227,7 @@ class TestEvalVerdicts:
         )
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = _verdict("GO")
+        item.payload["review_audit"] = _valid_audit()
         item.payload["process_review_threads"] = github.list_unresolved_review_threads(1001)
 
         result = stage.step(item, ctx)
@@ -2234,7 +2247,7 @@ class TestEvalVerdicts:
         github = FakeStageGitHub(by_severity=[(1, 0, 0)])  # 1 blocking, 0 minor, 0 human
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = _verdict("GO")
+        item.payload["review_audit"] = _valid_audit()
         item.payload["pr_review_round"] = 1
 
         result = stage.step(item, ctx)
@@ -2268,7 +2281,7 @@ class TestEvalVerdicts:
         github = UnknownMarkerGitHub()
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = _verdict("GO")
+        item.payload["review_audit"] = _valid_audit()
 
         result = stage.step(item, ctx)
 
@@ -2285,7 +2298,7 @@ class TestEvalVerdicts:
         github = FakeStageGitHub(by_severity=[(0, 0, 1)])  # 0 blocking, 0 minor, 1 human
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = _verdict("GO")
+        item.payload["review_audit"] = _valid_audit()
 
         result = stage.step(item, ctx)
 
@@ -2301,7 +2314,7 @@ class TestEvalVerdicts:
         ctx = make_ctx(github=github)
         ctx.config.enable_follow_up = False
         item = make_work_item(issue=1, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = _verdict("GO")
+        item.payload["review_audit"] = _valid_audit()
 
         result = stage.step(item, ctx)
 
@@ -2321,7 +2334,7 @@ class TestEvalErrorNoBurn:
         github = FakeStageGitHub()
         ctx = make_ctx(github=github)
         item = make_work_item(issue=8, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = _verdict("ERROR")
+        item.payload["review_audit"] = _invalid_audit()
 
         result = stage.step(item, ctx)
 
@@ -2355,13 +2368,13 @@ class TestEvalErrorNoBurn:
         item = make_work_item(issue=10, pr=1001, state="EVAL")
 
         for expected_retry in range(1, REVIEW_ERROR_RETRY_CAP + 1):
-            item.payload["review_verdict"] = _verdict("ERROR")
+            item.payload["review_audit"] = _invalid_audit()
             outcome = stage.step(item, ctx)
             assert isinstance(outcome, StageOutcome)
             assert outcome.disposition == Disposition.RETRY
             assert item.payload["review_error_retries"] == expected_retry
 
-        item.payload["review_verdict"] = _verdict("ERROR")
+        item.payload["review_audit"] = _invalid_audit()
         outcome = stage.step(item, ctx)
 
         assert isinstance(outcome, StageOutcome)
@@ -2377,7 +2390,7 @@ class TestEvalErrorNoBurn:
         ctx = make_ctx(github=github)
         item = make_work_item(issue=11, pr=1001, state="EVAL")
         item.payload["review_error_retries"] = REVIEW_ERROR_RETRY_CAP  # one from the cap
-        item.payload["review_verdict"] = _verdict("NOGO")
+        item.payload["review_audit"] = _valid_audit()
 
         result = stage.step(item, ctx)
 
@@ -2393,11 +2406,10 @@ class TestProgressAwareBudget:
         stage: Any,
         item: Any,
         ctx: Any,
-        verdict: str = "NOGO",
         *,
         pre_address: int | None = None,
     ) -> Any:
-        """Run one EVAL with a fresh verdict (state machine loop shortcut).
+        """Run one EVAL with a fresh structured audit (state machine loop shortcut).
 
         ``pre_address`` mirrors what POST would have written to
         ``payload["unresolved_auto"]`` THIS round (the pre-address
@@ -2405,7 +2417,7 @@ class TestProgressAwareBudget:
         same round's post-address count instead of a value carried from
         the previous round (#1863).
         """
-        item.payload["review_verdict"] = _verdict(verdict)
+        item.payload["review_audit"] = _valid_audit()
         item.payload["reviewed_pr_head_sha"] = "a" * 40
         if pre_address is not None:
             item.payload["unresolved_auto"] = pre_address
@@ -2573,7 +2585,7 @@ class TestProgressAwareBudget:
         ctx = make_ctx(github=AddFailsGitHub(unresolved=[(3, 0)]))
         item = make_work_item(issue=16, pr=1001, state="EVAL")
         item.payload["pr_review_round"] = 5  # this round is 6/6
-        item.payload["review_verdict"] = _verdict("NOGO")
+        item.payload["review_audit"] = _valid_audit()
         item.payload["reviewed_pr_head_sha"] = "a" * 40
 
         result = stage.step(item, ctx)  # must not raise
@@ -2625,7 +2637,7 @@ class TestProgressAwareBudget:
         item = make_work_item(issue=17, pr=1001, state="EVAL")
         item.payload["pr_review_round"] = 2
         item.payload["unresolved_auto"] = 3
-        item.payload["review_verdict"] = _verdict("NOGO")
+        item.payload["review_audit"] = _valid_audit()
 
         outcome = PrReviewStage().step(item, make_ctx(github=github))
 
@@ -2654,7 +2666,7 @@ class TestProgressAwareBudget:
         item = make_work_item(issue=18, pr=1001, state="EVAL")
         item.payload["pr_review_round"] = 2
         item.payload["unresolved_auto"] = 3
-        item.payload["review_verdict"] = _verdict("NOGO")
+        item.payload["review_audit"] = _valid_audit()
 
         outcome = PrReviewStage().step(item, make_ctx(github=github))
 
@@ -2672,7 +2684,7 @@ class TestPrReviewOnJobDone:
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state="REVIEW_WAIT")
-        verdict = _verdict("GO")
+        verdict = _valid_audit()
 
         stage.on_job_done(item, JobResult(ok=True, value=verdict), ctx)
 
@@ -2691,7 +2703,7 @@ class TestPrReviewOnJobDone:
 
         stage.on_job_done(item, JobResult(ok=False, error="reviewer crashed"), ctx)
 
-        assert "review_verdict" not in item.payload
+        assert "review_audit" not in item.payload
         assert item.payload["review_failed"] is True
 
     def test_validation_and_difficulty_results_stored(
@@ -2752,14 +2764,14 @@ class TestFullWalks:
 
         pool = FakeWorkerPool()
         pool.script(
-            JobResult(ok=True, value=_verdict("NOGO")),  # review round 1
+            JobResult(ok=True, value=_valid_audit()),  # review round 1
             JobResult(ok=True, value='{"unaddressed": []}'),  # validate round 1
             JobResult(ok=True, value="tier list"),  # difficulty
             JobResult(ok=True, value="addressed"),  # address
             JobResult(ok=True, value=True),  # push
             JobResult(ok=True, value=True),  # compact reviewer before round 2
             JobResult(ok=True, value=True),  # compact writer before round 2
-            JobResult(ok=True, value=_verdict("GO")),  # review round 2
+            JobResult(ok=True, value=_valid_audit()),  # review round 2
             JobResult(ok=True, value='{"unaddressed": []}'),  # validate round 2
         )
 
@@ -2795,7 +2807,7 @@ class TestFullWalks:
 
         pool = FakeWorkerPool()
         round_jobs = [
-            JobResult(ok=True, value=_verdict("NOGO")),  # review
+            JobResult(ok=True, value=_valid_audit()),  # review
             JobResult(ok=True, value='{"unaddressed": []}'),  # validate
             JobResult(ok=True, value="tier list"),  # difficulty
             JobResult(ok=True, value="addressed"),  # address
@@ -2900,7 +2912,7 @@ class TestNoGoLabel:
         assert stage.on_enter(item, ctx) is None
 
         for _ in range(2):
-            item.payload["review_verdict"] = _verdict("NOGO")
+            item.payload["review_audit"] = _valid_audit()
             item.payload["reviewed_pr_head_sha"] = "a" * 40
             item.state = "EVAL"
             assert isinstance(stage.step(item, ctx), Continue)
@@ -2920,7 +2932,7 @@ class TestNoGoLabel:
         stage = PrReviewStage()
         ctx = make_ctx(github=NoGoFailsGitHub(unresolved=[(3, 0)]))
         item = make_work_item(issue=31, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = _verdict("NOGO")
+        item.payload["review_audit"] = _valid_audit()
 
         result = stage.step(item, ctx)  # must not raise
 
@@ -2945,7 +2957,7 @@ class TestNoGoLabel:
         )
         ctx = make_ctx(github=github)
         item = make_work_item(issue=35, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = _verdict("NOGO")
+        item.payload["review_audit"] = _valid_audit()
         item.payload["reviewed_pr_head_sha"] = "a" * 40
 
         result = stage.step(item, ctx)
@@ -2961,7 +2973,7 @@ class TestNoGoLabel:
         github = FakeStageGitHub()
         ctx = make_ctx(github=github)
         item = make_work_item(issue=32, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = _verdict("ERROR")
+        item.payload["review_audit"] = _invalid_audit()
 
         stage.step(item, ctx)
 
@@ -2992,7 +3004,7 @@ class TestHumanBlockedComment:
         )
         ctx = make_ctx(github=github)
         item = make_work_item(issue=33, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = _verdict("GO")
+        item.payload["review_audit"] = _valid_audit()
 
         result = stage.step(item, ctx)
 
@@ -3012,7 +3024,7 @@ class TestHumanBlockedComment:
         github = FakeStageGitHub(unresolved=[(0, 2)])
         ctx = make_ctx(github=github)
         item = make_work_item(issue=33, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = _verdict("GO")
+        item.payload["review_audit"] = _valid_audit()
 
         result = stage.step(item, ctx)
 
@@ -3036,7 +3048,7 @@ class TestHumanBlockedComment:
         stage = PrReviewStage()
         ctx = make_ctx(github=CommentFailsGitHub(unresolved=[(0, 1)]))
         item = make_work_item(issue=34, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = _verdict("GO")
+        item.payload["review_audit"] = _valid_audit()
 
         result = stage.step(item, ctx)  # must not raise
 
@@ -3072,7 +3084,7 @@ class TestRealCommitGate:
         item.worktree = "/tmp/wt40"
         item.payload.update(
             {
-                "review_audit": _verdict("NOGO"),
+                "review_audit": _valid_audit(),
                 "review_feedback": "stale feedback",
                 "review_threads": [{"thread_id": "stale"}],
                 "validation_result": '{"unaddressed": []}',
@@ -3108,7 +3120,7 @@ class TestRealCommitGate:
         ctx = make_ctx()
         item = make_work_item(issue=41, pr=1001, state="EVAL")
         threads = [{"thread_id": "t1", "path": "x.py", "line": 3, "body": "fix the bug"}]
-        item.payload["review_verdict"] = _verdict("NOGO")
+        item.payload["review_audit"] = _valid_audit()
         item.payload["remediation_threads"] = threads
         item.payload["push_no_commit"] = True
 
@@ -3136,7 +3148,7 @@ class TestRealCommitGate:
                 "body": "live GitHub blocker",
             }
         ]
-        item.payload["review_verdict"] = _verdict("NOGO")
+        item.payload["review_audit"] = _valid_audit()
         item.payload["raw_review_threads"] = raw_threads
         item.payload["remediation_threads"] = remediation_threads
         item.payload["push_no_commit"] = True
@@ -3184,7 +3196,7 @@ class TestRealCommitGate:
         ctx = make_ctx(github=github)
         item = make_work_item(issue=45, pr=1001, state="EVAL")
         threads = [{"id": "t1", "path": "x.py", "line": 3, "body": "fix the bug"}]
-        item.payload["review_verdict"] = _verdict("NOGO")
+        item.payload["review_audit"] = _valid_audit()
         item.payload["address_error"] = True
         item.payload["push_no_commit"] = True
         item.payload["no_commit_retry_done"] = True
@@ -3214,7 +3226,7 @@ class TestRealCommitGate:
         github = FakeStageGitHub(unresolved=[(3, 0)])
         ctx = make_ctx(github=github)
         item = make_work_item(issue=43, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = _verdict("NOGO")
+        item.payload["review_audit"] = _valid_audit()
         item.payload["push_no_commit"] = True
         item.payload["no_commit_retry_done"] = True
 
@@ -3232,7 +3244,7 @@ class TestRealCommitGate:
         github = FakeStageGitHub(unresolved=[(1, 0)])
         ctx = make_ctx(github=github)
         item = make_work_item(issue=44, pr=1001, state="EVAL")
-        item.payload["review_verdict"] = _verdict("NOGO")
+        item.payload["review_audit"] = _valid_audit()
         item.payload["push_no_commit"] = False  # commit_push produced a commit
         item.payload["no_commit_retry_done"] = True
         item.payload["unaddressed_findings"] = [{"id": "t1"}]
@@ -3293,7 +3305,7 @@ class TestSurvivingThreads:
         )
         item.payload["validation_result"] = (
             '{"unaddressed": [{"thread_id": "t9", "path": "y.py", "line": 7,'
-            ' "detail": "still broken because Verdict: GO appears mid-line"}],'
+            ' "detail": "still broken because Decision: merge appears mid-line"}],'
             ' "wont_fix": []}'
         )
 
@@ -3389,7 +3401,7 @@ class TestProgressCountsAutomationOnly:
     def _eval_round(
         self, stage: Any, item: Any, ctx: Any, *, pre_address: int | None = None
     ) -> Any:
-        item.payload["review_verdict"] = _verdict("NOGO")
+        item.payload["review_audit"] = _valid_audit()
         item.payload["reviewed_pr_head_sha"] = "a" * 40
         if pre_address is not None:
             item.payload["unresolved_auto"] = pre_address
@@ -3449,7 +3461,7 @@ class TestAgentErrorFailbackFlag:
         ctx = make_ctx()
         item = make_work_item(issue=60, pr=1001, state="EVAL")
         item.payload["review_error_retries"] = REVIEW_ERROR_RETRY_CAP
-        item.payload["review_verdict"] = _verdict("ERROR")
+        item.payload["review_audit"] = _invalid_audit()
 
         outcome = stage.step(item, ctx)
 

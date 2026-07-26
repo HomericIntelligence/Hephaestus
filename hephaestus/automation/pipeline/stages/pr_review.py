@@ -238,7 +238,6 @@ REVIEW_CHECKOUT_RETRY_CAP = 2
 _ROUND_PAYLOAD_KEYS = (
     "review_audit",
     "review_feedback",
-    "review_verdict",
     "review_text",
     "review_failed",
     "validation_result",
@@ -1535,13 +1534,6 @@ class PrReviewStage(Stage):
             return no_commit_retry
 
         audit = payload.get("review_audit")
-        # A structural object under the old fixture key is an internal
-        # compatibility representation, not legacy prose. Textual verdict
-        # objects remain deliberately inert and cannot reach a label write.
-        if not isinstance(audit, ReviewAudit) and isinstance(
-            payload.get("review_verdict"), ReviewAudit
-        ):
-            audit = payload.get("review_verdict")
         if payload.pop("review_audit_failure", False) or not isinstance(audit, ReviewAudit):
             return self._handle_error_verdict(item, ReviewAudit(None, "", (), "", valid=False))
         if not audit.valid:
