@@ -711,7 +711,16 @@ class PlanReviewStage(Stage):
 
         """
         if not result.ok:
-            logger.warning("plan_review:%s: job failed: %s", item.issue, result.error)
+            stderr_tail = result.stderr_tail.strip()
+            if stderr_tail:
+                logger.warning(
+                    "plan_review:%s: job failed: %s; stderr tail: %s",
+                    item.issue,
+                    result.error,
+                    stderr_tail,
+                )
+            else:
+                logger.warning("plan_review:%s: job failed: %s", item.issue, result.error)
             return
 
         if result.value is not None:

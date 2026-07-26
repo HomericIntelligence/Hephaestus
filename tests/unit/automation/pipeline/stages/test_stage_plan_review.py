@@ -1055,16 +1055,41 @@ class TestPlanReviewStageOnJobDone:
         assert "Review v1" not in history
         assert "Review v2" not in history
 
-    def test_failed_result_is_not_stored(self, make_ctx: Any, make_work_item: Any) -> None:
-        """A failed job result is logged and never stored."""
+    def test_failed_result_without_stderr_is_not_stored_or_noisy(
+        self, make_ctx: Any, make_work_item: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A failed review without a diagnostic keeps the concise legacy log."""
         stage = PlanReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=3, state="REVIEW_WAIT")
         result = JobResult(ok=False, error="reviewer crashed")
 
-        stage.on_job_done(item, result, ctx)
+        with caplog.at_level("WARNING", logger=plan_review.__name__):
+            stage.on_job_done(item, result, ctx)
 
         assert "review_verdict" not in item.payload
+        assert all("stderr tail:" not in message for message in caplog.messages)
+
+    def test_failed_result_logs_stderr_diagnostic(
+        self, make_ctx: Any, make_work_item: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A failed review exposes its bounded worker diagnostic to operators."""
+        stage = PlanReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=3, state="REVIEW_WAIT")
+        result = JobResult(
+            ok=False,
+            error="rc=1",
+            stderr_tail="stream disconnected before completion",
+        )
+
+        with caplog.at_level("WARNING", logger=plan_review.__name__):
+            stage.on_job_done(item, result, ctx)
+
+        assert any(
+            "job failed: rc=1; stderr tail: stream disconnected before completion" in message
+            for message in caplog.messages
+        )
 
 
 class TestDurableWriteOrdering:
