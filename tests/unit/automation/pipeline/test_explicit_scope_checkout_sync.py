@@ -53,13 +53,17 @@ class _RecordingPool(FakeWorkerPool):
 class _RecordingGitHub(FakeStageGitHub):
     """Record the first label mutation relative to direct classification."""
 
-    def __init__(self, events: list[str]) -> None:
-        super().__init__(labels=["state:needs-plan"])
+    def __init__(self, events: list[str], **kwargs: Any) -> None:
+        super().__init__(labels=["state:needs-plan"], **kwargs)
         self._events = events
 
     def ensure_state_labels(self) -> None:
         self._events.append("labels")
         super().ensure_state_labels()
+
+    def find_issue_for_pr(self, pr_number: int) -> int | None:
+        self._events.append("classify-pr")
+        return super().find_issue_for_pr(pr_number)
 
 
 def _facts(issue: int) -> IssueFacts:
@@ -114,17 +118,49 @@ def test_explicit_scope_syncs_before_labels_and_classification(
     assert events[:3] == ["sync", "labels", "classify"]
 
 
-def test_explicit_scope_sync_failure_blocks_labels_sources_and_agents(
+def test_explicit_pr_scope_syncs_before_labels_and_pr_classification(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A failed explicit-scope fetch never falls through to stale checkout work."""
+    """An explicit PR follows the same checkout proof before its first read."""
+    events: list[str] = []
+    (tmp_path / "repo-a").mkdir()
+    pool = _RecordingPool(events)
+    github = _RecordingGitHub(events, pr_issue=101, pr_impl_state=(True, False))
+
+    monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda *_args: [])
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            prs=[77],
+            projects_dir=tmp_path,
+            scope=PipelineScope(frozenset({StageName.MERGE_WAIT})),
+        ),
+        github=github,
+        pool=pool,
+        install_signals=False,
+    )
+    coordinator.stages[StageName.MERGE_WAIT] = _ImmediatePassStage()
+
+    assert coordinator.run() == 0
+    assert events[:3] == ["sync", "labels", "classify-pr"]
+
+
+@pytest.mark.parametrize(
+    "sync_error",
+    ["fetch unavailable", "checkout is dirty", "cannot fast-forward checkout"],
+)
+def test_explicit_scope_sync_failure_blocks_labels_sources_and_agents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sync_error: str
+) -> None:
+    """Fetch, dirty, or stale checkout failures cannot enter a scoped run."""
     checkout = tmp_path / "repo-a"
     checkout.mkdir()
     classifications: list[int] = []
     pool = FakeWorkerPool()
     pool.script(
-        JobResult(ok=False, error="fetch unavailable"),
-        JobResult(ok=False, error="fetch unavailable"),
+        JobResult(ok=False, error=sync_error),
+        JobResult(ok=False, error=sync_error),
     )
     github = FakeStageGitHub(labels=["state:needs-plan"])
 
