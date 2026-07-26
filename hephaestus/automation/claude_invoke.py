@@ -43,8 +43,6 @@ from hephaestus.github.client import ClaudeUsageCapError, PromptTooLongError
 from hephaestus.github.rate_limit import resolve_quota_reset_epoch
 from hephaestus.utils.helpers import strip_null_bytes
 
-from .review_types import ReviewVerdict as ReviewVerdict
-
 logger = logging.getLogger(__name__)
 
 _MAX_SUBPROCESS_FAILURE_DETAIL_CHARS = 500
@@ -607,69 +605,3 @@ def detect_model_usage_cap(*texts: str) -> bool:
         if _MODEL_USAGE_CAP_RE.search(text):
             return True
     return False
-
-
-# Deprecated historical compatibility parser.  There are no production
-# callers: active implementation review accepts only structural audits and
-# GitHub labels are the sole transition authority.  Do not attach this parser
-# to an agent job or use it for routing; it is retained only for isolated
-# historical-parser unit coverage until the compatibility surface is removed.
-_VERDICT_RE = re.compile(
-    r"^\s*\**\s*Verdict\s*:\s*\**\s*(CONDITIONAL[\s-]?GO|GO|NO[\s-]?GO|ERROR)\b",
-    re.MULTILINE | re.IGNORECASE,
-)
-_SUMMARY_PAIR_RE = re.compile(
-    r"^\s*\**\s*Grade\s*:\s*\**\s*(?P<grade>[A-F][+-]?)(?![A-Za-z])[ \t]*\r?\n"
-    r"^\s*\**\s*Verdict\s*:\s*\**\s*(?P<verdict>CONDITIONAL[\s-]?GO|GO|NO[\s-]?GO|ERROR)\b",
-    re.MULTILINE | re.IGNORECASE,
-)
-
-# Deprecated companion fixture for the historical compatibility parser.  It
-# is not emitted by an active review loop.
-INFRA_ERROR_REVIEW_TEXT = "Grade: F\nVerdict: ERROR\n"
-
-
-def parse_review_verdict(text: str) -> ReviewVerdict:
-    """Parse historical textual verdicts for compatibility tests only.
-
-    This function has no production caller.  New code must use structural
-    review-audit parsing and GitHub label/state checks instead.
-
-    Looks for lines like:
-        Grade: B+
-        Verdict: GO     (or CONDITIONAL GO, NOGO, NO-GO, NO GO, ERROR)
-
-    A response missing a verdict is treated as AMBIGUOUS — which the loop
-    treats as NoGo (continue iterating). A grade is associated only with an
-    immediately adjacent preceding ``Grade`` line, so a final verdict cannot
-    borrow a grade from an earlier summary. An explicit ``Verdict: ERROR`` marks
-    a reviewer-infrastructure failure (see
-    :data:`INFRA_ERROR_REVIEW_TEXT`) and is surfaced as ``verdict="ERROR"`` so
-    callers can distinguish it from a genuine NOGO. ``CONDITIONAL GO`` is
-    normalized to NOGO because the pipeline's gate is binary.
-
-    Args:
-        text: The full review text from Claude.
-
-    Returns:
-        :class:`ReviewVerdict`.
-
-    """
-    # Last verdict wins. A grade belongs to it only when it appears in the
-    # immediately preceding Grade/Verdict pair; this preserves plan-review's
-    # historical verdict-only format while allowing PR review to reject an
-    # ungraded final verdict fail-closed.
-    pairs = list(_SUMMARY_PAIR_RE.finditer(text))
-    verdicts = list(_VERDICT_RE.finditer(text))
-    if not verdicts:
-        return ReviewVerdict(grade=None, verdict="AMBIGUOUS", raw=text)
-
-    final_verdict = verdicts[-1]
-    matching_pair = next(
-        (pair for pair in reversed(pairs) if pair.start("verdict") == final_verdict.start(1)),
-        None,
-    )
-    raw_verdict = re.sub(r"[\s-]", "", final_verdict.group(1).upper())
-    verdict = "GO" if raw_verdict == "GO" else "ERROR" if raw_verdict == "ERROR" else "NOGO"
-    grade = matching_pair.group("grade").upper() if matching_pair else None
-    return ReviewVerdict(grade=grade, verdict=verdict, raw=text)

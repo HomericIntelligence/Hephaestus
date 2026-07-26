@@ -210,38 +210,6 @@ def test_capability_scope_still_blocks_io_in_seeding() -> None:
     assert not any("dependency_resolver" in v for v in violations)
 
 
-def test_plan_review_rejects_the_legacy_textual_verdict_parser() -> None:
-    """Pipeline stages cannot reintroduce the inert textual-verdict parser."""
-    synthetic_source = (
-        "from hephaestus.automation.claude_invoke import parse_review_verdict\n"
-        "from hephaestus.automation.claude_invoke import ReviewVerdict\n"
-        "from hephaestus.automation.claude_invoke import invoke_claude_with_session\n"
-        "import hephaestus.automation.claude_invoke\n"
-    )
-    tree = ast.parse(synthetic_source, filename="<synthetic-plan-review>")
-    violations = _collect_violations(tree, "plan_review.py", {})
-
-    assert len(violations) == 4, violations
-    assert any(
-        v.startswith("plan_review.py:1: from hephaestus.automation.claude_invoke")
-        for v in violations
-    )
-    assert any(
-        v.startswith("plan_review.py:2: from hephaestus.automation.claude_invoke")
-        for v in violations
-    )
-    assert any(
-        v.startswith("plan_review.py:3: from hephaestus.automation.claude_invoke")
-        for v in violations
-    )
-    # A bare module import exposes the whole surface: always a violation
-    # under a symbol-scoped exemption.
-    assert any(
-        v.startswith("plan_review.py:4: import hephaestus.automation.claude_invoke")
-        for v in violations
-    )
-
-
 def test_forbidden_detects_synthetic_forbidden_import() -> None:
     """Negative test: the guard must actually flag forbidden imports.
 

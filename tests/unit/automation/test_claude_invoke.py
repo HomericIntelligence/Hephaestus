@@ -1,20 +1,16 @@
-"""Tests for Claude invocation helpers and inert parser compatibility."""
+"""Tests for Claude invocation helpers."""
 
 from __future__ import annotations
 
 import subprocess
 
 import pytest
-from hypothesis import given, strategies as st
 
 from hephaestus.automation.claude_invoke import (
-    INFRA_ERROR_REVIEW_TEXT,
-    ReviewVerdict,
     describe_claude_failure,
     detect_model_usage_cap,
     detect_server_overload,
     format_called_process_error,
-    parse_review_verdict,
 )
 
 # The exact model-cap phrasing observed in output2.log (2026-07-03). Unlike a
@@ -121,117 +117,6 @@ class TestDetectServerOverload:
         """Empty or falsy streams are skipped without error."""
         assert detect_server_overload("", "") is False
         assert detect_server_overload() is False
-
-
-class TestParseReviewVerdict:
-    """Compatibility tests for an inert historical text parser."""
-
-    def test_unambiguous_go(self) -> None:
-        """Parse a clean GO with letter grade."""
-        v = parse_review_verdict("blah blah\nGrade: A\nVerdict: GO\n")
-        assert v == ReviewVerdict(grade="A", verdict="GO", raw=v.raw)
-        assert v.is_go is True
-
-    def test_unambiguous_nogo(self) -> None:
-        """Parse a clean NOGO with letter+plus grade."""
-        v = parse_review_verdict("Grade: D+\nVerdict: NOGO")
-        assert v.grade == "D+"
-        assert v.verdict == "NOGO"
-        assert v.is_go is False
-
-    def test_no_go_with_dash(self) -> None:
-        """Accept `NO-GO` as a NOGO verdict."""
-        v = parse_review_verdict("Grade: F\nVerdict: NO-GO")
-        assert v.verdict == "NOGO"
-
-    def test_no_go_with_space(self) -> None:
-        """Accept `NO GO` as a NOGO verdict."""
-        v = parse_review_verdict("Grade: F\nVerdict: NO GO")
-        assert v.verdict == "NOGO"
-
-    def test_conditional_go_is_a_nogo_for_the_binary_review_gate(self) -> None:
-        """A conditional skill approval must not pass the loop's GO gate."""
-        v = parse_review_verdict("Grade: B\nVerdict: CONDITIONAL GO")
-        assert v.grade == "B"
-        assert v.verdict == "NOGO"
-        assert v.is_go is False
-
-    def test_missing_verdict_is_ambiguous(self) -> None:
-        """Missing verdict => AMBIGUOUS, treated as not-GO by the loop."""
-        v = parse_review_verdict("Grade: B")
-        assert v.verdict == "AMBIGUOUS"
-        assert v.is_go is False
-
-    def test_missing_grade_keeps_the_verdict_ungraded(self) -> None:
-        """Verdict-only plan reviews remain readable but have no grade."""
-        v = parse_review_verdict("Verdict: GO")
-        assert v.grade is None
-        assert v.verdict == "GO"
-        assert v.is_go is True
-
-    def test_with_bold_markers(self) -> None:
-        """Markdown bold around the labels is tolerated."""
-        v = parse_review_verdict("**Grade:** B+\n**Verdict:** GO")
-        assert v.grade == "B+"
-        assert v.verdict == "GO"
-
-    def test_case_insensitive(self) -> None:
-        """Lowercase labels still match."""
-        v = parse_review_verdict("grade: c-\nverdict: nogo")
-        assert v.grade == "C-"
-        assert v.verdict == "NOGO"
-
-    def test_last_grade_and_verdict_win(self) -> None:
-        """The reviewer's final summary overrides earlier quoted verdicts."""
-        v = parse_review_verdict(
-            "Quoted context:\nGrade: F\nVerdict: NOGO\n\nFinal review:\nGrade: A\nVerdict: GO"
-        )
-        assert v.grade == "A"
-        assert v.verdict == "GO"
-
-    def test_later_unpaired_verdict_does_not_borrow_an_earlier_grade(self) -> None:
-        """The PR stage can fail closed when the final verdict has no grade."""
-        v = parse_review_verdict("Grade: F\nVerdict: NOGO\n\nLater summary:\nVerdict: GO")
-        assert v.grade is None
-        assert v.verdict == "GO"
-
-
-class TestInfraErrorVerdict:
-    """Historical parser compatibility retains a distinct ERROR result.
-
-    Active reviewers return structural audits, so this fixture is never emitted
-    or routed by a production review loop.
-    """
-
-    def test_sentinel_text_parses_to_error_verdict(self) -> None:
-        """The infra-error sentinel text resolves to verdict=ERROR."""
-        v = parse_review_verdict(INFRA_ERROR_REVIEW_TEXT)
-        assert v.verdict == "ERROR"
-        assert v.is_error is True
-        assert v.is_go is False
-
-    def test_error_verdict_round_trips_through_text(self) -> None:
-        """An ERROR verdict survives the text → log → re-parse round-trip.
-
-        The loop persists ``review_text`` and re-parses it, so the sentinel
-        must be recognizable as ERROR on a second parse, not collapse to NOGO.
-        """
-        first = parse_review_verdict(
-            f"Reviewer crashed at iteration 2\n\n{INFRA_ERROR_REVIEW_TEXT}"
-        )
-        assert first.verdict == "ERROR"
-        assert parse_review_verdict(first.raw).verdict == "ERROR"
-
-    def test_real_nogo_is_not_error(self) -> None:
-        """A genuine reviewer NOGO is distinct from an infra ERROR."""
-        v = parse_review_verdict("Grade: F\nVerdict: NOGO")
-        assert v.verdict == "NOGO"
-        assert v.is_error is False
-
-    def test_go_is_not_error(self) -> None:
-        """A GO verdict is not an error."""
-        v = parse_review_verdict("Grade: A\nVerdict: GO")
-        assert v.is_error is False
 
 
 class TestRaiseForErrorEnvelope:
@@ -369,32 +254,3 @@ class TestDescribeClaudeFailure:
 
     def test_other_exceptions_fall_back_to_str(self) -> None:
         assert describe_claude_failure(TimeoutError("too slow")) == "too slow"
-
-
-# Verdict fragments Hypothesis interleaves with arbitrary text to exercise the
-# structured branches of the parser, not just unicode noise (issue #1470).
-_VERDICT_TOKENS = ["GO", "NOGO", "NO-GO", "NO GO", "ERROR"]
-
-
-class TestParseReviewVerdictProperties:
-    """Property-based coverage for inert parser compatibility (#1470)."""
-
-    @given(st.text())
-    def test_never_raises_and_preserves_raw(self, text: str) -> None:
-        result = parse_review_verdict(text)
-        assert isinstance(result, ReviewVerdict)
-        assert result.raw == text
-        assert result.verdict in {"GO", "NOGO", "ERROR", "AMBIGUOUS"}
-
-    @given(st.text())
-    def test_no_verdict_marker_is_ambiguous(self, text: str) -> None:
-        # Text with no "verdict" token must resolve to AMBIGUOUS (fail-safe).
-        if "verdict" not in text.lower():
-            assert parse_review_verdict(text).verdict == "AMBIGUOUS"
-
-    @given(st.sampled_from(_VERDICT_TOKENS), st.text(max_size=200))
-    def test_anchored_grade_verdict_pair_classifies(self, token: str, noise: str) -> None:
-        body = f"{noise}\nGrade: F\nVerdict: {token}\n"
-        normalized = token.replace("-", "").replace(" ", "")
-        expected = {"GO": "GO", "ERROR": "ERROR"}.get(normalized, "NOGO")
-        assert parse_review_verdict(body).verdict == expected
