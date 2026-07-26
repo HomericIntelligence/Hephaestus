@@ -2,18 +2,19 @@
 
 Binding contract: docs/architecture.md §5.1 "repo".
 
-States: ENTER -> CLONE_WAIT -> DISCOVER -> SOURCE.
+States: ENTER -> CLONE_WAIT -> LABELS -> DISCOVER -> SOURCE.
 
 Steps:
 
-1. [M] ``on_enter``: ``ctx.github.ensure_state_labels()`` — idempotent label
-   vocabulary setup.
-2. [W:G] CLONE_WAIT: ``GitJob(op="clone")`` when the checkout is missing, or
-   ``GitJob(op="sync_checkout")`` when it already exists. Synchronization
-   validates the expected remote and fast-forwards only a clean default-branch
-   checkout. Both operations are logged-skipped under dry-run — the
+1. [W:G] CLONE_WAIT: ``GitJob(op="clone")`` when the checkout is missing, then
+   ``GitJob(op="sync_checkout")``; or ``GitJob(op="sync_checkout")`` directly
+   when it already exists. Synchronization validates the expected remote and
+   fast-forwards only a clean default-branch checkout. Both operations are
+   logged-skipped under dry-run — the
    coordinator's ``_submit`` asserts no job is ever submitted in dry-run.
    Budget ``clone`` = 2; exhaustion -> finished(fail).
+2. [M] LABELS: ``ctx.github.ensure_state_labels()`` only after checkout
+   synchronization succeeds.
 3. [M] DISCOVER: initialize one page-at-a-time metadata cursor. It never
    materializes a list of classified products.
 4. [M] SOURCE: the coordinator transfers the bounded cursor to its fair
@@ -88,7 +89,7 @@ class RepoStage(Stage):
     kind = StageName.REPO
 
     def on_enter(self, item: WorkItem, ctx: StageContext) -> StageOutcome | None:
-        """Ensure the state-label vocabulary exists (idempotent, durable).
+        """Proceed to checkout preparation before any durable label work.
 
         Args:
             item: The repo work item.
@@ -98,7 +99,7 @@ class RepoStage(Stage):
             None to proceed with step().
 
         """
-        ctx.github.ensure_state_labels()
+        del item, ctx
         return None
 
     def step(self, item: WorkItem, ctx: StageContext) -> StepResult:
@@ -118,6 +119,15 @@ class RepoStage(Stage):
         if item.state == "CLONE_WAIT":
             return self._clone_or_skip(item, ctx)
 
+        if item.state == "LABELS":
+            ctx.github.ensure_state_labels()
+            if item.payload.get("_direct_scope_bootstrap", False):
+                return StageOutcome(
+                    Disposition.FINISH_PASS,
+                    note="direct scope checkout synchronized",
+                )
+            return Continue(next_state="DISCOVER")
+
         if item.state == "DISCOVER":
             return self._discover(item, ctx)
 
@@ -131,8 +141,9 @@ class RepoStage(Stage):
 
     def _clone_or_skip(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Prepare a checkout by cloning or safely synchronizing it."""
-        # Clone failure handling (budget clone=2): on_job_done recorded the
-        # failure; classify it here so retry re-submits and exhaustion fails.
+        # Checkout preparation failure handling (budget clone=2): on_job_done
+        # records the failure while retaining CLONE_WAIT, so retry cannot fall
+        # through into label work or discovery after a failed fetch.
         if item.payload.pop("clone_failed", False):
             if item.attempts.get("clone", 0) >= ctx.budget("clone"):
                 return StageOutcome(
@@ -146,15 +157,19 @@ class RepoStage(Stage):
                 ctx.budget("clone"),
             )
 
+        if item.payload.pop("checkout_verified", False):
+            return Continue(next_state="LABELS")
+
         dest = _repo_checkout_path(item, ctx)
         if ctx.dry_run:
             if dest.exists():
                 logger.info("[dry-run] would synchronize %s/%s at %s", ctx.org, item.repo, dest)
-                return Continue(next_state="DISCOVER")
+                return Continue(next_state="LABELS")
             logger.info("[dry-run] would clone %s/%s to %s", ctx.org, item.repo, dest)
-            return Continue(next_state="DISCOVER")
+            return Continue(next_state="LABELS")
 
-        if dest.exists():
+        if item.payload.pop("checkout_cloned", False) or dest.exists():
+            item.payload["checkout_op"] = "sync_checkout"
             job = GitJob(
                 repo=item.repo,
                 op="sync_checkout",
@@ -162,8 +177,9 @@ class RepoStage(Stage):
                 kwargs={"repo": f"{ctx.org}/{item.repo}", "dest": str(dest)},
                 descr=f"synchronize {ctx.org}/{item.repo}",
             )
-            return JobRequest(job=job, on_done_state="DISCOVER")
+            return JobRequest(job=job, on_done_state="CLONE_WAIT")
 
+        item.payload["checkout_op"] = "clone"
         job = GitJob(
             repo=item.repo,
             op="clone",
@@ -173,7 +189,7 @@ class RepoStage(Stage):
             kwargs={"repo": f"{ctx.org}/{item.repo}", "dest": str(dest)},
             descr=f"clone {ctx.org}/{item.repo}",
         )
-        return JobRequest(job=job, on_done_state="DISCOVER")
+        return JobRequest(job=job, on_done_state="CLONE_WAIT")
 
     def _discover(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """[M] Initialize a bounded metadata source; do not classify eagerly."""
@@ -204,7 +220,17 @@ class RepoStage(Stage):
         if item.state != "CLONE_WAIT":
             return
         if result.ok:
-            logger.info("repo:%s: checkout preparation completed", item.repo)
+            operation = item.payload.get("checkout_op")
+            if operation == "clone":
+                item.payload["checkout_cloned"] = True
+                logger.info("repo:%s: clone completed; verifying checkout", item.repo)
+            elif operation == "sync_checkout":
+                item.payload["checkout_verified"] = True
+                logger.info("repo:%s: checkout preparation completed", item.repo)
+            else:  # pragma: no cover - every checkout JobRequest records its operation
+                item.payload["clone_failed"] = True
+                item.attempts["clone"] = item.attempts.get("clone", 0) + 1
+                logger.warning("repo:%s: checkout operation identity missing", item.repo)
             return
         item.attempts["clone"] = item.attempts.get("clone", 0) + 1
         item.payload["clone_failed"] = True
