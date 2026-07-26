@@ -1152,6 +1152,32 @@ class TestPlanReviewStageOnJobDone:
             f"plan_review:3: job failed: exit code 1; diagnostic: {expected_diagnostic}"
         ]
 
+    @pytest.mark.parametrize(
+        ("error", "expected_reason"),
+        [
+            ("timeout", "agent timed out"),
+            ("circuit_open", "agent circuit is open"),
+            ("interrupted_before_start", "agent job was interrupted before start"),
+        ],
+    )
+    def test_failed_result_uses_known_safe_error_reasons(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        caplog: pytest.LogCaptureFixture,
+        error: str,
+        expected_reason: str,
+    ) -> None:
+        """Known worker error codes retain fixed, non-sensitive reasons."""
+        stage = PlanReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=3, state="REVIEW_WAIT")
+
+        with caplog.at_level("WARNING", logger=plan_review.__name__):
+            stage.on_job_done(item, JobResult(ok=False, error=error), ctx)
+
+        assert caplog.messages == [f"plan_review:3: job failed: {expected_reason}"]
+
 
 class TestDurableWriteOrdering:
     """The load-bearing invariant: durable writes precede advancing outcomes."""
