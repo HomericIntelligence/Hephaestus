@@ -303,14 +303,14 @@ class MergeWaitStage(Stage):
         admitted = self._admit(item, ctx)
         if not isinstance(admitted, tuple):
             return admitted
-        # A 405 can race a just-completed check or protection update.  Even a
-        # now-clean readiness result must therefore wait for a fresh turn: a
-        # later entry will re-read the authoritative admission facts before it
-        # considers another SHA-conditional request.
-        if self._requires_declined_readiness_guard(readiness):
-            fingerprint = self._readiness_fingerprint(item, readiness)
-            if fingerprint is not None:
-                item.payload[_DECLINED_READINESS_FINGERPRINT] = fingerprint
+        # A 405 can race a just-completed check or protection update. Record
+        # every valid readiness fingerprint so an unchanged result cannot
+        # consume another conditional attempt. A later readiness change may
+        # retry within the existing bounded wait window after authoritative
+        # admission facts are re-read.
+        fingerprint = self._readiness_fingerprint(item, readiness)
+        if fingerprint is not None:
+            item.payload[_DECLINED_READINESS_FINGERPRINT] = fingerprint
         parked = self._wait_for_readiness(item, ctx, readiness=readiness, park_if_ready=True)
         if parked is None:  # Defensive type boundary; park_if_ready never returns None.
             return self._park_for_readiness(item, ctx)
@@ -384,16 +384,8 @@ class MergeWaitStage(Stage):
         return self._park_for_readiness(item, ctx)
 
     @staticmethod
-    def _requires_declined_readiness_guard(readiness: dict[str, Any]) -> bool:
-        """Keep one accepted optional-status request from repeatedly consuming attempts."""
-        return (
-            str(readiness.get("mergeStateStatus") or "").upper() == "UNSTABLE"
-            and str(readiness.get("mergeable") or "").upper() == "MERGEABLE"
-        )
-
-    @staticmethod
     def _readiness_fingerprint(item: WorkItem, readiness: dict[str, Any]) -> list[str] | None:
-        """Bind a declined optional-status request to its reviewed proof."""
+        """Bind a declined conditional request to its reviewed proof and readiness."""
         readiness_head = readiness.get("headRefOid")
         proof_generation = item.payload.get("reviewed_pr_proof_generation", 0)
         if (

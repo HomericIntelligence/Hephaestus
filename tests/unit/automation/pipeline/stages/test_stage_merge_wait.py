@@ -113,7 +113,7 @@ def test_conditional_merge_succeeds_only_after_lifecycle_confirms_merged(
     assert github.merge_attempts == [(12, "a" * 40)]
 
 
-@pytest.mark.parametrize("merge_state_status", ["CLEAN", "HAS_HOOKS", "UNSTABLE"])
+@pytest.mark.parametrize("merge_state_status", ["CLEAN", "HAS_HOOKS"])
 def test_mergeable_requestable_readiness_merges_successfully(
     make_ctx: Any, make_work_item: Any, merge_state_status: str
 ) -> None:
@@ -124,6 +124,30 @@ def test_mergeable_requestable_readiness_merges_successfully(
             **_open_pr(),
             "mergeable": "MERGEABLE",
             "mergeStateStatus": merge_state_status,
+        },
+    )
+    ctx = make_ctx(github=github)
+    ctx.config.enable_learn = False
+    item = _reviewed_item(make_work_item)
+
+    result = MergeWaitStage().step(item, ctx)
+
+    assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
+    assert github.merge_attempts == [(12, "a" * 40)]
+    assert "merge_readiness_deadline_s" not in item.payload
+    assert "merge_readiness_polls" not in item.payload
+
+
+def test_optional_failure_unstable_readiness_attempts_conditional_merge(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """An optional failing status lets server protection classify the first PUT."""
+    github = _ConditionalGitHub(
+        states=[_open_pr(), _open_pr(), {"state": "MERGED"}],
+        readiness={
+            **_open_pr(),
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "UNSTABLE",
         },
     )
     ctx = make_ctx(github=github)
@@ -679,14 +703,15 @@ def test_405_reenters_readiness_wait_without_a_second_conditional_put(
     assert github.merge_attempts == [(12, "a" * 40)]
 
 
-def test_persistent_405_unstable_readiness_does_not_duplicate_the_put(
-    make_ctx: Any, make_work_item: Any
+@pytest.mark.parametrize("merge_state_status", ["CLEAN", "HAS_HOOKS", "UNSTABLE"])
+def test_persistent_405_unchanged_readiness_does_not_duplicate_the_put(
+    make_ctx: Any, make_work_item: Any, merge_state_status: str
 ) -> None:
     """A 405 parks while readiness is unchanged instead of retrying the same PUT."""
-    unstable = {
+    readiness = {
         **_open_pr(),
         "mergeable": "MERGEABLE",
-        "mergeStateStatus": "UNSTABLE",
+        "mergeStateStatus": merge_state_status,
     }
     github = _ConditionalGitHub(
         states=[_open_pr()],
@@ -699,7 +724,7 @@ def test_persistent_405_unstable_readiness_does_not_duplicate_the_put(
                 dry_run=False,
             )
         ],
-        readiness=[unstable, unstable, unstable],
+        readiness=[readiness, readiness, readiness],
     )
     item = _reviewed_item(make_work_item)
     stage = MergeWaitStage()
@@ -720,16 +745,21 @@ def test_persistent_405_unstable_readiness_does_not_duplicate_the_put(
     assert github.merge_attempts == [(12, "a" * 40)]
 
 
-def test_persistent_405_clean_readiness_retries_after_one_fresh_wait(
+def test_persistent_405_has_hooks_retries_only_after_readiness_changes(
     make_ctx: Any, make_work_item: Any
 ) -> None:
-    """A same-state CLEAN 405 preserves the established fresh-turn retry contract."""
+    """Unchanged HAS_HOOKS after 405 parks across wakes until readiness changes."""
+    has_hooks = {
+        **_open_pr(),
+        "mergeable": "MERGEABLE",
+        "mergeStateStatus": "HAS_HOOKS",
+    }
     clean = {
         **_open_pr(),
         "mergeable": "MERGEABLE",
         "mergeStateStatus": "CLEAN",
     }
-    scripted_states: list[dict[str, object] | None] = [_open_pr() for _ in range(5)]
+    scripted_states: list[dict[str, object] | None] = [_open_pr() for _ in range(7)]
     scripted_states.append({"state": "MERGED"})
     github = _ConditionalGitHub(
         states=scripted_states,
@@ -749,7 +779,7 @@ def test_persistent_405_clean_readiness_retries_after_one_fresh_wait(
                 dry_run=False,
             ),
         ],
-        readiness=[clean, clean, clean],
+        readiness=[has_hooks, has_hooks, has_hooks, has_hooks, clean],
     )
     item = _reviewed_item(make_work_item)
     stage = MergeWaitStage()
@@ -757,7 +787,21 @@ def test_persistent_405_clean_readiness_retries_after_one_fresh_wait(
     ctx.config.enable_learn = False
 
     assert stage.step(item, ctx) == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
+    assert item.attempts["merge"] == 1
+    assert github.merge_attempts == [(12, "a" * 40)]
+
+    assert stage.step(item, ctx) == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
+    assert item.attempts["merge"] == 1
+    assert github.merge_attempts == [(12, "a" * 40)]
+
+    # A second unchanged HAS_HOOKS wake must remain non-mutating. This makes
+    # the regression independent of the one-step in-call 405 reconciliation.
+    assert stage.step(item, ctx) == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
+    assert item.attempts["merge"] == 1
+    assert github.merge_attempts == [(12, "a" * 40)]
+
     assert stage.step(item, ctx) == StageOutcome(Disposition.FINISH_PASS, "merged")
+    assert item.attempts["merge"] == 2
     assert github.merge_attempts == [(12, "a" * 40), (12, "a" * 40)]
 
 

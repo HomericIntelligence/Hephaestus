@@ -1,6 +1,6 @@
 # Migration Guide
 
-> **Status (as of 2026-07-24):** The latest released version is **0.10.0** (tag-driven
+> **Historical status for v0.10.0 (as of 2026-07-24):** The latest released version is **0.10.0** (tag-driven
 > via hatch-vcs). **1.0 has not been released yet** — the section below is the
 > *forthcoming* 1.0 migration guidance, published ahead of the cut so consumers can
 > prepare. 0.10.0's headline change is the queue pipeline's reviewed-head review
@@ -19,7 +19,7 @@
 > stable public API surface, not a 1.0 tag; the package remains tag-driven and is
 > currently on the 0.10.x series.
 
-## Current main (unreleased)
+## Current main (unreleased; post-v0.10.0)
 
 The 15-minute operational readiness wait described below is new on current main
 and is not part of the released 0.10.0 behavior.

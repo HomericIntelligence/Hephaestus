@@ -20,8 +20,15 @@ boundary and does not inherit an old head's deadline after fresh review.
 ## Decision
 
 1. Before a conditional merge request, `merge_wait` observes GitHub's
-   operational readiness. `CLEAN` plus `MERGEABLE` permits consideration of a
-   request; any other transient status parks the item on the timer heap.
+   operational readiness. `CLEAN`, `HAS_HOOKS`, and `UNSTABLE` each permit
+   consideration of a request only when GitHub also reports `MERGEABLE`.
+   `CLEAN` is the ordinary ready state. `HAS_HOOKS` and `UNSTABLE` can reflect
+   optional or externally supplied checks that do not independently revoke the
+   reviewed-head admission proof, so the server-protected conditional request
+   remains the authoritative classification. `BEHIND`, `BLOCKED`, and
+   `UNKNOWN` park on the timer heap; `CONFLICTING` or `DIRTY` (and a
+   conflicting mergeability result) fail closed, as do unsupported readiness
+   combinations.
 2. Readiness is never merge authority. Immediately before every conditional
    request, the queue again verifies the open `main` PR, active reviewed head,
    exclusive implementation-state label, unresolved-thread state, and server
@@ -35,8 +42,13 @@ boundary and does not inherit an old head's deadline after fresh review.
    requests and transport-ambiguity retries. If it is already exhausted, the
    stage fails closed rather than waiting.
 5. A declined conditional request re-enters the readiness wait before any
-   later request. Conflicting, incomplete, externally armed, closed, or
-   deadline-expired state remains fail-closed.
+   later request. The stage records a fingerprint of the reviewed head, proof
+   generation, mergeability, and merge-state status. While that fingerprint is
+   unchanged after a `405`, each timer wake parks without another conditional
+   request; a changed fingerprint, or fresh review that creates a new proof
+   generation, may permit a later request within its bounded wait window.
+   Conflicting, incomplete, externally armed, closed, or deadline-expired
+   state remains fail-closed.
 
 ## Alternatives considered
 
