@@ -8,13 +8,19 @@ or polls native auto-merge.
 
 The implemented mini-state graph is:
 
-- Open PR: ``ENTER -> MERGE``, subject to the live implementation-GO check.
-- Already-merged PR: ``ENTER -> MERGE -> LEARN_WAIT -> MW_FINISH``,
-  preserving exactly-once post-merge learning.
-
-Dirty or blocked recovery is not a dormant compatibility branch here. Issue
-#2055 must introduce any such transition explicitly behind current,
-head-bound approval proof.
+- ``ENTER -> MERGE``. An open PR is admitted only with the current-process
+  reviewed-head proof and the PR-level implementation-GO label; readiness may
+  retry ``MERGE`` within its bounded wait.
+- A PR observed as already merged, or a conditional merge freshly confirmed as
+  merged, enters ``_route_merged``. It exits directly with ``FINISH_PASS``
+  when learning is disabled or already terminal, or follows
+  ``MERGE -> LEARN_WAIT -> MW_FINISH -> FINISH_PASS`` when one post-merge
+  learning job must run.
+- The already-merged path can exit ``FINISH_FAIL`` when a learning result is
+  already in flight or unknown, its claim fails, or result persistence fails.
+  Live admission, readiness, and conditional-merge failures likewise exit
+  safely (or fail back to fresh PR review when the head-bound proof is absent
+  or stale).
 """
 
 from __future__ import annotations

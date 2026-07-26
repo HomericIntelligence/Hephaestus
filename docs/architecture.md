@@ -1161,9 +1161,7 @@ PR-probe failure cannot misclassify toward IMPLEMENTATION).
 | Direct PR already merged | `FINISHED` (pass, idempotent) |
 | Direct PR already closed | excluded |
 | Open PR carries PR-level `state:implementation-go` | `MERGE_WAIT` |
-| Open PR carries only issue-level `state:implementation-go` | `PR_REVIEW` (legacy fallback) |
-| Open PR with `state:implementation-no-go` | `PR_REVIEW` |
-| Open PR, neither impl label | `PR_REVIEW` |
+| Any other open PR, including one carrying only issue-level `state:implementation-go` | `PR_REVIEW` |
 | No PR, at-or-past `state:plan-go` | `IMPLEMENTATION` |
 | No PR, `state:plan-no-go` | `PLANNING` (amend path) |
 | No PR, `state:plan-blocked` | excluded until an external actor resolves the block and replaces the label; comments alone are inert |
@@ -1492,22 +1490,6 @@ Dry-run also overrides two retry semantics that would otherwise stall:
  earlier stage would re-check, so a regression would ping-pong until
  the safety cap; dry-run finishes with reason `[dry-run] would
  fail_back` instead ([`_route_fail_back`](hephaestus/automation/pipeline/coordinator.py)).
-
----
-
-## Legacy compatibility inventory and retirement gates
-
-Compatibility paths accept durable GitHub state written before the current
-head-bound review workflow. They remain contained until their observable
-retirement conditions are satisfied.
-
-| Compatibility family | Current containment | Removal gate |
-|---|---|---|
-| `legacy_issue_impl_go_fallback` in `pipeline/seeding.py` | An issue-level implementation-GO on an open PR routes back to `pr_review`, and each use emits the named warning marker. | After #2055 is deployed, require a complete supported-repository seed pass with zero fallback observations before removing the branch and its classifier tests. |
-| `already_implementation_go_pr` and `not_implementation_go` | Legacy-GO PRs receive only the bounded behavior implemented by the current pipeline. | Remove only after #2055 reconstructs eligibility from head-bound proof and supported repositories contain zero open legacy implementation-GO PRs. Remove the routes, stage branches, documentation, and tests together. |
-
-The former `pr_review` follow-up mini-states were removed by #2140 because
-queue mini-states are not persisted and no active transition produced them.
 
 ---
 

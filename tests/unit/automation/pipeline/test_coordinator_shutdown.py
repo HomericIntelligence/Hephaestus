@@ -366,11 +366,7 @@ class TestCrashMatrixJournal:
                 StageName.PR_REVIEW,
             ),
             (
-                # Issue-level implementation-go on an open PR is a legacy
-                # compatibility label (#2140): post-#2280 the durable
-                # authorization is the PR-level label, so this routes back to
-                # review rather than arming a merge.
-                "open PR with legacy issue-level implementation-go",
+                "open PR with issue-level implementation-go",
                 [STATE_IMPLEMENTATION_GO],
                 78,
                 None,
