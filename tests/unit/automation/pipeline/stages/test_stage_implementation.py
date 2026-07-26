@@ -757,6 +757,28 @@ class TestWorktreeAndAdvise:
         }
         assert result.on_done_state == "DIRTY_DECISION_WAIT"
 
+    def test_direct_scope_worktree_uses_its_bootstrap_pin_without_refresh(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A direct fresh implementation is cut only from the synchronized SHA."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        item.branch = "1-auto-impl"
+        item.payload["_direct_scope_base_sha"] = "a" * 40
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.kwargs == {
+            "issue_number": 1,
+            "branch_name": "1-auto-impl",
+            "refresh_base": False,
+            "repo_root": "/tmp/repo",
+            "base_sha": "a" * 40,
+        }
+
     def test_worktree_result_stores_path_and_dirty_state(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -774,6 +796,49 @@ class TestWorktreeAndAdvise:
         assert item.payload["worktree_dirty"] is True
         assert item.payload["worktree_status"] == "M x.py"
         assert item.payload["worktree_diff"] == "+x"
+
+    def test_direct_worktree_result_stores_remote_reservation_receipt(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Finished can release a failed direct run only from this exact receipt."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        item.branch = "1-auto-impl"
+        item.payload["_direct_scope_base_sha"] = "a" * 40
+        result = JobResult(
+            ok=True,
+            value={
+                "path": "/tmp/wt",
+                "direct_scope_reservation": {
+                    "branch": "1-auto-impl",
+                    "base_sha": "a" * 40,
+                },
+            },
+        )
+
+        stage.on_job_done(item, result, ctx)
+
+        assert item.worktree == "/tmp/wt"
+        assert item.payload["_direct_scope_reservation"] == {
+            "branch": "1-auto-impl",
+            "base_sha": "a" * 40,
+        }
+
+    def test_direct_worktree_rejects_missing_remote_reservation_receipt(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A protocol drift cannot let a direct agent run without its lease receipt."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        item.branch = "1-auto-impl"
+        item.payload["_direct_scope_base_sha"] = "a" * 40
+
+        stage.on_job_done(item, JobResult(ok=True, value={"path": "/tmp/wt"}), ctx)
+
+        assert item.worktree == ""
+        assert item.payload["git_error"] is True
 
     def test_worktree_string_result_stores_path(self, make_ctx: Any, make_work_item: Any) -> None:
         """A plain string worktree result is the worktree path."""
@@ -800,6 +865,37 @@ class TestWorktreeAndAdvise:
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.RETRY
         assert item.attempts["implement"] == 0  # transient: no budget burned
+
+    def test_worktree_rollback_failure_preserves_direct_reservation_receipt(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Finished can clean an early remote lease after the retry budget is exhausted."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        item.branch = "1-auto-impl"
+        item.payload["_direct_scope_base_sha"] = "a" * 40
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                value={
+                    "direct_scope_reservation": {
+                        "branch": "1-auto-impl",
+                        "base_sha": "a" * 40,
+                    }
+                },
+                error="worktree creation failed; reservation rollback failed",
+            ),
+            ctx,
+        )
+
+        assert item.payload["_direct_scope_reservation"] == {
+            "branch": "1-auto-impl",
+            "base_sha": "a" * 40,
+        }
+        assert item.payload["git_error"] is True
 
     def test_clean_worktree_skips_dirty_decision(self, make_ctx: Any, make_work_item: Any) -> None:
         """A clean worktree continues straight to ADVISE_WAIT."""
@@ -1137,6 +1233,23 @@ class TestCommitPushAndPrCreate:
         }
         assert result.on_done_state == "PR_CREATE"
 
+    def test_direct_scope_commit_push_carries_its_remote_reservation_pin(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The publish job can reject a remote writer that changed the reservation."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
+        item.branch = "1-auto-impl"
+        item.worktree = "/tmp/wt"
+        item.payload["_direct_scope_base_sha"] = "a" * 40
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.kwargs["expected_remote_sha"] == "a" * 40
+
     def test_commit_push_no_commit_sets_skip_payload(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -1148,6 +1261,43 @@ class TestCommitPushAndPrCreate:
         stage.on_job_done(item, JobResult(ok=True, value=False), ctx)
 
         assert item.payload["no_commits"] is True
+
+    def test_direct_no_commit_transfers_receipt_to_local_branch_cleanup(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Removing the remote no-op reservation must not strand its local ref."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
+        item.payload["_direct_scope_reservation"] = {
+            "branch": "1-auto-impl",
+            "base_sha": "a" * 40,
+        }
+
+        stage.on_job_done(item, JobResult(ok=True, value=False), ctx)
+
+        assert item.payload["no_commits"] is True
+        assert "_direct_scope_reservation" not in item.payload
+        assert item.payload["_direct_scope_local_branch_cleanup"] == {
+            "branch": "1-auto-impl",
+            "base_sha": "a" * 40,
+        }
+
+    def test_commit_push_success_consumes_direct_reservation_receipt(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A published branch must not be released by the terminal cleanup."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
+        item.payload["_direct_scope_reservation"] = {
+            "branch": "1-auto-impl",
+            "base_sha": "a" * 40,
+        }
+
+        stage.on_job_done(item, JobResult(ok=True, value=True), ctx)
+
+        assert "_direct_scope_reservation" not in item.payload
 
     def test_pr_create_journals_pr_without_auto_merge_mutation(
         self, make_ctx: Any, make_work_item: Any

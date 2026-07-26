@@ -116,6 +116,12 @@ from .base import (
     stage_model,
     write_skip_label,
 )
+from .repo import (
+    DIRECT_SCOPE_BASE_SHA_KEY,
+    DIRECT_SCOPE_LOCAL_BRANCH_CLEANUP_KEY,
+    DIRECT_SCOPE_RESERVATION_KEY,
+    is_full_commit_sha,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -302,6 +308,9 @@ class ImplementationStage(Stage):
         issue = _issue_number(item)
         logger.info("implementation:%d: requesting worktree job", issue)
         adopted = bool(item.payload.get("existing_pr"))
+        direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
+        if not adopted and direct_base_sha is not None and not is_full_commit_sha(direct_base_sha):
+            return StageOutcome(Disposition.FINISH_FAIL, "direct_scope_base_pin_invalid")
         kwargs: dict[str, object] = {
             "issue_number": issue,
             "branch_name": item.branch,
@@ -311,9 +320,11 @@ class ImplementationStage(Stage):
             # remote head instead (the anti-clobber reset of
             # _prepare_worktree_for_existing_pr :649/:693, so re-running
             # never discards pushed commits). Values coordinator-vetted.
-            "refresh_base": not adopted,
+            "refresh_base": not adopted and direct_base_sha is None,
             "repo_root": str(ctx.paths.repo_root),
         }
+        if not adopted and direct_base_sha is not None:
+            kwargs["base_sha"] = direct_base_sha
         if adopted:
             kwargs["sync_to_remote"] = True
             kwargs["pr_number"] = item.pr
@@ -506,16 +517,22 @@ class ImplementationStage(Stage):
         if item.payload.get("tests_failed"):
             return Continue(next_state=TESTFIX_WAIT)
         logger.info("implementation:%d: requesting commit+push job", issue)
+        kwargs: dict[str, object] = {
+            "issue_number": issue,
+            "worktree_path": item.worktree,
+            "branch": item.branch,
+            "agent": agent_provider(ctx),
+        }
+        direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
+        if direct_base_sha is not None:
+            if not is_full_commit_sha(direct_base_sha):
+                return StageOutcome(Disposition.FINISH_FAIL, "direct_scope_base_pin_invalid")
+            kwargs["expected_remote_sha"] = direct_base_sha
         push_job = GitJob(
             repo=item.repo,
             op="commit_push",
             timeout_s=GIT_JOB_TIMEOUT_S,
-            kwargs={
-                "issue_number": issue,
-                "worktree_path": item.worktree,
-                "branch": item.branch,
-                "agent": agent_provider(ctx),
-            },
+            kwargs=kwargs,
             descr="commit_push",
         )
         return JobRequest(push_job, on_done_state=PR_CREATE)
@@ -570,6 +587,18 @@ class ImplementationStage(Stage):
         if result.ok:
             if not bool(result.value):
                 item.payload["no_commits"] = True
+                # The worker's no-commit path conditionally released the
+                # remote branch.  Keep the exact receipt so Finished can
+                # remove the now-unused local branch after its worktree is
+                # detached; otherwise the next direct run would fail closed
+                # on that stale local ref.
+                reservation = item.payload.pop(DIRECT_SCOPE_RESERVATION_KEY, None)
+                if isinstance(reservation, dict):
+                    item.payload[DIRECT_SCOPE_LOCAL_BRANCH_CLEANUP_KEY] = reservation
+            else:
+                # A published branch has real commits and must not be
+                # released by terminal cleanup.
+                item.payload.pop(DIRECT_SCOPE_RESERVATION_KEY, None)
             # A successful worker result ends the consecutive-git-failure
             # streak even when no commit was produced; PR_CREATE handles skip.
             item.payload.pop("git_error_retries", None)
@@ -618,6 +647,26 @@ class ImplementationStage(Stage):
         """
         if not result.ok:
             logger.warning("implementation:%s: worktree job failed: %s", item.issue, result.error)
+            direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
+            reservation = (
+                result.value.get("direct_scope_reservation")
+                if isinstance(result.value, dict)
+                else None
+            )
+            if (
+                is_full_commit_sha(direct_base_sha)
+                and isinstance(reservation, dict)
+                and reservation.get("branch") == item.branch
+                and reservation.get("base_sha") == direct_base_sha
+            ):
+                # The worktree did not materialize, but a failed rollback
+                # left our server-side reservation at its base. Preserve the
+                # receipt so Finished can use its bounded, conditional release
+                # protocol if the retriable worktree job is exhausted.
+                item.payload[DIRECT_SCOPE_RESERVATION_KEY] = {
+                    "branch": item.branch,
+                    "base_sha": direct_base_sha,
+                }
             item.worktree = ""
             item.payload.pop("worktree_dirty", None)
             item.payload.pop("worktree_status", None)
@@ -632,6 +681,27 @@ class ImplementationStage(Stage):
             item.payload["worktree_dirty"] = bool(value.get("dirty"))
             item.payload["worktree_status"] = str(value.get("status", ""))
             item.payload["worktree_diff"] = str(value.get("diff", ""))
+            direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
+            if direct_base_sha is not None:
+                reservation = value.get("direct_scope_reservation")
+                if (
+                    not is_full_commit_sha(direct_base_sha)
+                    or not isinstance(reservation, dict)
+                    or reservation.get("branch") != item.branch
+                    or reservation.get("base_sha") != direct_base_sha
+                ):
+                    logger.warning(
+                        "implementation:%s: direct worktree result omitted or corrupted its "
+                        "remote reservation receipt",
+                        item.issue,
+                    )
+                    item.worktree = ""
+                    item.payload["git_error"] = True
+                    return
+                item.payload[DIRECT_SCOPE_RESERVATION_KEY] = {
+                    "branch": item.branch,
+                    "base_sha": direct_base_sha,
+                }
         elif isinstance(value, str) and value:
             item.worktree = value
 

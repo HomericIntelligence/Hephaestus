@@ -650,6 +650,13 @@ Repo intake discovers candidate work through a bounded source, records
 exclusions, and routes each eligible issue or pull request to the stage implied
 by its durable state.
 
+Before it reads a direct `--issues` / `--prs` scope, performs a label mutation,
+or dispatches an agent, repo intake proves its reusable checkout is the
+expected repository, clean, on the remote default branch, and fast-forwarded
+to that branch's fetched head. A missing checkout is cloned and then subjected
+to the same synchronization proof. Any failure is terminal for that scope; it
+never falls through to an ambient or stale checkout.
+
 #### Boundary diagram
 
 ```mermaid
@@ -685,6 +692,9 @@ stateDiagram-v2
 Architectural contract:
 
 - Exclusions become durable before excluded work leaves the queue.
+- Label-vocabulary setup and source classification occur only after the
+  checkout proof succeeds. Explicit scopes use the same bounded direct cursors
+  after that gate; they do not bypass it or widen their selected stage scope.
 - Discovery never writes planning, review, implementation, or merge verdicts.
 - Failure of the repository item does not fabricate outcomes for its issues.
 - Runtime repository discovery does not eagerly build `products` or downstream
@@ -1050,6 +1060,7 @@ stateDiagram-v2
     RECORD --> CLEANUP: result recorded
     CLEANUP --> DONE: remove passed workspace
     CLEANUP --> DONE: preserve failed workspace
+    CLEANUP --> DONE: non-forced direct no-op cleanup
     CLEANUP --> DONE: no workspace
     DONE --> [*]
 ```
@@ -1057,7 +1068,11 @@ stateDiagram-v2
 Architectural contract:
 
 - A terminal result is recorded once.
-- Failed workspaces are preserved for diagnosis.
+- Failed workspaces are preserved for diagnosis, except a direct-scope no-op
+  whose remote reservation was released: its known-clean worktree and local
+  branch receive a non-forced cleanup so a later direct run is not blocked by
+  stale deterministic state. A late dirty edit makes that cleanup fail and
+  preserves the worktree instead.
 - Successful temporary workspaces are removed when safe.
 - Cleanup failure never rewrites the underlying result.
 
