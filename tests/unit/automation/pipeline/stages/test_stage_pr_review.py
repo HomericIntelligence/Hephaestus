@@ -12,7 +12,12 @@ import pytest
 from hephaestus.automation.claude_invoke import ReviewVerdict
 from hephaestus.automation.pipeline.jobs import AgentJob, CompactJob, GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition
-from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
+from hephaestus.automation.pipeline.stages import (
+    Continue,
+    JobRequest,
+    ProcessThreadResolutionResult,
+    StageOutcome,
+)
 from hephaestus.automation.pipeline.stages.pr_review import (
     ADOPT_WORKTREE_WAIT,
     REVIEW_CHECKOUT_WAIT,
@@ -724,6 +729,7 @@ class TestPrReviewStageStep:
             valid=True,
         )
         item.payload["review_threads"] = [dict(t) for t in item.payload["review_audit"].findings]
+        item.payload["reviewed_pr_head_sha"] = "a" * 40
 
         result = stage.step(item, ctx)
 
@@ -869,6 +875,7 @@ class TestPrReviewStageStep:
 
         stage.on_job_done(item, JobResult(ok=True, value=audit), ctx)
         item.state = "POST"
+        item.payload["reviewed_pr_head_sha"] = "a" * 40
         assert stage.step(item, ctx) == Continue(next_state="DIFFICULTY_WAIT")
         item.state = "ADDRESS_WAIT"
         result = stage.step(item, ctx)
@@ -1093,10 +1100,10 @@ class TestProcessOwnedReviewThreadLifecycle:
         assert github.posted_batches == []
         assert len(github.live) == 22
 
-    def test_addressed_process_thread_stands_down_without_resolving(
+    def test_addressed_process_thread_stands_down_when_guarded_accessor_blocks(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A validator result cannot turn a thread-id-only mutation into a safe write."""
+        """A blocked guarded-resolution result remains a human handoff."""
 
         class ResolverForbiddenGitHub(FakeStageGitHub):
             def __init__(self) -> None:
@@ -1131,6 +1138,55 @@ class TestProcessOwnedReviewThreadLifecycle:
         )
         assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
         assert not any(name == "mark_pr_implementation_go" for name, _ in github.mutation_log)
+
+    def test_addressed_process_thread_replies_and_resolves_before_post(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Validated handled receipts use the narrow reply-before-resolve accessor."""
+
+        class ResolvingGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__()
+                self.live = [
+                    TestProcessOwnedReviewThreadLifecycle._thread("process-1", 3, "fix this")
+                ]
+                self.calls: list[tuple[int, str, list[dict[str, Any]], dict[str, str]]] = []
+
+            def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+                del pr_number
+                return [dict(thread) for thread in self.live]
+
+            def reply_and_resolve_process_review_threads(
+                self,
+                pr_number: int,
+                *,
+                reviewed_head_sha: str,
+                receipts: list[dict[str, Any]],
+                dispositions: dict[str, str],
+            ) -> ProcessThreadResolutionResult:
+                self.calls.append((pr_number, reviewed_head_sha, receipts, dispositions))
+                self.live = []
+                return ProcessThreadResolutionResult(resolved_thread_ids=("process-1",))
+
+        github = ResolvingGitHub()
+        process = github.live[0]
+        item = make_work_item(issue=1, pr=1001, state="POST")
+        item.payload.update(
+            {
+                "reviewed_pr_head_sha": "a" * 40,
+                "process_review_threads": [dict(process)],
+                "validation_process_threads": [dict(process)],
+                "validation_result": {"unaddressed": [], "wont_fix": []},
+                "review_audit": ReviewAudit("A", "clean", (), "", valid=True),
+                "review_threads": [],
+            }
+        )
+
+        result = PrReviewStage().step(item, make_ctx(github=github))
+
+        assert result == Continue(next_state="EVAL")
+        assert github.calls == [(1001, "a" * 40, [process], {"process-1": "addressed"})]
+        assert item.payload["process_review_threads"] == []
 
     def test_minor_finding_is_audit_only_not_an_inline_merge_blocker(
         self, make_ctx: Any, make_work_item: Any
