@@ -455,12 +455,17 @@ def _is_process_thread_receipt(raw: dict[str, Any]) -> bool:
     """Return whether one post-time receipt proves exactly one created comment."""
     review_id = raw.get("review_id")
     comments = raw.get("comments")
+    initial = comments[0] if isinstance(comments, list) and len(comments) == 1 else None
     return bool(
         _durable_thread_id(raw)
         and isinstance(review_id, str)
         and review_id.strip()
         and isinstance(comments, list)
         and len(comments) == 1
+        and isinstance(initial, dict)
+        and isinstance(initial.get("id"), str)
+        and initial["id"].strip()
+        and initial.get("review_id") == review_id
         and _thread_comment_signature(raw) is not None
     )
 
@@ -520,10 +525,19 @@ def _handled_process_receipts(
         or unaddressed_ids & wont_fix_ids
     ):
         return None
+    reviewed_head = item.payload.get("reviewed_pr_head_sha")
     dispositions = {
-        thread_id: ("wont_fix" if thread_id in wont_fix_ids else "addressed")
+        thread_id: "addressed"
         for thread_id in validation_ids
-        if thread_id not in unaddressed_ids
+        if (
+            thread_id not in unaddressed_ids
+            and thread_id not in wont_fix_ids
+            and isinstance(reviewed_head, str)
+            and reviewed_head.strip()
+            and isinstance(records[thread_id].get("created_head_sha"), str)
+            and records[thread_id]["created_head_sha"].strip()
+            and records[thread_id]["created_head_sha"] != reviewed_head
+        )
     }
     return ([records[thread_id] for thread_id in dispositions], dispositions)
 
@@ -728,21 +742,6 @@ class PrReviewStage(Stage):
             arm_outcome = self._require_confirmed_unarmed(item.pr, ctx)
             if arm_outcome is not None:
                 return arm_outcome
-            if "process_review_threads" not in item.payload:
-                try:
-                    item.payload["process_review_threads"] = (
-                        ctx.github.load_process_review_thread_receipts(item.pr)
-                    )
-                except Exception as error:
-                    logger.warning(
-                        "pr_review:%s: process review receipt state unavailable (%s)",
-                        item.issue,
-                        type(error).__name__,
-                    )
-                    return StageOutcome(
-                        Disposition.FINISH_FAIL,
-                        "process_review_receipts_unavailable",
-                    )
         cycle = item.attempts.get("implement", 0)
         if item.payload.get("pr_review_cycle") != cycle:
             item.payload["pr_review_cycle"] = cycle
@@ -1277,6 +1276,11 @@ class PrReviewStage(Stage):
         adapter returns each process-created thread only after proving its
         sole initial comment and owning review identity.
         """
+        if not post_receipts:
+            return _process_thread_records(item) is not None
+        created_head = item.payload.get("reviewed_pr_head_sha")
+        if not isinstance(created_head, str) or not created_head.strip():
+            return False
         new_records: dict[str, dict[str, Any]] = {}
         for receipt in post_receipts:
             if not isinstance(receipt, dict):
@@ -1284,7 +1288,7 @@ class PrReviewStage(Stage):
             thread_id = _durable_thread_id(receipt)
             if thread_id is None or thread_id in new_records:
                 return False
-            new_records[thread_id] = dict(receipt)
+            new_records[thread_id] = {**receipt, "created_head_sha": created_head}
         if any(not _is_process_thread_receipt(receipt) for receipt in new_records.values()):
             return False
         records = _process_thread_records(item)
@@ -1391,13 +1395,6 @@ class PrReviewStage(Stage):
         if not self._record_posted_process_threads(item, post_receipts):
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
-        if post_receipts:
-            reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
-            if not reviewed_head or not ctx.github.persist_process_review_thread_receipts(
-                item.pr, reviewed_head, post_receipts
-            ):
-                item.payload["review_audit_failure"] = True
-                return Continue(next_state=EVAL)
         item.payload["posted_thread_ids"] = [str(receipt["id"]) for receipt in post_receipts]
         try:
             live_threads = ctx.github.list_unresolved_review_threads(item.pr)

@@ -152,7 +152,6 @@ class FakeStageGitHub(FakeGitHub):
         )
         self._learn_terminal = learn_terminal
         self._posted_thread_ids: dict[int, list[str]] = {}
-        self._process_review_thread_receipts: dict[int, list[dict[str, Any]]] = {}
         self.learn_results: dict[int, bool] = {}
         self.learn_claims: set[int] = set()
 
@@ -418,6 +417,7 @@ class FakeStageGitHub(FakeGitHub):
                 "authors": ["hephaestus[bot]"],
                 "comments": [
                     {
+                        "id": f"comment-{thread_id}",
                         "author": "hephaestus[bot]",
                         "body": str(thread.get("body") or "finding"),
                         "review_id": review_id,
@@ -426,20 +426,6 @@ class FakeStageGitHub(FakeGitHub):
                 "review_id": review_id,
             }
             for thread_id, thread in zip(ids, threads, strict=True)
-        ]
-
-    def persist_process_review_thread_receipts(
-        self, pr_number: int, created_head_sha: str, receipts: list[dict[str, Any]]
-    ) -> bool:
-        """Persist receipt fixtures for a later simulated stage entry."""
-        del created_head_sha
-        self._process_review_thread_receipts[pr_number] = [dict(receipt) for receipt in receipts]
-        return True
-
-    def load_process_review_thread_receipts(self, pr_number: int) -> list[dict[str, Any]]:
-        """Return the fake's persisted process-only receipt records."""
-        return [
-            dict(receipt) for receipt in self._process_review_thread_receipts.get(pr_number, [])
         ]
 
     def reply_and_resolve_process_review_threads(

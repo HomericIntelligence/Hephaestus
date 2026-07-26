@@ -119,74 +119,19 @@ def _process_thread_receipt(thread_id: str, review_id: str, body: str) -> dict[s
             }
         ],
         "review_id": review_id,
+        "created_head_sha": "b" * 40,
     }
 
 
 class TestProcessReviewThreadReceipts:
     """Durable receipts limit automated thread actions to this loop's threads."""
 
-    def test_persisting_later_receipts_keeps_existing_open_receipts(
-        self, adapter: pg.PipelineGitHub
-    ) -> None:
-        """A later review cycle cannot strand an earlier process-created thread."""
-        first = _process_thread_receipt("PRRT_process_1", "PRR_process_1", "first")
-        second = _process_thread_receipt("PRRT_process_2", "PRR_process_2", "second")
-
-        assert adapter.persist_process_review_thread_receipts(7, "a" * 40, [first])
-        assert adapter.persist_process_review_thread_receipts(7, "a" * 40, [second])
-
-        assert adapter.load_process_review_thread_receipts(7) == [first, second]
-
-    def test_persists_only_valid_immutable_receipts(self, adapter: pg.PipelineGitHub) -> None:
-        """A post-time receipt can be recovered exactly after a process restart."""
-        receipt: dict[str, Any] = {
-            "id": "PRRT_process_1",
-            "path": "a.py",
-            "line": 7,
-            "side": "RIGHT",
-            "body": "finding",
-            "author": "hephaestus[bot]",
-            "authors": ["hephaestus[bot]"],
-            "comments": [
-                {
-                    "id": "c0",
-                    "author": "hephaestus[bot]",
-                    "body": "finding",
-                    "review_id": "PRR_process_1",
-                }
-            ],
-            "review_id": "PRR_process_1",
-        }
-
-        assert adapter.persist_process_review_thread_receipts(7, "a" * 40, [receipt])
-        assert adapter.load_process_review_thread_receipts(7) == [receipt]
-        invalid = dict(receipt)
-        invalid["line"] = 0
-        assert not adapter.persist_process_review_thread_receipts(7, "a" * 40, [invalid])
-
     def test_replies_before_resolving_a_revalidated_process_receipt(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A handled receipt gets the loop reply before its thread is resolved."""
         adapter.repo = "repo"
-        receipt: dict[str, Any] = {
-            "id": "PRRT_process_1",
-            "path": "a.py",
-            "line": 7,
-            "side": "RIGHT",
-            "body": "finding",
-            "author": "hephaestus[bot]",
-            "authors": ["hephaestus[bot]"],
-            "comments": [
-                {
-                    "author": "hephaestus[bot]",
-                    "body": "finding",
-                    "review_id": "PRR_process_1",
-                }
-            ],
-            "review_id": "PRR_process_1",
-        }
-        assert adapter.persist_process_review_thread_receipts(7, "a" * 40, [receipt])
+        receipt = _process_thread_receipt("PRRT_process_1", "PRR_process_1", "finding")
         reply_body: dict[str, str] = {}
         live_reads = 0
 
@@ -239,79 +184,16 @@ class TestProcessReviewThreadReceipts:
         assert result.blocked_thread_ids == ()
         assert mutation_order == ["reply", "resolve"]
 
-    def test_does_not_resolve_when_the_persisted_reply_id_is_not_live(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A same-text reply without the exact process comment id remains a human gate."""
-        receipt = _process_thread_receipt("PRRT_process_1", "PRR_process_1", "finding")
-        assert adapter.persist_process_review_thread_receipts(7, "a" * 40, [receipt])
-        record = adapter._load_process_receipt_record(7)
-        assert record is not None
-        reply_body = (
-            "Addressed by automation and revalidated on the current PR head `aaaaaaaaaaaa`."
-        )
-        record["operations"][receipt["id"]] = {
-            "state": "reply_posted",
-            "reply_body": reply_body,
-            "reply_comment_id": "PRRC_expected",
-        }
-        adapter._save_process_receipt_record(7, record)
-        copied_reply = {
-            "id": "PRRC_human_copy",
-            "author": "maintainer",
-            "body": reply_body,
-            "review_id": "",
-        }
-        live = {**receipt, "comments": [*receipt["comments"], copied_reply]}
-        monkeypatch.setattr(adapter, "_unresolved_threads", lambda _pr: [live])
-        monkeypatch.setattr(
-            adapter,
-            "gh_pr_state",
-            lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
-        )
-        monkeypatch.setattr(
-            adapter,
-            "_graphql",
-            lambda *_args, **_kwargs: pytest.fail("unidentified reply must not resolve"),
-        )
-
-        result = adapter.reply_and_resolve_process_review_threads(
-            7,
-            reviewed_head_sha="a" * 40,
-            receipts=[receipt],
-            dispositions={receipt["id"]: "addressed"},
-        )
-
-        assert result.resolved_thread_ids == ()
-        assert result.blocked_thread_ids == (receipt["id"],)
-
     def test_refuses_a_thread_with_an_unexpected_human_reply(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A live thread with any non-receipted reply remains a human gate."""
-        receipt: dict[str, Any] = {
-            "id": "PRRT_process_1",
-            "path": "a.py",
-            "line": 7,
-            "side": "RIGHT",
-            "body": "finding",
-            "author": "hephaestus[bot]",
-            "authors": ["hephaestus[bot]"],
-            "comments": [
-                {
-                    "author": "hephaestus[bot]",
-                    "body": "finding",
-                    "review_id": "PRR_process_1",
-                }
-            ],
-            "review_id": "PRR_process_1",
-        }
+        receipt = _process_thread_receipt("PRRT_process_1", "PRR_process_1", "finding")
         changed = dict(receipt)
         changed["comments"] = [
             *receipt["comments"],
             {"author": "maintainer", "body": "Please keep this open."},
         ]
-        assert adapter.persist_process_review_thread_receipts(7, "a" * 40, [receipt])
         monkeypatch.setattr(adapter, "_unresolved_threads", lambda _pr: [changed])
         monkeypatch.setattr(
             adapter,
@@ -334,114 +216,20 @@ class TestProcessReviewThreadReceipts:
         assert result.resolved_thread_ids == ()
         assert result.blocked_thread_ids == (receipt["id"],)
 
-    def test_does_not_resolve_after_the_pr_head_changes(
+    def test_does_not_mutate_when_the_pr_head_is_already_stale(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A head change after the reply prevents the irreversible resolution."""
-        receipt: dict[str, Any] = {
-            "id": "PRRT_process_1",
-            "path": "a.py",
-            "line": 7,
-            "side": "RIGHT",
-            "body": "finding",
-            "author": "hephaestus[bot]",
-            "authors": ["hephaestus[bot]"],
-            "comments": [
-                {
-                    "author": "hephaestus[bot]",
-                    "body": "finding",
-                    "review_id": "PRR_process_1",
-                }
-            ],
-            "review_id": "PRR_process_1",
-        }
-        assert adapter.persist_process_review_thread_receipts(7, "a" * 40, [receipt])
-        reply_body: dict[str, str] = {}
-        live_reads = 0
-
-        def unresolved_threads(_pr_number: int) -> list[dict[str, Any]]:
-            nonlocal live_reads
-            live_reads += 1
-            if live_reads == 1:
-                return [dict(receipt)]
-            replied = dict(receipt)
-            replied["comments"] = [
-                *receipt["comments"],
-                {"author": "hephaestus[bot]", "body": reply_body["body"]},
-            ]
-            return [replied]
-
-        state_reads = 0
-
-        def pr_state(_pr_number: int) -> dict[str, Any]:
-            nonlocal state_reads
-            state_reads += 1
-            head = "a" * 40 if state_reads == 1 else "b" * 40
-            return {"state": "OPEN", "headRefOid": head, "autoMergeRequest": None}
-
-        mutations: list[str] = []
-
-        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
-            if "addPullRequestReviewThreadReply" in query:
-                mutations.append("reply")
-                reply_body["body"] = str(fields["body"])
-                return {"data": {"addPullRequestReviewThreadReply": {"comment": {"id": "c1"}}}}
-            pytest.fail(f"unexpected mutation: {query}")
-
-        monkeypatch.setattr(adapter, "_unresolved_threads", unresolved_threads)
-        monkeypatch.setattr(adapter, "gh_pr_state", pr_state)
-        monkeypatch.setattr(adapter, "_graphql", graphql)
-
-        result = adapter.reply_and_resolve_process_review_threads(
-            7,
-            reviewed_head_sha="a" * 40,
-            receipts=[receipt],
-            dispositions={receipt["id"]: "addressed"},
-        )
-
-        assert result.resolved_thread_ids == ()
-        assert result.blocked_thread_ids == (receipt["id"],)
-        assert mutations == ["reply"]
-
-    def test_does_not_retry_an_ambiguous_reply_attempt(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """An initial-looking thread cannot make an uncertain reply request retryable."""
-        receipt: dict[str, Any] = {
-            "id": "PRRT_process_1",
-            "path": "a.py",
-            "line": 7,
-            "side": "RIGHT",
-            "body": "finding",
-            "author": "hephaestus[bot]",
-            "authors": ["hephaestus[bot]"],
-            "comments": [
-                {
-                    "author": "hephaestus[bot]",
-                    "body": "finding",
-                    "review_id": "PRR_process_1",
-                }
-            ],
-            "review_id": "PRR_process_1",
-        }
-        assert adapter.persist_process_review_thread_receipts(7, "a" * 40, [receipt])
-        record = adapter._load_process_receipt_record(7)
-        assert record is not None
-        record["operations"][receipt["id"]] = {
-            "state": "reply_attempted",
-            "reply_body": "prior reply with an unknown outcome",
-        }
-        adapter._save_process_receipt_record(7, record)
-        monkeypatch.setattr(adapter, "_unresolved_threads", lambda _pr: [dict(receipt)])
+        """A head changed before reconciliation prevents both reply and close."""
+        receipt = _process_thread_receipt("PRRT_process_1", "PRR_process_1", "finding")
         monkeypatch.setattr(
             adapter,
             "gh_pr_state",
-            lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
+            lambda _pr: {"state": "OPEN", "headRefOid": "c" * 40, "autoMergeRequest": None},
         )
         monkeypatch.setattr(
             adapter,
             "_graphql",
-            lambda *_args, **_kwargs: pytest.fail("ambiguous reply must not retry"),
+            lambda *_args, **_kwargs: pytest.fail("stale head must not mutate"),
         )
 
         result = adapter.reply_and_resolve_process_review_threads(

@@ -27,7 +27,7 @@ import re
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 from urllib.parse import quote
 
 from hephaestus.automation import github_api, pr_manager
@@ -78,7 +78,6 @@ from hephaestus.automation.state_labels import (
 )
 from hephaestus.constants import read_timeout_env
 from hephaestus.github.client import gh_call
-from hephaestus.io.utils import write_secure
 from hephaestus.utils.file_lock import file_lock
 
 logger = logging.getLogger(__name__)
@@ -86,7 +85,6 @@ logger = logging.getLogger(__name__)
 _CLOSES_ISSUE_LINE_RE = re.compile(r"^Closes #(\d+)\s*$", re.MULTILINE)
 _STANDALONE_VERDICT_LINE_RE = re.compile(r"(?i)^\s*verdict\s*:")
 _HTTP_STATUS_RE = re.compile(r"^HTTP/\S+\s+(\d{3})\b", re.MULTILINE)
-_PROCESS_THREAD_RECEIPT_VERSION = 1
 
 
 def _parse_included_http_response(
@@ -785,62 +783,6 @@ class PipelineGitHub:
             return True
         return False
 
-    def _process_receipt_path(self, pr_number: int) -> Path:
-        """Return the durable, repository-scoped receipt path for a PR."""
-        scope = self._repo_slug or self.org
-        digest = hashlib.sha256(scope.encode("utf-8")).hexdigest()[:16]
-        return (
-            ensure_state_dir(self._repo_root) / f"process-review-receipts-{digest}-{pr_number}.json"
-        )
-
-    def _process_receipt_lock_path(self, pr_number: int) -> Path:
-        """Return the stable sibling lock for one PR's receipt record."""
-        return self._process_receipt_path(pr_number).with_suffix(".lock")
-
-    def _load_process_receipt_record(self, pr_number: int) -> dict[str, Any] | None:
-        """Read and validate one receipt record while its caller owns the lock."""
-        path = self._process_receipt_path(pr_number)
-        if not path.exists():
-            return None
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
-            raise RuntimeError(
-                f"process review receipt state unavailable for PR #{pr_number}"
-            ) from error
-        if (
-            not isinstance(data, dict)
-            or data.get("version") != _PROCESS_THREAD_RECEIPT_VERSION
-            or data.get("pr_number") != pr_number
-            or not isinstance(data.get("created_head_sha"), str)
-            or not isinstance(data.get("receipts"), list)
-            or not isinstance(data.get("operations"), dict)
-        ):
-            raise RuntimeError(f"process review receipt state malformed for PR #{pr_number}")
-        receipts = data["receipts"]
-        if any(
-            not isinstance(receipt, dict) or not self._is_immutable_process_receipt(receipt)
-            for receipt in receipts
-        ):
-            raise RuntimeError(f"process review receipt state malformed for PR #{pr_number}")
-        thread_ids = [str(receipt["id"]) for receipt in receipts]
-        if len(thread_ids) != len(set(thread_ids)) or set(data["operations"]) != set(thread_ids):
-            raise RuntimeError(f"process review receipt state malformed for PR #{pr_number}")
-        if any(
-            not isinstance(operation, dict)
-            or not self._is_valid_process_receipt_operation(operation)
-            for operation in data["operations"].values()
-        ):
-            raise RuntimeError(f"process review receipt state malformed for PR #{pr_number}")
-        return data
-
-    def _save_process_receipt_record(self, pr_number: int, record: dict[str, Any]) -> None:
-        """Atomically persist a receipt record while its caller owns the lock."""
-        write_secure(
-            self._process_receipt_path(pr_number),
-            json.dumps(record, indent=2, sort_keys=True),
-        )
-
     @staticmethod
     def _is_immutable_process_receipt(receipt: dict[str, Any]) -> bool:
         """Return whether a receipt proves one initial process-created comment."""
@@ -852,6 +794,8 @@ class PipelineGitHub:
         author = receipt.get("author")
         body = receipt.get("body")
         comments = receipt.get("comments")
+        created_head_sha = receipt.get("created_head_sha")
+        initial = comments[0] if isinstance(comments, list) and len(comments) == 1 else None
         return bool(
             isinstance(thread_id, str)
             and thread_id.strip()
@@ -866,102 +810,17 @@ class PipelineGitHub:
             and isinstance(author, str)
             and author.strip()
             and isinstance(body, str)
+            and isinstance(created_head_sha, str)
+            and created_head_sha.strip()
             and isinstance(comments, list)
             and len(comments) == 1
-            and isinstance(comments[0], dict)
-            and comments[0].get("author") == author
-            and comments[0].get("body") == body
-            and comments[0].get("review_id") == review_id
+            and isinstance(initial, dict)
+            and isinstance(initial.get("id"), str)
+            and initial["id"].strip()
+            and initial.get("author") == author
+            and initial.get("body") == body
+            and initial.get("review_id") == review_id
         )
-
-    @staticmethod
-    def _is_valid_process_receipt_operation(operation: dict[str, Any]) -> bool:
-        """Validate the durable reply state so ambiguous writes fail closed."""
-        state = operation.get("state")
-        if state == "open":
-            return set(operation) == {"state"}
-        if state == "reply_attempted":
-            return bool(
-                set(operation) == {"state", "reply_body"}
-                and isinstance(operation.get("reply_body"), str)
-                and operation["reply_body"].strip()
-            )
-        return bool(
-            state in {"reply_posted", "resolved"}
-            and set(operation) == {"state", "reply_body", "reply_comment_id"}
-            and isinstance(operation.get("reply_body"), str)
-            and operation["reply_body"].strip()
-            and isinstance(operation.get("reply_comment_id"), str)
-            and operation["reply_comment_id"].strip()
-        )
-
-    def persist_process_review_thread_receipts(
-        self, pr_number: int, created_head_sha: str, receipts: list[dict[str, Any]]
-    ) -> bool:
-        """Persist only immutable post-time receipts before later thread actions."""
-        if self._skip(f"persist process review-thread receipts for PR #{pr_number}"):
-            return False
-        if (
-            not isinstance(created_head_sha, str)
-            or not created_head_sha.strip()
-            or any(not self._is_immutable_process_receipt(receipt) for receipt in receipts)
-        ):
-            return False
-        thread_ids = [str(receipt["id"]) for receipt in receipts]
-        if len(thread_ids) != len(set(thread_ids)):
-            return False
-        try:
-            with file_lock(self._process_receipt_lock_path(pr_number), require_exclusive=True):
-                existing = self._load_process_receipt_record(pr_number)
-                if existing is None:
-                    record = {
-                        "version": _PROCESS_THREAD_RECEIPT_VERSION,
-                        "pr_number": pr_number,
-                        "created_head_sha": created_head_sha,
-                        "receipts": list(receipts),
-                        "operations": {
-                            str(receipt["id"]): {"state": "open"} for receipt in receipts
-                        },
-                    }
-                else:
-                    record = existing
-                    stored_receipts = cast(list[dict[str, Any]], record["receipts"])
-                    stored_operations = cast(dict[str, dict[str, Any]], record["operations"])
-                    stored = {str(receipt["id"]): receipt for receipt in stored_receipts}
-                    for receipt in receipts:
-                        thread_id = str(receipt["id"])
-                        prior = stored.get(thread_id)
-                        if prior is not None:
-                            if prior != receipt:
-                                return False
-                            continue
-                        stored_receipts.append(receipt)
-                        stored_operations[thread_id] = {"state": "open"}
-                        stored[thread_id] = receipt
-                self._save_process_receipt_record(pr_number, record)
-        except OSError as error:
-            logger.warning(
-                "Could not persist process review receipts for PR #%s: %s", pr_number, error
-            )
-            return False
-        return True
-
-    def load_process_review_thread_receipts(self, pr_number: int) -> list[dict[str, Any]]:
-        """Load validated persisted receipts; malformed state is never trusted."""
-        try:
-            with file_lock(self._process_receipt_lock_path(pr_number), require_exclusive=True):
-                data = self._load_process_receipt_record(pr_number)
-        except OSError as error:
-            raise RuntimeError(
-                f"process review receipt state unavailable for PR #{pr_number}"
-            ) from error
-        if data is None:
-            return []
-        return [
-            dict(receipt)
-            for receipt in data["receipts"]
-            if data["operations"][str(receipt["id"])].get("state") != "resolved"
-        ]
 
     @staticmethod
     def _pr_is_current_open_head(state: dict[str, Any] | None, expected_head_sha: str) -> bool:
@@ -1020,17 +879,10 @@ class PipelineGitHub:
             ]
         )
         marker = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
-        if disposition == "wont_fix":
-            summary = (
-                "Reviewed by automation on the validated PR head "
-                f"`{reviewed_head_sha[:12]}`; no code change is required because this is "
-                "intentional by design."
-            )
-        else:
-            summary = (
-                "Addressed by automation and revalidated on the current PR head "
-                f"`{reviewed_head_sha[:12]}`."
-            )
+        summary = (
+            "Addressed by automation and revalidated on the current PR head "
+            f"`{reviewed_head_sha[:12]}`."
+        )
         return f"{summary}\n\n<!-- hephaestus-process-review-reply:{marker} -->"
 
     def reply_and_resolve_process_review_threads(  # noqa: C901
@@ -1041,146 +893,121 @@ class PipelineGitHub:
         receipts: list[dict[str, Any]],
         dispositions: dict[str, str],
     ) -> ProcessThreadResolutionResult:
-        """Reply then resolve only revalidated durable process-owned receipts."""
+        """Reply then resolve exact active-work-item process receipts.
+
+        The stage supplies only receipts created in the current active work
+        item.  Restarted work has no receipt and is therefore a human gate;
+        this accessor intentionally owns no second persistence journal.
+        """
         candidate_ids = tuple(sorted(dispositions))
         if self._skip(
             f"reply and resolve {len(candidate_ids)} process review thread(s) on PR #{pr_number}"
         ):
             return ProcessThreadResolutionResult(blocked_thread_ids=candidate_ids)
-        if not candidate_ids or any(
-            value not in {"addressed", "wont_fix"} for value in dispositions.values()
-        ):
+        if not candidate_ids or any(value != "addressed" for value in dispositions.values()):
             return ProcessThreadResolutionResult(blocked_thread_ids=candidate_ids)
         try:
-            with file_lock(self._process_receipt_lock_path(pr_number), require_exclusive=True):
-                record = self._load_process_receipt_record(pr_number)
-                if record is None:
-                    return ProcessThreadResolutionResult(blocked_thread_ids=candidate_ids)
-                stored = {str(receipt["id"]): receipt for receipt in record["receipts"]}
-                submitted = {str(receipt.get("id") or ""): receipt for receipt in receipts}
-                if (
-                    set(candidate_ids) - set(stored)
-                    or set(candidate_ids) - set(submitted)
-                    or any(stored[thread_id] != submitted[thread_id] for thread_id in candidate_ids)
+            submitted = {str(receipt.get("id") or ""): receipt for receipt in receipts}
+            if (
+                len(submitted) != len(receipts)
+                or set(candidate_ids) - set(submitted)
+                or any(
+                    not self._is_immutable_process_receipt(submitted[thread_id])
+                    or submitted[thread_id].get("created_head_sha") == reviewed_head_sha
+                    for thread_id in candidate_ids
+                )
+            ):
+                return ProcessThreadResolutionResult(blocked_thread_ids=candidate_ids)
+            resolved: list[str] = []
+            blocked: list[str] = []
+            for thread_id in candidate_ids:
+                receipt = submitted[thread_id]
+                if not self._pr_is_current_open_head(
+                    self.gh_pr_state(pr_number), reviewed_head_sha
                 ):
-                    return ProcessThreadResolutionResult(blocked_thread_ids=candidate_ids)
-                resolved: list[str] = []
-                blocked: list[str] = []
-                for thread_id in candidate_ids:
-                    receipt = stored[thread_id]
-                    operation = record["operations"][thread_id]
-                    if operation.get("state") == "resolved":
-                        resolved.append(thread_id)
-                        continue
-                    if not self._pr_is_current_open_head(
+                    blocked.append(thread_id)
+                    continue
+                live_by_id = {
+                    str(thread.get("id")): thread
+                    for thread in self._unresolved_threads(pr_number)
+                    if isinstance(thread, dict) and isinstance(thread.get("id"), str)
+                }
+                live = live_by_id.get(thread_id)
+                if not self._same_initial_receipt(receipt, live or {}):
+                    blocked.append(thread_id)
+                    continue
+                reply_body = self._process_thread_reply_body(
+                    pr_number, reviewed_head_sha, receipt, dispositions[thread_id]
+                )
+                reply_query = (
+                    "mutation($threadId:ID!,$body:String!,$clientMutationId:String!){"
+                    "addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId,body:$body,"
+                    "clientMutationId:$clientMutationId}){comment{id}}}"
+                )
+                reply_data = self._graphql(
+                    reply_query,
+                    threadId=thread_id,
+                    body=reply_body,
+                    clientMutationId=hashlib.sha256(reply_body.encode("utf-8")).hexdigest(),
+                )
+                comment = (
+                    reply_data.get("data", {})
+                    .get("addPullRequestReviewThreadReply", {})
+                    .get("comment", {})
+                )
+                if not isinstance(comment, dict) or not comment.get("id"):
+                    blocked.append(thread_id)
+                    continue
+                reply_comment_id = str(comment["id"])
+                if not self._pr_is_current_open_head(
+                    self.gh_pr_state(pr_number), reviewed_head_sha
+                ):
+                    blocked.append(thread_id)
+                    continue
+                after_reply = {
+                    str(thread.get("id")): thread
+                    for thread in self._unresolved_threads(pr_number)
+                    if isinstance(thread, dict) and isinstance(thread.get("id"), str)
+                }.get(thread_id)
+                if not self._same_replied_receipt(
+                    receipt, after_reply or {}, reply_body, reply_comment_id
+                ):
+                    blocked.append(thread_id)
+                    continue
+                resolve_query = (
+                    "mutation($threadId:ID!,$clientMutationId:String!){"
+                    "resolveReviewThread(input:{threadId:$threadId,clientMutationId:$clientMutationId})"
+                    "{thread{id isResolved}}}"
+                )
+                resolve_data = self._graphql(
+                    resolve_query,
+                    threadId=thread_id,
+                    clientMutationId=hashlib.sha256(
+                        (reply_body + ":resolve").encode("utf-8")
+                    ).hexdigest(),
+                )
+                resolved_thread = (
+                    resolve_data.get("data", {}).get("resolveReviewThread", {}).get("thread", {})
+                )
+                if (
+                    not isinstance(resolved_thread, dict)
+                    or resolved_thread.get("id") != thread_id
+                    or resolved_thread.get("isResolved") is not True
+                    or not self._pr_is_current_open_head(
                         self.gh_pr_state(pr_number), reviewed_head_sha
-                    ):
-                        blocked.append(thread_id)
-                        continue
-                    live_by_id = {
-                        str(thread.get("id")): thread
-                        for thread in self._unresolved_threads(pr_number)
-                        if isinstance(thread, dict) and isinstance(thread.get("id"), str)
-                    }
-                    live = live_by_id.get(thread_id)
-                    operation_state = operation.get("state")
-                    reply_body = str(operation.get("reply_body") or "")
-                    reply_comment_id = str(operation.get("reply_comment_id") or "")
-                    if operation_state == "open":
-                        reply_body = self._process_thread_reply_body(
-                            pr_number, reviewed_head_sha, receipt, dispositions[thread_id]
-                        )
-                        # Persist before the external write. If this process
-                        # dies or the response is ambiguous, a restart must
-                        # never issue a duplicate reply merely because the
-                        # live read still looks initial.
-                        operation["state"] = "reply_attempted"
-                        operation["reply_body"] = reply_body
-                        self._save_process_receipt_record(pr_number, record)
-                    if operation_state == "open" and self._same_initial_receipt(
-                        receipt, live or {}
-                    ):
-                        reply_query = (
-                            "mutation($threadId:ID!,$body:String!,$clientMutationId:String!){"
-                            "addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId,body:$body,"
-                            "clientMutationId:$clientMutationId}){comment{id}}}"
-                        )
-                        reply_data = self._graphql(
-                            reply_query,
-                            threadId=thread_id,
-                            body=reply_body,
-                            clientMutationId=hashlib.sha256(reply_body.encode("utf-8")).hexdigest(),
-                        )
-                        comment = (
-                            reply_data.get("data", {})
-                            .get("addPullRequestReviewThreadReply", {})
-                            .get("comment", {})
-                        )
-                        if not isinstance(comment, dict) or not comment.get("id"):
-                            blocked.append(thread_id)
-                            continue
-                        operation["state"] = "reply_posted"
-                        operation["reply_comment_id"] = str(comment["id"])
-                        reply_comment_id = str(comment["id"])
-                        self._save_process_receipt_record(pr_number, record)
-                    elif not self._same_replied_receipt(
-                        receipt, live or {}, reply_body, reply_comment_id
-                    ):
-                        blocked.append(thread_id)
-                        continue
-                    if not self._pr_is_current_open_head(
-                        self.gh_pr_state(pr_number), reviewed_head_sha
-                    ):
-                        blocked.append(thread_id)
-                        continue
-                    after_reply = {
-                        str(thread.get("id")): thread
-                        for thread in self._unresolved_threads(pr_number)
-                        if isinstance(thread, dict) and isinstance(thread.get("id"), str)
-                    }.get(thread_id)
-                    if not self._same_replied_receipt(
-                        receipt, after_reply or {}, reply_body, reply_comment_id
-                    ):
-                        blocked.append(thread_id)
-                        continue
-                    resolve_query = (
-                        "mutation($threadId:ID!,$clientMutationId:String!){"
-                        "resolveReviewThread(input:{threadId:$threadId,clientMutationId:$clientMutationId})"
-                        "{thread{id isResolved}}}"
                     )
-                    resolve_data = self._graphql(
-                        resolve_query,
-                        threadId=thread_id,
-                        clientMutationId=hashlib.sha256(
-                            (reply_body + ":resolve").encode("utf-8")
-                        ).hexdigest(),
-                    )
-                    resolved_thread = (
-                        resolve_data.get("data", {})
-                        .get("resolveReviewThread", {})
-                        .get("thread", {})
-                    )
-                    if (
-                        not isinstance(resolved_thread, dict)
-                        or resolved_thread.get("id") != thread_id
-                        or resolved_thread.get("isResolved") is not True
-                        or not self._pr_is_current_open_head(
-                            self.gh_pr_state(pr_number), reviewed_head_sha
-                        )
-                    ):
-                        blocked.append(thread_id)
-                        continue
-                    if any(
-                        str(thread.get("id")) == thread_id
-                        for thread in self._unresolved_threads(pr_number)
-                        if isinstance(thread, dict)
-                    ):
-                        blocked.append(thread_id)
-                        continue
-                    operation["state"] = "resolved"
-                    self._save_process_receipt_record(pr_number, record)
-                    resolved.append(thread_id)
-                return ProcessThreadResolutionResult(tuple(resolved), tuple(blocked))
+                ):
+                    blocked.append(thread_id)
+                    continue
+                if any(
+                    str(thread.get("id")) == thread_id
+                    for thread in self._unresolved_threads(pr_number)
+                    if isinstance(thread, dict)
+                ):
+                    blocked.append(thread_id)
+                    continue
+                resolved.append(thread_id)
+            return ProcessThreadResolutionResult(tuple(resolved), tuple(blocked))
         except (OSError, RuntimeError, subprocess.SubprocessError, json.JSONDecodeError) as error:
             logger.warning(
                 "Process review thread reconciliation failed on PR #%s: %s", pr_number, error

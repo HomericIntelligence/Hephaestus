@@ -329,16 +329,6 @@ class StageGitHub(Protocol):
         """
         ...
 
-    def persist_process_review_thread_receipts(
-        self, pr_number: int, created_head_sha: str, receipts: list[dict[str, Any]]
-    ) -> bool:
-        """Persist immutable post-time receipts before later reconciliation."""
-        ...
-
-    def load_process_review_thread_receipts(self, pr_number: int) -> list[dict[str, Any]]:
-        """Load only previously persisted, still-open process receipts."""
-        ...
-
     def reply_and_resolve_process_review_threads(
         self,
         pr_number: int,

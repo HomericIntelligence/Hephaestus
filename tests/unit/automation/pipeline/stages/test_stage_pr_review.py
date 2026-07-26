@@ -23,6 +23,8 @@ from hephaestus.automation.pipeline.stages.pr_review import (
     REVIEW_CHECKOUT_WAIT,
     REVIEW_ERROR_RETRY_CAP,
     PrReviewStage,
+    _handled_process_receipts,
+    _is_process_thread_receipt,
     _surviving_threads,
 )
 from hephaestus.automation.pipeline.work_item import ItemKind
@@ -964,6 +966,20 @@ class TestPrReviewStageStep:
 
         assert result == StageOutcome(Disposition.FINISH_FAIL, f"unknown state: {state}")
 
+    def test_on_enter_does_not_restore_receipts_from_a_second_local_journal(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A restart without active item receipts must fail closed without local state I/O."""
+
+        class NoReceiptJournalGitHub(FakeStageGitHub):
+            def load_process_review_thread_receipts(self, pr_number: int) -> list[dict[str, Any]]:
+                del pr_number
+                pytest.fail("PR-review entry must not restore mutation authority from local state")
+
+        item = make_work_item(issue=1, pr=1001, state="REVIEW_WAIT")
+
+        assert PrReviewStage().on_enter(item, make_ctx(github=NoReceiptJournalGitHub())) is None
+
     def test_unknown_state_fails(self, make_ctx: Any, make_work_item: Any) -> None:
         """An unknown state finishes failed instead of looping silently."""
         stage = PrReviewStage()
@@ -998,9 +1014,60 @@ class TestProcessOwnedReviewThreadLifecycle:
             "automation_owned": participants == ["hephaestus[bot]"],
             "author": participants[0],
             "authors": participants,
-            "comments": [{"author": author, "body": body} for author in participants],
+            "comments": [
+                {
+                    "id": f"comment-{thread_id}-{index}",
+                    "author": author,
+                    "body": body,
+                    "review_id": f"review-{thread_id}",
+                }
+                for index, author in enumerate(participants)
+            ],
             "review_id": f"review-{thread_id}",
+            "created_head_sha": "b" * 40,
         }
+
+    def test_process_receipt_requires_the_original_comment_node_id(self) -> None:
+        """A process receipt without its original immutable comment ID is unproven."""
+        receipt = self._thread("process-1", 3, "fix this")
+        del receipt["comments"][0]["id"]
+
+        assert not _is_process_thread_receipt(receipt)
+
+    def test_wont_fix_process_thread_is_not_a_resolution_candidate(
+        self, make_work_item: Any
+    ) -> None:
+        """Only a verified code fix may make a process thread eligible for closure."""
+        process = self._thread("process-1", 3, "fix this")
+        item = make_work_item(issue=1, pr=1001, state="POST")
+        item.payload.update(
+            {
+                "reviewed_pr_head_sha": "a" * 40,
+                "process_review_threads": [process],
+                "validation_process_threads": [dict(process)],
+                "validation_result": {"unaddressed": [], "wont_fix": [{"thread_id": "process-1"}]},
+            }
+        )
+
+        assert _handled_process_receipts(item) == ([], {})
+
+    def test_process_thread_at_its_creation_head_is_not_a_resolution_candidate(
+        self, make_work_item: Any
+    ) -> None:
+        """A validator claim alone cannot prove the code changed after the finding was posted."""
+        process = self._thread("process-1", 3, "fix this")
+        process["created_head_sha"] = "a" * 40
+        item = make_work_item(issue=1, pr=1001, state="POST")
+        item.payload.update(
+            {
+                "reviewed_pr_head_sha": "a" * 40,
+                "process_review_threads": [process],
+                "validation_process_threads": [dict(process)],
+                "validation_result": {"unaddressed": [], "wont_fix": []},
+            }
+        )
+
+        assert _handled_process_receipts(item) == ([], {})
 
     def test_live_process_threads_stand_down_without_duplication(
         self, make_ctx: Any, make_work_item: Any
