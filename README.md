@@ -91,41 +91,64 @@ Hephaestus ships two layers from one distribution:
 `tests/unit/validation/test_automation_boundary.py`. See
 [`docs/adr/0001-automation-library-boundary.md`](docs/adr/0001-automation-library-boundary.md).
 
-## Directory Structure
+## Repository navigation
 
-```
-Hephaestus/
-├── pyproject.toml          # uv configuration
-├── pyproject.toml     # Python package configuration
-├── hephaestus/        # Main package
-│   ├── __init__.py
-│   ├── agents/        # Agent frontmatter + loader + runtime
-│   ├── automation/    # Queue-based automation pipeline and scoped wrappers
-│   ├── benchmarks/    # Benchmark comparison utilities
-│   ├── ci/            # CI helpers (precommit, workflows, docker timing)
-│   ├── cli/           # CLI helpers (argument parsing, output formatting)
-│   ├── config/        # Configuration utilities (YAML, JSON, env vars)
-│   ├── datasets/      # Dataset downloading utilities
-│   ├── discovery/     # Discovery of agents, skills, and code blocks
-│   ├── forensics/     # Coredump capture + gdb post-mortem runner
-│   ├── github/        # GitHub automation (PR merging, fleet sync, tidy, stats)
-│   ├── io/            # I/O utilities (read, write, safe_write, load/save data)
-│   ├── logging/       # Logging utilities (ContextLogger, setup_logging)
-│   ├── markdown/      # Markdown linting and link fixing
-│   ├── nats/          # NATS JetStream subscriber (event-driven workflows)
-│   ├── observability/ # Prometheus metrics, local health endpoint, and alert transitions
-│   ├── prompts/       # Packaged Jinja templates and CLI-only override catalog
-│   ├── resilience/    # Circuit breaker + retry + subprocess resilience primitives
-│   ├── scripts_lib/   # Standalone consistency-check scripts (CLI table, version)
-│   ├── system/        # System information collection
-│   ├── utils/         # General utility functions (slugify, retry, subprocess, git helpers)
-│   ├── validation/    # README, schema, and structural validation
-│   └── version/       # Version management (hatch-vcs + consistency checks)
-├── tests/             # Unit tests
-├── docs/              # Documentation
-├── scripts/           # Utility scripts
-└── README.md          # This file
-```
+This index covers every tracked top-level path except `README.md` itself. The
+navigation guard in `tests/unit/validation/test_readme_subpackage_tree.py`
+requires new tracked root entries to be added here. Checkout-only state and
+ignored generated output such as `.git/`, `.venv/`, `.pytest_cache/`, and
+`build/` are intentionally outside this index.
+
+### Source and supporting material
+
+| Path | Purpose |
+| --- | --- |
+| [hephaestus/](hephaestus/) | Python package, including the utility library and optional automation product layer. |
+| [tests/](tests/) | Unit and integration test suites. |
+| [docs/](docs/) | User documentation, architecture decisions, roadmap, and release guidance. |
+| [scripts/](scripts/) | Maintenance, validation, demonstration, and operational scripts. |
+| [.github/](.github/) | GitHub templates, ownership rules, dependency automation, and workflows. |
+| [.claude/](.claude/) | Repository-scoped Claude settings, security guidance, and development workflow. |
+| [.vscode/](.vscode/) | Shared VS Code extensions, settings, and debug configuration. |
+
+### Project and policy documents
+
+| Path | Purpose |
+| --- | --- |
+| [AGENTS.md](AGENTS.md) | Authoritative repository and agent-development contract. |
+| [CLAUDE.md](CLAUDE.md) | Claude Code entry point to the authoritative agent contract. |
+| [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Community conduct expectations. |
+| [COMPATIBILITY.md](COMPATIBILITY.md) | Supported versions and compatibility policy. |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Contributor setup, development, and pull-request workflow. |
+| [LICENSE](LICENSE) | BSD 3-Clause license terms. |
+| [NOTICE](NOTICE) | Attribution and third-party notice information. |
+| [PRIVACY.md](PRIVACY.md) | Privacy, retention, and deletion policy. |
+| [SECURITY.md](SECURITY.md) | Vulnerability reporting and security-support policy. |
+
+### Build and dependency metadata
+
+| Path | Purpose |
+| --- | --- |
+| [pyproject.toml](pyproject.toml) | Package metadata, dependencies, entry points, build settings, and Python tool configuration. |
+| [uv.lock](uv.lock) | Reproducible resolved dependency set. |
+| [justfile](justfile) | Canonical contributor command shortcuts. |
+| [coverage.toml](coverage.toml) | Coverage collection, reporting, and omit policy. |
+
+### Repository tool configuration
+
+| Path | Purpose |
+| --- | --- |
+| [.codexignore](.codexignore) | Paths excluded from Codex context discovery. |
+| [.editorconfig](.editorconfig) | Cross-editor formatting defaults. |
+| [.fleet.yml](.fleet.yml) | Fleet synchronization organization and repository inventory. |
+| [.gitattributes](.gitattributes) | Git text and line-ending normalization. |
+| [.gitignore](.gitignore) | Ignored generated, local, and sensitive paths. |
+| [.heph-project-denylist](.heph-project-denylist) | Centrally enforced project privacy and PII denylist. |
+| [.markdownlint.yaml](.markdownlint.yaml) | Markdown lint policy. |
+| [.mcp.json](.mcp.json) | Repository MCP server declarations. |
+| [.pip-audit-ignore.txt](.pip-audit-ignore.txt) | Documented dependency-audit suppressions. |
+| [.pre-commit-config.yaml](.pre-commit-config.yaml) | Pre-commit quality and policy hooks. |
+| [.yamllint.yaml](.yamllint.yaml) | YAML lint policy. |
 
 ## Getting Started with uv
 
