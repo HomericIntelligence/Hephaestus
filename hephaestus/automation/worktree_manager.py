@@ -263,6 +263,7 @@ class WorktreeManager:
         base_sha: str | None = None,
         remote_branch_reserved: bool = False,
         isolated: bool = False,
+        isolated_generation: int = 0,
         timeout: int | None = None,
     ) -> Path:
         """Create a new worktree for an issue.
@@ -286,6 +287,10 @@ class WorktreeManager:
                 reusing another worktree that holds ``branch_name``. PR review
                 uses this so a preserved writer checkout is never
                 reset or exposed to an agent.
+            isolated_generation: Recovery generation for an isolated checkout.
+                A nonzero value creates a distinct path so a changed PR head
+                is reviewed from a fresh checkout without replacing the
+                preserved failed checkout.
             timeout: Optional timeout in seconds for each git command.
 
         Returns:
@@ -295,8 +300,18 @@ class WorktreeManager:
             RuntimeError: If worktree creation fails
 
         """
+        if (
+            isinstance(isolated_generation, bool)
+            or not isinstance(isolated_generation, int)
+            or isolated_generation < 0
+        ):
+            raise RuntimeError("isolated worktree generation is invalid")
+        if isolated_generation and not isolated:
+            raise RuntimeError("isolated worktree generation requires isolation")
         with self.lock:
             isolated_key = f"review-pr-{issue_number}"
+            if isolated_generation:
+                isolated_key = f"{isolated_key}-{isolated_generation}"
             worktree_key: int | str = isolated_key if isolated else issue_number
             if branch_name is None:
                 branch_name = f"{issue_number}-auto"

@@ -161,6 +161,7 @@ from .base import (
     stage_model,
     write_skip_label,
 )
+from .repo import is_full_commit_sha
 
 logger = logging.getLogger(__name__)
 
@@ -252,6 +253,8 @@ _ROUND_PAYLOAD_KEYS = (
     "difficulty_tiers",
     "address_error",
     "address_output",
+    "direct_push_retries",
+    "detached_push_retry_head_sha",
     "push_no_commit",
     "no_commit_retry_done",
     "unaddressed_findings",
@@ -858,27 +861,33 @@ class PrReviewStage(Stage):
             return StageOutcome(Disposition.FINISH_FAIL, "direct_pr_no_head_branch")
         item.branch = branch
         item.payload["existing_pr"] = True
+        generation = item.payload.get("direct_pr_worktree_generation", 0)
+        if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
+            return StageOutcome(Disposition.FINISH_FAIL, "direct_pr_worktree_generation_invalid")
         logger.info(
             "pr_review:%d: adopting direct PR #%d (branch %r) for review",
             _issue_number(item),
             item.pr,
             branch,
         )
+        kwargs: dict[str, object] = {
+            "issue_number": _issue_number(item),
+            "branch_name": branch,
+            "refresh_base": False,
+            # This mutable review checkout cannot reuse the writer's branch
+            # checkout.
+            "isolated": True,
+            "sync_to_remote": True,
+            "pr_number": item.pr,
+            "repo_root": str(ctx.paths.repo_root),
+        }
+        if generation:
+            kwargs["isolated_generation"] = generation
         job = GitJob(
             repo=item.repo,
             op="create_worktree",
             timeout_s=GIT_JOB_TIMEOUT_S,
-            kwargs={
-                "issue_number": _issue_number(item),
-                "branch_name": branch,
-                "refresh_base": False,
-                # This mutable review checkout cannot reuse the writer's
-                # branch checkout.
-                "isolated": True,
-                "sync_to_remote": True,
-                "pr_number": item.pr,
-                "repo_root": str(ctx.paths.repo_root),
-            },
+            kwargs=kwargs,
             descr="direct_pr_review_worktree",
         )
         # Coordinator completion callbacks run before on_done_state is
@@ -1116,6 +1125,13 @@ class PrReviewStage(Stage):
             # deliberate rebase without overwriting a concurrent writer.
             kwargs["publish_detached_head"] = True
             kwargs["expected_remote_sha"] = item.payload.get("reviewed_pr_head_sha")
+            retry_head_sha = item.payload.get("detached_push_retry_head_sha")
+            if retry_head_sha is not None:
+                if not is_full_commit_sha(retry_head_sha):
+                    return StageOutcome(
+                        Disposition.FINISH_FAIL, "detached_push_retry_receipt_invalid"
+                    )
+                kwargs["detached_push_retry_head_sha"] = retry_head_sha
         git_job = GitJob(
             repo=item.repo,
             op="commit_push",
@@ -1293,13 +1309,19 @@ class PrReviewStage(Stage):
             # the flag lets VALIDATE_WAIT skip the dead round.
             item.payload["review_failed"] = True
         elif item.state == PUSH_WAIT:
-            failure = (
-                result.value.get("detached_push_failure")
-                if isinstance(result.value, dict)
-                else None
-            )
-            if failure in {"remote_changed", "remote_unchanged", "remote_unconfirmed"}:
+            receipt = result.value if isinstance(result.value, dict) else {}
+            failure = receipt.get("detached_push_failure")
+            if failure in {
+                "remote_changed",
+                "remote_unchanged",
+                "remote_unconfirmed",
+                "retry_checkout_changed",
+                "retry_checkout_unconfirmed",
+            }:
                 item.payload["detached_push_failure"] = failure
+                source_sha = receipt.get("detached_push_head_sha")
+                if is_full_commit_sha(source_sha):
+                    item.payload["detached_push_head_sha"] = source_sha
                 return
             item.payload["address_error"] = True
         elif item.state == ADDRESS_WAIT:
@@ -1586,6 +1608,29 @@ class PrReviewStage(Stage):
         )
         return JobRequest(job, on_done_state=PUSH_WAIT)
 
+    @staticmethod
+    def _restart_direct_pr_review(item: WorkItem) -> StageOutcome | None:
+        """Preserve a drifted checkout and route the PR through a fresh review."""
+        if not item.worktree:
+            return StageOutcome(Disposition.FINISH_FAIL, "detached_push_recovery_worktree_missing")
+        generation = item.payload.get("direct_pr_worktree_generation", 0)
+        if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
+            return StageOutcome(Disposition.FINISH_FAIL, "direct_pr_worktree_generation_invalid")
+        preserved = item.payload.setdefault("preserved_direct_worktrees", [])
+        if not isinstance(preserved, list):
+            return StageOutcome(Disposition.FINISH_FAIL, "detached_push_recovery_receipt_invalid")
+        if item.worktree not in preserved:
+            preserved.append(item.worktree)
+        item.worktree = ""
+        item.payload["existing_pr"] = True
+        item.payload.pop("direct_pr_worktree", None)
+        item.payload.pop("direct_pr_worktree_dirty", None)
+        item.payload["direct_pr_worktree_generation"] = generation + 1
+        item.session_ids.pop(AGENT_PR_REVIEWER, None)
+        item.session_ids.pop(AGENT_ADDRESS_REVIEW, None)
+        _clear_round_review_state(item)
+        return None
+
     def _eval(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901 - state-machine gate
         """EVAL [M]: apply the structural-audit gate and review budget.
 
@@ -1602,11 +1647,20 @@ class PrReviewStage(Stage):
 
         detached_push_failure = payload.pop("detached_push_failure", None)
         if detached_push_failure == "remote_unchanged":
+            source_sha = payload.pop("detached_push_head_sha", None)
+            if not is_full_commit_sha(source_sha):
+                logger.warning(
+                    "pr_review:%d: detached push retry receipt lacks an exact local head",
+                    item.issue,
+                )
+                return StageOutcome(Disposition.FINISH_FAIL, "detached_push_retry_receipt_invalid")
             retries = int(payload.get("direct_push_retries", 0))
             if retries < DIRECT_PUSH_RETRY_CAP:
                 payload["direct_push_retries"] = retries + 1
+                payload["detached_push_retry_head_sha"] = source_sha
                 logger.warning(
-                    "pr_review:%d: detached push failed with an unchanged remote; retrying commit",
+                    "pr_review:%d: detached push failed with unchanged remote; "
+                    "retrying exact commit",
                     item.issue,
                 )
                 return Continue(next_state=PUSH_WAIT)
@@ -1617,20 +1671,27 @@ class PrReviewStage(Stage):
             )
             return StageOutcome(Disposition.FINISH_FAIL, "detached_push_failed")
         if detached_push_failure == "remote_changed":
-            payload["detached_push_failure"] = detached_push_failure
+            recovery = self._restart_direct_pr_review(item)
+            if recovery is not None:
+                return recovery
             logger.warning(
-                "pr_review:%d: detached push saw a changed remote head; preserving checkout",
+                "pr_review:%d: detached push saw changed remote head; "
+                "restarting from a fresh checkout",
                 item.issue,
             )
-            return StageOutcome(Disposition.FINISH_FAIL, "detached_push_head_changed")
-        if detached_push_failure == "remote_unconfirmed":
+            return Continue(next_state=ENTER)
+        if detached_push_failure in {
+            "remote_unconfirmed",
+            "retry_checkout_changed",
+            "retry_checkout_unconfirmed",
+        }:
             payload["detached_push_failure"] = detached_push_failure
             logger.warning(
-                "pr_review:%d: detached push remote head could not be verified; "
-                "preserving checkout",
+                "pr_review:%d: detached push recovery state %s; preserving checkout",
                 item.issue,
+                detached_push_failure,
             )
-            return StageOutcome(Disposition.FINISH_FAIL, "detached_push_remote_unconfirmed")
+            return StageOutcome(Disposition.FINISH_FAIL, "detached_push_failed")
 
         address_error = self._handle_address_error(item)
         if address_error is not None:

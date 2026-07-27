@@ -1969,16 +1969,109 @@ class TestGitOps:
         )
         with (
             patch("hephaestus.automation.git_utils.commit_if_changes", return_value=True),
+            patch(
+                "hephaestus.automation.git_utils.run",
+                return_value=subprocess.CompletedProcess([], 0, stdout="b" * 40 + "\n"),
+            ),
             patch("hephaestus.automation.git_utils.push_head_to_branch") as mock_push,
             patch("hephaestus.automation.git_utils.push_branch") as normal_push,
         ):
             pool.submit(job, StageName.PR_REVIEW)
             _, result = completion_q.get(timeout=10)
 
-        mock_push.assert_called_once_with("5-auto", "a" * 40, tmp_path, timeout=60)
+        mock_push.assert_called_once_with(
+            "5-auto", "a" * 40, tmp_path, source_sha="b" * 40, timeout=60
+        )
         normal_push.assert_not_called()
         assert result.ok is True
         assert result.value is True
+
+    @pytest.mark.parametrize(
+        ("status_output", "current_head"),
+        [(" M changed.py\n", "b" * 40), ("", "c" * 40)],
+    )
+    def test_detached_push_retry_refuses_a_changed_checkout_before_publishing(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+        status_output: str,
+        current_head: str,
+    ) -> None:
+        """A retry cannot publish dirty or amended content after the first push."""
+        source_sha = "b" * 40
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 5,
+                "worktree_path": tmp_path,
+                "branch": "5-auto",
+                "publish_detached_head": True,
+                "expected_remote_sha": "a" * 40,
+                "detached_push_retry_head_sha": source_sha,
+            },
+        )
+        with (
+            patch("hephaestus.automation.git_utils.commit_if_changes") as commit,
+            patch(
+                "hephaestus.automation.git_utils.run",
+                side_effect=[
+                    subprocess.CompletedProcess([], 0, stdout=status_output),
+                    subprocess.CompletedProcess([], 0, stdout=current_head + "\n"),
+                ],
+            ),
+            patch("hephaestus.automation.git_utils.push_head_to_branch") as push,
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        commit.assert_not_called()
+        push.assert_not_called()
+        assert result.ok is False
+        assert result.value == {"detached_push_failure": "retry_checkout_changed"}
+
+    def test_detached_push_retry_republishes_only_the_captured_commit(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A clean retry uses the saved commit SHA rather than a mutable HEAD ref."""
+        source_sha = "b" * 40
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 5,
+                "worktree_path": tmp_path,
+                "branch": "5-auto",
+                "publish_detached_head": True,
+                "expected_remote_sha": "a" * 40,
+                "detached_push_retry_head_sha": source_sha,
+            },
+        )
+        with (
+            patch("hephaestus.automation.git_utils.commit_if_changes") as commit,
+            patch(
+                "hephaestus.automation.git_utils.run",
+                side_effect=[
+                    subprocess.CompletedProcess([], 0, stdout=""),
+                    subprocess.CompletedProcess([], 0, stdout=source_sha + "\n"),
+                ],
+            ),
+            patch("hephaestus.automation.git_utils.push_head_to_branch") as push,
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        commit.assert_not_called()
+        push.assert_called_once_with(
+            "5-auto", "a" * 40, tmp_path, source_sha=source_sha, timeout=60
+        )
+        assert result.ok is True
 
     @pytest.mark.parametrize(
         ("exc", "failure_kind"),
@@ -2020,13 +2113,20 @@ class TestGitOps:
         )
         with (
             patch("hephaestus.automation.git_utils.commit_if_changes", return_value=True),
+            patch(
+                "hephaestus.automation.git_utils.run",
+                return_value=subprocess.CompletedProcess([], 0, stdout="b" * 40 + "\n"),
+            ),
             patch("hephaestus.automation.git_utils.push_head_to_branch", side_effect=exc),
         ):
             pool.submit(job, StageName.PR_REVIEW)
             _, result = completion_q.get(timeout=10)
 
         assert result.ok is False
-        assert result.value == {"detached_push_failure": failure_kind}
+        assert result.value == {
+            "detached_push_failure": failure_kind,
+            "detached_push_head_sha": "b" * 40,
+        }
 
     def test_commit_push_missing_worktree_path_is_error(
         self,

@@ -148,6 +148,21 @@ class TestCleanup:
         }
         assert result.on_done_state == "DONE"
 
+    def test_fresh_review_completion_retains_the_recovery_checkout(
+        self,
+        stage: FinishedStage,
+        preserved: list[tuple[str, int, str]],
+        make_ctx: Any,
+    ) -> None:
+        """A successful re-review must not erase its prior failed checkout."""
+        item = _item(passed=True, worktree="/wt/fresh", state="CLEANUP")
+        item.payload["preserved_direct_worktrees"] = ["/wt/recovery"]
+
+        result = stage.step(item, make_ctx())
+
+        assert isinstance(result, JobRequest)
+        assert ("repo-a", 42, "/wt/recovery") in preserved
+
     def test_fail_with_worktree_preserves_for_debugging(
         self,
         stage: FinishedStage,

@@ -283,6 +283,23 @@ class TestWorktreeManager:
             "worktree remove" not in call.args[0] for call in worktree_mocks.run.call_args_list
         )
 
+    def test_isolated_review_generation_uses_a_fresh_checkout_path(
+        self, worktree_mocks: Any, tmp_path: Any
+    ) -> None:
+        """A recovery review is distinct from its preserved predecessor."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+
+        worktree_path = manager.create_worktree(
+            2500,
+            "2500-auto-impl",
+            isolated=True,
+            isolated_generation=1,
+        )
+
+        assert worktree_path == manager.base_dir / "review-pr-2500-1"
+        assert manager.worktrees["review-pr-2500-1"] == worktree_path
+
     def test_create_worktree_default_branch_name(self, worktree_mocks: Any, tmp_path: Any) -> None:
         """Test worktree creation with default branch name."""
         worktree_mocks.repo_root.return_value = tmp_path

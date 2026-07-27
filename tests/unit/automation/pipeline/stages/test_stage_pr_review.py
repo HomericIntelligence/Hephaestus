@@ -2300,7 +2300,10 @@ class TestEvalVerdicts:
             item,
             JobResult(
                 ok=False,
-                value={"detached_push_failure": "remote_unchanged"},
+                value={
+                    "detached_push_failure": "remote_unchanged",
+                    "detached_push_head_sha": "b" * 40,
+                },
                 error="detached review push failed while remote head was unchanged",
             ),
             ctx,
@@ -2311,6 +2314,7 @@ class TestEvalVerdicts:
 
         assert result == Continue(next_state="PUSH_WAIT")
         assert item.payload["direct_push_retries"] == 1
+        assert item.payload["detached_push_retry_head_sha"] == "b" * 40
         assert "address_error" not in item.payload
 
     def test_detached_push_retry_cap_preserves_the_checkout(
@@ -2320,13 +2324,17 @@ class TestEvalVerdicts:
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state="PUSH_WAIT")
+        item.worktree = "/tmp/review-pr-1001"
         item.payload["direct_push_retries"] = DIRECT_PUSH_RETRY_CAP
 
         stage.on_job_done(
             item,
             JobResult(
                 ok=False,
-                value={"detached_push_failure": "remote_unchanged"},
+                value={
+                    "detached_push_failure": "remote_unchanged",
+                    "detached_push_head_sha": "b" * 40,
+                },
                 error="detached review push failed while remote head was unchanged",
             ),
             ctx,
@@ -2338,13 +2346,43 @@ class TestEvalVerdicts:
         assert result == StageOutcome(Disposition.FINISH_FAIL, "detached_push_failed")
         assert item.payload["detached_push_failure"] == "remote_unchanged"
 
+    def test_successful_detached_push_resets_the_retry_budget_for_the_next_round(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A later independent failure receives its own bounded retry."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="PUSH_WAIT")
+        item.payload["direct_push_retries"] = DIRECT_PUSH_RETRY_CAP
+
+        stage.on_job_done(item, JobResult(ok=True, value=True), ctx)
+
+        assert "direct_push_retries" not in item.payload
+        item.state = "PUSH_WAIT"
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                value={
+                    "detached_push_failure": "remote_unchanged",
+                    "detached_push_head_sha": "b" * 40,
+                },
+                error="detached review push failed while remote head was unchanged",
+            ),
+            ctx,
+        )
+        item.state = "EVAL"
+
+        assert stage.step(item, ctx) == Continue(next_state="PUSH_WAIT")
+
     def test_detached_push_with_advanced_remote_preserves_the_checkout(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
         """A changed remote must not be overwritten or called an agent failure."""
         stage = PrReviewStage()
-        ctx = make_ctx()
+        ctx = make_ctx(github=FakeStageGitHub(pr_head_branch="1001-auto"))
         item = make_work_item(issue=1, pr=1001, state="PUSH_WAIT")
+        item.worktree = "/tmp/review-pr-1001"
 
         stage.on_job_done(
             item,
@@ -2359,8 +2397,17 @@ class TestEvalVerdicts:
 
         result = stage.step(item, ctx)
 
-        assert result == StageOutcome(Disposition.FINISH_FAIL, "detached_push_head_changed")
+        assert result == Continue(next_state="ENTER")
+        assert item.worktree == ""
+        assert item.payload["preserved_direct_worktrees"] == ["/tmp/review-pr-1001"]
+        assert item.payload["direct_pr_worktree_generation"] == 1
         assert "address_error" not in item.payload
+
+        item.state = "ENTER"
+        retry = stage.step(item, ctx)
+
+        assert isinstance(retry, JobRequest)
+        assert retry.job.kwargs["isolated_generation"] == 1
 
     # Severity-aware GO gate tests (#1856)
     def test_same_login_human_reply_to_process_advisory_thread_blocks_go(

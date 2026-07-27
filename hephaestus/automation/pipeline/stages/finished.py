@@ -122,6 +122,7 @@ class FinishedStage(Stage):
 
     def _cleanup(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Clean or preserve the writer worktree."""
+        self._record_recovery_worktrees(item)
         reservation = item.payload.get(DIRECT_SCOPE_RESERVATION_KEY)
         if not item.payload.get("_direct_scope_reservation_release_attempted", False):
             if isinstance(reservation, dict):
@@ -213,6 +214,18 @@ class FinishedStage(Stage):
             descr=f"remove worktree {item.worktree}",
         )
         return JobRequest(job=job, on_done_state="DONE")
+
+    def _record_recovery_worktrees(self, item: WorkItem) -> None:
+        """Retain failed direct-review checkouts even when a re-review succeeds."""
+        recovery_worktrees = item.payload.get("preserved_direct_worktrees", [])
+        if not isinstance(recovery_worktrees, list):
+            return
+        for worktree in recovery_worktrees:
+            if not isinstance(worktree, str) or not worktree:
+                continue
+            entry = (item.repo, item.issue or item.pr or 0, worktree)
+            if entry not in self._preserved:
+                self._preserved.append(entry)
 
     def on_job_done(self, item: WorkItem, result: JobResult, ctx: StageContext) -> None:
         """Log cleanup failures (never fatal — the result is already recorded).

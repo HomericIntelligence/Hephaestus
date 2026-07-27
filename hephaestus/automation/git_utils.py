@@ -463,6 +463,7 @@ def push_head_to_branch(
     expected_remote_sha: str,
     worktree_path: Path,
     *,
+    source_sha: str | None = None,
     timeout: int | None = None,
 ) -> None:
     """Publish detached ``HEAD`` to ``origin/<branch_name>`` safely.
@@ -473,6 +474,7 @@ def push_head_to_branch(
     permits an address agent to rebase onto current main while refusing to
     overwrite a PR head that changed after its reviewed-head proof.
     """
+    source_ref = source_sha or "HEAD"
     try:
         run(
             [
@@ -480,13 +482,13 @@ def push_head_to_branch(
                 "push",
                 f"--force-with-lease=refs/heads/{branch_name}:{expected_remote_sha}",
                 "origin",
-                f"HEAD:refs/heads/{branch_name}",
+                f"{source_ref}:refs/heads/{branch_name}",
             ],
             cwd=worktree_path,
             **_timeout_kw(timeout),
         )
         logger.info("Published detached HEAD to origin/%s", branch_name)
-    except subprocess.CalledProcessError as exc:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         # The rejected push can be a local pre-push-hook failure, transport
         # failure, or a server-side lease rejection.  Never infer which from
         # git's stderr: hook output is untrusted diagnostic content and may
