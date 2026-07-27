@@ -167,7 +167,7 @@ def _issue_number(item: WorkItem) -> int:
 #: remote must still terminate. Reset on any successful git job.
 GIT_ERROR_RETRY_CAP = 2
 
-#: Timeout for the optional pre-PR unit-test run (mirrors the legacy
+#: Timeout for the optional pre-PR test run (mirrors the legacy
 #: ``_pr_create_phase`` bound; the budget that matters — ``test_fix`` —
 #: lives in ROUTES).
 PRE_PR_TEST_TIMEOUT_S = 1800

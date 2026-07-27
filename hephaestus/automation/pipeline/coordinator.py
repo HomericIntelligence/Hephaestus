@@ -285,7 +285,7 @@ class PipelineConfig:
     budget_overrides: dict[str, int] = field(default_factory=dict)
     # Configurable argv for the optional pre-PR test gate. The
     # implementation stage reads this vector instead of hardcoding the test
-    # command so repositories with non-standard unit-test layouts can opt in.
+    # command so repositories with non-standard test layouts can opt in.
     pre_pr_test_argv: tuple[str, ...] = PRE_PR_TEST_ARGV
     run_pre_pr_tests: bool = False
     serialize_file_overlap: bool = True

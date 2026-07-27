@@ -343,9 +343,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--run-pre-pr-tests",
         action="store_true",
-        help=(
-            "Run the implementation-stage pre-PR unit-test gate before committing and creating PRs."
-        ),
+        help=("Run the implementation-stage pre-PR test gate before committing and creating PRs."),
     )
     p.add_argument(
         "--model",
