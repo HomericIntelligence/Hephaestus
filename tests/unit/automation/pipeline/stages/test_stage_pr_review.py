@@ -432,7 +432,6 @@ class TestPrReviewStageStep:
                 value={
                     "path": "/tmp/review-pr",
                     "dirty": False,
-                    "preserved_direct_worktrees": ["/tmp/review-pr-previous"],
                 },
             ),
             ctx,
@@ -445,7 +444,6 @@ class TestPrReviewStageStep:
         assert result == Continue(next_state="REVIEW_WAIT")
         assert item.worktree == "/tmp/review-pr"
         assert item.payload["direct_pr_worktree"] == "/tmp/review-pr"
-        assert item.payload["preserved_direct_worktrees"] == ["/tmp/review-pr-previous"]
         assert "direct_pr_worktree_pending" not in item.payload
 
     def test_enter_advances_to_review(self, make_ctx: Any, make_work_item: Any) -> None:
@@ -963,6 +961,8 @@ class TestPrReviewStageStep:
         assert result.job.op == "commit_push"
         assert result.job.kwargs == {
             "issue_number": 1,
+            "pr_number": 1001,
+            "repo_root": str(ctx.paths.repo_root),
             "worktree_path": "/tmp/wt",
             "branch": "1-auto-impl",
             "agent": "claude",
@@ -2408,7 +2408,7 @@ class TestEvalVerdicts:
 
         assert result == Continue(next_state="ENTER")
         assert item.worktree == ""
-        assert item.payload["preserved_direct_worktrees"] == ["/tmp/review-pr-1001"]
+        assert "preserved_direct_worktrees" not in item.payload
         assert item.payload["direct_pr_worktree_generation"] == 1
         assert "address_error" not in item.payload
 
@@ -2418,6 +2418,31 @@ class TestEvalVerdicts:
         assert isinstance(retry, JobRequest)
         assert isinstance(retry.job, GitJob)
         assert retry.job.kwargs["isolated_generation"] == 1
+
+    def test_detached_push_without_a_durable_recovery_receipt_preserves_the_checkout(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The stage must not restart if the worker could not persist provenance."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="PUSH_WAIT")
+        item.worktree = "/tmp/review-pr-1001"
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                value={"detached_push_failure": "remote_changed_unrecorded"},
+                error="remote changed and receipt storage failed",
+            ),
+            ctx,
+        )
+        item.state = "EVAL"
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "detached_push_failed"
+        )
+        assert item.worktree == "/tmp/review-pr-1001"
 
     def test_detached_push_remote_changed_recovery_has_a_bounded_restart_budget(
         self, make_ctx: Any, make_work_item: Any

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 
+from hephaestus.automation.direct_review_recovery import list_direct_review_recovery_paths
 from hephaestus.automation.pipeline.work_item import ItemResult, PreservedWorktree
 
 from .base import (
@@ -127,7 +128,7 @@ class FinishedStage(Stage):
 
     def _cleanup(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Clean or preserve the writer worktree."""
-        self._record_recovery_worktrees(item)
+        self._record_recovery_worktrees(item, ctx)
         reservation = item.payload.get(DIRECT_SCOPE_RESERVATION_KEY)
         if not item.payload.get("_direct_scope_reservation_release_attempted", False):
             if isinstance(reservation, dict):
@@ -220,15 +221,25 @@ class FinishedStage(Stage):
         )
         return JobRequest(job=job, on_done_state="DONE")
 
-    def _record_recovery_worktrees(self, item: WorkItem) -> None:
-        """Retain failed direct-review checkouts even when a re-review succeeds."""
-        recovery_worktrees = item.payload.get("preserved_direct_worktrees", [])
-        if not isinstance(recovery_worktrees, list):
+    def _record_recovery_worktrees(self, item: WorkItem, ctx: StageContext) -> None:
+        """Retain only receipt-backed direct-review recovery checkouts."""
+        if item.issue is None or item.pr is None:
+            return
+        try:
+            recovery_worktrees = list_direct_review_recovery_paths(
+                repo_root=ctx.paths.repo_root,
+                issue=item.issue,
+                pr=item.pr,
+            )
+        except (OSError, RuntimeError) as error:
+            logger.warning(
+                "finished:%s: could not read detached-review recovery receipts: %s",
+                item.issue or item.repo,
+                error,
+            )
             return
         for worktree in recovery_worktrees:
-            if not isinstance(worktree, str) or not worktree:
-                continue
-            entry = (item.repo, item.issue or item.pr or 0, worktree)
+            entry = (item.repo, item.issue, str(worktree))
             if entry not in self._recovery_preserved:
                 self._recovery_preserved.append(entry)
 

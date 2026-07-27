@@ -923,6 +923,7 @@ class Coordinator:
             )
             summary_items = self._effective_items()
             preserved = self._active_preserved_worktrees()
+            recovery_preserved = self._active_recovery_worktrees()
             try:
                 self._record_event(
                     "run_end",
@@ -939,6 +940,7 @@ class Coordinator:
                     stats,
                     preserved,
                     json_out=self.config.json_out,
+                    recovery_preserved=recovery_preserved,
                     terminal_summary=(
                         self._terminal_summary if self._terminal_summary.total else None
                     ),
@@ -953,7 +955,7 @@ class Coordinator:
         return latest_logical_items(self.items)
 
     def _active_preserved_worktrees(self) -> list[PreservedWorktree]:
-        """Return extant failed-item and direct-review recovery worktrees."""
+        """Return extant failed-item worktrees for the latest logical items."""
         failed_items = {
             (item.repo, item.issue or item.pr or 0)
             for item in self._effective_items()
@@ -967,6 +969,12 @@ class Coordinator:
                 continue
             seen.add(entry)
             active.append(entry)
+        return active
+
+    def _active_recovery_worktrees(self) -> list[PreservedWorktree]:
+        """Return extant receipt-backed detached-review recovery worktrees."""
+        active: list[PreservedWorktree] = []
+        seen: set[PreservedWorktree] = set()
         for repo, issue_or_pr, path in self.recovery_preserved:
             entry = (repo, issue_or_pr, path)
             if entry in seen or not Path(path).exists():

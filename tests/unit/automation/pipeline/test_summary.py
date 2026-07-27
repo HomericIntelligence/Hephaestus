@@ -16,6 +16,7 @@ import pytest
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.summary import (
     RunStats,
+    format_direct_review_recovery_worktrees,
     format_preserved_worktrees,
     print_summary,
 )
@@ -62,6 +63,14 @@ class TestFormatPreservedWorktrees:
 
     def test_empty_list_yields_no_lines(self) -> None:
         assert format_preserved_worktrees([], "script.py") == []
+
+    def test_detached_recovery_guidance_is_inspection_only(self) -> None:
+        """Receipt-backed recoveries must never inherit force-remove commands."""
+        lines = format_direct_review_recovery_worktrees([("repo-a", 101, "/wt/review-101")])
+
+        assert "Detached-review recovery worktrees" in lines[0]
+        assert "/wt/review-101" in lines[1]
+        assert all("git worktree remove" not in line and "--issues" not in line for line in lines)
 
     def test_line_sequence_matches_legacy(self) -> None:
         preserved = [("repo-a", 101, "/wt/issue-101"), ("repo-b", 202, "/wt/issue-202")]
@@ -239,6 +248,7 @@ class TestJsonEnvelope:
         assert envelope["loops_run"] == 3
         assert envelope["resumable"] == ["repo-a#2@pr_review"]
         assert envelope["preserved_worktrees"] == [[2, "/wt/2"]]
+        assert envelope["recovery_worktrees"] == []
 
     @pytest.mark.parametrize(
         ("exit_code", "expected_message"),

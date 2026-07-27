@@ -365,7 +365,8 @@ class TestExitCode:
         entry = ("repo-a", 2009, str(recovery_path))
         coordinator.recovery_preserved.append(entry)
 
-        assert coordinator._active_preserved_worktrees() == [entry]
+        assert coordinator._active_preserved_worktrees() == []
+        assert coordinator._active_recovery_worktrees() == [entry]
 
     def test_preserved_worktrees_ignore_missing_paths_for_failed_items(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

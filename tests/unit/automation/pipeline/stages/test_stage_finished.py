@@ -11,6 +11,7 @@ import logging
 import re
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -158,17 +159,21 @@ class TestCleanup:
         }
         assert result.on_done_state == "DONE"
 
-    def test_fresh_review_completion_retains_the_recovery_checkout(
+    def test_fresh_review_completion_retains_only_receipt_backed_recovery_checkouts(
         self,
         stage: FinishedStage,
         recovery_preserved: list[tuple[str, int, str]],
         make_ctx: Any,
     ) -> None:
-        """A successful re-review must not erase its prior failed checkout."""
-        item = _item(passed=True, worktree="/wt/fresh", state="CLEANUP")
-        item.payload["preserved_direct_worktrees"] = ["/wt/recovery"]
+        """A successful re-review must retain only durable recovery evidence."""
+        item = _item(passed=True, worktree="/wt/fresh", state="CLEANUP", pr=1001)
 
-        result = stage.step(item, make_ctx())
+        with patch.object(
+            finished_module,
+            "list_direct_review_recovery_paths",
+            return_value=[Path("/wt/recovery")],
+        ):
+            result = stage.step(item, make_ctx())
 
         assert isinstance(result, JobRequest)
         assert ("repo-a", 42, "/wt/recovery") in recovery_preserved

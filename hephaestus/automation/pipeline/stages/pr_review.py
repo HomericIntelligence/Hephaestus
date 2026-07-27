@@ -1120,6 +1120,8 @@ class PrReviewStage(Stage):
         logger.info("pr_review:%d: requesting push job", issue)
         kwargs: dict[str, object] = {
             "issue_number": issue,
+            "pr_number": item.pr,
+            "repo_root": str(ctx.paths.repo_root),
             "worktree_path": item.worktree,
             "branch": item.branch,
             "agent": agent_provider(ctx),
@@ -1297,24 +1299,6 @@ class PrReviewStage(Stage):
         if isinstance(value, dict):
             item.worktree = str(value.get("path", ""))
             item.payload["direct_pr_worktree_dirty"] = bool(value.get("dirty"))
-            recovery_worktrees = value.get("preserved_direct_worktrees", [])
-            if not isinstance(recovery_worktrees, list) or any(
-                not isinstance(path, str) or not path for path in recovery_worktrees
-            ):
-                item.payload["direct_pr_worktree_error"] = (
-                    "worktree job returned invalid recovery paths"
-                )
-                return
-            if recovery_worktrees:
-                preserved = item.payload.setdefault("preserved_direct_worktrees", [])
-                if not isinstance(preserved, list):
-                    item.payload["direct_pr_worktree_error"] = (
-                        "direct review recovery receipt is invalid"
-                    )
-                    return
-                for path in recovery_worktrees:
-                    if path not in preserved:
-                        preserved.append(path)
             if item.worktree and not item.payload["direct_pr_worktree_dirty"]:
                 item.payload["direct_pr_worktree"] = item.worktree
         elif isinstance(value, str):
@@ -1337,6 +1321,7 @@ class PrReviewStage(Stage):
             failure = receipt.get("detached_push_failure")
             if failure in {
                 "remote_changed",
+                "remote_changed_unrecorded",
                 "remote_unchanged",
                 "remote_unconfirmed",
                 "retry_checkout_changed",
@@ -1640,11 +1625,6 @@ class PrReviewStage(Stage):
         generation = item.payload.get("direct_pr_worktree_generation", 0)
         if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
             return StageOutcome(Disposition.FINISH_FAIL, "direct_pr_worktree_generation_invalid")
-        preserved = item.payload.setdefault("preserved_direct_worktrees", [])
-        if not isinstance(preserved, list):
-            return StageOutcome(Disposition.FINISH_FAIL, "detached_push_recovery_receipt_invalid")
-        if item.worktree not in preserved:
-            preserved.append(item.worktree)
         item.worktree = ""
         item.payload["existing_pr"] = True
         item.payload.pop("direct_pr_worktree", None)
@@ -1719,6 +1699,14 @@ class PrReviewStage(Stage):
                 item.issue,
             )
             return Continue(next_state=ENTER)
+        if detached_push_failure == "remote_changed_unrecorded":
+            payload["detached_push_failure"] = detached_push_failure
+            logger.warning(
+                "pr_review:%d: detached push remote-change receipt could not be recorded; "
+                "preserving checkout",
+                item.issue,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "detached_push_failed")
         if detached_push_failure in {
             "remote_unconfirmed",
             "retry_checkout_changed",

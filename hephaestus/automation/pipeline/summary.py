@@ -73,6 +73,26 @@ def format_preserved_worktrees(preserved: Sequence[PreservedWorktree], script: s
     return lines
 
 
+def format_direct_review_recovery_worktrees(
+    recovery: Sequence[PreservedWorktree],
+) -> list[str]:
+    """Format inspection-only guidance for receipt-backed detached recoveries.
+
+    Unlike ordinary failed-item worktrees, a recovery checkout may contain an
+    unpublished detached commit. Never offer a destructive command for it:
+    operators must first establish that no loop is still using the checkout.
+    """
+    if not recovery:
+        return []
+    lines = ["\nDetached-review recovery worktrees (inspection required):"]
+    lines.extend(f"  #{number}: {path}" for _, number, path in recovery)
+    lines.append(
+        "Do not remove or reuse these paths until you have confirmed that no "
+        "automation loop is active."
+    )
+    return lines
+
+
 def _logical_item_key(item: WorkItem) -> tuple[object, ...]:
     """Return the stable logical identity for a potentially re-seeded item."""
     if item.kind is ItemKind.REPO:
@@ -181,6 +201,7 @@ def print_summary(
     preserved: list[PreservedWorktree],
     *,
     json_out: bool,
+    recovery_preserved: Sequence[PreservedWorktree] = (),
     terminal_summary: TerminalSummary | None = None,
 ) -> None:
     """Log the end-of-run summary; emit the JSON envelope when requested.
@@ -191,6 +212,8 @@ def print_summary(
         preserved: ``(repo, issue_number, worktree_path)`` tuples retained for
             recovery or failed-item debugging.
         json_out: Emit the machine-readable ``emit_json_status`` envelope.
+        recovery_preserved: Receipt-backed detached-review checkouts requiring
+            inspection-only recovery guidance.
         terminal_summary: Optional constant-space aggregate for all terminal
             outcomes.  When supplied, it controls aggregate counts while
             ``items`` remains the bounded detailed reporting window.
@@ -240,6 +263,8 @@ def print_summary(
 
     for line in format_preserved_worktrees(preserved, sys.argv[0]):
         logger.info("%s", line)
+    for line in format_direct_review_recovery_worktrees(recovery_preserved):
+        logger.info("%s", line)
 
     if json_out:
         resumable = [
@@ -257,4 +282,5 @@ def print_summary(
             wall_s=round(stats.wall_s, 1),
             resumable=resumable,
             preserved_worktrees=[[number, path] for _, number, path in preserved],
+            recovery_worktrees=[[number, path] for _, number, path in recovery_preserved],
         )

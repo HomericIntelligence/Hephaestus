@@ -25,6 +25,7 @@ from typing import TypeGuard
 
 from hephaestus.agents.runtime import resolve_agent, resume_agent_session, run_agent_session
 from hephaestus.automation import claude_invoke, git_utils, subprocess_registry
+from hephaestus.automation.direct_review_recovery import record_direct_review_recovery
 from hephaestus.automation.learn import compact_agent_session
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.jobs import (
@@ -1176,7 +1177,6 @@ class WorkerPool:
                     error=f"worktree creation failed: {exc}",
                 )
             raise
-        recovery_worktrees = list(manager.last_isolated_recovery_paths)
         return self._finalize_created_worktree(
             created=created,
             base_sha=base_sha,
@@ -1185,7 +1185,6 @@ class WorkerPool:
             repo=job.repo,
             sync_to_remote=sync_to_remote,
             pr_number=pr_number,
-            recovery_worktrees=recovery_worktrees,
             timeout_s=job.timeout_s,
         )
 
@@ -1242,7 +1241,6 @@ class WorkerPool:
         repo: str,
         sync_to_remote: bool,
         pr_number: object,
-        recovery_worktrees: list[Path],
         timeout_s: int,
     ) -> JobResult:
         """Validate a created worktree and attach a direct reservation receipt."""
@@ -1332,8 +1330,6 @@ class WorkerPool:
             "status": status,
             "diff": diff,
         }
-        if recovery_worktrees:
-            value["preserved_direct_worktrees"] = [str(path) for path in recovery_worktrees]
         return JobResult(ok=True, value=value)
 
     @staticmethod
@@ -1537,6 +1533,7 @@ class WorkerPool:
             if isinstance(source_sha, JobResult):
                 return source_sha
             detached_push_result = self._publish_detached_head(
+                job,
                 branch,
                 expected_remote_sha,
                 worktree_path,
@@ -1561,6 +1558,7 @@ class WorkerPool:
         if retry_head_sha is None:
             return None
         return self._retry_detached_head_push(
+            job=job,
             branch=str(job.kwargs.get("branch") or ""),
             expected_remote_sha=job.kwargs.get("expected_remote_sha"),
             source_sha=retry_head_sha,
@@ -1585,10 +1583,10 @@ class WorkerPool:
             return JobResult(ok=False, error="cannot bind detached review push head")
         return head
 
-    @classmethod
     def _retry_detached_head_push(
-        cls,
+        self,
         *,
+        job: GitJob,
         branch: str,
         expected_remote_sha: object,
         source_sha: object,
@@ -1629,7 +1627,8 @@ class WorkerPool:
                 value={"detached_push_failure": "retry_checkout_changed"},
                 error="detached review retry checkout changed after the failed push",
             )
-        result = cls._publish_detached_head(
+        result = self._publish_detached_head(
+            job,
             branch,
             expected_remote_sha,
             worktree_path,
@@ -1638,8 +1637,9 @@ class WorkerPool:
         )
         return result or JobResult(ok=True, value=True)
 
-    @staticmethod
     def _publish_detached_head(
+        self,
+        job: GitJob,
         branch: str,
         expected_remote_sha: str,
         worktree_path: Path,
@@ -1657,6 +1657,22 @@ class WorkerPool:
                 timeout=timeout,
             )
         except git_utils.DetachedHeadPushRemoteHeadChangedError as exc:
+            recovery_error = self._record_detached_push_recovery(
+                job=job,
+                branch=branch,
+                worktree_path=worktree_path,
+                expected_remote_sha=expected_remote_sha,
+                source_sha=source_sha,
+            )
+            if recovery_error is not None:
+                return JobResult(
+                    ok=False,
+                    value={
+                        "detached_push_failure": "remote_changed_unrecorded",
+                        "detached_push_head_sha": source_sha,
+                    },
+                    error=f"{exc}; recovery receipt could not be recorded: {recovery_error}",
+                )
             return JobResult(
                 ok=False,
                 value={
@@ -1683,6 +1699,42 @@ class WorkerPool:
                 },
                 error=str(exc),
             )
+        return None
+
+    @staticmethod
+    def _record_detached_push_recovery(
+        *,
+        job: GitJob,
+        branch: str,
+        worktree_path: Path,
+        expected_remote_sha: str,
+        source_sha: str,
+    ) -> str | None:
+        """Record a drifted detached checkout before allowing a fresh review."""
+        issue = job.kwargs.get("issue_number")
+        pr = job.kwargs.get("pr_number")
+        repo_root = job.kwargs.get("repo_root")
+        if (
+            isinstance(issue, bool)
+            or not isinstance(issue, int)
+            or isinstance(pr, bool)
+            or not isinstance(pr, int)
+            or not isinstance(repo_root, str)
+            or not repo_root
+        ):
+            return "detached review recovery receipt context is invalid"
+        try:
+            record_direct_review_recovery(
+                repo_root=Path(repo_root),
+                issue=issue,
+                pr=pr,
+                worktree=worktree_path,
+                branch=branch,
+                expected_remote_sha=expected_remote_sha,
+                source_sha=source_sha,
+            )
+        except (OSError, RuntimeError, ValueError) as error:
+            return str(error)
         return None
 
     @staticmethod
