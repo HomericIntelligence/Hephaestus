@@ -134,4 +134,4 @@ class JsonFormatter(logging.Formatter):
 # neither should be promoted to a top-level JSON key via the extras path.
 _DEFAULT_RECORD_ATTRS: frozenset[str] = frozenset(
     logging.LogRecord("", 0, "", 0, None, None, None).__dict__.keys()
-) | {"asctime", "stack_info"}
+) | {"asctime", "stack_info", _LOCALIZER_RECORD_ATTR}
