@@ -19,7 +19,6 @@ from typing import Any
 
 import pytest
 
-from hephaestus.automation.claude_invoke import ReviewVerdict
 from hephaestus.automation.pipeline import seeding as seeding_mod
 from hephaestus.automation.pipeline.coordinator import Coordinator, PipelineConfig
 from hephaestus.automation.pipeline.jobs import AgentJob, JobHandle, JobResult
@@ -35,6 +34,7 @@ from hephaestus.automation.pipeline.stages.implementation import ImplementationS
 from hephaestus.automation.pipeline.stages.plan_review import PlanReviewStage
 from hephaestus.automation.pipeline.stages.planning import PlanningStage
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
+from hephaestus.automation.review_types import ReviewVerdict
 from hephaestus.automation.state_labels import (
     STATE_IMPLEMENTATION_GO,
     STATE_IMPLEMENTATION_NO_GO,
