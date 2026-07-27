@@ -565,7 +565,16 @@ class WorktreeManager:
                 branch_name,
                 branch_name,
             )
-            run(["git", "fetch", "origin", branch_name], cwd=self.repo_root, **_timeout_kw(timeout))
+            run(
+                [
+                    "git",
+                    "fetch",
+                    "origin",
+                    f"+refs/heads/{branch_name}:refs/remotes/origin/{branch_name}",
+                ],
+                cwd=self.repo_root,
+                **_timeout_kw(timeout),
+            )
             run(
                 [
                     "git",
