@@ -993,9 +993,7 @@ class TestGitOps:
         )
         owner_path = tmp_path / "build" / ".worktrees" / "issue-2268"
         instance = MagicMock()
-        instance.create_worktree.side_effect = BranchWorktreeOwnedError(
-            "shared-head", owner_path
-        )
+        instance.create_worktree.side_effect = BranchWorktreeOwnedError("shared-head", owner_path)
         with patch(f"{_WP}.WorktreeManager", return_value=instance):
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)

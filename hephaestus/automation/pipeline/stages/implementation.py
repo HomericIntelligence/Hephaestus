@@ -342,8 +342,25 @@ class ImplementationStage(Stage):
         """DIRTY_DECISION_WAIT routes either to retry or to the dirty-decision job."""
         issue = _issue_number(item)
         if ownership := item.payload.pop("branch_worktree_owner", None):
-            branch = str(ownership.get("branch") or item.branch)
-            owner_path = str(ownership.get("owner_path") or "")
+            branch = ownership.get("branch") if isinstance(ownership, dict) else None
+            owner_path = ownership.get("owner_path") if isinstance(ownership, dict) else None
+            is_pipeline_sibling = (
+                isinstance(branch, str)
+                and branch == item.branch
+                and isinstance(owner_path, str)
+                and bool(owner_path)
+                and ctx.branch_worktree_owner_is_pipeline_sibling is not None
+                and ctx.branch_worktree_owner_is_pipeline_sibling(item, branch, owner_path)
+            )
+            if not is_pipeline_sibling:
+                logger.warning(
+                    "implementation:%d: branch-worktree holder for %r at %r is not a "
+                    "verified pipeline sibling; refusing to supersede",
+                    issue,
+                    branch,
+                    owner_path,
+                )
+                return StageOutcome(Disposition.FINISH_FAIL, "branch_worktree_owner_unverified")
             return StageOutcome(
                 Disposition.FINISH_PASS,
                 f"branch {branch!r} already owned at {owner_path}; "
@@ -659,8 +676,8 @@ class ImplementationStage(Stage):
             if result.error == BRANCH_WORKTREE_OWNED:
                 ownership = result.value if isinstance(result.value, dict) else {}
                 item.payload["branch_worktree_owner"] = {
-                    "branch": str(ownership.get("branch") or item.branch),
-                    "owner_path": str(ownership.get("owner_path") or ""),
+                    "branch": ownership.get("branch"),
+                    "owner_path": ownership.get("owner_path"),
                 }
                 item.worktree = ""
                 return

@@ -646,7 +646,10 @@ class TestGitErrorRetryCap:
             make_ctx(),
         )
         item.state = "DIRTY_DECISION_WAIT"
-        outcome = stage.step(item, make_ctx())
+        outcome = stage.step(
+            item,
+            make_ctx(branch_worktree_owner_is_pipeline_sibling=lambda _item, _branch, _path: True),
+        )
 
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition is Disposition.FINISH_PASS
@@ -654,6 +657,39 @@ class TestGitErrorRetryCap:
         assert item.worktree == ""
         assert item.attempts["implement"] == 0
         assert "git_error_retries" not in item.payload
+
+    def test_external_branch_worktree_holder_fails_closed(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Git holder data without coordinator ownership proof cannot supersede work."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=2269, state="WORKTREE_WAIT")
+        item.branch = "shared-head"
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error=BRANCH_WORKTREE_OWNED,
+                value={
+                    "branch": "shared-head",
+                    "owner_path": "/external/manual-worktree",
+                },
+            ),
+            make_ctx(),
+        )
+        item.state = "DIRTY_DECISION_WAIT"
+
+        outcome = stage.step(
+            item,
+            make_ctx(branch_worktree_owner_is_pipeline_sibling=lambda _item, _branch, _path: False),
+        )
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.FINISH_FAIL
+        assert outcome.note == "branch_worktree_owner_unverified"
+        assert item.worktree == ""
+        assert item.attempts["implement"] == 0
 
     def test_worktree_failures_retry_to_the_cap_then_fail(
         self, make_ctx: Any, make_work_item: Any

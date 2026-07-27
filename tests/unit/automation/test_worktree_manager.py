@@ -950,9 +950,7 @@ class TestCreateWorktreeBranchCollision:
         assert raised.value.owner_path == existing
         assert 725 not in manager.worktrees
 
-    def test_same_issue_reuses_branch_worktree(
-        self, worktree_mocks: Any, tmp_path: Any
-    ) -> None:
+    def test_same_issue_reuses_branch_worktree(self, worktree_mocks: Any, tmp_path: Any) -> None:
         worktree_mocks.repo_root.return_value = tmp_path
         manager = WorktreeManager()
         existing = manager.base_dir / "issue-708"

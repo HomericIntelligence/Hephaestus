@@ -93,7 +93,7 @@ from jinja2 import TemplateNotFound
 from hephaestus.automation.models import IssueInfo
 from hephaestus.automation.pipeline import admission as _admission, seeding as _seeding
 from hephaestus.automation.pipeline.events import StageEvent, encode_stage_event
-from hephaestus.automation.pipeline.jobs import AgentJob, JobHandle, JobResult
+from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobHandle, JobResult
 from hephaestus.automation.pipeline.queues import CompletionQueue, StageQueue, StageQueueLease
 from hephaestus.automation.pipeline.routing import (
     PIPELINE_ORDER,
@@ -537,6 +537,11 @@ class Coordinator:
         }
         self.timers: list[tuple[float, int, WorkItem]] = []
         self.in_flight: dict[JobHandle, WorkItem] = {}
+        # A holder path reported by Git becomes a safe supersession signal
+        # only after a successful create-worktree completion registered it
+        # here.  Paths discovered from Git alone can belong to a human or a
+        # different automation process and must fail closed.
+        self._pipeline_writer_worktrees: dict[tuple[str, str], WorkItem] = {}
         # Known implementation plans retain their repository-scoped file
         # claims for the lifetime of the submitted job.  Never reconstruct
         # this from mutable issue comments during later drain rounds (#2451).
@@ -685,6 +690,9 @@ class Coordinator:
                 now_fn=time.monotonic,
                 budget_fn=self._budget_for,
                 event_fn=self._record_stage_event,
+                branch_worktree_owner_is_pipeline_sibling=(
+                    self._is_pipeline_branch_worktree_sibling
+                ),
             )
             if len(self._ctx_cache) >= self._ctx_cache_capacity:
                 self._ctx_cache.popitem(last=False)
@@ -1358,6 +1366,7 @@ class Coordinator:
             )
             self._finish(item, passed=False, reason="poisoned: on_job_done raised")
             return
+        self._register_pipeline_writer_worktree(item, handle.job, result)
         item.state = (
             handle.on_done_state.value
             if isinstance(handle.on_done_state, StageName)
@@ -2142,6 +2151,61 @@ class Coordinator:
         else:
             self._timer_park(item, float(delay))
 
+    def _register_pipeline_writer_worktree(
+        self,
+        item: WorkItem,
+        job: object,
+        result: JobResult,
+    ) -> None:
+        """Register a successful implementation writer worktree.
+
+        The registry is coordinator-owned evidence: a future collision may
+        supersede only when its holder path exactly matches this live,
+        successful pipeline allocation.  It deliberately does not infer
+        ownership from a conventional path such as ``issue-123``.
+        """
+        if not isinstance(job, GitJob) or job.op != "create_worktree" or not result.ok:
+            return
+        if item.stage is not StageName.IMPLEMENTATION or not item.branch or not item.worktree:
+            return
+        expected_branch = job.kwargs.get("branch_name")
+        if expected_branch != item.branch or bool(job.kwargs.get("isolated", False)):
+            return
+        key = (item.repo, item.branch)
+        existing = self._pipeline_writer_worktrees.get(key)
+        if existing is not None and existing is not item and existing.result is None:
+            logger.error(
+                "coordinator: refusing to replace live writer registration for %s at %s",
+                item.repo,
+                item.branch,
+            )
+            return
+        self._pipeline_writer_worktrees[key] = item
+
+    def _is_pipeline_branch_worktree_sibling(
+        self, item: WorkItem, branch: str, owner_path: str
+    ) -> bool:
+        """Return whether *owner_path* is a verified live pipeline sibling.
+
+        A Git holder result by itself is not evidence of pipeline ownership.
+        It becomes eligible for the documented first-writer-wins policy only
+        when this run recorded the exact path after a successful writer
+        worktree job and that sibling is still live.  All absent, stale,
+        external, malformed, or cross-repository holders therefore route to a
+        terminal fail instead of silently dropping work.
+        """
+        if not branch or branch != item.branch or not owner_path:
+            return False
+        owner = self._pipeline_writer_worktrees.get((item.repo, branch))
+        return bool(
+            owner is not None
+            and owner is not item
+            and owner.result is None
+            and owner.stage is not StageName.FINISHED
+            and owner.branch == branch
+            and owner.worktree == owner_path
+        )
+
     def _route_fail_back(self, item: WorkItem, outcome: StageOutcome, route: Route) -> None:
         """Apply the FAIL_BACK row: reason-keyed regression, globally capped.
 
@@ -2171,6 +2235,9 @@ class Coordinator:
 
     def _finish(self, item: WorkItem, *, passed: bool, reason: str) -> None:
         """Set the item's result and hand it to the finished sink."""
+        writer_key = (item.repo, item.branch)
+        if self._pipeline_writer_worktrees.get(writer_key) is item:
+            self._pipeline_writer_worktrees.pop(writer_key, None)
         if item.stage is StageName.REPO and item.payload.get(DIRECT_SCOPE_BOOTSTRAP_KEY, False):
             self._direct_scope_bootstrap_pending = False
         if item.stage is StageName.FINISHED:

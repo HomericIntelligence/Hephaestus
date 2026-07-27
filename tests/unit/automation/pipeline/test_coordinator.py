@@ -1042,6 +1042,136 @@ class TestFailBackRouting:
 class TestImplementationAdmission:
     """Topological order + file-overlap reuse for the implementation queue."""
 
+    def test_distinct_prs_sharing_head_allow_one_writer_and_supersede_verified_sibling(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A live writer receipt, not a matching branch name, permits supersession."""
+        coordinator, _pool, _ = make_coordinator(
+            tmp_path,
+            monkeypatch,
+            max_workers=2,
+            serialize_file_overlap=False,
+        )
+        shared_branch = "shared-head"
+        owner_path = tmp_path / "repo-a" / "build" / ".worktrees" / "issue-2268"
+        owner_path.mkdir(parents=True)
+        owner = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=2268,
+            pr=3001,
+            stage=StageName.IMPLEMENTATION,
+            state="WORKTREE_WAIT",
+            branch=shared_branch,
+            payload={"existing_pr": True},
+        )
+        sibling = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=2269,
+            pr=3002,
+            stage=StageName.IMPLEMENTATION,
+            state="WORKTREE_WAIT",
+            branch=shared_branch,
+            payload={"existing_pr": True},
+        )
+        coordinator._push_item(owner, StageName.IMPLEMENTATION, enter=False)
+        coordinator._push_item(sibling, StageName.IMPLEMENTATION, enter=False)
+        owner.worktree = str(owner_path)
+        coordinator._register_pipeline_writer_worktree(
+            owner,
+            GitJob(
+                repo="repo-a",
+                op="create_worktree",
+                timeout_s=60,
+                kwargs={"issue_number": 2268, "branch_name": shared_branch},
+            ),
+            JobResult(ok=True, value={"path": str(owner_path)}),
+        )
+        claimed = coordinator._claim_item(StageName.IMPLEMENTATION, index=1)
+        assert claimed is sibling
+        stage = coordinator.stages[StageName.IMPLEMENTATION]
+        stage.on_job_done(
+            sibling,
+            JobResult(
+                ok=False,
+                error="branch_worktree_owned",
+                value={"branch": shared_branch, "owner_path": str(owner_path)},
+            ),
+            coordinator._ctx_for(sibling),
+        )
+        sibling.state = "DIRTY_DECISION_WAIT"
+        outcome = stage.step(sibling, coordinator._ctx_for(sibling))
+        assert isinstance(outcome, StageOutcome)
+        coordinator._route(sibling, outcome)
+
+        assert owner.pr == 3001
+        assert sibling.pr == 3002
+        assert owner.branch == sibling.branch == shared_branch
+        assert owner.worktree == str(owner_path)
+        assert coordinator._pipeline_writer_worktrees[("repo-a", shared_branch)] is owner
+        assert sibling.result is not None and sibling.result.passed
+        assert "superseded" in sibling.result.reason
+        assert sibling.worktree == ""
+        assert coordinator.queues[StageName.FINISHED].snapshot() == [sibling]
+
+        # If the sole writer later fails, only its checkout is preserved and
+        # shown in rerun guidance; the superseded sibling never aliases it.
+        owner.result = ItemResult(
+            passed=False,
+            reason="writer failed",
+            final_stage=StageName.PR_REVIEW,
+        )
+        coordinator.preserved.append(("repo-a", 2268, str(owner_path)))
+        assert coordinator._active_preserved_worktrees() == [("repo-a", 2268, str(owner_path))]
+
+    def test_external_branch_holder_fails_closed_without_a_writer_registration(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A manually held branch cannot be mistaken for a redundant pipeline sibling."""
+        coordinator, _pool, _ = make_coordinator(
+            tmp_path,
+            monkeypatch,
+            max_workers=1,
+            serialize_file_overlap=False,
+        )
+        item = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=2269,
+            pr=3002,
+            stage=StageName.IMPLEMENTATION,
+            state="WORKTREE_WAIT",
+            branch="shared-head",
+            payload={"existing_pr": True},
+        )
+        coordinator._push_item(item, StageName.IMPLEMENTATION, enter=False)
+        claimed = coordinator._claim_item(StageName.IMPLEMENTATION)
+        assert claimed is item
+        stage = coordinator.stages[StageName.IMPLEMENTATION]
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="branch_worktree_owned",
+                value={
+                    "branch": "shared-head",
+                    "owner_path": str(tmp_path / "manual-worktree"),
+                },
+            ),
+            coordinator._ctx_for(item),
+        )
+        item.state = "DIRTY_DECISION_WAIT"
+        outcome = stage.step(item, coordinator._ctx_for(item))
+        assert isinstance(outcome, StageOutcome)
+        coordinator._route(item, outcome)
+
+        assert item.result is not None and not item.result.passed
+        assert item.result.reason == "branch_worktree_owner_unverified"
+        assert item.worktree == ""
+        assert coordinator._pipeline_writer_worktrees == {}
+        assert coordinator.queues[StageName.FINISHED].snapshot() == [item]
+
     def test_full_downstream_retains_implementation_lease_until_handoff(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

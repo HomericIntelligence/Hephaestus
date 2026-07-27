@@ -507,6 +507,12 @@ class StageContext:
     now_fn: Callable[[], float] | None = None  # injectable clock (tests pass a fake)
     budget_fn: Callable[[str], int] | None = None  # injected overrides; falls back to ROUTES
     event_fn: Callable[[StageEvent], None] | None = None
+    # A worktree-holder result is only a diagnostic fact from Git.  The
+    # coordinator proves that it belongs to a live pipeline sibling before
+    # implementation can treat a collision as redundant work.  Leaving this
+    # unset intentionally fails closed in isolated stage tests and alternate
+    # hosts.
+    branch_worktree_owner_is_pipeline_sibling: Callable[[WorkItem, str, str], bool] | None = None
 
     def now(self) -> float:
         """Return the injected stage clock value (monotonic in the coordinator)."""
