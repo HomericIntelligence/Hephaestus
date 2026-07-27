@@ -54,6 +54,7 @@ POLL = "POLL"
 LEARN_WAIT = "LEARN_WAIT"
 MW_FINISH = "MW_FINISH"
 FINISH = MW_FINISH
+_CONFLICTING_READINESS = frozenset({"CONFLICTING", "DIRTY"})
 
 
 def build_drive_green_learn_prompt(issue_number: int, pr_number: int) -> str:
@@ -114,6 +115,9 @@ class MergeWaitStage(Stage):
                 "merge_wait: PR #%d state unavailable; operator action required", item.pr
             )
             return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unavailable")
+        conflicting = self._conflicting_readiness_outcome(item, pr_state)
+        if conflicting is not None:
+            return conflicting
         if pr_state.get("autoMergeRequest"):
             logger.warning(
                 "merge_wait: PR #%d is already armed; leaving it to the operator", item.pr
@@ -157,6 +161,9 @@ class MergeWaitStage(Stage):
                 "merge_wait: PR #%d state unavailable; operator action required", item.pr
             )
             return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unavailable")
+        conflicting = self._conflicting_readiness_outcome(item, pr_state)
+        if conflicting is not None:
+            return conflicting
         has_go, _has_no_go = ctx.github.pr_has_implementation_state_label(item.pr)
         if not has_go:
             logger.warning(
@@ -175,6 +182,24 @@ class MergeWaitStage(Stage):
             return StageOutcome(Disposition.FINISH_PASS, "auto_merge_already_armed")
         item.payload["retry_delay_s"] = 30
         return StageOutcome(Disposition.RETRY, "merge_pending")
+
+    @staticmethod
+    def _conflicting_readiness_outcome(
+        item: WorkItem, pr_state: dict[str, object]
+    ) -> StageOutcome | None:
+        """Fail with an actionable warning when GitHub reports a merge conflict."""
+        status = str(pr_state.get("mergeStateStatus") or "").upper()
+        mergeable = str(pr_state.get("mergeable") or "").upper()
+        if status not in _CONFLICTING_READINESS and mergeable != "CONFLICTING":
+            return None
+        logger.warning(
+            "merge_wait: PR #%s merge readiness is conflicting "
+            "(mergeStateStatus=%s, mergeable=%s); operator action required",
+            item.pr,
+            status or "UNKNOWN",
+            mergeable or "UNKNOWN",
+        )
+        return StageOutcome(Disposition.FINISH_FAIL, "merge_conflicting")
 
     def _route_merged(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Dispatch the existing deduplicated post-merge learning step."""

@@ -70,6 +70,30 @@ def test_arm_error_is_warned_and_stops_without_cross_run_reconciliation(
     assert "operator" in caplog.text
 
 
+def test_conflicting_readiness_warning_reports_github_state(
+    make_ctx: Any, make_work_item: Any, caplog: Any
+) -> None:
+    """A merge-conflict terminal path reports the real readiness reason."""
+    github = _ArmingGitHub()
+    github._pr_state = {
+        "state": "OPEN",
+        "headRefOid": "a" * 40,
+        "autoMergeRequest": None,
+        "mergeStateStatus": "DIRTY",
+        "mergeable": "CONFLICTING",
+    }
+    item = make_work_item(stage=StageName.MERGE_WAIT, pr=12, state=ARM)
+
+    result = MergeWaitStage().step(item, make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_conflicting")
+    assert not any(action == "arm_auto_merge" for action, _ in github.mutation_log)
+    assert "merge readiness is conflicting" in caplog.text
+    assert "mergeStateStatus=DIRTY" in caplog.text
+    assert "mergeable=CONFLICTING" in caplog.text
+    assert "None" not in caplog.text
+
+
 def test_lost_own_arm_is_warned_and_stops_without_retrying(
     make_ctx: Any, make_work_item: Any, caplog: Any
 ) -> None:

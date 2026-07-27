@@ -1009,7 +1009,10 @@ class TestGitOps:
         completion_q: CompletionQueue,
         rebase_clean: bool,
     ) -> None:
-        """Rebase forwards to rebase_worktree_onto; its bool is ok AND value."""
+        """Rebase forwards its boolean result as both status and value.
+
+        A failed rebase also reports the mechanical-conflict error below.
+        """
         job = GitJob(
             repo="test/repo",
             op="rebase",
@@ -1030,8 +1033,37 @@ class TestGitOps:
         )
         assert result.ok is rebase_clean
         assert result.value is rebase_clean
-        expected_error = None if rebase_clean else "mechanical rebase hit conflicts; aborted"
+        expected_error = (
+            None if rebase_clean else "mechanical rebase onto main hit conflicts; aborted"
+        )
         assert result.error == expected_error
+
+    def test_rebase_conflict_error_defaults_to_main_when_base_missing(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+    ) -> None:
+        """The active rebase-failure consumer reports the fallback target branch."""
+        job = GitJob(
+            repo="test/repo",
+            op="rebase",
+            timeout_s=60,
+            kwargs={"cwd": Path("/tmp/wt")},
+        )
+        with patch(
+            "hephaestus.automation.git_utils.rebase_worktree_onto",
+            return_value=False,
+        ) as mock_rebase:
+            pool.submit(job, StageName.MERGE_WAIT)
+            _, result = completion_q.get(timeout=10)
+
+        mock_rebase.assert_called_once_with(
+            cwd=Path("/tmp/wt"),
+            timeout=60,
+        )
+        assert result.ok is False
+        assert result.value is False
+        assert result.error == "mechanical rebase onto main hit conflicts; aborted"
 
     def test_push_dispatch(
         self,
