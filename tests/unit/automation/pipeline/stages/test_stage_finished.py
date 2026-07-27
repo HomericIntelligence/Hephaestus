@@ -39,9 +39,19 @@ def preserved() -> list[tuple[str, int, str]]:
 
 
 @pytest.fixture
-def stage(ledger: list[ItemResult], preserved: list[tuple[str, int, str]]) -> FinishedStage:
+def recovery_preserved() -> list[tuple[str, int, str]]:
+    """Fresh recovery-checkout list retained after a later pass."""
+    return []
+
+
+@pytest.fixture
+def stage(
+    ledger: list[ItemResult],
+    preserved: list[tuple[str, int, str]],
+    recovery_preserved: list[tuple[str, int, str]],
+) -> FinishedStage:
     """FinishedStage bound to the fixture ledger/preserved lists."""
-    return FinishedStage(ledger, preserved)
+    return FinishedStage(ledger, preserved, recovery_preserved)
 
 
 def _item(
@@ -151,7 +161,7 @@ class TestCleanup:
     def test_fresh_review_completion_retains_the_recovery_checkout(
         self,
         stage: FinishedStage,
-        preserved: list[tuple[str, int, str]],
+        recovery_preserved: list[tuple[str, int, str]],
         make_ctx: Any,
     ) -> None:
         """A successful re-review must not erase its prior failed checkout."""
@@ -161,7 +171,7 @@ class TestCleanup:
         result = stage.step(item, make_ctx())
 
         assert isinstance(result, JobRequest)
-        assert ("repo-a", 42, "/wt/recovery") in preserved
+        assert ("repo-a", 42, "/wt/recovery") in recovery_preserved
 
     def test_fail_with_worktree_preserves_for_debugging(
         self,

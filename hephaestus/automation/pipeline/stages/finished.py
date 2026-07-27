@@ -59,6 +59,9 @@ class FinishedStage(Stage):
             (``(repo, item_number, worktree_path)`` tuples) the summary prints.
             Failed issue items use the issue number; PR-only items use the PR
             number; unknown items fall back to 0.
+        recovery_preserved: The coordinator's direct-review recovery list.
+            These checkouts remain reported even if a later fresh review
+            succeeds, unlike ordinary failed-item debugging worktrees.
 
     """
 
@@ -68,10 +71,12 @@ class FinishedStage(Stage):
         self,
         ledger: list[ItemResult],
         preserved: list[PreservedWorktree],
+        recovery_preserved: list[PreservedWorktree],
     ) -> None:
         """Bind the coordinator-owned ledger and preserved-worktree list."""
         self._ledger = ledger
         self._preserved = preserved
+        self._recovery_preserved = recovery_preserved
 
     def on_enter(self, item: WorkItem, ctx: StageContext) -> StageOutcome | None:
         """Proceed unconditionally (the sink never routes away).
@@ -224,8 +229,8 @@ class FinishedStage(Stage):
             if not isinstance(worktree, str) or not worktree:
                 continue
             entry = (item.repo, item.issue or item.pr or 0, worktree)
-            if entry not in self._preserved:
-                self._preserved.append(entry)
+            if entry not in self._recovery_preserved:
+                self._recovery_preserved.append(entry)
 
     def on_job_done(self, item: WorkItem, result: JobResult, ctx: StageContext) -> None:
         """Log cleanup failures (never fatal — the result is already recorded).

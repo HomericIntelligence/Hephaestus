@@ -349,6 +349,24 @@ class TestExitCode:
 
         assert coordinator._active_preserved_worktrees() == []
 
+    def test_recovery_worktrees_remain_reported_after_a_later_pass(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A passed fresh review must still surface its retained recovery checkout."""
+        coordinator = _coordinator(tmp_path, monkeypatch)
+        recovery_path = tmp_path / "review-pr-2009"
+        recovery_path.mkdir()
+        passed = _item(2009, StageName.FINISHED)
+        passed.pr = 2010
+        passed.result = work_item_mod.ItemResult(
+            passed=True, reason="merged", final_stage=StageName.FINISHED
+        )
+        coordinator.items = [passed]
+        entry = ("repo-a", 2009, str(recovery_path))
+        coordinator.recovery_preserved.append(entry)
+
+        assert coordinator._active_preserved_worktrees() == [entry]
+
     def test_preserved_worktrees_ignore_missing_paths_for_failed_items(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -1518,9 +1518,7 @@ class WorkerPool:
                 return JobResult(ok=False, error="commit_push left uncommitted changes")
         return self._publish_commit_push(job, branch, Path(worktree_path))
 
-    def _publish_commit_push(
-        self, job: GitJob, branch: str, worktree_path: Path
-    ) -> JobResult:
+    def _publish_commit_push(self, job: GitJob, branch: str, worktree_path: Path) -> JobResult:
         """Publish a newly created commit through the configured branch mode."""
         branch = branch or "HEAD"
         expected_remote_sha = job.kwargs.get("expected_remote_sha")
@@ -1554,9 +1552,7 @@ class WorkerPool:
             git_utils.push_branch(branch, worktree_path, timeout=job.timeout_s)
         return JobResult(ok=True, value=True)
 
-    def _detached_push_retry_result(
-        self, job: GitJob, worktree_path: Path
-    ) -> JobResult | None:
+    def _detached_push_retry_result(self, job: GitJob, worktree_path: Path) -> JobResult | None:
         """Return the push-only retry result when a detached retry receipt exists."""
         retry_head_sha = job.kwargs.get("detached_push_retry_head_sha")
         if retry_head_sha is None:

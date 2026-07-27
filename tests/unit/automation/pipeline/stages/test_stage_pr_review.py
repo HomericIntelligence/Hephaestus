@@ -19,6 +19,7 @@ from hephaestus.automation.pipeline.stages import (
 )
 from hephaestus.automation.pipeline.stages.pr_review import (
     ADOPT_WORKTREE_WAIT,
+    DIRECT_PUSH_REMOTE_CHANGED_RESTART_CAP,
     DIRECT_PUSH_RETRY_CAP,
     REVIEW_CHECKOUT_WAIT,
     REVIEW_ERROR_RETRY_CAP,
@@ -2407,7 +2408,35 @@ class TestEvalVerdicts:
         retry = stage.step(item, ctx)
 
         assert isinstance(retry, JobRequest)
+        assert isinstance(retry.job, GitJob)
         assert retry.job.kwargs["isolated_generation"] == 1
+
+    def test_detached_push_remote_changed_recovery_has_a_bounded_restart_budget(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Repeated concurrent head changes preserve the current checkout and stop."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="PUSH_WAIT")
+        item.worktree = "/tmp/review-pr-1001-1"
+        item.payload["direct_push_remote_changed_restarts"] = DIRECT_PUSH_REMOTE_CHANGED_RESTART_CAP
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                value={"detached_push_failure": "remote_changed"},
+                error="detached review push observed a different remote head",
+            ),
+            ctx,
+        )
+        item.state = "EVAL"
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "detached_push_failed"
+        )
+        assert item.worktree == "/tmp/review-pr-1001-1"
+        assert item.payload["detached_push_failure"] == "remote_changed"
 
     # Severity-aware GO gate tests (#1856)
     def test_same_login_human_reply_to_process_advisory_thread_blocks_go(

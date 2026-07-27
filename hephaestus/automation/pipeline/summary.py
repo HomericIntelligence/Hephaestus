@@ -48,7 +48,8 @@ def format_preserved_worktrees(preserved: Sequence[PreservedWorktree], script: s
     with the pipeline conversion (#1821).
 
     Args:
-        preserved: ``(repo, issue_number, worktree_path)`` tuples for failed items.
+        preserved: ``(repo, issue_number, worktree_path)`` tuples retained for
+            recovery or failed-item debugging.
         script: The script name (``sys.argv[0]``) for the rerun hint.
 
     Returns:
@@ -63,7 +64,7 @@ def format_preserved_worktrees(preserved: Sequence[PreservedWorktree], script: s
     # rest, and ``--resume`` is not an option on this CLI at all (#2281). The loop
     # resumes a preserved worktree by re-seeding the same ``--issues``.
     issues_arg = ",".join(str(n) for n in issue_nums)
-    lines: list[str] = ["\nPreserved worktrees (contain uncommitted changes):"]
+    lines: list[str] = ["\nPreserved worktrees (retained for recovery or debugging):"]
     lines.extend(f"  #{number}: {path}" for _, number, path in preserved)
     lines.append("\nRerun these issues after inspecting/cleaning the worktrees:")
     lines.append(f"  {script} --issues {issues_arg}")
@@ -187,7 +188,8 @@ def print_summary(
     Args:
         items: Recent detailed work items (results attached).
         stats: Aggregate run statistics (exit code, loops, agent time, wall).
-        preserved: ``(repo, issue_number, worktree_path)`` tuples for failed items.
+        preserved: ``(repo, issue_number, worktree_path)`` tuples retained for
+            recovery or failed-item debugging.
         json_out: Emit the machine-readable ``emit_json_status`` envelope.
         terminal_summary: Optional constant-space aggregate for all terminal
             outcomes.  When supplied, it controls aggregate counts while

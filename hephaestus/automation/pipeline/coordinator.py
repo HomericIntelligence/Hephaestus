@@ -575,6 +575,10 @@ class Coordinator:
         self._live_work_permit_ids: set[int] = set()
         self.ledger: list[ItemResult] = []
         self.preserved: list[PreservedWorktree] = []
+        # Recovery checkouts are intentionally distinct from failed-item
+        # debugging worktrees: a later fresh review may pass, but the prior
+        # checkout still needs explicit operator cleanup guidance.
+        self.recovery_preserved: list[PreservedWorktree] = []
         self.items: list[WorkItem] = []
         self._terminal_summary = TerminalSummary()
         self.event_log: deque[tuple[Any, ...]] = deque(maxlen=config.event_log_capacity)
@@ -670,7 +674,11 @@ class Coordinator:
             StageName.IMPLEMENTATION: ImplementationStage(),
             StageName.PR_REVIEW: PrReviewStage(),
             StageName.MERGE_WAIT: MergeWaitStage(),
-            StageName.FINISHED: FinishedStage(self.ledger, self.preserved),
+            StageName.FINISHED: FinishedStage(
+                self.ledger,
+                self.preserved,
+                self.recovery_preserved,
+            ),
         }
 
     def _ctx_for_repo(self, repo: str) -> StageContext:
@@ -945,7 +953,7 @@ class Coordinator:
         return latest_logical_items(self.items)
 
     def _active_preserved_worktrees(self) -> list[PreservedWorktree]:
-        """Return preserved worktrees for latest failed items that still exist."""
+        """Return extant failed-item and direct-review recovery worktrees."""
         failed_items = {
             (item.repo, item.issue or item.pr or 0)
             for item in self._effective_items()
@@ -956,6 +964,12 @@ class Coordinator:
         for repo, issue_or_pr, path in self.preserved:
             entry = (repo, issue_or_pr, path)
             if entry in seen or (repo, issue_or_pr) not in failed_items or not Path(path).exists():
+                continue
+            seen.add(entry)
+            active.append(entry)
+        for repo, issue_or_pr, path in self.recovery_preserved:
+            entry = (repo, issue_or_pr, path)
+            if entry in seen or not Path(path).exists():
                 continue
             seen.add(entry)
             active.append(entry)
@@ -1059,6 +1073,8 @@ class Coordinator:
             del self.ledger[:-retained]
         if len(self.preserved) > retained:
             del self.preserved[:-retained]
+        if len(self.recovery_preserved) > retained:
+            del self.recovery_preserved[:-retained]
 
     # -- stage-queue leases -------------------------------------------------
 

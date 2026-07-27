@@ -300,14 +300,13 @@ class WorktreeManager:
             RuntimeError: If worktree creation fails
 
         """
-        if (
-            isinstance(isolated_generation, bool)
-            or not isinstance(isolated_generation, int)
-            or isolated_generation < 0
-        ):
-            raise RuntimeError("isolated worktree generation is invalid")
-        if isolated_generation and not isolated:
-            raise RuntimeError("isolated worktree generation requires isolation")
+        self._validate_create_worktree_request(
+            refresh_base=refresh_base,
+            base_sha=base_sha,
+            remote_branch_reserved=remote_branch_reserved,
+            isolated=isolated,
+            isolated_generation=isolated_generation,
+        )
         with self.lock:
             isolated_key = f"review-pr-{issue_number}"
             if isolated_generation:
@@ -329,6 +328,14 @@ class WorktreeManager:
                 # Refresh acquires the same metadata lock; complete it before
                 # entering the lock that serializes holder detection and add.
                 self.refresh_base_branch(timeout=timeout)
+            if isolated:
+                return self._create_isolated_worktree(
+                    issue_number,
+                    branch_name,
+                    isolated_generation=isolated_generation,
+                    refresh_base=refresh_base,
+                    timeout=timeout,
+                )
             try:
                 with file_lock(self._git_metadata_lock_path()):
                     if base_sha is None and (
@@ -337,7 +344,6 @@ class WorktreeManager:
                             worktree_key=worktree_key,
                             worktree_path=worktree_path,
                             branch_name=branch_name,
-                            isolated=isolated,
                             refresh_base=refresh_base,
                             timeout=timeout,
                         )
@@ -347,27 +353,20 @@ class WorktreeManager:
                         base_sha=base_sha,
                         remote_branch_reserved=remote_branch_reserved,
                         refresh_base=refresh_base,
-                        isolated=isolated,
+                        isolated=False,
                         worktree_key=worktree_key,
                         worktree_path=worktree_path,
                         branch_name=branch_name,
                         timeout=timeout,
                     )
                     try:
-                        if isolated:
-                            self._add_isolated_worktree_for_branch(
-                                worktree_path,
-                                branch_name,
-                                timeout=timeout,
-                            )
-                        else:
-                            self._add_worktree_for_branch(
-                                worktree_path,
-                                branch_name,
-                                base_sha=base_sha,
-                                refresh_base=refresh_base,
-                                timeout=timeout,
-                            )
+                        self._add_worktree_for_branch(
+                            worktree_path,
+                            branch_name,
+                            base_sha=base_sha,
+                            refresh_base=refresh_base,
+                            timeout=timeout,
+                        )
                     except Exception:
                         self.worktrees.pop(worktree_key, None)
                         if base_sha is None:
@@ -382,6 +381,94 @@ class WorktreeManager:
             except Exception as e:
                 raise RuntimeError(f"Failed to create worktree: {e}") from e
 
+    @staticmethod
+    def _validate_create_worktree_request(
+        *,
+        refresh_base: bool,
+        base_sha: str | None,
+        remote_branch_reserved: bool,
+        isolated: bool,
+        isolated_generation: int,
+    ) -> None:
+        """Validate non-I/O worktree request invariants before acquiring locks."""
+        if (
+            isinstance(isolated_generation, bool)
+            or not isinstance(isolated_generation, int)
+            or isolated_generation < 0
+        ):
+            raise RuntimeError("isolated worktree generation is invalid")
+        if isolated_generation and not isolated:
+            raise RuntimeError("isolated worktree generation requires isolation")
+        if base_sha is not None and (
+            refresh_base
+            or isolated
+            or not remote_branch_reserved
+            or not _is_full_commit_sha(base_sha)
+        ):
+            raise RuntimeError("direct scope base pin invalid")
+        if base_sha is None and remote_branch_reserved:
+            raise RuntimeError("direct scope reservation requires a base pin")
+
+    def _create_isolated_worktree(
+        self,
+        issue_number: int,
+        branch_name: str,
+        *,
+        isolated_generation: int,
+        refresh_base: bool,
+        timeout: int | None,
+    ) -> Path:
+        """Create a collision-free direct-review checkout without cleanup on failure."""
+        # An isolated checkout is a recovery artifact as soon as an address
+        # agent has written to it. Pick the first free path while holding the
+        # cross-process Git lock, rather than trusting one loop's in-memory
+        # generation hint. This supports cold-start re-review safely.
+        if refresh_base:
+            self.refresh_base_branch(timeout=timeout)
+        try:
+            with file_lock(self._git_metadata_lock_path()):
+                worktree_key, worktree_path = self._next_isolated_worktree_slot(
+                    issue_number, isolated_generation
+                )
+                self._add_isolated_worktree_for_branch(
+                    worktree_path,
+                    branch_name,
+                    timeout=timeout,
+                )
+            self.worktrees[worktree_key] = worktree_path
+            logger.info(
+                "Created isolated review worktree for issue #%s at %s",
+                issue_number,
+                worktree_path,
+            )
+            return worktree_path
+        except Exception as e:
+            # Do not remove this path on failure. Another coordinator may have
+            # created it while we waited for the metadata lock, or an
+            # interrupted Git command may have left the only recoverable
+            # address commit there.
+            raise RuntimeError(f"Failed to create worktree: {e}") from e
+
+    def _next_isolated_worktree_slot(
+        self, issue_number: int, requested_generation: int
+    ) -> tuple[str, Path]:
+        """Return an unused detached-review path at or after the requested generation.
+
+        This runs under :meth:`_git_metadata_lock_path`, so two coordinators
+        cannot select and create the same recovery worktree concurrently.
+        Existing paths are never reused: they may contain an unpublished
+        address commit even when ``git status`` reports a clean tree.
+        """
+        generation = requested_generation
+        while True:
+            key = f"review-pr-{issue_number}"
+            if generation:
+                key = f"{key}-{generation}"
+            path = self.base_dir / key
+            if key not in self.worktrees and not path.exists():
+                return key, path
+            generation += 1
+
     def _reuse_or_clear_normal_worktree(
         self,
         *,
@@ -389,7 +476,6 @@ class WorktreeManager:
         worktree_key: int | str,
         worktree_path: Path,
         branch_name: str,
-        isolated: bool,
         refresh_base: bool,
         timeout: int | None,
     ) -> Path | None:
@@ -397,7 +483,7 @@ class WorktreeManager:
         if worktree_key in self.worktrees:
             logger.warning("Worktree for issue #%s already exists", issue_number)
             return self.worktrees[worktree_key]
-        existing = None if isolated else self._worktree_holding_branch(branch_name, timeout=timeout)
+        existing = self._worktree_holding_branch(branch_name, timeout=timeout)
         if existing is not None:
             if existing.resolve() == worktree_path.resolve():
                 self.worktrees[worktree_key] = existing
@@ -411,12 +497,6 @@ class WorktreeManager:
         ):
             return worktree_path
         if worktree_path.exists():
-            if isolated:
-                # A detached review checkout can contain a committed but
-                # unpublished address fix, which ``git status`` reports as
-                # clean.  Removing it here would erase the only recovery
-                # artifact after a failed lease-protected push.
-                raise RuntimeError("refuses to replace existing isolated review worktree")
             logger.warning("Removing existing worktree directory: %s", worktree_path)
             self._remove_worktree_path_forcefully(worktree_path, timeout=timeout)
         return None

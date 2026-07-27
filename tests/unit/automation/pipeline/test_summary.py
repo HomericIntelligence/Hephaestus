@@ -69,7 +69,7 @@ class TestFormatPreservedWorktrees:
         lines = format_preserved_worktrees(preserved, "impl.py")
 
         assert lines == [
-            "\nPreserved worktrees (contain uncommitted changes):",
+            "\nPreserved worktrees (retained for recovery or debugging):",
             "  #101: /wt/issue-101",
             "  #202: /wt/issue-202",
             "\nRerun these issues after inspecting/cleaning the worktrees:",
@@ -210,7 +210,7 @@ class TestPrintSummaryRows:
         with caplog.at_level(logging.INFO):
             print_summary([], _stats(exit_code=1), [("repo-a", 9, "/wt/9")], json_out=False)
 
-        assert "Preserved worktrees (contain uncommitted changes):" in caplog.text
+        assert "Preserved worktrees (retained for recovery or debugging):" in caplog.text
         assert "git worktree remove --force /wt/9" in caplog.text
 
 

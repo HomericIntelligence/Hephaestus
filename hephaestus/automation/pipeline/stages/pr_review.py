@@ -202,6 +202,12 @@ COMPACT_WRITER_WAIT = "COMPACT_WRITER_WAIT"
 # commit once; never ask the address agent to recreate it or discard it.
 DIRECT_PUSH_RETRY_CAP = 1
 
+# A changed remote requires a new review checkout because the previous one is
+# a recovery artifact. One fresh pass handles a concurrent update without
+# allowing a continuously advancing branch to accumulate unbounded agent runs
+# and preserved worktrees in one coordinator invocation.
+DIRECT_PUSH_REMOTE_CHANGED_RESTART_CAP = 1
+
 _STEP_HANDLER_NAMES: dict[str, str] = {
     ENTER: "_enter",
     ADOPT_WORKTREE_WAIT: "_adopt_worktree_wait",
@@ -1671,6 +1677,21 @@ class PrReviewStage(Stage):
             )
             return StageOutcome(Disposition.FINISH_FAIL, "detached_push_failed")
         if detached_push_failure == "remote_changed":
+            restarts = payload.get("direct_push_remote_changed_restarts", 0)
+            if isinstance(restarts, bool) or not isinstance(restarts, int) or restarts < 0:
+                return StageOutcome(
+                    Disposition.FINISH_FAIL,
+                    "detached_push_recovery_receipt_invalid",
+                )
+            if restarts >= DIRECT_PUSH_REMOTE_CHANGED_RESTART_CAP:
+                payload["detached_push_failure"] = detached_push_failure
+                logger.warning(
+                    "pr_review:%d: detached push remote-change recovery cap reached; "
+                    "preserving checkout",
+                    item.issue,
+                )
+                return StageOutcome(Disposition.FINISH_FAIL, "detached_push_failed")
+            payload["direct_push_remote_changed_restarts"] = restarts + 1
             recovery = self._restart_direct_pr_review(item)
             if recovery is not None:
                 return recovery
