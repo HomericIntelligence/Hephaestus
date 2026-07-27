@@ -212,6 +212,14 @@ _DIRECT_ISSUE_ENTRY_STAGES: frozenset[StageName] = frozenset(
     }
 )
 
+# A direct PR that reached one of these explicit safety handoffs cannot make
+# further progress until a person changes the review state on GitHub.  Retain
+# the identity only for this coordinator invocation so the current run
+# converges, while a later invocation still re-evaluates fresh GitHub facts.
+_DIRECT_PR_HANDOFF_REASONS: frozenset[str] = frozenset(
+    {"human_blocked", "automation_threads_require_human_resolution"}
+)
+
 StageStepResult: TypeAlias = Continue | JobRequest | StageOutcome
 
 
@@ -542,6 +550,7 @@ class Coordinator:
         self._pending_handoffs: dict[int, _PendingHandoff] = {}
         self._direct_issue_source: _DirectIssueSource | None = None
         self._direct_pr_source: _DirectPrSource | None = None
+        self._direct_pr_handoff_keys: set[tuple[str, int]] = set()
         self._direct_scope_bootstrap_pending = False
         self._repo_entry_source: _RepoEntrySource | None = None
         self._repo_issue_sources: deque[_ActiveRepoIssueSource] = deque()
@@ -1001,6 +1010,12 @@ class Coordinator:
         """
         if item.result is None or item.payload.get("_summary_recorded", False):
             return
+        if (
+            item.kind is ItemKind.PR
+            and item.pr is not None
+            and item.result.reason in _DIRECT_PR_HANDOFF_REASONS
+        ):
+            self._direct_pr_handoff_keys.add((item.repo, item.pr))
         item.payload["_summary_recorded"] = True
         self._terminal_summary.record(item)
         self._seen_item_ids.discard(id(item))
@@ -2427,7 +2442,9 @@ class Coordinator:
         if self.config.prs:
             self._direct_pr_source = _DirectPrSource(
                 repo=repo,
-                prs=iter(self.config.prs),
+                prs=(
+                    pr for pr in self.config.prs if (repo, pr) not in self._direct_pr_handoff_keys
+                ),
                 base_sha=base_sha,
             )
 
@@ -2824,6 +2841,19 @@ class Coordinator:
             )
         )
 
+    def _only_direct_pr_handoffs_remain(self) -> bool:
+        """Return whether every explicitly scoped PR needs an external human action.
+
+        This is deliberately limited to ``--prs`` without ``--issues`` and
+        only lasts for the current coordinator.  A later invocation must
+        query GitHub again because a reviewer may have resolved a thread or
+        changed the PR head in the meantime.
+        """
+        if self.config.issues or not self.config.prs or not self.config.repos:
+            return False
+        repo = self.config.repos[0]
+        return all((repo, pr) in self._direct_pr_handoff_keys for pr in self.config.prs)
+
     def _reseed_if_converged(self) -> bool:
         """Re-seed after full drain; False = stop (loops or zero-work exit).
 
@@ -2832,6 +2862,9 @@ class Coordinator:
         actionable (non-repo, non-finished) work, the run converged — exit
         even if ``--loops`` remain.
         """
+        if self._only_direct_pr_handoffs_remain():
+            logger.info("direct PR handoff convergence: all scoped PRs require human action")
+            return False
         if self._loops_run >= self.config.loops:
             logger.info("loop budget exhausted (%d/%d)", self._loops_run, self.config.loops)
             return False
