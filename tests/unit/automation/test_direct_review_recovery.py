@@ -98,7 +98,7 @@ def test_receipt_rejects_worktree_git_metadata_outside_the_repository(tmp_path: 
     outside.mkdir(exist_ok=True)
     (worktree / ".git").write_text(f"gitdir: {outside}\n", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="outside the repository"):
+    with pytest.raises(ValueError, match="Git metadata"):
         record_direct_review_recovery(
             repo_root=tmp_path,
             issue=2500,

@@ -245,7 +245,10 @@ def _write_receipt(receipt_dir: Path, receipt_fd: int | None, target: Path, cont
 def _read_receipt(receipt_dir: Path, receipt_fd: int | None, name: str) -> Any:
     """Read one regular receipt from a trusted descriptor or portable path."""
     if receipt_fd is None:
-        return json.loads((receipt_dir / name).read_text(encoding="utf-8"))
+        target = receipt_dir / name
+        if target.is_symlink() or not target.is_file():
+            raise ValueError("direct review recovery receipt is not a regular file")
+        return json.loads(target.read_text(encoding="utf-8"))
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -264,7 +267,10 @@ def _read_receipt(receipt_dir: Path, receipt_fd: int | None, name: str) -> Any:
 def _read_secure_text(directory: Path, directory_fd: int | None, name: str) -> str:
     """Read a regular no-follow text file from a trusted directory."""
     if directory_fd is None:
-        return (directory / name).read_text(encoding="utf-8")
+        target = directory / name
+        if target.is_symlink() or not target.is_file():
+            raise ValueError("direct review recovery marker is not a regular file")
+        return target.read_text(encoding="utf-8")
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -299,7 +305,7 @@ def _open_marker_directory(repo_root: Path, marker_path: Path) -> Iterator[tuple
     if not _DIR_FD_SUPPORTED:
         yield marker_dir, None
         return
-    root = repo_root.resolve()
+    root = _common_git_dir(repo_root)
     try:
         components = marker_dir.relative_to(root).parts
     except ValueError as error:
@@ -337,6 +343,28 @@ def _worktree_identity(worktree: Path) -> tuple[int, int]:
     return stat.st_dev, stat.st_ino
 
 
+def _common_git_dir(repo_root: Path) -> Path:
+    """Return the common Git metadata directory for a checkout or linked worktree."""
+    root = repo_root.resolve()
+    dot_git = root / ".git"
+    if dot_git.is_dir() and not dot_git.is_symlink():
+        return dot_git.resolve()
+    try:
+        line = dot_git.read_text(encoding="utf-8").strip()
+    except OSError:
+        # Lightweight fixtures without a repository-level Git directory keep
+        # metadata confined to the fixture root.
+        return root
+    prefix = "gitdir: "
+    if not line.startswith(prefix):
+        raise ValueError("direct review recovery repository Git metadata is invalid")
+    raw_git_dir = Path(line.removeprefix(prefix))
+    git_dir = (raw_git_dir if raw_git_dir.is_absolute() else root / raw_git_dir).resolve()
+    if git_dir.parent.name != "worktrees" or not git_dir.parent.parent.is_dir():
+        raise ValueError("direct review recovery repository Git metadata is unavailable")
+    return git_dir.parent.parent
+
+
 def _worktree_marker_path(repo_root: Path, worktree: Path) -> Path:
     """Return the private Git-metadata marker for one direct-review checkout."""
     dot_git = worktree / ".git"
@@ -358,17 +386,20 @@ def _worktree_marker_path(repo_root: Path, worktree: Path) -> Path:
     if not git_dir.is_dir():
         raise ValueError("direct review recovery Git metadata is unavailable")
     normalized_root = repo_root.resolve()
-    try:
-        git_dir.relative_to(normalized_root)
-    except ValueError as error:
-        raise ValueError("direct review recovery Git metadata is outside the repository") from error
+    common_git_dir = _common_git_dir(normalized_root)
     if not dot_git.is_dir():
-        common_git_dir = normalized_root / ".git" / "worktrees"
         try:
-            git_dir.relative_to(common_git_dir.resolve())
+            git_dir.relative_to(common_git_dir / "worktrees")
         except ValueError as error:
             raise ValueError(
                 "direct review recovery Git metadata is not a linked worktree"
+            ) from error
+    else:
+        try:
+            git_dir.relative_to(normalized_root)
+        except ValueError as error:
+            raise ValueError(
+                "direct review recovery Git metadata is outside the repository"
             ) from error
     return git_dir / _WORKTREE_MARKER
 

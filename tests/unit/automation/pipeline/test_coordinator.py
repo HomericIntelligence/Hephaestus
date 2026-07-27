@@ -2495,6 +2495,7 @@ class TestDurableEventLog:
         worktree = tmp_path / "review-pr-1001"
         worktree.mkdir()
         item.worktree = str(worktree)
+        item.state = "PUSH_WAIT"
         item.payload["direct_pr_worktree"] = item.worktree
         item.payload["detached_push_failure"] = "remote_changed_unrecorded"
 

@@ -1444,8 +1444,14 @@ class Coordinator:
         reaches ``FinishedStage``, so collect the same durable evidence here
         for the interrupt summary rather than losing the operator guidance.
         """
-        if item.worktree and is_inspection_only_detached_push_failure(
-            item.payload.get("detached_push_failure")
+        direct_publication_interrupted = (
+            item.worktree
+            and item.payload.get("direct_pr_worktree") == item.worktree
+            and item.state in {"ADDRESS_WAIT", "PUSH_WAIT"}
+        )
+        if direct_publication_interrupted or (
+            item.worktree
+            and is_inspection_only_detached_push_failure(item.payload.get("detached_push_failure"))
         ):
             entry = (item.repo, item.issue or item.pr or 0, item.worktree)
             if entry not in self.recovery_preserved:
