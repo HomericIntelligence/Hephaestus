@@ -28,6 +28,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from hephaestus._localization import Localizer
 
+_LOCALIZER_RECORD_ATTR = "_hephaestus_localizer"
+
 # Fields that are reserved for the formatter and cannot be overridden by
 # context or extra data.  If a context key collides with one of these, it
 # is prefixed with ``ctx_`` to avoid silent data loss.
@@ -37,7 +39,14 @@ RESERVED_FIELDS: frozenset[str] = frozenset(
 
 
 class _LocalizedFormatter(logging.Formatter):
-    """Translate copied plain-text log message templates."""
+    """Translate copied plain-text log message templates.
+
+    The localizer captured at construction is a fallback for manually created
+    or already-deferred records.  Normal Hephaestus logging captures the active
+    context-local localizer on each ``LogRecord`` when the record is emitted, so
+    module-level loggers configured before a catalog is selected can still
+    render localized output later without depending on handler re-creation.
+    """
 
     def __init__(
         self,
@@ -58,7 +67,8 @@ class _LocalizedFormatter(logging.Formatter):
         """Format a translated shallow copy without mutating the record."""
         copied = copy.copy(record)
         if isinstance(copied.msg, str):
-            copied.msg = self._localizer.template(copied.msg)
+            localizer = getattr(copied, _LOCALIZER_RECORD_ATTR, self._localizer)
+            copied.msg = localizer.template(copied.msg)
         return super().format(copied)
 
 

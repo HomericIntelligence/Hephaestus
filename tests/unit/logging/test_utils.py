@@ -431,7 +431,7 @@ class TestSetupLogging:
             root.handlers.extend(saved)
 
     def test_plain_handlers_are_localized_and_existing_handler_is_preserved(self) -> None:
-        """Only newly created plain handlers receive the localized formatter."""
+        """Custom existing handlers are preserved while created handlers localize."""
         root = logging.getLogger()
         saved = list(root.handlers)
         root.handlers.clear()

@@ -224,6 +224,28 @@ class TestLocalizedFormatter:
         record = logging.LogRecord("test", logging.INFO, "test.py", 1, "Ready", (), None)
         assert formatter.format(record) == "Prêt"
 
+    def test_record_localizer_survives_deferred_formatting(self) -> None:
+        """Records carry the emission-time catalog for later formatting."""
+        from hephaestus.logging.utils import get_logger
+
+        records: list[logging.LogRecord] = []
+
+        class CaptureHandler(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        logger = get_logger("test.deferred_localization", level=logging.INFO).logger
+        logger.handlers.clear()
+        logger.addHandler(CaptureHandler())
+        try:
+            with using_localizer({"Ready": "Prêt"}):
+                logger.info("Ready")
+        finally:
+            logger.handlers.clear()
+
+        formatter = _LocalizedFormatter("%(message)s")
+        assert formatter.format(records[0]) == "Prêt"
+
     def test_non_string_message_is_unchanged(self) -> None:
         """Non-string logging payloads retain standard formatter behavior."""
         record = logging.LogRecord("test", logging.INFO, "test.py", 1, 42, (), None)

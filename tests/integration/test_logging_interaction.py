@@ -5,6 +5,7 @@ Exercises the real combined workflow to catch regressions in handler
 deduplication and propagation behaviour.
 """
 
+import importlib.util
 import json
 import logging
 import sys
@@ -164,6 +165,47 @@ class TestJsonFormat:
         assert payload["message"] == "Ready 2"
         assert payload["request_id"] == "abc"
         assert {"timestamp", "level", "logger", "message"} <= payload.keys()
+
+
+class TestLocalizationLifecycle:
+    """Integration: import-time loggers and context-local catalogs."""
+
+    def test_module_level_logger_created_before_catalog_still_localizes_plain_output(
+        self, capsys, tmp_path
+    ) -> None:
+        """A reused import-time handler uses the localizer active when records emit."""
+        from hephaestus.cli.localization import using_localizer
+
+        module_name = "test_prelocalized_module_logger"
+        module_path = tmp_path / f"{module_name}.py"
+        module_path.write_text(
+            "\n".join(
+                [
+                    "import logging",
+                    "from hephaestus.logging.utils import get_logger",
+                    "logger = get_logger(__name__, level=logging.INFO)",
+                    "def emit() -> None:",
+                    "    logger.info('Ready %d', 3)",
+                ]
+            )
+        )
+        spec = importlib.util.spec_from_file_location(module_name, module_path)
+        assert spec is not None
+        assert spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+
+            with using_localizer({"Ready %d": "Prêt %d"}):
+                module.emit()
+        finally:
+            logging.getLogger(module_name).handlers.clear()
+            sys.modules.pop(module_name, None)
+
+        out = capsys.readouterr().out
+        assert "Prêt 3" in out
+        assert "Ready 3" not in out
 
 
 class TestContextLogger:
