@@ -207,6 +207,87 @@ def _thread_severity_is_blocking(thread: dict[str, Any]) -> bool:
     return severity is None or severity in BLOCKING_SEVERITIES
 
 
+_AUTOMATED_REVIEW_PREFIX = "## Automated PR review"
+
+
+def _canonical_restart_process_receipt(thread: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the one canonical receipt proven by an immutable automated review.
+
+    A worker restart loses its in-memory post receipt, but GitHub still holds
+    enough immutable provenance to reconstruct the same receipt: one initial
+    inline comment, its parent automated review, and that review's commit.
+    This is deliberately stricter than account ownership, because operators
+    and automation can share a GitHub login.
+    """
+    comments = thread.get("comments")
+    if not isinstance(comments, list) or len(comments) != 1:
+        return None
+    comment = comments[0]
+    if not isinstance(comment, dict):
+        return None
+    body = comment.get("body")
+    if not isinstance(body, str):
+        return None
+    marker = body.splitlines()[0].strip() if body.splitlines() else ""
+    if not marker.startswith(SEVERITY_MARKER_PREFIX) or not marker.endswith("-->"):
+        return None
+    severity = marker[len(SEVERITY_MARKER_PREFIX) : -3].strip().lower()
+    if severity not in VALID_SEVERITIES:
+        return None
+    review_body = thread.get("review_body")
+    review_commit_sha = thread.get("review_commit_sha")
+    if (
+        not isinstance(review_body, str)
+        or not review_body.startswith(_AUTOMATED_REVIEW_PREFIX)
+        or not isinstance(review_commit_sha, str)
+        or re.fullmatch(r"[0-9a-f]{40}", review_commit_sha) is None
+    ):
+        return None
+    thread_id = thread.get("id")
+    path = thread.get("path")
+    line = thread.get("line")
+    side = thread.get("side")
+    author = comment.get("author")
+    review_id = comment.get("review_id")
+    comment_id = comment.get("id")
+    if not (
+        isinstance(thread_id, str)
+        and thread_id
+        and isinstance(path, str)
+        and path
+        and isinstance(line, int)
+        and not isinstance(line, bool)
+        and line > 0
+        and side == "RIGHT"
+        and isinstance(author, str)
+        and author
+        and isinstance(review_id, str)
+        and review_id
+        and isinstance(comment_id, str)
+        and comment_id
+    ):
+        return None
+    return {
+        "id": thread_id,
+        "path": path,
+        "line": line,
+        "side": side,
+        "body": body,
+        "author": author,
+        "authors": [author],
+        "comments": [
+            {
+                "id": comment_id,
+                "author": author,
+                "body": body,
+                "review_id": review_id,
+            }
+        ],
+        "review_id": review_id,
+        "created_head_sha": review_commit_sha,
+    }
+
+
 def _has_no_explicit_pull_request_bypasses(protection: dict[str, Any]) -> bool:
     """Return whether the classic protection response grants no PR bypasses.
 
@@ -534,7 +615,7 @@ class PipelineGitHub:
             "        pageInfo{ hasNextPage endCursor }"
             "        nodes{ id isResolved path line side:diffSide "
             "comments(first:20){ pageInfo{ hasNextPage } "
-            "nodes{ id body author{ login } pullRequestReview{ id } } } }"
+            "nodes{ id body author{ login } pullRequestReview{ id body commit{ oid } } } } }"
             "      }"
             "    }"
             "  }"
@@ -565,6 +646,8 @@ class PipelineGitHub:
                 first_comment = comment_nodes[0] if comment_nodes else {}
                 comments: list[dict[str, str]] = []
                 authors: list[str] = []
+                review_body = ""
+                review_commit_sha = ""
                 for comment in comment_nodes:
                     author_node = comment.get("author")
                     author = author_node.get("login") if isinstance(author_node, dict) else ""
@@ -573,6 +656,12 @@ class PipelineGitHub:
                         authors.append(author)
                     review = comment.get("pullRequestReview") or {}
                     review_id = review.get("id") if isinstance(review, dict) else ""
+                    if isinstance(review, dict) and not review_body:
+                        review_body = str(review.get("body") or "")
+                        commit = review.get("commit") or {}
+                        review_commit_sha = (
+                            str(commit.get("oid") or "") if isinstance(commit, dict) else ""
+                        )
                     comments.append(
                         {
                             "id": str(comment.get("id") or ""),
@@ -581,19 +670,23 @@ class PipelineGitHub:
                             "review_id": review_id or "",
                         }
                     )
-                threads.append(
-                    {
-                        "id": node["id"],
-                        "path": node.get("path", ""),
-                        "line": node.get("line"),
-                        "side": node.get("side") or "RIGHT",
-                        "body": first_comment.get("body", ""),
-                        "author": authors[0] if authors else "",
-                        "authors": authors,
-                        "comments": comments,
-                        "review_id": comments[0].get("review_id", "") if comments else "",
-                    }
-                )
+                thread = {
+                    "id": node["id"],
+                    "path": node.get("path", ""),
+                    "line": node.get("line"),
+                    "side": node.get("side") or "RIGHT",
+                    "body": first_comment.get("body", ""),
+                    "author": authors[0] if authors else "",
+                    "authors": authors,
+                    "comments": comments,
+                    "review_id": comments[0].get("review_id", "") if comments else "",
+                    "review_body": review_body,
+                    "review_commit_sha": review_commit_sha,
+                }
+                restart_receipt = _canonical_restart_process_receipt(thread)
+                if restart_receipt is not None:
+                    thread["process_receipt"] = restart_receipt
+                threads.append(thread)
             page_info = review_threads.get("pageInfo", {})
             if not page_info.get("hasNextPage"):
                 break
@@ -895,9 +988,9 @@ class PipelineGitHub:
     ) -> ProcessThreadResolutionResult:
         """Reply then resolve exact active-work-item process receipts.
 
-        The stage supplies only receipts created in the current active work
-        item.  Restarted work has no receipt and is therefore a human gate;
-        this accessor intentionally owns no second persistence journal.
+        The stage supplies only canonical receipts held by the current active
+        work item. A restart may re-adopt a host-normalized receipt, but this
+        accessor intentionally owns no second persistence journal.
         """
         candidate_ids = tuple(sorted(dispositions))
         if self._skip(
@@ -1231,6 +1324,14 @@ class PipelineGitHub:
         for thread in threads:
             thread["automation_owned"] = _is_automation_owned_thread(thread, current_login)
         return threads
+
+    def list_restart_process_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+        """Return only host-proven automation threads eligible for restart adoption."""
+        return [
+            thread
+            for thread in self._unresolved_threads(pr_number)
+            if isinstance(thread.get("process_receipt"), dict)
+        ]
 
     def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
         """Read shared PR state for seed, implementation, and merge_wait.
