@@ -120,7 +120,11 @@ def _split_threads(threads: list[dict[str, Any]]) -> tuple[int, int]:
     if not threads:
         return (0, 0)
     current_login = github_api.gh_current_login()
-    automation = sum(1 for thread in threads if _is_automation_owned_thread(thread, current_login))
+    automation = sum(
+        1
+        for thread in threads
+        if _is_automation_owned_thread(thread, current_login) or _has_external_bot_receipt(thread)
+    )
     return automation, len(threads) - automation
 
 
@@ -290,6 +294,80 @@ def _canonical_restart_process_receipt(thread: dict[str, Any]) -> dict[str, Any]
         # current positive line at the post/readback boundary.
         receipt["restart_stale_line"] = True
     return receipt
+
+
+def _canonical_external_bot_receipt(thread: dict[str, Any]) -> dict[str, Any] | None:
+    """Return a restart receipt for one immutable GitHub Bot review thread.
+
+    A verified GitHub ``Bot`` actor is distinct from a user handoff, but its
+    finding remains untrusted and must still pass the same validator, changed
+    head, exact reply/readback, and resolution/readback boundaries as a
+    process-created thread.  Threads with replies or incomplete review
+    provenance deliberately remain outside this path.
+    """
+    comments = thread.get("comments")
+    if not isinstance(comments, list) or len(comments) != 1:
+        return None
+    comment = comments[0]
+    if not isinstance(comment, dict) or comment.get("author_type") != "Bot":
+        return None
+    thread_id = thread.get("id")
+    path = thread.get("path")
+    line = thread.get("line")
+    side = thread.get("side")
+    body = comment.get("body")
+    author = comment.get("author")
+    review_id = comment.get("review_id")
+    comment_id = comment.get("id")
+    review_commit_sha = thread.get("review_commit_sha")
+    if not (
+        isinstance(thread_id, str)
+        and thread_id
+        and isinstance(path, str)
+        and path
+        and isinstance(line, int)
+        and not isinstance(line, bool)
+        and line > 0
+        and side == "RIGHT"
+        and isinstance(body, str)
+        and isinstance(author, str)
+        and author
+        and isinstance(review_id, str)
+        and review_id
+        and isinstance(comment_id, str)
+        and comment_id
+        and isinstance(review_commit_sha, str)
+        and re.fullmatch(r"[0-9a-f]{40}", review_commit_sha) is not None
+    ):
+        return None
+    return {
+        "id": thread_id,
+        "path": path,
+        "line": line,
+        "side": side,
+        "body": body,
+        "author": author,
+        "author_type": "Bot",
+        "authors": [author],
+        "comments": [
+            {
+                "id": comment_id,
+                "author": author,
+                "author_type": "Bot",
+                "body": body,
+                "review_id": review_id,
+            }
+        ],
+        "review_id": review_id,
+        "created_head_sha": review_commit_sha,
+        "external_bot": True,
+    }
+
+
+def _has_external_bot_receipt(thread: dict[str, Any]) -> bool:
+    """Return whether a host-normalized thread is eligible for bot remediation."""
+    receipt = thread.get("process_receipt")
+    return isinstance(receipt, dict) and receipt.get("external_bot") is True
 
 
 def _has_no_explicit_pull_request_bypasses(protection: dict[str, Any]) -> bool:
@@ -619,7 +697,8 @@ class PipelineGitHub:
             "        pageInfo{ hasNextPage endCursor }"
             "        nodes{ id isResolved path line side:diffSide "
             "comments(first:20){ pageInfo{ hasNextPage } "
-            "nodes{ id body author{ login } pullRequestReview{ id body commit{ oid } } } } }"
+            "nodes{ id body author{ login __typename } "
+            "pullRequestReview{ id body commit{ oid } } } } }"
             "      }"
             "    }"
             "  }"
@@ -656,6 +735,10 @@ class PipelineGitHub:
                     author_node = comment.get("author")
                     author = author_node.get("login") if isinstance(author_node, dict) else ""
                     author = author or ""
+                    author_type = (
+                        author_node.get("__typename") if isinstance(author_node, dict) else ""
+                    )
+                    author_type = author_type or ""
                     if author:
                         authors.append(author)
                     review = comment.get("pullRequestReview") or {}
@@ -671,6 +754,7 @@ class PipelineGitHub:
                             "id": str(comment.get("id") or ""),
                             "body": comment.get("body") or "",
                             "author": author,
+                            "author_type": author_type,
                             "review_id": review_id or "",
                         }
                     )
@@ -681,13 +765,16 @@ class PipelineGitHub:
                     "side": node.get("side") or "RIGHT",
                     "body": first_comment.get("body", ""),
                     "author": authors[0] if authors else "",
+                    "author_type": comments[0].get("author_type", "") if comments else "",
                     "authors": authors,
                     "comments": comments,
                     "review_id": comments[0].get("review_id", "") if comments else "",
                     "review_body": review_body,
                     "review_commit_sha": review_commit_sha,
                 }
-                restart_receipt = _canonical_restart_process_receipt(thread)
+                restart_receipt = _canonical_restart_process_receipt(
+                    thread
+                ) or _canonical_external_bot_receipt(thread)
                 if restart_receipt is not None:
                     thread["process_receipt"] = restart_receipt
                 threads.append(thread)
@@ -893,6 +980,7 @@ class PipelineGitHub:
         comments = receipt.get("comments")
         created_head_sha = receipt.get("created_head_sha")
         initial = comments[0] if isinstance(comments, list) and len(comments) == 1 else None
+        external_bot = receipt.get("external_bot") is True
         return bool(
             isinstance(thread_id, str)
             and thread_id.strip()
@@ -918,6 +1006,10 @@ class PipelineGitHub:
             and initial.get("author") == author
             and initial.get("body") == body
             and initial.get("review_id") == review_id
+            and (
+                not external_bot
+                or (receipt.get("author_type") == "Bot" and initial.get("author_type") == "Bot")
+            )
         )
 
     @staticmethod
@@ -1313,7 +1405,7 @@ class PipelineGitHub:
         current_login = github_api.gh_current_login()
         blocking = minor = human = 0
         for t in threads:
-            if _is_automation_owned_thread(t, current_login):
+            if _is_automation_owned_thread(t, current_login) or _has_external_bot_receipt(t):
                 if _thread_severity_is_blocking(t):
                     blocking += 1
                 else:
@@ -1327,11 +1419,13 @@ class PipelineGitHub:
         threads = self._unresolved_threads(pr_number)
         current_login = github_api.gh_current_login()
         for thread in threads:
-            thread["automation_owned"] = _is_automation_owned_thread(thread, current_login)
+            thread["automation_owned"] = _is_automation_owned_thread(
+                thread, current_login
+            ) or _has_external_bot_receipt(thread)
         return threads
 
     def list_restart_process_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
-        """Return only host-proven automation threads eligible for restart adoption."""
+        """Return only host-proven process or verified-bot restart receipts."""
         return [
             thread
             for thread in self._unresolved_threads(pr_number)

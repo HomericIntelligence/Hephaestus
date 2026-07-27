@@ -1065,6 +1065,69 @@ class TestProcessOwnedReviewThreadLifecycle:
 
         assert _is_process_thread_receipt(receipt)
 
+    def test_external_bot_receipt_requires_verified_bot_actor(self) -> None:
+        """A login-shaped user thread must not enter the external-bot path."""
+        receipt = self._thread("bot-1", 3, "fix this")
+        receipt.update(
+            {
+                "external_bot": True,
+                "author_type": "Bot",
+            }
+        )
+        receipt["comments"][0]["author_type"] = "Bot"
+
+        assert _is_process_thread_receipt(receipt)
+
+        receipt["author_type"] = "User"
+
+        assert not _is_process_thread_receipt(receipt)
+
+    def test_unaddressed_external_bot_receipt_routes_to_remediation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An exact bot finding is fenced into the address path, not a human handoff."""
+        bot = self._thread("bot-1", 3, "fix this")
+        bot.update(
+            {
+                "external_bot": True,
+                "author_type": "Bot",
+                "automation_owned": True,
+            }
+        )
+        bot["comments"][0]["author_type"] = "Bot"
+
+        class BotGitHub(FakeStageGitHub):
+            def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+                del pr_number
+                return [dict(bot)]
+
+        item = make_work_item(issue=1, pr=1001, state="POST")
+        item.worktree = "/tmp/wt"
+        item.payload.update(
+            {
+                "existing_pr": True,
+                "reviewed_pr_head_sha": "a" * 40,
+                "process_review_threads": [dict(bot)],
+                "validation_process_threads": [dict(bot)],
+                "validation_result": {"unaddressed": [{"thread_id": "bot-1"}], "wont_fix": []},
+                "review_audit": ReviewAudit("A", "clean", (), "", valid=True),
+                "review_threads": [],
+            }
+        )
+
+        stage = PrReviewStage()
+        assert stage.step(item, make_ctx(github=BotGitHub())) == Continue(
+            next_state="DIFFICULTY_WAIT"
+        )
+        assert item.payload["remediation_threads"] == [
+            {
+                "thread_id": "bot-1",
+                "path": "a.py",
+                "line": 3,
+                "body": "<!-- hephaestus-severity: major -->\nfix this",
+            }
+        ]
+
     def test_validation_adopts_a_canonical_live_restart_receipt(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

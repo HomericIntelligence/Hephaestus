@@ -253,6 +253,31 @@ class TestProcessReviewThreadReceipts:
                                             ],
                                         },
                                     },
+                                    {
+                                        "id": "bot-thread",
+                                        "isResolved": False,
+                                        "path": "bot.py",
+                                        "line": 13,
+                                        "side": "RIGHT",
+                                        "comments": {
+                                            "pageInfo": {"hasNextPage": False},
+                                            "nodes": [
+                                                {
+                                                    "id": "bot-comment",
+                                                    "body": "Please handle this finding.",
+                                                    "author": {
+                                                        "login": "github-code-quality",
+                                                        "__typename": "Bot",
+                                                    },
+                                                    "pullRequestReview": {
+                                                        "id": "PRR_bot",
+                                                        "body": "Automated quality review.",
+                                                        "commit": {"oid": review_head},
+                                                    },
+                                                }
+                                            ],
+                                        },
+                                    },
                                 ],
                             }
                         }
@@ -304,6 +329,28 @@ class TestProcessReviewThreadReceipts:
             "created_head_sha": review_head,
             "restart_stale_line": True,
         }
+        assert threads[4]["process_receipt"] == {
+            "id": "bot-thread",
+            "path": "bot.py",
+            "line": 13,
+            "side": "RIGHT",
+            "body": "Please handle this finding.",
+            "author": "github-code-quality",
+            "author_type": "Bot",
+            "authors": ["github-code-quality"],
+            "comments": [
+                {
+                    "id": "bot-comment",
+                    "author": "github-code-quality",
+                    "author_type": "Bot",
+                    "body": "Please handle this finding.",
+                    "review_id": "PRR_bot",
+                }
+            ],
+            "review_id": "PRR_bot",
+            "created_head_sha": review_head,
+            "external_bot": True,
+        }
 
     def test_stale_line_receipt_requires_restart_provenance(
         self, adapter: pg.PipelineGitHub
@@ -318,12 +365,36 @@ class TestProcessReviewThreadReceipts:
 
         assert adapter._is_immutable_process_receipt(receipt)
 
-    def test_replies_before_resolving_a_revalidated_process_receipt(
+    def test_verified_bot_receipt_is_automation_owned_without_login_matching(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A handled receipt gets the loop reply before its thread is resolved."""
+        """A host-proven Bot receipt does not rely on a login allowlist."""
+        thread = {
+            "id": "bot-thread",
+            "process_receipt": {"external_bot": True},
+            "author": "github-code-quality",
+            "authors": ["github-code-quality"],
+        }
+        monkeypatch.setattr(adapter, "_unresolved_threads", lambda _pr: [dict(thread)])
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "mvillmow")
+
+        threads = adapter.list_unresolved_review_threads(7)
+
+        assert threads[0]["automation_owned"] is True
+
+    @pytest.mark.parametrize("external_bot", [False, True], ids=["process", "verified-bot"])
+    def test_replies_before_resolving_a_revalidated_process_receipt(
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        external_bot: bool,
+    ) -> None:
+        """A handled process or verified-bot receipt replies before resolution."""
         adapter.repo = "repo"
         receipt = _process_thread_receipt("PRRT_process_1", "PRR_process_1", "finding")
+        if external_bot:
+            receipt.update({"external_bot": True, "author_type": "Bot"})
+            receipt["comments"][0]["author_type"] = "Bot"
         reply_body: dict[str, str] = {}
         live_reads = 0
 
