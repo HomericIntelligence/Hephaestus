@@ -6,6 +6,11 @@ Runtime and API compatibility are defined by `pyproject.toml` and
 [COMPATIBILITY.md](COMPATIBILITY.md), which are the authoritative sources for
 the current compatibility policy.
 
+| Version | Supported       |
+|---------|-----------------|
+| 0.10.x  | ✅ Supported    |
+| < 0.10  | ❌ End of life  |
+
 Security fixes are made against the current default branch and released in the
 latest available package version. Older releases are not maintained as
 separate security-support lines. Users should reproduce issues on and upgrade
