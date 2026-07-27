@@ -1106,9 +1106,11 @@ class PrReviewStage(Stage):
         }
         if item.payload.get("direct_pr_worktree"):
             # Direct review addresses findings from a detached checkout; the
-            # coordinator must publish that exact HEAD to the PR branch with
-            # a normal fast-forward push.
+            # coordinator may publish that exact HEAD only while the remote
+            # still equals the checkout-proven reviewed head. This permits a
+            # deliberate rebase without overwriting a concurrent writer.
             kwargs["publish_detached_head"] = True
+            kwargs["expected_remote_sha"] = item.payload.get("reviewed_pr_head_sha")
         git_job = GitJob(
             repo=item.repo,
             op="commit_push",

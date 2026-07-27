@@ -532,13 +532,21 @@ class TestDirectScopeBranchReservation:
 class TestPushDetachedHead:
     """Tests for publishing direct PR-review commits from a detached checkout."""
 
-    def test_pushes_head_to_branch_without_force_or_proof(
+    def test_pushes_head_to_branch_with_the_reviewed_head_lease(
         self, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
-        push_head_to_branch("123-auto-impl", tmp_path, timeout=42)
+        reviewed_head = "a" * 40
+
+        push_head_to_branch("123-auto-impl", reviewed_head, tmp_path, timeout=42)
 
         git_utils_mocks.run.assert_called_once_with(
-            ["git", "push", "origin", "HEAD:refs/heads/123-auto-impl"],
+            [
+                "git",
+                "push",
+                f"--force-with-lease=refs/heads/123-auto-impl:{reviewed_head}",
+                "origin",
+                "HEAD:refs/heads/123-auto-impl",
+            ],
             cwd=tmp_path,
             timeout=42,
         )
