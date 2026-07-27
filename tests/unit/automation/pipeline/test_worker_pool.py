@@ -19,7 +19,7 @@ from unittest.mock import ANY, MagicMock, call, patch
 
 import pytest
 
-from hephaestus.automation import git_utils
+from hephaestus.automation import git_utils, subprocess_registry
 from hephaestus.automation._review_utils import build_automation_parser
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.jobs import (
@@ -303,6 +303,7 @@ class TestWorkerPoolSubmitComplete:
             model=job.model,
             sandbox="workspace-write",
             approval="never",
+            process_tracker=subprocess_registry.track_process_group,
         )
         assert result.ok is True
         assert result.value == "codex output"
@@ -334,6 +335,7 @@ class TestWorkerPoolSubmitComplete:
             model=job.model,
             sandbox="workspace-write",
             approval="never",
+            process_tracker=subprocess_registry.track_process_group,
         )
         run.assert_not_called()
         assert result.ok is True
@@ -3557,6 +3559,35 @@ class TestOnFutureDone:
 )
 class TestShutdownReapsSubprocess:
     """WorkerPool.shutdown() SIGTERMs in-flight agent process groups (#2059)."""
+
+    def test_shutdown_terminates_running_codex_subprocess_fast(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+    ) -> None:
+        """A direct Codex session is registered and reaped with the worker pool."""
+        sleeper = [sys.executable, "-c", "import time; time.sleep(60)"]
+        job = _agent_job(
+            agent="codex", model="reap-test", timeout_s=60, session_agent="implementer"
+        )
+        with (
+            patch(f"{_WP}.resolve_agent", return_value="codex"),
+            patch("hephaestus.agents.runtime._codex_base_cmd", return_value=sleeper),
+        ):
+            pool.submit(job, StageName.IMPLEMENTATION)
+            deadline = time.monotonic() + 10
+            while subprocess_registry.live_count() == 0 and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert subprocess_registry.live_count() == 1, "Codex subprocess never registered"
+
+            t0 = time.monotonic()
+            pool.shutdown()
+            _handle, result = completion_q.get(timeout=10)
+            elapsed = time.monotonic() - t0
+
+        assert elapsed < 15, f"shutdown did not reap Codex fast ({elapsed:.1f}s)"
+        assert result.ok is False
+        assert result.interrupted is True
 
     def test_shutdown_terminates_running_agent_subprocess_fast(
         self,
