@@ -12,8 +12,8 @@ Entry routing (the binding contract is the classification table in
 
 - ``state:skip`` or epic → excluded (stage ``None``, logged)
 - PR merged → finished (pass, idempotent)
-- Open PR + at-or-past ``state:implementation-go`` → merge_wait
-- Open PR, no impl-GO → pr_review (existing-PR path)
+- Open PR + PR-level ``state:implementation-go`` → merge_wait
+- Any other open PR → pr_review (including an issue-level implementation-GO)
 - No PR, at-or-past ``state:plan-go`` → implementation
 - No PR, ``state:plan-no-go`` → planning (amend path)
 - No PR, ``state:plan-blocked`` → excluded until an external operator resolves
@@ -280,26 +280,8 @@ def classify_issue(facts: IssueFacts) -> Classification:
             )
         if facts.pr_has_implementation_no_go:
             return StageName.PR_REVIEW, f"#{facts.number} open PR awaiting review"
-        if _label_at_or_past(state_label, STATE_IMPLEMENTATION_GO):
-            # Legacy compatibility path (#2140): an *issue-level*
-            # IMPLEMENTATION_GO label on an open PR predates the loop-owned
-            # approval model (#2280), where the durable authorization is the
-            # PR-level label handled above (facts.pr_has_implementation_go).
-            # Post-#2280 there is no CI pipeline stage, so the legacy
-            # issue-level GO no longer auto-authorizes a merge — it is treated
-            # as an open PR awaiting review. The warning surfaces the stale
-            # label so it can be retired.
-            LOG.warning(
-                "legacy_issue_impl_go_fallback: issue #%d supplies %s for open PR #%s",
-                facts.number,
-                STATE_IMPLEMENTATION_GO,
-                facts.pr_number,
-            )
-            return (
-                StageName.PR_REVIEW,
-                f"#{facts.number} open PR with legacy issue-level {STATE_IMPLEMENTATION_GO}",
-            )
-        # Open PR, no implementation-go → awaiting PR review
+        # Only the PR-level label above has approval semantics.  Issue labels
+        # never select a special open-PR route.
         return StageName.PR_REVIEW, f"#{facts.number} open PR awaiting review"
 
     # No PR path: check implementation readiness
@@ -491,7 +473,7 @@ def seed_from_cli(
       open-PR routing: merged PR -> FINISHED (idempotent), closed PR ->
       excluded, open PR with ``state:implementation-go`` -> MERGE_WAIT, open PR
       without it -> PR_REVIEW. A failed state/label fetch reads as
-      "open, not yet reviewed" (-> pr_review), matching the legacy
+      "open, not yet reviewed" (-> pr_review), matching the existing
       ``_review_existing_pr`` fail-open-to-review semantics.
       When *github* is given (a repo-scoped accessor, e.g.
       :class:`~hephaestus.automation.pipeline_github.PipelineGitHub`), both
