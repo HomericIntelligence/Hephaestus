@@ -78,11 +78,11 @@ class PRCreatePhase(StageMixin):
         return pr_number
 
     def _run_tests_in_worktree(self, worktree_path: Path, issue_number: int) -> bool:
-        """Run the unit test suite inside the worktree as a pre-PR gate (A2-004)."""
+        """Run the worktree test suite as a pre-PR gate (A2-004)."""
         timeout_s = pre_pr_test_timeout()
         try:
             result = subprocess.run(
-                ["uv", "run", "pytest", "tests/unit", "-q", "--tb=short"],
+                ["uv", "run", "pytest", "tests", "-q", "--tb=short"],
                 cwd=worktree_path,
                 capture_output=True,
                 text=True,

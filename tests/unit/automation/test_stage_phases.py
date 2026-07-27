@@ -303,6 +303,14 @@ def test_pr_create_run_tests_uses_env_configured_timeout(
 
         assert phase._run_tests_in_worktree(tmp_path, 7) is True
 
+    assert mock_run.call_args.args[0] == [
+        "uv",
+        "run",
+        "pytest",
+        "tests",
+        "-q",
+        "--tb=short",
+    ]
     assert mock_run.call_args.kwargs["timeout"] == 777
 
 

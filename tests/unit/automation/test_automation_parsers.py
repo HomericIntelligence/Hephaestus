@@ -657,7 +657,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
         _store_true(
             "--run-pre-pr-tests",
             "run_pre_pr_tests",
-            "Run the implementation-stage pre-PR unit-test gate before committing and "
+            "Run the implementation-stage pre-PR test gate before committing and "
             "creating PRs.",
         ),
         _action_spec(

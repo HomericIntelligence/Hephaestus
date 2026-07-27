@@ -1111,7 +1111,9 @@ class TestTestsAndFix:
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, BuildTestJob)
-        assert result.job.argv == PRE_PR_TEST_ARGV
+        expected_argv = ("uv", "run", "pytest", "tests", "-q", "--tb=short")
+        assert expected_argv == PRE_PR_TEST_ARGV
+        assert result.job.argv == expected_argv
         assert result.on_done_state == "COMMIT_PUSH_WAIT"
         assert "tests_failed" not in item.payload  # stale result cleared at submit
 
@@ -1319,6 +1321,7 @@ class TestCommitPushAndPrCreate:
         assert [name for name, _ in github.mutation_log] == ["gh_pr_create"]
         # The PR body is a get_pr_description body carrying the closing line.
         assert "Closes #9" in github.prs[1001]["body"]
+        assert "uv run pytest tests -q --tb=short" in github.prs[1001]["body"]
         assert github.prs[1001]["title"] == "Add the widget"
 
     def test_pr_create_does_not_call_the_removed_auto_merge_mutator(
