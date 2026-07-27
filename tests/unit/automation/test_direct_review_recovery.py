@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import shutil
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -17,6 +20,7 @@ def _worktree(repo_root: Path, issue: int) -> Path:
     """Create a direct-review checkout fixture path."""
     path = repo_root / "build" / ".worktrees" / f"review-pr-{issue}"
     path.mkdir(parents=True)
+    (path / ".git").mkdir()
     return path
 
 
@@ -86,6 +90,42 @@ def test_receipt_rejects_a_symlinked_state_directory(tmp_path: Path) -> None:
     assert list_direct_review_recovery_paths(repo_root=tmp_path, issue=2500, pr=2501) == []
 
 
+def test_receipt_write_does_not_follow_a_replaced_state_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A concurrent receipt-directory swap cannot redirect the atomic write."""
+    if os.name != "posix":
+        pytest.skip("descriptor-relative receipt writes require POSIX")
+    worktree = _worktree(tmp_path, 2500)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    receipt_dir = tmp_path / DEFAULT_STATE_DIR / "direct-review-recovery"
+    displaced_dir = tmp_path / "displaced-receipts"
+    original_replace = os.replace
+
+    def replace_after_swap(*args: object, **kwargs: object) -> None:
+        """Swap the pathname after descriptor acquisition and before replacement."""
+        if kwargs.get("dst_dir_fd") is not None:
+            receipt_dir.rename(displaced_dir)
+            receipt_dir.symlink_to(outside, target_is_directory=True)
+        cast(Any, original_replace)(*args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", replace_after_swap)
+
+    with pytest.raises(ValueError, match="receipt directory changed"):
+        record_direct_review_recovery(
+            repo_root=tmp_path,
+            issue=2500,
+            pr=2501,
+            worktree=worktree,
+            branch="2500-auto",
+            expected_remote_sha="a" * 40,
+            source_sha="b" * 40,
+        )
+
+    assert list(outside.iterdir()) == []
+
+
 def test_receipt_does_not_authorize_a_replacement_checkout_at_the_same_path(
     tmp_path: Path,
 ) -> None:
@@ -101,7 +141,8 @@ def test_receipt_does_not_authorize_a_replacement_checkout_at_the_same_path(
         source_sha="b" * 40,
     )
 
-    worktree.rmdir()
+    shutil.rmtree(worktree)
     worktree.mkdir()
+    (worktree / ".git").mkdir()
 
     assert list_direct_review_recovery_paths(repo_root=tmp_path, issue=2500, pr=2501) == []

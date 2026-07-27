@@ -90,6 +90,7 @@ from typing import Any, TypeAlias
 
 from jinja2 import TemplateNotFound
 
+from hephaestus.automation.direct_review_recovery import list_direct_review_recovery_paths
 from hephaestus.automation.models import IssueInfo
 from hephaestus.automation.pipeline import admission as _admission, seeding as _seeding
 from hephaestus.automation.pipeline.events import StageEvent, encode_stage_event
@@ -1416,6 +1417,7 @@ class Coordinator:
         seeding reconstruction resumes exactly here with no shutdown
         bookkeeping.
         """
+        self._record_resumable_recovery_worktrees(item)
         self._release_source_lease(item)
         item.result = ItemResult(
             passed=False,
@@ -1430,6 +1432,34 @@ class Coordinator:
             self._item_key(item),
             item.stage.value,
         )
+
+    def _record_resumable_recovery_worktrees(self, item: WorkItem) -> None:
+        """Retain receipt-backed recovery paths when shutdown skips FinishedStage.
+
+        A worker writes a remote-drift receipt before returning the result that
+        triggers a fresh review.  A shutdown can park that item before it ever
+        reaches ``FinishedStage``, so collect the same durable evidence here
+        for the interrupt summary rather than losing the operator guidance.
+        """
+        if item.issue is None or item.pr is None:
+            return
+        try:
+            worktrees = list_direct_review_recovery_paths(
+                repo_root=_effective_repo_root(self.config, item.repo),
+                issue=item.issue,
+                pr=item.pr,
+            )
+        except (OSError, RuntimeError) as error:
+            logger.warning(
+                "interrupt:%s: could not read detached-review recovery receipts: %s",
+                item.issue or item.repo,
+                error,
+            )
+            return
+        for worktree in worktrees:
+            entry = (item.repo, item.issue, str(worktree))
+            if entry not in self.recovery_preserved:
+                self.recovery_preserved.append(entry)
 
     @staticmethod
     def _job_result_event_fields(result: JobResult) -> dict[str, Any]:

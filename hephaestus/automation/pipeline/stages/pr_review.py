@@ -1332,6 +1332,13 @@ class PrReviewStage(Stage):
                 if is_full_commit_sha(source_sha):
                     item.payload["detached_push_head_sha"] = source_sha
                 return
+            if item.payload.get("direct_pr_worktree") and item.worktree:
+                # A direct-review checkout may hold an address commit even
+                # when publication setup itself failed before it could return
+                # a classified receipt. Preserve rather than failing back to
+                # an agent re-adoption path that could orphan that commit.
+                item.payload["detached_push_failure"] = "remote_unconfirmed"
+                return
             item.payload["address_error"] = True
         elif item.state == ADDRESS_WAIT:
             item.payload["address_error"] = True

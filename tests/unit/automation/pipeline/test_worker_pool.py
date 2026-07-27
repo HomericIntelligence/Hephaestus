@@ -2234,6 +2234,7 @@ class TestGitOps:
         """The worker writes durable provenance before it returns remote drift."""
         worktree = tmp_path / "build" / ".worktrees" / "review-pr-5"
         worktree.mkdir(parents=True)
+        (worktree / ".git").mkdir()
         job = GitJob(
             repo="test/repo",
             op="commit_push",
