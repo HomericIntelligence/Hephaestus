@@ -167,14 +167,14 @@ def _issue_number(item: WorkItem) -> int:
 #: remote must still terminate. Reset on any successful git job.
 GIT_ERROR_RETRY_CAP = 2
 
-#: Timeout for the optional pre-PR unit-test run (mirrors the legacy
+#: Timeout for the optional pre-PR test run (mirrors the legacy
 #: ``_pr_create_phase`` bound; the budget that matters — ``test_fix`` —
 #: lives in ROUTES).
 PRE_PR_TEST_TIMEOUT_S = 1800
 
 #: Vetted pre-PR test command (BuildTestJob argv must never carry
 #: issue-derived strings).
-PRE_PR_TEST_ARGV: tuple[str, ...] = ("uv", "run", "pytest", "tests/unit", "-q", "--tb=short")
+PRE_PR_TEST_ARGV: tuple[str, ...] = ("uv", "run", "pytest", "tests", "-q", "--tb=short")
 
 
 def build_implementation_prompt(
@@ -1015,7 +1015,7 @@ class ImplementationStage(Stage):
                 summary=item.payload.get("implement_summary", "")
                 or f"Automated implementation for issue #{item.issue}.",
                 changes="See the PR diff for the full change set.",
-                testing=item.payload.get("test_output") or "uv run pytest tests/unit -q",
+                testing=item.payload.get("test_output") or "uv run pytest tests -q --tb=short",
             )
             pr_number = ctx.github.create_pr(item.issue, item.branch, title, body)
             item.pr = pr_number
