@@ -42,7 +42,11 @@ from hephaestus.automation.pipeline.tool_scopes import (
     ToolScope,
     tool_scope_for,
 )
-from hephaestus.automation.worktree_manager import WorktreeManager
+from hephaestus.automation.worktree_manager import (
+    BRANCH_WORKTREE_OWNED,
+    BranchWorktreeOwnedError,
+    WorktreeManager,
+)
 from hephaestus.resilience import (
     CircuitBreakerOpenError,
     resilient_call,
@@ -766,6 +770,12 @@ class WorkerPool:
                 ok=False,
                 interrupted=True,
                 error="interrupted_waiting_for_git_lock",
+            )
+        except BranchWorktreeOwnedError as exc:
+            return JobResult(
+                ok=False,
+                error=BRANCH_WORKTREE_OWNED,
+                value={"branch": exc.branch, "owner_path": str(exc.owner_path)},
             )
         except subprocess.TimeoutExpired as exc:
             return JobResult(

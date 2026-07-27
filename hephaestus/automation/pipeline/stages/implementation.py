@@ -92,6 +92,7 @@ from hephaestus.automation.state_labels import (
     is_plan_go,
     is_skipped,
 )
+from hephaestus.automation.worktree_manager import BRANCH_WORKTREE_OWNED
 from hephaestus.prompts import PromptCatalog
 
 from .base import (
@@ -340,6 +341,14 @@ class ImplementationStage(Stage):
     def _dirty_decision_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """DIRTY_DECISION_WAIT routes either to retry or to the dirty-decision job."""
         issue = _issue_number(item)
+        if ownership := item.payload.pop("branch_worktree_owner", None):
+            branch = str(ownership.get("branch") or item.branch)
+            owner_path = str(ownership.get("owner_path") or "")
+            return StageOutcome(
+                Disposition.FINISH_PASS,
+                f"branch {branch!r} already owned at {owner_path}; "
+                "redundant implementation superseded",
+            )
         if item.payload.pop("git_error", None):
             # Worktree creation failed: transient infrastructure, not an
             # implement outcome. If the retry budget remains, retry the
@@ -647,6 +656,14 @@ class ImplementationStage(Stage):
         """
         if not result.ok:
             logger.warning("implementation:%s: worktree job failed: %s", item.issue, result.error)
+            if result.error == BRANCH_WORKTREE_OWNED:
+                ownership = result.value if isinstance(result.value, dict) else {}
+                item.payload["branch_worktree_owner"] = {
+                    "branch": str(ownership.get("branch") or item.branch),
+                    "owner_path": str(ownership.get("owner_path") or ""),
+                }
+                item.worktree = ""
+                return
             direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
             reservation = (
                 result.value.get("direct_scope_reservation")

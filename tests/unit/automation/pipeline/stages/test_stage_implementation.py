@@ -30,6 +30,7 @@ from hephaestus.automation.state_labels import (
     STATE_PLAN_NO_GO,
     STATE_SKIP,
 )
+from hephaestus.automation.worktree_manager import BRANCH_WORKTREE_OWNED
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
@@ -623,6 +624,36 @@ class TestAgentErrorPingPongBound:
 
 class TestGitErrorRetryCap:
     """M5: transient git RETRYs are bounded by GIT_ERROR_RETRY_CAP."""
+
+    def test_branch_worktree_owner_supersedes_without_retry(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A second issue finishes without retrying or starting implementation."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=2269, state="WORKTREE_WAIT")
+        item.branch = "shared-head"
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error=BRANCH_WORKTREE_OWNED,
+                value={
+                    "branch": "shared-head",
+                    "owner_path": "/repo/build/.worktrees/issue-2268",
+                },
+            ),
+            make_ctx(),
+        )
+        item.state = "DIRTY_DECISION_WAIT"
+        outcome = stage.step(item, make_ctx())
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.FINISH_PASS
+        assert "superseded" in outcome.note
+        assert item.worktree == ""
+        assert item.attempts["implement"] == 0
+        assert "git_error_retries" not in item.payload
 
     def test_worktree_failures_retry_to_the_cap_then_fail(
         self, make_ctx: Any, make_work_item: Any

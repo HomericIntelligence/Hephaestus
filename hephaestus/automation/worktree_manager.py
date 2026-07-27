@@ -80,6 +80,19 @@ class WorktreeDirtyError(Exception):
         super().__init__(f"Worktree for issue #{issue_number} at {path} has uncommitted changes")
 
 
+BRANCH_WORKTREE_OWNED = "branch_worktree_owned"
+
+
+class BranchWorktreeOwnedError(RuntimeError):
+    """A different issue already owns the requested writer branch."""
+
+    def __init__(self, branch: str, owner_path: Path) -> None:
+        """Initialize the error with the branch and owning worktree."""
+        self.branch = branch
+        self.owner_path = owner_path
+        super().__init__(f"{branch!r} is already checked out at {owner_path}")
+
+
 class WorktreeManager:
     """Thread-safe manager for git worktrees.
 
@@ -297,21 +310,24 @@ class WorktreeManager:
                 raise RuntimeError("direct scope base pin invalid")
             if base_sha is None and remote_branch_reserved:
                 raise RuntimeError("direct scope reservation requires a base pin")
-            if base_sha is None and (
-                existing := self._reuse_or_clear_normal_worktree(
-                    issue_number=issue_number,
-                    worktree_key=worktree_key,
-                    worktree_path=worktree_path,
-                    branch_name=branch_name,
-                    isolated=isolated,
-                    refresh_base=refresh_base,
-                    timeout=timeout,
-                )
-            ):
-                return existing
-
+            if base_sha is None and refresh_base:
+                # Refresh acquires the same metadata lock; complete it before
+                # entering the lock that serializes holder detection and add.
+                self.refresh_base_branch(timeout=timeout)
             try:
                 with file_lock(self._git_metadata_lock_path()):
+                    if base_sha is None and (
+                        existing := self._reuse_or_clear_normal_worktree(
+                            issue_number=issue_number,
+                            worktree_key=worktree_key,
+                            worktree_path=worktree_path,
+                            branch_name=branch_name,
+                            isolated=isolated,
+                            refresh_base=refresh_base,
+                            timeout=timeout,
+                        )
+                    ):
+                        return existing
                     self._validate_direct_scope_worktree_request(
                         base_sha=base_sha,
                         remote_branch_reserved=remote_branch_reserved,
@@ -346,6 +362,8 @@ class WorktreeManager:
                 logger.info("Created worktree for issue #%s at %s", issue_number, worktree_path)
                 return worktree_path
 
+            except BranchWorktreeOwnedError:
+                raise
             except Exception as e:
                 raise RuntimeError(f"Failed to create worktree: {e}") from e
 
@@ -364,18 +382,12 @@ class WorktreeManager:
         if worktree_key in self.worktrees:
             logger.warning("Worktree for issue #%s already exists", issue_number)
             return self.worktrees[worktree_key]
-        if refresh_base:
-            self.refresh_base_branch(timeout=timeout)
         existing = None if isolated else self._worktree_holding_branch(branch_name, timeout=timeout)
-        if existing is not None and existing != worktree_path:
-            logger.info(
-                "Branch %s already checked out at %s — reusing that worktree for issue #%s",
-                branch_name,
-                existing,
-                issue_number,
-            )
-            self.worktrees[worktree_key] = existing
-            return existing
+        if existing is not None:
+            if existing == worktree_path:
+                self.worktrees[worktree_key] = existing
+                return existing
+            raise BranchWorktreeOwnedError(branch_name, existing)
         if self._reuse_existing_dirty_worktree(
             issue_number,
             worktree_key,
@@ -883,10 +895,9 @@ class WorktreeManager:
 
             worktree_path = self.worktrees[issue_number]
 
-            # Idempotent removal: when several issues share one branch they alias
-            # the same path (see create_worktree's branch-reuse), so cleanup_all
-            # may reach this with the directory already gone after the first key
-            # removed it. Treat an absent directory as already-removed rather than
+            # Idempotent removal: a legacy/stale registration may point at a
+            # directory already removed while recovering an interrupted run.
+            # Treat an absent directory as already-removed rather than
             # raising [Errno 2] — drop the key and prune stale git metadata (#1532).
             if not worktree_path.exists():
                 logger.info(
@@ -956,11 +967,10 @@ class WorktreeManager:
         with self.lock:
             issue_numbers = list(self.worktrees.keys())
 
-        # Several issues can alias the same path when they share a branch (see
-        # create_worktree's branch-reuse). Remove each distinct directory once;
-        # for aliased keys whose path was already removed, just drop the stale
-        # registration instead of re-running `git worktree remove` on a gone dir
-        # (which logged "[Errno 2]" failures before #1532).
+        # Remove each distinct directory once. A legacy/stale registration may
+        # point at a path already removed by an interrupted run; drop that
+        # registration instead of re-running `git worktree remove` on a gone
+        # directory (which logged "[Errno 2]" failures before #1532).
         removed_paths: set[Path] = set()
         for issue_num in issue_numbers:
             with self.lock:
@@ -969,7 +979,7 @@ class WorktreeManager:
                 with self.lock:
                     self.worktrees.pop(issue_num, None)
                 logger.debug(
-                    "Issue #%s aliases already-removed worktree %s; dropping registration",
+                    "Issue #%s references already-removed worktree %s; dropping registration",
                     issue_num,
                     path,
                 )
