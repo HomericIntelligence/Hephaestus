@@ -551,6 +551,19 @@ class TestPushDetachedHead:
             timeout=42,
         )
 
+    def test_rejects_a_detached_push_when_the_remote_head_advanced(
+        self, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A lease rejection remains a hard failure for the coordinator."""
+        git_utils_mocks.run.side_effect = subprocess.CalledProcessError(
+            1,
+            ["git", "push"],
+            stderr="! [rejected] HEAD -> 123-auto-impl (stale info)",
+        )
+
+        with pytest.raises(RuntimeError, match="Failed to publish detached HEAD"):
+            push_head_to_branch("123-auto-impl", "a" * 40, tmp_path)
+
 
 class TestGetCurrentBranch:
     """Tests for get_current_branch function."""
