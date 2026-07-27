@@ -1054,6 +1054,29 @@ class TestProcessOwnedReviewThreadLifecycle:
 
         assert not _is_process_thread_receipt(receipt)
 
+    def test_validation_adopts_a_canonical_live_restart_receipt(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A host-normalized prior automation thread re-enters the one receipt flow."""
+        receipt = self._thread("process-1", 3, "fix this")
+        live = {**receipt, "process_receipt": dict(receipt)}
+
+        class RestartGitHub(FakeStageGitHub):
+            def list_restart_process_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+                del pr_number
+                return [dict(live)]
+
+        item = make_work_item(issue=1, pr=1001, state="VALIDATE_WAIT")
+        item.payload["reviewed_pr_head_sha"] = "a" * 40
+        result = PrReviewStage().step(item, make_ctx(github=RestartGitHub()))
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)
+        assert item.payload["process_review_threads"] == [receipt]
+        assert json.loads(result.job.prompt_kwargs["prior_comments_json"]) == [live]
+        item.payload["validation_result"] = {"unaddressed": [], "wont_fix": []}
+        assert _handled_process_receipts(item) == ([receipt], {"process-1": "addressed"})
+
     def test_wont_fix_process_thread_is_not_a_resolution_candidate(
         self, make_work_item: Any
     ) -> None:

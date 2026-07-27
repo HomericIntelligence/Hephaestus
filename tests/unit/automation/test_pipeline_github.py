@@ -126,6 +126,141 @@ def _process_thread_receipt(thread_id: str, review_id: str, body: str) -> dict[s
 class TestProcessReviewThreadReceipts:
     """Durable receipts limit automated thread actions to this loop's threads."""
 
+    def test_live_automated_thread_exposes_a_canonical_restart_receipt(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only an immutable, marked automated review may be re-adopted after restart."""
+        review_id = "PRR_automation"
+        review_head = "b" * 40
+        automated_comment = "<!-- hephaestus-severity: major -->\nfix this"
+
+        monkeypatch.setattr(
+            adapter,
+            "_graphql",
+            lambda *_args, **_kwargs: {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                "nodes": [
+                                    {
+                                        "id": "automated-thread",
+                                        "isResolved": False,
+                                        "path": "a.py",
+                                        "line": 7,
+                                        "side": "RIGHT",
+                                        "comments": {
+                                            "pageInfo": {"hasNextPage": False},
+                                            "nodes": [
+                                                {
+                                                    "id": "automated-comment",
+                                                    "body": automated_comment,
+                                                    "author": {"login": "mvillmow"},
+                                                    "pullRequestReview": {
+                                                        "id": review_id,
+                                                        "body": (
+                                                            "## Automated PR review\n\nSummary."
+                                                        ),
+                                                        "commit": {"oid": review_head},
+                                                    },
+                                                }
+                                            ],
+                                        },
+                                    },
+                                    {
+                                        "id": "human-thread",
+                                        "isResolved": False,
+                                        "path": "a.py",
+                                        "line": 9,
+                                        "side": "RIGHT",
+                                        "comments": {
+                                            "pageInfo": {"hasNextPage": False},
+                                            "nodes": [
+                                                {
+                                                    "id": "human-comment",
+                                                    "body": (
+                                                        "<!-- hephaestus-severity: major -->\n"
+                                                        "Keep the original text."
+                                                    ),
+                                                    "author": {"login": "mvillmow"},
+                                                    "pullRequestReview": {
+                                                        "id": "PRR_human",
+                                                        "body": "",
+                                                        "commit": {"oid": review_head},
+                                                    },
+                                                }
+                                            ],
+                                        },
+                                    },
+                                    {
+                                        "id": "replied-thread",
+                                        "isResolved": False,
+                                        "path": "a.py",
+                                        "line": 11,
+                                        "side": "RIGHT",
+                                        "comments": {
+                                            "pageInfo": {"hasNextPage": False},
+                                            "nodes": [
+                                                {
+                                                    "id": "replied-comment",
+                                                    "body": automated_comment,
+                                                    "author": {"login": "mvillmow"},
+                                                    "pullRequestReview": {
+                                                        "id": review_id,
+                                                        "body": (
+                                                            "## Automated PR review\n\nSummary."
+                                                        ),
+                                                        "commit": {"oid": review_head},
+                                                    },
+                                                },
+                                                {
+                                                    "id": "human-reply",
+                                                    "body": "Please leave this open.",
+                                                    "author": {"login": "reviewer"},
+                                                    "pullRequestReview": {
+                                                        "id": review_id,
+                                                        "body": (
+                                                            "## Automated PR review\n\nSummary."
+                                                        ),
+                                                        "commit": {"oid": review_head},
+                                                    },
+                                                },
+                                            ],
+                                        },
+                                    },
+                                ],
+                            }
+                        }
+                    }
+                }
+            },
+        )
+
+        threads = adapter._repo_unresolved_threads(7)
+
+        assert threads[0]["process_receipt"] == {
+            "id": "automated-thread",
+            "path": "a.py",
+            "line": 7,
+            "side": "RIGHT",
+            "body": automated_comment,
+            "author": "mvillmow",
+            "authors": ["mvillmow"],
+            "comments": [
+                {
+                    "id": "automated-comment",
+                    "author": "mvillmow",
+                    "body": automated_comment,
+                    "review_id": review_id,
+                }
+            ],
+            "review_id": review_id,
+            "created_head_sha": review_head,
+        }
+        assert "process_receipt" not in threads[1]
+        assert "process_receipt" not in threads[2]
+
     def test_replies_before_resolving_a_revalidated_process_receipt(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
