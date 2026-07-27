@@ -123,42 +123,24 @@ class TestClassifyIssue:
         assert stage is StageName.FINISHED
         assert "merged" in reason
 
-    def test_open_pr_with_legacy_issue_impl_go_routes_to_pr_review_and_warns(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """A legacy issue-level implementation-GO on an open PR is compatibility routing.
-
-        Post-#2280 the durable authorization is the PR-level label; the older
-        issue-level label no longer auto-authorizes a merge. It is treated as
-        an open PR awaiting review and the fallback is logged so the stale
-        label can be retired (#2140).
-        """
-        with caplog.at_level(logging.WARNING, logger="hephaestus.automation.pipeline.seeding"):
-            stage, reason = classify_issue(
-                _facts(labels={STATE_IMPLEMENTATION_GO}, pr_number=42, pr_is_open=True)
-            )
-
+    def test_open_pr_with_issue_impl_go_uses_generic_pr_review_route(self) -> None:
+        """An issue label alone cannot route an open PR to merge wait."""
+        stage, _reason = classify_issue(
+            _facts(labels={STATE_IMPLEMENTATION_GO}, pr_number=42, pr_is_open=True)
+        )
         assert stage is StageName.PR_REVIEW
-        assert "legacy issue-level" in reason
-        assert "legacy_issue_impl_go_fallback" in caplog.text
 
-    def test_open_pr_with_pr_impl_go_routes_to_merge_wait(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """PR-level loop approval routes directly to merge-wait, no legacy fallback."""
-        with caplog.at_level(logging.WARNING, logger="hephaestus.automation.pipeline.seeding"):
-            stage, reason = classify_issue(
-                _facts(
-                    labels={STATE_PLAN_GO},
-                    pr_number=42,
-                    pr_is_open=True,
-                    pr_has_implementation_go=True,
-                )
+    def test_open_pr_with_pr_impl_go_routes_to_merge_wait(self) -> None:
+        """Only the PR-level loop approval routes directly to merge wait."""
+        stage, _reason = classify_issue(
+            _facts(
+                labels={STATE_PLAN_GO},
+                pr_number=42,
+                pr_is_open=True,
+                pr_has_implementation_go=True,
             )
+        )
         assert stage is StageName.MERGE_WAIT
-        assert "implementation-go" in reason
-        assert "legacy issue-level" not in reason
-        assert "legacy_issue_impl_go_fallback" not in caplog.text
 
     def test_open_pr_without_impl_go_routes_to_pr_review(self) -> None:
         """Open PR without implementation-go awaits PR review."""
@@ -176,28 +158,18 @@ class TestClassifyIssue:
         assert stage is StageName.PR_REVIEW
         assert "review" in reason
 
-    def test_pr_impl_no_go_overrides_issue_level_impl_go(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """Authoritative PR no-GO prevents the legacy issue fallback from routing away.
-
-        A pre-PR-label issue snapshot may still carry implementation-GO, but a
-        PR-level no-GO is authoritative and must return the PR to review
-        without emitting the compatibility-fallback observation.
-        """
-        with caplog.at_level(logging.WARNING, logger="hephaestus.automation.pipeline.seeding"):
-            stage, reason = classify_issue(
-                _facts(
-                    labels={STATE_IMPLEMENTATION_GO},
-                    pr_number=42,
-                    pr_is_open=True,
-                    pr_has_implementation_no_go=True,
-                )
+    def test_pr_impl_no_go_with_issue_impl_go_routes_to_pr_review(self) -> None:
+        """A PR-level no-GO remains an ordinary open-PR review route."""
+        stage, _reason = classify_issue(
+            _facts(
+                labels={STATE_IMPLEMENTATION_GO},
+                pr_number=42,
+                pr_is_open=True,
+                pr_has_implementation_no_go=True,
             )
+        )
 
         assert stage is StageName.PR_REVIEW
-        assert "awaiting review" in reason
-        assert "legacy_issue_impl_go_fallback" not in caplog.text
 
     def test_no_pr_at_plan_go_routes_to_implementation(self) -> None:
         """No PR, at-or-past state:plan-go → ready for implementation."""

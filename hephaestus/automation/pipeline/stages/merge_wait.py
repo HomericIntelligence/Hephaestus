@@ -5,6 +5,22 @@ one ordinary REST squash merge only after it observes the exact active-run
 reviewed head, an exclusive implementation-GO label, an open ``main`` PR, and
 an explicitly absent auto-merge request. It never enables, disables, adopts,
 or polls native auto-merge.
+
+The implemented mini-state graph is:
+
+- ``ENTER -> MERGE``. An open PR is admitted only with the current-process
+  reviewed-head proof and the PR-level implementation-GO label; readiness may
+  retry ``MERGE`` within its bounded wait.
+- A PR observed as already merged, or a conditional merge freshly confirmed as
+  merged, enters ``_route_merged``. It exits directly with ``FINISH_PASS``
+  when learning is disabled or already terminal, or follows
+  ``MERGE -> LEARN_WAIT -> MW_FINISH -> FINISH_PASS`` when one post-merge
+  learning job must run.
+- The already-merged path can exit ``FINISH_FAIL`` when a learning result is
+  already in flight or unknown, its claim fails, or result persistence fails.
+  Live admission, readiness, and conditional-merge failures likewise exit
+  safely (or fail back to fresh PR review when the head-bound proof is absent
+  or stale).
 """
 
 from __future__ import annotations
