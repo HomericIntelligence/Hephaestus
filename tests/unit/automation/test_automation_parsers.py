@@ -657,8 +657,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
         _store_true(
             "--run-pre-pr-tests",
             "run_pre_pr_tests",
-            "Run the implementation-stage pre-PR unit-test gate before committing and "
-            "creating PRs.",
+            "Run the implementation-stage pre-PR test gate before committing and creating PRs.",
         ),
         _action_spec(
             ("--model",),
@@ -862,6 +861,19 @@ def test_ci_driver_help_describes_loop_owned_review() -> None:
 
     assert "loop-owned PR review" in description
     assert "enable auto-merge" not in description
+
+
+def test_loop_runner_pre_pr_tests_help_describes_the_test_gate() -> None:
+    """The optional gate is not restricted to repositories' unit-test roots."""
+    parser = loop_runner._build_parser()
+    action = next(
+        action for action in parser._actions if "--run-pre-pr-tests" in action.option_strings
+    )
+
+    assert (
+        action.help
+        == "Run the implementation-stage pre-PR test gate before committing and creating PRs."
+    )
 
 
 def test_build_automation_parser_does_not_add_throttle_by_default() -> None:

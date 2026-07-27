@@ -1346,9 +1346,9 @@ out-of-band.
 
 `--run-pre-pr-tests` is an opt-in queue-runner flag enabling the
 [`implementation`](hephaestus/automation/pipeline/stages/implementation.py)
-pre-PR unit-test gate — argv comes from
-`PipelineConfig.pre_pr_test_argv` so non-standard unit-test layouts
-work without code change.
+pre-PR test gate. Its vetted default is `uv run pytest tests -q --tb=short`;
+programmatic callers can supply `PipelineConfig.pre_pr_test_argv` for a
+different vetted test command.
 
 Three Codex-only flags control per-role reasoning effort:
 `--planner-reasoning-effort {default|low|medium|high|xhigh}` and the
