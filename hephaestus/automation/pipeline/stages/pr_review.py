@@ -450,8 +450,9 @@ def _thread_comment_signature(thread: dict[str, Any]) -> tuple[tuple[str, str], 
 
 
 def _is_process_thread_receipt(raw: dict[str, Any]) -> bool:
-    """Return whether one post-time receipt proves exactly one created comment."""
+    """Return whether a post-time or host-normalized stale receipt is exact."""
     review_id = raw.get("review_id")
+    line = raw.get("line")
     comments = raw.get("comments")
     initial = comments[0] if isinstance(comments, list) and len(comments) == 1 else None
     return bool(
@@ -464,6 +465,10 @@ def _is_process_thread_receipt(raw: dict[str, Any]) -> bool:
         and isinstance(initial.get("id"), str)
         and initial["id"].strip()
         and initial.get("review_id") == review_id
+        and (
+            (isinstance(line, int) and not isinstance(line, bool) and line > 0)
+            or (line is None and raw.get("restart_stale_line") is True)
+        )
         and _thread_comment_signature(raw) is not None
     )
 

@@ -1054,6 +1054,17 @@ class TestProcessOwnedReviewThreadLifecycle:
 
         assert not _is_process_thread_receipt(receipt)
 
+    def test_stale_line_receipt_requires_explicit_restart_provenance(self) -> None:
+        """Only host-normalized restart receipts may retain GitHub's null line."""
+        receipt = self._thread("process-1", 3, "fix this")
+        receipt["line"] = None
+
+        assert not _is_process_thread_receipt(receipt)
+
+        receipt["restart_stale_line"] = True
+
+        assert _is_process_thread_receipt(receipt)
+
     def test_validation_adopts_a_canonical_live_restart_receipt(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
