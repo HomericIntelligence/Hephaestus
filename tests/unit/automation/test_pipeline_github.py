@@ -229,6 +229,30 @@ class TestProcessReviewThreadReceipts:
                                             ],
                                         },
                                     },
+                                    {
+                                        "id": "stale-thread",
+                                        "isResolved": False,
+                                        "path": "stale.py",
+                                        "line": None,
+                                        "side": "RIGHT",
+                                        "comments": {
+                                            "pageInfo": {"hasNextPage": False},
+                                            "nodes": [
+                                                {
+                                                    "id": "stale-comment",
+                                                    "body": automated_comment,
+                                                    "author": {"login": "mvillmow"},
+                                                    "pullRequestReview": {
+                                                        "id": review_id,
+                                                        "body": (
+                                                            "## Automated PR review\n\nSummary."
+                                                        ),
+                                                        "commit": {"oid": review_head},
+                                                    },
+                                                }
+                                            ],
+                                        },
+                                    },
                                 ],
                             }
                         }
@@ -260,6 +284,39 @@ class TestProcessReviewThreadReceipts:
         }
         assert "process_receipt" not in threads[1]
         assert "process_receipt" not in threads[2]
+        assert threads[3]["process_receipt"] == {
+            "id": "stale-thread",
+            "path": "stale.py",
+            "line": None,
+            "side": "RIGHT",
+            "body": automated_comment,
+            "author": "mvillmow",
+            "authors": ["mvillmow"],
+            "comments": [
+                {
+                    "id": "stale-comment",
+                    "author": "mvillmow",
+                    "body": automated_comment,
+                    "review_id": review_id,
+                }
+            ],
+            "review_id": review_id,
+            "created_head_sha": review_head,
+            "restart_stale_line": True,
+        }
+
+    def test_stale_line_receipt_requires_restart_provenance(
+        self, adapter: pg.PipelineGitHub
+    ) -> None:
+        """A null line is eligible only for the host-normalized restart shape."""
+        receipt = _process_thread_receipt("PRRT_stale", "PRR_stale", "finding")
+        receipt["line"] = None
+
+        assert not adapter._is_immutable_process_receipt(receipt)
+
+        receipt["restart_stale_line"] = True
+
+        assert adapter._is_immutable_process_receipt(receipt)
 
     def test_replies_before_resolving_a_revalidated_process_receipt(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch

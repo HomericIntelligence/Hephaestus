@@ -255,9 +255,7 @@ def _canonical_restart_process_receipt(thread: dict[str, Any]) -> dict[str, Any]
         and thread_id
         and isinstance(path, str)
         and path
-        and isinstance(line, int)
-        and not isinstance(line, bool)
-        and line > 0
+        and (line is None or (isinstance(line, int) and not isinstance(line, bool) and line > 0))
         and side == "RIGHT"
         and isinstance(author, str)
         and author
@@ -267,7 +265,7 @@ def _canonical_restart_process_receipt(thread: dict[str, Any]) -> dict[str, Any]
         and comment_id
     ):
         return None
-    return {
+    receipt = {
         "id": thread_id,
         "path": path,
         "line": line,
@@ -286,6 +284,12 @@ def _canonical_restart_process_receipt(thread: dict[str, Any]) -> dict[str, Any]
         "review_id": review_id,
         "created_head_sha": review_commit_sha,
     }
+    if line is None:
+        # GitHub clears the position when the reviewed diff moves.  This is
+        # restart-only provenance: newly posted threads must still have a
+        # current positive line at the post/readback boundary.
+        receipt["restart_stale_line"] = True
+    return receipt
 
 
 def _has_no_explicit_pull_request_bypasses(protection: dict[str, Any]) -> bool:
@@ -878,7 +882,7 @@ class PipelineGitHub:
 
     @staticmethod
     def _is_immutable_process_receipt(receipt: dict[str, Any]) -> bool:
-        """Return whether a receipt proves one initial process-created comment."""
+        """Return whether a receipt proves one immutable process-created comment."""
         thread_id = receipt.get("id")
         review_id = receipt.get("review_id")
         path = receipt.get("path")
@@ -896,9 +900,10 @@ class PipelineGitHub:
             and review_id.strip()
             and isinstance(path, str)
             and path.strip()
-            and isinstance(line, int)
-            and not isinstance(line, bool)
-            and line > 0
+            and (
+                (isinstance(line, int) and not isinstance(line, bool) and line > 0)
+                or (line is None and receipt.get("restart_stale_line") is True)
+            )
             and side == "RIGHT"
             and isinstance(author, str)
             and author.strip()
