@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -186,6 +187,42 @@ def test_run_codex_session_returns_session_id_and_last_message(tmp_path: Path) -
 
     assert result.session_id == "019e1e57-7652-7892-b1ca-c31c93d4b160"
     assert result.stdout == "final answer"
+
+
+def test_run_codex_session_tracks_a_dedicated_process_group(tmp_path: Path) -> None:
+    """An automation caller can reap the complete Codex process group on shutdown."""
+    popen_kwargs: dict[str, Any] = {}
+    tracker_events: list[tuple[str, int]] = []
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeCodexPopen:
+        popen_kwargs.update(kwargs)
+        proc = _FakeCodexPopen(cmd, proc_stdout="", final_message="done", **kwargs)
+        proc.pid = 2468  # type: ignore[attr-defined]
+        return proc
+
+    @contextmanager
+    def track_process_group(pid: int) -> Any:
+        tracker_events.append(("enter", pid))
+        try:
+            yield
+        finally:
+            tracker_events.append(("exit", pid))
+
+    with (
+        patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
+        patch("subprocess.Popen", side_effect=fake_popen),
+    ):
+        agent_runtime.run_codex_session(
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+            sandbox="workspace-write",
+            process_tracker=track_process_group,
+        )
+
+    assert popen_kwargs["start_new_session"] is True
+    assert tracker_events == [("enter", 2468), ("exit", 2468)]
 
 
 def test_run_claude_text_strips_null_byte_from_stdin(tmp_path: Path) -> None:
