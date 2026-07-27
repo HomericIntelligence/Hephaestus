@@ -1176,6 +1176,7 @@ class WorkerPool:
                     error=f"worktree creation failed: {exc}",
                 )
             raise
+        recovery_worktrees = list(manager.last_isolated_recovery_paths)
         return self._finalize_created_worktree(
             created=created,
             base_sha=base_sha,
@@ -1184,6 +1185,7 @@ class WorkerPool:
             repo=job.repo,
             sync_to_remote=sync_to_remote,
             pr_number=pr_number,
+            recovery_worktrees=recovery_worktrees,
             timeout_s=job.timeout_s,
         )
 
@@ -1240,6 +1242,7 @@ class WorkerPool:
         repo: str,
         sync_to_remote: bool,
         pr_number: object,
+        recovery_worktrees: list[Path],
         timeout_s: int,
     ) -> JobResult:
         """Validate a created worktree and attach a direct reservation receipt."""
@@ -1323,15 +1326,15 @@ class WorkerPool:
                 error=f"worktree post-create preparation failed: {exc}",
                 value={"path": str(worktree_path), WORKTREE_MATERIALIZED_KEY: True},
             )
-        return JobResult(
-            ok=True,
-            value={
-                "path": str(worktree_path),
-                "dirty": dirty,
-                "status": status,
-                "diff": diff,
-            },
-        )
+        value: dict[str, object] = {
+            "path": str(worktree_path),
+            "dirty": dirty,
+            "status": status,
+            "diff": diff,
+        }
+        if recovery_worktrees:
+            value["preserved_direct_worktrees"] = [str(path) for path in recovery_worktrees]
+        return JobResult(ok=True, value=value)
 
     @staticmethod
     def _prepare_direct_scope_worktree(

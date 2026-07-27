@@ -427,7 +427,14 @@ class TestPrReviewStageStep:
 
         stage.on_job_done(
             item,
-            JobResult(ok=True, value={"path": "/tmp/review-pr", "dirty": False}),
+            JobResult(
+                ok=True,
+                value={
+                    "path": "/tmp/review-pr",
+                    "dirty": False,
+                    "preserved_direct_worktrees": ["/tmp/review-pr-previous"],
+                },
+            ),
             ctx,
         )
         # ``Coordinator._handle_completion`` assigns on_done_state only after
@@ -438,6 +445,7 @@ class TestPrReviewStageStep:
         assert result == Continue(next_state="REVIEW_WAIT")
         assert item.worktree == "/tmp/review-pr"
         assert item.payload["direct_pr_worktree"] == "/tmp/review-pr"
+        assert item.payload["preserved_direct_worktrees"] == ["/tmp/review-pr-previous"]
         assert "direct_pr_worktree_pending" not in item.payload
 
     def test_enter_advances_to_review(self, make_ctx: Any, make_work_item: Any) -> None:

@@ -1297,6 +1297,24 @@ class PrReviewStage(Stage):
         if isinstance(value, dict):
             item.worktree = str(value.get("path", ""))
             item.payload["direct_pr_worktree_dirty"] = bool(value.get("dirty"))
+            recovery_worktrees = value.get("preserved_direct_worktrees", [])
+            if not isinstance(recovery_worktrees, list) or any(
+                not isinstance(path, str) or not path for path in recovery_worktrees
+            ):
+                item.payload["direct_pr_worktree_error"] = (
+                    "worktree job returned invalid recovery paths"
+                )
+                return
+            if recovery_worktrees:
+                preserved = item.payload.setdefault("preserved_direct_worktrees", [])
+                if not isinstance(preserved, list):
+                    item.payload["direct_pr_worktree_error"] = (
+                        "direct review recovery receipt is invalid"
+                    )
+                    return
+                for path in recovery_worktrees:
+                    if path not in preserved:
+                        preserved.append(path)
             if item.worktree and not item.payload["direct_pr_worktree_dirty"]:
                 item.payload["direct_pr_worktree"] = item.worktree
         elif isinstance(value, str):

@@ -1357,6 +1357,7 @@ class TestGitOps:
         )
         instance = MagicMock()
         instance.create_worktree.return_value = review_path
+        instance.last_isolated_recovery_paths = []
         with (
             patch(f"{_WP}.WorktreeManager", return_value=instance),
             patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
@@ -1373,6 +1374,48 @@ class TestGitOps:
         )
         mock_sync.assert_called_once_with(review_path, "70-existing", pr_number=70, timeout=60)
         assert result.ok is True
+
+    def test_create_isolated_worktree_returns_cold_start_recovery_paths(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A new direct-review adoption reports older retained checkouts to the stage."""
+        review_path = tmp_path / "build" / ".worktrees" / "review-pr-70-1"
+        retained_path = tmp_path / "build" / ".worktrees" / "review-pr-70"
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 70,
+                "branch_name": "70-existing",
+                "isolated": True,
+                "repo_root": str(tmp_path),
+                "sync_to_remote": True,
+                "pr_number": 70,
+            },
+        )
+        instance = MagicMock()
+        instance.create_worktree.return_value = review_path
+        instance.last_isolated_recovery_paths = [retained_path]
+        with (
+            patch(f"{_WP}.WorktreeManager", return_value=instance),
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+            patch(f"{_WP}.git_utils.sync_worktree_to_remote_branch"),
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        assert result.value == {
+            "path": str(review_path),
+            "dirty": False,
+            "status": "",
+            "diff": "",
+            "preserved_direct_worktrees": [str(retained_path)],
+        }
 
     def test_verify_pr_review_checkout_rejects_a_dirty_worktree(
         self,

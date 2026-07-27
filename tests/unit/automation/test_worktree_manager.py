@@ -299,6 +299,24 @@ class TestWorktreeManager:
         assert clean.exists()
         assert (dirty / "uncommitted-fix").read_text() == "retain me"
 
+    def test_isolated_review_skips_a_registered_missing_checkout_and_reports_it(
+        self, worktree_mocks: Any, tmp_path: Any
+    ) -> None:
+        """A cold-start recovery does not collide with a prunable Git worktree."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+        registered = manager.base_dir / "review-pr-2500"
+
+        with patch.object(manager, "list_worktrees", return_value=[{"path": str(registered)}]):
+            created = manager.create_worktree(2500, "2500-auto-impl", isolated=True)
+
+        assert created == manager.base_dir / "review-pr-2500-1"
+        assert manager.last_isolated_recovery_paths == [registered]
+        assert all(
+            "worktree remove" not in call.args[0] and "worktree prune" not in call.args[0]
+            for call in worktree_mocks.run.call_args_list
+        )
+
     def test_isolated_review_add_failure_never_removes_a_concurrently_created_checkout(
         self, worktree_mocks: Any, tmp_path: Any
     ) -> None:

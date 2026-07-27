@@ -139,6 +139,9 @@ class WorktreeManager:
         self._base_branch_resolved: str | None = None
         self.worktrees: dict[int | str, Path] = {}
         self.preserved: list[tuple[int | str, Path]] = []
+        # The WorkerPool reads this receipt after an isolated creation so a
+        # cold-start review can surface older recovery checkouts in Finished.
+        self.last_isolated_recovery_paths: list[Path] = []
         self.lock = threading.Lock()
 
         logger.debug("Initialized WorktreeManager at %s", self.base_dir)
@@ -425,16 +428,18 @@ class WorktreeManager:
         # generation hint. This supports cold-start re-review safely.
         if refresh_base:
             self.refresh_base_branch(timeout=timeout)
+        self.last_isolated_recovery_paths = []
         try:
             with file_lock(self._git_metadata_lock_path()):
-                worktree_key, worktree_path = self._next_isolated_worktree_slot(
-                    issue_number, isolated_generation
+                worktree_key, worktree_path, recovery_paths = self._next_isolated_worktree_slot(
+                    issue_number, isolated_generation, timeout=timeout
                 )
                 self._add_isolated_worktree_for_branch(
                     worktree_path,
                     branch_name,
                     timeout=timeout,
                 )
+            self.last_isolated_recovery_paths = recovery_paths
             self.worktrees[worktree_key] = worktree_path
             logger.info(
                 "Created isolated review worktree for issue #%s at %s",
@@ -450,8 +455,12 @@ class WorktreeManager:
             raise RuntimeError(f"Failed to create worktree: {e}") from e
 
     def _next_isolated_worktree_slot(
-        self, issue_number: int, requested_generation: int
-    ) -> tuple[str, Path]:
+        self,
+        issue_number: int,
+        requested_generation: int,
+        *,
+        timeout: int | None,
+    ) -> tuple[str, Path, list[Path]]:
         """Return an unused detached-review path at or after the requested generation.
 
         This runs under :meth:`_git_metadata_lock_path`, so two coordinators
@@ -459,15 +468,28 @@ class WorktreeManager:
         Existing paths are never reused: they may contain an unpublished
         address commit even when ``git status`` reports a clean tree.
         """
+        registered_paths = self._registered_worktree_paths(timeout=timeout)
         generation = requested_generation
+        recovery_paths: list[Path] = []
         while True:
             key = f"review-pr-{issue_number}"
             if generation:
                 key = f"{key}-{generation}"
             path = self.base_dir / key
-            if key not in self.worktrees and not path.exists():
-                return key, path
+            occupied = key in self.worktrees or path.exists() or path.resolve() in registered_paths
+            if not occupied:
+                return key, path, recovery_paths
+            if path not in recovery_paths:
+                recovery_paths.append(path)
             generation += 1
+
+    def _registered_worktree_paths(self, *, timeout: int | None) -> set[Path]:
+        """Return Git-registered worktree paths, failing closed on a listing error."""
+        return {
+            Path(path).resolve()
+            for worktree in self.list_worktrees(raise_on_error=True, timeout=timeout)
+            if isinstance(path := worktree.get("path"), str) and path
+        }
 
     def _reuse_or_clear_normal_worktree(
         self,
