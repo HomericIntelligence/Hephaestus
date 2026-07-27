@@ -455,6 +455,7 @@ def _is_process_thread_receipt(raw: dict[str, Any]) -> bool:
     line = raw.get("line")
     comments = raw.get("comments")
     initial = comments[0] if isinstance(comments, list) and len(comments) == 1 else None
+    external_bot = raw.get("external_bot") is True
     return bool(
         _durable_thread_id(raw)
         and isinstance(review_id, str)
@@ -470,6 +471,14 @@ def _is_process_thread_receipt(raw: dict[str, Any]) -> bool:
             or (line is None and raw.get("restart_stale_line") is True)
         )
         and _thread_comment_signature(raw) is not None
+        and (
+            not external_bot
+            or (
+                raw.get("author_type") == "Bot"
+                and isinstance(initial, dict)
+                and initial.get("author_type") == "Bot"
+            )
+        )
     )
 
 
@@ -1283,12 +1292,14 @@ class PrReviewStage(Stage):
     def _reconcile_process_threads_before_post(
         item: WorkItem, ctx: StageContext, threads: list[dict[str, Any]]
     ) -> list[dict[str, Any]] | StepResult:
-        """Suppress duplicate findings and hand live process threads to a human.
+        """Suppress duplicate findings and preserve process-thread boundaries.
 
         Guarded receipt reconciliation runs immediately before this helper.
-        Any process thread still live here was unaddressed, changed, or not
-        provably process-owned, so it remains a GitHub-human gate. A fresh run
-        can proceed after a human resolves it or a new exact receipt is made.
+        A live loop-created thread remains a GitHub-human gate.  A verified
+        external Bot receipt may proceed only when the validator explicitly
+        reports it unaddressed; POST then routes its fenced finding through
+        the normal address path.  Any changed, replied, malformed, user, or
+        validator-ambiguous thread remains a hard handoff.
         """
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
@@ -1312,12 +1323,29 @@ class PrReviewStage(Stage):
         if live_process is None:
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
-        if live_process:
+        bot_ids = {
+            thread_id
+            for thread_id, receipt in records.items()
+            if receipt.get("external_bot") is True and thread_id in live_process
+        }
+        if set(live_process) - bot_ids:
             return PrReviewStage._handle_automation_threads_requiring_human_resolution(
                 item,
-                len(live_process),
+                len(set(live_process) - bot_ids),
                 ctx,
             )
+        if bot_ids:
+            parsed = _parse_validation_result(item.payload.get("validation_result"))
+            if parsed is None:
+                return PrReviewStage._handle_automation_threads_requiring_human_resolution(
+                    item, len(bot_ids), ctx
+                )
+            unaddressed = _thread_ids(parsed.get("unaddressed"))
+            wont_fix = _thread_ids(parsed.get("wont_fix"))
+            if bot_ids & wont_fix or not bot_ids.issubset(unaddressed):
+                return PrReviewStage._handle_automation_threads_requiring_human_resolution(
+                    item, len(bot_ids), ctx
+                )
         return _without_duplicate_live_process_findings(threads, live_process)
 
     @staticmethod
