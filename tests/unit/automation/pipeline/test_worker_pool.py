@@ -1030,6 +1030,8 @@ class TestGitOps:
         )
         assert result.ok is rebase_clean
         assert result.value is rebase_clean
+        expected_error = None if rebase_clean else "mechanical rebase hit conflicts; aborted"
+        assert result.error == expected_error
 
     def test_push_dispatch(
         self,
