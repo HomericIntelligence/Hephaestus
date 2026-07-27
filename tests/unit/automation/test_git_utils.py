@@ -613,6 +613,18 @@ class TestPushDetachedHead:
 
         assert "sensitive" not in str(exc_info.value)
 
+    def test_accepts_an_ambiguous_push_after_the_exact_source_was_published(
+        self, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A lost transport result is not remote drift when the source is live."""
+        source_sha = "b" * 40
+        git_utils_mocks.run.side_effect = [
+            subprocess.TimeoutExpired(["git", "push"], timeout=42),
+            Mock(stdout=source_sha + "\trefs/heads/123-auto-impl\n"),
+        ]
+
+        push_head_to_branch("123-auto-impl", "a" * 40, tmp_path, source_sha=source_sha)
+
     @pytest.mark.parametrize(
         ("observed_head", "error_type"),
         [

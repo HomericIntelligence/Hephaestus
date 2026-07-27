@@ -504,6 +504,13 @@ def push_head_to_branch(
             raise DetachedHeadPushRemoteProbeError(
                 "Detached review push failed and the remote head could not be verified"
             ) from probe_exc
+        if source_sha is not None and observed and observed[0] == source_sha:
+            # A transport error can arrive after receive-pack accepted this
+            # exact immutable source commit. The intended remote state is
+            # already present, so treating it as drift would needlessly start
+            # a second review and preserve a checkout that was published.
+            logger.info("Detached review commit was published before the push result was lost")
+            return
         if not observed or observed[0] != expected_remote_sha:
             raise DetachedHeadPushRemoteHeadChangedError(
                 "Detached review push observed a different remote head"

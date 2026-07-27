@@ -192,6 +192,56 @@ class TestCleanup:
         assert isinstance(result, Continue) and result.next_state == "DONE"
         assert preserved == [("repo-a", 42, "/wt/issue-42")]
 
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            "remote_changed",
+            "remote_changed_unrecorded",
+            "remote_unchanged",
+            "remote_unconfirmed",
+            "retry_checkout_changed",
+            "retry_checkout_unconfirmed",
+        ],
+    )
+    def test_failed_detached_push_uses_inspection_only_preservation(
+        self,
+        stage: FinishedStage,
+        preserved: list[tuple[str, int, str]],
+        recovery_preserved: list[tuple[str, int, str]],
+        make_ctx: Any,
+        failure: str,
+    ) -> None:
+        """Any terminal detached-push failure can contain an unpublished commit."""
+        item = _item(passed=False, worktree="/wt/review-pr-42", state="CLEANUP", pr=1001)
+        item.payload["detached_push_failure"] = failure
+
+        result = stage.step(item, make_ctx())
+
+        assert result == Continue(next_state="DONE")
+        assert preserved == []
+        assert recovery_preserved == [("repo-a", 42, "/wt/review-pr-42")]
+
+    def test_receipt_backed_failed_checkout_never_reaches_force_remove_footer(
+        self,
+        stage: FinishedStage,
+        preserved: list[tuple[str, int, str]],
+        recovery_preserved: list[tuple[str, int, str]],
+        make_ctx: Any,
+    ) -> None:
+        """A capped remote-drift retry remains inspection-only after receipt discovery."""
+        item = _item(passed=False, worktree="/wt/review-pr-42", state="CLEANUP", pr=1001)
+
+        with patch.object(
+            finished_module,
+            "list_direct_review_recovery_paths",
+            return_value=[Path(item.worktree)],
+        ):
+            result = stage.step(item, make_ctx())
+
+        assert result == Continue(next_state="DONE")
+        assert preserved == []
+        assert recovery_preserved == [("repo-a", 42, "/wt/review-pr-42")]
+
     def test_fail_preserve_is_idempotent(
         self,
         stage: FinishedStage,

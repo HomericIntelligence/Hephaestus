@@ -10,6 +10,7 @@ from hephaestus.automation.direct_review_recovery import (
     list_direct_review_recovery_paths,
     record_direct_review_recovery,
 )
+from hephaestus.automation.models import DEFAULT_STATE_DIR
 
 
 def _worktree(repo_root: Path, issue: int) -> Path:
@@ -60,3 +61,47 @@ def test_receipt_rejects_a_worktree_outside_the_isolated_review_root(tmp_path: P
             expected_remote_sha="a" * 40,
             source_sha="b" * 40,
         )
+
+
+def test_receipt_rejects_a_symlinked_state_directory(tmp_path: Path) -> None:
+    """Receipt reads and writes never follow a state-directory symlink."""
+    worktree = _worktree(tmp_path, 2500)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    state_dir = tmp_path / DEFAULT_STATE_DIR
+    state_dir.parent.mkdir(parents=True, exist_ok=True)
+    state_dir.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="receipt directory"):
+        record_direct_review_recovery(
+            repo_root=tmp_path,
+            issue=2500,
+            pr=2501,
+            worktree=worktree,
+            branch="2500-auto",
+            expected_remote_sha="a" * 40,
+            source_sha="b" * 40,
+        )
+
+    assert list_direct_review_recovery_paths(repo_root=tmp_path, issue=2500, pr=2501) == []
+
+
+def test_receipt_does_not_authorize_a_replacement_checkout_at_the_same_path(
+    tmp_path: Path,
+) -> None:
+    """A stale receipt cannot reclassify a later checkout as an old recovery."""
+    worktree = _worktree(tmp_path, 2500)
+    record_direct_review_recovery(
+        repo_root=tmp_path,
+        issue=2500,
+        pr=2501,
+        worktree=worktree,
+        branch="2500-auto",
+        expected_remote_sha="a" * 40,
+        source_sha="b" * 40,
+    )
+
+    worktree.rmdir()
+    worktree.mkdir()
+
+    assert list_direct_review_recovery_paths(repo_root=tmp_path, issue=2500, pr=2501) == []

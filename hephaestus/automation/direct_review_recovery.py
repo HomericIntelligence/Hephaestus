@@ -12,7 +12,7 @@ from hephaestus.io.utils import write_secure
 from hephaestus.utils.file_lock import file_lock
 
 _RECEIPT_DIR = "direct-review-recovery"
-_RECEIPT_VERSION = 1
+_RECEIPT_VERSION = 2
 _REMOTE_CHANGED_REASON = "remote_changed"
 
 
@@ -42,9 +42,34 @@ def _validated_worktree_path(repo_root: Path, issue: int, path: Path) -> Path:
     return normalized
 
 
-def _receipt_dir(repo_root: Path) -> Path:
-    """Return the repository-scoped direct-review receipt directory."""
-    return repo_root / DEFAULT_STATE_DIR / _RECEIPT_DIR
+def _receipt_dir(repo_root: Path, *, create: bool = False) -> Path:
+    """Return a confined direct-review receipt directory.
+
+    Receipt metadata participates in recovery decisions, so it must not escape
+    the repository when a pre-existing state-directory component is a symlink.
+    The caller that writes a receipt requests directory creation explicitly;
+    read-only discovery leaves an absent state directory absent.
+    """
+    root = repo_root.resolve()
+    receipt_dir = root / DEFAULT_STATE_DIR / _RECEIPT_DIR
+    resolved_receipt_dir = receipt_dir.resolve()
+    if root not in resolved_receipt_dir.parents:
+        raise ValueError("direct review recovery receipt directory is outside the repository")
+    component = root
+    for part in (*Path(DEFAULT_STATE_DIR).parts, _RECEIPT_DIR):
+        component /= part
+        if component.is_symlink():
+            raise ValueError("direct review recovery receipt directory is symlinked")
+        if component.exists() and not component.is_dir():
+            raise ValueError("direct review recovery receipt directory is not a directory")
+    if create:
+        receipt_dir.mkdir(parents=True, exist_ok=True)
+        # Re-check after mkdir: a concurrent replacement must not redirect the
+        # lock or atomic receipt write outside this repository.
+        resolved_receipt_dir = receipt_dir.resolve()
+        if root not in resolved_receipt_dir.parents or receipt_dir.is_symlink():
+            raise ValueError("direct review recovery receipt directory is unsafe")
+    return receipt_dir
 
 
 def _receipt_path(receipt_dir: Path, pr: int, worktree: Path) -> Path:
@@ -56,6 +81,12 @@ def _receipt_path(receipt_dir: Path, pr: int, worktree: Path) -> Path:
 def _receipt_lock_path(receipt_dir: Path, pr: int) -> Path:
     """Return the per-PR lock serializing receipt writes and reads."""
     return receipt_dir / f"direct-review-{pr}.lock"
+
+
+def _worktree_identity(worktree: Path) -> tuple[int, int]:
+    """Return the filesystem identity that binds a receipt to one checkout."""
+    stat = worktree.stat()
+    return stat.st_dev, stat.st_ino
 
 
 def record_direct_review_recovery(
@@ -80,11 +111,12 @@ def record_direct_review_recovery(
         raise ValueError("direct review recovery branch is invalid")
     if not _is_full_sha(expected_remote_sha) or not _is_full_sha(source_sha):
         raise ValueError("direct review recovery commit receipt is invalid")
-    normalized_root = repo_root.resolve()
+    normalized_root = Path(repo_root).resolve()
     normalized_worktree = _validated_worktree_path(normalized_root, issue, worktree)
     if not normalized_worktree.is_dir():
         raise ValueError("direct review recovery worktree is missing")
-    receipt_dir = _receipt_dir(normalized_root)
+    worktree_device, worktree_inode = _worktree_identity(normalized_worktree)
+    receipt_dir = _receipt_dir(normalized_root, create=True)
     receipt = {
         "branch": branch,
         "expected_remote_sha": expected_remote_sha,
@@ -95,6 +127,8 @@ def record_direct_review_recovery(
         "schema_version": _RECEIPT_VERSION,
         "source_sha": source_sha,
         "worktree": str(normalized_worktree),
+        "worktree_device": worktree_device,
+        "worktree_inode": worktree_inode,
     }
     target = _receipt_path(receipt_dir, pr, normalized_worktree)
     with file_lock(_receipt_lock_path(receipt_dir, pr)):
@@ -110,8 +144,11 @@ def list_direct_review_recovery_paths(*, repo_root: Path, issue: int, pr: int) -
     """
     if isinstance(pr, bool) or not isinstance(pr, int) or pr <= 0:
         return []
-    normalized_root = repo_root.resolve()
-    receipt_dir = _receipt_dir(normalized_root)
+    normalized_root = Path(repo_root).resolve()
+    try:
+        receipt_dir = _receipt_dir(normalized_root)
+    except ValueError:
+        return []
     if not receipt_dir.is_dir():
         return []
     paths: list[Path] = []
@@ -125,6 +162,7 @@ def list_direct_review_recovery_paths(*, repo_root: Path, issue: int, pr: int) -
                 worktree = _validated_worktree_path(
                     normalized_root, issue, Path(str(payload.get("worktree", "")))
                 )
+                worktree_device, worktree_inode = _worktree_identity(worktree)
                 if (
                     payload.get("schema_version") != _RECEIPT_VERSION
                     or payload.get("reason") != _REMOTE_CHANGED_REASON
@@ -135,6 +173,12 @@ def list_direct_review_recovery_paths(*, repo_root: Path, issue: int, pr: int) -
                     or not _is_full_sha(payload.get("expected_remote_sha"))
                     or not _is_full_sha(payload.get("source_sha"))
                     or not worktree.is_dir()
+                    or isinstance(payload.get("worktree_device"), bool)
+                    or not isinstance(payload.get("worktree_device"), int)
+                    or payload.get("worktree_device") != worktree_device
+                    or isinstance(payload.get("worktree_inode"), bool)
+                    or not isinstance(payload.get("worktree_inode"), int)
+                    or payload.get("worktree_inode") != worktree_inode
                     or worktree in seen
                 ):
                     continue
