@@ -1071,6 +1071,7 @@ class TestProcessOwnedReviewThreadLifecycle:
         result = PrReviewStage().step(item, make_ctx(github=RestartGitHub()))
 
         assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)
         assert item.payload["process_review_threads"] == [receipt]
         assert json.loads(result.job.prompt_kwargs["prior_comments_json"]) == [live]
         item.payload["validation_result"] = {"unaddressed": [], "wont_fix": []}
