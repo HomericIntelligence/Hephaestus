@@ -137,6 +137,34 @@ def test_receipt_supports_and_binds_a_linked_worktree_gitdir(tmp_path: Path) -> 
     ]
 
 
+def test_receipt_supports_a_linked_repository_root(tmp_path: Path) -> None:
+    """Recovery works when the loop itself runs from a linked checkout."""
+    repo_root = tmp_path / "linked-root"
+    worktree = repo_root / "build" / ".worktrees" / "review-pr-2500"
+    worktree.mkdir(parents=True)
+    common_git_dir = tmp_path / "common" / ".git"
+    root_git_dir = common_git_dir / "worktrees" / "linked-root"
+    review_git_dir = common_git_dir / "worktrees" / "review-pr-2500"
+    root_git_dir.mkdir(parents=True)
+    review_git_dir.mkdir()
+    (repo_root / ".git").write_text(f"gitdir: {root_git_dir}\n", encoding="utf-8")
+    (worktree / ".git").write_text(f"gitdir: {review_git_dir}\n", encoding="utf-8")
+
+    record_direct_review_recovery(
+        repo_root=repo_root,
+        issue=2500,
+        pr=2501,
+        worktree=worktree,
+        branch="2500-auto",
+        expected_remote_sha="a" * 40,
+        source_sha="b" * 40,
+    )
+
+    assert list_direct_review_recovery_paths(repo_root=repo_root, issue=2500, pr=2501) == [
+        worktree.resolve()
+    ]
+
+
 def test_receipt_write_does_not_follow_a_replaced_state_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
