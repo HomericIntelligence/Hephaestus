@@ -443,21 +443,26 @@ def delete_local_branch_if_unchanged(
 
 
 def push_head_to_branch(
-    branch_name: str, worktree_path: Path, *, timeout: int | None = None
+    branch_name: str,
+    expected_remote_sha: str,
+    worktree_path: Path,
+    *,
+    timeout: int | None = None,
 ) -> None:
     """Publish detached ``HEAD`` to ``origin/<branch_name>`` safely.
 
     Direct PR review uses a detached, isolated worktree so it can never reset
-    or remove a writer checkout.  Addressing commits therefore live on its
-    detached ``HEAD`` rather than on the local branch ref.  An ordinary
-    fast-forward push of that exact HEAD fails closed if the PR branch changed;
-    it neither records a proof nor force-updates another writer's work.
+    or remove a writer checkout. Addressing commits therefore live on its
+    detached ``HEAD`` rather than on the local branch ref. The explicit lease
+    permits an address agent to rebase onto current main while refusing to
+    overwrite a PR head that changed after its reviewed-head proof.
     """
     try:
         run(
             [
                 "git",
                 "push",
+                f"--force-with-lease=refs/heads/{branch_name}:{expected_remote_sha}",
                 "origin",
                 f"HEAD:refs/heads/{branch_name}",
             ],

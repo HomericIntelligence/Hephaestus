@@ -532,16 +532,37 @@ class TestDirectScopeBranchReservation:
 class TestPushDetachedHead:
     """Tests for publishing direct PR-review commits from a detached checkout."""
 
-    def test_pushes_head_to_branch_without_force_or_proof(
+    def test_pushes_head_to_branch_with_the_reviewed_head_lease(
         self, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
-        push_head_to_branch("123-auto-impl", tmp_path, timeout=42)
+        reviewed_head = "a" * 40
+
+        push_head_to_branch("123-auto-impl", reviewed_head, tmp_path, timeout=42)
 
         git_utils_mocks.run.assert_called_once_with(
-            ["git", "push", "origin", "HEAD:refs/heads/123-auto-impl"],
+            [
+                "git",
+                "push",
+                f"--force-with-lease=refs/heads/123-auto-impl:{reviewed_head}",
+                "origin",
+                "HEAD:refs/heads/123-auto-impl",
+            ],
             cwd=tmp_path,
             timeout=42,
         )
+
+    def test_rejects_a_detached_push_when_the_remote_head_advanced(
+        self, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A lease rejection remains a hard failure for the coordinator."""
+        git_utils_mocks.run.side_effect = subprocess.CalledProcessError(
+            1,
+            ["git", "push"],
+            stderr="! [rejected] HEAD -> 123-auto-impl (stale info)",
+        )
+
+        with pytest.raises(RuntimeError, match="Failed to publish detached HEAD"):
+            push_head_to_branch("123-auto-impl", "a" * 40, tmp_path)
 
 
 class TestGetCurrentBranch:

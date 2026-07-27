@@ -959,6 +959,29 @@ class TestPrReviewStageStep:
         }
         assert result.on_done_state == "EVAL"
 
+    def test_push_wait_binds_detached_push_to_reviewed_head(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A rebased detached address commit may update only the reviewed PR head."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="PUSH_WAIT")
+        item.branch = "1-auto-impl"
+        item.worktree = "/tmp/review-pr"
+        item.payload.update(
+            {
+                "direct_pr_worktree": "/tmp/review-pr",
+                "reviewed_pr_head_sha": "a" * 40,
+            }
+        )
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.kwargs["publish_detached_head"] is True
+        assert result.job.kwargs["expected_remote_sha"] == "a" * 40
+
     def test_address_refuses_fork_head_without_base_origin_write(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

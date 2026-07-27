@@ -1888,6 +1888,7 @@ class TestGitOps:
                 "worktree_path": tmp_path,
                 "branch": "5-auto",
                 "publish_detached_head": True,
+                "expected_remote_sha": "a" * 40,
             },
         )
         with (
@@ -1898,7 +1899,7 @@ class TestGitOps:
             pool.submit(job, StageName.PR_REVIEW)
             _, result = completion_q.get(timeout=10)
 
-        mock_push.assert_called_once_with("5-auto", tmp_path, timeout=60)
+        mock_push.assert_called_once_with("5-auto", "a" * 40, tmp_path, timeout=60)
         normal_push.assert_not_called()
         assert result.ok is True
         assert result.value is True
