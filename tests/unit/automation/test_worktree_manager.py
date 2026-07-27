@@ -386,8 +386,16 @@ class TestWorktreeManager:
             manager.create_worktree(768, "768-auto-impl")
 
         argvs = [c[0][0] for c in worktree_mocks.run.call_args_list]
-        # A fetch of the remote branch must occur.
-        assert any(a[:2] == ["git", "fetch"] and "768-auto-impl" in a for a in argvs)
+        # A single-branch clone does not materialize a remote-tracking ref for
+        # ``git fetch origin <branch>``; fetch the ref explicitly because the
+        # next command must resolve ``origin/<branch>`` locally.
+        fetch_argv = next(a for a in argvs if a[:2] == ["git", "fetch"])
+        assert fetch_argv == [
+            "git",
+            "fetch",
+            "origin",
+            "+refs/heads/768-auto-impl:refs/remotes/origin/768-auto-impl",
+        ]
         # The worktree-add must use origin/<branch>, NOT the base branch.
         add_argv = next(a for a in argvs if a[:3] == ["git", "worktree", "add"])
         assert add_argv == [
