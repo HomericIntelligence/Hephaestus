@@ -50,10 +50,11 @@ def _placeholder_signature(
             raise ValueError(f"invalid percent placeholder in template {template!r}")
         cursor = match.end()
         conversion = match.group("conversion")
-        if match.group("width") == "*":
-            positional.append("*")
-        if match.group("precision") == "*":
-            positional.append("*")
+        # ``*`` width and precision are positional operands consumed before
+        # the conversion value (for example, ``%*.*f`` consumes three args).
+        for specifier in ("width", "precision"):
+            if match.group(specifier) == "*":
+                positional.append("*")
         name = match.group("name")
         if name is None:
             positional.append(conversion)

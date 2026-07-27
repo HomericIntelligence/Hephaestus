@@ -7,7 +7,13 @@ from typing import Any, cast
 
 import pytest
 
-from hephaestus.cli.localization import Localizer, get_localizer, text, using_localizer
+from hephaestus._localization import _placeholder_signature
+from hephaestus.cli.localization import (
+    Localizer,
+    get_localizer,
+    text,
+    using_localizer,
+)
 
 
 def test_english_fallback_and_missing_key() -> None:
@@ -35,6 +41,31 @@ def test_named_placeholders_may_be_reordered() -> None:
 
 
 @pytest.mark.parametrize(
+    ("template", "expected"),
+    [
+        ("Width %*s", (("*", "s"), ())),
+        ("Precision %.*f", (("*", "f"), ())),
+        ("Width and precision %*.*f", (("*", "*", "f"), ())),
+    ],
+)
+def test_placeholder_signature_includes_star_operands(
+    template: str,
+    expected: tuple[tuple[str, ...], tuple[tuple[str, str], ...]],
+) -> None:
+    """Star width and precision operands count before their conversion."""
+    assert _placeholder_signature(template) == expected
+
+
+def test_star_operands_are_used_when_rendering_translations() -> None:
+    """Catalog validation and rendering agree on star operand arity."""
+    localizer = Localizer({"Width and precision %*.*f": "Largeur et précision %*.*f"})
+
+    assert localizer.text("Width and precision %*.*f", 8, 2, 3.14) == (
+        "Largeur et précision     3.14"
+    )
+
+
+@pytest.mark.parametrize(
     ("source", "translated"),
     [
         ("Hello %(name)s", "Bonjour"),
@@ -45,6 +76,8 @@ def test_named_placeholders_may_be_reordered() -> None:
         ("Width %*s", "Large %s"),
         ("Precision %.*f", "Précision %f"),
         ("Number %*.*f", "Nombre %.*f"),
+        ("Width %*s", "Large %*d"),
+        ("Precision %.*f", "Précision %.*d"),
     ],
 )
 def test_invalid_placeholder_catalogs_are_rejected(source: str, translated: str) -> None:
