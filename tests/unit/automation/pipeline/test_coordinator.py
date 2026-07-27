@@ -34,7 +34,7 @@ from hephaestus.automation.pipeline.routing import (
 )
 from hephaestus.automation.pipeline.seeding import SeedEntry
 from hephaestus.automation.pipeline.stages.base import JobRequest
-from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
+from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkItem
 from hephaestus.resilience import (
     all_circuit_breaker_snapshots,
     get_circuit_breaker,
@@ -287,6 +287,151 @@ class TestQuiescence:
 
         assert coordinator._reseed_if_converged() is False
         assert coordinator._loops_run == 2
+
+    @pytest.mark.parametrize(
+        "handoff_reason",
+        ["human_blocked", "automation_threads_require_human_resolution"],
+    )
+    def test_direct_pr_human_handoff_is_not_reseeded_in_same_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, handoff_reason: str
+    ) -> None:
+        """An unchanged human handoff converges instead of re-reviewing the PR."""
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                prs=[701],
+                max_workers=2,
+                projects_dir=tmp_path,
+            ),
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        entry = SeedEntry(
+            kind="pr",
+            identifier=701,
+            stage=StageName.PR_REVIEW,
+            reason="awaiting review",
+            pr_number=701,
+            issue_number=700,
+        )
+        monkeypatch.setattr(
+            coordinator,
+            "_seed_direct_pr_scope",
+            lambda _repo, _prs: [entry],
+        )
+
+        coordinator._begin_direct_pr_source("repo-a", "")
+        assert coordinator._drain_direct_pr_source() == 1
+        first_item = coordinator.items[0]
+        first_item.result = ItemResult(
+            passed=False,
+            reason=handoff_reason,
+            final_stage=StageName.PR_REVIEW,
+        )
+        coordinator._record_terminal_result(first_item)
+
+        coordinator._pass_work_count = 0
+        coordinator._begin_direct_pr_source("repo-a", "")
+
+        assert coordinator._drain_direct_pr_source() == 0
+        assert coordinator._pass_work_count == 0
+
+    def test_only_direct_pr_handoffs_stop_before_a_new_pass(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """All explicit PRs awaiting a person end the run without a reseed."""
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                prs=[701],
+                loops=2,
+                projects_dir=tmp_path,
+            ),
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        item = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.PR,
+            issue=700,
+            pr=701,
+            stage=StageName.PR_REVIEW,
+        )
+        item.result = ItemResult(
+            passed=False,
+            reason="human_blocked",
+            final_stage=StageName.PR_REVIEW,
+        )
+        coordinator._record_terminal_result(item)
+        coordinator._loops_run = 1
+        coordinator._pass_work_count = 1
+        monkeypatch.setattr(
+            coordinator,
+            "_seed_pass",
+            lambda: pytest.fail("a terminal direct PR handoff must not reseed"),
+        )
+
+        assert coordinator._reseed_if_converged() is False
+        assert coordinator._loops_run == 1
+
+    def test_fresh_coordinator_rechecks_direct_pr_after_handoff(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A later invocation has no in-memory handoff state from the prior run."""
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            prs=[701],
+            max_workers=2,
+            projects_dir=tmp_path,
+        )
+        prior = Coordinator(
+            config,
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        prior_item = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.PR,
+            issue=700,
+            pr=701,
+            stage=StageName.PR_REVIEW,
+        )
+        prior_item.result = ItemResult(
+            passed=False,
+            reason="human_blocked",
+            final_stage=StageName.PR_REVIEW,
+        )
+        prior._record_terminal_result(prior_item)
+
+        current = Coordinator(
+            config,
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        entry = SeedEntry(
+            kind="pr",
+            identifier=701,
+            stage=StageName.PR_REVIEW,
+            reason="awaiting review",
+            pr_number=701,
+            issue_number=700,
+        )
+        monkeypatch.setattr(
+            current,
+            "_seed_direct_pr_scope",
+            lambda _repo, _prs: [entry],
+        )
+
+        current._begin_direct_pr_source("repo-a", "")
+
+        assert current._drain_direct_pr_source() == 1
 
     def test_poisoned_item_routes_finished_fail_and_loop_survives(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
