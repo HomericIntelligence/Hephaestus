@@ -9,6 +9,7 @@ from typing import Any, cast
 
 import pytest
 
+from hephaestus.automation import direct_review_recovery
 from hephaestus.automation.direct_review_recovery import (
     list_direct_review_recovery_paths,
     record_direct_review_recovery,
@@ -46,6 +47,27 @@ def test_receipt_backed_recovery_is_discoverable_across_manager_instances(tmp_pa
 def test_active_unreceipted_checkout_is_never_reported_as_recovery(tmp_path: Path) -> None:
     """Collision avoidance must not turn a live checkout into cleanup guidance."""
     _worktree(tmp_path, 2500)
+
+    assert list_direct_review_recovery_paths(repo_root=tmp_path, issue=2500, pr=2501) == []
+
+
+def test_receipts_fail_closed_without_no_follow_directory_descriptors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Portable fallbacks preserve without creating a race-prone receipt."""
+    worktree = _worktree(tmp_path, 2500)
+    monkeypatch.setattr(direct_review_recovery, "_DIR_FD_SUPPORTED", False)
+
+    with pytest.raises(ValueError, match="no-follow directory descriptors"):
+        record_direct_review_recovery(
+            repo_root=tmp_path,
+            issue=2500,
+            pr=2501,
+            worktree=worktree,
+            branch="2500-auto",
+            expected_remote_sha="a" * 40,
+            source_sha="b" * 40,
+        )
 
     assert list_direct_review_recovery_paths(repo_root=tmp_path, issue=2500, pr=2501) == []
 

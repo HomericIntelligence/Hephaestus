@@ -445,6 +445,8 @@ def record_direct_review_recovery(
         raise ValueError("direct review recovery branch is invalid")
     if not _is_full_sha(expected_remote_sha) or not _is_full_sha(source_sha):
         raise ValueError("direct review recovery commit receipt is invalid")
+    if not _DIR_FD_SUPPORTED:
+        raise ValueError("direct review recovery requires no-follow directory descriptors")
     normalized_root = Path(repo_root).resolve()
     normalized_worktree = _validated_worktree_path(normalized_root, issue, worktree)
     if not normalized_worktree.is_dir():
@@ -488,6 +490,8 @@ def list_direct_review_recovery_paths(*, repo_root: Path, issue: int, pr: int) -
     arbitrary occupied checkout is safe to surface as a recovery artifact.
     """
     if isinstance(pr, bool) or not isinstance(pr, int) or pr <= 0:
+        return []
+    if not _DIR_FD_SUPPORTED:
         return []
     normalized_root = Path(repo_root).resolve()
     try:
