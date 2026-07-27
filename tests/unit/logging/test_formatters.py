@@ -9,7 +9,12 @@ from datetime import datetime
 import pytest
 
 from hephaestus.cli.localization import using_localizer
-from hephaestus.logging.formatters import RESERVED_FIELDS, JsonFormatter, _LocalizedFormatter
+from hephaestus.logging.formatters import (
+    _LOCALIZER_RECORD_ATTR,
+    RESERVED_FIELDS,
+    JsonFormatter,
+    _LocalizedFormatter,
+)
 
 
 @pytest.fixture()
@@ -107,6 +112,16 @@ class TestJsonFormatterExtras:
         parsed = json.loads(formatter.format(record))
         assert parsed["request_id"] == "abc-123"
         assert parsed["service"] == "keystone"
+
+    def test_localizer_attribute_does_not_change_json_key_set(
+        self, formatter: JsonFormatter, make_record: Callable[..., logging.LogRecord]
+    ) -> None:
+        """The internal record localizer is not emitted as a JSON extra."""
+        record = make_record()
+        expected_keys = set(json.loads(formatter.format(record)))
+        setattr(record, _LOCALIZER_RECORD_ATTR, object())
+
+        assert set(json.loads(formatter.format(record))) == expected_keys
 
     def test_reserved_field_collision_prefixed(
         self, formatter: JsonFormatter, make_record: Callable[..., logging.LogRecord]

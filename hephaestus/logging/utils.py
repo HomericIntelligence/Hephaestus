@@ -18,7 +18,7 @@ import os
 import sys
 import threading
 import uuid
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Literal
@@ -29,7 +29,6 @@ from hephaestus.logging.formatters import _LOCALIZER_RECORD_ATTR, JsonFormatter,
 # Module-level lock protects the check-then-add TOCTOU in get_logger()
 _handler_setup_lock = threading.Lock()
 _log_record_factory_lock = threading.Lock()
-_log_record_factory_base = logging.getLogRecordFactory()
 
 # Honour HEPHAESTUS_LOG_FORMAT=json so logging format can be configured at
 # deployment time without code changes (12-factor pattern).
@@ -41,31 +40,37 @@ _correlation_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar
 )
 
 
-def _localizing_log_record_factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
-    """Attach the emission-context localizer to each log record.
+class _LocalizingLogRecordFactory:
+    """Log record factory that preserves its wrapped delegate."""
 
-    Handler formatters may run later or on another thread, so records carry the
-    localizer selected when the logging call was made.  Existing Hephaestus
-    plain-text handlers can therefore be safely reused across catalog scopes;
-    arbitrary pre-existing custom formatters are left alone.
-    """
-    record = _log_record_factory_base(*args, **kwargs)
-    if not hasattr(record, _LOCALIZER_RECORD_ATTR):
-        from hephaestus._localization import get_localizer
+    def __init__(self, delegate: Callable[..., logging.LogRecord]) -> None:
+        """Initialize with the factory wrapped by this installation."""
+        self._delegate = delegate
 
-        setattr(record, _LOCALIZER_RECORD_ATTR, get_localizer())
-    return record
+    def __call__(self, *args: Any, **kwargs: Any) -> logging.LogRecord:
+        """Attach the emission-context localizer to each log record.
+
+        Handler formatters may run later or on another thread, so records carry
+        the localizer selected when the logging call was made. Existing
+        Hephaestus plain-text handlers can therefore be safely reused across
+        catalog scopes; arbitrary pre-existing custom formatters are left
+        alone.
+        """
+        record = self._delegate(*args, **kwargs)
+        if not hasattr(record, _LOCALIZER_RECORD_ATTR):
+            from hephaestus._localization import get_localizer
+
+            setattr(record, _LOCALIZER_RECORD_ATTR, get_localizer())
+        return record
 
 
 def _install_localizing_log_record_factory() -> None:
     """Install the record-time localization hook without clobbering other hooks."""
-    global _log_record_factory_base
     with _log_record_factory_lock:
         current = logging.getLogRecordFactory()
-        if current is _localizing_log_record_factory:
+        if isinstance(current, _LocalizingLogRecordFactory):
             return
-        _log_record_factory_base = current
-        logging.setLogRecordFactory(_localizing_log_record_factory)
+        logging.setLogRecordFactory(_LocalizingLogRecordFactory(current))
 
 
 # WHY justified: logging.LoggerAdapter is non-generic at runtime on Python 3.10

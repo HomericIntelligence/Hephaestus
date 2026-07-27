@@ -10,6 +10,7 @@ import threading
 from collections.abc import Generator
 from io import StringIO
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -173,6 +174,30 @@ class TestGetLogger:
         get_logger(logger_name)
 
         assert len(underlying.handlers) == 1
+
+    def test_external_record_factory_between_calls_does_not_recurse(self) -> None:
+        """Reinstalling over an external wrapper preserves the prior delegate."""
+        original_factory = logging.getLogRecordFactory()
+        logger = get_logger("test.external_factory_reinstall")
+        localized_factory = logging.getLogRecordFactory()
+        external_calls = 0
+
+        def external_factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
+            nonlocal external_calls
+            external_calls += 1
+            return localized_factory(*args, **kwargs)
+
+        logging.setLogRecordFactory(external_factory)
+        try:
+            logger = get_logger("test.external_factory_reinstall")
+            logger.logger.handlers.clear()
+            logger.logger.addHandler(logging.NullHandler())
+
+            logger.info("factory chain remains acyclic")
+
+            assert external_calls == 1
+        finally:
+            logging.setLogRecordFactory(original_factory)
 
     def test_propagate_false_when_handlers_added(self) -> None:
         """get_logger sets propagate=False to prevent duplicate output."""
