@@ -341,7 +341,7 @@ class StageGitHub(Protocol):
         receipts: list[dict[str, Any]],
         dispositions: dict[str, str],
     ) -> ProcessThreadResolutionResult:
-        """Reply then resolve exact, freshly revalidated process-owned receipts."""
+        """Reply then resolve exact, freshly revalidated thread receipts."""
         ...
 
     def mark_pr_implementation_go(self, pr_number: int) -> None:
