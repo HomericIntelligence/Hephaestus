@@ -484,6 +484,37 @@ def _process_thread_records(item: WorkItem) -> dict[str, dict[str, Any]] | None:
     return records
 
 
+def _adopt_live_process_receipts(
+    records: dict[str, dict[str, Any]], live_threads: list[dict[str, Any]]
+) -> dict[str, dict[str, Any]] | None:
+    """Merge host-normalized restart receipts into the single receipt set.
+
+    ``PipelineGitHub`` attaches ``process_receipt`` only after proving the
+    marker, sole-comment shape, automated-review parent, and review commit.
+    The stage still verifies the complete receipt against the same live thread
+    before letting the validator describe it as addressed.
+    """
+    adopted = dict(records)
+    for live in live_threads:
+        if not isinstance(live, dict):
+            return None
+        raw_receipt = live.get("process_receipt")
+        if raw_receipt is None:
+            continue
+        if not isinstance(raw_receipt, dict) or not _is_process_thread_receipt(raw_receipt):
+            return None
+        thread_id = _durable_thread_id(raw_receipt)
+        if thread_id is None or thread_id != _durable_thread_id(live):
+            return None
+        if _thread_comment_signature(raw_receipt) != _thread_comment_signature(live):
+            return None
+        existing = adopted.get(thread_id)
+        if existing is not None and existing != raw_receipt:
+            return None
+        adopted[thread_id] = raw_receipt
+    return adopted
+
+
 def _handled_process_receipts(
     item: WorkItem,
 ) -> tuple[list[dict[str, Any]], dict[str, str]] | None:
@@ -970,20 +1001,35 @@ class PrReviewStage(Stage):
                 live_threads = ctx.github.list_unresolved_review_threads(item.pr)
             except Exception as error:
                 logger.warning(
-                    "pr_review:%s: could not fetch complete process-thread facts for "
-                    "validation (%s)",
+                    "pr_review:%s: could not fetch complete process-thread facts "
+                    "for validation (%s)",
                     item.issue,
                     type(error).__name__,
                 )
                 item.payload["review_audit_failure"] = True
                 return Continue(next_state=EVAL)
-            live_process = _live_process_threads(records, live_threads)
-            if live_process is None:
+        else:
+            try:
+                live_threads = ctx.github.list_restart_process_review_threads(item.pr)
+            except Exception as error:
+                logger.warning(
+                    "pr_review:%s: could not fetch complete process-thread facts "
+                    "for restart validation (%s)",
+                    item.issue,
+                    type(error).__name__,
+                )
                 item.payload["review_audit_failure"] = True
                 return Continue(next_state=EVAL)
-            validation_threads = list(live_process.values())
-        else:
-            validation_threads = []
+        records = _adopt_live_process_receipts(records, live_threads)
+        if records is None:
+            item.payload["review_audit_failure"] = True
+            return Continue(next_state=EVAL)
+        item.payload["process_review_threads"] = list(records.values())
+        live_process = _live_process_threads(records, live_threads)
+        if live_process is None:
+            item.payload["review_audit_failure"] = True
+            return Continue(next_state=EVAL)
+        validation_threads = list(live_process.values())
         item.payload["validation_process_threads"] = [dict(thread) for thread in validation_threads]
         item.payload["prior_comments_json"] = json.dumps(
             validation_threads, ensure_ascii=False, sort_keys=True

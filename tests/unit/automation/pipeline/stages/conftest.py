@@ -301,6 +301,11 @@ class FakeStageGitHub(FakeGitHub):
                 )
         return threads
 
+    def list_restart_process_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+        """Return no restart receipts unless a test explicitly supplies one."""
+        del pr_number
+        return []
+
     # -- mutator surface used by the stages ----------------------------------
     # Coordinator-neutral names (the pipeline architecture guard forbids
     # github_api mutator names inside pipeline modules); each delegates to

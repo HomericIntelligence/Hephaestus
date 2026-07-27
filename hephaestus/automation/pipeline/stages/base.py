@@ -275,6 +275,10 @@ class StageGitHub(Protocol):
         """Return fresh unresolved review-thread facts, including ownership."""
         ...
 
+    def list_restart_process_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+        """Return host-proven canonical receipts eligible for restart adoption."""
+        ...
+
     def create_pr(self, issue_number: int, branch: str, title: str, body: str) -> int:
         """Durably ensure the PR exists and return its number (idempotent).
 
