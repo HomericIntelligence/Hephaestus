@@ -631,6 +631,7 @@ class WorkerPool:
                         model=job.model,
                         sandbox=job.sandbox,
                         approval="never",
+                        process_tracker=subprocess_registry.track_process_group,
                     )
                 else:
                     agent_result = run_agent_session(
@@ -641,6 +642,7 @@ class WorkerPool:
                         model=job.model,
                         sandbox=job.sandbox,
                         approval="never",
+                        process_tracker=subprocess_registry.track_process_group,
                     )
                 # A resumed command may not repeat the session-start event;
                 # retain the known id in that case.
