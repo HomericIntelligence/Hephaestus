@@ -378,6 +378,61 @@ class TestQuiescence:
         assert coordinator._reseed_if_converged() is False
         assert coordinator._loops_run == 1
 
+    def test_fresh_coordinator_rechecks_direct_pr_after_handoff(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A later invocation has no in-memory handoff state from the prior run."""
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            prs=[701],
+            max_workers=2,
+            projects_dir=tmp_path,
+        )
+        prior = Coordinator(
+            config,
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        prior_item = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.PR,
+            issue=700,
+            pr=701,
+            stage=StageName.PR_REVIEW,
+        )
+        prior_item.result = ItemResult(
+            passed=False,
+            reason="human_blocked",
+            final_stage=StageName.PR_REVIEW,
+        )
+        prior._record_terminal_result(prior_item)
+
+        current = Coordinator(
+            config,
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        entry = SeedEntry(
+            kind="pr",
+            identifier=701,
+            stage=StageName.PR_REVIEW,
+            reason="awaiting review",
+            pr_number=701,
+            issue_number=700,
+        )
+        monkeypatch.setattr(
+            current,
+            "_seed_direct_pr_scope",
+            lambda _repo, _prs: [entry],
+        )
+
+        current._begin_direct_pr_source("repo-a", "")
+
+        assert current._drain_direct_pr_source() == 1
+
     def test_poisoned_item_routes_finished_fail_and_loop_survives(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
