@@ -842,8 +842,8 @@ class TestPushCurrentBranchWithLeaseOnDivergence:
 class TestSyncWorktreeToRemoteBranch:
     """Tests for sync_worktree_to_remote_branch (#832 — reset before agent)."""
 
-    def test_fetches_then_resets_to_remote_head(self, git_utils_mocks: Any) -> None:
-        """Runs ``git fetch origin <branch>`` then ``git reset --hard origin/<branch>``."""
+    def test_materializes_tracking_ref_before_reset(self, git_utils_mocks: Any) -> None:
+        """Fetches into the reset target when no tracking ref exists yet."""
         git_utils_mocks.run.return_value = Mock(returncode=0)
         worktree = Path("/tmp/worktree-xyz")
 
@@ -851,7 +851,12 @@ class TestSyncWorktreeToRemoteBranch:
 
         assert git_utils_mocks.run.call_count == 2
         fetch_args, fetch_kwargs = git_utils_mocks.run.call_args_list[0]
-        assert fetch_args[0] == ["git", "fetch", "origin", "5450-auto-impl"]
+        assert fetch_args[0] == [
+            "git",
+            "fetch",
+            "origin",
+            "+refs/heads/5450-auto-impl:refs/remotes/origin/5450-auto-impl",
+        ]
         assert fetch_kwargs["cwd"] == worktree
         reset_args, reset_kwargs = git_utils_mocks.run.call_args_list[1]
         assert reset_args[0] == ["git", "reset", "--hard", "origin/5450-auto-impl"]
