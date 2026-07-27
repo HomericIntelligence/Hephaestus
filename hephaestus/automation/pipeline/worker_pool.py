@@ -1523,12 +1523,14 @@ class WorkerPool:
                     ok=False,
                     error="detached PR push requires the reviewed remote head",
                 )
-            git_utils.push_head_to_branch(
+            detached_push_result = self._publish_detached_head(
                 branch,
                 expected_remote_sha,
                 Path(worktree_path),
                 timeout=job.timeout_s,
             )
+            if detached_push_result is not None:
+                return detached_push_result
         elif isinstance(expected_remote_sha, str):
             git_utils.push_branch_if_remote_matches(
                 branch,
@@ -1539,6 +1541,42 @@ class WorkerPool:
         else:
             git_utils.push_branch(branch, Path(worktree_path), timeout=job.timeout_s)
         return JobResult(ok=True, value=True)
+
+    @staticmethod
+    def _publish_detached_head(
+        branch: str,
+        expected_remote_sha: str,
+        worktree_path: Path,
+        *,
+        timeout: int,
+    ) -> JobResult | None:
+        """Publish a detached review commit, classifying only verified failures."""
+        try:
+            git_utils.push_head_to_branch(
+                branch,
+                expected_remote_sha,
+                worktree_path,
+                timeout=timeout,
+            )
+        except git_utils.DetachedHeadPushRemoteHeadChangedError as exc:
+            return JobResult(
+                ok=False,
+                value={"detached_push_failure": "remote_changed"},
+                error=str(exc),
+            )
+        except git_utils.DetachedHeadPushRemoteHeadUnchangedError as exc:
+            return JobResult(
+                ok=False,
+                value={"detached_push_failure": "remote_unchanged"},
+                error=str(exc),
+            )
+        except git_utils.DetachedHeadPushRemoteProbeError as exc:
+            return JobResult(
+                ok=False,
+                value={"detached_push_failure": "remote_unconfirmed"},
+                error=str(exc),
+            )
+        return None
 
     @staticmethod
     def _commit_push_requires_publish(

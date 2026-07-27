@@ -33,6 +33,22 @@ logger = logging.getLogger(__name__)
 COMMIT_POLICY_REWRITE_EXEC = "git commit --amend --no-edit -S -s --allow-empty"
 
 
+class DetachedHeadPushError(RuntimeError):
+    """Base error for a failed lease-protected detached-head publication."""
+
+
+class DetachedHeadPushRemoteHeadChangedError(DetachedHeadPushError):
+    """The remote branch changed after the reviewed-head proof was obtained."""
+
+
+class DetachedHeadPushRemoteHeadUnchangedError(DetachedHeadPushError):
+    """The detached push failed while the remote branch still matched its proof."""
+
+
+class DetachedHeadPushRemoteProbeError(DetachedHeadPushError):
+    """The remote branch could not be checked after a detached push failure."""
+
+
 def _timeout_kw(timeout: int | None) -> dict[str, Any]:
     """Return a ``run`` kwargs fragment only when a timeout was provided."""
     return {} if timeout is None else {"timeout": timeout}
@@ -470,8 +486,29 @@ def push_head_to_branch(
             **_timeout_kw(timeout),
         )
         logger.info("Published detached HEAD to origin/%s", branch_name)
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"Failed to publish detached HEAD to branch {branch_name}: {e}") from e
+    except subprocess.CalledProcessError as exc:
+        # The rejected push can be a local pre-push-hook failure, transport
+        # failure, or a server-side lease rejection.  Never infer which from
+        # git's stderr: hook output is untrusted diagnostic content and may
+        # contain repository data.  A fresh authoritative ref read classifies
+        # only the safe ownership distinction needed by the pipeline.
+        try:
+            observed = run(
+                ["git", "ls-remote", "--refs", "origin", f"refs/heads/{branch_name}"],
+                cwd=worktree_path,
+                **_timeout_kw(timeout),
+            ).stdout.split()
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as probe_exc:
+            raise DetachedHeadPushRemoteProbeError(
+                "Detached review push failed and the remote head could not be verified"
+            ) from probe_exc
+        if not observed or observed[0] != expected_remote_sha:
+            raise DetachedHeadPushRemoteHeadChangedError(
+                "Detached review push observed a different remote head"
+            ) from exc
+        raise DetachedHeadPushRemoteHeadUnchangedError(
+            "Detached review push failed while the remote head remained unchanged"
+        ) from exc
 
 
 def has_unpushed_commits(

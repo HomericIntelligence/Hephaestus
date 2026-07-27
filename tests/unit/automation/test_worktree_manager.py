@@ -264,6 +264,25 @@ class TestWorktreeManager:
         argvs = [call.args[0] for call in worktree_mocks.run.call_args_list]
         assert ["git", "worktree", "remove", "--force", str(worktree_path)] not in argvs
 
+    def test_isolated_review_refuses_to_replace_an_existing_checkout(
+        self, worktree_mocks: Any, tmp_path: Any
+    ) -> None:
+        """A preserved direct-review checkout is never overwritten on a later loop."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+        worktree_path = manager.base_dir / "review-pr-2500"
+        worktree_path.mkdir(parents=True)
+
+        with pytest.raises(
+            RuntimeError, match="refuses to replace existing isolated review worktree"
+        ):
+            manager.create_worktree(2500, "2500-auto-impl", isolated=True)
+
+        assert worktree_path.exists()
+        assert all(
+            "worktree remove" not in call.args[0] for call in worktree_mocks.run.call_args_list
+        )
+
     def test_create_worktree_default_branch_name(self, worktree_mocks: Any, tmp_path: Any) -> None:
         """Test worktree creation with default branch name."""
         worktree_mocks.repo_root.return_value = tmp_path

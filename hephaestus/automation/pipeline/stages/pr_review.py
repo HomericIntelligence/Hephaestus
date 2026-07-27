@@ -196,6 +196,11 @@ EVAL = "EVAL"
 COMPACT_REVIEWER_WAIT = "COMPACT_REVIEWER_WAIT"
 COMPACT_WRITER_WAIT = "COMPACT_WRITER_WAIT"
 
+# A failed push with an unchanged live remote may be a transient local
+# pre-push-hook or transport failure. Retry the already-created detached
+# commit once; never ask the address agent to recreate it or discard it.
+DIRECT_PUSH_RETRY_CAP = 1
+
 _STEP_HANDLER_NAMES: dict[str, str] = {
     ENTER: "_enter",
     ADOPT_WORKTREE_WAIT: "_adopt_worktree_wait",
@@ -1287,7 +1292,17 @@ class PrReviewStage(Stage):
             # EVAL treats the missing audit as reviewer infrastructure failure;
             # the flag lets VALIDATE_WAIT skip the dead round.
             item.payload["review_failed"] = True
-        elif item.state in (ADDRESS_WAIT, PUSH_WAIT):
+        elif item.state == PUSH_WAIT:
+            failure = (
+                result.value.get("detached_push_failure")
+                if isinstance(result.value, dict)
+                else None
+            )
+            if failure in {"remote_changed", "remote_unchanged", "remote_unconfirmed"}:
+                item.payload["detached_push_failure"] = failure
+                return
+            item.payload["address_error"] = True
+        elif item.state == ADDRESS_WAIT:
             item.payload["address_error"] = True
 
     @staticmethod
@@ -1584,6 +1599,38 @@ class PrReviewStage(Stage):
         if item.issue is None:  # guarded by step(); kept for type narrowing
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
         payload = item.payload
+
+        detached_push_failure = payload.pop("detached_push_failure", None)
+        if detached_push_failure == "remote_unchanged":
+            retries = int(payload.get("direct_push_retries", 0))
+            if retries < DIRECT_PUSH_RETRY_CAP:
+                payload["direct_push_retries"] = retries + 1
+                logger.warning(
+                    "pr_review:%d: detached push failed with an unchanged remote; retrying commit",
+                    item.issue,
+                )
+                return Continue(next_state=PUSH_WAIT)
+            payload["detached_push_failure"] = detached_push_failure
+            logger.warning(
+                "pr_review:%d: detached push retry cap reached; preserving checkout",
+                item.issue,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "detached_push_failed")
+        if detached_push_failure == "remote_changed":
+            payload["detached_push_failure"] = detached_push_failure
+            logger.warning(
+                "pr_review:%d: detached push saw a changed remote head; preserving checkout",
+                item.issue,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "detached_push_head_changed")
+        if detached_push_failure == "remote_unconfirmed":
+            payload["detached_push_failure"] = detached_push_failure
+            logger.warning(
+                "pr_review:%d: detached push remote head could not be verified; "
+                "preserving checkout",
+                item.issue,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "detached_push_remote_unconfirmed")
 
         address_error = self._handle_address_error(item)
         if address_error is not None:

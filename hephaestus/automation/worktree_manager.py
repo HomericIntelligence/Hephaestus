@@ -396,6 +396,12 @@ class WorktreeManager:
         ):
             return worktree_path
         if worktree_path.exists():
+            if isolated:
+                # A detached review checkout can contain a committed but
+                # unpublished address fix, which ``git status`` reports as
+                # clean.  Removing it here would erase the only recovery
+                # artifact after a failed lease-protected push.
+                raise RuntimeError("refuses to replace existing isolated review worktree")
             logger.warning("Removing existing worktree directory: %s", worktree_path)
             self._remove_worktree_path_forcefully(worktree_path, timeout=timeout)
         return None

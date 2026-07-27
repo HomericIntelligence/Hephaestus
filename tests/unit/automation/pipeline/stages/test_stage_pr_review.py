@@ -19,6 +19,7 @@ from hephaestus.automation.pipeline.stages import (
 )
 from hephaestus.automation.pipeline.stages.pr_review import (
     ADOPT_WORKTREE_WAIT,
+    DIRECT_PUSH_RETRY_CAP,
     REVIEW_CHECKOUT_WAIT,
     REVIEW_ERROR_RETRY_CAP,
     PrReviewStage,
@@ -2286,6 +2287,80 @@ class TestEvalVerdicts:
         assert result.note == "agent_error"
         assert item.attempts["pr_review_iter"] == 0  # no round burned
         assert github.mutation_log == []
+
+    def test_detached_push_with_unchanged_remote_retries_without_reinvoking_agent(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A pre-push failure retries the existing detached commit exactly once."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="PUSH_WAIT")
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                value={"detached_push_failure": "remote_unchanged"},
+                error="detached review push failed while remote head was unchanged",
+            ),
+            ctx,
+        )
+        item.state = "EVAL"
+
+        result = stage.step(item, ctx)
+
+        assert result == Continue(next_state="PUSH_WAIT")
+        assert item.payload["direct_push_retries"] == 1
+        assert "address_error" not in item.payload
+
+    def test_detached_push_retry_cap_preserves_the_checkout(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Repeated local push failures terminate safely instead of failing back."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="PUSH_WAIT")
+        item.payload["direct_push_retries"] = DIRECT_PUSH_RETRY_CAP
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                value={"detached_push_failure": "remote_unchanged"},
+                error="detached review push failed while remote head was unchanged",
+            ),
+            ctx,
+        )
+        item.state = "EVAL"
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "detached_push_failed")
+        assert item.payload["detached_push_failure"] == "remote_unchanged"
+
+    def test_detached_push_with_advanced_remote_preserves_the_checkout(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A changed remote must not be overwritten or called an agent failure."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="PUSH_WAIT")
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                value={"detached_push_failure": "remote_changed"},
+                error="detached review push observed a different remote head",
+            ),
+            ctx,
+        )
+        item.state = "EVAL"
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "detached_push_head_changed")
+        assert "address_error" not in item.payload
 
     # Severity-aware GO gate tests (#1856)
     def test_same_login_human_reply_to_process_advisory_thread_blocks_go(

@@ -1980,6 +1980,54 @@ class TestGitOps:
         assert result.ok is True
         assert result.value is True
 
+    @pytest.mark.parametrize(
+        ("exc", "failure_kind"),
+        [
+            (
+                git_utils.DetachedHeadPushRemoteHeadChangedError("remote changed"),
+                "remote_changed",
+            ),
+            (
+                git_utils.DetachedHeadPushRemoteHeadUnchangedError("remote unchanged"),
+                "remote_unchanged",
+            ),
+            (
+                git_utils.DetachedHeadPushRemoteProbeError("probe unavailable"),
+                "remote_unconfirmed",
+            ),
+        ],
+    )
+    def test_commit_push_classifies_verified_detached_push_failures(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+        exc: Exception,
+        failure_kind: str,
+    ) -> None:
+        """The PR-review stage receives a safe, actionable detached-push outcome."""
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 5,
+                "worktree_path": tmp_path,
+                "branch": "5-auto",
+                "publish_detached_head": True,
+                "expected_remote_sha": "a" * 40,
+            },
+        )
+        with (
+            patch("hephaestus.automation.git_utils.commit_if_changes", return_value=True),
+            patch("hephaestus.automation.git_utils.push_head_to_branch", side_effect=exc),
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.value == {"detached_push_failure": failure_kind}
+
     def test_commit_push_missing_worktree_path_is_error(
         self,
         pool: WorkerPool,
