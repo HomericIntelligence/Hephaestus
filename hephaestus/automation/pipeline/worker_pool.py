@@ -1500,8 +1500,14 @@ class WorkerPool:
         if expected_remote_sha is not None and not _is_full_commit_sha(expected_remote_sha):
             return JobResult(ok=False, error="direct scope base pin invalid")
         if bool(job.kwargs.get("publish_detached_head", False)):
+            if not isinstance(expected_remote_sha, str):
+                return JobResult(
+                    ok=False,
+                    error="detached PR push requires the reviewed remote head",
+                )
             git_utils.push_head_to_branch(
                 branch,
+                expected_remote_sha,
                 Path(worktree_path),
                 timeout=job.timeout_s,
             )
