@@ -1083,11 +1083,12 @@ class PipelineGitHub:
         receipts: list[dict[str, Any]],
         dispositions: dict[str, str],
     ) -> ProcessThreadResolutionResult:
-        """Reply then resolve exact active-work-item process receipts.
+        """Reply then resolve exact, freshly revalidated review-thread receipts.
 
-        The stage supplies only canonical receipts held by the current active
-        work item. A restart may re-adopt a host-normalized receipt, but this
-        accessor intentionally owns no second persistence journal.
+        The stage may supply a receipt posted in this work item or a canonical
+        receipt reconstructed from a prior loop invocation. This accessor owns
+        no second persistence journal; it proves the submitted receipt still
+        exactly matches GitHub immediately before each mutation.
         """
         candidate_ids = tuple(sorted(dispositions))
         if self._skip(

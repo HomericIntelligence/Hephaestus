@@ -1295,11 +1295,10 @@ class PrReviewStage(Stage):
         """Suppress duplicate findings and preserve process-thread boundaries.
 
         Guarded receipt reconciliation runs immediately before this helper.
-        A live loop-created thread remains a GitHub-human gate.  A verified
-        external Bot receipt may proceed only when the validator explicitly
-        reports it unaddressed; POST then routes its fenced finding through
-        the normal address path.  Any changed, replied, malformed, user, or
-        validator-ambiguous thread remains a hard handoff.
+        A verified process receipt may proceed only when the validator
+        explicitly reports it unaddressed; POST then routes its fenced finding
+        through the normal address path. Any changed, replied, malformed,
+        user, or validator-ambiguous thread remains a hard handoff.
         """
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
@@ -1323,28 +1322,18 @@ class PrReviewStage(Stage):
         if live_process is None:
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
-        bot_ids = {
-            thread_id
-            for thread_id, receipt in records.items()
-            if receipt.get("external_bot") is True and thread_id in live_process
-        }
-        if set(live_process) - bot_ids:
-            return PrReviewStage._handle_automation_threads_requiring_human_resolution(
-                item,
-                len(set(live_process) - bot_ids),
-                ctx,
-            )
-        if bot_ids:
+        process_ids = set(live_process)
+        if process_ids:
             parsed = _parse_validation_result(item.payload.get("validation_result"))
             if parsed is None:
                 return PrReviewStage._handle_automation_threads_requiring_human_resolution(
-                    item, len(bot_ids), ctx
+                    item, len(process_ids), ctx
                 )
             unaddressed = _thread_ids(parsed.get("unaddressed"))
             wont_fix = _thread_ids(parsed.get("wont_fix"))
-            if bot_ids & wont_fix or not bot_ids.issubset(unaddressed):
+            if process_ids & wont_fix or not process_ids.issubset(unaddressed):
                 return PrReviewStage._handle_automation_threads_requiring_human_resolution(
-                    item, len(bot_ids), ctx
+                    item, len(process_ids), ctx
                 )
         return _without_duplicate_live_process_findings(threads, live_process)
 
@@ -2192,12 +2181,12 @@ class PrReviewStage(Stage):
         automation_unresolved: int,
         ctx: StageContext,
     ) -> StepResult:
-        """Record a fail-closed handoff for open threads outside the receipt scope.
+        """Record a fail-closed handoff for open threads that cannot be proven safe.
 
-        The guarded adapter may reply and resolve only immutable receipts it
-        revalidates immediately before each mutation. Any remaining thread is
-        unaddressed, human-owned, changed, or otherwise unprovable and must
-        remain a human gate.
+        The guarded adapter may reply and resolve a canonical receipt from any
+        loop invocation after revalidating it immediately before each mutation.
+        A remaining changed, human-owned, malformed, or otherwise unprovable
+        thread must remain a human gate.
         """
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
@@ -2208,7 +2197,7 @@ class PrReviewStage(Stage):
             "**Automation stand-down: unresolved automation review thread(s) require "
             "human resolution.**\n\n"
             f"{automation_unresolved} automation-created review thread(s) remain open on this "
-            "PR outside the immutable process-receipt scope. The guarded loop could not prove "
+            "PR without a verifiable immutable receipt. The guarded loop could not prove "
             "that a reply and resolution would leave human activity untouched. "
             "The PR is marked `state:implementation-no-go`; automation does not arm auto-merge. "
             "A human must "

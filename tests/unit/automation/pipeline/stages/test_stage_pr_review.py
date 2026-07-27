@@ -1140,16 +1140,42 @@ class TestProcessOwnedReviewThreadLifecycle:
                 del pr_number
                 return [dict(live)]
 
+            def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+                del pr_number
+                return [dict(live)]
+
         item = make_work_item(issue=1, pr=1001, state="VALIDATE_WAIT")
         item.payload["reviewed_pr_head_sha"] = "a" * 40
-        result = PrReviewStage().step(item, make_ctx(github=RestartGitHub()))
+        stage = PrReviewStage()
+        result = stage.step(item, make_ctx(github=RestartGitHub()))
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)
         assert item.payload["process_review_threads"] == [receipt]
         assert json.loads(result.job.prompt_kwargs["prior_comments_json"]) == [live]
-        item.payload["validation_result"] = {"unaddressed": [], "wont_fix": []}
-        assert _handled_process_receipts(item) == ([receipt], {"process-1": "addressed"})
+        item.state = "POST"
+        item.payload.update(
+            {
+                "validation_result": {
+                    "unaddressed": [{"thread_id": "process-1"}],
+                    "wont_fix": [],
+                },
+                "review_audit": ReviewAudit("A", "clean", (), "", valid=True),
+                "review_threads": [],
+            }
+        )
+
+        assert stage.step(item, make_ctx(github=RestartGitHub())) == Continue(
+            next_state="DIFFICULTY_WAIT"
+        )
+        assert item.payload["remediation_threads"] == [
+            {
+                "thread_id": "process-1",
+                "path": "a.py",
+                "line": 3,
+                "body": "<!-- hephaestus-severity: major -->\nfix this",
+            }
+        ]
 
     def test_wont_fix_process_thread_is_not_a_resolution_candidate(
         self, make_work_item: Any
@@ -1636,10 +1662,10 @@ class TestProcessOwnedReviewThreadLifecycle:
             assert result == Continue(next_state="REVIEW_WAIT")
             assert github.mutation_log == []
 
-    def test_live_process_thread_requires_human_resolution_without_thread_write(
+    def test_unaddressed_process_thread_routes_to_remediation(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """No receipt revalidation can authorize an automatic thread mutation."""
+        """A verified prior finding is sent to the address leg, not handed off."""
 
         class GuardRaceGitHub(FakeStageGitHub):
             def __init__(self, live: dict[str, Any]) -> None:
@@ -1658,7 +1684,10 @@ class TestProcessOwnedReviewThreadLifecycle:
                 "reviewed_pr_head_sha": "a" * 40,
                 "process_review_threads": [process],
                 "validation_process_threads": [process],
-                "validation_result": {"unaddressed": [], "wont_fix": []},
+                "validation_result": {
+                    "unaddressed": [{"thread_id": "process-1"}],
+                    "wont_fix": [],
+                },
                 "review_audit": ReviewAudit("A", "clean", (), "", valid=True),
                 "review_threads": [],
             }
@@ -1666,11 +1695,16 @@ class TestProcessOwnedReviewThreadLifecycle:
 
         result = PrReviewStage().step(item, make_ctx(github=github))
 
-        assert result == StageOutcome(
-            Disposition.FINISH_FAIL,
-            "automation_threads_require_human_resolution",
-        )
-        assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
+        assert result == Continue(next_state="DIFFICULTY_WAIT")
+        assert item.payload["remediation_threads"] == [
+            {
+                "thread_id": "process-1",
+                "path": "a.py",
+                "line": 3,
+                "body": "<!-- hephaestus-severity: major -->\nfix this",
+            }
+        ]
+        assert ("mark_pr_implementation_no_go", (1001,)) not in github.mutation_log
 
     def test_truncated_live_thread_facts_skip_validation_and_all_writes(
         self, make_ctx: Any, make_work_item: Any
