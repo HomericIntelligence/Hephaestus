@@ -22,6 +22,16 @@ _RECEIPT_VERSION = 3
 _REMOTE_CHANGED_REASON = "remote_changed"
 _WORKTREE_MARKER = "hephaestus-direct-review-recovery"
 _DIR_FD_SUPPORTED = os.name == "posix" and hasattr(os, "O_DIRECTORY")
+_INSPECTION_ONLY_FAILURES = frozenset(
+    {
+        "remote_changed",
+        "remote_changed_unrecorded",
+        "remote_unchanged",
+        "remote_unconfirmed",
+        "retry_checkout_changed",
+        "retry_checkout_unconfirmed",
+    }
+)
 
 
 def _is_full_sha(value: object) -> bool:
@@ -31,6 +41,11 @@ def _is_full_sha(value: object) -> bool:
         and len(value) in (40, 64)
         and all(char in "0123456789abcdef" for char in value)
     )
+
+
+def is_inspection_only_detached_push_failure(value: object) -> bool:
+    """Return whether a failed detached publication needs manual inspection."""
+    return isinstance(value, str) and value in _INSPECTION_ONLY_FAILURES
 
 
 def _validated_worktree_path(repo_root: Path, issue: int, path: Path) -> Path:
@@ -192,9 +207,7 @@ def _receipt_lock(receipt_dir: Path, receipt_fd: int | None, pr: int) -> Iterato
         os.close(fd)
 
 
-def _write_receipt(
-    receipt_dir: Path, receipt_fd: int | None, target: Path, content: str
-) -> None:
+def _write_receipt(receipt_dir: Path, receipt_fd: int | None, target: Path, content: str) -> None:
     """Atomically write a receipt without resolving its parent again."""
     if receipt_fd is None:
         write_secure(target, content)
@@ -248,6 +261,25 @@ def _read_receipt(receipt_dir: Path, receipt_fd: int | None, name: str) -> Any:
             os.close(fd)
 
 
+def _read_secure_text(directory: Path, directory_fd: int | None, name: str) -> str:
+    """Read a regular no-follow text file from a trusted directory."""
+    if directory_fd is None:
+        return (directory / name).read_text(encoding="utf-8")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(name, flags, dir_fd=directory_fd)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError("direct review recovery marker is not a regular file")
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            fd = -1
+            return handle.read()
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
 def _receipt_names(receipt_dir: Path, receipt_fd: int | None, pr: int) -> list[str]:
     """Return receipt basenames for a PR without traversing a mutable parent."""
     prefix = f"direct-review-{pr}-"
@@ -258,6 +290,32 @@ def _receipt_names(receipt_dir: Path, receipt_fd: int | None, pr: int) -> list[s
         for name in os.listdir(receipt_fd)
         if name.startswith(prefix) and name.endswith(".json")
     )
+
+
+@contextmanager
+def _open_marker_directory(repo_root: Path, marker_path: Path) -> Iterator[tuple[Path, int | None]]:
+    """Yield the marker parent through a no-follow descriptor when available."""
+    marker_dir = marker_path.parent
+    if not _DIR_FD_SUPPORTED:
+        yield marker_dir, None
+        return
+    root = repo_root.resolve()
+    try:
+        components = marker_dir.relative_to(root).parts
+    except ValueError as error:
+        raise ValueError("direct review recovery marker is outside the repository") from error
+    root_fd = os.open(root, _directory_open_flags())
+    current_fd = root_fd
+    try:
+        for component in components:
+            child_fd = _open_directory_component(current_fd, component, create=False)
+            if child_fd is None:
+                raise ValueError("direct review recovery Git metadata is unavailable")
+            os.close(current_fd)
+            current_fd = child_fd
+        yield marker_dir, current_fd
+    finally:
+        os.close(current_fd)
 
 
 def _receipt_directory_is_current(repo_root: Path, receipt_fd: int | None) -> bool:
@@ -279,9 +337,11 @@ def _worktree_identity(worktree: Path) -> tuple[int, int]:
     return stat.st_dev, stat.st_ino
 
 
-def _worktree_marker_path(worktree: Path) -> Path:
+def _worktree_marker_path(repo_root: Path, worktree: Path) -> Path:
     """Return the private Git-metadata marker for one direct-review checkout."""
     dot_git = worktree / ".git"
+    if dot_git.is_symlink():
+        raise ValueError("direct review recovery Git metadata is symlinked")
     if dot_git.is_dir():
         git_dir = dot_git
     else:
@@ -297,22 +357,36 @@ def _worktree_marker_path(worktree: Path) -> Path:
     git_dir = git_dir.resolve()
     if not git_dir.is_dir():
         raise ValueError("direct review recovery Git metadata is unavailable")
+    normalized_root = repo_root.resolve()
+    try:
+        git_dir.relative_to(normalized_root)
+    except ValueError as error:
+        raise ValueError("direct review recovery Git metadata is outside the repository") from error
+    if not dot_git.is_dir():
+        common_git_dir = normalized_root / ".git" / "worktrees"
+        try:
+            git_dir.relative_to(common_git_dir.resolve())
+        except ValueError as error:
+            raise ValueError(
+                "direct review recovery Git metadata is not a linked worktree"
+            ) from error
     return git_dir / _WORKTREE_MARKER
 
 
-def _write_worktree_marker(worktree: Path) -> str:
+def _write_worktree_marker(repo_root: Path, worktree: Path) -> str:
     """Create an unguessable marker that cannot survive checkout replacement."""
     marker = secrets.token_urlsafe(32)
-    write_secure(_worktree_marker_path(worktree), marker + "\n")
+    marker_path = _worktree_marker_path(repo_root, worktree)
+    with _open_marker_directory(repo_root, marker_path) as (marker_dir, marker_fd):
+        _write_receipt(marker_dir, marker_fd, marker_path, marker + "\n")
     return marker
 
 
-def _read_worktree_marker(worktree: Path) -> str:
+def _read_worktree_marker(repo_root: Path, worktree: Path) -> str:
     """Read the checkout-local marker or raise when it is absent or unsafe."""
-    marker_path = _worktree_marker_path(worktree)
-    if marker_path.is_symlink():
-        raise ValueError("direct review recovery worktree marker is symlinked")
-    marker = marker_path.read_text(encoding="utf-8").strip()
+    marker_path = _worktree_marker_path(repo_root, worktree)
+    with _open_marker_directory(repo_root, marker_path) as (marker_dir, marker_fd):
+        marker = _read_secure_text(marker_dir, marker_fd, marker_path.name).strip()
     if not marker:
         raise ValueError("direct review recovery worktree marker is invalid")
     return marker
@@ -345,7 +419,7 @@ def record_direct_review_recovery(
     if not normalized_worktree.is_dir():
         raise ValueError("direct review recovery worktree is missing")
     worktree_device, worktree_inode = _worktree_identity(normalized_worktree)
-    worktree_marker = _write_worktree_marker(normalized_worktree)
+    worktree_marker = _write_worktree_marker(normalized_root, normalized_worktree)
     receipt = {
         "branch": branch,
         "expected_remote_sha": expected_remote_sha,
@@ -405,7 +479,7 @@ def list_direct_review_recovery_paths(*, repo_root: Path, issue: int, pr: int) -
                             normalized_root, issue, Path(str(payload.get("worktree", "")))
                         )
                         worktree_device, worktree_inode = _worktree_identity(worktree)
-                        worktree_marker = _read_worktree_marker(worktree)
+                        worktree_marker = _read_worktree_marker(normalized_root, worktree)
                         recorded_marker = payload.get("worktree_marker")
                         if (
                             payload.get("schema_version") != _RECEIPT_VERSION

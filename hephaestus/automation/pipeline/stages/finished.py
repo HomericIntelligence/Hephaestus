@@ -23,7 +23,10 @@ from __future__ import annotations
 
 import logging
 
-from hephaestus.automation.direct_review_recovery import list_direct_review_recovery_paths
+from hephaestus.automation.direct_review_recovery import (
+    is_inspection_only_detached_push_failure,
+    list_direct_review_recovery_paths,
+)
 from hephaestus.automation.pipeline.work_item import ItemResult, PreservedWorktree
 
 from .base import (
@@ -49,16 +52,6 @@ from .repo import (
 logger = logging.getLogger(__name__)
 
 _RESERVATION_RELEASE_RETRY_CAP = 2
-_DETACHED_PUSH_INSPECTION_FAILURES = frozenset(
-    {
-        "remote_changed",
-        "remote_changed_unrecorded",
-        "remote_unchanged",
-        "remote_unconfirmed",
-        "retry_checkout_changed",
-        "retry_checkout_unconfirmed",
-    }
-)
 
 
 class FinishedStage(Stage):
@@ -195,7 +188,7 @@ class FinishedStage(Stage):
             and is_full_commit_sha(local_cleanup.get("base_sha"))
         )
         inspection_only = (
-            item.payload.get("detached_push_failure") in _DETACHED_PUSH_INSPECTION_FAILURES
+            is_inspection_only_detached_push_failure(item.payload.get("detached_push_failure"))
             or item.worktree in recovery_worktrees
         )
         if not passed and inspection_only:

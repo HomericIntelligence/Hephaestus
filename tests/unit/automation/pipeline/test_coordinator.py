@@ -2483,9 +2483,24 @@ class TestDurableEventLog:
 
         coordinator._park_resumable(item)
 
-        assert coordinator._active_recovery_worktrees() == [
-            ("repo-a", 44, str(worktree.resolve()))
-        ]
+        assert coordinator._active_recovery_worktrees() == [("repo-a", 44, str(worktree.resolve()))]
+
+    def test_park_resumable_reports_an_unreceipted_detached_push_checkout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A shutdown preserves inspection guidance even when receipt creation failed."""
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+        item = _issue_item(44, StageName.PR_REVIEW)
+        item.pr = 1001
+        worktree = tmp_path / "review-pr-1001"
+        worktree.mkdir()
+        item.worktree = str(worktree)
+        item.payload["direct_pr_worktree"] = item.worktree
+        item.payload["detached_push_failure"] = "remote_changed_unrecorded"
+
+        coordinator._park_resumable(item)
+
+        assert coordinator._active_recovery_worktrees() == [("repo-a", 44, str(worktree))]
 
 
 class TestPipelineScopeWiring:

@@ -90,7 +90,10 @@ from typing import Any, TypeAlias
 
 from jinja2 import TemplateNotFound
 
-from hephaestus.automation.direct_review_recovery import list_direct_review_recovery_paths
+from hephaestus.automation.direct_review_recovery import (
+    is_inspection_only_detached_push_failure,
+    list_direct_review_recovery_paths,
+)
 from hephaestus.automation.models import IssueInfo
 from hephaestus.automation.pipeline import admission as _admission, seeding as _seeding
 from hephaestus.automation.pipeline.events import StageEvent, encode_stage_event
@@ -1441,6 +1444,12 @@ class Coordinator:
         reaches ``FinishedStage``, so collect the same durable evidence here
         for the interrupt summary rather than losing the operator guidance.
         """
+        if item.worktree and is_inspection_only_detached_push_failure(
+            item.payload.get("detached_push_failure")
+        ):
+            entry = (item.repo, item.issue or item.pr or 0, item.worktree)
+            if entry not in self.recovery_preserved:
+                self.recovery_preserved.append(entry)
         if item.issue is None or item.pr is None:
             return
         try:

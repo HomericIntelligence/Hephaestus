@@ -90,6 +90,53 @@ def test_receipt_rejects_a_symlinked_state_directory(tmp_path: Path) -> None:
     assert list_direct_review_recovery_paths(repo_root=tmp_path, issue=2500, pr=2501) == []
 
 
+def test_receipt_rejects_worktree_git_metadata_outside_the_repository(tmp_path: Path) -> None:
+    """A mutable linked-worktree gitdir cannot redirect recovery marker writes."""
+    worktree = _worktree(tmp_path, 2500)
+    shutil.rmtree(worktree / ".git")
+    outside = tmp_path.parent / "outside-git-metadata"
+    outside.mkdir(exist_ok=True)
+    (worktree / ".git").write_text(f"gitdir: {outside}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="outside the repository"):
+        record_direct_review_recovery(
+            repo_root=tmp_path,
+            issue=2500,
+            pr=2501,
+            worktree=worktree,
+            branch="2500-auto",
+            expected_remote_sha="a" * 40,
+            source_sha="b" * 40,
+        )
+
+    assert not (outside / "hephaestus-direct-review-recovery").exists()
+
+
+def test_receipt_supports_and_binds_a_linked_worktree_gitdir(tmp_path: Path) -> None:
+    """The production linked-worktree gitdir layout remains receipt-backed."""
+    worktree = _worktree(tmp_path, 2500)
+    shutil.rmtree(worktree / ".git")
+    git_dir = tmp_path / ".git" / "worktrees" / "review-pr-2500"
+    git_dir.mkdir(parents=True)
+    (worktree / ".git").write_text(
+        "gitdir: ../../../.git/worktrees/review-pr-2500\n", encoding="utf-8"
+    )
+
+    record_direct_review_recovery(
+        repo_root=tmp_path,
+        issue=2500,
+        pr=2501,
+        worktree=worktree,
+        branch="2500-auto",
+        expected_remote_sha="a" * 40,
+        source_sha="b" * 40,
+    )
+
+    assert list_direct_review_recovery_paths(repo_root=tmp_path, issue=2500, pr=2501) == [
+        worktree.resolve()
+    ]
+
+
 def test_receipt_write_does_not_follow_a_replaced_state_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -105,7 +152,7 @@ def test_receipt_write_does_not_follow_a_replaced_state_directory(
 
     def replace_after_swap(*args: object, **kwargs: object) -> None:
         """Swap the pathname after descriptor acquisition and before replacement."""
-        if kwargs.get("dst_dir_fd") is not None:
+        if kwargs.get("dst_dir_fd") is not None and receipt_dir.exists():
             receipt_dir.rename(displaced_dir)
             receipt_dir.symlink_to(outside, target_is_directory=True)
         cast(Any, original_replace)(*args, **kwargs)
