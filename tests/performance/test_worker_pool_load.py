@@ -173,6 +173,157 @@ class _LoadReport:
         }
 
 
+class _SyntheticRecoveryStage:
+    """Run one real worker-pool job, then finish after its completion."""
+
+    def on_enter(self, item: WorkItem, ctx: Any) -> None:
+        """Perform no enter-time transition."""
+        del item, ctx
+
+    def step(self, item: WorkItem, ctx: Any) -> JobRequest | StageOutcome:
+        """Submit once and finish after the recovered completion."""
+        del ctx
+        if item.payload.get("completed"):
+            return StageOutcome(Disposition.FINISH_PASS, "synthetic complete")
+        job = BuildTestJob(
+            repo=item.repo,
+            cwd=Path.cwd(),
+            argv=("synthetic", f"recovery-{item.issue}"),
+            timeout_s=2,
+            descr=f"recovery-{item.issue}",
+        )
+        return JobRequest(job, on_done_state=StageName.PLANNING)
+
+    def on_job_done(self, item: WorkItem, result: JobResult, ctx: Any) -> None:
+        """Record successful completion for the next stage step."""
+        del ctx
+        if result.ok:
+            item.payload["completed"] = True
+
+
+class _ObservedCompletionQueue(CompletionQueue):
+    """Completion queue with a synchronization-only publication counter."""
+
+    def __init__(self, *, capacity: int) -> None:
+        super().__init__(capacity=capacity)
+        self._offer_condition = threading.Condition()
+        self.offer_count = 0
+        self.accepted_count = 0
+        self.rejected_count = 0
+        self.result_high_water = 0
+        self.rejection_high_water = 0
+        self.overflow_observed = False
+        self.publication_outcomes: list[tuple[str, bool]] = []
+
+    def offer(self, value: tuple[Any, Any]) -> bool:
+        """Publish normally and capture exact paused-consumer high-water state."""
+        accepted = super().offer(value)
+        with self._offer_condition:
+            self.offer_count += 1
+            if accepted:
+                self.accepted_count += 1
+            else:
+                self.rejected_count += 1
+            self.result_high_water = max(self.result_high_water, self.qsize())
+            self.rejection_high_water = max(
+                self.rejection_high_water,
+                self._rejections.qsize(),
+            )
+            self.overflow_observed = self.overflow_observed or self._rejection_overflowed
+            handle = value[0]
+            description = str(getattr(getattr(handle, "job", None), "descr", ""))
+            self.publication_outcomes.append((description, accepted))
+            self._offer_condition.notify_all()
+        return accepted
+
+    def wait_for_offers(self, expected: int, *, timeout: float) -> None:
+        """Wait until exactly observed worker callbacks reach *expected*."""
+        deadline = time.monotonic() + timeout
+        with self._offer_condition:
+            while self.offer_count < expected:
+                remaining = deadline - time.monotonic()
+                assert remaining > 0, (
+                    f"observed {self.offer_count}/{expected} completion publications"
+                )
+                self._offer_condition.wait(timeout=remaining)
+
+
+class _StalledConsumerHarness:
+    """Synchronize two complete worker waves without relying on sleeps."""
+
+    def __init__(self, workers: int) -> None:
+        self.workers = workers
+        self.legitimate_started = 0
+        self.overflow_started = 0
+        self.state_lock = threading.Lock()
+        self.legitimate_ready = threading.Event()
+        self.overflow_ready = threading.Event()
+        self.release_legitimate = threading.Event()
+        self.release_overflow = threading.Event()
+
+    def run_job(self, _pool: WorkerPool, job: BuildTestJob) -> JobResult:
+        """Hold two worker waves while the coordinator cannot consume."""
+        is_overflow = job.descr.startswith("overflow-")
+        with self.state_lock:
+            if is_overflow:
+                self.overflow_started += 1
+                if self.overflow_started == self.workers:
+                    self.overflow_ready.set()
+            else:
+                self.legitimate_started += 1
+                if self.legitimate_started == self.workers:
+                    self.legitimate_ready.set()
+        release = self.release_overflow if is_overflow else self.release_legitimate
+        assert release.wait(timeout=5.0)
+        return JobResult(ok=True, value=job.descr)
+
+
+def _make_recovery_coordinator(
+    monkeypatch: pytest.MonkeyPatch,
+    workers: int,
+    *,
+    observed: bool = False,
+) -> Coordinator:
+    """Build the same C-sized coordinator/pool topology used in production."""
+    config = PipelineConfig(
+        org="org",
+        repos=["performance/worker-pool"],
+        loops=1,
+        max_workers=workers,
+        parallel_repos=1,
+        stage_queue_capacity=workers,
+        projects_dir=Path.cwd(),
+    )
+    work_window = max(1, config.parallel_repos * config.max_workers)
+    completion_q: CompletionQueue
+    if observed:
+        completion_q = _ObservedCompletionQueue(capacity=work_window)
+    else:
+        completion_q = CompletionQueue(capacity=work_window)
+    shared_shutdown = threading.Event()
+    pool = WorkerPool(size=work_window, shutdown=shared_shutdown, completion_q=completion_q)
+    coordinator = Coordinator(
+        config,
+        github=cast(Any, object()),
+        pool=pool,
+        install_signals=False,
+    )
+    # Injected pools expose their queue but not their private shutdown event.
+    # Use the same event on both sides, as production Coordinator does.
+    coordinator.shutdown = shared_shutdown
+    coordinator.stages[StageName.PLANNING] = _SyntheticRecoveryStage()
+    monkeypatch.setattr(coordinator, "_seed_pass", lambda: 0)
+    for issue in range(workers):
+        item = WorkItem(
+            repo="performance/worker-pool",
+            kind=ItemKind.ISSUE,
+            issue=issue,
+            stage=StageName.PLANNING,
+        )
+        assert coordinator._push_item(item, StageName.PLANNING, enter=True)
+    return coordinator
+
+
 def _percentile(samples: list[float], percentile: float) -> float:
     """Return the linearly interpolated percentile (tail-inclusive) in ms.
 
@@ -390,97 +541,95 @@ def _run_load(
 def test_worker_pool_stalled_consumer_preserves_and_recovers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A production-wired coordinator bounds completions and resumes a seed burst."""
+    """A stalled coordinator bounds concurrent publication and recovers its seeds."""
     workers = 3
-    seed_count = workers + 1
+    stalled = _make_recovery_coordinator(monkeypatch, workers, observed=True)
+    assert isinstance(stalled.completion_q, _ObservedCompletionQueue)
+    assert stalled._work_window == stalled.config.parallel_repos * stalled.config.max_workers
+    assert stalled.completion_q.capacity == stalled._work_window == workers
+    harness = _StalledConsumerHarness(workers)
+    consumer_paused = threading.Event()
+    resume_consumer = threading.Event()
 
-    class SyntheticStage:
-        """One real worker-pool job followed by a terminal success."""
+    original_wait = stalled._wait_for_completion
 
-        def on_enter(self, item: WorkItem, ctx: Any) -> None:
-            del item, ctx
+    def paused_wait(timeout: float) -> None:
+        """Stop the only completion-consumer path once all C seeds are live."""
+        if len(stalled.in_flight) == workers and not resume_consumer.is_set():
+            consumer_paused.set()
+            assert resume_consumer.wait(timeout=5.0)
+        original_wait(timeout)
 
-        def step(self, item: WorkItem, ctx: Any) -> JobRequest | StageOutcome:
-            del ctx
-            if item.payload.get("completed"):
-                return StageOutcome(Disposition.FINISH_PASS, "synthetic complete")
-            job = BuildTestJob(
-                repo=item.repo,
-                cwd=Path.cwd(),
-                argv=("synthetic", f"recovery-{item.issue}"),
-                timeout_s=2,
-                descr=f"recovery-{item.issue}",
+    monkeypatch.setattr(stalled, "_wait_for_completion", paused_wait)
+    run_codes: list[int] = []
+    run_thread = threading.Thread(target=lambda: run_codes.append(stalled.run()), daemon=True)
+
+    with patch.object(
+        WorkerPool,
+        "_run_build_test",
+        lambda pool, job: harness.run_job(pool, job),
+    ):
+        run_thread.start()
+        assert harness.legitimate_ready.wait(timeout=5.0)
+        assert consumer_paused.wait(timeout=5.0)
+
+        # The coordinator owns C legitimate handles. Queue a separate C+1
+        # publication burst through the same real pool while all workers are
+        # occupied, then release each wave under the stalled consumer.
+        for index in range(workers + 1):
+            stalled.pool.submit(
+                BuildTestJob(
+                    repo="performance/worker-pool",
+                    cwd=Path.cwd(),
+                    argv=("synthetic", f"overflow-{index}"),
+                    timeout_s=2,
+                    descr=f"overflow-{index}",
+                ),
+                StageName.PLANNING,
             )
-            return JobRequest(job, on_done_state=StageName.PLANNING)
 
-        def on_job_done(self, item: WorkItem, result: JobResult, ctx: Any) -> None:
-            del ctx
-            if result.ok:
-                item.payload["completed"] = True
+        harness.release_legitimate.set()
+        stalled.completion_q.wait_for_offers(workers, timeout=5.0)
+        assert harness.overflow_ready.wait(timeout=5.0)
+        assert stalled.completion_q.qsize() == workers
 
-    def make_coordinator() -> Coordinator:
-        """Build the same C-sized coordinator/pool topology used in production."""
-        completion_q = CompletionQueue(capacity=workers)
-        pool = WorkerPool(size=workers, shutdown=threading.Event(), completion_q=completion_q)
-        coordinator = Coordinator(
-            PipelineConfig(
-                org="org",
-                repos=["performance/worker-pool"],
-                loops=1,
-                max_workers=workers,
-                parallel_repos=1,
-                stage_queue_capacity=workers,
-                projects_dir=Path.cwd(),
-            ),
-            github=cast(Any, object()),
-            pool=pool,
-            install_signals=False,
-        )
-        coordinator.stages[StageName.PLANNING] = SyntheticStage()
-        monkeypatch.setattr(coordinator, "_seed_pass", lambda: 0)
-        for issue in range(seed_count):
-            item = WorkItem(
-                repo="performance/worker-pool",
-                kind=ItemKind.ISSUE,
-                issue=issue,
-                stage=StageName.PLANNING,
-            )
-            assert coordinator._push_item(item, StageName.PLANNING, enter=True)
-        return coordinator
+        harness.release_overflow.set()
+        stalled.completion_q.wait_for_offers((2 * workers) + 1, timeout=5.0)
 
-    stalled = make_coordinator()
-    started = 0
-    finished = 0
-    state_lock = threading.Lock()
-    release = threading.Event()
+        # C results occupy the channel, C rejected results occupy its bounded
+        # mailbox, and the final publication records overflow. Nothing grows
+        # while consumption is paused, and the worker callback requests stop.
+        assert run_thread.is_alive()
+        assert not resume_consumer.is_set()
+        assert harness.legitimate_started == workers
+        assert stalled.completion_q.offer_count == (2 * workers) + 1
+        assert stalled.completion_q.accepted_count == workers
+        assert stalled.completion_q.rejected_count == workers + 1
+        assert set(stalled.completion_q.publication_outcomes) == {
+            *((f"recovery-{issue}", True) for issue in range(workers)),
+            *((f"overflow-{issue}", False) for issue in range(workers + 1)),
+        }
+        assert stalled.completion_q.result_high_water == workers
+        assert stalled.completion_q.rejection_high_water == workers
+        assert stalled.completion_q.overflow_observed is True
+        assert stalled.completion_q.qsize() == stalled.completion_q.capacity == workers
+        assert stalled.shutdown.is_set()
 
-    def stalled_handler(_pool: WorkerPool, job: BuildTestJob) -> JobResult:
-        """Release all C workers together, then request graceful shutdown."""
-        nonlocal started, finished
-        with state_lock:
-            started += 1
-            if started == workers:
-                stalled.shutdown.set()
-                release.set()
-        assert release.wait(timeout=2.0)
-        with state_lock:
-            finished += 1
-        return JobResult(ok=True, value=job.descr)
+        resume_consumer.set()
+        run_thread.join(timeout=5.0)
 
-    with patch.object(WorkerPool, "_run_build_test", stalled_handler):
-        assert stalled.run() == 130
-
-    assert stalled._work_window == workers
-    assert stalled.completion_q.capacity == stalled._work_window
-    assert stalled.completion_q.qsize() <= stalled.completion_q.capacity
-    assert finished == workers
-    assert len(stalled.items) == seed_count
+    assert not run_thread.is_alive()
+    assert run_codes and run_codes[0] != 0
+    assert len(stalled.items) == workers
+    expected_issues = set(range(workers))
+    assert {item.issue for item in stalled.items} == expected_issues
     assert all(
         item.result is not None and item.result.reason.startswith("resumable at")
         for item in stalled.items
     )
 
-    recovered = make_coordinator()
+    recovered = _make_recovery_coordinator(monkeypatch, workers)
+    assert recovered.completion_q.capacity == recovered._work_window
     with patch.object(
         WorkerPool,
         "_run_build_test",
@@ -488,7 +637,8 @@ def test_worker_pool_stalled_consumer_preserves_and_recovers(
     ):
         assert recovered.run() == 0
 
-    assert len(recovered.items) == seed_count
+    assert len(recovered.items) == workers
+    assert {item.issue for item in recovered.items} == expected_issues
     assert all(item.result is not None and item.result.passed for item in recovered.items)
 
 

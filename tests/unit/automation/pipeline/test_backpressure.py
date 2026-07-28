@@ -149,6 +149,196 @@ def test_stage_burst_is_deferred_until_queue_drains(
     assert any(record["event"] == "queue_deferred" for record in records)
 
 
+def test_stage_burst_beyond_spool_bound_is_durable_and_resident_work_stays_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stalled stage cannot move an arbitrary source burst into coordinator memory."""
+    event_log = tmp_path / "bounded-admission-events.jsonl"
+    burst_size = 10_000
+    monkeypatch.setattr(
+        seeding_mod,
+        "seed_from_cli",
+        lambda repos, issues, prs: [
+            seeding_mod.SeedEntry(
+                kind="issue",
+                identifier=issue,
+                stage=StageName.PLANNING,
+                reason="burst seed",
+            )
+            for issue in range(1, burst_size + 1)
+        ],
+    )
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            max_workers=1,
+            parallel_repos=1,
+            stage_queue_capacity=1,
+            metrics_port=9124,
+            projects_dir=tmp_path,
+            event_log_path=event_log,
+        ),
+        github=FakeStageGitHub(),
+        pool=FakeWorkerPool(size=1, completion_q=CompletionQueue(capacity=1)),
+        install_signals=False,
+    )
+
+    pushed = coordinator._seed_pass()
+
+    assert coordinator._admission_spool_capacity == len(StageName)
+    assert pushed == 1 + coordinator._admission_spool_capacity
+    assert len(coordinator.queues[StageName.PLANNING]) == 1
+    assert len(coordinator._pending_admissions) == coordinator._admission_spool_capacity
+    resident_depth = sum(len(queue) for queue in coordinator.queues.values()) + len(
+        coordinator._pending_admissions
+    )
+    resident_capacity = sum(queue.capacity for queue in coordinator.queues.values()) + (
+        coordinator._admission_spool_capacity
+    )
+    assert resident_depth == 1 + coordinator._admission_spool_capacity
+    assert resident_depth <= resident_capacity
+    # The one item that crossed the hard boundary is retained as the exact
+    # RESUMABLE recovery receipt; the remaining source burst is not retained.
+    assert len(coordinator.items) == pushed + 1
+    assert len(coordinator.items) < burst_size
+    assert coordinator.items[-1].result is not None
+    assert "admission spool saturated" in coordinator.items[-1].result.reason
+    assert coordinator.shutdown.is_set()
+    assert coordinator._fatal is True
+
+    snapshot = coordinator._observability_snapshot()
+    assert snapshot["admission_depth"] == coordinator._admission_spool_capacity
+    assert snapshot["admission_capacity"] == coordinator._admission_spool_capacity
+    coordinator._emit_observability_tick()
+    assert coordinator._metrics_registry is not None
+    rendered = coordinator._metrics_registry.render_prometheus()
+    assert (
+        f"hephaestus_pipeline_admission_depth {coordinator._admission_spool_capacity}" in rendered
+    )
+    assert (
+        f"hephaestus_pipeline_admission_capacity {coordinator._admission_spool_capacity}"
+        in rendered
+    )
+    records = [json.loads(line) for line in event_log.read_text().splitlines()]
+    saturation = next(record for record in records if record["event"] == "queue_saturated")
+    assert saturation["fields"][0]["queue"] == "admission"
+    assert saturation["fields"][0]["item"] == f"repo-a#{pushed + 1}"
+
+
+def test_push_fallback_overflow_preserves_spool_and_journals_exact_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bounded fallback refuses overflow without deque maxlen eviction."""
+    event_log = tmp_path / "push-fallback-overflow.jsonl"
+    coordinator = _coordinator(
+        tmp_path,
+        monkeypatch,
+        event_log_path=event_log,
+        stage_queue_capacity=1,
+    )
+    queued = WorkItem(
+        repo="repo-a",
+        kind=ItemKind.ISSUE,
+        issue=1,
+        stage=StageName.PLANNING,
+    )
+    assert coordinator._push_item(queued, StageName.PLANNING, enter=True)
+    for issue in range(2, 2 + coordinator._admission_spool_capacity):
+        assert coordinator._push_item(
+            WorkItem(
+                repo="repo-a",
+                kind=ItemKind.ISSUE,
+                issue=issue,
+                stage=StageName.PLANNING,
+            ),
+            StageName.PLANNING,
+            enter=True,
+        )
+    pending_before = list(coordinator._pending_admissions)
+    boundary_issue = 2 + coordinator._admission_spool_capacity
+    boundary = WorkItem(
+        repo="repo-a",
+        kind=ItemKind.ISSUE,
+        issue=boundary_issue,
+        stage=StageName.PLANNING,
+    )
+
+    assert coordinator._push_item(boundary, StageName.PLANNING, enter=True) is False
+
+    assert list(coordinator._pending_admissions) == pending_before
+    assert boundary.result is not None
+    assert "admission spool saturated" in boundary.result.reason
+    receipt = next(
+        record
+        for record in (json.loads(line) for line in event_log.read_text().splitlines())
+        if record["event"] == "queue_saturated"
+    )
+    assert receipt["fields"][0]["item"] == f"repo-a#{boundary_issue}"
+    assert receipt["fields"][0]["details"] == {
+        "admission_depth": coordinator._admission_spool_capacity,
+        "blocked_stage": "planning",
+        "stage_capacity": 1,
+        "stage_depth": 1,
+    }
+
+
+def test_product_burst_beyond_spool_bound_records_exact_recovery_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Discovery cannot retain products beyond the stage plus admission bounds."""
+    event_log = tmp_path / "bounded-product-events.jsonl"
+    burst_size = 10_000
+    coordinator = _coordinator(
+        tmp_path,
+        monkeypatch,
+        event_log_path=event_log,
+        stage_queue_capacity=1,
+    )
+    repo_item = WorkItem(repo="repo-a", kind=ItemKind.REPO, stage=StageName.REPO)
+    repo_item.payload["products"] = [
+        {"kind": "issue", "number": issue, "stage": StageName.PLANNING}
+        for issue in range(1, burst_size + 1)
+    ]
+
+    coordinator._seed_products(repo_item)
+
+    resident_capacity = 1 + coordinator._admission_spool_capacity
+    assert len(coordinator.queues[StageName.PLANNING]) == 1
+    assert len(coordinator._pending_admissions) == coordinator._admission_spool_capacity
+    # One additional item is retained as the exact rejected recovery receipt;
+    # the remaining source products are reconstructible by repo discovery and
+    # are not copied into another coordinator-owned backlog.
+    assert len(coordinator.items) == resident_capacity + 1
+    assert len(coordinator.items) < burst_size
+    rejected = coordinator.items[-1]
+    assert rejected.issue == resident_capacity + 1
+    assert rejected.result is not None
+    assert "admission spool saturated" in rejected.result.reason
+    assert "products" not in repo_item.payload
+    assert coordinator.shutdown.is_set()
+    assert coordinator._fatal is True
+
+    snapshot = coordinator._observability_snapshot()
+    assert snapshot["admission_depth"] == coordinator._admission_spool_capacity
+    records = [json.loads(line) for line in event_log.read_text().splitlines()]
+    saturation = next(record for record in records if record["event"] == "queue_saturated")
+    assert saturation["fields"][0] == {
+        "capacity": coordinator._admission_spool_capacity,
+        "details": {
+            "admission_depth": coordinator._admission_spool_capacity,
+            "blocked_stage": "planning",
+            "stage_capacity": 1,
+            "stage_depth": 1,
+        },
+        "fatal": True,
+        "item": f"repo-a#{resident_capacity + 1}",
+        "queue": "admission",
+        "rejections": 1,
+        "source": "planning_stage_queue_overflow",
+    }
+
+
 def test_c_plus_one_seed_drains_and_recovery_reuses_the_same_seed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -182,10 +372,18 @@ def test_c_plus_one_seed_drains_and_recovery_reuses_the_same_seed(
     coordinator.stages[StageName.PLANNING] = _RecoveringStage()
 
     assert coordinator.run() == 0
-    assert {item.issue for item in coordinator.items} == {1, 2}
+    assert [item.issue for item in coordinator.items] == [1, 2]
+    assert len(coordinator.items) == 2
+    assert len(coordinator.ledger) == 2
+    assert not coordinator._pending_admissions
     assert all(item.result is not None and item.result.passed for item in coordinator.items)
+    assert all(
+        item.payload["entry_stage"] == StageName.PLANNING.value for item in coordinator.items
+    )
     records = [json.loads(line) for line in event_log.read_text().splitlines()]
-    assert any(record["event"] == "queue_deferred" for record in records)
+    deferred = [record for record in records if record["event"] == "queue_deferred"]
+    assert len(deferred) == 1
+    assert deferred[0]["fields"][1] == "repo-a#2"
     assert not any(record["event"] == "queue_saturated" for record in records)
 
     retry = Coordinator(
@@ -197,7 +395,10 @@ def test_c_plus_one_seed_drains_and_recovery_reuses_the_same_seed(
     retry.stages[StageName.PLANNING] = _RecoveringStage()
 
     assert retry.run() == 0
-    assert {item.issue for item in retry.items} == {1, 2}
+    assert [item.issue for item in retry.items] == [1, 2]
+    assert len(retry.items) == 2
+    assert len(retry.ledger) == 2
+    assert not retry._pending_admissions
     assert all(item.result is not None and item.result.passed for item in retry.items)
 
 
@@ -266,6 +467,8 @@ def test_snapshot_exports_capacity_depth_and_rejection_totals(
     snapshot = coordinator._observability_snapshot()
     assert snapshot["queue_capacities"][StageName.REPO.value] == 1
     assert snapshot["queue_depths"][StageName.REPO.value] == 1
+    assert snapshot["admission_depth"] == 1
+    assert snapshot["admission_capacity"] == len(StageName)
     assert snapshot["queue_rejection_totals"][StageName.REPO.value] == 1
     assert snapshot["saturated_queues"] == [StageName.REPO.value]
 
@@ -273,6 +476,8 @@ def test_snapshot_exports_capacity_depth_and_rejection_totals(
     assert coordinator._metrics_registry is not None
     rendered = coordinator._metrics_registry.render_prometheus()
     assert 'hephaestus_pipeline_queue_capacity{stage="repo"} 1' in rendered
+    assert f"hephaestus_pipeline_admission_capacity {len(StageName)}" in rendered
+    assert "hephaestus_pipeline_admission_depth 1" in rendered
     assert "hephaestus_pipeline_queue_rejections_total" in rendered
 
 
@@ -325,9 +530,10 @@ def test_completion_rejection_is_durable_and_terminates(
     coordinator.stages[StageName.PLANNING] = _JobRequestingStage()
 
     started = time.monotonic()
-    assert coordinator.run() == 130
+    assert coordinator.run() == 1
 
     assert time.monotonic() - started < 1.0
+    assert coordinator._signal_received is False
     assert coordinator.in_flight == {}
     assert coordinator.items[0].result is not None
     assert coordinator.items[0].result.reason.startswith("resumable at planning")
@@ -343,7 +549,8 @@ def test_completion_rejection_recovers_from_the_same_seed(
     first = _coordinator(tmp_path, monkeypatch, pool=first_pool)
     first.stages[StageName.PLANNING] = _JobRequestingStage()
 
-    assert first.run() == 130
+    assert first.run() == 1
+    assert first._signal_received is False
     assert first.items[0].result is not None
     assert first.items[0].result.reason.startswith("resumable at planning")
 
@@ -362,7 +569,7 @@ def test_completion_rejection_recovers_from_the_same_seed(
 def test_rejection_mailbox_overflow_parks_all_live_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Catastrophic fallback parks remaining in-flight items instead of hanging."""
+    """Mailbox overflow parks live work and reports failure, not a signal."""
     coordinator = _coordinator(tmp_path, monkeypatch)
     first = WorkItem(repo="repo-a", kind=ItemKind.ISSUE, issue=1, stage=StageName.PLANNING)
     second = WorkItem(repo="repo-a", kind=ItemKind.ISSUE, issue=2, stage=StageName.PLANNING)
@@ -381,4 +588,9 @@ def test_rejection_mailbox_overflow_parks_all_live_work(
     assert coordinator.in_flight == {}
     assert first.result is not None
     assert second.result is not None
+    assert first.result.reason.startswith("resumable at planning")
+    assert second.result.reason.startswith("resumable at planning")
     assert coordinator._pool_shut_down is True
+    assert coordinator.shutdown.is_set()
+    assert coordinator._signal_received is False
+    assert coordinator._exit_code() == 1

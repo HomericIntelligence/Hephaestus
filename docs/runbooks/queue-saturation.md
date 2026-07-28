@@ -1,9 +1,10 @@
 # Runbook: Pipeline Queue Saturation
 
 Use this when the coordinator emits the critical `queue_saturated` alert or a
-run ends with resumable work after a completion publication was rejected.
-Normal stage backlogs emit `queue_deferred` and drain automatically; they are
-not saturation incidents.
+run ends with resumable work after an admission or completion publication was
+rejected. Normal stage backlogs emit `queue_deferred` and drain automatically;
+they are not saturation incidents unless the bounded admission spool also
+fills.
 
 ## Diagnose
 
@@ -16,8 +17,9 @@ not saturation incidents.
    ```
 
 2. Compare the event with the live snapshot or metrics. A stage queue at its
-   configured capacity is only a backlog; `queue_saturated` means a completion
-   publication or the bounded rejection mailbox could not accept a result.
+   configured capacity is only a backlog; `queue_saturated` means the bounded
+   admission spool, completion channel, or rejection mailbox could not accept
+   more work.
 
 3. Check the run summary for `RESUMABLE at <stage>`. The coordinator parks the
    exact rejected item before graceful shutdown, and parks all remaining live
