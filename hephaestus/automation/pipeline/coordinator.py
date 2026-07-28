@@ -90,6 +90,10 @@ from typing import Any, TypeAlias
 
 from jinja2 import TemplateNotFound
 
+from hephaestus.automation.direct_review_recovery import (
+    is_inspection_only_detached_push_failure,
+    list_direct_review_recovery_paths,
+)
 from hephaestus.automation.models import IssueInfo
 from hephaestus.automation.pipeline import admission as _admission, seeding as _seeding
 from hephaestus.automation.pipeline.events import StageEvent, encode_stage_event
@@ -575,6 +579,10 @@ class Coordinator:
         self._live_work_permit_ids: set[int] = set()
         self.ledger: list[ItemResult] = []
         self.preserved: list[PreservedWorktree] = []
+        # Recovery checkouts are intentionally distinct from failed-item
+        # debugging worktrees: a later fresh review may pass, but the prior
+        # checkout still needs explicit operator cleanup guidance.
+        self.recovery_preserved: list[PreservedWorktree] = []
         self.items: list[WorkItem] = []
         self._terminal_summary = TerminalSummary()
         self.event_log: deque[tuple[Any, ...]] = deque(maxlen=config.event_log_capacity)
@@ -670,7 +678,11 @@ class Coordinator:
             StageName.IMPLEMENTATION: ImplementationStage(),
             StageName.PR_REVIEW: PrReviewStage(),
             StageName.MERGE_WAIT: MergeWaitStage(),
-            StageName.FINISHED: FinishedStage(self.ledger, self.preserved),
+            StageName.FINISHED: FinishedStage(
+                self.ledger,
+                self.preserved,
+                self.recovery_preserved,
+            ),
         }
 
     def _ctx_for_repo(self, repo: str) -> StageContext:
@@ -915,6 +927,7 @@ class Coordinator:
             )
             summary_items = self._effective_items()
             preserved = self._active_preserved_worktrees()
+            recovery_preserved = self._active_recovery_worktrees()
             try:
                 self._record_event(
                     "run_end",
@@ -931,6 +944,7 @@ class Coordinator:
                     stats,
                     preserved,
                     json_out=self.config.json_out,
+                    recovery_preserved=recovery_preserved,
                     terminal_summary=(
                         self._terminal_summary if self._terminal_summary.total else None
                     ),
@@ -945,7 +959,7 @@ class Coordinator:
         return latest_logical_items(self.items)
 
     def _active_preserved_worktrees(self) -> list[PreservedWorktree]:
-        """Return preserved worktrees for latest failed items that still exist."""
+        """Return extant failed-item worktrees for the latest logical items."""
         failed_items = {
             (item.repo, item.issue or item.pr or 0)
             for item in self._effective_items()
@@ -956,6 +970,18 @@ class Coordinator:
         for repo, issue_or_pr, path in self.preserved:
             entry = (repo, issue_or_pr, path)
             if entry in seen or (repo, issue_or_pr) not in failed_items or not Path(path).exists():
+                continue
+            seen.add(entry)
+            active.append(entry)
+        return active
+
+    def _active_recovery_worktrees(self) -> list[PreservedWorktree]:
+        """Return extant receipt-backed detached-review recovery worktrees."""
+        active: list[PreservedWorktree] = []
+        seen: set[PreservedWorktree] = set()
+        for repo, issue_or_pr, path in self.recovery_preserved:
+            entry = (repo, issue_or_pr, path)
+            if entry in seen or not Path(path).exists():
                 continue
             seen.add(entry)
             active.append(entry)
@@ -1059,6 +1085,8 @@ class Coordinator:
             del self.ledger[:-retained]
         if len(self.preserved) > retained:
             del self.preserved[:-retained]
+        if len(self.recovery_preserved) > retained:
+            del self.recovery_preserved[:-retained]
 
     # -- stage-queue leases -------------------------------------------------
 
@@ -1392,6 +1420,7 @@ class Coordinator:
         seeding reconstruction resumes exactly here with no shutdown
         bookkeeping.
         """
+        self._record_resumable_recovery_worktrees(item)
         self._release_source_lease(item)
         item.result = ItemResult(
             passed=False,
@@ -1406,6 +1435,46 @@ class Coordinator:
             self._item_key(item),
             item.stage.value,
         )
+
+    def _record_resumable_recovery_worktrees(self, item: WorkItem) -> None:
+        """Retain receipt-backed recovery paths when shutdown skips FinishedStage.
+
+        A worker writes a remote-drift receipt before returning the result that
+        triggers a fresh review.  A shutdown can park that item before it ever
+        reaches ``FinishedStage``, so collect the same durable evidence here
+        for the interrupt summary rather than losing the operator guidance.
+        """
+        direct_publication_interrupted = (
+            item.worktree
+            and item.payload.get("direct_pr_worktree") == item.worktree
+            and item.state in {"ADDRESS_WAIT", "PUSH_WAIT"}
+        )
+        if direct_publication_interrupted or (
+            item.worktree
+            and is_inspection_only_detached_push_failure(item.payload.get("detached_push_failure"))
+        ):
+            entry = (item.repo, item.issue or item.pr or 0, item.worktree)
+            if entry not in self.recovery_preserved:
+                self.recovery_preserved.append(entry)
+        if item.issue is None or item.pr is None:
+            return
+        try:
+            worktrees = list_direct_review_recovery_paths(
+                repo_root=_effective_repo_root(self.config, item.repo),
+                issue=item.issue,
+                pr=item.pr,
+            )
+        except (OSError, RuntimeError) as error:
+            logger.warning(
+                "interrupt:%s: could not read detached-review recovery receipts: %s",
+                item.issue or item.repo,
+                error,
+            )
+            return
+        for worktree in worktrees:
+            entry = (item.repo, item.issue, str(worktree))
+            if entry not in self.recovery_preserved:
+                self.recovery_preserved.append(entry)
 
     @staticmethod
     def _job_result_event_fields(result: JobResult) -> dict[str, Any]:

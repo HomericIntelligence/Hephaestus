@@ -11,6 +11,10 @@ from unittest.mock import Mock, patch
 import pytest
 
 from hephaestus.automation.git_utils import (
+    DetachedHeadPushError,
+    DetachedHeadPushRemoteHeadChangedError,
+    DetachedHeadPushRemoteHeadUnchangedError,
+    DetachedHeadPushRemoteProbeError,
     _commit_policy_rebase_command,
     _remove_untracked_files_tracked_by_ref,
     clear_repo_caches,
@@ -551,17 +555,109 @@ class TestPushDetachedHead:
             timeout=42,
         )
 
-    def test_rejects_a_detached_push_when_the_remote_head_advanced(
+    def test_pushes_the_explicit_detached_commit_with_the_reviewed_head_lease(
         self, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
-        """A lease rejection remains a hard failure for the coordinator."""
-        git_utils_mocks.run.side_effect = subprocess.CalledProcessError(
-            1,
-            ["git", "push"],
-            stderr="! [rejected] HEAD -> 123-auto-impl (stale info)",
+        """A bounded retry cannot follow a later detached-HEAD update."""
+        reviewed_head = "a" * 40
+        source_sha = "b" * 40
+
+        push_head_to_branch(
+            "123-auto-impl",
+            reviewed_head,
+            tmp_path,
+            source_sha=source_sha,
+            timeout=42,
         )
 
-        with pytest.raises(RuntimeError, match="Failed to publish detached HEAD"):
+        assert git_utils_mocks.run.call_args.args[0][-1] == (
+            f"{source_sha}:refs/heads/123-auto-impl"
+        )
+
+    def test_reports_a_detached_push_when_the_remote_head_advanced(
+        self, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """Only a post-failure remote read may classify a lease as stale."""
+        git_utils_mocks.run.side_effect = [
+            subprocess.CalledProcessError(1, ["git", "push"]),
+            Mock(stdout=("b" * 40) + "\trefs/heads/123-auto-impl\n"),
+        ]
+
+        with pytest.raises(DetachedHeadPushRemoteHeadChangedError):
+            push_head_to_branch("123-auto-impl", "a" * 40, tmp_path)
+
+        assert git_utils_mocks.run.call_args_list[1].args[0] == [
+            "git",
+            "ls-remote",
+            "--refs",
+            "origin",
+            "refs/heads/123-auto-impl",
+        ]
+
+    def test_reports_an_unchanged_remote_without_logging_push_output(
+        self, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A failed local hook remains retryable when the remote is unchanged."""
+        pin = "a" * 40
+        git_utils_mocks.run.side_effect = [
+            subprocess.CalledProcessError(
+                1,
+                ["git", "push"],
+                stderr="sensitive pre-push hook output must not escape",
+            ),
+            Mock(stdout=pin + "\trefs/heads/123-auto-impl\n"),
+        ]
+
+        with pytest.raises(DetachedHeadPushRemoteHeadUnchangedError) as exc_info:
+            push_head_to_branch("123-auto-impl", pin, tmp_path)
+
+        assert "sensitive" not in str(exc_info.value)
+
+    def test_accepts_an_ambiguous_push_after_the_exact_source_was_published(
+        self, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A lost transport result is not remote drift when the source is live."""
+        source_sha = "b" * 40
+        git_utils_mocks.run.side_effect = [
+            subprocess.TimeoutExpired(["git", "push"], timeout=42),
+            Mock(stdout=source_sha + "\trefs/heads/123-auto-impl\n"),
+        ]
+
+        push_head_to_branch("123-auto-impl", "a" * 40, tmp_path, source_sha=source_sha)
+
+    @pytest.mark.parametrize(
+        ("observed_head", "error_type"),
+        [
+            ("a" * 40, DetachedHeadPushRemoteHeadUnchangedError),
+            ("b" * 40, DetachedHeadPushRemoteHeadChangedError),
+        ],
+    )
+    def test_classifies_a_timed_out_push_from_the_authoritative_remote_head(
+        self,
+        git_utils_mocks: Any,
+        tmp_path: Path,
+        observed_head: str,
+        error_type: type[DetachedHeadPushError],
+    ) -> None:
+        """A transport timeout receives the same safe post-failure classification."""
+        git_utils_mocks.run.side_effect = [
+            subprocess.TimeoutExpired(["git", "push"], timeout=42),
+            Mock(stdout=observed_head + "\trefs/heads/123-auto-impl\n"),
+        ]
+
+        with pytest.raises(error_type):
+            push_head_to_branch("123-auto-impl", "a" * 40, tmp_path, timeout=42)
+
+    def test_reports_an_unconfirmed_failure_when_the_remote_probe_fails(
+        self, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """Transport uncertainty never masquerades as a stale lease."""
+        git_utils_mocks.run.side_effect = [
+            subprocess.TimeoutExpired(["git", "push"], timeout=42),
+            subprocess.TimeoutExpired(["git", "ls-remote"], timeout=42),
+        ]
+
+        with pytest.raises(DetachedHeadPushRemoteProbeError):
             push_head_to_branch("123-auto-impl", "a" * 40, tmp_path)
 
 

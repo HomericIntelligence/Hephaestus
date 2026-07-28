@@ -11,6 +11,7 @@ import logging
 import re
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -39,9 +40,19 @@ def preserved() -> list[tuple[str, int, str]]:
 
 
 @pytest.fixture
-def stage(ledger: list[ItemResult], preserved: list[tuple[str, int, str]]) -> FinishedStage:
+def recovery_preserved() -> list[tuple[str, int, str]]:
+    """Fresh recovery-checkout list retained after a later pass."""
+    return []
+
+
+@pytest.fixture
+def stage(
+    ledger: list[ItemResult],
+    preserved: list[tuple[str, int, str]],
+    recovery_preserved: list[tuple[str, int, str]],
+) -> FinishedStage:
     """FinishedStage bound to the fixture ledger/preserved lists."""
-    return FinishedStage(ledger, preserved)
+    return FinishedStage(ledger, preserved, recovery_preserved)
 
 
 def _item(
@@ -148,6 +159,25 @@ class TestCleanup:
         }
         assert result.on_done_state == "DONE"
 
+    def test_fresh_review_completion_retains_only_receipt_backed_recovery_checkouts(
+        self,
+        stage: FinishedStage,
+        recovery_preserved: list[tuple[str, int, str]],
+        make_ctx: Any,
+    ) -> None:
+        """A successful re-review must retain only durable recovery evidence."""
+        item = _item(passed=True, worktree="/wt/fresh", state="CLEANUP", pr=1001)
+
+        with patch.object(
+            finished_module,
+            "list_direct_review_recovery_paths",
+            return_value=[Path("/wt/recovery")],
+        ):
+            result = stage.step(item, make_ctx())
+
+        assert isinstance(result, JobRequest)
+        assert ("repo-a", 42, "/wt/recovery") in recovery_preserved
+
     def test_fail_with_worktree_preserves_for_debugging(
         self,
         stage: FinishedStage,
@@ -161,6 +191,56 @@ class TestCleanup:
 
         assert isinstance(result, Continue) and result.next_state == "DONE"
         assert preserved == [("repo-a", 42, "/wt/issue-42")]
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            "remote_changed",
+            "remote_changed_unrecorded",
+            "remote_unchanged",
+            "remote_unconfirmed",
+            "retry_checkout_changed",
+            "retry_checkout_unconfirmed",
+        ],
+    )
+    def test_failed_detached_push_uses_inspection_only_preservation(
+        self,
+        stage: FinishedStage,
+        preserved: list[tuple[str, int, str]],
+        recovery_preserved: list[tuple[str, int, str]],
+        make_ctx: Any,
+        failure: str,
+    ) -> None:
+        """Any terminal detached-push failure can contain an unpublished commit."""
+        item = _item(passed=False, worktree="/wt/review-pr-42", state="CLEANUP", pr=1001)
+        item.payload["detached_push_failure"] = failure
+
+        result = stage.step(item, make_ctx())
+
+        assert result == Continue(next_state="DONE")
+        assert preserved == []
+        assert recovery_preserved == [("repo-a", 42, "/wt/review-pr-42")]
+
+    def test_receipt_backed_failed_checkout_never_reaches_force_remove_footer(
+        self,
+        stage: FinishedStage,
+        preserved: list[tuple[str, int, str]],
+        recovery_preserved: list[tuple[str, int, str]],
+        make_ctx: Any,
+    ) -> None:
+        """A capped remote-drift retry remains inspection-only after receipt discovery."""
+        item = _item(passed=False, worktree="/wt/review-pr-42", state="CLEANUP", pr=1001)
+
+        with patch.object(
+            finished_module,
+            "list_direct_review_recovery_paths",
+            return_value=[Path(item.worktree)],
+        ):
+            result = stage.step(item, make_ctx())
+
+        assert result == Continue(next_state="DONE")
+        assert preserved == []
+        assert recovery_preserved == [("repo-a", 42, "/wt/review-pr-42")]
 
     def test_fail_preserve_is_idempotent(
         self,

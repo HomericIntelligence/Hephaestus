@@ -21,6 +21,7 @@ import pytest
 
 from hephaestus.automation import git_utils, subprocess_registry
 from hephaestus.automation._review_utils import build_automation_parser
+from hephaestus.automation.direct_review_recovery import list_direct_review_recovery_paths
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.jobs import (
     WORKTREE_MATERIALIZED_KEY,
@@ -1357,6 +1358,7 @@ class TestGitOps:
         )
         instance = MagicMock()
         instance.create_worktree.return_value = review_path
+        instance.last_isolated_recovery_paths = []
         with (
             patch(f"{_WP}.WorktreeManager", return_value=instance),
             patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
@@ -1373,6 +1375,45 @@ class TestGitOps:
         )
         mock_sync.assert_called_once_with(review_path, "70-existing", pr_number=70, timeout=60)
         assert result.ok is True
+
+    def test_create_isolated_worktree_does_not_infer_recovery_from_occupancy(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """An occupied checkout is not itself proof of an abandoned recovery."""
+        review_path = tmp_path / "build" / ".worktrees" / "review-pr-70-1"
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 70,
+                "branch_name": "70-existing",
+                "isolated": True,
+                "repo_root": str(tmp_path),
+                "sync_to_remote": True,
+                "pr_number": 70,
+            },
+        )
+        instance = MagicMock()
+        instance.create_worktree.return_value = review_path
+        with (
+            patch(f"{_WP}.WorktreeManager", return_value=instance),
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+            patch(f"{_WP}.git_utils.sync_worktree_to_remote_branch"),
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        assert result.value == {
+            "path": str(review_path),
+            "dirty": False,
+            "status": "",
+            "diff": "",
+        }
 
     def test_verify_pr_review_checkout_rejects_a_dirty_worktree(
         self,
@@ -1963,22 +2004,275 @@ class TestGitOps:
                 "issue_number": 5,
                 "worktree_path": tmp_path,
                 "branch": "5-auto",
+                "pr_number": 1005,
+                "repo_root": str(tmp_path),
                 "publish_detached_head": True,
                 "expected_remote_sha": "a" * 40,
             },
         )
         with (
             patch("hephaestus.automation.git_utils.commit_if_changes", return_value=True),
+            patch(
+                "hephaestus.automation.git_utils.run",
+                return_value=subprocess.CompletedProcess([], 0, stdout="b" * 40 + "\n"),
+            ),
             patch("hephaestus.automation.git_utils.push_head_to_branch") as mock_push,
             patch("hephaestus.automation.git_utils.push_branch") as normal_push,
         ):
             pool.submit(job, StageName.PR_REVIEW)
             _, result = completion_q.get(timeout=10)
 
-        mock_push.assert_called_once_with("5-auto", "a" * 40, tmp_path, timeout=60)
+        mock_push.assert_called_once_with(
+            "5-auto", "a" * 40, tmp_path, source_sha="b" * 40, timeout=60
+        )
         normal_push.assert_not_called()
         assert result.ok is True
         assert result.value is True
+
+    @pytest.mark.parametrize(
+        ("status_output", "current_head"),
+        [(" M changed.py\n", "b" * 40), ("", "c" * 40)],
+    )
+    def test_detached_push_retry_refuses_a_changed_checkout_before_publishing(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+        status_output: str,
+        current_head: str,
+    ) -> None:
+        """A retry cannot publish dirty or amended content after the first push."""
+        source_sha = "b" * 40
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 5,
+                "worktree_path": tmp_path,
+                "branch": "5-auto",
+                "pr_number": 1005,
+                "repo_root": str(tmp_path),
+                "publish_detached_head": True,
+                "expected_remote_sha": "a" * 40,
+                "detached_push_retry_head_sha": source_sha,
+            },
+        )
+        with (
+            patch("hephaestus.automation.git_utils.commit_if_changes") as commit,
+            patch(
+                "hephaestus.automation.git_utils.run",
+                side_effect=[
+                    subprocess.CompletedProcess([], 0, stdout=status_output),
+                    subprocess.CompletedProcess([], 0, stdout=current_head + "\n"),
+                ],
+            ),
+            patch("hephaestus.automation.git_utils.push_head_to_branch") as push,
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        commit.assert_not_called()
+        push.assert_not_called()
+        assert result.ok is False
+        assert result.value == {"detached_push_failure": "retry_checkout_changed"}
+
+    def test_detached_push_retry_republishes_only_the_captured_commit(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A clean retry uses the saved commit SHA rather than a mutable HEAD ref."""
+        source_sha = "b" * 40
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 5,
+                "worktree_path": tmp_path,
+                "branch": "5-auto",
+                "publish_detached_head": True,
+                "expected_remote_sha": "a" * 40,
+                "detached_push_retry_head_sha": source_sha,
+            },
+        )
+        with (
+            patch("hephaestus.automation.git_utils.commit_if_changes") as commit,
+            patch(
+                "hephaestus.automation.git_utils.run",
+                side_effect=[
+                    subprocess.CompletedProcess([], 0, stdout=""),
+                    subprocess.CompletedProcess([], 0, stdout=source_sha + "\n"),
+                ],
+            ),
+            patch("hephaestus.automation.git_utils.push_head_to_branch") as push,
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        commit.assert_not_called()
+        push.assert_called_once_with(
+            "5-auto", "a" * 40, tmp_path, source_sha=source_sha, timeout=60
+        )
+        assert result.ok is True
+
+    @pytest.mark.parametrize(
+        ("exc", "failure_kind"),
+        [
+            (
+                git_utils.DetachedHeadPushRemoteHeadChangedError("remote changed"),
+                "remote_changed",
+            ),
+            (
+                git_utils.DetachedHeadPushRemoteHeadUnchangedError("remote unchanged"),
+                "remote_unchanged",
+            ),
+            (
+                git_utils.DetachedHeadPushRemoteProbeError("probe unavailable"),
+                "remote_unconfirmed",
+            ),
+        ],
+    )
+    def test_commit_push_classifies_verified_detached_push_failures(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+        exc: Exception,
+        failure_kind: str,
+    ) -> None:
+        """The PR-review stage receives a safe, actionable detached-push outcome."""
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 5,
+                "pr_number": 1005,
+                "repo_root": str(tmp_path),
+                "worktree_path": tmp_path,
+                "branch": "5-auto",
+                "publish_detached_head": True,
+                "expected_remote_sha": "a" * 40,
+            },
+        )
+        with (
+            patch("hephaestus.automation.git_utils.commit_if_changes", return_value=True),
+            patch(
+                "hephaestus.automation.git_utils.run",
+                return_value=subprocess.CompletedProcess([], 0, stdout="b" * 40 + "\n"),
+            ),
+            patch("hephaestus.automation.git_utils.push_head_to_branch", side_effect=exc),
+            patch(f"{_WP}.record_direct_review_recovery") as record_recovery,
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        if failure_kind == "remote_changed":
+            record_recovery.assert_called_once()
+        else:
+            record_recovery.assert_not_called()
+        assert result.value == {
+            "detached_push_failure": failure_kind,
+            "detached_push_head_sha": "b" * 40,
+        }
+
+    def test_remote_changed_without_a_durable_receipt_stops_without_restart(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A fresh review is unsafe when the abandoned checkout cannot be recorded."""
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 5,
+                "pr_number": 1005,
+                "repo_root": str(tmp_path),
+                "worktree_path": tmp_path,
+                "branch": "5-auto",
+                "publish_detached_head": True,
+                "expected_remote_sha": "a" * 40,
+            },
+        )
+        with (
+            patch("hephaestus.automation.git_utils.commit_if_changes", return_value=True),
+            patch(
+                "hephaestus.automation.git_utils.run",
+                return_value=subprocess.CompletedProcess([], 0, stdout="b" * 40 + "\n"),
+            ),
+            patch(
+                "hephaestus.automation.git_utils.push_head_to_branch",
+                side_effect=git_utils.DetachedHeadPushRemoteHeadChangedError("remote changed"),
+            ),
+            patch(
+                f"{_WP}.record_direct_review_recovery",
+                side_effect=OSError("state directory is unavailable"),
+            ),
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.value == {
+            "detached_push_failure": "remote_changed_unrecorded",
+            "detached_push_head_sha": "b" * 40,
+        }
+
+    def test_remote_changed_persists_a_recovery_receipt_before_restarting(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """The worker writes durable provenance before it returns remote drift."""
+        worktree = tmp_path / "build" / ".worktrees" / "review-pr-5"
+        worktree.mkdir(parents=True)
+        (worktree / ".git").mkdir()
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 5,
+                "pr_number": 1005,
+                "repo_root": str(tmp_path),
+                "worktree_path": worktree,
+                "branch": "5-auto",
+                "publish_detached_head": True,
+                "expected_remote_sha": "a" * 40,
+            },
+        )
+        with (
+            patch("hephaestus.automation.git_utils.commit_if_changes", return_value=True),
+            patch(
+                "hephaestus.automation.git_utils.run",
+                return_value=subprocess.CompletedProcess([], 0, stdout="b" * 40 + "\n"),
+            ),
+            patch(
+                "hephaestus.automation.git_utils.push_head_to_branch",
+                side_effect=git_utils.DetachedHeadPushRemoteHeadChangedError("remote changed"),
+            ),
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.value == {
+            "detached_push_failure": "remote_changed",
+            "detached_push_head_sha": "b" * 40,
+        }
+        assert list_direct_review_recovery_paths(
+            repo_root=tmp_path,
+            issue=5,
+            pr=1005,
+        ) == [worktree.resolve()]
 
     def test_commit_push_missing_worktree_path_is_error(
         self,
