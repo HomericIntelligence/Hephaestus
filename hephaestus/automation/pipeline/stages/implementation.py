@@ -341,18 +341,26 @@ class ImplementationStage(Stage):
     def _dirty_decision_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """DIRTY_DECISION_WAIT routes either to retry or to the dirty-decision job."""
         issue = _issue_number(item)
-        if ownership := item.payload.pop("branch_worktree_owner", None):
+        if (ownership := item.payload.get("branch_worktree_owner")) is not None:
             branch = ownership.get("branch") if isinstance(ownership, dict) else None
             owner_path = ownership.get("owner_path") if isinstance(ownership, dict) else None
-            is_pipeline_sibling = (
+            owner_status = "unverified"
+            if (
                 isinstance(branch, str)
                 and branch == item.branch
                 and isinstance(owner_path, str)
                 and bool(owner_path)
-                and ctx.branch_worktree_owner_is_pipeline_sibling is not None
-                and ctx.branch_worktree_owner_is_pipeline_sibling(item, branch, owner_path)
-            )
-            if not is_pipeline_sibling:
+                and ctx.branch_worktree_owner_status is not None
+            ):
+                owner_status = ctx.branch_worktree_owner_status(item, branch, owner_path)
+            if owner_status == "pending":
+                # A same-branch pipeline allocation already observed the
+                # holder but its success/failure completion has not reached
+                # the coordinator. Keep the collision receipt intact and
+                # retry after that completion; no Git/agent budget is spent.
+                return StageOutcome(Disposition.RETRY, "branch_worktree_owner_pending")
+            item.payload.pop("branch_worktree_owner", None)
+            if owner_status != "verified":
                 logger.warning(
                     "implementation:%d: branch-worktree holder for %r at %r is not a "
                     "verified pipeline sibling; refusing to supersede",

@@ -118,6 +118,7 @@ from hephaestus.automation.pipeline.stages import (
     StageContext,
     StageGitHub,
 )
+from hephaestus.automation.pipeline.stages.base import BranchWorktreeOwnerStatus
 from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARGV
 from hephaestus.automation.pipeline.stages.repo import (
     DIRECT_SCOPE_BASE_SHA_KEY,
@@ -690,9 +691,7 @@ class Coordinator:
                 now_fn=time.monotonic,
                 budget_fn=self._budget_for,
                 event_fn=self._record_stage_event,
-                branch_worktree_owner_is_pipeline_sibling=(
-                    self._is_pipeline_branch_worktree_sibling
-                ),
+                branch_worktree_owner_status=self._branch_worktree_owner_status,
             )
             if len(self._ctx_cache) >= self._ctx_cache_capacity:
                 self._ctx_cache.popitem(last=False)
@@ -2182,29 +2181,46 @@ class Coordinator:
             return
         self._pipeline_writer_worktrees[key] = item
 
-    def _is_pipeline_branch_worktree_sibling(
+    def _branch_worktree_owner_status(
         self, item: WorkItem, branch: str, owner_path: str
-    ) -> bool:
-        """Return whether *owner_path* is a verified live pipeline sibling.
+    ) -> BranchWorktreeOwnerStatus:
+        """Classify a branch holder as verified, pending, or unverified.
 
         A Git holder result by itself is not evidence of pipeline ownership.
         It becomes eligible for the documented first-writer-wins policy only
         when this run recorded the exact path after a successful writer
-        worktree job and that sibling is still live.  All absent, stale,
-        external, malformed, or cross-repository holders therefore route to a
-        terminal fail instead of silently dropping work.
+        worktree job and that sibling is still live. A matching in-flight
+        create-worktree job may have obtained the holder before its completion
+        is dequeued, so it is retried without consuming a work budget. All
+        absent, stale, external, malformed, or cross-repository holders route
+        to a terminal fail instead of silently dropping work.
         """
         if not branch or branch != item.branch or not owner_path:
-            return False
+            return "unverified"
         owner = self._pipeline_writer_worktrees.get((item.repo, branch))
-        return bool(
+        if (
             owner is not None
             and owner is not item
             and owner.result is None
             and owner.stage is not StageName.FINISHED
             and owner.branch == branch
             and owner.worktree == owner_path
-        )
+        ):
+            return "verified"
+        for handle, candidate in self.in_flight.items():
+            job = handle.job
+            if (
+                candidate is not item
+                and candidate.repo == item.repo
+                and candidate.branch == branch
+                and candidate.stage is StageName.IMPLEMENTATION
+                and isinstance(job, GitJob)
+                and job.op == "create_worktree"
+                and job.kwargs.get("branch_name") == branch
+                and not bool(job.kwargs.get("isolated", False))
+            ):
+                return "pending"
+        return "unverified"
 
     def _route_fail_back(self, item: WorkItem, outcome: StageOutcome, route: Route) -> None:
         """Apply the FAIL_BACK row: reason-keyed regression, globally capped.

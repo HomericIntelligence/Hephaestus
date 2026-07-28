@@ -1042,10 +1042,19 @@ class TestFailBackRouting:
 class TestImplementationAdmission:
     """Topological order + file-overlap reuse for the implementation queue."""
 
-    def test_distinct_prs_sharing_head_allow_one_writer_and_supersede_verified_sibling(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        ("owner_pr", "sibling_pr"),
+        [(3001, 3002), (3001, 3001)],
+        ids=("distinct-prs", "consolidated-pr"),
+    )
+    def test_reversed_worktree_completions_wait_for_one_shared_head_writer(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        owner_pr: int,
+        sibling_pr: int,
     ) -> None:
-        """A live writer receipt, not a matching branch name, permits supersession."""
+        """A collision waits for its owner completion, for either shared-head topology."""
         coordinator, _pool, _ = make_coordinator(
             tmp_path,
             monkeypatch,
@@ -1059,7 +1068,7 @@ class TestImplementationAdmission:
             repo="repo-a",
             kind=ItemKind.ISSUE,
             issue=2268,
-            pr=3001,
+            pr=owner_pr,
             stage=StageName.IMPLEMENTATION,
             state="WORKTREE_WAIT",
             branch=shared_branch,
@@ -1069,7 +1078,7 @@ class TestImplementationAdmission:
             repo="repo-a",
             kind=ItemKind.ISSUE,
             issue=2269,
-            pr=3002,
+            pr=sibling_pr,
             stage=StageName.IMPLEMENTATION,
             state="WORKTREE_WAIT",
             branch=shared_branch,
@@ -1077,36 +1086,64 @@ class TestImplementationAdmission:
         )
         coordinator._push_item(owner, StageName.IMPLEMENTATION, enter=False)
         coordinator._push_item(sibling, StageName.IMPLEMENTATION, enter=False)
-        owner.worktree = str(owner_path)
-        coordinator._register_pipeline_writer_worktree(
-            owner,
-            GitJob(
-                repo="repo-a",
-                op="create_worktree",
-                timeout_s=60,
-                kwargs={"issue_number": 2268, "branch_name": shared_branch},
-            ),
-            JobResult(ok=True, value={"path": str(owner_path)}),
+        owner_lease = coordinator._claim_item(StageName.IMPLEMENTATION)
+        sibling_lease = coordinator._claim_item(StageName.IMPLEMENTATION)
+        assert owner_lease is owner
+        assert sibling_lease is sibling
+        owner_job = GitJob(
+            repo="repo-a",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={"issue_number": 2268, "branch_name": shared_branch},
         )
-        claimed = coordinator._claim_item(StageName.IMPLEMENTATION, index=1)
-        assert claimed is sibling
-        stage = coordinator.stages[StageName.IMPLEMENTATION]
-        stage.on_job_done(
-            sibling,
+        sibling_job = GitJob(
+            repo="repo-a",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={"issue_number": 2269, "branch_name": shared_branch},
+        )
+        owner_handle = JobHandle(job=owner_job, on_done_state="DIRTY_DECISION_WAIT")
+        sibling_handle = JobHandle(job=sibling_job, on_done_state="DIRTY_DECISION_WAIT")
+        coordinator.in_flight[owner_handle] = owner
+        coordinator.in_flight[sibling_handle] = sibling
+        coordinator.inflight_per_repo["repo-a"] = 2
+
+        # The collision reaches the coordinator first even though the owner
+        # allocated the branch first. It must defer rather than fail closed or
+        # incorrectly start another implementation session.
+        coordinator._handle_completion(
+            sibling_handle,
             JobResult(
                 ok=False,
                 error="branch_worktree_owned",
                 value={"branch": shared_branch, "owner_path": str(owner_path)},
             ),
-            coordinator._ctx_for(sibling),
         )
-        sibling.state = "DIRTY_DECISION_WAIT"
-        outcome = stage.step(sibling, coordinator._ctx_for(sibling))
-        assert isinstance(outcome, StageOutcome)
-        coordinator._route(sibling, outcome)
+        assert sibling.result is None
+        assert sibling.payload["branch_worktree_owner"] == {
+            "branch": shared_branch,
+            "owner_path": str(owner_path),
+        }
+        assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == [sibling]
+        assert sibling.attempts["implement"] == 0
+        assert "git_error_retries" not in sibling.payload
 
-        assert owner.pr == 3001
-        assert sibling.pr == 3002
+        # The owner completion then establishes the only durable writer
+        # receipt. Re-running the sibling consumes its retained receipt and
+        # terminally supersedes it without an implementation agent job.
+        coordinator._handle_completion(
+            owner_handle,
+            JobResult(
+                ok=True,
+                value={"path": str(owner_path), "dirty": False, "status": "", "diff": ""},
+            ),
+        )
+        claimed = coordinator._claim_item(StageName.IMPLEMENTATION)
+        assert claimed is sibling
+        coordinator._run_item(sibling)
+
+        assert owner.pr == owner_pr
+        assert sibling.pr == sibling_pr
         assert owner.branch == sibling.branch == shared_branch
         assert owner.worktree == str(owner_path)
         assert coordinator._pipeline_writer_worktrees[("repo-a", shared_branch)] is owner
@@ -1114,6 +1151,7 @@ class TestImplementationAdmission:
         assert "superseded" in sibling.result.reason
         assert sibling.worktree == ""
         assert coordinator.queues[StageName.FINISHED].snapshot() == [sibling]
+        assert not any(isinstance(handle.job, AgentJob) for handle in coordinator.in_flight)
 
         # If the sole writer later fails, only its checkout is preserved and
         # shown in rerun guidance; the superseded sibling never aliases it.
@@ -1171,6 +1209,86 @@ class TestImplementationAdmission:
         assert item.worktree == ""
         assert coordinator._pipeline_writer_worktrees == {}
         assert coordinator.queues[StageName.FINISHED].snapshot() == [item]
+
+    def test_pending_branch_owner_that_fails_to_register_leaves_sibling_failed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A deferred collision fails closed if the candidate owner allocation fails."""
+        coordinator, _pool, _ = make_coordinator(
+            tmp_path,
+            monkeypatch,
+            max_workers=2,
+            serialize_file_overlap=False,
+        )
+        shared_branch = "shared-head"
+        owner = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=2268,
+            pr=3001,
+            stage=StageName.IMPLEMENTATION,
+            state="WORKTREE_WAIT",
+            branch=shared_branch,
+            payload={"existing_pr": True},
+        )
+        sibling = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=2269,
+            pr=3002,
+            stage=StageName.IMPLEMENTATION,
+            state="WORKTREE_WAIT",
+            branch=shared_branch,
+            payload={"existing_pr": True},
+        )
+        coordinator._push_item(owner, StageName.IMPLEMENTATION, enter=False)
+        coordinator._push_item(sibling, StageName.IMPLEMENTATION, enter=False)
+        assert coordinator._claim_item(StageName.IMPLEMENTATION) is owner
+        assert coordinator._claim_item(StageName.IMPLEMENTATION) is sibling
+        owner_handle = JobHandle(
+            job=GitJob(
+                repo="repo-a",
+                op="create_worktree",
+                timeout_s=60,
+                kwargs={"issue_number": 2268, "branch_name": shared_branch},
+            ),
+            on_done_state="DIRTY_DECISION_WAIT",
+        )
+        sibling_handle = JobHandle(
+            job=GitJob(
+                repo="repo-a",
+                op="create_worktree",
+                timeout_s=60,
+                kwargs={"issue_number": 2269, "branch_name": shared_branch},
+            ),
+            on_done_state="DIRTY_DECISION_WAIT",
+        )
+        coordinator.in_flight[owner_handle] = owner
+        coordinator.in_flight[sibling_handle] = sibling
+        coordinator.inflight_per_repo["repo-a"] = 2
+
+        coordinator._handle_completion(
+            sibling_handle,
+            JobResult(
+                ok=False,
+                error="branch_worktree_owned",
+                value={
+                    "branch": shared_branch,
+                    "owner_path": str(tmp_path / "manual-worktree"),
+                },
+            ),
+        )
+        coordinator._handle_completion(owner_handle, JobResult(ok=False, error="disk full"))
+
+        assert coordinator._pipeline_writer_worktrees == {}
+        claimed = coordinator._claim_item(StageName.IMPLEMENTATION, index=1)
+        assert claimed is sibling
+        coordinator._run_item(sibling)
+
+        assert sibling.result is not None and not sibling.result.passed
+        assert sibling.result.reason == "branch_worktree_owner_unverified"
+        assert sibling.worktree == ""
+        assert coordinator.queues[StageName.FINISHED].snapshot() == [sibling]
 
     def test_full_downstream_retains_implementation_lease_until_handoff(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -54,7 +54,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, TypeAlias, runtime_checkable
+from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 
 from hephaestus.agents.runtime import DEFAULT_AGENT
 from hephaestus.automation.review_journal import IssueComment
@@ -480,6 +480,7 @@ class JobRequest:
 
 
 StepResult: TypeAlias = "Continue | JobRequest | StageOutcome"
+BranchWorktreeOwnerStatus: TypeAlias = Literal["verified", "pending", "unverified"]
 
 
 @dataclass(frozen=True)
@@ -512,7 +513,9 @@ class StageContext:
     # implementation can treat a collision as redundant work.  Leaving this
     # unset intentionally fails closed in isolated stage tests and alternate
     # hosts.
-    branch_worktree_owner_is_pipeline_sibling: Callable[[WorkItem, str, str], bool] | None = None
+    branch_worktree_owner_status: (
+        Callable[[WorkItem, str, str], BranchWorktreeOwnerStatus] | None
+    ) = None
 
     def now(self) -> float:
         """Return the injected stage clock value (monotonic in the coordinator)."""

@@ -648,7 +648,7 @@ class TestGitErrorRetryCap:
         item.state = "DIRTY_DECISION_WAIT"
         outcome = stage.step(
             item,
-            make_ctx(branch_worktree_owner_is_pipeline_sibling=lambda _item, _branch, _path: True),
+            make_ctx(branch_worktree_owner_status=lambda _item, _branch, _path: "verified"),
         )
 
         assert isinstance(outcome, StageOutcome)
@@ -682,7 +682,7 @@ class TestGitErrorRetryCap:
 
         outcome = stage.step(
             item,
-            make_ctx(branch_worktree_owner_is_pipeline_sibling=lambda _item, _branch, _path: False),
+            make_ctx(branch_worktree_owner_status=lambda _item, _branch, _path: "unverified"),
         )
 
         assert isinstance(outcome, StageOutcome)
@@ -690,6 +690,42 @@ class TestGitErrorRetryCap:
         assert outcome.note == "branch_worktree_owner_unverified"
         assert item.worktree == ""
         assert item.attempts["implement"] == 0
+
+    def test_pending_branch_worktree_owner_retries_without_losing_the_receipt(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A collision waits for the candidate owner completion without spending budget."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=2269, state="WORKTREE_WAIT")
+        item.branch = "shared-head"
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error=BRANCH_WORKTREE_OWNED,
+                value={
+                    "branch": "shared-head",
+                    "owner_path": "/repo/build/.worktrees/issue-2268",
+                },
+            ),
+            make_ctx(),
+        )
+        item.state = "DIRTY_DECISION_WAIT"
+
+        outcome = stage.step(
+            item,
+            make_ctx(branch_worktree_owner_status=lambda _item, _branch, _path: "pending"),
+        )
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.RETRY
+        assert outcome.note == "branch_worktree_owner_pending"
+        assert item.payload["branch_worktree_owner"] == {
+            "branch": "shared-head",
+            "owner_path": "/repo/build/.worktrees/issue-2268",
+        }
+        assert item.attempts["implement"] == 0
+        assert "git_error_retries" not in item.payload
 
     def test_worktree_failures_retry_to_the_cap_then_fail(
         self, make_ctx: Any, make_work_item: Any
