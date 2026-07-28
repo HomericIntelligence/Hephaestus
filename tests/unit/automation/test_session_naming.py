@@ -393,6 +393,42 @@ class TestSessionTranscriptResolver:
         ):
             assert resolve_session_jsonl_path(sid, local) is None
 
+    def test_nested_foreign_checkout_is_rejected_by_common_dir_identity(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Lexical ancestry cannot make an independent nested repository trusted."""
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        local = tmp_path / "owner" / "Repo"
+        nested_foreign = local / "nested" / "Repo"
+        nested_foreign.mkdir(parents=True)
+        sid = session_uuid("Repo", 2284, AGENT_PLAN_REVIEWER, "fable")
+
+        foreign_transcript = session_jsonl_path(sid, nested_foreign)
+        foreign_transcript.parent.mkdir(parents=True, exist_ok=True)
+        foreign_transcript.write_text(
+            f'{{"cwd": "{nested_foreign.resolve()}"}}\n',
+            encoding="utf-8",
+        )
+        assert nested_foreign.is_relative_to(local)
+
+        common_dirs = {
+            local.resolve(): tmp_path / "local-common.git",
+            nested_foreign.resolve(): tmp_path / "foreign-common.git",
+        }
+        with (
+            patch.object(
+                agent_config,
+                "_registered_worktree_roots",
+                return_value=(local.resolve(),),
+            ),
+            patch.object(
+                agent_config,
+                "_git_common_dir",
+                side_effect=lambda cwd: common_dirs[cwd.resolve()],
+            ),
+        ):
+            assert resolve_session_jsonl_path(sid, local) is None
+
     def test_registered_worktree_discovery_uses_explicit_cwd_and_scrubbed_env(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -465,6 +501,109 @@ class TestSessionTranscriptResolver:
             resolved = resolve_session_jsonl_path("session-id", worktree)
 
         assert resolved == min(paths, key=str)
+
+
+@pytest.mark.requires_posix
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Creates throwaway repositories and linked worktrees; skipped on win32",
+)
+class TestSessionTranscriptResolverRealWorktrees:
+    """Integration coverage for Git-identity transcript validation."""
+
+    @staticmethod
+    def _init_repo(repo_root: Path) -> None:
+        repo_root.mkdir(parents=True)
+        env = _git_test_env()
+        subprocess.run(["git", "init", "-q", str(repo_root)], check=True, env=env)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo_root),
+                "commit",
+                "--allow-empty",
+                "-m",
+                "initial",
+                "--no-gpg-sign",
+            ],
+            check=True,
+            env=env,
+        )
+
+    @staticmethod
+    def _add_worktree(repo_root: Path, worktree: Path, branch: str) -> None:
+        worktree.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo_root),
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                str(worktree),
+            ],
+            check=True,
+            env=_git_test_env(),
+        )
+
+    def test_sibling_worktree_resumes_main_checkout_transcript(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        repo_root = tmp_path / "main" / "Repo"
+        sibling_worktree = tmp_path / "separate-root" / "issue-2284"
+        self._init_repo(repo_root)
+        self._add_worktree(repo_root, sibling_worktree, "issue-2284")
+
+        sid = session_uuid("Repo", 2284, AGENT_PLAN_REVIEWER, "fable")
+        transcript = session_jsonl_path(sid, repo_root)
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text(f'{{"cwd": "{repo_root.resolve()}"}}\n', encoding="utf-8")
+
+        assert resolve_session_jsonl_path(sid, sibling_worktree) == transcript
+
+    def test_removed_managed_predecessor_resumes_from_replacement(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        repo_root = tmp_path / "main" / "Repo"
+        predecessor = repo_root / "build" / ".worktrees" / "issue-2284-a"
+        replacement = tmp_path / "separate-root" / "issue-2284-b"
+        self._init_repo(repo_root)
+        self._add_worktree(repo_root, predecessor, "issue-2284-a")
+
+        sid = session_uuid("Repo", 2284, AGENT_PLAN_REVIEWER, "fable")
+        transcript = session_jsonl_path(sid, predecessor)
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text(f'{{"cwd": "{predecessor.resolve()}"}}\n', encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(repo_root), "worktree", "remove", str(predecessor)],
+            check=True,
+            env=_git_test_env(),
+        )
+        self._add_worktree(repo_root, replacement, "issue-2284-b")
+
+        assert resolve_session_jsonl_path(sid, replacement) == transcript
+
+    def test_nested_independent_clone_is_not_same_worktree_family(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        repo_root = tmp_path / "main" / "Repo"
+        nested_clone = repo_root / "nested" / "Repo"
+        self._init_repo(repo_root)
+        self._init_repo(nested_clone)
+
+        sid = session_uuid("Repo", 2284, AGENT_PLAN_REVIEWER, "fable")
+        transcript = session_jsonl_path(sid, nested_clone)
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text(f'{{"cwd": "{nested_clone.resolve()}"}}\n', encoding="utf-8")
+
+        assert resolve_session_jsonl_path(sid, repo_root) is None
 
 
 @pytest.mark.requires_posix

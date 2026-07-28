@@ -624,30 +624,86 @@ def _recorded_transcript_cwds(transcript: Path) -> set[Path]:
     return recorded
 
 
-def _checkout_root(roots: set[Path]) -> Path | None:
-    """Return the registered root that contains this checkout's worktree family."""
-    candidates = [root for root in roots if all(path.is_relative_to(root) for path in roots)]
-    return min(candidates, key=lambda path: (len(path.parts), str(path)), default=None)
+def _git_common_dir(cwd: Path) -> Path | None:
+    """Return *cwd*'s absolute Git common directory, or ``None`` outside Git."""
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(cwd),
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-common-dir",
+            ],
+            check=True,
+            capture_output=True,
+            env=_repo_scoped_git_env(),
+            text=True,
+            timeout=5,
+        )
+    except subprocess.CalledProcessError:
+        return None
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"unable to determine Git common directory for {cwd}") from exc
+    common_dir = result.stdout.strip()
+    return Path(common_dir).resolve() if common_dir else None
 
 
-def _transcript_belongs_to_worktree_family(transcript: Path, roots: set[Path]) -> bool:
-    """Return whether *transcript* belongs to this checkout's stable root."""
+def _managed_worktree_dirs(roots: set[Path], common_dir: Path | None) -> set[Path]:
+    """Return constrained directories that may contain removed managed worktrees."""
+    managed: set[Path] = set()
+
+    # A normal checkout's common directory is ``<main-worktree>/.git`` even
+    # when the caller is a linked worktree in a sibling filesystem tree.
+    if common_dir is not None and common_dir.name == ".git":
+        main_root = common_dir.parent.resolve()
+        if main_root in roots:
+            managed.add(main_root / "build" / ".worktrees")
+
+    # Retain a structural fallback for mocked/nonstandard discovery: only a
+    # registered root that currently owns a direct managed child is eligible.
+    for root in roots:
+        candidate = root / "build" / ".worktrees"
+        if any(other.parent == candidate for other in roots):
+            managed.add(candidate)
+    return managed
+
+
+def _transcript_belongs_to_worktree_family(
+    transcript: Path,
+    roots: set[Path],
+    common_dir: Path | None,
+) -> bool:
+    """Return whether *transcript* belongs to this exact Git worktree family."""
     recorded_cwds = _recorded_transcript_cwds(transcript)
     if not recorded_cwds:
         logger.warning("Ignoring Claude transcript without recorded cwd: %s", transcript)
         return False
-    checkout_root = _checkout_root(roots)
-    if any(
-        recorded not in roots
-        and (checkout_root is None or not recorded.is_relative_to(checkout_root))
-        for recorded in recorded_cwds
-    ):
-        logger.warning(
-            "Ignoring Claude transcript outside the current worktree family: %s",
-            transcript,
-        )
-        return False
-    return True
+
+    managed_dirs = _managed_worktree_dirs(roots, common_dir)
+    for recorded in recorded_cwds:
+        if recorded.exists():
+            recorded_common_dir = _git_common_dir(recorded)
+            if common_dir is not None:
+                if recorded_common_dir != common_dir:
+                    break
+            elif recorded not in roots:
+                # Non-repository callers have no family beyond their exact cwd.
+                break
+        elif not any(recorded.parent == managed_dir for managed_dir in managed_dirs):
+            # A removed worktree no longer has Git metadata to authenticate.
+            # Accept only automation's direct ``build/.worktrees/<name>`` path
+            # beneath the main checkout, never arbitrary lexical descendants.
+            break
+    else:
+        return True
+
+    logger.warning(
+        "Ignoring Claude transcript outside the current Git worktree family: %s",
+        transcript,
+    )
+    return False
 
 
 def _session_transcript_candidates(uuid_str: str, roots: set[Path]) -> set[Path]:
@@ -671,6 +727,7 @@ def resolve_session_jsonl_path(uuid_str: str, cwd: Path) -> Path | None:
     another checkout that collide under Claude's lossy cwd path encoding.
     """
     roots = set(_registered_worktree_roots(cwd))
+    common_dir = _git_common_dir(cwd)
     existing = sorted(
         (
             candidate
@@ -680,7 +737,7 @@ def resolve_session_jsonl_path(uuid_str: str, cwd: Path) -> Path | None:
         key=str,
     )
     for candidate in existing:
-        if _transcript_belongs_to_worktree_family(candidate, roots):
+        if _transcript_belongs_to_worktree_family(candidate, roots, common_dir):
             return candidate
     return None
 
