@@ -491,6 +491,8 @@ class TestFatalTeardown:
 
         def seed_then_immediate() -> int:
             pushed = original_seed()
+            coordinator._signal_received = True
+            coordinator.shutdown.set()
             coordinator._immediate = True
             return pushed
 
@@ -1355,6 +1357,47 @@ class TestDurableEventLog:
         assert records[-1]["event"] == "push"
         assert records[-1]["fields"] == ["planning", "repo-a#44"]
         assert coordinator.event_log[-1] == ("push", "planning", "repo-a#44")
+
+    def test_event_log_retains_only_configured_recent_events(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The in-memory diagnostic event view cannot grow for a long-lived run."""
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+        config = replace(coordinator.config, event_log_capacity=2)
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(
+                size=2,
+                completion_q=CompletionQueue(capacity=2),
+            ),
+            install_signals=False,
+        )
+
+        for index in range(3):
+            coordinator._record_event("test", index)
+
+        assert coordinator.event_log.maxlen == 2
+        assert list(coordinator.event_log) == [("test", 1), ("test", 2)]
+
+    @pytest.mark.parametrize("capacity", [0, -1])
+    def test_event_log_rejects_non_positive_capacity(self, tmp_path: Path, capacity: int) -> None:
+        """A coordinator needs a positive in-memory diagnostic retention bound."""
+        with pytest.raises(ValueError, match="event log capacity must be positive"):
+            Coordinator(
+                PipelineConfig(
+                    org="org",
+                    repos=["repo-a"],
+                    projects_dir=tmp_path,
+                    event_log_capacity=capacity,
+                ),
+                github=FakeStageGitHub(),
+                pool=FakeWorkerPool(
+                    size=1,
+                    completion_q=CompletionQueue(capacity=1),
+                ),
+                install_signals=False,
+            )
 
     def test_zero_thread_nogo_event_is_durable_and_bounded(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

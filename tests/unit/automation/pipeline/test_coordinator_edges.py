@@ -299,6 +299,7 @@ class TestExitCode:
                 final_stage=StageName.FINISHED,
             )
         )
+        coordinator._signal_received = True
         coordinator.shutdown.set()
 
         assert coordinator._exit_code() == 130
@@ -1084,6 +1085,7 @@ class TestLivenessAndFatal:
         coordinator = _coordinator(tmp_path, monkeypatch, grace_s=0.0)
         item = _item()
         coordinator.in_flight[object()] = item  # type: ignore[index]
+        coordinator._signal_received = True
         coordinator.shutdown.set()
         coordinator._grace_deadline = 0.0  # already expired
 

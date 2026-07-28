@@ -52,6 +52,7 @@ logger = logging.getLogger(__name__)
 
 _TAIL = 4000  # chars of stdout/stderr retained in a JobResult
 _ERR_MAX = 500  # chars of error detail retained in a JobResult
+_JOB_LOG_FIELD_MAX = 160  # chars of non-secret job identity retained in incident logs
 _GIT_LOCK_WAIT_POLL_S = 0.1
 _FETCH_ENV_BLOCKLIST = frozenset(
     {
@@ -91,6 +92,31 @@ _TRUSTED_GH_CANDIDATES = (
     Path("/usr/bin/gh"),
 )
 _TRUSTED_GH_ROOTS = (Path("/opt/homebrew"), Path("/usr/local"), Path("/usr"))
+
+
+def _bounded_job_log_field(value: object) -> str:
+    """Return a bounded, single-line scalar suitable for incident logging."""
+    if isinstance(value, str):
+        text = value
+    elif isinstance(value, int) and not isinstance(value, bool):
+        text = str(value)
+    else:
+        return ""
+    text = text.replace("\r", "\\r").replace("\n", "\\n")
+    if len(text) <= _JOB_LOG_FIELD_MAX:
+        return text
+    return f"{text[: _JOB_LOG_FIELD_MAX - 1]}…"
+
+
+def _completion_rejection_log_fields(handle: JobHandle) -> tuple[str, str, str, str]:
+    """Return bounded identifiers without rendering untrusted job payloads."""
+    job = handle.job
+    return (
+        type(job).__name__,
+        _bounded_job_log_field(job.repo),
+        _bounded_job_log_field(getattr(job, "issue", "")),
+        _bounded_job_log_field(job.descr),
+    )
 
 
 def _controlled_git_env() -> dict[str, str]:
@@ -444,9 +470,14 @@ class WorkerPool:
                 worker_id=worker_id,
             )
         if not self._completion_q.offer((handle, result)):
+            job_type, repo, issue, description = _completion_rejection_log_fields(handle)
             logger.critical(
-                "completion queue rejected result for %s; coordinator will park resumable work",
-                handle,
+                "completion queue rejected result; coordinator will park resumable work "
+                "job_type=%s repo=%s issue=%s description=%s",
+                job_type,
+                repo,
+                issue,
+                description,
             )
             self._shutdown.set()
 

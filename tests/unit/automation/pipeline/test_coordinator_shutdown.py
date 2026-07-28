@@ -88,12 +88,13 @@ class InterruptingPool(FakeWorkerPool):
     event is set mid-job and the result comes back ``interrupted=True``.
     """
 
-    def __init__(self, coordinator_shutdown: Any) -> None:
+    def __init__(self, coordinator: Coordinator) -> None:
         super().__init__()
-        self._coordinator_shutdown = coordinator_shutdown
+        self._coordinator = coordinator
 
     def submit(self, job: Any, on_done_state: Any, **kwargs: Any) -> Any:
-        self._coordinator_shutdown.set()
+        self._coordinator._signal_received = True
+        self._coordinator.shutdown.set()
         self.queue_result(JobResult(ok=False, interrupted=True, error="interrupted"))
         return super().submit(job, on_done_state, **kwargs)
 
@@ -168,7 +169,7 @@ class TestInterruptSemantics:
         """An interrupted job parks its item RESUMABLE; on_job_done never runs."""
         seed = [SeedEntry(kind="issue", identifier=1, stage=StageName.PLANNING, reason="r")]
         coordinator = _coordinator(tmp_path, monkeypatch, seed=seed)
-        pool = InterruptingPool(coordinator.shutdown)
+        pool = InterruptingPool(coordinator)
         coordinator.pool = pool
         coordinator.completion_q = pool.completion_q
         stage = JobRequestingStage()
@@ -194,6 +195,7 @@ class TestInterruptSemantics:
             repo="repo-a", kind=ItemKind.ISSUE, issue=2, stage=StageName.PR_REVIEW, state="ENTER"
         )
         coordinator._push_item(item, StageName.PR_REVIEW, enter=True)
+        coordinator._signal_received = True
         coordinator.shutdown.set()
 
         exit_code = coordinator.run()

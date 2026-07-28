@@ -178,6 +178,9 @@ The only cross-thread channel is
 and global admission keeps at most `C` handles in flight. Each stage queue has
 the independent `PipelineConfig.stage_queue_capacity` bound; a full stage
 queue defers admission into the coordinator-owned spool until the next drain.
+That spool has capacity `number of stages × stage_queue_capacity`, providing
+one additional full batch per stage. If it fills, the exact rejected item is
+journaled and parked RESUMABLE, and the run stops admitting source work.
 A completion publication never blocks a worker. When the result queue is full,
 the rejected `(JobHandle, JobResult)` enters a separate bounded mailbox of
 capacity `C` for coordinator-owned terminalization. Signal wakes use a
@@ -285,11 +288,14 @@ the coordinator parks the exact rejected item. If the bounded rejection
 mailbox overflows, immediate teardown parks every remaining in-flight item.
 Stage-queue backlogs are deferred rather than treated as saturation: the
 coordinator retains the item in its admission spool and retries it after queue
-slots open, so a normal `C+1` seed burst does not shut down the run. Completion
-publication saturation still starts the same recovery rule after the exact
-rejected item is parked. Every production entrypoint supplies the durable JSONL
-event-log path, including when metrics are disabled; if that journal cannot
-record a saturation event, the coordinator fails closed with exit code `1`.
+slots open, so a normal `C+1` seed burst does not shut down the run. If the
+bounded spool fills, admission saturation journals and parks the boundary item
+before shutdown; source reconstruction on the next run recovers the unadmitted
+remainder. Completion publication saturation uses the same recovery rule after
+the exact rejected item is parked. Every production entrypoint supplies the
+durable JSONL event-log path, including when metrics are disabled; if that
+journal cannot record a saturation event, the coordinator fails closed with
+exit code `1`.
 Items touched by an interrupt report
 `ItemResult(passed=False, reason="resumable at <stage>", …)` — **never** FAILED. The
 end-of-run summary lists them under `RESUMABLE at <stage>`. Resume is
@@ -1259,6 +1265,8 @@ state-transition is rendered as zero, not as stale active work.
 | `hephaestus_pipeline_queue_capacity` | Gauge | `stage` | `C` | Configured capacity for each stage queue. |
 | `hephaestus_pipeline_completion_depth` | Gauge | — | `0` | Completion results waiting for the coordinator. |
 | `hephaestus_pipeline_completion_capacity` | Gauge | — | `C` | Configured result-queue capacity. |
+| `hephaestus_pipeline_admission_depth` | Gauge | — | `0` | Deferred items waiting for a stage-queue slot. |
+| `hephaestus_pipeline_admission_capacity` | Gauge | — | `stages × stage capacity` | Configured admission-spool capacity. |
 | `hephaestus_pipeline_queue_rejections_total` | Counter | `queue` | `0` | Rejected stage or completion publications. |
 | `hephaestus_pipeline_inflight_jobs` | Gauge | (none) | `0` | Total in-flight jobs across all worker pools. |
 | `hephaestus_pipeline_inflight_per_repo` | Gauge | `repo` | `0` | In-flight jobs by repo, capped by `max_workers`. |

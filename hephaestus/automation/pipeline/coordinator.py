@@ -147,6 +147,10 @@ _IDLE_POLL_S = 1.0
 #: the worker/completion window; excess seed products use admission spooling.
 _DEFAULT_STAGE_QUEUE_CAPACITY = 64
 
+#: Maximum number of recent coordinator events kept for in-process diagnostics.
+#: The optional JSONL journal remains the durable complete event history.
+_DEFAULT_EVENT_LOG_CAPACITY = 1_024
+
 #: Number of fully stalled idle ticks before the coordinator force-runs work.
 _STALL_TICKS_BEFORE_FORCE = 3
 
@@ -271,6 +275,9 @@ class PipelineConfig:
     # coordinator remains a zero-I/O pipeline module and never imports the
     # resilience capability directly.
     circuit_breaker_snapshot_provider: Callable[[], dict[str, dict[str, Any]]] | None = None
+    # A bounded diagnostic view only; ``event_log_path`` is the durable event
+    # history and is not truncated by this setting.
+    event_log_capacity: int = _DEFAULT_EVENT_LOG_CAPACITY
     event_log_path: Path | None = None
     projects_dir: Path = field(default_factory=lambda: Path.home() / "Projects")
     # Optional exceptions to the normal ``projects_dir / repo`` checkout
@@ -368,6 +375,8 @@ class Coordinator:
         self._work_window = max(1, config.parallel_repos * config.max_workers)
         if config.stage_queue_capacity < 1:
             raise ValueError("stage queue capacity must be positive")
+        if config.event_log_capacity < 1:
+            raise ValueError("event log capacity must be positive")
         self.completion_q = CompletionQueue(capacity=self._work_window)
         if pool is None:
             # Imported here, not module-top: WorkerPool is the pipeline's one
@@ -400,11 +409,19 @@ class Coordinator:
         self.ledger: list[ItemResult] = []
         self.preserved: list[PreservedWorktree] = []
         self.items: list[WorkItem] = []
-        self.event_log: list[tuple[Any, ...]] = []
+        self.event_log: deque[tuple[Any, ...]] = deque(maxlen=config.event_log_capacity)
         self._event_log_disabled = False
         self._journal_failure = False
         self._completion_wake = threading.Event()
-        self._pending_admissions: deque[tuple[WorkItem, StageName, bool]] = deque()
+        # A single global spool serves every bounded stage queue.  Reserving one
+        # additional full batch per stage gives each stage equal overflow room
+        # while proving a hard resident-work bound of 2 * stages * capacity
+        # (plus the independently bounded worker window).
+        self._admission_spool_capacity = len(StageName) * config.stage_queue_capacity
+        self._pending_admissions: deque[tuple[WorkItem, StageName, bool]] = deque(
+            maxlen=self._admission_spool_capacity
+        )
+        self._admission_saturated = False
         self._saturated_queues: set[str] = set()
         self._saturation_totals: Counter[str] = Counter()
         self._exported_saturation_totals: Counter[str] = Counter()
@@ -454,6 +471,10 @@ class Coordinator:
         self._seq = 0
         self._grace_deadline: float | None = None
         self._immediate = False
+        # The worker pool and internal recovery paths share ``shutdown`` with
+        # signal handling, so the Event alone cannot identify an operator
+        # interrupt. Exit 130 is reserved for a handler-observed signal.
+        self._signal_received = False
         self._agent_job_count = 0
         self._agent_job_time_s = 0.0
         self._loops_run = 0
@@ -574,6 +595,7 @@ class Coordinator:
         item: WorkItem | None = None,
         source: str,
         fatal: bool = False,
+        details: dict[str, Any] | None = None,
     ) -> None:
         """Record a bounded queue rejection in memory and the optional journal."""
         self._saturation_totals[queue] += 1
@@ -588,6 +610,8 @@ class Coordinator:
             fields["item"] = self._item_key(item)
         if fatal:
             fields["fatal"] = True
+        if details:
+            fields["details"] = details
         if (
             not self._record_event("queue_saturated", fields)
             and self.config.event_log_path is not None
@@ -615,6 +639,8 @@ class Coordinator:
             "queue_capacities": {name.value: queue.capacity for name, queue in self.queues.items()},
             "completion_depth": self.completion_q.qsize(),
             "completion_capacity": self.completion_q.capacity,
+            "admission_depth": len(self._pending_admissions),
+            "admission_capacity": self._admission_spool_capacity,
             "queue_rejection_totals": dict(self._saturation_totals),
             "saturated_queues": sorted(self._saturated_queues),
             "inflight_per_repo": dict(self.inflight_per_repo),
@@ -656,6 +682,14 @@ class Coordinator:
             "hephaestus_pipeline_completion_capacity",
             "Configured completion queue capacity.",
         ).set(snapshot["completion_capacity"])
+        registry.gauge(
+            "hephaestus_pipeline_admission_depth",
+            "Pipeline work waiting for a bounded stage-queue slot.",
+        ).set(snapshot["admission_depth"])
+        registry.gauge(
+            "hephaestus_pipeline_admission_capacity",
+            "Configured pending-admission spool capacity.",
+        ).set(snapshot["admission_capacity"])
         rejection_totals = registry.counter(
             "hephaestus_pipeline_queue_rejections_total",
             "Rejected stage or completion queue publications by queue.",
@@ -834,10 +868,10 @@ class Coordinator:
         return active
 
     def _exit_code(self) -> int:
-        """130 on interrupt; 1 on any effective fail/skip/blocked; 0 clean."""
+        """130 on a signal; 1 on internal stop/fail/skip/blocked; 0 clean."""
         if self._journal_failure:
             return 1
-        if self.shutdown.is_set():
+        if self._signal_received:
             # Interrupt deliberately takes priority over non-passing ledger
             # entries and fatal coordinator errors: a signal means the run did
             # not complete, so wrappers must classify it as cancellation even
@@ -845,7 +879,7 @@ class Coordinator:
             return 130
         effective_results = [item.result for item in self._effective_items() if item.result]
         results = effective_results or self.ledger
-        if self._fatal or any(not result.passed for result in results):
+        if self.shutdown.is_set() or self._fatal or any(not result.passed for result in results):
             return 1
         return 0
 
@@ -1539,6 +1573,8 @@ class Coordinator:
         if item.kind is not ItemKind.REPO:
             return
         for product in item.payload.pop("products", []):
+            if self._admission_saturated:
+                break
             if product.get("stage") is None:
                 logger.info("[%s] excluded: %s", item.repo, product.get("reason", ""))
                 continue
@@ -1591,25 +1627,54 @@ class Coordinator:
         from an already-tracked item re-pushing itself on timer/retry/fail-back/
         advance, which must always be allowed through.
         """
+        is_new = id(item) not in self._seen_item_ids
+        if self._admission_saturated:
+            # The first rejected item is retained below as the exact durable
+            # recovery boundary.  Refuse later source products without
+            # retaining them so a caller that has not observed shutdown yet
+            # cannot defeat the resident-work bound.
+            return False
         if (
-            id(item) not in self._seen_item_ids
+            is_new
             and item.kind is ItemKind.ISSUE
             and item.issue is not None
             and (item.repo, item.issue) in self._live_issue_keys()
         ):
             logger.info("seed skipped: #%s already queued/in-flight in %s", item.issue, item.repo)
             return False
-        is_new = id(item) not in self._seen_item_ids
+        # Register a novel item before attempting bounded admission. This makes
+        # ``items`` the accounting source of truth for every seed that reaches
+        # the queue-capacity decision: it is present whether admitted directly,
+        # deferred to the bounded spool, or parked at the saturation boundary.
+        if is_new:
+            self._seen_item_ids.add(id(item))
+            self.items.append(item)
+            item.payload.setdefault("entry_stage", stage.value)
         queue = self.queues[stage]
         if not queue.push(item):
             item.stage = stage
             if enter:
                 item.state = "ENTER"
                 item.payload["_enter_pending"] = True
-            if is_new:
-                self._seen_item_ids.add(id(item))
-                self.items.append(item)
-                item.payload.setdefault("entry_stage", stage.value)
+            if len(self._pending_admissions) >= self._admission_spool_capacity:
+                self._admission_saturated = True
+                self._fatal = True
+                self._record_queue_saturation(
+                    queue="admission",
+                    capacity=self._admission_spool_capacity,
+                    item=item,
+                    source=f"{stage.value}_stage_queue_overflow",
+                    fatal=True,
+                    details={
+                        "admission_depth": len(self._pending_admissions),
+                        "blocked_stage": stage.value,
+                        "stage_capacity": queue.capacity,
+                        "stage_depth": len(queue),
+                    },
+                )
+                self._park_resumable(item, reason="admission spool saturated")
+                self._begin_graceful_shutdown("admission spool saturation")
+                return False
             self._pending_admissions.append((item, stage, enter))
             item.add_history_event(stage, item.state, note="queue deferred")
             self._record_event(
@@ -1624,10 +1689,6 @@ class Coordinator:
             item.state = "ENTER"
             item.payload["_enter_pending"] = True
             item.add_history_event(stage, item.state, note="enqueued")
-        if is_new:
-            self._seen_item_ids.add(id(item))
-            self.items.append(item)
-            item.payload.setdefault("entry_stage", stage.value)
         self._record_event("push", stage.value, self._item_key(item))
         return True
 
@@ -1657,6 +1718,8 @@ class Coordinator:
             entries.extend(self._seed_direct_scope(default_repo))
         pushed = 0
         for entry in entries:
+            if self._admission_saturated:
+                break
             if entry.stage is None:
                 # Epic tagging is the ONE sanctioned seeding write, executed
                 # here through the skip_epics chokepoint BEFORE the exclusion
@@ -1962,11 +2025,13 @@ class Coordinator:
         """SIGINT/SIGTERM/SIGHUP -> one shutdown Event (first graceful, second immediate)."""
 
         def _handler(signum: int, frame: object) -> None:
-            if self.shutdown.is_set():
+            del frame
+            if self._signal_received:
                 logger.warning("second signal %d: immediate shutdown", signum)
                 self._immediate = True
                 self._wake_completion_wait()
             else:
+                self._signal_received = True
                 logger.warning(
                     "signal %d: graceful shutdown (grace %.0fs; press again to force)",
                     signum,

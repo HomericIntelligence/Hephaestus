@@ -109,20 +109,32 @@ def test_shutdown_can_reap_without_marking_interrupted(
     assert not shutdown_event.is_set()
 
 
-def test_full_completion_queue_never_blocks_worker_callback() -> None:
+def test_full_completion_queue_never_blocks_worker_callback(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """A full result channel requests shutdown and retains the rejected result."""
     shutdown = threading.Event()
     completion_q = CompletionQueue(capacity=1)
     pool = WorkerPool(size=1, shutdown=shutdown, completion_q=completion_q)
     existing_handle = JobHandle(job=_agent_job(issue=1), on_done_state="VERIFY")
-    handle = JobHandle(job=_agent_job(issue=2), on_done_state="VERIFY")
+    untrusted_content = "untrusted issue body and session data must not reach logs"
+    handle = JobHandle(
+        job=_agent_job(
+            issue=2,
+            descr="r" * 200,
+            resume_session_id=untrusted_content,
+            prompt_kwargs={"issue_body": untrusted_content},
+        ),
+        on_done_state="VERIFY",
+    )
     future: Future[JobResult] = Future()
     future.set_result(JobResult(ok=True, value="done"))
 
     try:
         assert completion_q.offer((existing_handle, JobResult(ok=True)))
         started = time.monotonic()
-        pool._on_future_done(handle, future)
+        with caplog.at_level(logging.CRITICAL, logger=_WP):
+            pool._on_future_done(handle, future)
         assert time.monotonic() - started < 1.0
     finally:
         pool.shutdown(mark_interrupted=False)
@@ -131,6 +143,9 @@ def test_full_completion_queue_never_blocks_worker_callback() -> None:
     assert shutdown.is_set()
     assert [entry.handle for entry in rejected] == [handle]
     assert overflowed is False
+    assert untrusted_content not in caplog.text
+    assert "job_type=AgentJob repo=test/repo issue=2" in caplog.text
+    assert "description=" + ("r" * 159) + "…" in caplog.text
 
 
 class TestWorkerPoolSubmitComplete:
