@@ -246,12 +246,111 @@ def test_receipt_rejects_root_git_metadata_swapped_to_a_symlink(
     assert not outside_marker.exists()
 
 
+def test_receipt_rejects_worktree_git_metadata_swapped_to_a_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The review gitfile is opened no-follow after the worktree descriptor exists."""
+    worktree = _worktree(tmp_path, 2500)
+    shutil.rmtree(worktree / ".git")
+    git_dir = tmp_path / ".git" / "worktrees" / "review-pr-2500"
+    other_git_dir = tmp_path / ".git" / "worktrees" / "other"
+    git_dir.mkdir(parents=True)
+    other_git_dir.mkdir()
+    (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    (git_dir / "gitdir").write_text(f"{worktree / '.git'}\n", encoding="utf-8")
+    (worktree / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+    forged_pointer = tmp_path / "forged-worktree-git-pointer"
+    forged_pointer.write_text(f"gitdir: {other_git_dir}\n", encoding="utf-8")
+    original_open = os.open
+    swapped = False
+    worktree_stat = worktree.stat()
+
+    def open_after_swap(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        """Replace the review gitfile just before its descriptor-relative open."""
+        nonlocal swapped
+        if (
+            not swapped
+            and path == ".git"
+            and dir_fd is not None
+            and os.path.samestat(os.fstat(dir_fd), worktree_stat)
+        ):
+            (worktree / ".git").unlink()
+            (worktree / ".git").symlink_to(forged_pointer)
+            swapped = True
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", open_after_swap)
+
+    with pytest.raises(ValueError, match="Git metadata is symlinked"):
+        record_direct_review_recovery(
+            repo_root=tmp_path,
+            issue=2500,
+            pr=2501,
+            worktree=worktree,
+            branch="2500-auto",
+            expected_remote_sha="a" * 40,
+            source_sha="b" * 40,
+        )
+
+    assert not (other_git_dir / "hephaestus-direct-review-recovery").exists()
+
+
+def test_receipt_rejects_normal_root_git_directory_swapped_to_a_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A verified root Git directory cannot be replaced before marker I/O."""
+    worktree = _worktree(tmp_path, 2500)
+    shutil.rmtree(worktree / ".git")
+    git_dir = tmp_path / ".git" / "worktrees" / "review-pr-2500"
+    git_dir.mkdir(parents=True)
+    (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    (git_dir / "gitdir").write_text(f"{worktree / '.git'}\n", encoding="utf-8")
+    (worktree / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+    root_git_dir = tmp_path / ".git"
+    displaced_git_dir = tmp_path / "displaced-git"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    original_common_git_dir = direct_review_recovery._common_git_dir
+
+    def common_git_dir_after_swap(repo_root: Path) -> Path:
+        """Swap the root metadata path after it is verified but before reopening it."""
+        common_git_dir = original_common_git_dir(repo_root)
+        root_git_dir.rename(displaced_git_dir)
+        root_git_dir.symlink_to(outside, target_is_directory=True)
+        return common_git_dir
+
+    monkeypatch.setattr(direct_review_recovery, "_common_git_dir", common_git_dir_after_swap)
+
+    with pytest.raises(ValueError, match="Git metadata is unavailable"):
+        record_direct_review_recovery(
+            repo_root=tmp_path,
+            issue=2500,
+            pr=2501,
+            worktree=worktree,
+            branch="2500-auto",
+            expected_remote_sha="a" * 40,
+            source_sha="b" * 40,
+        )
+
+    assert not (
+        outside / "worktrees" / "review-pr-2500" / "hephaestus-direct-review-recovery"
+    ).exists()
+
+
 def test_receipt_supports_and_binds_a_linked_worktree_gitdir(tmp_path: Path) -> None:
     """The production linked-worktree gitdir layout remains receipt-backed."""
     worktree = _worktree(tmp_path, 2500)
     shutil.rmtree(worktree / ".git")
     git_dir = tmp_path / ".git" / "worktrees" / "review-pr-2500"
     git_dir.mkdir(parents=True)
+    (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    (git_dir / "gitdir").write_text(f"{worktree / '.git'}\n", encoding="utf-8")
     (worktree / ".git").write_text(
         "gitdir: ../../../.git/worktrees/review-pr-2500\n", encoding="utf-8"
     )
@@ -282,6 +381,8 @@ def test_receipt_supports_a_linked_repository_root(tmp_path: Path) -> None:
     root_git_dir.mkdir(parents=True)
     review_git_dir.mkdir()
     (root_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    (review_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    (review_git_dir / "gitdir").write_text(f"{worktree / '.git'}\n", encoding="utf-8")
     (repo_root / ".git").write_text(f"gitdir: {root_git_dir}\n", encoding="utf-8")
     (worktree / ".git").write_text(f"gitdir: {review_git_dir}\n", encoding="utf-8")
 

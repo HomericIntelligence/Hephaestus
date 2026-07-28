@@ -310,7 +310,10 @@ def _open_marker_directory(repo_root: Path, marker_path: Path) -> Iterator[tuple
         components = marker_dir.relative_to(root).parts
     except ValueError as error:
         raise ValueError("direct review recovery marker is outside the repository") from error
-    root_fd = os.open(root, _directory_open_flags())
+    try:
+        root_fd = os.open(root, _directory_open_flags())
+    except OSError as error:
+        raise ValueError("direct review recovery Git metadata is unavailable") from error
     current_fd = root_fd
     try:
         for component in components:
@@ -380,6 +383,51 @@ def _read_root_git_metadata(root: Path) -> tuple[bool, str | None]:
         os.close(root_fd)
 
 
+def _read_worktree_git_metadata(worktree: Path) -> tuple[bool, str]:
+    """Return direct-review Git metadata after a descriptor-relative no-follow read."""
+    worktree_fd = os.open(worktree, _directory_open_flags())
+    try:
+        try:
+            git_fd = os.open(".git", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=worktree_fd)
+        except OSError as error:
+            if error.errno == errno.ELOOP:
+                raise ValueError("direct review recovery Git metadata is symlinked") from error
+            raise ValueError("direct review recovery Git metadata is unavailable") from error
+        try:
+            mode = os.fstat(git_fd).st_mode
+            if stat.S_ISDIR(mode):
+                return True, ""
+            if not stat.S_ISREG(mode):
+                raise ValueError("direct review recovery Git metadata is unavailable")
+            with os.fdopen(git_fd, "r", encoding="utf-8") as handle:
+                git_fd = -1
+                return False, handle.read().strip()
+        finally:
+            if git_fd >= 0:
+                os.close(git_fd)
+    finally:
+        os.close(worktree_fd)
+
+
+def _verify_linked_worktree_backlink(worktree: Path, git_dir: Path) -> None:
+    """Require a linked-worktree admin directory to point back to this checkout."""
+    try:
+        git_dir_fd = os.open(git_dir, _directory_open_flags())
+    except OSError as error:
+        raise ValueError("direct review recovery Git metadata is unavailable") from error
+    try:
+        backlink = _read_secure_text(git_dir, git_dir_fd, "gitdir").strip()
+    except (OSError, ValueError) as error:
+        raise ValueError("direct review recovery Git metadata is unavailable") from error
+    finally:
+        os.close(git_dir_fd)
+    raw_backlink = Path(backlink)
+    backlink_path = raw_backlink if raw_backlink.is_absolute() else git_dir / raw_backlink
+    expected_path = worktree / ".git"
+    if os.path.normpath(str(backlink_path)) != os.path.normpath(str(expected_path)):
+        raise ValueError("direct review recovery Git metadata is not bound to its worktree")
+
+
 def _verified_common_git_dir(git_dir: Path) -> Path:
     """Return the common directory proven by a linked worktree's ``commondir``."""
     if git_dir.parent.name != "worktrees" or not git_dir.parent.parent.is_dir():
@@ -414,7 +462,7 @@ def _common_git_dir(repo_root: Path) -> Path:
     if line is None:
         # Lightweight fixtures without a repository-level Git directory keep
         # metadata confined to the fixture root.
-        return dot_git.resolve() if is_directory else root
+        return dot_git if is_directory else root
     prefix = "gitdir: "
     if not line.startswith(prefix):
         raise ValueError("direct review recovery repository Git metadata is invalid")
@@ -426,15 +474,10 @@ def _common_git_dir(repo_root: Path) -> Path:
 def _worktree_marker_path(repo_root: Path, worktree: Path) -> Path:
     """Return the private Git-metadata marker for one direct-review checkout."""
     dot_git = worktree / ".git"
-    if dot_git.is_symlink():
-        raise ValueError("direct review recovery Git metadata is symlinked")
-    if dot_git.is_dir():
+    is_directory, line = _read_worktree_git_metadata(worktree)
+    if is_directory:
         git_dir = dot_git
     else:
-        try:
-            line = dot_git.read_text(encoding="utf-8").strip()
-        except OSError as error:
-            raise ValueError("direct review recovery Git metadata is unavailable") from error
         prefix = "gitdir: "
         if not line.startswith(prefix):
             raise ValueError("direct review recovery Git metadata is invalid")
@@ -445,13 +488,16 @@ def _worktree_marker_path(repo_root: Path, worktree: Path) -> Path:
         raise ValueError("direct review recovery Git metadata is unavailable")
     normalized_root = repo_root.resolve()
     common_git_dir = _common_git_dir(normalized_root)
-    if not dot_git.is_dir():
+    if not is_directory:
         try:
             git_dir.relative_to(common_git_dir / "worktrees")
         except ValueError as error:
             raise ValueError(
                 "direct review recovery Git metadata is not a linked worktree"
             ) from error
+        if _verified_common_git_dir(git_dir) != common_git_dir:
+            raise ValueError("direct review recovery Git metadata is unavailable")
+        _verify_linked_worktree_backlink(worktree, git_dir)
     else:
         try:
             git_dir.relative_to(normalized_root)
