@@ -1,6 +1,8 @@
-"""Regression tests for repository-local skill topology documentation (#2134)."""
+"""Regression tests for externalized skill/plugin topology (#2134, #2504)."""
 
+import json
 import re
+from collections.abc import Mapping
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -12,6 +14,88 @@ TOPOLOGY_FILES = (
 )
 
 LOCAL_SKILLS_PATH = re.compile(r"(?<![\w.-])(?:\./|Hephaestus/)?skills(?=[/\\`)])")
+LEGACY_PLUGIN_PATHS = (
+    REPO_ROOT / "skills",
+    REPO_ROOT / "plugins" / "hephaestus",
+    REPO_ROOT / ".codex-plugin",
+)
+REQUIRED_ROOT_METADATA = (
+    REPO_ROOT / "README.md",
+    REPO_ROOT / "SECURITY.md",
+    REPO_ROOT / "LICENSE",
+    REPO_ROOT / ".codexignore",
+)
+ATHENA_REPOSITORY = "https://github.com/HomericIntelligence/Athena.git"
+
+
+def _present_path_names(paths: tuple[Path, ...], root: Path) -> list[str]:
+    """Return repository-relative names for entries that exist or are symlinks."""
+    return [
+        path.relative_to(root).as_posix() for path in paths if path.exists() or path.is_symlink()
+    ]
+
+
+def _enabled_plugins_from_marketplace(enabled: Mapping[str, object], marketplace: str) -> list[str]:
+    """Return enabled plugins for a marketplace without case-sensitive bypasses."""
+    return sorted(
+        name
+        for name, value in enabled.items()
+        if value is True and name.rpartition("@")[2].casefold() == marketplace.casefold()
+    )
+
+
+def test_repository_has_no_local_plugin_distribution() -> None:
+    """Retired Hephaestus plugin roots must not be recreated."""
+    present = _present_path_names(LEGACY_PLUGIN_PATHS, REPO_ROOT)
+
+    assert present == [], "repository-local plugin content must not reappear: " + ", ".join(present)
+
+
+def test_dangling_legacy_plugin_symlink_remains_present(tmp_path: Path) -> None:
+    """A broken symlink is still a recreated legacy plugin-root entry."""
+    legacy_root = tmp_path / "skills"
+    legacy_root.symlink_to(tmp_path / "retired-target")
+
+    assert _present_path_names((legacy_root,), tmp_path) == ["skills"]
+
+
+def test_repository_metadata_remains_at_root() -> None:
+    """Repository policy files replace the retired nested plugin copies."""
+    missing = [
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in REQUIRED_ROOT_METADATA
+        if not path.is_file()
+    ]
+
+    assert missing == [], "missing root metadata: " + ", ".join(missing)
+
+
+def test_settings_route_skill_plugins_to_athena() -> None:
+    """Hephaestus must consume skills from its configured marketplace."""
+    settings = json.loads((REPO_ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    enabled = settings["enabledPlugins"]
+    marketplace = settings["extraKnownMarketplaces"]["Athena"]["source"]
+
+    assert marketplace == {
+        "source": "git",
+        "url": ATHENA_REPOSITORY,
+    }
+    assert any(
+        name.rpartition("@")[2].casefold() == "athena" and value is True
+        for name, value in enabled.items()
+    )
+    assert _enabled_plugins_from_marketplace(enabled, "hephaestus") == []
+
+
+def test_legacy_marketplace_suffix_is_case_insensitive() -> None:
+    """Case variations must not restore the retired Hephaestus marketplace."""
+    enabled = {
+        "skill@Athena": True,
+        "safety-net@cc-marketplace": True,
+        "legacy@Hephaestus": True,
+    }
+
+    assert _enabled_plugins_from_marketplace(enabled, "hephaestus") == ["legacy@Hephaestus"]
 
 
 def test_repository_has_no_local_skills_directory() -> None:
