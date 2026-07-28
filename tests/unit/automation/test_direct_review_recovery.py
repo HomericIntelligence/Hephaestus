@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import shutil
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, cast
 
@@ -23,6 +25,18 @@ def _worktree(repo_root: Path, issue: int) -> Path:
     path.mkdir(parents=True)
     (path / ".git").mkdir()
     return path
+
+
+def _linked_worktree(repo_root: Path, issue: int) -> tuple[Path, Path]:
+    """Create a linked-worktree fixture bound to the fixture's common Git dir."""
+    worktree = _worktree(repo_root, issue)
+    shutil.rmtree(worktree / ".git")
+    git_dir = repo_root / ".git" / "worktrees" / f"review-pr-{issue}"
+    git_dir.mkdir(parents=True)
+    (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    (git_dir / "gitdir").write_text(f"{worktree / '.git'}\n", encoding="utf-8")
+    (worktree / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+    return worktree, git_dir
 
 
 def test_receipt_backed_recovery_is_discoverable_across_manager_instances(tmp_path: Path) -> None:
@@ -343,6 +357,94 @@ def test_receipt_rejects_normal_root_git_directory_swapped_to_a_symlink(
     ).exists()
 
 
+def test_receipt_rejects_normal_root_git_directory_swapped_to_a_regular_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A regular metadata replacement cannot receive a marker after validation."""
+    worktree, _ = _linked_worktree(tmp_path, 2500)
+    root_git_dir = tmp_path / ".git"
+    displaced_git_dir = tmp_path / "displaced-git"
+    replacement_marker = (
+        root_git_dir / "worktrees" / "review-pr-2500" / "hephaestus-direct-review-recovery"
+    )
+    original_open_marker_directory = direct_review_recovery._open_marker_directory
+
+    @contextmanager
+    def open_marker_directory_after_swap(
+        repo_root: Path,
+        marker_path: Path,
+        marker_dir_stat: os.stat_result,
+    ) -> Iterator[tuple[Path, int | None]]:
+        """Replace the common Git directory after target validation."""
+        root_git_dir.rename(displaced_git_dir)
+        replacement_git_dir = root_git_dir / "worktrees" / "review-pr-2500"
+        replacement_git_dir.mkdir(parents=True)
+        (replacement_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+        (replacement_git_dir / "gitdir").write_text(
+            f"{worktree / '.git'}\n", encoding="utf-8"
+        )
+        with original_open_marker_directory(repo_root, marker_path, marker_dir_stat) as opened:
+            yield opened
+
+    monkeypatch.setattr(
+        direct_review_recovery, "_open_marker_directory", open_marker_directory_after_swap
+    )
+
+    with pytest.raises(ValueError, match="marker directory changed"):
+        record_direct_review_recovery(
+            repo_root=tmp_path,
+            issue=2500,
+            pr=2501,
+            worktree=worktree,
+            branch="2500-auto",
+            expected_remote_sha="a" * 40,
+            source_sha="b" * 40,
+        )
+
+    assert not replacement_marker.exists()
+
+
+def test_receipt_rejects_review_admin_directory_swapped_to_a_regular_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A replacement linked-worktree admin directory cannot receive a marker."""
+    worktree, git_dir = _linked_worktree(tmp_path, 2500)
+    displaced_git_dir = tmp_path / "displaced-review-git"
+    replacement_marker = git_dir / "hephaestus-direct-review-recovery"
+    original_open_marker_directory = direct_review_recovery._open_marker_directory
+
+    @contextmanager
+    def open_marker_directory_after_swap(
+        repo_root: Path,
+        marker_path: Path,
+        marker_dir_stat: os.stat_result,
+    ) -> Iterator[tuple[Path, int | None]]:
+        """Replace the final admin directory after it has been validated."""
+        git_dir.rename(displaced_git_dir)
+        git_dir.mkdir()
+        (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+        (git_dir / "gitdir").write_text(f"{worktree / '.git'}\n", encoding="utf-8")
+        with original_open_marker_directory(repo_root, marker_path, marker_dir_stat) as opened:
+            yield opened
+
+    monkeypatch.setattr(
+        direct_review_recovery, "_open_marker_directory", open_marker_directory_after_swap
+    )
+
+    with pytest.raises(ValueError, match="marker directory changed"):
+        record_direct_review_recovery(
+            repo_root=tmp_path,
+            issue=2500,
+            pr=2501,
+            worktree=worktree,
+            branch="2500-auto",
+            expected_remote_sha="a" * 40,
+            source_sha="b" * 40,
+        )
+
+    assert not replacement_marker.exists()
+
+
 def test_receipt_supports_and_binds_a_linked_worktree_gitdir(tmp_path: Path) -> None:
     """The production linked-worktree gitdir layout remains receipt-backed."""
     worktree = _worktree(tmp_path, 2500)
@@ -368,6 +470,32 @@ def test_receipt_supports_and_binds_a_linked_worktree_gitdir(tmp_path: Path) -> 
     assert list_direct_review_recovery_paths(repo_root=tmp_path, issue=2500, pr=2501) == [
         worktree.resolve()
     ]
+
+
+@pytest.mark.parametrize("metadata_name", ["commondir", "gitdir"])
+def test_receipt_discovery_rejects_tampered_linked_worktree_metadata(
+    tmp_path: Path, metadata_name: str
+) -> None:
+    """A receipt never survives a forged linked-worktree metadata binding."""
+    worktree, git_dir = _linked_worktree(tmp_path, 2500)
+    record_direct_review_recovery(
+        repo_root=tmp_path,
+        issue=2500,
+        pr=2501,
+        worktree=worktree,
+        branch="2500-auto",
+        expected_remote_sha="a" * 40,
+        source_sha="b" * 40,
+    )
+
+    if metadata_name == "commondir":
+        (git_dir / metadata_name).write_text("../../forged-common\n", encoding="utf-8")
+    else:
+        (git_dir / metadata_name).write_text(
+            f"{tmp_path / 'other-worktree' / '.git'}\n", encoding="utf-8"
+        )
+
+    assert list_direct_review_recovery_paths(repo_root=tmp_path, issue=2500, pr=2501) == []
 
 
 def test_receipt_supports_a_linked_repository_root(tmp_path: Path) -> None:
