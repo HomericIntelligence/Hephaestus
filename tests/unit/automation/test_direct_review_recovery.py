@@ -380,9 +380,7 @@ def test_receipt_rejects_normal_root_git_directory_swapped_to_a_regular_director
         replacement_git_dir = root_git_dir / "worktrees" / "review-pr-2500"
         replacement_git_dir.mkdir(parents=True)
         (replacement_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
-        (replacement_git_dir / "gitdir").write_text(
-            f"{worktree / '.git'}\n", encoding="utf-8"
-        )
+        (replacement_git_dir / "gitdir").write_text(f"{worktree / '.git'}\n", encoding="utf-8")
         with original_open_marker_directory(repo_root, marker_path, marker_dir_stat) as opened:
             yield opened
 
