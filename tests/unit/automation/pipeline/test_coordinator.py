@@ -1048,6 +1048,37 @@ class TestFailBackRouting:
 class TestImplementationAdmission:
     """Topological order + file-overlap reuse for the implementation queue."""
 
+    def test_relative_writer_path_matches_an_absolute_git_holder(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A relative configured worktree still verifies Git's absolute holder path."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        monkeypatch.chdir(tmp_path)
+        shared_branch = "shared-head"
+        owner_path = tmp_path / "repo-a" / "build" / ".worktrees" / "issue-2268"
+        owner_path.mkdir(parents=True)
+        owner = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=2268,
+            stage=StageName.IMPLEMENTATION,
+            branch=shared_branch,
+            worktree="repo-a/build/.worktrees/issue-2268",
+        )
+        sibling = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=2269,
+            stage=StageName.IMPLEMENTATION,
+            branch=shared_branch,
+        )
+        coordinator._pipeline_writer_worktrees[("repo-a", shared_branch)] = owner
+
+        assert (
+            coordinator._branch_worktree_owner_status(sibling, shared_branch, str(owner_path))
+            == "verified"
+        )
+
     @pytest.mark.parametrize(
         ("owner_pr", "sibling_pr"),
         [(3001, 3002), (3001, 3001)],

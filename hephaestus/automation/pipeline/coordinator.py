@@ -2217,7 +2217,8 @@ class Coordinator:
             and owner.result is None
             and owner.stage is not StageName.FINISHED
             and owner.branch == branch
-            and owner.worktree == owner_path
+            and owner.worktree
+            and Path(owner.worktree).resolve() == Path(owner_path).resolve()
         ):
             return "verified"
         for handle, candidate in self.in_flight.items():
