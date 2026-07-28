@@ -54,7 +54,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, TypeAlias, runtime_checkable
+from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 
 from hephaestus.agents.runtime import DEFAULT_AGENT
 from hephaestus.automation.review_journal import IssueComment
@@ -480,6 +480,7 @@ class JobRequest:
 
 
 StepResult: TypeAlias = "Continue | JobRequest | StageOutcome"
+BranchWorktreeOwnerStatus: TypeAlias = Literal["verified", "pending", "unverified"]
 
 
 @dataclass(frozen=True)
@@ -507,6 +508,14 @@ class StageContext:
     now_fn: Callable[[], float] | None = None  # injectable clock (tests pass a fake)
     budget_fn: Callable[[str], int] | None = None  # injected overrides; falls back to ROUTES
     event_fn: Callable[[StageEvent], None] | None = None
+    # A worktree-holder result is only a diagnostic fact from Git.  The
+    # coordinator proves that it belongs to a live pipeline sibling before
+    # implementation can treat a collision as redundant work.  Leaving this
+    # unset intentionally fails closed in isolated stage tests and alternate
+    # hosts.
+    branch_worktree_owner_status: (
+        Callable[[WorkItem, str, str], BranchWorktreeOwnerStatus] | None
+    ) = None
 
     def now(self) -> float:
         """Return the injected stage clock value (monotonic in the coordinator)."""
