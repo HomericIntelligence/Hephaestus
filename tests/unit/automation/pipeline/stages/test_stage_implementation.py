@@ -17,6 +17,7 @@ from hephaestus.automation.pipeline.stages import (
     implementation as implementation_module,
 )
 from hephaestus.automation.pipeline.stages.implementation import (
+    BRANCH_WORKTREE_OWNER_PENDING_DELAY_S,
     GIT_ERROR_RETRY_CAP,
     PRE_PR_TEST_ARGV,
     ImplementationStage,
@@ -720,6 +721,7 @@ class TestGitErrorRetryCap:
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition is Disposition.RETRY
         assert outcome.note == "branch_worktree_owner_pending"
+        assert item.payload["retry_delay_s"] == BRANCH_WORKTREE_OWNER_PENDING_DELAY_S
         assert item.payload["branch_worktree_owner"] == {
             "branch": "shared-head",
             "owner_path": "/repo/build/.worktrees/issue-2268",

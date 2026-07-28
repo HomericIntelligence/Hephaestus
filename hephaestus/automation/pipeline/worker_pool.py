@@ -28,6 +28,7 @@ from hephaestus.automation import claude_invoke, git_utils, subprocess_registry
 from hephaestus.automation.learn import compact_agent_session
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.jobs import (
+    WORKTREE_MATERIALIZED_KEY,
     AgentJob,
     BuildTestJob,
     CompactJob,
@@ -1288,32 +1289,39 @@ class WorkerPool:
         if pr_number is not None and not isinstance(pr_number, (int, str)):
             return JobResult(ok=False, error="worktree sync received an invalid PR number")
 
-        dirty = not git_utils.is_clean_working_tree(worktree_path, timeout=timeout_s)
-        status = ""
-        diff = ""
-        if dirty:
-            status_result = git_utils.run(
-                ["git", "status", "--short"],
-                cwd=worktree_path,
-                capture_output=True,
-                check=False,
-                timeout=timeout_s,
-            )
-            diff_result = git_utils.run(
-                ["git", "diff"],
-                cwd=worktree_path,
-                capture_output=True,
-                check=False,
-                timeout=timeout_s,
-            )
-            status = status_result.stdout or ""
-            diff = diff_result.stdout or ""
-        elif branch_name:
-            git_utils.sync_worktree_to_remote_branch(
-                worktree_path,
-                branch_name,
-                pr_number=int(pr_number) if isinstance(pr_number, (int, str)) else None,
-                timeout=timeout_s,
+        try:
+            dirty = not git_utils.is_clean_working_tree(worktree_path, timeout=timeout_s)
+            status = ""
+            diff = ""
+            if dirty:
+                status_result = git_utils.run(
+                    ["git", "status", "--short"],
+                    cwd=worktree_path,
+                    capture_output=True,
+                    check=False,
+                    timeout=timeout_s,
+                )
+                diff_result = git_utils.run(
+                    ["git", "diff"],
+                    cwd=worktree_path,
+                    capture_output=True,
+                    check=False,
+                    timeout=timeout_s,
+                )
+                status = status_result.stdout or ""
+                diff = diff_result.stdout or ""
+            elif branch_name:
+                git_utils.sync_worktree_to_remote_branch(
+                    worktree_path,
+                    branch_name,
+                    pr_number=int(pr_number) if isinstance(pr_number, (int, str)) else None,
+                    timeout=timeout_s,
+                )
+        except Exception as exc:
+            return JobResult(
+                ok=False,
+                error=f"worktree post-create preparation failed: {exc}",
+                value={"path": str(worktree_path), WORKTREE_MATERIALIZED_KEY: True},
             )
         return JobResult(
             ok=True,

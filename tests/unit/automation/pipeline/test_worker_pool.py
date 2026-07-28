@@ -23,6 +23,7 @@ from hephaestus.automation import git_utils, subprocess_registry
 from hephaestus.automation._review_utils import build_automation_parser
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.jobs import (
+    WORKTREE_MATERIALIZED_KEY,
     AgentJob,
     BuildTestJob,
     CompactJob,
@@ -1292,6 +1293,46 @@ class TestGitOps:
             "status": "",
             "diff": "",
         }
+
+    def test_create_worktree_sync_failure_retains_materialized_checkout(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A post-create adopted sync error preserves first-writer evidence."""
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 7,
+                "branch_name": "7-existing",
+                "refresh_base": False,
+                "repo_root": str(tmp_path),
+                "sync_to_remote": True,
+                "pr_number": 70,
+            },
+        )
+        instance = MagicMock()
+        instance.create_worktree.return_value = tmp_path / "wt"
+        with (
+            patch(f"{_WP}.WorktreeManager", return_value=instance),
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+            patch(
+                f"{_WP}.git_utils.sync_worktree_to_remote_branch",
+                side_effect=RuntimeError("sync timeout"),
+            ),
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.value == {
+            "path": str(tmp_path / "wt"),
+            WORKTREE_MATERIALIZED_KEY: True,
+        }
+        assert "post-create preparation failed" in (result.error or "")
 
     def test_create_isolated_worktree_syncs_only_detached_checkout(
         self,

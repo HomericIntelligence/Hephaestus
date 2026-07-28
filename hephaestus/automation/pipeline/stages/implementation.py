@@ -95,6 +95,7 @@ from hephaestus.automation.state_labels import (
 from hephaestus.automation.worktree_manager import BRANCH_WORKTREE_OWNED
 from hephaestus.prompts import PromptCatalog
 
+from ..jobs import WORKTREE_MATERIALIZED_KEY
 from .base import (
     GIT_JOB_TIMEOUT_S,
     AgentJob,
@@ -167,6 +168,10 @@ def _issue_number(item: WorkItem) -> int:
 #: failures never burn the implement budget, but a persistently broken
 #: remote must still terminate. Reset on any successful git job.
 GIT_ERROR_RETRY_CAP = 2
+
+#: A pending shared-branch holder waits for the in-flight creator's completion
+#: instead of re-entering the implementation drain in a tight loop.
+BRANCH_WORKTREE_OWNER_PENDING_DELAY_S = 0.1
 
 #: Timeout for the optional pre-PR test run (mirrors the legacy
 #: ``_pr_create_phase`` bound; the budget that matters — ``test_fix`` —
@@ -357,7 +362,9 @@ class ImplementationStage(Stage):
                 # A same-branch pipeline allocation already observed the
                 # holder but its success/failure completion has not reached
                 # the coordinator. Keep the collision receipt intact and
-                # retry after that completion; no Git/agent budget is spent.
+                # timer-park until that completion; no Git/agent budget is
+                # spent and the queue cannot busy-spin while it is pending.
+                item.payload["retry_delay_s"] = BRANCH_WORKTREE_OWNER_PENDING_DELAY_S
                 return StageOutcome(Disposition.RETRY, "branch_worktree_owner_pending")
             item.payload.pop("branch_worktree_owner", None)
             if owner_status != "verified":
@@ -689,6 +696,17 @@ class ImplementationStage(Stage):
                 }
                 item.worktree = ""
                 return
+            materialized_path = (
+                result.value.get("path")
+                if isinstance(result.value, dict)
+                and result.value.get(WORKTREE_MATERIALIZED_KEY) is True
+                else None
+            )
+            if isinstance(materialized_path, str) and materialized_path:
+                item.worktree = materialized_path
+                item.payload[WORKTREE_MATERIALIZED_KEY] = True
+            else:
+                item.worktree = ""
             direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
             reservation = (
                 result.value.get("direct_scope_reservation")
@@ -709,13 +727,13 @@ class ImplementationStage(Stage):
                     "branch": item.branch,
                     "base_sha": direct_base_sha,
                 }
-            item.worktree = ""
             item.payload.pop("worktree_dirty", None)
             item.payload.pop("worktree_status", None)
             item.payload.pop("worktree_diff", None)
             item.payload["git_error"] = True
             return
         # A successful worktree job ends the consecutive-git-failure streak.
+        item.payload.pop(WORKTREE_MATERIALIZED_KEY, None)
         item.payload.pop("git_error_retries", None)
         value = result.value
         if isinstance(value, dict):

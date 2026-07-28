@@ -93,7 +93,13 @@ from jinja2 import TemplateNotFound
 from hephaestus.automation.models import IssueInfo
 from hephaestus.automation.pipeline import admission as _admission, seeding as _seeding
 from hephaestus.automation.pipeline.events import StageEvent, encode_stage_event
-from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobHandle, JobResult
+from hephaestus.automation.pipeline.jobs import (
+    WORKTREE_MATERIALIZED_KEY,
+    AgentJob,
+    GitJob,
+    JobHandle,
+    JobResult,
+)
 from hephaestus.automation.pipeline.queues import CompletionQueue, StageQueue, StageQueueLease
 from hephaestus.automation.pipeline.routing import (
     PIPELINE_ORDER,
@@ -2163,7 +2169,14 @@ class Coordinator:
         successful pipeline allocation.  It deliberately does not infer
         ownership from a conventional path such as ``issue-123``.
         """
-        if not isinstance(job, GitJob) or job.op != "create_worktree" or not result.ok:
+        materialized = (
+            isinstance(result.value, dict) and result.value.get(WORKTREE_MATERIALIZED_KEY) is True
+        )
+        if (
+            not isinstance(job, GitJob)
+            or job.op != "create_worktree"
+            or (not result.ok and not materialized)
+        ):
             return
         if item.stage is not StageName.IMPLEMENTATION or not item.branch or not item.worktree:
             return

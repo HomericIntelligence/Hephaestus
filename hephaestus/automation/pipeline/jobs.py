@@ -30,6 +30,12 @@ GIT_OPS: frozenset[str] = frozenset(
     }
 )
 
+#: Structured failed ``create_worktree`` results set this only after a
+#: checkout was created but a later adopted-branch preparation step failed.
+#: The coordinator retains that physical checkout as first-writer evidence
+#: while its transient retry is pending.
+WORKTREE_MATERIALIZED_KEY = "worktree_materialized"
+
 
 @dataclass(frozen=True)
 class AgentJob:
