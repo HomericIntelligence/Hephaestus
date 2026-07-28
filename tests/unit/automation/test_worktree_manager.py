@@ -965,6 +965,27 @@ class TestCreateWorktreeBranchCollision:
             assert manager.create_worktree(708, "708-auto-impl") == existing
         assert manager.worktrees[708] == existing
 
+    def test_same_issue_reuses_absolute_holder_with_a_relative_base_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Git's absolute worktree path matches a relative manager configuration."""
+        repo_root = tmp_path / "repo"
+        (repo_root / ".git").mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+        manager = WorktreeManager(repo_root=Path("repo"), base_dir=Path("repo/build/.worktrees"))
+        existing = (repo_root / "build" / ".worktrees" / "issue-708").resolve()
+
+        with patch.object(
+            manager,
+            "list_worktrees",
+            return_value=[
+                {"path": str(existing), "branch": "refs/heads/708-auto-impl", "commit": "abc"},
+            ],
+        ):
+            assert manager.create_worktree(708, "708-auto-impl") == existing
+
+        assert manager.worktrees[708] == existing
+
     def test_isolated_checkout_does_not_reuse_branch_holder(
         self, worktree_mocks: Any, tmp_path: Any
     ) -> None:

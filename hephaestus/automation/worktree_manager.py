@@ -384,7 +384,7 @@ class WorktreeManager:
             return self.worktrees[worktree_key]
         existing = None if isolated else self._worktree_holding_branch(branch_name, timeout=timeout)
         if existing is not None:
-            if existing == worktree_path:
+            if existing.resolve() == worktree_path.resolve():
                 self.worktrees[worktree_key] = existing
                 return existing
             raise BranchWorktreeOwnedError(branch_name, existing)
