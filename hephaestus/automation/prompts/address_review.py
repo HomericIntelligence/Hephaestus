@@ -1,12 +1,13 @@
 """Address-review prompt: apply fixes for unresolved PR review threads."""
 
+import json
 from typing import Any
 
 from ._shared import _fence_untrusted, fence_content, get_terse_output_directive
 from .catalog import PromptCatalog
 
 
-def build_scope_retraction_directive(paths: tuple[str, ...]) -> str:
+def build_scope_retraction_directive(paths: tuple[str, ...], nonce: str) -> str:
     """Render host-derived paths that must be restored to the reviewed base.
 
     A scope-control review finding is different from an ordinary code defect:
@@ -16,10 +17,10 @@ def build_scope_retraction_directive(paths: tuple[str, ...]) -> str:
     """
     if not paths:
         return ""
-    rendered_paths = "\n".join(f"- restore `{path}` to the reviewed base" for path in paths)
+    rendered_paths = _fence_untrusted("SCOPE_RETRACTION_PATHS", json.dumps(paths), nonce)
     return (
         "**Host publication guard — required scope retraction:**\n"
-        "A review finding identified the following change as out of scope. "
+        "A review finding identified the path data below as out of scope. "
         "Remove it rather than repairing, refactoring, or retaining any part of it. "
         "The coordinator will refuse to publish while any listed path differs from "
         "the reviewed base.\n"
@@ -160,6 +161,8 @@ def get_address_review_prompt(
             unaddressed_findings or [],
             fenced.nonce,
         ),
-        scope_retraction_directive=build_scope_retraction_directive(scope_retraction_paths),
+        scope_retraction_directive=build_scope_retraction_directive(
+            scope_retraction_paths, fenced.nonce
+        ),
         terse_output_directive=get_terse_output_directive(),
     )

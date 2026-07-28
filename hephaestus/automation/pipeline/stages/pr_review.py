@@ -108,8 +108,7 @@ import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import PurePosixPath
-from typing import Any, TypeGuard, cast
+from typing import Any, cast
 
 from hephaestus.automation.agent_config import (
     address_review_claude_timeout,
@@ -141,6 +140,10 @@ from hephaestus.automation.session_naming import (
 )
 from hephaestus.automation.state_labels import STATE_SKIP
 
+from ..scope_retraction import (
+    is_safe_scope_retraction_path,
+    scope_retraction_paths_from_body,
+)
 from ..work_item import ItemKind
 from .base import (
     GIT_JOB_TIMEOUT_S,
@@ -171,39 +174,22 @@ _JSON_RESPONSE_BLOCK_RE = re.compile(
     re.DOTALL | re.MULTILINE,
 )
 
-_SCOPE_RETRACTION_BODY_RE = re.compile(
-    r"\b(?:unrelated|out[\s-]*of[\s-]*scope)\b.*\b(?:split|remove)\b",
-    re.IGNORECASE | re.DOTALL,
-)
-
-
-def _is_safe_scope_retraction_path(path: object) -> TypeGuard[str]:
-    """Return whether a review-thread path is safe for a git pathspec."""
-    if (
-        not isinstance(path, str)
-        or not path
-        or path == "."
-        or path.startswith(("/", "./"))
-        or "\\" in path
-    ):
-        return False
-    pure_path = PurePosixPath(path)
-    return (
-        not pure_path.is_absolute() and "." not in pure_path.parts and ".." not in pure_path.parts
-    )
-
 
 def _scope_retraction_paths(threads: list[dict[str, Any]]) -> tuple[str, ...] | None:
     """Extract host-enforced retractions from explicit scope-control findings."""
     paths: set[str] = set()
     for thread in threads:
-        body = str(thread.get("body") or "")
-        if not _SCOPE_RETRACTION_BODY_RE.search(body):
+        scope_paths = scope_retraction_paths_from_body(thread.get("body"))
+        if scope_paths == ():
             continue
         path = thread.get("path")
-        if not _is_safe_scope_retraction_path(path):
+        if (
+            scope_paths is None
+            or not is_safe_scope_retraction_path(path)
+            or path not in scope_paths
+        ):
             return None
-        paths.add(path)
+        paths.update(scope_paths)
     return tuple(sorted(paths))
 
 
@@ -1181,7 +1167,7 @@ class PrReviewStage(Stage):
         scope_retraction_paths = item.payload.get("scope_retraction_paths")
         if scope_retraction_paths is not None:
             if not isinstance(scope_retraction_paths, tuple) or not all(
-                _is_safe_scope_retraction_path(path) for path in scope_retraction_paths
+                is_safe_scope_retraction_path(path) for path in scope_retraction_paths
             ):
                 return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_path_invalid")
             base_sha = item.payload.get("reviewed_pr_base_sha")

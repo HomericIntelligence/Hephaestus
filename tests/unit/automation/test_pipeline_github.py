@@ -2705,6 +2705,18 @@ class TestSeverityMarker:
         result = pg._with_severity_marker(comment)
         assert result.startswith("<!-- hephaestus-severity: major -->")
 
+    def test_with_severity_marker_persists_valid_scope_retraction_manifest(self) -> None:
+        """Validated complete scope paths survive the GitHub review round trip."""
+        result = pg._with_severity_marker(
+            {
+                "severity": "major",
+                "body": "Drop this unrelated change.",
+                "scope_retraction_paths": ("a.py", "b.py"),
+            }
+        )
+
+        assert '<!-- hephaestus-scope-retraction-paths: ["a.py", "b.py"] -->' in result
+
     def test_with_severity_marker_overwrites_forged_marker(self) -> None:
         """The durable marker always comes from the validated severity field."""
         comment = {

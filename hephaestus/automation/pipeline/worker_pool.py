@@ -39,6 +39,7 @@ from hephaestus.automation.pipeline.jobs import (
 )
 from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.routing import StageName
+from hephaestus.automation.pipeline.scope_retraction import is_safe_scope_retraction_path
 from hephaestus.automation.pipeline.tool_scopes import (
     DEFAULT_TOOL_SCOPE,
     ToolScope,
@@ -1538,13 +1539,7 @@ class WorkerPool:
             or not isinstance(paths, tuple)
             or not paths
             or not all(
-                isinstance(path, str)
-                and bool(path)
-                and path != "."
-                and not path.startswith(("/", "./"))
-                and "\\" not in path
-                and ".." not in Path(path).parts
-                for path in paths
+                isinstance(path, str) and is_safe_scope_retraction_path(path) for path in paths
             )
         ):
             return JobResult(
@@ -1554,7 +1549,16 @@ class WorkerPool:
             )
         try:
             result = git_utils.run(
-                ["git", "diff", "--name-only", f"{base_sha}...HEAD", "--", *paths],
+                [
+                    "git",
+                    "--literal-pathspecs",
+                    "diff",
+                    "--name-only",
+                    base_sha,
+                    "HEAD",
+                    "--",
+                    *paths,
+                ],
                 cwd=worktree_path,
                 capture_output=True,
                 timeout=job.timeout_s,

@@ -1069,8 +1069,8 @@ class TestAddressReviewPrompt:
         # The directive body is reviewer text → fenced as untrusted.
         assert "_UNADDRESSED\n" in out
 
-    def test_scope_retraction_directive_is_trusted_and_precedes_threads(self) -> None:
-        """A host-derived scope cleanup cannot be reinterpreted as a code repair."""
+    def test_scope_retraction_directive_fences_paths_and_precedes_threads(self) -> None:
+        """Scope paths remain data rather than trusted prompt instructions."""
         out = prompts.get_address_review_prompt(
             pr_number=42,
             issue_number=7,
@@ -1080,7 +1080,8 @@ class TestAddressReviewPrompt:
         )
 
         assert "Host publication guard" in out
-        assert "restore `hephaestus/agents/runtime.py` to the reviewed base" in out
+        assert "_SCOPE_RETRACTION_PATHS\n" in out
+        assert '"hephaestus/agents/runtime.py"' in out
         assert out.index("Host publication guard") < out.index("Review Threads to Address")
 
     def test_build_unaddressed_directive_empty_is_blank(self) -> None:

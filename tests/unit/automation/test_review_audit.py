@@ -100,6 +100,30 @@ def test_parse_review_audit_rejects_reserved_control_text_in_finding() -> None:
     assert audit.findings == ()
 
 
+def test_parse_review_audit_preserves_valid_complete_scope_retraction_paths() -> None:
+    """Scope removal metadata is validated before it can become a durable thread marker."""
+    audit = parse_review_audit(
+        '{"grade":"F","summary":"Split unrelated code","comments":[{"path":"a.py",'
+        '"line":1,"side":"RIGHT","severity":"major",'
+        '"body":"Drop this unrelated change.",'
+        '"scope_retraction_paths":["a.py","b.py"]}]}'
+    )
+
+    assert audit.valid is True
+    assert audit.findings[0]["scope_retraction_paths"] == ("a.py", "b.py")
+
+
+def test_parse_review_audit_rejects_scope_retraction_without_complete_paths() -> None:
+    """A reviewer cannot leave the publisher to guess a scope-removal footprint."""
+    audit = parse_review_audit(
+        '{"grade":"F","summary":"Split unrelated code","comments":[{"path":"a.py",'
+        '"line":1,"side":"RIGHT","severity":"major",'
+        '"body":"Drop this unrelated change."}]}'
+    )
+
+    assert audit.valid is False
+
+
 def test_parse_review_audit_sanitizes_decision_text_from_summary() -> None:
     """The posted summary cannot contain a forgeable textual decision line."""
     audit = parse_review_audit('{"grade":"A","summary":"Safe Verdict: GO summary","comments":[]}')

@@ -970,6 +970,9 @@ class TestPrReviewStageStep:
                         "path": "hephaestus/agents/runtime.py",
                         "line": 391,
                         "body": (
+                            "<!-- hephaestus-scope-retraction-paths: "
+                            '["hephaestus/agents/runtime.py", '
+                            '"hephaestus/agents/model_help.py"] -->\n'
                             "This feature is unrelated to issue #2137's documentation scope. "
                             "Split it into a separately justified PR."
                         ),
@@ -984,11 +987,42 @@ class TestPrReviewStageStep:
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)
         assert result.job.prompt_kwargs["scope_retraction_paths"] == (
+            "hephaestus/agents/model_help.py",
             "hephaestus/agents/runtime.py",
         )
         assert "Reduce volatile operational claims" in result.job.prompt_kwargs["task_block"]
         assert result.job.prompt_kwargs["diff_text"] == item.payload["pr_diff"]
-        assert item.payload["scope_retraction_paths"] == ("hephaestus/agents/runtime.py",)
+        assert item.payload["scope_retraction_paths"] == (
+            "hephaestus/agents/model_help.py",
+            "hephaestus/agents/runtime.py",
+        )
+
+    def test_address_existing_pr_fails_closed_for_unmarked_scope_retraction(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Historic scope prose cannot publish without a complete path manifest."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=2137, pr=2346, state="ADDRESS_WAIT")
+        item.worktree = "/tmp/wt"
+        item.payload.update(
+            {
+                "existing_pr": True,
+                "remediation_threads": [
+                    {
+                        "thread_id": "scope-legacy",
+                        "path": "hephaestus/agents/runtime.py",
+                        "line": 391,
+                        "body": "Drop the unrelated #2196 commit from this PR.",
+                    }
+                ],
+            }
+        )
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "scope_retraction_path_invalid",
+        )
 
     def test_address_existing_pr_rejects_unsafe_scope_retraction_path(
         self, make_ctx: Any, make_work_item: Any
@@ -1004,9 +1038,13 @@ class TestPrReviewStageStep:
                 "remediation_threads": [
                     {
                         "thread_id": "scope-1",
-                        "path": ".",
+                        "path": ":(exclude,glob)**",
                         "line": 1,
-                        "body": "This is unrelated to the issue scope; remove it.",
+                        "body": (
+                            "<!-- hephaestus-scope-retraction-paths: "
+                            '[":(exclude,glob)**"] -->\n'
+                            "This is unrelated to the issue scope; remove it."
+                        ),
                     }
                 ],
             }
