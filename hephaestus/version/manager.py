@@ -86,7 +86,7 @@ class VersionManager:
         repo_root: Path | None = None,
         version_files: list[Path] | None = None,
         init_files: list[Path] | None = None,
-        pyproject_file: Path | None | _UnsetType = _UNSET,
+        pyproject_file: Path | _UnsetType | None = _UNSET,
     ):
         """Initialize the version manager.
 
