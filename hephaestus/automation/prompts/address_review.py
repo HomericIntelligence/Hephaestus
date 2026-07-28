@@ -6,6 +6,27 @@ from ._shared import _fence_untrusted, fence_content, get_terse_output_directive
 from .catalog import PromptCatalog
 
 
+def build_scope_retraction_directive(paths: tuple[str, ...]) -> str:
+    """Render host-derived paths that must be restored to the reviewed base.
+
+    A scope-control review finding is different from an ordinary code defect:
+    the correct remediation is to remove the out-of-scope change, not to
+    improve it. WorkerPool independently verifies the retraction before it
+    can publish a commit.
+    """
+    if not paths:
+        return ""
+    rendered_paths = "\n".join(f"- restore `{path}` to the reviewed base" for path in paths)
+    return (
+        "**Host publication guard — required scope retraction:**\n"
+        "A review finding identified the following change as out of scope. "
+        "Remove it rather than repairing, refactoring, or retaining any part of it. "
+        "The coordinator will refuse to publish while any listed path differs from "
+        "the reviewed base.\n"
+        f"{rendered_paths}\n"
+    )
+
+
 def build_unaddressed_directive(threads: list[dict[str, Any]], nonce: str) -> str:
     """Render a "Make sure to handle <finding>" directive from unresolved threads.
 
@@ -85,6 +106,7 @@ def get_address_review_prompt(
     task_review_block: str = "",
     diff_text: str = "",
     unaddressed_findings: list[dict[str, Any]] | None = None,
+    scope_retraction_paths: tuple[str, ...] = (),
 ) -> str:
     """Get the address review prompt for fixing inline review thread feedback.
 
@@ -138,5 +160,6 @@ def get_address_review_prompt(
             unaddressed_findings or [],
             fenced.nonce,
         ),
+        scope_retraction_directive=build_scope_retraction_directive(scope_retraction_paths),
         terse_output_directive=get_terse_output_directive(),
     )

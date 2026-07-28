@@ -1515,7 +1515,63 @@ class WorkerPool:
             )
             if status.stdout.strip():
                 return JobResult(ok=False, error="commit_push left uncommitted changes")
+        scope_retraction = self._verify_scope_retraction(job, Path(worktree_path))
+        if scope_retraction is not None:
+            return scope_retraction
         return self._publish_commit_push(job, branch, Path(worktree_path))
+
+    @staticmethod
+    def _verify_scope_retraction(job: GitJob, worktree_path: Path) -> JobResult | None:
+        """Reject publication unless host-designated paths match the reviewed base.
+
+        The coordinator derives these paths only from validated scope-control
+        review findings. Re-check their shape here before using them as Git
+        pathspecs, then compare the exact post-commit ``HEAD`` with the base
+        from the review checkout barrier. A failed check remains local-only.
+        """
+        paths = job.kwargs.get("scope_retraction_paths")
+        if paths is None:
+            return None
+        base_sha = job.kwargs.get("scope_retraction_base_sha")
+        if (
+            not _is_full_commit_sha(base_sha)
+            or not isinstance(paths, tuple)
+            or not paths
+            or not all(
+                isinstance(path, str)
+                and bool(path)
+                and path != "."
+                and not path.startswith(("/", "./"))
+                and "\\" not in path
+                and ".." not in Path(path).parts
+                for path in paths
+            )
+        ):
+            return JobResult(
+                ok=False,
+                value={"scope_retraction_failure": True},
+                error="scope retraction verification unavailable",
+            )
+        try:
+            result = git_utils.run(
+                ["git", "diff", "--name-only", f"{base_sha}...HEAD", "--", *paths],
+                cwd=worktree_path,
+                capture_output=True,
+                timeout=job.timeout_s,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            return JobResult(
+                ok=False,
+                value={"scope_retraction_failure": True},
+                error="scope retraction verification unavailable",
+            )
+        if str(result.stdout or "").strip():
+            return JobResult(
+                ok=False,
+                value={"scope_retraction_failure": True},
+                error="scope retraction incomplete",
+            )
+        return None
 
     def _publish_commit_push(self, job: GitJob, branch: str, worktree_path: Path) -> JobResult:
         """Publish a newly created commit through the configured branch mode."""
