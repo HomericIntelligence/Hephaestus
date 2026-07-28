@@ -56,7 +56,11 @@ from ._shared import (
     get_terse_output_directive as get_terse_output_directive,
     get_untrusted_notice as get_untrusted_notice,
 )
-from .address_review import build_unaddressed_directive, get_address_review_prompt
+from .address_review import (
+    build_scope_retraction_directive,
+    build_unaddressed_directive,
+    get_address_review_prompt,
+)
 from .advise import (
     get_advise_prompt,
     get_advise_prompt_builder,
@@ -144,6 +148,7 @@ __all__ = [
     "PLAN_REVIEW_PROMPT",
     "PR_REVIEW_ANALYSIS_PROMPT",
     "FencedContent",
+    "build_scope_retraction_directive",
     "build_unaddressed_directive",
     "fence_content",
     "get_address_review_prompt",

@@ -76,8 +76,13 @@ Rules for the JSON block:
   - `path`: file path relative to repo root (string)
   - `line`: line number in the file (integer, must be a changed line in the diff)
   - `side`: always `"RIGHT"` for new code
-  - `severity`: one of `"critical"`, `"major"`, `"minor"`, `"nitpick"` (see above)
-  - `body`: the review comment text (string)
+- `severity`: one of `"critical"`, `"major"`, `"minor"`, `"nitpick"` (see above)
+- `body`: the review comment text (string)
+- `scope_retraction_paths`: REQUIRED only when the body asks to drop, remove,
+  or split a change because it is unrelated or out of scope. It must be a
+  complete non-empty list of every repo-relative path that must be restored to
+  the reviewed base, including this comment's `path`. Do not include this
+  control data in `body`; the coordinator validates and persists it separately.
 - `grade`: one of `A`, `B`, `C`, `D`, `E`, or `F`.
 - `summary`: bounded informational review summary, max 200 characters.
 - If there are no inline comments, emit `{"grade": "A", "summary": "LGTM", "comments": []}`.

@@ -140,6 +140,10 @@ from hephaestus.automation.session_naming import (
 )
 from hephaestus.automation.state_labels import STATE_SKIP
 
+from ..scope_retraction import (
+    is_safe_scope_retraction_path,
+    scope_retraction_paths_from_body,
+)
 from ..work_item import ItemKind
 from .base import (
     GIT_JOB_TIMEOUT_S,
@@ -169,6 +173,24 @@ _JSON_RESPONSE_BLOCK_RE = re.compile(
     r"^[ \t]*```json[ \t]*\r?\n(.*?)\r?\n^[ \t]*```[ \t]*$",
     re.DOTALL | re.MULTILINE,
 )
+
+
+def _scope_retraction_paths(threads: list[dict[str, Any]]) -> tuple[str, ...] | None:
+    """Extract host-enforced retractions from explicit scope-control findings."""
+    paths: set[str] = set()
+    for thread in threads:
+        scope_paths = scope_retraction_paths_from_body(thread.get("body"))
+        if scope_paths == ():
+            continue
+        path = thread.get("path")
+        if (
+            scope_paths is None
+            or not is_safe_scope_retraction_path(path)
+            or path not in scope_paths
+        ):
+            return None
+        paths.update(scope_paths)
+    return tuple(sorted(paths))
 
 
 @dataclass(frozen=True)
@@ -268,6 +290,8 @@ _ROUND_PAYLOAD_KEYS = (
     "review_refresh_required",
     "prior_comments_json",
     "validation_process_threads",
+    "scope_retraction_paths",
+    "reviewed_pr_base_sha",
 )
 
 
@@ -1140,6 +1164,17 @@ class PrReviewStage(Stage):
                         Disposition.FINISH_FAIL, "detached_push_retry_receipt_invalid"
                     )
                 kwargs["detached_push_retry_head_sha"] = retry_head_sha
+        scope_retraction_paths = item.payload.get("scope_retraction_paths")
+        if scope_retraction_paths is not None:
+            if not isinstance(scope_retraction_paths, tuple) or not all(
+                is_safe_scope_retraction_path(path) for path in scope_retraction_paths
+            ):
+                return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_path_invalid")
+            base_sha = item.payload.get("reviewed_pr_base_sha")
+            if not is_full_commit_sha(base_sha):
+                return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_base_unavailable")
+            kwargs["scope_retraction_paths"] = scope_retraction_paths
+            kwargs["scope_retraction_base_sha"] = base_sha
         git_job = GitJob(
             repo=item.repo,
             op="commit_push",
@@ -1252,11 +1287,14 @@ class PrReviewStage(Stage):
         value = result.value
         ready = bool(isinstance(value, dict) and value.get("ready"))
         review_diff = value.get("diff") if isinstance(value, dict) else None
+        review_base = value.get("base") if isinstance(value, dict) else None
         if ready and not isinstance(review_diff, str):
             item.payload["review_checkout_error"] = "checkout job returned no bound diff"
             ready = False
         if ready:
             item.payload["pr_diff"] = review_diff
+            if is_full_commit_sha(review_base):
+                item.payload["reviewed_pr_base_sha"] = review_base
         item.payload["review_checkout_ready"] = ready
         return True
 
@@ -1318,6 +1356,9 @@ class PrReviewStage(Stage):
             item.payload["review_failed"] = True
         elif item.state == PUSH_WAIT:
             receipt = result.value if isinstance(result.value, dict) else {}
+            if receipt.get("scope_retraction_failure") is True:
+                item.payload["scope_retraction_failure"] = True
+                return
             failure = receipt.get("detached_push_failure")
             if failure in {
                 "remote_changed",
@@ -1580,6 +1621,29 @@ class PrReviewStage(Stage):
             )
             return self._fail_back_agent_error(item)
         if item.payload.get("existing_pr"):
+            remediation_threads = item.payload.get("remediation_threads") or []
+            if not isinstance(remediation_threads, list):
+                return StageOutcome(Disposition.FINISH_FAIL, "remediation_threads_invalid")
+            scope_retraction_paths = _scope_retraction_paths(remediation_threads)
+            if scope_retraction_paths is None:
+                return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_path_invalid")
+            if scope_retraction_paths:
+                base_sha = item.payload.get("reviewed_pr_base_sha")
+                if not is_full_commit_sha(base_sha):
+                    return StageOutcome(
+                        Disposition.FINISH_FAIL,
+                        "scope_retraction_base_unavailable",
+                    )
+                item.payload["scope_retraction_paths"] = scope_retraction_paths
+            else:
+                item.payload.pop("scope_retraction_paths", None)
+            task_parts = [
+                f"Linked issue #{item.issue}: {item.payload.get('issue_title', '')}".strip(),
+                str(item.payload.get("issue_body", "")),
+            ]
+            pr_description = str(item.payload.get("pr_description", ""))
+            if pr_description:
+                task_parts.append(f"PR description:\n{pr_description}")
             job = AgentJob(
                 repo=item.repo,
                 issue=item.issue if item.issue is not None else 0,
@@ -1596,6 +1660,9 @@ class PrReviewStage(Stage):
                     "worktree_path": item.worktree,
                     "threads_json": json.dumps(item.payload.get("remediation_threads", [])),
                     "todo_block": item.payload.get("difficulty_tiers", ""),
+                    "task_block": "\n\n".join(part for part in task_parts if part),
+                    "diff_text": str(item.payload.get("pr_diff", "")),
+                    "scope_retraction_paths": scope_retraction_paths or (),
                     # No-commit retry directive (#1575): non-empty ONLY on
                     # the one retry after a no-commit address turn;
                     # get_address_review_prompt renders it via
@@ -1655,6 +1722,13 @@ class PrReviewStage(Stage):
         if item.issue is None:  # guarded by step(); kept for type narrowing
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
         payload = item.payload
+
+        if payload.pop("scope_retraction_failure", False):
+            logger.warning(
+                "pr_review:%d: refusing to publish incomplete scope retraction",
+                item.issue,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_incomplete")
 
         detached_push_failure = payload.pop("detached_push_failure", None)
         if detached_push_failure == "remote_unchanged":
