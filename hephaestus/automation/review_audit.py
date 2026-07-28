@@ -147,15 +147,20 @@ def _normalize_finding(comment: object) -> dict[str, object] | None:
         paths = normalize_scope_retraction_paths(scope_retraction_paths)
         if paths is None:
             return None
+        # A scope retraction is a publication-safety boundary, not advisory
+        # review prose. Host-normalize it to blocking before POST filters
+        # minor/nitpick comments out of the remediation path.
+        normalized_severity = "major"
     elif scope_retraction_paths is not None:
         return None
     else:
         paths = ()
+        normalized_severity = severity.lower()
     finding: dict[str, object] = {
         "path": path.strip(),
         "line": line,
         "side": "RIGHT",
-        "severity": severity.lower(),
+        "severity": normalized_severity,
         "body": body.strip(),
     }
     if paths:
