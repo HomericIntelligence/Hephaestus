@@ -23,6 +23,7 @@ from hephaestus.automation.pipeline.stages import (
     StageContext,
     StageGitHub,
 )
+from hephaestus.automation.pipeline.stages.base import BranchWorktreeOwnerStatus
 from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARGV
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.protocol import (
@@ -578,7 +579,9 @@ def make_ctx() -> Callable[..., StageContext]:
         now_fn: Callable[[], float] | None = None,
         budget_fn: Callable[[str], int] | None = None,
         event_fn: Callable[[StageEvent], None] | None = None,
-        branch_worktree_owner_status: Callable[[WorkItem, str, str], str] | None = None,
+        branch_worktree_owner_status: (
+            Callable[[WorkItem, str, str], BranchWorktreeOwnerStatus] | None
+        ) = None,
     ) -> StageContext:
         ticks = [0]
 
