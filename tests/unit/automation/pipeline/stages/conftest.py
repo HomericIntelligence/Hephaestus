@@ -74,7 +74,7 @@ class FakeStageGitHub(FakeGitHub):
         pr_impl_readbacks: list[tuple[bool, bool] | Exception] | None = None,
         unresolved: list[tuple[int, int]] | None = None,
         by_severity: list[tuple[int, int, int]] | None = None,
-        pr_state: dict[str, Any] | None | _DefaultPrState = _DEFAULT_PR_STATE,
+        pr_state: dict[str, Any] | _DefaultPrState | None = _DEFAULT_PR_STATE,
         conversation_resolution: bool = True,
         pr_review_context: dict[str, str] | None = None,
         learn_terminal: bool = False,
