@@ -160,6 +160,92 @@ def test_receipt_rejects_a_symlinked_repository_git_metadata(tmp_path: Path) -> 
     assert not (review_git_dir / "hephaestus-direct-review-recovery").exists()
 
 
+def test_receipt_rejects_forged_linked_repository_git_metadata(tmp_path: Path) -> None:
+    """A root gitfile must prove its common metadata directory before marker I/O."""
+    repo_root = tmp_path / "linked-root"
+    worktree = repo_root / "build" / ".worktrees" / "review-pr-2500"
+    worktree.mkdir(parents=True)
+    outside_git_dir = tmp_path / "outside" / ".git"
+    root_git_dir = outside_git_dir / "worktrees" / "linked-root"
+    review_git_dir = outside_git_dir / "worktrees" / "review-pr-2500"
+    root_git_dir.mkdir(parents=True)
+    review_git_dir.mkdir()
+    (repo_root / ".git").write_text(f"gitdir: {root_git_dir}\n", encoding="utf-8")
+    (worktree / ".git").write_text(f"gitdir: {review_git_dir}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="repository Git metadata is unavailable"):
+        record_direct_review_recovery(
+            repo_root=repo_root,
+            issue=2500,
+            pr=2501,
+            worktree=worktree,
+            branch="2500-auto",
+            expected_remote_sha="a" * 40,
+            source_sha="b" * 40,
+        )
+
+    assert not (review_git_dir / "hephaestus-direct-review-recovery").exists()
+
+
+def test_receipt_rejects_root_git_metadata_swapped_to_a_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The root gitfile is opened no-follow after the trusted-root descriptor exists."""
+    repo_root = tmp_path / "linked-root"
+    worktree = repo_root / "build" / ".worktrees" / "review-pr-2500"
+    worktree.mkdir(parents=True)
+    common_git_dir = tmp_path / "common" / ".git"
+    root_git_dir = common_git_dir / "worktrees" / "linked-root"
+    review_git_dir = common_git_dir / "worktrees" / "review-pr-2500"
+    root_git_dir.mkdir(parents=True)
+    review_git_dir.mkdir()
+    (root_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    root_dot_git = repo_root / ".git"
+    root_dot_git.write_text(f"gitdir: {root_git_dir}\n", encoding="utf-8")
+    (worktree / ".git").write_text(f"gitdir: {review_git_dir}\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    forged_pointer = outside / "git-pointer"
+    forged_pointer.write_text(
+        f"gitdir: {outside / '.git' / 'worktrees' / 'linked-root'}\n", encoding="utf-8"
+    )
+    original_open = os.open
+    swapped = False
+
+    def open_after_swap(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        """Replace the gitfile just before its descriptor-relative open."""
+        nonlocal swapped
+        if not swapped and path == ".git" and dir_fd is not None:
+            root_dot_git.unlink()
+            root_dot_git.symlink_to(forged_pointer)
+            swapped = True
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", open_after_swap)
+
+    with pytest.raises(ValueError, match="repository Git metadata is symlinked"):
+        record_direct_review_recovery(
+            repo_root=repo_root,
+            issue=2500,
+            pr=2501,
+            worktree=worktree,
+            branch="2500-auto",
+            expected_remote_sha="a" * 40,
+            source_sha="b" * 40,
+        )
+
+    outside_marker = (
+        outside / ".git" / "worktrees" / "review-pr-2500" / "hephaestus-direct-review-recovery"
+    )
+    assert not outside_marker.exists()
+
+
 def test_receipt_supports_and_binds_a_linked_worktree_gitdir(tmp_path: Path) -> None:
     """The production linked-worktree gitdir layout remains receipt-backed."""
     worktree = _worktree(tmp_path, 2500)
@@ -195,6 +281,7 @@ def test_receipt_supports_a_linked_repository_root(tmp_path: Path) -> None:
     review_git_dir = common_git_dir / "worktrees" / "review-pr-2500"
     root_git_dir.mkdir(parents=True)
     review_git_dir.mkdir()
+    (root_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
     (repo_root / ".git").write_text(f"gitdir: {root_git_dir}\n", encoding="utf-8")
     (worktree / ".git").write_text(f"gitdir: {review_git_dir}\n", encoding="utf-8")
 

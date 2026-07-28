@@ -21,7 +21,7 @@ _RECEIPT_DIR = "direct-review-recovery"
 _RECEIPT_VERSION = 3
 _REMOTE_CHANGED_REASON = "remote_changed"
 _WORKTREE_MARKER = "hephaestus-direct-review-recovery"
-_DIR_FD_SUPPORTED = os.name == "posix" and hasattr(os, "O_DIRECTORY")
+_DIR_FD_SUPPORTED = os.name == "posix" and hasattr(os, "O_DIRECTORY") and hasattr(os, "O_NOFOLLOW")
 _INSPECTION_ONLY_FAILURES = frozenset(
     {
         "remote_changed",
@@ -343,30 +343,84 @@ def _worktree_identity(worktree: Path) -> tuple[int, int]:
     return stat.st_dev, stat.st_ino
 
 
+def _open_root_gitfile(root_fd: int) -> int | None:
+    """Open ``.git`` from a trusted root descriptor without following symlinks."""
+    try:
+        return os.open(".git", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise ValueError(
+                "direct review recovery repository Git metadata is symlinked"
+            ) from error
+        raise ValueError("direct review recovery repository Git metadata is unavailable") from error
+
+
+def _read_root_git_metadata(root: Path) -> tuple[bool, str | None]:
+    """Return whether ``.git`` is a directory and a no-follow gitfile payload."""
+    root_fd = os.open(root, _directory_open_flags())
+    try:
+        git_fd = _open_root_gitfile(root_fd)
+        if git_fd is None:
+            return False, None
+        try:
+            mode = os.fstat(git_fd).st_mode
+            if stat.S_ISDIR(mode):
+                return True, None
+            if not stat.S_ISREG(mode):
+                raise ValueError("direct review recovery repository Git metadata is unavailable")
+            with os.fdopen(git_fd, "r", encoding="utf-8") as handle:
+                git_fd = -1
+                return False, handle.read().strip()
+        finally:
+            if git_fd >= 0:
+                os.close(git_fd)
+    finally:
+        os.close(root_fd)
+
+
+def _verified_common_git_dir(git_dir: Path) -> Path:
+    """Return the common directory proven by a linked worktree's ``commondir``."""
+    if git_dir.parent.name != "worktrees" or not git_dir.parent.parent.is_dir():
+        raise ValueError("direct review recovery repository Git metadata is unavailable")
+    common_git_dir = git_dir.parent.parent
+    try:
+        git_dir_fd = os.open(git_dir, _directory_open_flags())
+    except OSError as error:
+        raise ValueError("direct review recovery repository Git metadata is unavailable") from error
+    try:
+        common_dir_text = _read_secure_text(git_dir, git_dir_fd, "commondir").strip()
+    except (OSError, ValueError) as error:
+        raise ValueError("direct review recovery repository Git metadata is unavailable") from error
+    finally:
+        os.close(git_dir_fd)
+    raw_common_dir = Path(common_dir_text)
+    resolved_common_dir = (
+        raw_common_dir if raw_common_dir.is_absolute() else git_dir / raw_common_dir
+    ).resolve()
+    if resolved_common_dir != common_git_dir:
+        raise ValueError("direct review recovery repository Git metadata is unavailable")
+    return common_git_dir
+
+
 def _common_git_dir(repo_root: Path) -> Path:
     """Return the common Git metadata directory for a checkout or linked worktree."""
     root = repo_root.resolve()
     dot_git = root / ".git"
-    if dot_git.is_symlink():
-        raise ValueError("direct review recovery repository Git metadata is symlinked")
-    if dot_git.is_dir():
-        return dot_git.resolve()
-    try:
-        line = dot_git.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
+    if not _DIR_FD_SUPPORTED:
+        raise ValueError("direct review recovery requires no-follow directory descriptors")
+    is_directory, line = _read_root_git_metadata(root)
+    if line is None:
         # Lightweight fixtures without a repository-level Git directory keep
         # metadata confined to the fixture root.
-        return root
-    except OSError as error:
-        raise ValueError("direct review recovery repository Git metadata is unavailable") from error
+        return dot_git.resolve() if is_directory else root
     prefix = "gitdir: "
     if not line.startswith(prefix):
         raise ValueError("direct review recovery repository Git metadata is invalid")
     raw_git_dir = Path(line.removeprefix(prefix))
     git_dir = (raw_git_dir if raw_git_dir.is_absolute() else root / raw_git_dir).resolve()
-    if git_dir.parent.name != "worktrees" or not git_dir.parent.parent.is_dir():
-        raise ValueError("direct review recovery repository Git metadata is unavailable")
-    return git_dir.parent.parent
+    return _verified_common_git_dir(git_dir)
 
 
 def _worktree_marker_path(repo_root: Path, worktree: Path) -> Path:
