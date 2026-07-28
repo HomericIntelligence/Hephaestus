@@ -43,6 +43,11 @@ from hephaestus.automation.arming_state import (
     ArmingStateStore,
 )
 from hephaestus.automation.git_utils import issue_auto_impl_branch_name
+from hephaestus.automation.pipeline.scope_retraction import (
+    SCOPE_RETRACTION_MARKER_PREFIX,
+    normalize_scope_retraction_paths,
+    scope_retraction_marker,
+)
 from hephaestus.automation.pipeline.stages.base import (
     ConditionalMergeResult,
     ProcessThreadResolutionResult,
@@ -189,9 +194,15 @@ def _with_severity_marker(comment: dict[str, Any]) -> str:
         line
         for line in body.splitlines()
         if not line.strip().startswith(SEVERITY_MARKER_PREFIX)
+        and not line.strip().startswith(SCOPE_RETRACTION_MARKER_PREFIX)
         and not _STANDALONE_VERDICT_LINE_RE.match(line)
     )
-    return f"{SEVERITY_MARKER_PREFIX} {sev} -->\n{body}"
+    paths = normalize_scope_retraction_paths(comment.get("scope_retraction_paths"))
+    markers = [f"{SEVERITY_MARKER_PREFIX} {sev} -->"]
+    if paths:
+        markers.append(scope_retraction_marker(paths))
+    markers.append(body)
+    return "\n".join(markers)
 
 
 def _thread_severity_is_blocking(thread: dict[str, Any]) -> bool:

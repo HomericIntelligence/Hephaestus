@@ -13,6 +13,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from html import escape
 
+from hephaestus.automation.pipeline.scope_retraction import (
+    SCOPE_RETRACTION_MARKER_PREFIX,
+    is_scope_retraction_finding,
+    normalize_scope_retraction_paths,
+)
+
 _JSON_BLOCK_RE = re.compile(
     r"^[ \t]*```json[ \t]*\r?\n(.*?)\r?\n^[ \t]*```[ \t]*$",
     re.DOTALL | re.MULTILINE | re.IGNORECASE,
@@ -136,18 +142,39 @@ def _normalize_finding(comment: object) -> dict[str, object] | None:
         or has_reserved_finding_control(body)
     ):
         return None
-    return {
+    scope_retraction_paths = comment.get("scope_retraction_paths")
+    if is_scope_retraction_finding(body):
+        paths = normalize_scope_retraction_paths(scope_retraction_paths)
+        if paths is None:
+            return None
+        # A scope retraction is a publication-safety boundary, not advisory
+        # review prose. Host-normalize it to blocking before POST filters
+        # minor/nitpick comments out of the remediation path.
+        normalized_severity = "major"
+    elif scope_retraction_paths is not None:
+        return None
+    else:
+        paths = ()
+        normalized_severity = severity.lower()
+    finding: dict[str, object] = {
         "path": path.strip(),
         "line": line,
         "side": "RIGHT",
-        "severity": severity.lower(),
+        "severity": normalized_severity,
         "body": body.strip(),
     }
+    if paths:
+        finding["scope_retraction_paths"] = paths
+    return finding
 
 
 def has_reserved_finding_control(body: str) -> bool:
     """Return whether a finding body contains a pipeline-owned control."""
-    return bool(_SEVERITY_MARKER_RE.search(body) or _RESERVED_AUTHORITY_CLAIM_RE.search(body))
+    return bool(
+        _SEVERITY_MARKER_RE.search(body)
+        or SCOPE_RETRACTION_MARKER_PREFIX in body
+        or _RESERVED_AUTHORITY_CLAIM_RE.search(body)
+    )
 
 
 def _sanitize_summary(summary: str) -> str:

@@ -1838,6 +1838,94 @@ class TestGitOps:
         assert result.ok is True
         assert result.value is True  # value carries commit_if_changes' bool
 
+    def test_commit_push_rejects_incomplete_scope_retraction_before_publish(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """An address agent cannot publish an unrelated feature it merely repaired."""
+        base_sha = "a" * 40
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 2137,
+                "worktree_path": tmp_path,
+                "branch": "2137-auto-impl",
+                "agent": "claude",
+                "scope_retraction_base_sha": base_sha,
+                "scope_retraction_paths": ("hephaestus/agents/runtime.py",),
+            },
+        )
+        with (
+            patch("hephaestus.automation.git_utils.commit_if_changes", return_value=True),
+            patch(
+                "hephaestus.automation.git_utils.run",
+                return_value=subprocess.CompletedProcess(
+                    [], 0, stdout="hephaestus/agents/runtime.py\n"
+                ),
+            ) as diff,
+            patch("hephaestus.automation.git_utils.push_branch") as push,
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.value == {"scope_retraction_failure": True}
+        assert result.error == "scope retraction incomplete"
+        diff.assert_called_once_with(
+            [
+                "git",
+                "--literal-pathspecs",
+                "diff",
+                "--name-only",
+                base_sha,
+                "HEAD",
+                "--",
+                "hephaestus/agents/runtime.py",
+            ],
+            cwd=tmp_path,
+            capture_output=True,
+            timeout=60,
+        )
+        push.assert_not_called()
+
+    def test_commit_push_rejects_pathspec_magic_before_publish(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """Git pathspec magic cannot turn a required retraction into an empty diff."""
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 2137,
+                "worktree_path": tmp_path,
+                "branch": "2137-auto-impl",
+                "agent": "claude",
+                "scope_retraction_base_sha": "a" * 40,
+                "scope_retraction_paths": (":(exclude,glob)**",),
+            },
+        )
+        with (
+            patch("hephaestus.automation.git_utils.commit_if_changes", return_value=True),
+            patch("hephaestus.automation.git_utils.run") as diff,
+            patch("hephaestus.automation.git_utils.push_branch") as push,
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.value == {"scope_retraction_failure": True}
+        assert result.error == "scope retraction verification unavailable"
+        diff.assert_not_called()
+        push.assert_not_called()
+
     def test_direct_scope_commit_push_requires_unchanged_remote_reservation(
         self,
         pool: WorkerPool,

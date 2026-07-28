@@ -946,6 +946,115 @@ class TestPrReviewStageStep:
             {"thread_id": "t1", "path": "x.py", "line": 1, "body": "fix"}
         ]
 
+    def test_address_existing_pr_binds_scope_retraction_to_verified_base(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An out-of-scope finding must retract its path rather than repair it."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=2137, pr=2346, state="ADDRESS_WAIT")
+        item.worktree = "/tmp/wt"
+        item.payload.update(
+            {
+                "existing_pr": True,
+                "issue_title": "Reduce volatile operational claims",
+                "issue_body": "Define maintained sources for normative docs.",
+                "pr_description": "Closes #2137",
+                "pr_diff": (
+                    "diff --git a/hephaestus/agents/runtime.py b/hephaestus/agents/runtime.py"
+                ),
+                "reviewed_pr_base_sha": "a" * 40,
+                "remediation_threads": [
+                    {
+                        "thread_id": "scope-1",
+                        "path": "hephaestus/agents/runtime.py",
+                        "line": 391,
+                        "body": (
+                            "<!-- hephaestus-scope-retraction-paths: "
+                            '["hephaestus/agents/runtime.py", '
+                            '"hephaestus/agents/model_help.py"] -->\n'
+                            "This feature is unrelated to issue #2137's documentation scope. "
+                            "Split it into a separately justified PR."
+                        ),
+                    }
+                ],
+                "difficulty_tiers": "@ runtime.py Line 391 - hard - split scope",
+            }
+        )
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)
+        assert result.job.prompt_kwargs["scope_retraction_paths"] == (
+            "hephaestus/agents/model_help.py",
+            "hephaestus/agents/runtime.py",
+        )
+        assert "Reduce volatile operational claims" in result.job.prompt_kwargs["task_block"]
+        assert result.job.prompt_kwargs["diff_text"] == item.payload["pr_diff"]
+        assert item.payload["scope_retraction_paths"] == (
+            "hephaestus/agents/model_help.py",
+            "hephaestus/agents/runtime.py",
+        )
+
+    def test_address_existing_pr_fails_closed_for_unmarked_scope_retraction(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Historic scope prose cannot publish without a complete path manifest."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=2137, pr=2346, state="ADDRESS_WAIT")
+        item.worktree = "/tmp/wt"
+        item.payload.update(
+            {
+                "existing_pr": True,
+                "remediation_threads": [
+                    {
+                        "thread_id": "scope-legacy",
+                        "path": "hephaestus/agents/runtime.py",
+                        "line": 391,
+                        "body": "Drop the unrelated #2196 commit from this PR.",
+                    }
+                ],
+            }
+        )
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "scope_retraction_path_invalid",
+        )
+
+    def test_address_existing_pr_rejects_unsafe_scope_retraction_path(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A scope comment must never turn the repository root into a pathspec."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=2137, pr=2346, state="ADDRESS_WAIT")
+        item.worktree = "/tmp/wt"
+        item.payload.update(
+            {
+                "existing_pr": True,
+                "remediation_threads": [
+                    {
+                        "thread_id": "scope-1",
+                        "path": ":(exclude,glob)**",
+                        "line": 1,
+                        "body": (
+                            "<!-- hephaestus-scope-retraction-paths: "
+                            '[":(exclude,glob)**"] -->\n'
+                            "This is unrelated to the issue scope; remove it."
+                        ),
+                    }
+                ],
+            }
+        )
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "scope_retraction_path_invalid",
+        )
+
     def test_push_wait_requests_commit_push(self, make_ctx: Any, make_work_item: Any) -> None:
         """PUSH_WAIT submits the commit+push job for the addressing changes."""
         stage = PrReviewStage()
@@ -991,6 +1100,31 @@ class TestPrReviewStageStep:
         assert isinstance(result.job, GitJob)
         assert result.job.kwargs["publish_detached_head"] is True
         assert result.job.kwargs["expected_remote_sha"] == "a" * 40
+
+    def test_push_wait_binds_scope_retraction_to_reviewed_base(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The worker must verify a scope cleanup before publishing it."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=2137, pr=2346, state="PUSH_WAIT")
+        item.branch = "2137-auto-impl"
+        item.worktree = "/tmp/review-pr"
+        item.payload.update(
+            {
+                "direct_pr_worktree": "/tmp/review-pr",
+                "reviewed_pr_head_sha": "b" * 40,
+                "reviewed_pr_base_sha": "a" * 40,
+                "scope_retraction_paths": ("hephaestus/agents/runtime.py",),
+            }
+        )
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.kwargs["scope_retraction_base_sha"] == "a" * 40
+        assert result.job.kwargs["scope_retraction_paths"] == ("hephaestus/agents/runtime.py",)
 
     def test_address_refuses_fork_head_without_base_origin_write(
         self, make_ctx: Any, make_work_item: Any
@@ -1838,6 +1972,21 @@ class TestEvalVerdicts:
 
         assert result == StageOutcome(Disposition.RETRY, "review audit format failure")
         assert not any(name == "mark_pr_implementation_go" for name, _ in github.mutation_log)
+
+    def test_incomplete_scope_retraction_finishes_without_a_label_mutation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A locally rejected address commit never becomes an approval or push retry."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=2137, pr=2346, state="EVAL")
+        item.payload["scope_retraction_failure"] = True
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_incomplete")
+        assert github.mutation_log == []
 
     def test_legacy_audit_payload_key_cannot_authorize_clean_pr(
         self, make_ctx: Any, make_work_item: Any
@@ -3097,6 +3246,27 @@ class TestPrReviewOnJobDone:
         item.state = "PUSH_WAIT"
         stage.on_job_done(item, JobResult(ok=False, error="push rejected"), ctx)
         assert item.payload["address_error"] is True
+
+    def test_scope_retraction_publish_failure_is_not_an_address_agent_failure(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The terminal safety outcome must not re-adopt and retry an unsafe draft."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=2137, pr=2346, state="PUSH_WAIT")
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                value={"scope_retraction_failure": True},
+                error="scope retraction incomplete",
+            ),
+            ctx,
+        )
+
+        assert item.payload["scope_retraction_failure"] is True
+        assert "address_error" not in item.payload
 
 
 class TestFullWalks:
