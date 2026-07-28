@@ -9,7 +9,11 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
-from hephaestus.automation.worktree_manager import WorktreeDirtyError, WorktreeManager
+from hephaestus.automation.worktree_manager import (
+    BranchWorktreeOwnedError,
+    WorktreeDirtyError,
+    WorktreeManager,
+)
 from hephaestus.utils.file_lock import file_lock
 
 
@@ -920,16 +924,9 @@ class TestBaseBranchDetectionRaisesOnFailure:
 
 
 class TestCreateWorktreeBranchCollision:
-    """create_worktree reuses an existing worktree when the branch is checked out there.
+    """create_worktree protects writer worktrees from cross-issue collisions."""
 
-    Regression for the exit-128 collision: the implement loop resolves a PR's
-    real head branch (e.g. 708-auto-impl) for a DIFFERENT issue (#725), but that
-    branch is already checked out in the issue-708 worktree. git forbids the same
-    branch in two worktrees, so `git worktree add` failed. Reuse the existing
-    worktree instead of forcing or adding a second one.
-    """
-
-    def test_reuses_worktree_already_holding_branch(
+    def test_different_issue_cannot_reuse_branch_worktree(
         self, worktree_mocks: Any, tmp_path: Any
     ) -> None:
         worktree_mocks.repo_root.return_value = tmp_path
@@ -946,19 +943,48 @@ class TestCreateWorktreeBranchCollision:
                 {"path": str(existing), "branch": "refs/heads/708-auto-impl", "commit": "abc"},
             ],
         ):
-            # Now ask for a worktree for issue #725 on that same branch.
-            result = manager.create_worktree(725, "708-auto-impl")
+            with pytest.raises(BranchWorktreeOwnedError) as raised:
+                manager.create_worktree(725, "708-auto-impl")
 
-        # Reuses the existing path, registers it under #725, and does NOT add a
-        # second worktree for the same branch.
-        assert result == existing
-        assert manager.worktrees[725] == existing
-        add_calls = [
-            c
-            for c in worktree_mocks.run.call_args_list
-            if c[0] and c[0][0][:3] == ["git", "worktree", "add"]
-        ]
-        assert add_calls == [], "must NOT run `git worktree add` when reusing"
+        assert raised.value.branch == "708-auto-impl"
+        assert raised.value.owner_path == existing
+        assert 725 not in manager.worktrees
+
+    def test_same_issue_reuses_branch_worktree(self, worktree_mocks: Any, tmp_path: Any) -> None:
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+        existing = manager.base_dir / "issue-708"
+
+        with patch.object(
+            manager,
+            "list_worktrees",
+            return_value=[
+                {"path": str(existing), "branch": "refs/heads/708-auto-impl", "commit": "abc"},
+            ],
+        ):
+            assert manager.create_worktree(708, "708-auto-impl") == existing
+        assert manager.worktrees[708] == existing
+
+    def test_same_issue_reuses_absolute_holder_with_a_relative_base_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Git's absolute worktree path matches a relative manager configuration."""
+        repo_root = tmp_path / "repo"
+        (repo_root / ".git").mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+        manager = WorktreeManager(repo_root=Path("repo"), base_dir=Path("repo/build/.worktrees"))
+        existing = (repo_root / "build" / ".worktrees" / "issue-708").resolve()
+
+        with patch.object(
+            manager,
+            "list_worktrees",
+            return_value=[
+                {"path": str(existing), "branch": "refs/heads/708-auto-impl", "commit": "abc"},
+            ],
+        ):
+            assert manager.create_worktree(708, "708-auto-impl") == existing
+
+        assert manager.worktrees[708] == existing
 
     def test_isolated_checkout_does_not_reuse_branch_holder(
         self, worktree_mocks: Any, tmp_path: Any
