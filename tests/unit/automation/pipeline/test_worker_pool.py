@@ -2029,6 +2029,88 @@ class TestGitOps:
         assert result.ok is True
         assert result.value is True
 
+    def test_clean_detached_pr_review_does_not_release_remote_branch(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A clean adopted PR review must leave its remote branch intact."""
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 5,
+                "worktree_path": tmp_path,
+                "branch": "5-auto",
+                "pr_number": 1005,
+                "repo_root": str(tmp_path),
+                "publish_detached_head": True,
+                "expected_remote_sha": "a" * 40,
+            },
+        )
+        with (
+            patch("hephaestus.automation.git_utils.commit_if_changes", return_value=False),
+            patch(
+                "hephaestus.automation.git_utils.run",
+                return_value=subprocess.CompletedProcess([], 0, stdout="0\n"),
+            ),
+            patch("hephaestus.automation.git_utils.delete_reserved_branch_if_unchanged") as release,
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        assert result.value is False
+        release.assert_not_called()
+
+    def test_clean_detached_pr_review_publishes_precommitted_head(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A clean adopted review still publishes an agent-created commit."""
+        expected_remote_sha = "a" * 40
+        source_sha = "b" * 40
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 5,
+                "worktree_path": tmp_path,
+                "branch": "5-auto",
+                "pr_number": 1005,
+                "repo_root": str(tmp_path),
+                "publish_detached_head": True,
+                "expected_remote_sha": expected_remote_sha,
+            },
+        )
+        with (
+            patch("hephaestus.automation.git_utils.commit_if_changes", return_value=False),
+            patch(
+                "hephaestus.automation.git_utils.run",
+                side_effect=[
+                    subprocess.CompletedProcess([], 0, stdout="1\n"),
+                    subprocess.CompletedProcess([], 0, stdout=""),
+                    subprocess.CompletedProcess([], 0, stdout=f"{source_sha}\n"),
+                ],
+            ),
+            patch("hephaestus.automation.git_utils.push_head_to_branch") as push,
+            patch("hephaestus.automation.git_utils.delete_reserved_branch_if_unchanged") as release,
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        assert result.value is True
+        push.assert_called_once_with(
+            "5-auto", expected_remote_sha, tmp_path, source_sha=source_sha, timeout=60
+        )
+        release.assert_not_called()
+
     @pytest.mark.parametrize(
         ("status_output", "current_head"),
         [(" M changed.py\n", "b" * 40), ("", "c" * 40)],

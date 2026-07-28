@@ -1767,6 +1767,12 @@ class WorkerPool:
             return JobResult(ok=False, error="cannot verify direct scope branch ancestry")
         if ahead.stdout.strip() != "0":
             return True
+        if bool(job.kwargs.get("publish_detached_head", False)):
+            # ``expected_remote_sha`` is the reviewed PR head in this mode,
+            # not a coordinator-created direct-scope reservation. A clean
+            # checkout at that head has nothing to publish, and releasing the
+            # branch would delete an adopted open PR.
+            return False
         released = git_utils.delete_reserved_branch_if_unchanged(
             branch,
             expected_remote_sha,
