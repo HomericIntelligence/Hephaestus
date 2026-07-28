@@ -134,6 +134,32 @@ def test_receipt_rejects_worktree_git_metadata_outside_the_repository(tmp_path: 
     assert not (outside / "hephaestus-direct-review-recovery").exists()
 
 
+def test_receipt_rejects_a_symlinked_repository_git_metadata(tmp_path: Path) -> None:
+    """A root Git metadata symlink cannot redirect linked-worktree markers."""
+    worktree = _worktree(tmp_path, 2500)
+    shutil.rmtree(worktree / ".git")
+    outside = tmp_path.parent / "outside-common-git"
+    review_git_dir = outside / ".git" / "worktrees" / "review-pr-2500"
+    review_git_dir.mkdir(parents=True)
+    pointer = tmp_path / "root-git-pointer"
+    pointer.write_text(f"gitdir: {outside / '.git' / 'worktrees' / 'root'}\n", encoding="utf-8")
+    (tmp_path / ".git").symlink_to(pointer)
+    (worktree / ".git").write_text(f"gitdir: {review_git_dir}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="repository Git metadata is symlinked"):
+        record_direct_review_recovery(
+            repo_root=tmp_path,
+            issue=2500,
+            pr=2501,
+            worktree=worktree,
+            branch="2500-auto",
+            expected_remote_sha="a" * 40,
+            source_sha="b" * 40,
+        )
+
+    assert not (review_git_dir / "hephaestus-direct-review-recovery").exists()
+
+
 def test_receipt_supports_and_binds_a_linked_worktree_gitdir(tmp_path: Path) -> None:
     """The production linked-worktree gitdir layout remains receipt-backed."""
     worktree = _worktree(tmp_path, 2500)

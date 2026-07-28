@@ -347,14 +347,18 @@ def _common_git_dir(repo_root: Path) -> Path:
     """Return the common Git metadata directory for a checkout or linked worktree."""
     root = repo_root.resolve()
     dot_git = root / ".git"
-    if dot_git.is_dir() and not dot_git.is_symlink():
+    if dot_git.is_symlink():
+        raise ValueError("direct review recovery repository Git metadata is symlinked")
+    if dot_git.is_dir():
         return dot_git.resolve()
     try:
         line = dot_git.read_text(encoding="utf-8").strip()
-    except OSError:
+    except FileNotFoundError:
         # Lightweight fixtures without a repository-level Git directory keep
         # metadata confined to the fixture root.
         return root
+    except OSError as error:
+        raise ValueError("direct review recovery repository Git metadata is unavailable") from error
     prefix = "gitdir: "
     if not line.startswith(prefix):
         raise ValueError("direct review recovery repository Git metadata is invalid")
