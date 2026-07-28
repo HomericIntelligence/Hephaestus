@@ -94,7 +94,7 @@ def resolve_projects_dir(
 
     """
     if override is not None:
-        return Path(override)
+        return Path(override).resolve()
 
     env = os.environ.get("PROJECTS_ROOT")
     key: tuple[str | None, str | None] = (override, env)
@@ -102,7 +102,7 @@ def resolve_projects_dir(
     if env:
         env_path = Path(env)
         if env_path.is_dir():
-            return env_path
+            return env_path.resolve()
         if key not in _warned_keys:
             logger.warning(
                 "PROJECTS_ROOT=%s does not exist; falling back to %s",

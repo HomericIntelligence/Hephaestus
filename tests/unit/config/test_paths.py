@@ -43,6 +43,33 @@ def test_override_takes_priority_no_warning(
     assert caplog.records == []
 
 
+def test_relative_override_is_resolved_from_the_invocation_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A relative CLI projects root cannot leak into Git worktree commands."""
+    monkeypatch.chdir(tmp_path)
+
+    result = resolve_projects_dir("loop-validation")
+
+    assert result == tmp_path / "loop-validation"
+    assert result.is_absolute()
+
+
+def test_relative_projects_root_environment_value_is_resolved_from_the_invocation_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A relative environment override cannot leak into Git worktree commands."""
+    projects_dir = tmp_path / "loop-validation"
+    projects_dir.mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PROJECTS_ROOT", "loop-validation")
+
+    result = resolve_projects_dir()
+
+    assert result == projects_dir
+    assert result.is_absolute()
+
+
 def test_env_var_used_when_dir_exists_no_warning(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path: Path
 ) -> None:
