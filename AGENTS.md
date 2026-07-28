@@ -339,18 +339,17 @@ releases from signed `vX.Y.Z` tags; there are no release branches.
 
 #### PR policy
 
-The active `homeric-main-baseline` ruleset requires cryptographically signed
-commits. `pr-policy` also validates each signature as a defense-in-depth
-backstop; it and the PR reviewer enforce:
+The active `homeric-main-baseline` ruleset is the sole enforcement point for
+cryptographically signed commits. `pr-policy` and the PR reviewer enforce:
 
 1. The PR body MUST contain the literal line `Closes #<issue-number>` (capital
    `C`, no colon, on its own line). `Fixes`, `Resolves`, `closes`, and
    `Closes:` are NOT accepted.
-2. Every commit MUST be cryptographically signed (`git commit -S`).
-3. Conventional Commit subjects.
-4. A DCO `Signed-off-by` trailer on every commit.
+2. Conventional Commit subjects.
+3. A DCO `Signed-off-by` trailer on every commit.
 
-`pr-policy` blocks PRs that fail those checks. The queue runs
+The ruleset and `pr-policy` block PRs that fail their respective checks. The
+queue runs
 `$athena:pr-review` in its normal default profile when available. Its prose,
 grades, and decision-shaped output are audit evidence, not authorization.
 `pr_review` applies `state:implementation-go` only after its structural audit
