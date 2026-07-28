@@ -25,6 +25,7 @@ from typing import TypeGuard
 
 from hephaestus.agents.runtime import resolve_agent, resume_agent_session, run_agent_session
 from hephaestus.automation import claude_invoke, git_utils, subprocess_registry
+from hephaestus.automation.direct_review_recovery import record_direct_review_recovery
 from hephaestus.automation.learn import compact_agent_session
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.jobs import (
@@ -1323,15 +1324,13 @@ class WorkerPool:
                 error=f"worktree post-create preparation failed: {exc}",
                 value={"path": str(worktree_path), WORKTREE_MATERIALIZED_KEY: True},
             )
-        return JobResult(
-            ok=True,
-            value={
-                "path": str(worktree_path),
-                "dirty": dirty,
-                "status": status,
-                "diff": diff,
-            },
-        )
+        value: dict[str, object] = {
+            "path": str(worktree_path),
+            "dirty": dirty,
+            "status": status,
+            "diff": diff,
+        }
+        return JobResult(ok=True, value=value)
 
     @staticmethod
     def _prepare_direct_scope_worktree(
@@ -1481,6 +1480,9 @@ class WorkerPool:
                 ok=False,
                 error="commit_push requires non-empty 'worktree_path' and 'issue_number' kwargs",
             )
+        retry_result = self._detached_push_retry_result(job, Path(worktree_path))
+        if retry_result is not None:
+            return retry_result
         # ``commit_if_changes`` returns False for a clean worktree.  An agent
         # is instructed to leave its edits uncommitted, but a defensive
         # recovery still recognizes a clean branch that is ahead of its
@@ -1513,6 +1515,10 @@ class WorkerPool:
             )
             if status.stdout.strip():
                 return JobResult(ok=False, error="commit_push left uncommitted changes")
+        return self._publish_commit_push(job, branch, Path(worktree_path))
+
+    def _publish_commit_push(self, job: GitJob, branch: str, worktree_path: Path) -> JobResult:
+        """Publish a newly created commit through the configured branch mode."""
         branch = branch or "HEAD"
         expected_remote_sha = job.kwargs.get("expected_remote_sha")
         if expected_remote_sha is not None and not _is_full_commit_sha(expected_remote_sha):
@@ -1523,22 +1529,213 @@ class WorkerPool:
                     ok=False,
                     error="detached PR push requires the reviewed remote head",
                 )
-            git_utils.push_head_to_branch(
+            source_sha = self._read_detached_push_head(worktree_path, timeout=job.timeout_s)
+            if isinstance(source_sha, JobResult):
+                return source_sha
+            detached_push_result = self._publish_detached_head(
+                job,
                 branch,
                 expected_remote_sha,
-                Path(worktree_path),
+                worktree_path,
+                source_sha=source_sha,
                 timeout=job.timeout_s,
             )
-        elif isinstance(expected_remote_sha, str):
+            return detached_push_result or JobResult(ok=True, value=True)
+        if isinstance(expected_remote_sha, str):
             git_utils.push_branch_if_remote_matches(
                 branch,
                 expected_remote_sha,
-                Path(worktree_path),
+                worktree_path,
                 timeout=job.timeout_s,
             )
         else:
-            git_utils.push_branch(branch, Path(worktree_path), timeout=job.timeout_s)
+            git_utils.push_branch(branch, worktree_path, timeout=job.timeout_s)
         return JobResult(ok=True, value=True)
+
+    def _detached_push_retry_result(self, job: GitJob, worktree_path: Path) -> JobResult | None:
+        """Return the push-only retry result when a detached retry receipt exists."""
+        retry_head_sha = job.kwargs.get("detached_push_retry_head_sha")
+        if retry_head_sha is None:
+            return None
+        return self._retry_detached_head_push(
+            job=job,
+            branch=str(job.kwargs.get("branch") or ""),
+            expected_remote_sha=job.kwargs.get("expected_remote_sha"),
+            source_sha=retry_head_sha,
+            worktree_path=worktree_path,
+            timeout=job.timeout_s,
+            publish_detached_head=bool(job.kwargs.get("publish_detached_head", False)),
+        )
+
+    @staticmethod
+    def _read_detached_push_head(worktree_path: Path, *, timeout: int) -> str | JobResult:
+        """Read the immutable commit a detached review push is allowed to publish."""
+        try:
+            head = git_utils.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=worktree_path,
+                capture_output=True,
+                timeout=timeout,
+            ).stdout.strip()
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            return JobResult(ok=False, error="cannot bind detached review push head")
+        if not _is_full_commit_sha(head):
+            return JobResult(ok=False, error="cannot bind detached review push head")
+        return head
+
+    def _retry_detached_head_push(
+        self,
+        *,
+        job: GitJob,
+        branch: str,
+        expected_remote_sha: object,
+        source_sha: object,
+        worktree_path: Path,
+        timeout: int,
+        publish_detached_head: bool,
+    ) -> JobResult:
+        """Retry only the exact detached commit captured before the first push."""
+        if (
+            not publish_detached_head
+            or not branch
+            or not _is_full_commit_sha(expected_remote_sha)
+            or not _is_full_commit_sha(source_sha)
+        ):
+            return JobResult(ok=False, error="detached review retry receipt is invalid")
+        try:
+            status = git_utils.run(
+                ["git", "status", "--porcelain"],
+                cwd=worktree_path,
+                capture_output=True,
+                timeout=timeout,
+            )
+            current_head = git_utils.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=worktree_path,
+                capture_output=True,
+                timeout=timeout,
+            ).stdout.strip()
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            return JobResult(
+                ok=False,
+                value={"detached_push_failure": "retry_checkout_unconfirmed"},
+                error="detached review retry checkout could not be verified",
+            )
+        if status.stdout.strip() or current_head != source_sha:
+            return JobResult(
+                ok=False,
+                value={"detached_push_failure": "retry_checkout_changed"},
+                error="detached review retry checkout changed after the failed push",
+            )
+        result = self._publish_detached_head(
+            job,
+            branch,
+            expected_remote_sha,
+            worktree_path,
+            source_sha=source_sha,
+            timeout=timeout,
+        )
+        return result or JobResult(ok=True, value=True)
+
+    def _publish_detached_head(
+        self,
+        job: GitJob,
+        branch: str,
+        expected_remote_sha: str,
+        worktree_path: Path,
+        *,
+        source_sha: str,
+        timeout: int,
+    ) -> JobResult | None:
+        """Publish a detached review commit, classifying only verified failures."""
+        try:
+            git_utils.push_head_to_branch(
+                branch,
+                expected_remote_sha,
+                worktree_path,
+                source_sha=source_sha,
+                timeout=timeout,
+            )
+        except git_utils.DetachedHeadPushRemoteHeadChangedError as exc:
+            recovery_error = self._record_detached_push_recovery(
+                job=job,
+                branch=branch,
+                worktree_path=worktree_path,
+                expected_remote_sha=expected_remote_sha,
+                source_sha=source_sha,
+            )
+            if recovery_error is not None:
+                return JobResult(
+                    ok=False,
+                    value={
+                        "detached_push_failure": "remote_changed_unrecorded",
+                        "detached_push_head_sha": source_sha,
+                    },
+                    error=f"{exc}; recovery receipt could not be recorded: {recovery_error}",
+                )
+            return JobResult(
+                ok=False,
+                value={
+                    "detached_push_failure": "remote_changed",
+                    "detached_push_head_sha": source_sha,
+                },
+                error=str(exc),
+            )
+        except git_utils.DetachedHeadPushRemoteHeadUnchangedError as exc:
+            return JobResult(
+                ok=False,
+                value={
+                    "detached_push_failure": "remote_unchanged",
+                    "detached_push_head_sha": source_sha,
+                },
+                error=str(exc),
+            )
+        except git_utils.DetachedHeadPushRemoteProbeError as exc:
+            return JobResult(
+                ok=False,
+                value={
+                    "detached_push_failure": "remote_unconfirmed",
+                    "detached_push_head_sha": source_sha,
+                },
+                error=str(exc),
+            )
+        return None
+
+    @staticmethod
+    def _record_detached_push_recovery(
+        *,
+        job: GitJob,
+        branch: str,
+        worktree_path: Path,
+        expected_remote_sha: str,
+        source_sha: str,
+    ) -> str | None:
+        """Record a drifted detached checkout before allowing a fresh review."""
+        issue = job.kwargs.get("issue_number")
+        pr = job.kwargs.get("pr_number")
+        repo_root = job.kwargs.get("repo_root")
+        if (
+            isinstance(issue, bool)
+            or not isinstance(issue, int)
+            or isinstance(pr, bool)
+            or not isinstance(pr, int)
+            or not isinstance(repo_root, str)
+            or not repo_root
+        ):
+            return "detached review recovery receipt context is invalid"
+        try:
+            record_direct_review_recovery(
+                repo_root=Path(repo_root),
+                issue=issue,
+                pr=pr,
+                worktree=worktree_path,
+                branch=branch,
+                expected_remote_sha=expected_remote_sha,
+                source_sha=source_sha,
+            )
+        except (OSError, RuntimeError, ValueError) as error:
+            return str(error)
+        return None
 
     @staticmethod
     def _commit_push_requires_publish(

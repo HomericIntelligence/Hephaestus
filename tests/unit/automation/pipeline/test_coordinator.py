@@ -19,6 +19,7 @@ from typing import Any, cast
 
 import pytest
 
+from hephaestus.automation.direct_review_recovery import record_direct_review_recovery
 from hephaestus.automation.pipeline import seeding as seeding_mod
 from hephaestus.automation.pipeline.coordinator import (
     _FAIL_BACK_CAP,
@@ -2458,6 +2459,49 @@ class TestDurableEventLog:
         coordinator._park_resumable(item)
 
         assert "_resumable" not in coordinator.__dict__
+
+    def test_park_resumable_reports_a_receipt_backed_recovery_checkout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An interrupt after remote drift keeps the current-run recovery guidance."""
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+        repo_root = tmp_path / "repo-a"
+        worktree = repo_root / "build" / ".worktrees" / "review-pr-44"
+        worktree.mkdir(parents=True)
+        (worktree / ".git").mkdir()
+        record_direct_review_recovery(
+            repo_root=repo_root,
+            issue=44,
+            pr=1001,
+            worktree=worktree,
+            branch="44-auto",
+            expected_remote_sha="a" * 40,
+            source_sha="b" * 40,
+        )
+        item = _issue_item(44, StageName.PR_REVIEW)
+        item.pr = 1001
+
+        coordinator._park_resumable(item)
+
+        assert coordinator._active_recovery_worktrees() == [("repo-a", 44, str(worktree.resolve()))]
+
+    def test_park_resumable_reports_an_unreceipted_detached_push_checkout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A shutdown preserves inspection guidance even when receipt creation failed."""
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+        item = _issue_item(44, StageName.PR_REVIEW)
+        item.pr = 1001
+        worktree = tmp_path / "review-pr-1001"
+        worktree.mkdir()
+        item.worktree = str(worktree)
+        item.state = "PUSH_WAIT"
+        item.payload["direct_pr_worktree"] = item.worktree
+        item.payload["detached_push_failure"] = "remote_changed_unrecorded"
+
+        coordinator._park_resumable(item)
+
+        assert coordinator._active_recovery_worktrees() == [("repo-a", 44, str(worktree))]
 
 
 class TestPipelineScopeWiring:

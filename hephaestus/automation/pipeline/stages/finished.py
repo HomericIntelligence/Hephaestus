@@ -23,6 +23,10 @@ from __future__ import annotations
 
 import logging
 
+from hephaestus.automation.direct_review_recovery import (
+    is_inspection_only_detached_push_failure,
+    list_direct_review_recovery_paths,
+)
 from hephaestus.automation.pipeline.work_item import ItemResult, PreservedWorktree
 
 from .base import (
@@ -59,6 +63,9 @@ class FinishedStage(Stage):
             (``(repo, item_number, worktree_path)`` tuples) the summary prints.
             Failed issue items use the issue number; PR-only items use the PR
             number; unknown items fall back to 0.
+        recovery_preserved: The coordinator's direct-review recovery list.
+            These checkouts remain reported even if a later fresh review
+            succeeds, unlike ordinary failed-item debugging worktrees.
 
     """
 
@@ -68,10 +75,12 @@ class FinishedStage(Stage):
         self,
         ledger: list[ItemResult],
         preserved: list[PreservedWorktree],
+        recovery_preserved: list[PreservedWorktree],
     ) -> None:
         """Bind the coordinator-owned ledger and preserved-worktree list."""
         self._ledger = ledger
         self._preserved = preserved
+        self._recovery_preserved = recovery_preserved
 
     def on_enter(self, item: WorkItem, ctx: StageContext) -> StageOutcome | None:
         """Proceed unconditionally (the sink never routes away).
@@ -122,6 +131,7 @@ class FinishedStage(Stage):
 
     def _cleanup(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Clean or preserve the writer worktree."""
+        recovery_worktrees = self._record_recovery_worktrees(item, ctx)
         reservation = item.payload.get(DIRECT_SCOPE_RESERVATION_KEY)
         if not item.payload.get("_direct_scope_reservation_release_attempted", False):
             if isinstance(reservation, dict):
@@ -177,6 +187,21 @@ class FinishedStage(Stage):
             and bool(local_cleanup["branch"])
             and is_full_commit_sha(local_cleanup.get("base_sha"))
         )
+        inspection_only = (
+            is_inspection_only_detached_push_failure(item.payload.get("detached_push_failure"))
+            or item.worktree in recovery_worktrees
+        )
+        if not passed and inspection_only:
+            entry = (item.repo, item.issue or item.pr or 0, item.worktree)
+            if entry not in self._recovery_preserved:
+                self._recovery_preserved.append(entry)
+            logger.info(
+                "finished:%s: retaining detached-review checkout for inspection: %s",
+                item.issue or item.repo,
+                item.worktree,
+            )
+            return Continue(next_state="DONE")
+
         if not passed and not is_direct_noop:
             entry = (item.repo, item.issue or item.pr or 0, item.worktree)
             if entry not in self._preserved:
@@ -213,6 +238,30 @@ class FinishedStage(Stage):
             descr=f"remove worktree {item.worktree}",
         )
         return JobRequest(job=job, on_done_state="DONE")
+
+    def _record_recovery_worktrees(self, item: WorkItem, ctx: StageContext) -> set[str]:
+        """Record receipt-backed recoveries and return their concrete paths."""
+        if item.issue is None or item.pr is None:
+            return set()
+        try:
+            recovery_worktrees = list_direct_review_recovery_paths(
+                repo_root=ctx.paths.repo_root,
+                issue=item.issue,
+                pr=item.pr,
+            )
+        except (OSError, RuntimeError) as error:
+            logger.warning(
+                "finished:%s: could not read detached-review recovery receipts: %s",
+                item.issue or item.repo,
+                error,
+            )
+            return set()
+        paths = {str(worktree) for worktree in recovery_worktrees}
+        for worktree in recovery_worktrees:
+            entry = (item.repo, item.issue, str(worktree))
+            if entry not in self._recovery_preserved:
+                self._recovery_preserved.append(entry)
+        return paths
 
     def on_job_done(self, item: WorkItem, result: JobResult, ctx: StageContext) -> None:
         """Log cleanup failures (never fatal — the result is already recorded).

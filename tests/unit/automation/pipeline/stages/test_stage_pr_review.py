@@ -19,6 +19,8 @@ from hephaestus.automation.pipeline.stages import (
 )
 from hephaestus.automation.pipeline.stages.pr_review import (
     ADOPT_WORKTREE_WAIT,
+    DIRECT_PUSH_REMOTE_CHANGED_RESTART_CAP,
+    DIRECT_PUSH_RETRY_CAP,
     REVIEW_CHECKOUT_WAIT,
     REVIEW_ERROR_RETRY_CAP,
     PrReviewStage,
@@ -425,7 +427,13 @@ class TestPrReviewStageStep:
 
         stage.on_job_done(
             item,
-            JobResult(ok=True, value={"path": "/tmp/review-pr", "dirty": False}),
+            JobResult(
+                ok=True,
+                value={
+                    "path": "/tmp/review-pr",
+                    "dirty": False,
+                },
+            ),
             ctx,
         )
         # ``Coordinator._handle_completion`` assigns on_done_state only after
@@ -953,6 +961,8 @@ class TestPrReviewStageStep:
         assert result.job.op == "commit_push"
         assert result.job.kwargs == {
             "issue_number": 1,
+            "pr_number": 1001,
+            "repo_root": str(ctx.paths.repo_root),
             "worktree_path": "/tmp/wt",
             "branch": "1-auto-impl",
             "agent": "claude",
@@ -2286,6 +2296,203 @@ class TestEvalVerdicts:
         assert result.note == "agent_error"
         assert item.attempts["pr_review_iter"] == 0  # no round burned
         assert github.mutation_log == []
+
+    def test_detached_push_with_unchanged_remote_retries_without_reinvoking_agent(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A pre-push failure retries the existing detached commit exactly once."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="PUSH_WAIT")
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                value={
+                    "detached_push_failure": "remote_unchanged",
+                    "detached_push_head_sha": "b" * 40,
+                },
+                error="detached review push failed while remote head was unchanged",
+            ),
+            ctx,
+        )
+        item.state = "EVAL"
+
+        result = stage.step(item, ctx)
+
+        assert result == Continue(next_state="PUSH_WAIT")
+        assert item.payload["direct_push_retries"] == 1
+        assert item.payload["detached_push_retry_head_sha"] == "b" * 40
+        assert "address_error" not in item.payload
+
+    def test_detached_push_retry_cap_preserves_the_checkout(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Repeated local push failures terminate safely instead of failing back."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="PUSH_WAIT")
+        item.worktree = "/tmp/review-pr-1001"
+        item.payload["direct_push_retries"] = DIRECT_PUSH_RETRY_CAP
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                value={
+                    "detached_push_failure": "remote_unchanged",
+                    "detached_push_head_sha": "b" * 40,
+                },
+                error="detached review push failed while remote head was unchanged",
+            ),
+            ctx,
+        )
+        item.state = "EVAL"
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "detached_push_failed")
+        assert item.payload["detached_push_failure"] == "remote_unchanged"
+
+    def test_successful_detached_push_resets_the_retry_budget_for_the_next_round(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A later independent failure receives its own bounded retry."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="PUSH_WAIT")
+        item.payload["direct_push_retries"] = DIRECT_PUSH_RETRY_CAP
+
+        stage.on_job_done(item, JobResult(ok=True, value=True), ctx)
+
+        assert "direct_push_retries" not in item.payload
+        item.state = "PUSH_WAIT"
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                value={
+                    "detached_push_failure": "remote_unchanged",
+                    "detached_push_head_sha": "b" * 40,
+                },
+                error="detached review push failed while remote head was unchanged",
+            ),
+            ctx,
+        )
+        item.state = "EVAL"
+
+        assert stage.step(item, ctx) == Continue(next_state="PUSH_WAIT")
+
+    def test_detached_push_with_advanced_remote_preserves_the_checkout(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A changed remote must not be overwritten or called an agent failure."""
+        stage = PrReviewStage()
+        ctx = make_ctx(github=FakeStageGitHub(pr_head_branch="1001-auto"))
+        item = make_work_item(issue=1, pr=1001, state="PUSH_WAIT")
+        item.worktree = "/tmp/review-pr-1001"
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                value={"detached_push_failure": "remote_changed"},
+                error="detached review push observed a different remote head",
+            ),
+            ctx,
+        )
+        item.state = "EVAL"
+
+        result = stage.step(item, ctx)
+
+        assert result == Continue(next_state="ENTER")
+        assert item.worktree == ""
+        assert "preserved_direct_worktrees" not in item.payload
+        assert item.payload["direct_pr_worktree_generation"] == 1
+        assert "address_error" not in item.payload
+
+        item.state = "ENTER"
+        retry = stage.step(item, ctx)
+
+        assert isinstance(retry, JobRequest)
+        assert isinstance(retry.job, GitJob)
+        assert retry.job.kwargs["isolated_generation"] == 1
+
+    def test_detached_push_without_a_durable_recovery_receipt_preserves_the_checkout(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The stage must not restart if the worker could not persist provenance."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="PUSH_WAIT")
+        item.worktree = "/tmp/review-pr-1001"
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                value={"detached_push_failure": "remote_changed_unrecorded"},
+                error="remote changed and receipt storage failed",
+            ),
+            ctx,
+        )
+        item.state = "EVAL"
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "detached_push_failed"
+        )
+        assert item.worktree == "/tmp/review-pr-1001"
+
+    def test_unclassified_direct_push_failure_preserves_the_checkout(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Publication setup uncertainty must not orphan a detached address commit."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="PUSH_WAIT")
+        item.worktree = "/tmp/review-pr-1001"
+        item.payload["direct_pr_worktree"] = item.worktree
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=False, error="cannot bind detached review push head"),
+            ctx,
+        )
+        item.state = "EVAL"
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "detached_push_failed"
+        )
+        assert item.payload["detached_push_failure"] == "remote_unconfirmed"
+        assert "address_error" not in item.payload
+
+    def test_detached_push_remote_changed_recovery_has_a_bounded_restart_budget(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Repeated concurrent head changes preserve the current checkout and stop."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="PUSH_WAIT")
+        item.worktree = "/tmp/review-pr-1001-1"
+        item.payload["direct_push_remote_changed_restarts"] = DIRECT_PUSH_REMOTE_CHANGED_RESTART_CAP
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                value={"detached_push_failure": "remote_changed"},
+                error="detached review push observed a different remote head",
+            ),
+            ctx,
+        )
+        item.state = "EVAL"
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "detached_push_failed"
+        )
+        assert item.worktree == "/tmp/review-pr-1001-1"
+        assert item.payload["detached_push_failure"] == "remote_changed"
 
     # Severity-aware GO gate tests (#1856)
     def test_same_login_human_reply_to_process_advisory_thread_blocks_go(

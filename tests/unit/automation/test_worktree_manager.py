@@ -264,6 +264,102 @@ class TestWorktreeManager:
         argvs = [call.args[0] for call in worktree_mocks.run.call_args_list]
         assert ["git", "worktree", "remove", "--force", str(worktree_path)] not in argvs
 
+    def test_isolated_review_uses_next_available_checkout_without_replacing_a_preserved_one(
+        self, worktree_mocks: Any, tmp_path: Any
+    ) -> None:
+        """A cold-start direct review allocates around a preserved checkout."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+        worktree_path = manager.base_dir / "review-pr-2500"
+        worktree_path.mkdir(parents=True)
+
+        created = manager.create_worktree(2500, "2500-auto-impl", isolated=True)
+
+        assert created == manager.base_dir / "review-pr-2500-1"
+        assert worktree_path.exists()
+        assert all(
+            "worktree remove" not in call.args[0] for call in worktree_mocks.run.call_args_list
+        )
+
+    def test_isolated_review_skips_clean_and_dirty_preserved_checkout_generations(
+        self, worktree_mocks: Any, tmp_path: Any
+    ) -> None:
+        """A fresh manager never reuses either kind of preserved review checkout."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+        clean = manager.base_dir / "review-pr-2500"
+        dirty = manager.base_dir / "review-pr-2500-1"
+        clean.mkdir(parents=True)
+        dirty.mkdir(parents=True)
+        (dirty / "uncommitted-fix").write_text("retain me")
+
+        created = manager.create_worktree(2500, "2500-auto-impl", isolated=True)
+
+        assert created == manager.base_dir / "review-pr-2500-2"
+        assert clean.exists()
+        assert (dirty / "uncommitted-fix").read_text() == "retain me"
+
+    def test_isolated_review_skips_a_registered_missing_checkout(
+        self, worktree_mocks: Any, tmp_path: Any
+    ) -> None:
+        """A cold-start recovery does not collide with a prunable Git worktree."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+        registered = manager.base_dir / "review-pr-2500"
+
+        with patch.object(manager, "list_worktrees", return_value=[{"path": str(registered)}]):
+            created = manager.create_worktree(2500, "2500-auto-impl", isolated=True)
+
+        assert created == manager.base_dir / "review-pr-2500-1"
+        assert all(
+            "worktree remove" not in call.args[0] and "worktree prune" not in call.args[0]
+            for call in worktree_mocks.run.call_args_list
+        )
+
+    def test_isolated_review_add_failure_never_removes_a_concurrently_created_checkout(
+        self, worktree_mocks: Any, tmp_path: Any
+    ) -> None:
+        """A failed isolated add cannot delete a competing recovery checkout."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+        worktree_path = manager.base_dir / "review-pr-2500"
+
+        def concurrent_creator(path: Path, *_: Any, **__: Any) -> None:
+            path.mkdir(parents=True)
+            raise RuntimeError("another coordinator claimed the checkout")
+
+        with (
+            patch.object(
+                manager,
+                "_add_isolated_worktree_for_branch",
+                side_effect=concurrent_creator,
+            ),
+            pytest.raises(RuntimeError, match="Failed to create worktree"),
+        ):
+            manager.create_worktree(2500, "2500-auto-impl", isolated=True)
+
+        assert worktree_path.exists()
+        assert all(
+            "worktree remove" not in call.args[0] for call in worktree_mocks.run.call_args_list
+        )
+
+    def test_isolated_review_generation_uses_a_fresh_checkout_path(
+        self, worktree_mocks: Any, tmp_path: Any
+    ) -> None:
+        """A recovery review is distinct from its preserved predecessor."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+
+        worktree_path = manager.create_worktree(
+            2500,
+            "2500-auto-impl",
+            isolated=True,
+            isolated_generation=1,
+        )
+
+        assert worktree_path == manager.base_dir / "review-pr-2500-1"
+        assert manager.worktrees["review-pr-2500-1"] == worktree_path
+
     def test_create_worktree_default_branch_name(self, worktree_mocks: Any, tmp_path: Any) -> None:
         """Test worktree creation with default branch name."""
         worktree_mocks.repo_root.return_value = tmp_path
