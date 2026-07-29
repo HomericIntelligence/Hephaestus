@@ -966,8 +966,12 @@ Architectural contract:
 - The implementation agent replies to every fixed open thread but never resolves it.
 - The reviewer validates each implementation reply against the current diff;
   it resolves validated threads or posts corrective feedback and leaves them open.
-- The review proof is a fresh GitHub snapshot plus a clean checkout at that
-  snapshot's head; it exists only in the current process.
+- After a fix push, a transient implementation-reply post keeps the exact
+  outstanding reply batch for bounded host-only retry at that pushed head; it
+  never asks an implementation agent to manufacture a no-op follow-up commit.
+- The review decision proof is a fresh GitHub snapshot plus a clean checkout
+  at that snapshot's head. A GitHub marker can recover only a candidate reply
+  after restart; it is never a substitute for that fresh proof.
 - No queue stage arms, disables, adopts, or polls auto-merge.
 
 ### 5.6 Merge wait

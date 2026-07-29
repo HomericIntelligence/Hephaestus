@@ -3755,6 +3755,72 @@ class TestRealCommitGate:
         )
         assert "pending_thread_reply_receipts" not in item.payload
 
+    def test_reply_handoff_retries_the_pushed_fix_without_a_second_commit(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A transient reply-post failure must not turn a real fix into a no-op loop."""
+
+        class ReplyFailsOnceGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__()
+                self.reply_attempts = 0
+
+            def post_implementation_thread_replies(
+                self,
+                pr_number: int,
+                *,
+                expected_head_sha: str,
+                threads: list[dict[str, Any]],
+                replies: dict[str, str],
+            ) -> Any:
+                self.reply_attempts += 1
+                if self.reply_attempts == 1:
+                    raise OSError("temporary GitHub transport failure")
+                return super().post_implementation_thread_replies(
+                    pr_number,
+                    expected_head_sha=expected_head_sha,
+                    threads=threads,
+                    replies=replies,
+                )
+
+        stage = PrReviewStage()
+        github = ReplyFailsOnceGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=40, pr=1001, state="PUSH_WAIT")
+        snapshot = {
+            "id": "thread-1",
+            "path": "a.py",
+            "line": 3,
+            "side": "RIGHT",
+            "body": "fix this",
+            "comments": [{"id": "comment-1", "author": "reviewer", "body": "fix this"}],
+        }
+        item.payload.update(
+            {
+                "remediation_threads": [{"thread_id": "thread-1", "body": "fix this"}],
+                "remediation_thread_snapshots": [snapshot],
+                "address_output": {
+                    "addressed": ["thread-1"],
+                    "replies": {"thread-1": "Fixed the guard."},
+                },
+            }
+        )
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),
+            ctx,
+        )
+
+        assert "pending_implementation_reply_handoff" in item.payload
+        assert github.reply_attempts == 1
+
+        item.state = "EVAL"
+        assert stage.step(item, ctx) == Continue(next_state="REVIEW_WAIT")
+        assert github.reply_attempts == 2
+        assert "pending_implementation_reply_handoff" not in item.payload
+        assert item.payload["push_no_commit"] is False
+
     def test_first_no_commit_retries_address_with_directive(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

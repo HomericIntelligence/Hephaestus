@@ -67,6 +67,11 @@ and are not collaborators of this stage:
   step is retried ONCE with the ``build_unaddressed_directive`` block
   (via ``get_address_review_prompt``'s ``unaddressed_findings``), and a
   second consecutive no-commit turn is evaluated as an unaddressed round.
+- Reply-handoff recovery: if GitHub reply posting fails after a fix reaches
+  its verified head, the host preserves the exact outstanding thread snapshot
+  and reply batch. EVAL retries this host-only handoff before requesting a
+  second implementation turn, so a valid fix cannot be stranded by a no-op
+  follow-up commit.
 - If the one-shot no-commit retry's address/push leg hard-fails, EVAL treats
   that as an explicit agent infrastructure failure, not as a second no-commit
   review round: it consumes the retry sentinel/directive, fails back
@@ -97,6 +102,7 @@ import json
 import logging
 import re
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -267,6 +273,14 @@ def _review_context_kind(item: WorkItem) -> str:
 #: plan_review.REVIEW_ERROR_RETRY_CAP). Reset whenever a valid audit arrives.
 REVIEW_ERROR_RETRY_CAP = 2
 REVIEW_CHECKOUT_RETRY_CAP = 2
+
+#: A pushed implementation fix must receive its review-thread explanation
+#: without requiring a second code change.  This bounded retry is host-only:
+#: it replays the exact saved thread snapshots and agent prose, never asks an
+#: implementation model to invent a new response.
+IMPLEMENTATION_REPLY_HANDOFF_RETRY_CAP = 2
+_PENDING_IMPLEMENTATION_REPLY_HANDOFF = "pending_implementation_reply_handoff"
+_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES = "pending_implementation_reply_handoff_retries"
 
 #: Round-scoped payload keys cleared at REVIEW_WAIT submission so a failed
 #: later round can never replay an earlier round's results.
@@ -508,6 +522,42 @@ def _address_replies(address_result: Any, threads: list[dict[str, Any]]) -> dict
             return None
         normalized_replies[thread_id] = reply.strip()
     return normalized_replies
+
+
+def _implementation_reply_handoff(
+    head_sha: object,
+    threads: object,
+    replies: object,
+) -> dict[str, Any] | None:
+    """Return a replay-safe outstanding implementation-reply handoff.
+
+    The persisted value is intentionally an exact host snapshot plus the
+    model's already validated reply mapping.  It is neither a review receipt
+    nor an authority to mutate: the adapter rechecks the live PR and thread
+    state before each retry.
+    """
+    if (
+        not is_full_commit_sha(head_sha)
+        or not isinstance(threads, list)
+        or not isinstance(replies, dict)
+    ):
+        return None
+    snapshots = [dict(thread) for thread in threads if isinstance(thread, dict)]
+    if len(snapshots) != len(threads):
+        return None
+    normalized_replies = _address_replies(
+        {"addressed": list(replies), "replies": replies}, snapshots
+    )
+    if normalized_replies is None:
+        return None
+    ids = {str(snapshot.get("id") or "") for snapshot in snapshots}
+    if "" in ids or ids != set(normalized_replies) or len(ids) != len(snapshots):
+        return None
+    return {
+        "head_sha": head_sha,
+        "threads": deepcopy(snapshots),
+        "replies": dict(normalized_replies),
+    }
 
 
 def _validation_thread_snapshots(
@@ -1094,6 +1144,24 @@ class PrReviewStage(Stage):
                         item.issue,
                     )
                 elif replies and item.pr is not None:
+                    handoff = _implementation_reply_handoff(
+                        published_head,
+                        thread_snapshots,
+                        replies,
+                    )
+                    if handoff is None:
+                        logger.warning(
+                            "pr_review:%s: could not preserve the exact implementation "
+                            "reply handoff; refusing to infer a replacement response",
+                            item.issue,
+                        )
+                    else:
+                        # Keep the exact, already-validated agent output until
+                        # GitHub proves every reply. _clear_round_review_state
+                        # deliberately does not clear this handoff because the
+                        # code commit has already changed the review head.
+                        item.payload[_PENDING_IMPLEMENTATION_REPLY_HANDOFF] = handoff
+                        item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
                     try:
                         # The worker returns the local commit it actually
                         # published.  A later arbitrary remote push must not
@@ -1121,9 +1189,29 @@ class PrReviewStage(Stage):
                         if replied != set(replies) or len(receipts) != len(replied):
                             logger.warning(
                                 "pr_review:%s: some implementation replies could not be verified; "
-                                "the next reviewer pass will derive every valid live receipt",
+                                "retrying the exact outstanding handoff before re-review",
                                 item.issue,
                             )
+                            if handoff is not None and replied and len(receipts) == len(replied):
+                                remaining = set(replies) - replied
+                                item.payload[_PENDING_IMPLEMENTATION_REPLY_HANDOFF] = (
+                                    _implementation_reply_handoff(
+                                        published_head,
+                                        [
+                                            snapshot
+                                            for snapshot in thread_snapshots
+                                            if str(snapshot.get("id") or "") in remaining
+                                        ],
+                                        {
+                                            thread_id: reply
+                                            for thread_id, reply in replies.items()
+                                            if thread_id in remaining
+                                        },
+                                    )
+                                )
+                        else:
+                            item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
+                            item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
                         if blocked:
                             logger.info(
                                 "pr_review:%s: %d changed thread(s) remain open for a new "
@@ -1566,6 +1654,72 @@ class PrReviewStage(Stage):
         _clear_round_review_state(item)
         return None
 
+    @staticmethod
+    def _retry_pending_implementation_reply_handoff(item: WorkItem, ctx: StageContext) -> str:
+        """Retry one exact post-push reply batch without invoking an agent.
+
+        Returns ``none`` when no handoff exists, ``completed`` when every
+        reply has a host receipt, ``stale`` when the exact pushed head can no
+        longer safely receive the saved response, ``invalid`` for malformed
+        persisted state, and ``retry`` for a bounded transient/incomplete
+        host operation.  No outcome grants reviewer authority; normal fresh
+        review still validates and resolves the replies.
+        """
+        raw_handoff = item.payload.get(_PENDING_IMPLEMENTATION_REPLY_HANDOFF)
+        if raw_handoff is None:
+            return "none"
+        handoff = _implementation_reply_handoff(
+            raw_handoff.get("head_sha") if isinstance(raw_handoff, dict) else None,
+            raw_handoff.get("threads") if isinstance(raw_handoff, dict) else None,
+            raw_handoff.get("replies") if isinstance(raw_handoff, dict) else None,
+        )
+        if handoff is None or item.pr is None:
+            return "invalid"
+        head_sha = handoff["head_sha"]
+        threads = handoff["threads"]
+        replies = handoff["replies"]
+        try:
+            if not _pr_is_current_open_head(ctx.github.gh_pr_state(item.pr), head_sha):
+                item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
+                item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+                return "stale"
+            result = ctx.github.post_implementation_thread_replies(
+                item.pr,
+                expected_head_sha=head_sha,
+                threads=threads,
+                replies=replies,
+            )
+        except Exception as error:
+            logger.warning(
+                "pr_review:%s: implementation reply handoff retry failed (%s)",
+                item.issue,
+                type(error).__name__,
+            )
+            return "retry"
+
+        expected_ids = set(replies)
+        replied = set(getattr(result, "replied_thread_ids", ()))
+        receipts = list(getattr(result, "receipts", ()))
+        if replied == expected_ids and len(receipts) == len(replied):
+            item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
+            item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+            return "completed"
+        if replied and replied.issubset(expected_ids) and len(receipts) == len(replied):
+            remaining = expected_ids - replied
+            replacement = _implementation_reply_handoff(
+                head_sha,
+                [snapshot for snapshot in threads if str(snapshot.get("id") or "") in remaining],
+                {
+                    thread_id: reply
+                    for thread_id, reply in replies.items()
+                    if thread_id in remaining
+                },
+            )
+            if replacement is None:
+                return "invalid"
+            item.payload[_PENDING_IMPLEMENTATION_REPLY_HANDOFF] = replacement
+        return "retry"
+
     def _eval(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901 - state-machine gate
         """EVAL [M]: apply the structural-audit gate and review budget.
 
@@ -1586,6 +1740,33 @@ class PrReviewStage(Stage):
                 item.issue,
             )
             return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_incomplete")
+
+        handoff_status = self._retry_pending_implementation_reply_handoff(item, ctx)
+        if handoff_status == "invalid":
+            logger.error(
+                "pr_review:%d: refusing to replay malformed implementation reply handoff",
+                item.issue,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_handoff_invalid")
+        if handoff_status == "retry":
+            retries = payload.get(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, 0)
+            if isinstance(retries, bool) or not isinstance(retries, int) or retries < 0:
+                return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_handoff_invalid")
+            retries += 1
+            payload[_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES] = retries
+            if retries <= IMPLEMENTATION_REPLY_HANDOFF_RETRY_CAP:
+                logger.warning(
+                    "pr_review:%d: retrying exact implementation reply handoff %d/%d",
+                    item.issue,
+                    retries,
+                    IMPLEMENTATION_REPLY_HANDOFF_RETRY_CAP,
+                )
+                return StageOutcome(Disposition.RETRY, "implementation_reply_handoff_retry")
+            logger.error(
+                "pr_review:%d: implementation reply handoff retry cap reached",
+                item.issue,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_handoff_failed")
 
         detached_push_failure = payload.pop("detached_push_failure", None)
         if detached_push_failure == "remote_unchanged":

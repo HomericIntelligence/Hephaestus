@@ -31,6 +31,9 @@ prose or a stale PR snapshot.
    a candidate reply from the final, viewer-owned thread comment on GitHub only
    when its marker recomputes for that exact thread and head; fresh GitHub
    state, not process-local memory, remains the authority for reconciliation.
+   If posting fails after that fix is pushed, the host preserves the exact
+   outstanding snapshot/reply batch and retries it at the same verified head
+   without asking the implementation agent for a second code commit.
 3. The reviewer reads every open thread. It may decide only the current
    implementation-reply receipts: it resolves a validated fix, or posts
    precise corrective feedback and leaves the thread open. The adapter repeats
@@ -56,5 +59,7 @@ prose or a stale PR snapshot.
   rejection has durable feedback and remains visible to the next implementer.
 - A restart or concurrent PR update fails closed: no stale reply receipt may
   resolve a current GitHub thread.
+- A transient reply-post failure cannot strand a valid fix in a no-commit
+  implementation loop; only the host may replay its exact saved reply batch.
 - The queue can apply implementation approval only after the fresh open-thread
   read is empty; review prose and CI remain non-authoritative for that label.
