@@ -363,7 +363,7 @@ class TestRunPrReviewAnalysis:
 
         assert out["summary"] == "No inline findings."
         assert out["audit"].valid is True
-        assert "Verdict:" in out["review_text"]
+        assert "Verdict:" not in out["review_text"]
         assert out["audit"].grade == "A"
 
     def test_codex_path_uses_structural_audit(self, tmp_path: Path) -> None:
@@ -391,7 +391,7 @@ class TestRunPrReviewAnalysis:
 
         assert out["summary"] == "Needs fixes."
         assert out["audit"].valid is True
-        assert "Verdict:" in out["review_text"]
+        assert "Verdict:" not in out["review_text"]
         assert out["audit"].grade == "D"
 
     def test_uses_canonical_review_utils_parser_patch_target(self, tmp_path: Path) -> None:
@@ -553,8 +553,8 @@ class TestReviewPrInline:
 class TestStructuralAuditNotProse:
     """Structural audit fields drive review handling; prose is supplemental."""
 
-    def test_run_analysis_keeps_prose_supplemental(self, tmp_path: Path) -> None:
-        """A legacy decision token in prose does not change the structural audit."""
+    def test_run_analysis_strips_decision_tokens_from_prose(self, tmp_path: Path) -> None:
+        """Decision-shaped prose cannot be retained beside the structural audit."""
         prose = (
             "## Review\nFindings here.\n\n"
             "Grade: F\nVerdict: NOGO — two real defects.\n\n"
@@ -585,4 +585,4 @@ class TestStructuralAuditNotProse:
             )
         assert out["summary"] == "two defects"
         assert out["audit"].grade == "F"
-        assert "Verdict: NOGO" in out["review_text"]
+        assert "Verdict: NOGO" not in out["review_text"]

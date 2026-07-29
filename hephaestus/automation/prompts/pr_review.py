@@ -99,9 +99,10 @@ def get_review_validation_prompt(
 ) -> str:
     """Get the prompt that validates whether prior review comments were addressed.
 
-    Used by :mod:`hephaestus.automation.review_validator` to re-check, with a
-    fresh read-only sub-agent, that the implementer's fixes actually resolved
-    the previous iteration's review comments.  It keeps an unaddressed
+    Used by the pipeline PR-review stage to re-check, with a fresh review of
+    the current change, prior review, and implementation reply, that the
+    implementer's fixes actually resolved the previous iteration's review
+    comments. It keeps an unaddressed
     original thread open and supplies a concrete reviewer reply describing
     what remains; it never creates a replacement inline thread.
 

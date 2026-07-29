@@ -36,12 +36,8 @@ PLAN_REVIEW_CANONICAL_MARKER: Final[str] = "<!-- hephaestus-plan-review:canonica
 class ReviewerProtocol(Protocol):
     """Structural contract satisfied by reviewer entry points.
 
-    Verified: PRReviewer.run (pr_reviewer.py:396),
-              AuditReviewer.run (audit_reviewer.py:197),
-              PlanReviewer.run (plan_reviewer.py:99).  The retired
-              AddressReviewer facade retains ``run`` only to fail closed and
-              remains structurally compatible for callers migrating to the
-              queue-owned review lifecycle.
+    Verified: AuditReviewer.run (audit_reviewer.py:197) and
+              PlanReviewer.run (plan_reviewer.py:99).
     """
 
     def run(self) -> Any:

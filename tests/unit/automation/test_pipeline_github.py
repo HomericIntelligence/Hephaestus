@@ -301,6 +301,112 @@ class TestAllThreadReplyAndReviewerResolution:
         assert len(live) == 1
         assert "Reviewer validation found this still unresolved" in calls[-1]
 
+    def test_reviewer_reconciles_each_thread_against_its_own_receipt(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A mixed batch does not bind every thread to the final receipt."""
+        reviewed_head_sha = "a" * 40
+        resolving = _external_reviewer_thread("thread-resolve")
+        feedback = _external_reviewer_thread("thread-feedback")
+        live_by_id = {
+            resolving["id"]: {
+                **resolving,
+                "comments": [
+                    *resolving["comments"],
+                    {
+                        "id": "implementation-resolve",
+                        "author": "hephaestus[bot]",
+                        "body": adapter._implementation_thread_reply_body(
+                            7, reviewed_head_sha, resolving["id"], "Resolved the finding."
+                        ),
+                        "viewer_did_author": True,
+                    },
+                ],
+            },
+            feedback["id"]: {
+                **feedback,
+                "comments": [
+                    *feedback["comments"],
+                    {
+                        "id": "implementation-feedback",
+                        "author": "hephaestus[bot]",
+                        "body": adapter._implementation_thread_reply_body(
+                            7, reviewed_head_sha, feedback["id"], "Attempted a fix."
+                        ),
+                        "viewer_did_author": True,
+                    },
+                ],
+            },
+        }
+        resolved_ids: set[str] = set()
+        calls: list[tuple[str, str]] = []
+
+        def snapshot(_pr: int, thread_id: str) -> dict[str, Any]:
+            return _open_thread_snapshot(live_by_id[thread_id], resolved=thread_id in resolved_ids)
+
+        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+            thread_id = str(fields["threadId"])
+            if "resolveReviewThread" in query:
+                calls.append(("resolve", thread_id))
+                resolved_ids.add(thread_id)
+                return {
+                    "data": {
+                        "resolveReviewThread": {"thread": {"id": thread_id, "isResolved": True}}
+                    }
+                }
+            if "addPullRequestReviewThreadReply" in query:
+                calls.append(("feedback", thread_id))
+                live_by_id[thread_id] = {
+                    **live_by_id[thread_id],
+                    "comments": [
+                        *live_by_id[thread_id]["comments"],
+                        {
+                            "id": f"reviewer-{thread_id}",
+                            "author": "hephaestus[bot]",
+                            "body": fields["body"],
+                            "viewer_did_author": True,
+                        },
+                    ],
+                }
+                return {
+                    "data": {
+                        "addPullRequestReviewThreadReply": {
+                            "comment": {"id": f"reviewer-{thread_id}"}
+                        }
+                    }
+                }
+            raise AssertionError(query)
+
+        monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_state",
+            lambda _pr: {
+                "state": "OPEN",
+                "headRefOid": reviewed_head_sha,
+                "autoMergeRequest": None,
+            },
+        )
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+        receipts = adapter.reviewer_validation_receipts(
+            7,
+            reviewed_head_sha=reviewed_head_sha,
+            threads=[live_by_id[resolving["id"]], live_by_id[feedback["id"]]],
+        )
+
+        result = adapter.reconcile_reviewer_validated_threads(
+            7,
+            reviewed_head_sha=reviewed_head_sha,
+            receipts=receipts,
+            resolved_thread_ids={resolving["id"]},
+            feedback={feedback["id"]: "The null case still is not covered."},
+        )
+
+        assert result.resolved_thread_ids == (resolving["id"],)
+        assert result.feedback_thread_ids == (feedback["id"],)
+        assert result.blocked_thread_ids == ()
+        assert calls == [("feedback", feedback["id"]), ("resolve", resolving["id"])]
+
     def test_malformed_reply_response_recovers_an_exact_host_read_receipt(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2666,6 +2772,45 @@ class TestRepoScoping:
                     {"path": "a.py", "line": 1, "side": "RIGHT", "body": "valid"},
                     {"path": "a.py", "line": 2, "side": "RIGHT", "body": "stale"},
                 ],
+                "summary",
+                expected_head_sha="a" * 40,
+            )
+
+        assert len(calls) == 1
+        assert calls[0][:3] == ["pr", "diff", "7"]
+
+    def test_repo_scoped_review_post_rechecks_head_immediately_before_write(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A head change while deriving anchors prevents stale publication."""
+        calls: list[list[str]] = []
+        head_changed = False
+        diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+ok\n"
+
+        def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            nonlocal head_changed
+            calls.append(argv)
+            if argv[:2] == ["pr", "diff"]:
+                head_changed = True
+                return SimpleNamespace(stdout=diff)
+            raise AssertionError(f"stale review publication attempted: {argv}")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_state",
+            lambda _pr: {
+                "state": "OPEN",
+                "headRefOid": "b" * 40 if head_changed else "a" * 40,
+                "autoMergeRequest": None,
+            },
+        )
+
+        with pytest.raises(RuntimeError, match="review publication head is stale"):
+            adapter.post_review_threads(
+                7,
+                [{"path": "a.py", "line": 1, "side": "RIGHT", "body": "finding"}],
                 "summary",
                 expected_head_sha="a" * 40,
             )

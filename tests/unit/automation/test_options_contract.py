@@ -11,7 +11,6 @@ from pydantic import BaseModel
 
 import hephaestus.automation.models as automation_models
 from hephaestus.automation import (
-    address_review,
     ci_driver,
     implementer,
     plan_reviewer,
@@ -19,7 +18,6 @@ from hephaestus.automation import (
     pr_reviewer,
 )
 from hephaestus.automation.models import (
-    AddressReviewOptions,
     CIDriverOptions,
     ImplementerOptions,
     PlannerOptions,
@@ -32,7 +30,6 @@ OPTION_CASES: tuple[tuple[type[BaseModel], dict[str, Any], dict[str, Any]], ...]
     (ImplementerOptions, {}, {"dry_run": True, "max_workers": 7}),
     (ReviewerOptions, {}, {"dry_run": True, "max_workers": 7}),
     (PlanReviewerOptions, {}, {"dry_run": True, "max_workers": 7, "verbose": True}),
-    (AddressReviewOptions, {}, {"dry_run": True, "max_workers": 7, "verbose": True}),
     (CIDriverOptions, {}, {"dry_run": True, "max_workers": 7, "verbose": True}),
 )
 
@@ -109,22 +106,6 @@ OPTION_FIELD_CASES: tuple[tuple[type[BaseModel], frozenset[str]], ...] = (
                 "enable_ui",
                 "verbose",
                 "agent_timeout",
-            }
-        ),
-    ),
-    (
-        AddressReviewOptions,
-        frozenset(
-            {
-                "issues",
-                "agent",
-                "max_workers",
-                "dry_run",
-                "enable_ui",
-                "verbose",
-                "resume_impl_session",
-                "agent_timeout",
-                "advise_timeout",
             }
         ),
     ),
@@ -222,7 +203,6 @@ def test_worker_option_classes_use_narrowest_base_class() -> None:
     assert issubclass(ReviewerOptions, automation_models.ParallelWorkerOptionsBase)
     assert not issubclass(ReviewerOptions, automation_models.VerboseParallelWorkerOptionsBase)
     assert issubclass(PlanReviewerOptions, automation_models.VerboseParallelWorkerOptionsBase)
-    assert issubclass(AddressReviewOptions, automation_models.VerboseParallelWorkerOptionsBase)
     assert issubclass(CIDriverOptions, automation_models.VerboseParallelWorkerOptionsBase)
 
 
@@ -236,7 +216,6 @@ def test_worker_option_classes_use_narrowest_base_class() -> None:
         ),
         (pr_reviewer._build_parser, ("--max-workers", "--dry-run", "--no-ui", "--verbose")),
         (plan_reviewer._build_parser, ("--max-workers", "--dry-run", "--no-ui", "--verbose")),
-        (address_review._build_parser, ("--max-workers", "--dry-run", "--no-ui", "--verbose")),
         (
             ci_driver._build_parser,
             ("--max-workers", "--dry-run", "--no-ui", "--no-advise", "--verbose"),

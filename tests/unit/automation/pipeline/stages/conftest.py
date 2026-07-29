@@ -519,7 +519,7 @@ class FakeStageGitHub(FakeGitHub):
         resolved_thread_ids: set[str],
         feedback: dict[str, str],
     ) -> ReviewerThreadReconciliationResult:
-        """Record the fresh reviewer's resolution/rejection decision for tests."""
+        """Record the reviewer's fresh resolution/rejection decision for tests."""
         del reviewed_head_sha, receipts
         self._log(
             "reconcile_reviewer_validated_threads",

@@ -1,9 +1,7 @@
 """PR-review stage: review, validate, post, address, and evaluate.
 
 The queue stage is the sole live implementation of the review/validate/address
-state machine (docs/architecture.md §5.5 "pr_review" is the binding contract).
-Retired direct helpers in ``pr_reviewer`` and ``address_review`` fail closed
-and are not collaborators of this stage:
+state machine (docs/architecture.md §5.5 "pr_review" is the binding contract):
 
 - States: ENTER -> REVIEW_WAIT -> VALIDATE_WAIT -> POST -> DIFFICULTY_WAIT
   -> ADDRESS_WAIT -> PUSH_WAIT -> EVAL -> COMPACT_REVIEWER_WAIT
@@ -12,9 +10,7 @@ and are not collaborators of this stage:
   advances to ``merge_wait`` from EVAL.
 - Budgets: ``pr_review_iter`` = 3 (soft cap), ``pr_review_hard`` = 6 (hard
   cap; rounds 4-6 are admitted ONLY while the unresolved-thread count
-  strictly decreases — the #1554 progress-aware extension, legacy
-  ``_review_thread_count_decreased`` +
-  :class:`_review_loop.ReviewLoopCoordinator`'s progress-extension contract).
+  strictly decreases under the progress-aware extension contract).
   Both read from ROUTES via
   ``ctx.budget``, never hardcoded here.
 - Iteration accounting: ``item.attempts["pr_review_iter"]`` is the
@@ -35,9 +31,10 @@ and are not collaborators of this stage:
 - Review-thread ownership semantics: every open review thread—regardless of
   author—is implementation work. The implementation agent investigates and
   fixes each thread, then returns a concise reply. The host posts that reply
-  only after the fix commit is pushed and never resolves the thread. A fresh
-  reviewer reads every open thread, validates the fix plus reply for the
-  host-read reply receipts, and is the sole actor that can resolve a valid
+  only after the fix commit is pushed and never resolves the thread. The
+  reviewer then performs a fresh review of the current change, prior review,
+  implementation reply, and every open thread. The reviewer is the sole actor
+  that can resolve a valid
   thread or post precise rejection feedback while leaving it open. Any open
   thread -> no-go label and address + re-review. A clean audit ->
   ``_write_go`` performs one final complete-thread live-read, requires a
@@ -48,9 +45,8 @@ and are not collaborators of this stage:
   real blocking round durably writes ``state:implementation-no-go`` before
   looping/regressing, non-fatally. Exhaustion -> durably
   apply ``state:skip`` [durable] -> SKIP.
-- Downgraded-GO cost (DELIBERATE 2-round divergence from legacy): legacy
-  downgraded a GO with open automation threads and ran the address step in
-  the SAME iteration; this stage records the downgrade in EVAL and lets
+- Downgraded-eligibility cost: when open automation threads invalidate an
+  otherwise clean audit, this stage records the downgrade in EVAL and lets
   the NEXT round's POST re-count the live threads before dispatching the
   address leg, so a downgraded GO costs one extra review round. Chosen
   because POST live-checks the unresolved counts (a thread resolved
@@ -326,9 +322,11 @@ def _parse_validation_result(raw: Any) -> dict[str, Any] | None:
     """Parse the validator job's output into its verdict dict, tolerantly.
 
     The validation prompt asks for a single fenced JSON block at the END of
-    the response (``{"resolved": [...], "unaddressed": [...]}``); the parser
-    takes the LAST parseable block, then falls back to treating the whole
-    output as JSON. Returns None when nothing parses — callers fail closed.
+    the response (``{"resolved": [...], "unaddressed": [...]}``). When a
+    response contains fenced blocks, only its complete final block can be a
+    verdict; an earlier valid block must never authorize a malformed later
+    answer. An unfenced response must be exactly one JSON object. Returns None
+    when the final verdict does not parse — callers fail closed.
 
     Args:
         raw: The validation job's stored output (str, dict, or anything).
@@ -341,15 +339,19 @@ def _parse_validation_result(raw: Any) -> dict[str, Any] | None:
         return raw
     if not isinstance(raw, str) or not raw.strip():
         return None
-    blocks = re.findall(r"```(?:json)?\s*(.*?)```", raw, flags=re.DOTALL)
-    for candidate in (*reversed(blocks), raw):
-        try:
-            parsed = json.loads(candidate.strip())
-        except (json.JSONDecodeError, ValueError):
-            continue
-        if isinstance(parsed, dict):
-            return parsed
-    return None
+    blocks = list(re.finditer(r"```(?:json)?\s*(.*?)```", raw, flags=re.DOTALL))
+    if blocks:
+        final = blocks[-1]
+        if raw[final.end() :].strip():
+            return None
+        candidate = final.group(1)
+    else:
+        candidate = raw
+    try:
+        parsed = json.loads(candidate.strip())
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def _thread_ids(entries: Any) -> set[str]:
@@ -444,8 +446,8 @@ def _normalize_remediation_threads(
     The reviewer audit contains proposed findings, not durable GitHub thread
     identities. Address jobs must instead consume the live post/read-back
     snapshot so every open thread—regardless of author—is investigated.  The
-    implementation agent replies after a real fix commit; a fresh reviewer
-    later validates and resolves or returns the exact thread.
+    implementation agent replies after a real fix commit; the reviewer later
+    performs a fresh review and resolves or returns the exact thread.
     """
     normalized: list[dict[str, Any]] = []
     for thread in threads:
@@ -995,7 +997,7 @@ class PrReviewStage(Stage):
         return JobRequest(job, on_done_state=VALIDATE_WAIT)
 
     def _validate_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """Validate implementation replies with a fresh reviewer before resolution."""
+        """Perform a fresh review of implementation replies before resolution."""
         issue = _issue_number(item)
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")

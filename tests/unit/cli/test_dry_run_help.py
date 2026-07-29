@@ -15,7 +15,6 @@ CLI_PARSER_BUILDERS = [
     "hephaestus.automation.planner",
     "hephaestus.automation.plan_reviewer",
     "hephaestus.automation.pr_reviewer",
-    "hephaestus.automation.address_review",
     "hephaestus.automation.implementer",
     "hephaestus.automation.ci_driver",
     "hephaestus.automation.loop_runner",

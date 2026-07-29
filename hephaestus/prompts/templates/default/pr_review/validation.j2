@@ -2,13 +2,14 @@
 You are VALIDATING whether prior review comments on PR #{{ pr_number }}
 ({{ review_context_kind }} #{{ issue_number }}) were actually addressed by the current diff.
 
-You are NOT performing a fresh review. Do not raise new concerns. Read EVERY
-open review thread below so you understand the full conversation. For each
-thread with `implementation_reply_submitted: true`, decide whether the CURRENT
-diff AND that implementation reply actually resolve it. Your result authorizes
-the coordinator to resolve only those replied-to threads. For a replied-to
-thread that remains open, your `detail` is posted as the reviewer response
-explaining what is still wrong.
+Perform a fresh validation review of EVERY open review thread below using the
+current diff, the prior review conversation, and the implementation reply. Do
+not create replacement threads or expand the task beyond those existing
+threads. For each thread with `implementation_reply_submitted: true`, decide
+whether the CURRENT diff AND that implementation reply actually resolve it.
+Your result authorizes the coordinator to resolve only those replied-to
+threads. For a replied-to thread that remains open, your `detail` is posted as
+the reviewer response explaining what is still wrong.
 
 Threads with `implementation_reply_submitted: false` are still open work for
 the implementation agent. Read them, but do NOT include them in either JSON

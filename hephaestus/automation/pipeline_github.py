@@ -1293,8 +1293,8 @@ class PipelineGitHub:
         """Post implementation-agent replies after a real fix commit reached GitHub.
 
         Every target must be an ID from the complete host-provided thread
-        snapshot.  The method never resolves threads: the next fresh reviewer
-        owns that decision.
+        snapshot. The method never resolves threads: the next reviewer pass
+        performs a fresh review and owns that decision.
         """
         candidate_ids = tuple(sorted(str(thread_id) for thread_id in replies))
         if self._skip(
@@ -1412,7 +1412,7 @@ class PipelineGitHub:
         resolved_thread_ids: set[str],
         feedback: dict[str, str],
     ) -> ReviewerThreadReconciliationResult:
-        """Apply a fresh reviewer's per-thread decision, preserving races safely."""
+        """Apply the reviewer's fresh per-thread decision, preserving races safely."""
         expected_ids = {str(receipt.get("id") or "") for receipt in receipts}
         candidate_ids = tuple(sorted(expected_ids | set(resolved_thread_ids) | set(feedback)))
         if (
@@ -1458,6 +1458,8 @@ class PipelineGitHub:
         try:
             for thread_id in candidate_ids:
                 receipt = by_id[thread_id]
+                reply_id = receipt["implementation_reply_id"]
+                reply_body = receipt["implementation_reply_body"]
                 live = self._review_thread_snapshot(pr_number, thread_id)
                 if (
                     not isinstance(live, dict)
@@ -2298,6 +2300,12 @@ class PipelineGitHub:
                     "comments": review_comments,
                 }
             )
+            # Diff filtering can take long enough for a push, close, or
+            # auto-merge arm to invalidate the original state proof. Check
+            # immediately before the irreversible review publication, then
+            # retain the post-write readback below for receipt proof.
+            if not self._pr_is_current_open_head(self.gh_pr_state(pr_number), expected_head_sha):
+                raise RuntimeError("review publication head is stale, closed, or auto-merge armed")
             with github_api._body_file(request_body) as input_path:
                 result = gh_call(
                     [

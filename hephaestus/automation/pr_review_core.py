@@ -14,8 +14,8 @@ two layers:
   (``hephaestus-review-prs``) around the pipeline. It preserves imports for
   compatibility without restoring direct PR-thread mutation.
 
-The cores are intentionally free of the ``PRReviewer``/``BaseReviewer``
-scaffolding: they take everything they need as explicit keyword arguments, so
+The core is intentionally free of reviewer-class scaffolding: it takes
+everything it needs as explicit keyword arguments, so
 the in-loop implementer review step (Stage 2, #28) and the standalone reviewer
 share exactly one invocation body (DRY).
 """

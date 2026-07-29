@@ -6,7 +6,6 @@ import pytest
 
 from hephaestus.automation.models import (
     DEFAULT_WORKER_COUNT,
-    AddressReviewOptions,
     CIDriverOptions,
     DependencyGraph,
     ImplementationPhase,
@@ -19,8 +18,6 @@ from hephaestus.automation.models import (
     PlanResult,
     PlanReviewerOptions,
     ReviewerOptions,
-    ReviewPhase,
-    ReviewState,
     VerboseParallelWorkerOptionsBase,
     WorkerOptionsBase,
     WorkerResult,
@@ -312,7 +309,6 @@ class TestWorkerOptionsBase:
             ImplementerOptions,
             ReviewerOptions,
             PlanReviewerOptions,
-            AddressReviewOptions,
             CIDriverOptions,
         ):
             assert issubclass(model_cls, WorkerOptionsBase)
@@ -326,7 +322,6 @@ class TestWorkerOptionsBase:
             ImplementerOptions,
             ReviewerOptions,
             PlanReviewerOptions,
-            AddressReviewOptions,
             CIDriverOptions,
         ):
             assert model_cls.model_fields["max_workers"].default == DEFAULT_WORKER_COUNT
@@ -350,11 +345,6 @@ class TestWorkerOptionsBase:
                 {"max_workers": 5, "dry_run": True, "verbose": True},
                 "max_workers",
             ),
-            (
-                AddressReviewOptions,
-                {"max_workers": 5, "dry_run": True, "verbose": True},
-                "max_workers",
-            ),
             (CIDriverOptions, {"max_workers": 5, "dry_run": True, "verbose": True}, "max_workers"),
         )
 
@@ -366,25 +356,6 @@ class TestWorkerOptionsBase:
                 expected["verbose"] = True
 
             assert dumped == expected
-
-
-class TestReviewState:
-    """Tests for ReviewState model."""
-
-    def test_session_agent_serialization(self) -> None:
-        """Review state files preserve provider metadata with session ids."""
-        state = ReviewState(
-            issue_number=123,
-            pr_number=456,
-            phase=ReviewPhase.FIXING,
-            session_id="pi-session-123",
-            session_agent="pi",
-        )
-
-        restored = ReviewState.model_validate_json(state.model_dump_json())
-
-        assert restored.session_id == "pi-session-123"
-        assert restored.session_agent == "pi"
 
 
 class TestPlannerOptions:

@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 #: Single-stage scope the PR-review CLI runs. Reviewer agents are read-only,
 #: but the stage owns the complete two-role lifecycle: it may direct the
 #: implementation agent to fix open threads, post its replies after a push,
-#: and reconcile the fresh reviewer's decision. Its ADVANCE target is out of
+#: and reconcile the reviewer's fresh decision. Its ADVANCE target is out of
 #: scope, so ``PipelineScope`` rewrites it to FINISHED — this CLI never arms
 #: auto-merge.
 _PR_REVIEWER_SCOPE_STAGES: frozenset[StageName] = frozenset({StageName.PR_REVIEW})

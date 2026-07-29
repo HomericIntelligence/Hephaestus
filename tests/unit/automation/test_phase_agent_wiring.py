@@ -9,12 +9,6 @@ The phase modules split into three categories:
   ``ci_driver`` owns Session 3 (``AGENT_CI_DRIVER``): drive-green polls CI,
   runs its own fix sessions, and captures its own learnings on a transcript
   independent of the implementer.
-- **Continuation phases** (`address_review`) deliberately resume the
-  implementer's session. Address-review applies code fixes to satisfy PR
-  review feedback, continuing the same line of work the implementer started,
-  so it passes ``AGENT_IMPLEMENTER`` to land on the same session UUID. This is
-  intentional and is the mechanism that gives that phase a warm prompt cache.
-
 These tests assert source-text properties (not runtime mock behavior)
 because constructing valid Options objects for every phase is brittle and
 orthogonal to what we want to guard: that the *wiring* is correct.
@@ -37,20 +31,17 @@ AUTOMATION_DIR = Path(automation_pkg.__file__).parent
 # Each entry is ``(module_file, expected_agent_constant, companion_files)``,
 # where ``companion_files`` is an optional tuple of sibling modules that
 # share the same self-agent identity. For ``implementer.py`` the
-# ``invoke_claude_with_session`` callsites live in the phase modules
-# (``_implement_phase.py`` / ``_review_phase.py``); ``implementer.py`` itself is
+# ``invoke_claude_with_session`` callsites live in ``_implement_phase.py``;
+# ``implementer.py`` itself is
 # now a thin pipeline CLI wrapper (#1821) that carries no agent identity, so the
 # ``AGENT_IMPLEMENTER`` import and ``agent=`` kwarg are inspected on the
-# companions. Each phase module imports and references ``AGENT_IMPLEMENTER``
+# companion. The phase module imports and references ``AGENT_IMPLEMENTER``
 # directly (no longer through the implementer module's namespace).
 SELF_AGENT_PHASES: list[tuple[str, str, tuple[str, ...]]] = [
     (
         "implementer.py",
         "AGENT_IMPLEMENTER",
-        (
-            "_implement_phase.py",
-            "_review_phase.py",
-        ),
+        ("_implement_phase.py",),
     ),
     # ci_driver owns Session 3 (AGENT_CI_DRIVER): the live AGENT_CI_DRIVER
     # imports moved into the extracted collaborators ci_fix_orchestrator (fix
@@ -63,16 +54,6 @@ SELF_AGENT_PHASES: list[tuple[str, str, tuple[str, ...]]] = [
         "AGENT_CI_DRIVER",
         ("ci_fix_orchestrator.py", "post_merge_processor.py"),
     ),
-]
-
-
-# Continuation phases: deliberately resume the implementer's session to get
-# warm prompt cache while continuing the same line of work.
-CONTINUATION_PHASES: list[str] = [
-    # The address-review fix session (agent=AGENT_IMPLEMENTER, warm-cache resume)
-    # moved into address_review_core.py in the #1823 omit-reduction split;
-    # address_review.py is now a thin re-export wrapper over the core.
-    "address_review_core.py",
 ]
 
 
@@ -89,9 +70,9 @@ def test_self_agent_phase_imports_expected_agent(
 ) -> None:
     """Each self-agent phase imports its dedicated AGENT_* constant.
 
-    Imports may live in ``module_file`` itself or in any of its
-    ``companions`` (e.g. ``_implement_phase.py`` / ``_review_phase.py`` hold the
-    implementer session's ``invoke_claude_with_session`` callsites, so they carry
+    Imports may live in ``module_file`` itself or in its
+    ``companions`` (``_implement_phase.py`` holds the implementer session's
+    ``invoke_claude_with_session`` callsites, so it carries
     the ``AGENT_IMPLEMENTER`` identity for the thin ``implementer.py`` wrapper).
     """
     src = _read_phase_sources(module_file, companions)
@@ -108,8 +89,8 @@ def test_self_agent_phase_passes_expected_agent_kwarg(
 ) -> None:
     """Each self-agent phase passes its AGENT_* constant via ``agent=``.
 
-    The implementer session's actual dispatch lives in the phase modules
-    (``_implement_phase.py`` / ``_review_phase.py``), which import the constant
+    The implementer session's actual dispatch lives in ``_implement_phase.py``,
+    which imports the constant
     directly and reference it as the bare ``AGENT_IMPLEMENTER``. The pattern
     below accepts both the bare ``AGENT_IMPLEMENTER`` form and the namespaced
     ``X.AGENT_IMPLEMENTER`` form for resilience.
@@ -140,23 +121,6 @@ def test_self_agent_phase_does_not_use_foreign_agent(
     assert found <= allowed, (
         f"{module_file} (and companions {companions}) uses unexpected AGENT_* "
         f"constants: {found - allowed}; expected only {allowed}"
-    )
-
-
-@pytest.mark.parametrize("module_file", CONTINUATION_PHASES)
-def test_continuation_phase_resumes_implementer_session(module_file: str) -> None:
-    """address_review deliberately resumes the implementer.
-
-    Address-review applies code fixes that continue the implementer's line of
-    work. Passing AGENT_IMPLEMENTER lands it on the implementer's deterministic
-    session UUID, giving it a warm prompt cache. Any other AGENT_* constant
-    here would create a fresh cold session and silently undo the cache reuse.
-    """
-    src = (AUTOMATION_DIR / module_file).read_text()
-    found = set(re.findall(r"\bagent\s*=\s*(AGENT_[A-Z_]+)\b", src))
-    assert found == {"AGENT_IMPLEMENTER"}, (
-        f"{module_file} must pass agent=AGENT_IMPLEMENTER to continue the "
-        f"implementer's session for warm-cache reuse; found {found}"
     )
 
 

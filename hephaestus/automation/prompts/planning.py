@@ -94,7 +94,7 @@ def get_plan_loop_review_prompt(
             reviewer the same Mnemosyne context the planner received.
 
     Returns:
-        Formatted prompt for a fresh reviewer session.
+        Formatted prompt for a fresh review iteration.
 
     """
     fenced = fence_content()

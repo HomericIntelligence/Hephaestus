@@ -995,14 +995,14 @@ class TestAddressReviewPrompt:
         """The final JSON-block contract the pipeline parses must be intact.
 
         The implementation agent must return one reply for every fixed thread.
-        The host posts that reply after verifying the pushed fix; a fresh
-        reviewer then decides whether to resolve the thread or leave feedback.
+        The host posts that reply after verifying the pushed fix; the reviewer
+        then performs a fresh review before resolving or leaving feedback.
         """
         out = self._build()
         assert '"addressed"' in out
         assert '"replies"' in out
         assert "never resolves a thread in this implementation step" in out
-        assert "fresh reviewer validates the fix and reply" in out
+        assert "fresh review of the fix and reply" in out
 
     def test_threads_json_is_fenced_untrusted(self) -> None:
         """Reviewer bodies stay fenced as untrusted input."""
@@ -1114,10 +1114,11 @@ class TestReviewValidationPrompt:
         assert "fix the leak" in out
         assert "diff --git a/a.py b/a.py" in out
 
-    def test_states_validation_not_fresh_review(self) -> None:
+    def test_states_validation_uses_current_and_prior_review_context(self) -> None:
         out = self._build()
         assert "VALIDATING" in out
-        assert "NOT performing a fresh review" in out
+        assert "fresh validation review" in out
+        assert "current diff, the prior review conversation, and the implementation reply" in out
 
     def test_requires_explicit_two_way_validation_contract(self) -> None:
         out = self._build()

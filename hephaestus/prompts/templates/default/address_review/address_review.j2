@@ -7,8 +7,8 @@ pipeline phase. You are fixing the underlying code concerns raised against the
 current diff. These GitHub threads live on the PR, not on the issue. You do
 not call GitHub yourself. After the coordinator confirms that your fix was
 committed and pushed, it posts your implementation reply on each addressed
-thread. A fresh reviewer then validates that reply and the fix; only that
-reviewer may resolve the thread.
+thread. The reviewer then performs a fresh review of that reply and fix; only
+the reviewer may resolve the thread.
 
 **Working Directory:** {{ worktree_path }}
 
@@ -110,5 +110,5 @@ Rules for the JSON block:
 - Emit only one JSON block, at the very end of your response (the parser takes the LAST one).
 - Do not attempt to resolve a GitHub thread. Return the required reply text in
   the JSON instead; the coordinator posts it after the pushed fix is verified.
-  The fresh reviewer validates the fix and reply, resolves verified threads,
+  The reviewer performs a fresh review of the fix and reply, resolves verified threads,
   and explains what remains wrong on threads it leaves open.

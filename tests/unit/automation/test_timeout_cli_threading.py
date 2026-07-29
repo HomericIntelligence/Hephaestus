@@ -18,7 +18,6 @@ from hephaestus.automation.agent_config import (
     DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT,
 )
 from hephaestus.automation.models import (
-    AddressReviewOptions,
     CIDriverOptions,
     ImplementerOptions,
     PlannerOptions,
@@ -617,39 +616,6 @@ class TestPlanReviewerOptionsTimeoutFields:
         """PlanReviewerOptions.agent_timeout can be overridden at construction time."""
         opts = PlanReviewerOptions(agent_timeout=5000)
         assert opts.agent_timeout == 5000
-
-
-# ---------------------------------------------------------------------------
-# AddressReviewOptions timeout fields
-# ---------------------------------------------------------------------------
-
-
-class TestAddressReviewOptionsTimeoutFields:
-    """AddressReviewOptions exposes agent_timeout and advise_timeout fields."""
-
-    def test_has_agent_timeout_field(self) -> None:
-        """AddressReviewOptions declares an agent_timeout field."""
-        assert "agent_timeout" in AddressReviewOptions.model_fields
-
-    def test_has_advise_timeout_field(self) -> None:
-        """AddressReviewOptions declares an advise_timeout field."""
-        assert "advise_timeout" in AddressReviewOptions.model_fields
-
-    def test_agent_timeout_default(self) -> None:
-        """AddressReviewOptions.agent_timeout defaults to DEFAULT_AGENT_TIMEOUT."""
-        opts = AddressReviewOptions()
-        assert opts.agent_timeout == DEFAULT_AGENT_TIMEOUT
-
-    def test_advise_timeout_default(self) -> None:
-        """AddressReviewOptions.advise_timeout defaults to DEFAULT_AGENT_TIMEOUT."""
-        opts = AddressReviewOptions()
-        assert opts.advise_timeout == DEFAULT_AGENT_TIMEOUT
-
-    def test_timeout_overrides(self) -> None:
-        """Timeout fields accept explicit override values."""
-        opts = AddressReviewOptions(agent_timeout=333, advise_timeout=444)
-        assert opts.agent_timeout == 333
-        assert opts.advise_timeout == 444
 
 
 # ---------------------------------------------------------------------------

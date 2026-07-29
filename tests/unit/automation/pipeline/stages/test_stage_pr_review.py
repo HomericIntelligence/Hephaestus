@@ -1428,6 +1428,13 @@ class TestReviewThreadLifecycle:
             'earlier ```json\n{"resolved": ["old"], "unaddressed": []}\n```\n'
             'final ```json\n{"resolved": ["thread-1"], "unaddressed": []}\n```'
         ) == {"resolved": ["thread-1"], "unaddressed": []}
+        assert (
+            _parse_validation_result(
+                'earlier ```json\n{"resolved": ["old"], "unaddressed": []}\n```\n'
+                "final ```json\n{not valid json}\n```"
+            )
+            is None
+        )
 
     @pytest.mark.parametrize(
         ("receipts", "verdict"),

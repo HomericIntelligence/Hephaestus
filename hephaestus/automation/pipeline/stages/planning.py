@@ -578,7 +578,7 @@ class PlanningStage(Stage):
                 session_agent=AGENT_PLANNER,
                 # build_plan_prompt composes get_plan_prompt with the issue
                 # title/body and advise findings in-worker, mirroring the
-                # legacy planner_review_loop.generate_plan(cached_advise=...)
+                # Preserve the cached advisory context through the plan job.
                 # context assembly.
                 prompt_kwargs={
                     "issue_number": item.issue,

@@ -1105,13 +1105,9 @@ budgets. Every `routes.py` row and every doc row MUST agree.
 
 Budget provenance (cross-check):
 
-- `plan_review_iter = 3`, `pr_review_iter = 3` ←
- [`_review_phase.py MAX_REVIEW_ITERATIONS`](hephaestus/automation/_review_phase.py)
- (the review-iteration cap; the value tag is the durable reference —
- line numbers drift).
-- `pr_review_hard = 6` ←
- [`_review_phase.py MAX_REVIEW_ITERATIONS_HARD_CAP`](hephaestus/automation/_review_phase.py)
- (= 3 × 2, the progress-aware extension cap).
+- `plan_review_iter = 3`, `pr_review_iter = 3`, and `pr_review_hard = 6`
+  are defined in [`pipeline/routing.py`](hephaestus/automation/pipeline/routing.py),
+  with the latter as the progress-aware extension cap.
 - `clone = 2`, `plan = 2`, `plan_cycles = 2`, `implement = 2`,
  `test_fix = 1`, `merge =
  DEFAULT_DRIVE_GREEN_LOOPS = 5` ←
@@ -1551,7 +1547,6 @@ Exit-code priority is:
  SHA-conditional merge rather than arming or polling auto-merge.
 - **Skip-reason marker** — the `<!-- hephaestus-state-skip-reason -->` HTML-comment marker ([`SKIP_REASON_MARKER`](hephaestus/automation/state_labels.py)) that prefixes every `state:skip` reason-comment body produced by [`format_skip_reason_comment`](hephaestus/automation/state_labels.py), so a repo reader can deterministically trace the automated skip reason.
 - **File-system loader** — the Jinja `FileSystemLoader` resolved from `__file__`-relative paths in [`prompts/catalog.py`](hephaestus/prompts/catalog.py); deliberately NOT `PackageLoader` to avoid importlib editable-install staleness (#2308).
-- **Conflict-resolution request** — the [`ConflictResolutionRequest`](hephaestus/automation/_review_conflict_resolver.py) immutable context consumed by the cohesive [`ReviewConflictResolver`](hephaestus/automation/_review_conflict_resolver.py) unit split out of `_review_phase.py` (#2209).
 - **Advise-skipped breadcrumb** — the [`advise_skipped(reason)`](hephaestus/automation/advise_runner.py) marker string returned by [`run_advise`](hephaestus/automation/advise_runner.py) when Mnemosyne is unavailable, so a stage aborts as `SKIP` rather than failing; the reason is forwarded verbatim from [`resolve_marketplace`](hephaestus/automation/advise_runner.py) (e.g. `clone_failed`, `manifest_missing`).
 - **Tool scope** — the explicit `(allowed_tools, permission_mode)` pair in [`AGENT_TOOL_SCOPES`](hephaestus/automation/pipeline/tool_scopes.py) for one of the 9 pipeline agent roles (advise, planner, plan-reviewer, implementer, pr-reviewer, comment-classifier, address-review, ci-driver, learnings); unmapped roles fall through to the read-only [`DEFAULT_TOOL_SCOPE`](hephaestus/automation/pipeline/tool_scopes.py) per the fail-closed security contract (#2319).
 - **Reasoning effort** — explicit Codex-only `--<role>-reasoning-effort` CLI flag value (`default|low|medium|high|xhigh`) mapped onto Codex's `model_reasoning_effort`; `default` omits the setting, `low|medium|high|xhigh` override per-role, and omitted flags preserve the model-alias default (#2287).

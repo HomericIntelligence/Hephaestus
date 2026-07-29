@@ -8,7 +8,7 @@
 
 `hephaestus/automation/` is 26,125 LoC of the 48,498-LoC source tree (53.9%, as of 2026-06-13). It
 implements the full Claude/Codex automation pipeline: Planner, Implementer,
-CIDriver, PRReviewer, PlanReviewer, AddressReviewer, AuditReviewer,
+CIDriver, PRReviewer, PlanReviewer, AuditReviewer,
 loop_runner, curses TUI, GitHub adapter, prompt assembly. The rest of
 `hephaestus/` is a shared utility library consumed by every
 HomericIntelligence project.

@@ -26,7 +26,6 @@ _BUDGETS = {
     "hephaestus.automation.auto_merge_coordinator.AutoMergeCoordinator": ClassBudget(320, 8, 80),
     "hephaestus.automation.drive_green_state.DriveGreenArmingCoordinator": ClassBudget(320, 7, 80),
     "hephaestus.automation.drive_green_state.LastCIFixStore": ClassBudget(140, 4, 60),
-    "hephaestus.automation.review_thread_resolver.ReviewThreadResolver": ClassBudget(280, 7, 80),
     "hephaestus.automation.pr_discovery.PRDiscovery": ClassBudget(560, 14, 80),
     # 18th method: _affected_tests_pass, the pre-push CI-fix test gate (#2122) —
     # a cohesive addition to the push-contract guard family this collaborator

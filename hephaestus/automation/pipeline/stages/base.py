@@ -147,7 +147,7 @@ class ImplementationThreadReplyResult:
 
 @dataclass(frozen=True)
 class ReviewerThreadReconciliationResult:
-    """Outcome of a fresh reviewer resolving or returning review threads."""
+    """Outcome of a reviewer performing fresh thread reconciliation."""
 
     resolved_thread_ids: tuple[str, ...] = ()
     feedback_thread_ids: tuple[str, ...] = ()
@@ -368,8 +368,7 @@ class StageGitHub(Protocol):
 
         Mirrors ``pr_manager.mark_pr_implementation_no_go`` (adds the no-go
         label, removes any stale go label). Doc section 5 owned label:
-        written on every NOGO round, before retry/regress [durable]
-        (legacy ``_review_phase._apply_impl_review_verdict`` :248).
+        written on every non-authorizing review round before retry/regress.
         """
         ...
 

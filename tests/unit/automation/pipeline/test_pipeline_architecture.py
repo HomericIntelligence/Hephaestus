@@ -56,9 +56,8 @@ _PRIVATE_MUTATORS = frozenset({"_post_shadow_review_comment", "_edit_or_keep_com
 
 _MUTATORS = _PUBLIC_MUTATORS | _PRIVATE_MUTATORS
 
-# Modules awaiting refactor (e.g. _review_phase fuses agent calls with gh mutations).
-# Shrinking allowlist strategy: document intent, enforce from day one, grow list
-# only when fuse-pattern is unavoidable. Empty on day one per issue #1812.
+# The empty allowlist is intentional: pipeline modules may not contain direct
+# GitHub mutations; all writes pass through the coordinator adapter.
 _ALLOWLIST: frozenset[str] = frozenset()
 
 # Worker-side modules: code that executes ON worker threads. These may not

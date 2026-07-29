@@ -1,6 +1,6 @@
 """Smoke tests for omitted orchestration modules — integration backstop.
 
-These tests validate that the 12 automation modules omitted from coverage
+These tests validate that the 11 automation modules omitted from coverage
 (per pyproject.toml[tool.coverage.run].omit) remain importable and their
 console entry points work correctly.
 
@@ -17,14 +17,13 @@ Module enumeration and entry-point discovery verified at plan time:
     deleted when hephaestus-implement-issues became a thin pipeline wrapper
     (#1821), dropping the omit list from 16 to 13 entries. The #1823 wave then
     split pr_reviewer.py into a thin ``hephaestus-review-prs`` pipeline wrapper
-    plus the unit-covered ``pr_review_core`` module (with a sibling
-    ``address_review_core``), removing pr_reviewer.py from omit (13 -> 12).
+    plus the unit-covered ``pr_review_core`` module, removing pr_reviewer.py
+    from omit (13 -> 12).
     ``hephaestus-review-prs`` is still asserted below via CONSOLE_SCRIPTS —
     its wrapper remains importable and --help-able — but it is no longer
-    omitted, so it is not enumerated in OMITTED_MODULES.
-    ``address_review.py`` stays omitted: its compatibility ``AddressReviewer``
-    entry point is retired and fails before any orchestration; its pure parse/fix
-    cores live in the unit-covered ``address_review_core``.
+    omitted, so it is not enumerated in OMITTED_MODULES. The retired standalone
+    address-review lifecycle was then removed, leaving the queue stage as the
+    sole review-thread workflow.
 """
 
 import subprocess
@@ -67,10 +66,7 @@ CONSOLE_SCRIPTS = [
 # Modules with main() but no console script of their own.
 # ``implementer.main()`` backs the ``hephaestus-implement-issues`` script and is
 # covered by CONSOLE_SCRIPTS.
-MAIN_ONLY_MODULES = [
-    "hephaestus.automation.address_review",
-    "hephaestus.automation.ci_driver",
-]
+MAIN_ONLY_MODULES = ["hephaestus.automation.ci_driver"]
 
 
 @pytest.mark.integration

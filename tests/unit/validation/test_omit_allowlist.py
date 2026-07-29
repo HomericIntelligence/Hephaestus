@@ -32,7 +32,7 @@ class TestOmitAllowlist:
 
         omit_list = pyproject.get("tool", {}).get("coverage", {}).get("run", {}).get("omit", [])
 
-        # Expected omit list: test globs + 13 automation modules
+        # Expected omit list: test globs + 11 automation modules
         expected_globs = {
             "*/tests/*",
             "*/__init__.py",
@@ -40,7 +40,6 @@ class TestOmitAllowlist:
         expected_modules = {
             "hephaestus/automation/implementer.py",
             "hephaestus/automation/planner.py",
-            "hephaestus/automation/address_review.py",
             "hephaestus/automation/ci_driver.py",
             # CIDriver collaborators extracted in #1357 (refs #1179, #1289).
             "hephaestus/automation/pr_discovery.py",
