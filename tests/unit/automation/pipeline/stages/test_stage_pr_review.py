@@ -1371,6 +1371,51 @@ class TestReviewThreadLifecycle:
         assert result == Continue(next_state="DIFFICULTY_WAIT")
         assert item.payload.get("review_audit_failure") is not True
 
+    def test_reconciliation_restore_failure_is_terminally_unsafe(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A thread that cannot be reopened after a resolution race must not reach GO."""
+        thread = self._thread("live-thread-restore-failed", 3, "first")
+        thread["comments"].append(
+            {
+                "id": "implementation-reply-live-thread-restore-failed",
+                "author": "hephaestus[bot]",
+                "body": "Fixed the first concern.",
+            }
+        )
+
+        class RestoreFailureGitHub(FakeStageGitHub):
+            def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+                del pr_number
+                return [dict(thread)]
+
+            def reconcile_reviewer_validated_threads(self, *args: Any, **kwargs: Any) -> Any:
+                del args, kwargs
+                from hephaestus.automation.pipeline.stages.base import (
+                    ReviewerThreadReconciliationResult,
+                )
+
+                return ReviewerThreadReconciliationResult(
+                    restoration_failed_thread_ids=("live-thread-restore-failed",)
+                )
+
+        item = make_work_item(issue=1, pr=1001, state="POST")
+        item.payload.update(
+            {
+                "reviewed_pr_head_sha": "a" * 40,
+                "validation_result": {
+                    "resolved": ["live-thread-restore-failed"],
+                    "unaddressed": [],
+                },
+                "review_audit": _valid_audit(),
+                "review_threads": [],
+            }
+        )
+
+        assert PrReviewStage().step(
+            item, make_ctx(github=RestoreFailureGitHub(unresolved=[(2, 0)]))
+        ) == StageOutcome(Disposition.FINISH_FAIL, "review_thread_restore_failed")
+
     def test_unaddressed_external_bot_thread_routes_to_remediation(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

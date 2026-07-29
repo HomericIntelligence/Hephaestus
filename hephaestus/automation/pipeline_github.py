@@ -892,6 +892,41 @@ class PipelineGitHub:
         marker = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
         return f"{reply}\n\n<!-- hephaestus-implementation-reply:{marker} -->"
 
+    def _validated_implementation_reply(
+        self, pr_number: int, reviewed_head_sha: str, thread: dict[str, Any]
+    ) -> tuple[str, str] | None:
+        """Return a final host-owned, exact-head implementation reply receipt."""
+        thread_id = thread.get("id")
+        snapshot = self._thread_comment_snapshot(thread)
+        comments = thread.get("comments")
+        if (
+            not isinstance(thread_id, str)
+            or not thread_id
+            or snapshot is None
+            or not isinstance(comments, list)
+            or not comments
+        ):
+            return None
+        reply_id, _author, reply_body = snapshot[-1]
+        final_comment = comments[-1]
+        if not isinstance(final_comment, dict) or not final_comment.get("viewer_did_author"):
+            return None
+        marker_match = re.fullmatch(
+            r"(?s)(.*)\n\n<!-- hephaestus-implementation-reply:[0-9a-f]{24} -->",
+            reply_body,
+        )
+        if marker_match is None:
+            return None
+        reply = self._safe_thread_reply(marker_match.group(1))
+        if reply is None:
+            return None
+        expected_body = self._implementation_thread_reply_body(
+            pr_number, reviewed_head_sha, thread_id, reply
+        )
+        if reply_body != expected_body:
+            return None
+        return reply_id, reply_body
+
     def reviewer_validation_receipts(
         self,
         pr_number: int,
@@ -914,33 +949,20 @@ class PipelineGitHub:
             if not isinstance(thread, dict):
                 raise RuntimeError("malformed live review thread")
             thread_id = thread.get("id")
-            snapshot = self._thread_comment_snapshot(thread)
             if (
                 not isinstance(thread_id, str)
                 or not thread_id
                 or thread_id in seen
-                or snapshot is None
+                or self._thread_comment_snapshot(thread) is None
             ):
                 raise RuntimeError("malformed live review-thread snapshot")
             seen.add(thread_id)
-            reply_id, _author, reply_body = snapshot[-1]
-            final_comment = thread.get("comments", [])[-1]
-            if not isinstance(final_comment, dict) or not final_comment.get("viewer_did_author"):
-                continue
-            marker_match = re.fullmatch(
-                r"(?s)(.*)\n\n<!-- hephaestus-implementation-reply:[0-9a-f]{24} -->",
-                reply_body,
+            implementation_reply = self._validated_implementation_reply(
+                pr_number, reviewed_head_sha, thread
             )
-            if marker_match is None:
+            if implementation_reply is None:
                 continue
-            reply = self._safe_thread_reply(marker_match.group(1))
-            if reply is None:
-                continue
-            expected_body = self._implementation_thread_reply_body(
-                pr_number, reviewed_head_sha, thread_id, reply
-            )
-            if reply_body != expected_body:
-                continue
+            reply_id, reply_body = implementation_reply
             receipts.append(
                 {
                     **thread,
@@ -981,6 +1003,90 @@ class PipelineGitHub:
         if not isinstance(comment, dict) or not isinstance(comment.get("id"), str):
             return None
         return str(comment["id"])
+
+    def _review_thread_snapshot(self, pr_number: int, thread_id: str) -> dict[str, Any] | None:
+        """Return one complete thread snapshot, including a resolved thread.
+
+        An unresolved-thread list cannot prove the contents of a thread after
+        ``resolveReviewThread`` hides it.  This node-scoped read is therefore
+        the post-mutation proof that no comment raced the reviewed receipt and
+        that the resolved node still belongs to this exact pull request.
+        """
+        query = (
+            "query($owner:String!,$name:String!,$number:Int!,$threadId:ID!,$after:String){"
+            "repository(owner:$owner,name:$name){pullRequest(number:$number){id}}"
+            "node(id:$threadId){... on PullRequestReviewThread{"
+            "id isResolved pullRequest{number repository{name owner{login}}}"
+            "comments(first:100,after:$after){pageInfo{hasNextPage endCursor}"
+            "nodes{id body viewerDidAuthor author{login}}}}}}"
+        )
+        comments: list[dict[str, Any]] = []
+        after: str | None = None
+        while True:
+            fields: dict[str, int | str] = {
+                "number": int(pr_number),
+                "threadId": thread_id,
+            }
+            if after is not None:
+                fields["after"] = after
+            data = self._graphql(query, **fields)
+            node = data.get("data", {}).get("node")
+            if not isinstance(node, dict) or node.get("id") != thread_id:
+                return None
+            pull_request = node.get("pullRequest")
+            repository = pull_request.get("repository") if isinstance(pull_request, dict) else None
+            owner = repository.get("owner") if isinstance(repository, dict) else None
+            if (
+                not isinstance(pull_request, dict)
+                or pull_request.get("number") != pr_number
+                or not isinstance(repository, dict)
+                or repository.get("name") != self.repo
+                or not isinstance(owner, dict)
+                or owner.get("login") != self.org
+            ):
+                return None
+            comment_connection = node.get("comments")
+            if not isinstance(comment_connection, dict):
+                return None
+            comment_nodes = comment_connection.get("nodes")
+            if not isinstance(comment_nodes, list):
+                return None
+            for comment in comment_nodes:
+                if not isinstance(comment, dict):
+                    return None
+                author_node = comment.get("author")
+                author = author_node.get("login") if isinstance(author_node, dict) else ""
+                comments.append(
+                    {
+                        "id": str(comment.get("id") or ""),
+                        "body": comment.get("body") or "",
+                        "author": author or "",
+                        "viewer_did_author": bool(comment.get("viewerDidAuthor")),
+                    }
+                )
+            page_info = comment_connection.get("pageInfo")
+            if not isinstance(page_info, dict) or not isinstance(
+                page_info.get("hasNextPage"), bool
+            ):
+                return None
+            if not page_info["hasNextPage"]:
+                return {
+                    "id": thread_id,
+                    "isResolved": node.get("isResolved"),
+                    "comments": comments,
+                }
+            next_cursor = page_info.get("endCursor")
+            if not isinstance(next_cursor, str) or not next_cursor or next_cursor == after:
+                raise RuntimeError(f"could not fetch all comments for PR review thread {thread_id}")
+            after = next_cursor
+
+    def _restore_after_unproven_resolution(self, pr_number: int, thread_id: str) -> bool:
+        """Best-effort compensation for a resolution whose outcome is unsafe."""
+        try:
+            return self._restore_resolved_thread(pr_number, thread_id)
+        except (OSError, RuntimeError, subprocess.SubprocessError, json.JSONDecodeError) as error:
+            logger.warning("Could not restore review thread %s: %s", thread_id, error)
+            return False
 
     def _restore_resolved_thread(self, pr_number: int, thread_id: str) -> bool:
         """Compensate a resolve that raced a reviewed-head change.
@@ -1140,6 +1246,9 @@ class PipelineGitHub:
             reply_body = receipt.get("implementation_reply_body")
             implementation_head_sha = receipt.get("implementation_head_sha")
             snapshot = self._thread_comment_snapshot(receipt)
+            validated_reply = self._validated_implementation_reply(
+                pr_number, reviewed_head_sha, receipt
+            )
             if (
                 not thread_id
                 or thread_id in by_id
@@ -1147,10 +1256,10 @@ class PipelineGitHub:
                 or not isinstance(reply_body, str)
                 or not isinstance(implementation_head_sha, str)
                 or implementation_head_sha != reviewed_head_sha
-                or "<!-- hephaestus-implementation-reply:" not in reply_body
                 or snapshot is None
                 or snapshot[-1][0] != reply_id
                 or snapshot[-1][2] != reply_body
+                or validated_reply != (reply_id, reply_body)
             ):
                 return ReviewerThreadReconciliationResult(blocked_thread_ids=candidate_ids)
             by_id[thread_id] = receipt
@@ -1200,40 +1309,68 @@ class PipelineGitHub:
                         continue
                     replied.append(thread_id)
                     continue
-                resolve_query = (
-                    "mutation($threadId:ID!,$clientMutationId:String!){"
-                    "resolveReviewThread(input:{threadId:$threadId,clientMutationId:$clientMutationId})"
-                    "{thread{id isResolved}}}"
-                )
-                resolve_data = self._graphql(
-                    resolve_query,
-                    threadId=thread_id,
-                    clientMutationId=hashlib.sha256(
-                        f"{pr_number}:{reviewed_head_sha}:{thread_id}:resolve".encode()
-                    ).hexdigest(),
-                )
-                resolved_thread = (
-                    resolve_data.get("data", {}).get("resolveReviewThread", {}).get("thread", {})
-                )
-                if (
-                    not isinstance(resolved_thread, dict)
-                    or resolved_thread.get("id") != thread_id
-                    or resolved_thread.get("isResolved") is not True
-                ):
-                    blocked.append(thread_id)
-                    continue
-                state_after_resolve = self.gh_pr_state(pr_number)
-                thread_still_open = any(
-                    str(thread.get("id")) == thread_id
-                    for thread in self._unresolved_threads(pr_number)
-                    if isinstance(thread, dict)
-                )
-                if not self._pr_is_current_open_head(state_after_resolve, reviewed_head_sha):
-                    if not self._restore_resolved_thread(pr_number, thread_id):
+                resolve_issued = False
+                try:
+                    resolve_query = (
+                        "mutation($threadId:ID!,$clientMutationId:String!){"
+                        "resolveReviewThread(input:{threadId:$threadId,clientMutationId:$clientMutationId})"
+                        "{thread{id isResolved}}}"
+                    )
+                    # A transport error can arrive after GitHub has applied
+                    # the mutation.  Treat every issued resolve as unsafe
+                    # until both the complete resolved snapshot and final
+                    # exact-head read prove this receipt remained current.
+                    resolve_issued = True
+                    resolve_data = self._graphql(
+                        resolve_query,
+                        threadId=thread_id,
+                        clientMutationId=hashlib.sha256(
+                            f"{pr_number}:{reviewed_head_sha}:{thread_id}:resolve".encode()
+                        ).hexdigest(),
+                    )
+                    resolved_thread = (
+                        resolve_data.get("data", {})
+                        .get("resolveReviewThread", {})
+                        .get("thread", {})
+                    )
+                    post_resolution = self._review_thread_snapshot(pr_number, thread_id)
+                    resolution_proven = bool(
+                        isinstance(resolved_thread, dict)
+                        and resolved_thread.get("id") == thread_id
+                        and resolved_thread.get("isResolved") is True
+                        and isinstance(post_resolution, dict)
+                        and post_resolution.get("isResolved") is True
+                        and self._same_thread_snapshot(receipt, post_resolution)
+                        and self._pr_is_current_open_head(
+                            self.gh_pr_state(pr_number), reviewed_head_sha
+                        )
+                    )
+                except (
+                    OSError,
+                    RuntimeError,
+                    subprocess.SubprocessError,
+                    json.JSONDecodeError,
+                ) as error:
+                    logger.warning(
+                        "Reviewer thread resolution proof failed on PR #%s thread %s: %s",
+                        pr_number,
+                        thread_id,
+                        error,
+                    )
+                    resolution_proven = False
+                if not resolution_proven:
+                    if resolve_issued and not self._restore_after_unproven_resolution(
+                        pr_number, thread_id
+                    ):
                         restoration_failed.append(thread_id)
-                    blocked.append(thread_id)
-                    continue
-                if thread_still_open:
+                        return ReviewerThreadReconciliationResult(
+                            resolved_thread_ids=tuple(resolved),
+                            feedback_thread_ids=tuple(replied),
+                            blocked_thread_ids=tuple(
+                                sorted(set(candidate_ids) - set(resolved) - set(replied))
+                            ),
+                            restoration_failed_thread_ids=tuple(restoration_failed),
+                        )
                     blocked.append(thread_id)
                     continue
                 resolved.append(thread_id)

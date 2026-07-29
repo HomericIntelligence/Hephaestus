@@ -315,7 +315,7 @@ The package currently installs 49 console scripts from `[project.scripts]`.
 | `hephaestus-automation-loop` | Multi-repo queue-based automation pipeline using Claude Code or Codex (repo → planning → plan_review → implementation → pr_review → merge_wait → finished; restarted implementation-GO inputs re-enter `merge_wait` with their loop-owned approval label) |
 | `hephaestus-plan-issues` | Bulk issue planning using Claude Code or Codex |
 | `hephaestus-implement-issues` | Bulk issue implementation using Claude Code or Codex in parallel worktrees |
-| `hephaestus-review-prs` | Read-only PR review automation using Claude Code or Codex in parallel worktrees |
+| `hephaestus-review-prs` | PR review/remediation automation using Claude Code or Codex in parallel worktrees; reviewer agents are read-only, while the coordinator may apply implementation fixes and reconcile threads |
 | `hephaestus-agent-stage` | Run one Claude or Codex automation stage with prompt and skill context |
 | `hephaestus-ensure-state-labels` | Idempotently provision the planning labels (`state:needs-plan`, `state:plan-no-go`, `state:plan-go`, and `state:plan-blocked`) on one or more repos |
 | `hephaestus-audit-prs` | Audit ALL open PRs in one coordinator agent invocation |

@@ -57,10 +57,12 @@ from .pr_review_core import (
 
 logger = logging.getLogger(__name__)
 
-#: Single-stage scope the PR-review CLI runs: the read-only analyze + post-inline
-#: + GO/NOGO review loop (PR_REVIEW). Its ADVANCE target is out of scope, so
-#: ``PipelineScope`` rewrites it to FINISHED — a GO'd review simply finishes
-#: (this CLI does not arm auto-merge).
+#: Single-stage scope the PR-review CLI runs. Reviewer agents are read-only,
+#: but the stage owns the complete two-role lifecycle: it may direct the
+#: implementation agent to fix open threads, post its replies after a push,
+#: and reconcile the fresh reviewer's decision. Its ADVANCE target is out of
+#: scope, so ``PipelineScope`` rewrites it to FINISHED — this CLI never arms
+#: auto-merge.
 _PR_REVIEWER_SCOPE_STAGES: frozenset[StageName] = frozenset({StageName.PR_REVIEW})
 
 
@@ -98,7 +100,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = build_review_parser(
         description=(
             "Analyze open PRs linked to GitHub issues using Claude Code or Codex "
-            "and post inline review comments (read-only — does not fix code)"
+            "and run the PR review/remediation lifecycle; reviewer agents are read-only, "
+            "while the coordinator may apply implementation fixes and reconcile threads"
         ),
         epilog="""
 Examples:
@@ -112,7 +115,9 @@ Examples:
   %(prog)s --issues 595 596 --max-workers 5
         """,
         issues_help="Issue numbers whose linked PRs should be reviewed",
-        dry_run_prefix="Show what would be done without actually posting any review comments.",
+        dry_run_prefix=(
+            "Show the review/remediation lifecycle without GitHub mutations or git pushes."
+        ),
     )
     add_version_arg(parser)
     add_agent_timeout_arg(parser)

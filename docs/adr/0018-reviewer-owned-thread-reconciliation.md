@@ -27,8 +27,10 @@ prose or a stale PR snapshot.
    returns a concise reply describing the change. It never resolves a thread.
 2. The host posts an implementation reply only after a real fix commit is
    pushed. Before and after each reply it requires a complete thread snapshot
-   and an open, unarmed PR at the exact expected head. The resulting
-   host-read reply receipt is process-local input to the next reviewer pass.
+   and an open, unarmed PR at the exact expected head. A later pass may recover
+   a candidate reply from the final, viewer-owned thread comment on GitHub only
+   when its marker recomputes for that exact thread and head; fresh GitHub
+   state, not process-local memory, remains the authority for reconciliation.
 3. The reviewer reads every open thread. It may decide only the current
    implementation-reply receipts: it resolves a validated fix, or posts
    precise corrective feedback and leaves the thread open. The adapter repeats
@@ -43,8 +45,10 @@ prose or a stale PR snapshot.
   removes independent verification of both the code change and its explanation.
 - **Hand non-automation threads to a human.** Rejected: author is not a valid
   proxy for whether feedback is actionable, and it strands review work.
-- **Resolve from a persisted receipt after restart.** Rejected: a receipt is
-  not durable authority and cannot prove the current thread or head state.
+- **Trust a persisted or process-local receipt after restart without a fresh
+  GitHub check.** Rejected: cached evidence cannot prove the current thread or
+  head state. A marker-backed candidate recovered from GitHub is admissible
+  only after the complete exact-head snapshot checks in this decision.
 
 ## Consequences
 
