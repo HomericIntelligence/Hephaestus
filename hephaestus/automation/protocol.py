@@ -31,21 +31,12 @@ PLAN_REVIEW_PREFIX: Final[str] = "## 🔍 Plan Review"
 PLAN_REVIEW_CANONICAL_MARKER: Final[str] = "<!-- hephaestus-plan-review:canonical -->"
 """Opaque ownership/deduplication marker for the editable current review."""
 
-WONT_FIX_MARKER: Final[str] = "WONT-FIX: intentional design"
-"""Prefix the validator (or a human) replies with to dismiss a review finding as
-intentional-by-design (#1163). A resolved thread whose comments carry this prefix
-is permanently skipped: never re-validated, re-opened, or re-raised — so an
-intentional-design finding (e.g. an abstract method's ``NotImplementedError``)
-cannot stack duplicate threads across runs. Part of the wire protocol — both the
-validator's resolve-reply and the reviewer's dedup match on this exact string."""
-
-
 @runtime_checkable
 class ReviewerProtocol(Protocol):
     """Structural contract satisfied by all four reviewer classes.
 
     Verified: PRReviewer.run (pr_reviewer.py:396),
-              AddressReviewer.run (address_review.py:350),
+              AddressReviewer.run (address_review.py:121; retired),
               AuditReviewer.run (audit_reviewer.py:197),
               PlanReviewer.run (plan_reviewer.py:99).
     """
@@ -59,6 +50,5 @@ __all__ = [
     "PLAN_COMMENT_MARKER",
     "PLAN_REVIEW_CANONICAL_MARKER",
     "PLAN_REVIEW_PREFIX",
-    "WONT_FIX_MARKER",
     "ReviewerProtocol",
 ]

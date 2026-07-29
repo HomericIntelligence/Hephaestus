@@ -22,9 +22,9 @@ Module enumeration and entry-point discovery verified at plan time:
     ``hephaestus-review-prs`` is still asserted below via CONSOLE_SCRIPTS —
     its wrapper remains importable and --help-able — but it is no longer
     omitted, so it is not enumerated in OMITTED_MODULES.
-    ``address_review.py`` stays omitted: it has no console script and its live
-    ``AddressReviewer`` orchestration is integration-only, while its parse/fix
-    cores now live in the unit-covered ``address_review_core``.
+    ``address_review.py`` stays omitted: its compatibility ``AddressReviewer``
+    entry point is retired and fails before any orchestration; its pure parse/fix
+    cores live in the unit-covered ``address_review_core``.
 """
 
 import subprocess

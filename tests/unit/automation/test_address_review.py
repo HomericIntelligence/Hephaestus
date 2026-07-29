@@ -1,16 +1,13 @@
 """Tests for the AddressReviewer automation (address_review.py)."""
 
 import json
-import subprocess
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hephaestus.agents.runtime import AgentRunResult
 from hephaestus.automation.address_review import AddressReviewer
-from hephaestus.automation.models import AddressReviewOptions, ReviewPhase, ReviewState
+from hephaestus.automation.models import AddressReviewOptions, ReviewState
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -132,8 +129,8 @@ class TestLoadImplSessionId:
 # ---------------------------------------------------------------------------
 
 
-class TestAddressReviewParseTracing:
-    """AddressReviewer keeps standalone trace diagnostics through the shared parser."""
+class TestAddressReviewRetirement:
+    """The standalone surface cannot start a partial remediation lifecycle."""
 
     def test_missing_block_writes_address_trace_and_warning(
         self,
@@ -141,85 +138,36 @@ class TestAddressReviewParseTracing:
         tmp_path: Path,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        reviewer.state_dir = tmp_path
-
-        def fake_run_address_fix_session(**kwargs: Any) -> dict[str, Any]:
-            return kwargs["parse_fn"]("No json here.")
-
-        with patch(
-            "hephaestus.automation.address_review.run_address_fix_session",
-            side_effect=fake_run_address_fix_session,
-        ):
-            result = reviewer._run_fix_session(123, 456, tmp_path, [], session_id=None)
-
-        assert result == {"addressed": [], "replies": {}}
-        trace = tmp_path / "address-123.parse-error.log"
-        assert trace.exists()
-        assert "reason: no fenced ```json block found in response" in trace.read_text()
-        assert "Issue #123: address-review JSON parse failed" in caplog.text
+        del tmp_path, caplog
+        with pytest.raises(RuntimeError, match="address_review_retired_use_pipeline"):
+            reviewer._run_fix_session(123, 456, Path("."), [], session_id=None)
 
     def test_invalid_block_writes_last_block_in_address_trace(
         self,
         reviewer: AddressReviewer,
         tmp_path: Path,
     ) -> None:
-        reviewer.state_dir = tmp_path
-        text = "```json\n{broken!!}\n```"
-
-        def fake_run_address_fix_session(**kwargs: Any) -> dict[str, Any]:
-            return kwargs["parse_fn"](text)
-
-        with patch(
-            "hephaestus.automation.address_review.run_address_fix_session",
-            side_effect=fake_run_address_fix_session,
-        ):
-            result = reviewer._run_fix_session(123, 456, tmp_path, [], session_id=None)
-
-        assert result == {"addressed": [], "replies": {}}
-        payload = (tmp_path / "address-123.parse-error.log").read_text()
-        assert "reason: json.JSONDecodeError:" in payload
-        assert "=== last fenced block (if any) ===\n{broken!!}" in payload
-        assert "=== full response ===\n" in payload
+        del tmp_path
+        with pytest.raises(RuntimeError, match="address_review_retired_use_pipeline"):
+            reviewer._run_fix_session(123, 456, Path("."), [], session_id=None)
 
 
-def test_codex_fix_session_falls_back_to_fresh_on_resume_failure(
+def test_codex_fix_session_is_retired_before_resume_attempt(
     reviewer: AddressReviewer,
     tmp_path: Path,
 ) -> None:
-    """Codex review repair should retry fresh when a saved session cannot resume."""
+    """A saved session cannot bypass the pipeline's thread lifecycle."""
     reviewer.options.agent = "codex"
     threads = [{"id": "thread-1", "path": "file.py", "line": 10, "body": "fix this"}]
-    resume_error = subprocess.CalledProcessError(
-        1,
-        ["codex"],
-        stderr="session not found",
-    )
-    fresh_result = AgentRunResult(
-        stdout='```json\n{"addressed": ["thread-1"], "replies": {}}\n```',
-        stderr="",
-        session_id="fresh-session",
-    )
-
     with (
         patch(
             "hephaestus.automation.address_review.resume_agent_session",
-            side_effect=resume_error,
-        ),
-        patch(
-            "hephaestus.automation.address_review_core.run_agent_session",
-            return_value=fresh_result,
-        ) as mock_fresh,
+        ) as mock_resume,
     ):
-        parsed = reviewer._run_fix_session(
-            issue_number=123,
-            pr_number=456,
-            worktree_path=tmp_path,
-            threads=threads,
-            session_id="old-session",
-        )
+        with pytest.raises(RuntimeError, match="address_review_retired_use_pipeline"):
+            reviewer._run_fix_session(123, 456, tmp_path, threads, session_id="old-session")
 
-    assert parsed["addressed"] == ["thread-1"]
-    mock_fresh.assert_called_once()
+    mock_resume.assert_not_called()
 
 
 class TestCommitIfChanges:
@@ -230,18 +178,8 @@ class TestCommitIfChanges:
     ) -> None:
         reviewer.options.agent = "codex"
 
-        with patch(
-            "hephaestus.automation.address_review.commit_if_changes",
-            return_value=True,
-        ) as mock_commit:
+        with pytest.raises(RuntimeError, match="address_review_retired_use_pipeline"):
             reviewer._commit_if_changes(123, tmp_path)
-
-        mock_commit.assert_called_once_with(
-            123,
-            tmp_path,
-            "codex",
-            committed_log_message="Committed fix changes for issue #%s",
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -253,23 +191,16 @@ class TestAddressIssue:
     """Integration-level tests for _address_issue method."""
 
     def test_no_unresolved_threads_skips(self, reviewer: AddressReviewer) -> None:
-        """gh_pr_list_unresolved_threads returns [] → skip gracefully."""
-        with (
-            patch.object(reviewer.status_tracker, "acquire_slot", return_value=0),
-            patch(
-                "hephaestus.automation.address_review.gh_pr_list_unresolved_threads",
-                return_value=[],
-            ),
-        ):
-            result = reviewer._address_issue(123, 456)
+        """The retired command rejects work before any thread read or mutation."""
+        result = reviewer._address_issue(123, 456)
 
-        assert result.success is True
-        assert result.pr_number == 456
+        assert result.success is False
+        assert result.error == "address_review_retired_use_pipeline"
 
     def test_dry_run_stops_before_thread_handoff(
         self, mock_options: AddressReviewOptions, tmp_path: Path
     ) -> None:
-        """dry_run=True → no worktree creation or push calls."""
+        """Dry run cannot revive the retired standalone workflow."""
         mock_options.dry_run = True
 
         mock_wm = MagicMock()
@@ -283,68 +214,36 @@ class TestAddressIssue:
         )
         dry_reviewer.state_dir = tmp_path
 
-        # Dry-run guard now fires BEFORE worktree creation, so we only need
-        # gh_pr_list_unresolved_threads to return some threads (the guard
-        # skips the rest of the flow).
-        threads = [{"id": "thread-1", "path": "foo.py", "line": 5, "body": "Fix this"}]
-
         with (
-            patch.object(dry_reviewer.status_tracker, "acquire_slot", return_value=0),
-            patch(
-                "hephaestus.automation.address_review.gh_pr_list_unresolved_threads",
-                return_value=threads,
-            ),
             patch.object(dry_reviewer, "_get_or_create_worktree") as mock_worktree,
             patch.object(dry_reviewer, "_push_branch") as mock_push,
         ):
             result = dry_reviewer._address_issue(123, 456)
 
-        assert result.success is True
-        # Dry-run guard fires before worktree creation.
+        assert result.error == "address_review_retired_use_pipeline"
         mock_worktree.assert_not_called()
         mock_push.assert_not_called()
 
     def test_no_pr_found_skips_run(self, reviewer: AddressReviewer) -> None:
-        """No PR for any issue → run() returns {} without launching any workers."""
-        with patch("hephaestus.automation.address_review.find_pr_for_issue", return_value=None):
-            results = reviewer.run()
+        """The public entry point reports a deliberate failure per requested issue."""
+        results = reviewer.run()
 
-        assert results == {}
+        assert results[123].error == "address_review_retired_use_pipeline"
 
     def test_address_issue_claimed_fixes_require_reviewer_validation(
         self, reviewer: AddressReviewer, tmp_path: Path
     ) -> None:
-        """A code-fix claim is reviewer-validation work, not a completion."""
-        threads = [{"id": "thread-1", "path": "foo.py", "line": 5, "body": "Fix this"}]
-        state = ReviewState(issue_number=123, pr_number=456, branch_name="branch-1")
-
+        """No direct call can create a code-fix claim without a reply receipt."""
         with (
-            patch.object(reviewer, "_check_threads_for_address", return_value=threads),
-            patch.object(
-                reviewer,
-                "_setup_address_state",
-                return_value=("session-1", state, "branch-1", tmp_path),
-            ),
-            patch.object(
-                reviewer,
-                "_run_fix_session",
-                return_value={"addressed": ["thread-1"], "replies": {}},
-            ),
-            patch.object(reviewer, "_commit_if_changes"),
-            patch.object(reviewer, "_push_branch"),
-            patch.object(reviewer, "_save_review_state"),
-            patch("hephaestus.automation.address_review.time.sleep") as mock_sleep,
+            patch.object(reviewer, "_run_fix_session") as mock_fix,
+            patch.object(reviewer, "_commit_if_changes") as mock_commit,
         ):
             result = reviewer._address_issue(123, 456)
 
         assert result.success is False
-        assert result.error == "reviewer_validation_required"
-        assert state.phase is ReviewPhase.REVIEWER_VALIDATION_REQUIRED
-        assert state.addressed_thread_ids == ["thread-1"]
-        assert state.completed_at is None
-        assert state.error is not None
-        assert "pipeline reviewer" in state.error.lower()
-        mock_sleep.assert_called_once_with(1)
+        assert result.error == "address_review_retired_use_pipeline"
+        mock_fix.assert_not_called()
+        mock_commit.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -352,13 +251,8 @@ class TestAddressIssue:
 # ---------------------------------------------------------------------------
 
 
-class TestAddressReviewerPreservedReporting:
-    """Tests that AddressReviewer.run() logs preserved worktrees (#382/A4-06).
-
-    Note: cleanup_all is only reached after the _address_all() call completes.
-    The early-return for no-PR cases bypasses the try/finally intentionally.
-    Tests must supply a non-empty pr_map so the code reaches the finally block.
-    """
+class TestAddressReviewerRetiredRun:
+    """The retired command neither creates nor cleans up standalone worktrees."""
 
     def _make_reviewer_with_mock_wm(
         self,
@@ -385,43 +279,29 @@ class TestAddressReviewerPreservedReporting:
         tmp_path: Path,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """If cleanup_all preserves dirty worktrees, they are logged at INFO."""
+        """A retired run never reaches the old cleanup/reporting path."""
         import logging
 
         preserved_path = tmp_path / "issue-1"
         ar, _ = self._make_reviewer_with_mock_wm(mock_options, tmp_path, [(1, preserved_path)])
 
-        with (
-            # Provide a non-empty pr_map so we reach the finally block
-            patch.object(ar, "_discover_prs", return_value={123: 456}),
-            patch.object(
-                ar,
-                "_address_all",
-                return_value={123: MagicMock(success=True)},
-            ),
-            caplog.at_level(logging.INFO, logger="hephaestus.automation.address_review"),
-        ):
-            ar.run()
+        with caplog.at_level(logging.INFO, logger="hephaestus.automation.address_review"):
+            results = ar.run()
 
-        logs = caplog.text
-        assert "Preserved worktrees" in logs
-        assert str(preserved_path) in logs
+        assert results[123].error == "address_review_retired_use_pipeline"
+        assert str(preserved_path) not in caplog.text
 
     def test_cleanup_all_called_when_prs_exist(
         self,
         mock_options: AddressReviewOptions,
         tmp_path: Path,
     ) -> None:
-        """cleanup_all() is called when there are PRs to process."""
+        """cleanup_all() is not called because no standalone worktree exists."""
         ar, mock_wm = self._make_reviewer_with_mock_wm(mock_options, tmp_path, [])
 
-        with (
-            patch.object(ar, "_discover_prs", return_value={123: 456}),
-            patch.object(ar, "_address_all", return_value={}),
-        ):
-            ar.run()
+        ar.run()
 
-        mock_wm.cleanup_all.assert_called_once()
+        mock_wm.cleanup_all.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -560,12 +440,12 @@ class TestSetupAddressState:
 
 
 class TestCommitPushAndRecord:
-    """AddressReviewer records agent claims without mutating review threads."""
+    """No standalone helper can commit/push a partial review lifecycle."""
 
     def test_updates_review_state_addressed_threads(
         self, reviewer: AddressReviewer, tmp_path: Path
     ) -> None:
-        """The helper updates review_state.addressed_thread_ids."""
+        """The helper refuses a direct commit/push attempt."""
         review_state = ReviewState(
             issue_number=123,
             pr_number=456,
@@ -577,12 +457,7 @@ class TestCommitPushAndRecord:
         replies = {"t1": "Fixed."}
         threads = [{"id": "t1", "path": "a.py", "line": 10, "body": "fix"}]
 
-        with (
-            patch.object(reviewer, "_commit_if_changes"),
-            patch.object(reviewer, "_push_branch"),
-            patch.object(reviewer, "_save_review_state") as mock_save,
-            patch.object(reviewer.status_tracker, "update_slot"),
-        ):
+        with pytest.raises(RuntimeError, match="address_review_retired_use_pipeline"):
             reviewer._commit_push_and_record(
                 issue_number=123,
                 pr_number=456,
@@ -596,11 +471,6 @@ class TestCommitPushAndRecord:
                 thread_id=1,
             )
 
-        # Check that the state was updated with the new addressed thread IDs
+        # No state is updated because the queue pipeline owns the full handoff.
         assert "old-t1" in review_state.addressed_thread_ids
-        assert "t1" in review_state.addressed_thread_ids
-        assert review_state.phase == ReviewPhase.REVIEWER_VALIDATION_REQUIRED
-        assert review_state.completed_at is None
-        assert review_state.error is not None
-        assert "pipeline reviewer" in review_state.error.lower()
-        mock_save.assert_called_once()
+        assert "t1" not in review_state.addressed_thread_ids

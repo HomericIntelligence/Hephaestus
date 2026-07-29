@@ -23,6 +23,7 @@ from hephaestus.automation.pipeline.stages.pr_review import (
     REVIEW_CHECKOUT_WAIT,
     REVIEW_ERROR_RETRY_CAP,
     PrReviewStage,
+    _normalize_remediation_threads,
     _reviewer_thread_decisions,
     _validation_thread_snapshots,
 )
@@ -617,7 +618,11 @@ class TestPrReviewStageStep:
         item.state = "ADDRESS_WAIT"
         stage.on_job_done(item, JobResult(ok=True, value="addressed"), ctx)
         item.state = "PUSH_WAIT"
-        stage.on_job_done(item, JobResult(ok=True, value=True), ctx)
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),
+            ctx,
+        )
         item.state = "EVAL"
 
         assert stage.step(item, ctx) == Continue(next_state="COMPACT_REVIEWER_WAIT")
@@ -1216,8 +1221,20 @@ class TestReviewThreadLifecycle:
         replied = {
             **self._thread("thread-1", 3, "fix this"),
             "implementation_reply_id": "reply-1",
-            "implementation_reply_body": "Added the missing guard and regression test.",
+            "implementation_reply_body": (
+                "Added the missing guard and regression test.\n\n"
+                "<!-- hephaestus-implementation-reply:fixture -->"
+            ),
+            "implementation_head_sha": "a" * 40,
         }
+        replied["comments"].append(
+            {
+                "id": "reply-1",
+                "author": "hephaestus[bot]",
+                "body": replied["implementation_reply_body"],
+                "review_id": "review-thread-1",
+            }
+        )
         inherited = self._thread("thread-2", 8, "manual review")
 
         snapshots = _validation_thread_snapshots([replied, inherited], [replied])
@@ -1227,8 +1244,91 @@ class TestReviewThreadLifecycle:
         assert snapshots[1]["implementation_reply_submitted"] is False
         assert _reviewer_thread_decisions(
             [replied],
-            {"unaddressed": [], "wont_fix": []},
+            {"resolved": ["thread-1"], "unaddressed": []},
         ) == ({"thread-1"}, {})
+
+    def test_reviewer_decisions_require_an_explicit_exhaustive_partition(self) -> None:
+        """A missing decision or legacy dismissal bucket cannot resolve a thread."""
+        receipt = {"id": "thread-1"}
+
+        assert _reviewer_thread_decisions(
+            [receipt], {"resolved": [], "unaddressed": []}
+        ) is None
+        assert _reviewer_thread_decisions(
+            [receipt], {"unaddressed": [], "wont_fix": []}
+        ) is None
+
+    def test_reviewer_feedback_is_preserved_for_the_next_implementer(self) -> None:
+        """A rejection reply is present in the next remediation prompt payload."""
+        thread = self._thread("thread-1", 3, "fix this")
+        thread["comments"].append(
+            {
+                "id": "reviewer-follow-up",
+                "author": "reviewer",
+                "body": "Reviewer validation found this still unresolved: guard None first.",
+            }
+        )
+
+        normalized = _normalize_remediation_threads([thread])
+
+        assert len(normalized) == 1
+        assert "guard None first" in normalized[0]["body"]
+        assert "Thread conversation:" in normalized[0]["body"]
+
+    def test_partial_reconciliation_refreshes_live_threads_without_stale_receipts(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A partial race cannot permanently wedge a now-consumed receipt set."""
+        first = self._thread("live-thread-1001-0", 3, "first")
+        second = self._thread("live-thread-1001-1", 4, "second")
+        receipts = [
+            {
+                **thread,
+                "implementation_reply_id": f"reply-{thread['id']}",
+                "implementation_reply_body": "fixed",
+                "comments": [
+                    *thread["comments"],
+                    {
+                        "id": f"reply-{thread['id']}",
+                        "author": "hephaestus[bot]",
+                        "body": "fixed",
+                    },
+                ],
+            }
+            for thread in (first, second)
+        ]
+
+        class PartialGitHub(FakeStageGitHub):
+            def reconcile_reviewer_validated_threads(self, *args: Any, **kwargs: Any) -> Any:
+                del args, kwargs
+                from hephaestus.automation.pipeline.stages.base import (
+                    ReviewerThreadReconciliationResult,
+                )
+
+                return ReviewerThreadReconciliationResult(
+                    resolved_thread_ids=("live-thread-1001-0",),
+                    blocked_thread_ids=("live-thread-1001-1",),
+                )
+
+        item = make_work_item(issue=1, pr=1001, state="POST")
+        item.payload.update(
+            {
+                "reviewed_pr_head_sha": "a" * 40,
+                "pending_thread_reply_receipts": receipts,
+                "validation_result": {
+                    "resolved": ["live-thread-1001-0", "live-thread-1001-1"],
+                    "unaddressed": [],
+                },
+                "review_audit": _valid_audit(),
+                "review_threads": [],
+            }
+        )
+
+        result = PrReviewStage().step(item, make_ctx(github=PartialGitHub(unresolved=[(2, 0)])))
+
+        assert result == Continue(next_state="DIFFICULTY_WAIT")
+        assert "pending_thread_reply_receipts" not in item.payload
+        assert item.payload.get("review_audit_failure") is not True
 
     def test_unaddressed_external_bot_thread_routes_to_remediation(
         self, make_ctx: Any, make_work_item: Any
@@ -2405,7 +2505,11 @@ class TestEvalVerdicts:
         item = make_work_item(issue=1, pr=1001, state="PUSH_WAIT")
         item.payload["direct_push_retries"] = DIRECT_PUSH_RETRY_CAP
 
-        stage.on_job_done(item, JobResult(ok=True, value=True), ctx)
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),
+            ctx,
+        )
 
         assert "direct_push_retries" not in item.payload
         item.state = "PUSH_WAIT"
@@ -3175,7 +3279,7 @@ class TestFullWalks:
                 '"replies": {"live-thread-1001-0": "Fixed it.", '
                 '"live-thread-1001-1": "Fixed it."}}',
             ),  # address
-            JobResult(ok=True, value=True),  # push
+            JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),  # push
             JobResult(ok=True, value=True),  # compact reviewer before round 2
             JobResult(ok=True, value=True),  # compact writer before round 2
             JobResult(ok=True, value=_valid_audit()),  # review round 2
@@ -3457,7 +3561,7 @@ class TestRealCommitGate:
     def test_push_result_records_the_no_commit_flag(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """commit_push value False -> push_no_commit True; True -> False."""
+        """commit_push requires a matching immutable publication receipt."""
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=40, pr=1001, state="PUSH_WAIT")
@@ -3465,7 +3569,11 @@ class TestRealCommitGate:
         stage.on_job_done(item, JobResult(ok=True, value=False), ctx)
         assert item.payload["push_no_commit"] is True
 
-        stage.on_job_done(item, JobResult(ok=True, value=True), ctx)
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),
+            ctx,
+        )
         assert item.payload["push_no_commit"] is False
 
     def test_successful_push_discards_review_evidence_and_forces_fresh_review(
@@ -3488,7 +3596,11 @@ class TestRealCommitGate:
             }
         )
 
-        stage.on_job_done(item, JobResult(ok=True, value=True), ctx)
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),
+            ctx,
+        )
 
         for key in (
             "review_audit",
@@ -3506,6 +3618,45 @@ class TestRealCommitGate:
         assert result == Continue(next_state="COMPACT_REVIEWER_WAIT")
         assert item.attempts["pr_review_iter"] == 0
         assert github.mutation_log == []
+
+    def test_head_drift_after_push_cannot_post_an_implementation_reply(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A later push cannot inherit a reply from the implementation commit."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(
+            pr_state={"state": "OPEN", "headRefOid": "b" * 40, "autoMergeRequest": None}
+        )
+        item = make_work_item(issue=40, pr=1001, state="PUSH_WAIT")
+        thread = {
+            "id": "thread-1",
+            "path": "a.py",
+            "line": 3,
+            "side": "RIGHT",
+            "body": "fix this",
+            "comments": [{"id": "comment-1", "author": "reviewer", "body": "fix this"}],
+        }
+        item.payload.update(
+            {
+                "remediation_threads": [{"thread_id": "thread-1", "body": "fix this"}],
+                "remediation_thread_snapshots": [thread],
+                "address_output": {
+                    "addressed": ["thread-1"],
+                    "replies": {"thread-1": "Fixed the guard."},
+                },
+            }
+        )
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),
+            make_ctx(github=github),
+        )
+
+        assert not any(
+            name == "post_implementation_thread_replies" for name, _ in github.mutation_log
+        )
+        assert "pending_thread_reply_receipts" not in item.payload
 
     def test_first_no_commit_retries_address_with_directive(
         self, make_ctx: Any, make_work_item: Any

@@ -1,4 +1,4 @@
-"""Address unresolved PR review threads using the selected coding agent.
+"""Retired standalone address-review compatibility surface.
 
 Provides:
 - Parallel processing of issues with unresolved review threads
@@ -6,11 +6,10 @@ Provides:
 - Agent code-fix claims recorded for pipeline reviewer validation
 - State persistence and UI monitoring
 
-This module finds PRs with unresolved review threads, resumes the original
-implementer's session when supported (or starts a fresh one), runs the selected
-agent to fix the code, then records its claimed thread IDs. This compatibility
-entry point never resolves GitHub threads; the queue pipeline posts the
-implementation reply and a fresh reviewer validates and resolves or returns it.
+This module remains importable for compatibility, but its public entry points
+fail closed. It cannot safely post implementation replies or run the fresh
+reviewer reconciliation, so the queue pipeline is the only supported path for
+review-thread remediation.
 """
 
 from __future__ import annotations
@@ -19,8 +18,6 @@ import argparse
 import json
 import logging
 import subprocess
-import threading
-import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -66,7 +63,6 @@ from .address_review_core import (
     run_address_fix_session as run_address_fix_session,
 )
 from .agent_config import DEFAULT_AGENT_TIMEOUT
-from .curses_ui import CursesUI
 from .git_utils import (
     commit_if_changes,
     issue_auto_impl_branch_name,
@@ -81,6 +77,8 @@ from .models import AddressReviewOptions, ReviewPhase, ReviewState, WorkerResult
 from .prompts import get_address_review_prompt
 
 logger = logging.getLogger(__name__)
+
+_RETIRED_ERROR = "address_review_retired_use_pipeline"
 
 
 class AddressReviewer(BaseReviewer):
@@ -120,48 +118,19 @@ class AddressReviewer(BaseReviewer):
         instance_log(self.log_manager, level, msg, thread_id, caller_logger=logger)
 
     def run(self) -> dict[int, WorkerResult]:
-        """Run the address review workflow.
-
-        Returns:
-            Dictionary mapping issue number to WorkerResult
-
-        """
-        logger.info("Starting address review for issues: %s", self.options.issues)
-
-        # Pre-discover PRs — only submit workers for issues that have an open PR.
-        # This prevents Claude from being launched for issues with no PR at all.
-        pr_map = self._discover_prs(self.options.issues)
-        if not pr_map:
-            logger.warning("No open PRs found for the specified issues — nothing to address")
-            return {}
-
-        logger.info("Found %s PR(s) to address: %s", len(pr_map), pr_map)
-
-        # Start UI if enabled and not dry run
-        if not self.options.dry_run and self.options.enable_ui:
-            self.ui = CursesUI(self.status_tracker, self.log_manager)
-            self.ui.start()
-
-        try:
-            results = self._address_all(pr_map)
-            return results
-        finally:
-            if self.ui:
-                self.ui.stop()
-            if not self.options.dry_run:
-                try:
-                    self.worktree_manager.cleanup_all()
-                except Exception:
-                    logger.exception("Error during worktree cleanup in AddressReviewer.run()")
-
-            # Report preserved worktrees (contain uncommitted changes after cleanup_all).
-            # Mirror implementer.py:1263-1275 so operators know which worktrees survived.
-            preserved = self.worktree_manager.preserved
-            if preserved:
-                logger.info("Preserved worktrees (contain uncommitted changes):")
-                for issue_num, path in preserved:
-                    logger.info("  #%d: %s", issue_num, path)
-                logger.info("Inspect or discard them with: git worktree remove --force <path>")
+        """Refuse the retired standalone address workflow before any mutation."""
+        logger.error(
+            "AddressReviewer is retired; use hephaestus-automation-loop so implementation "
+            "replies and reviewer reconciliation stay in one lifecycle"
+        )
+        return {
+            issue_number: WorkerResult(
+                issue_number=issue_number,
+                success=False,
+                error=_RETIRED_ERROR,
+            )
+            for issue_number in self.options.issues
+        }
 
     def _discover_prs(self, issue_numbers: list[int]) -> dict[int, int]:
         """Pre-discover open PRs for all issues.
@@ -325,7 +294,7 @@ class AddressReviewer(BaseReviewer):
         slot_id: int,
         thread_id: int,
     ) -> None:
-        """Commit fixes, push branch, and record reviewer-validation work.
+        """Reject the retired standalone commit/push lifecycle.
 
         Args:
             issue_number: GitHub issue number.
@@ -340,6 +309,8 @@ class AddressReviewer(BaseReviewer):
             thread_id: Current thread id for logging.
 
         """
+        raise RuntimeError(_RETIRED_ERROR)
+
         self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Committing")
         self._commit_if_changes(issue_number, worktree_path)
 
@@ -374,93 +345,13 @@ class AddressReviewer(BaseReviewer):
         )
 
     def _address_issue(self, issue_number: int, pr_number: int) -> WorkerResult:
-        """Address unresolved review threads for a single issue."""
-        with self.status_tracker.slot(f"{issue_ref(issue_number)}: Starting") as slot_id:
-            if slot_id is None:
-                return WorkerResult(
-                    issue_number=issue_number,
-                    success=False,
-                    error="Failed to acquire worker slot",
-                )
-
-            thread_id = threading.get_ident()
-            self._log(
-                "info",
-                f"Addressing PR {pr_ref(pr_number)} for issue {issue_ref(issue_number)}",
-                thread_id,
-            )
-
-            try:
-                threads = self._check_threads_for_address(issue_number, pr_number, thread_id)
-                if threads is None:
-                    return WorkerResult(
-                        issue_number=issue_number, success=True, pr_number=pr_number
-                    )
-
-                session_id, review_state, branch_name, worktree_path = self._setup_address_state(
-                    issue_number, pr_number, slot_id
-                )
-
-                self.status_tracker.update_slot(
-                    slot_id, f"{issue_ref(issue_number)}: Running Claude fix"
-                )
-                fix_result = self._run_fix_session(
-                    issue_number=issue_number,
-                    pr_number=pr_number,
-                    worktree_path=worktree_path,
-                    threads=threads,
-                    session_id=session_id if self.options.resume_impl_session else None,
-                )
-                addressed: list[str] = fix_result.get("addressed", [])
-                replies: dict[str, str] = fix_result.get("replies", {})
-                self._log(
-                    "info",
-                    f"Claude addressed {len(addressed)} thread(s) on PR {pr_ref(pr_number)}",
-                    thread_id,
-                )
-                self._commit_push_and_record(
-                    issue_number=issue_number,
-                    pr_number=pr_number,
-                    branch_name=branch_name,
-                    worktree_path=worktree_path,
-                    addressed=addressed,
-                    replies=replies,
-                    threads=threads,
-                    review_state=review_state,
-                    slot_id=slot_id,
-                    thread_id=thread_id,
-                )
-                return WorkerResult(
-                    issue_number=issue_number,
-                    success=False,
-                    error="reviewer_validation_required",
-                    pr_number=pr_number,
-                    branch_name=branch_name,
-                    worktree_path=str(worktree_path),
-                )
-
-            except subprocess.TimeoutExpired as e:
-                error_msg = f"Timeout: {' '.join(str(c) for c in e.cmd[:3])} exceeded {e.timeout}s"
-                self._log("error", error_msg, thread_id)
-                return self._fail(issue_number, error_msg, slot_id)
-
-            except subprocess.CalledProcessError as e:
-                error_msg = (
-                    f"Command failed (exit {e.returncode}): {' '.join(str(c) for c in e.cmd[:3])}"
-                )
-                self._log("error", error_msg, thread_id)
-                return self._fail(issue_number, error_msg, slot_id)
-
-            except RuntimeError as e:
-                self._log("error", f"Runtime error: {e}", thread_id)
-                return self._fail(issue_number, str(e)[:80], slot_id)
-
-            except Exception as e:
-                self._log("error", f"Unexpected {type(e).__name__}: {e}", thread_id)
-                return self._fail(issue_number, str(e)[:80], slot_id)
-
-            finally:
-                time.sleep(1)
+        """Refuse direct review-thread remediation outside the queue pipeline."""
+        del pr_number
+        return WorkerResult(
+            issue_number=issue_number,
+            success=False,
+            error=_RETIRED_ERROR,
+        )
 
     def _load_impl_session_id(self, issue_number: int) -> str | None:
         """Load the implementer's agent session ID from state file.
@@ -548,7 +439,7 @@ class AddressReviewer(BaseReviewer):
         threads: list[dict[str, Any]],
         session_id: str | None,
     ) -> dict[str, Any]:
-        """Run Claude fix session to address review threads.
+        """Reject the retired standalone agent-fix lifecycle.
 
         Delegates to the module-level :func:`run_address_fix_session` so the
         in-loop implementer step (#28) and this standalone phase share one
@@ -567,6 +458,8 @@ class AddressReviewer(BaseReviewer):
             Parsed dict with "addressed" and "replies" keys
 
         """
+        raise RuntimeError(_RETIRED_ERROR)
+
         log_file = log_file_path(self.state_dir, "address-review", issue_number)
 
         def parse_with_trace(text: str) -> dict[str, Any]:
@@ -648,13 +541,15 @@ class AddressReviewer(BaseReviewer):
         )
 
     def _commit_if_changes(self, issue_number: int, worktree_path: Path) -> None:
-        """Commit any pending changes in the worktree.
+        """Reject standalone commits outside the pipeline lifecycle.
 
         Args:
             issue_number: GitHub issue number (used in commit message)
             worktree_path: Path to git worktree
 
         """
+        raise RuntimeError(_RETIRED_ERROR)
+
         commit_if_changes(
             issue_number,
             worktree_path,
@@ -663,7 +558,7 @@ class AddressReviewer(BaseReviewer):
         )
 
     def _push_branch(self, branch_name: str, worktree_path: Path) -> None:
-        """Push the branch to origin.
+        """Reject standalone pushes outside the pipeline lifecycle.
 
         Args:
             branch_name: Branch name to push
@@ -673,6 +568,8 @@ class AddressReviewer(BaseReviewer):
             RuntimeError: If push fails
 
         """
+        raise RuntimeError(_RETIRED_ERROR)
+
         push_branch(branch_name, worktree_path)
 
     def _print_summary(self, results: dict[int, WorkerResult]) -> None:

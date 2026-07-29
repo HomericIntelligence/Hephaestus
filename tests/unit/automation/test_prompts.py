@@ -1119,13 +1119,16 @@ class TestReviewValidationPrompt:
         assert "VALIDATING" in out
         assert "NOT performing a fresh review" in out
 
-    def test_preserves_unaddressed_json_contract(self) -> None:
+    def test_requires_explicit_two_way_validation_contract(self) -> None:
         out = self._build()
+        assert '"resolved"' in out
         assert '"unaddressed"' in out
         assert "original_body" in out
         assert "detail" in out
         # #1085 C2: the sub-agent must echo thread_id so resolution matches by id.
         assert "thread_id" in out
+        assert "WON'T FIX" not in out
+        assert '"wont_fix"' not in out
 
     def test_inputs_fenced_untrusted(self) -> None:
         out = self._build()

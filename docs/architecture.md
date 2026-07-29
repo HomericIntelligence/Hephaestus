@@ -919,7 +919,7 @@ local process or agent-session loss.
 flowchart LR
     PR["PR diff and requirements"] --> Review
     Review --> GitHub["GitHub review and inline threads"]
-    GitHub --> Gate{"Blocking findings?"}
+    GitHub --> Gate{"Open review thread?"}
     Gate -->|"open thread"| Address["Implementation fixes and replies"] --> Validate["Reviewer validates reply + diff"]
     Validate -->|"resolved"| Review
     Validate -->|"needs work"| Address
@@ -944,13 +944,11 @@ stateDiagram-v2
     RetryReview --> Implementation: fresh implementation context required
     Validate --> Post: findings normalized
     Post --> Evaluate: GitHub review recorded
-    Evaluate --> Address: open review finding
-    Evaluate --> ResolveMinor: advisory findings only
+    Evaluate --> Address: any open review thread
     Evaluate --> Approve: no unresolved findings
     Evaluate --> Skipped: no progress or review limit reached
     Address --> PublishFix: changes produced
     PublishFix --> Review: fixes published
-    ResolveMinor --> Approve
     Approve --> MergeReady: implementation-go durable
     MergeReady --> [*]
     Implementation --> [*]
@@ -963,8 +961,8 @@ Architectural contract:
 - Every implementation review is posted to the pull request.
 - Actionable findings use durable inline threads and severity.
 - Prior rounds remain visible in the PR timeline.
-- Blocking findings produce `state:implementation-no-go`; only a clean review
-  produces `state:implementation-go`.
+- Any open review thread produces `state:implementation-no-go`; only a fresh
+  review with no open threads produces `state:implementation-go`.
 - The implementation agent replies to every fixed open thread but never resolves it.
 - The reviewer validates each implementation reply against the current diff;
   it resolves validated threads or posts corrective feedback and leaves them open.

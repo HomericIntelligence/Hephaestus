@@ -273,7 +273,7 @@ class StageGitHub(Protocol):
         ...
 
     def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
-        """Return fresh unresolved review-thread facts, including ownership."""
+        """Return complete fresh snapshots of every unresolved review thread."""
         ...
 
     def post_implementation_thread_replies(

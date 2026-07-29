@@ -5,8 +5,7 @@ Re-houses the legacy implementation-review semantics now isolated in
 ``_review_conflict_resolver.ReviewConflictResolver``. The queue stage remains
 the live implementation of the review/validate/address state machine. Its
 collaborators include
-(``pr_reviewer.review_pr_inline``, ``review_validator
-.validate_prior_comments_addressed``, ``address_review
+(``pr_reviewer.review_pr_inline``, ``address_review
 .run_address_fix_session``) as a pipeline stage
 (docs/architecture.md §5.5 "pr_review" is the binding
 contract):
@@ -250,6 +249,17 @@ def _issue_number(item: WorkItem) -> int:
     return item.issue
 
 
+def _pr_is_current_open_head(state: object, expected_head_sha: object) -> bool:
+    """Return whether a fresh PR state proves one exact open, unarmed head."""
+    return bool(
+        is_full_commit_sha(expected_head_sha)
+        and isinstance(state, dict)
+        and state.get("state") == "OPEN"
+        and state.get("autoMergeRequest") is None
+        and state.get("headRefOid") == expected_head_sha
+    )
+
+
 def _review_context_kind(item: WorkItem) -> str:
     """Return the prompt-facing numeric context kind for this review item."""
     return "PR" if item.payload.get("review_context_kind") == "PR" else "issue"
@@ -305,10 +315,9 @@ def _parse_validation_result(raw: Any) -> dict[str, Any] | None:
     """Parse the validator job's output into its verdict dict, tolerantly.
 
     The validation prompt asks for a single fenced JSON block at the END of
-    the response (``{"unaddressed": [...], "wont_fix": [...]}``); the parser
-    takes the LAST parseable block (legacy last-block-wins convention), then
-    falls back to treating the whole output as JSON. Returns None when
-    nothing parses — callers fail open.
+    the response (``{"resolved": [...], "unaddressed": [...]}``); the parser
+    takes the LAST parseable block, then falls back to treating the whole
+    output as JSON. Returns None when nothing parses — callers fail closed.
 
     Args:
         raw: The validation job's stored output (str, dict, or anything).
@@ -433,6 +442,23 @@ def _normalize_remediation_threads(
         if not thread_id:
             continue
         line = thread.get("line")
+        body = str(thread.get("body") or "")
+        comments = thread.get("comments")
+        # The first thread body is already supplied above.  Once a reviewer
+        # leaves a follow-up, retain the entire conversation in the next
+        # implementer prompt so the agent can act on the precise remaining
+        # defect rather than trying the original fix again.
+        if isinstance(comments, list) and len(comments) > 1:
+            rendered_comments: list[str] = []
+            for comment in comments:
+                if not isinstance(comment, dict):
+                    continue
+                author = str(comment.get("author") or "unknown reviewer").strip()
+                comment_body = str(comment.get("body") or "").strip()
+                if comment_body:
+                    rendered_comments.append(f"{author}: {comment_body}")
+            if rendered_comments:
+                body = f"{body}\n\nThread conversation:\n" + "\n\n".join(rendered_comments)
         normalized.append(
             {
                 "thread_id": thread_id,
@@ -442,7 +468,7 @@ def _normalize_remediation_threads(
                     if isinstance(line, int) and not isinstance(line, bool) and line > 0
                     else None
                 ),
-                "body": str(thread.get("body") or ""),
+                "body": body,
             }
         )
     return normalized
@@ -535,16 +561,22 @@ def _validation_thread_snapshots(
     return snapshots
 
 
-def _reviewer_thread_decisions(
+def _reviewer_thread_decisions(  # noqa: C901
     receipts: list[dict[str, Any]], validation_result: Any
 ) -> tuple[set[str], dict[str, str]] | None:
     """Return reviewer-approved IDs and rejection explanations, fail closed."""
     parsed = _parse_validation_result(validation_result)
     if parsed is None:
         return None
+    # Resolution is authority-bearing.  Require the reviewer to make an
+    # explicit, exhaustive two-way decision for every host-read receipt;
+    # omission and a historical ``wont_fix`` bucket must never silently close
+    # a discussion.
+    if set(parsed) != {"resolved", "unaddressed"}:
+        return None
+    resolved = parsed.get("resolved")
     unaddressed = parsed.get("unaddressed")
-    wont_fix = parsed.get("wont_fix")
-    if not isinstance(unaddressed, list) or not isinstance(wont_fix, list):
+    if not isinstance(resolved, list) or not isinstance(unaddressed, list):
         return None
     known_ids: set[str] = set()
     for receipt in receipts:
@@ -552,24 +584,34 @@ def _reviewer_thread_decisions(
         if thread_id is None:
             return None
         known_ids.add(thread_id)
-    unaddressed_ids = _thread_ids(unaddressed)
-    wont_fix_ids = _thread_ids(wont_fix)
-    if (
-        not unaddressed_ids.issubset(known_ids)
-        or not wont_fix_ids.issubset(known_ids)
-        or unaddressed_ids & wont_fix_ids
-    ):
+    if len(known_ids) != len(receipts):
         return None
+    resolved_ids: set[str] = set()
+    for thread_id in resolved:
+        if not isinstance(thread_id, str) or not thread_id.strip():
+            return None
+        normalized_id = thread_id.strip()
+        if normalized_id in resolved_ids:
+            return None
+        resolved_ids.add(normalized_id)
     feedback: dict[str, str] = {}
     for entry in unaddressed:
         if not isinstance(entry, dict):
             return None
         thread_id = str(entry.get("thread_id") or entry.get("id") or "").strip()
         detail = str(entry.get("detail") or "").strip()
-        if not thread_id or not detail:
+        if not thread_id or not detail or thread_id in feedback:
             return None
         feedback[thread_id] = detail
-    return (set(known_ids) - unaddressed_ids, feedback)
+    feedback_ids = set(feedback)
+    if (
+        not resolved_ids.issubset(known_ids)
+        or not feedback_ids.issubset(known_ids)
+        or resolved_ids & feedback_ids
+        or resolved_ids | feedback_ids != known_ids
+    ):
+        return None
+    return (resolved_ids, feedback)
 
 
 def _address_review_feedback(item: WorkItem) -> str:
@@ -1035,7 +1077,12 @@ class PrReviewStage(Stage):
             # was actually produced (value/changed True). A no-commit push
             # means the address turn was a phantom fix — EVAL must NOT treat
             # the round as addressed.
-            produced_commit = bool(result.value)
+            push_receipt = result.value if isinstance(result.value, dict) else {}
+            raw_published_head = push_receipt.get("head_sha")
+            published_head = raw_published_head if isinstance(raw_published_head, str) else ""
+            produced_commit = bool(push_receipt.get("pushed")) and is_full_commit_sha(
+                published_head
+            )
             if produced_commit:
                 remediation_threads = item.payload.get("remediation_threads")
                 threads = remediation_threads if isinstance(remediation_threads, list) else []
@@ -1044,13 +1091,16 @@ class PrReviewStage(Stage):
                 replies = _address_replies(item.payload.get("address_output"), threads)
                 if replies and item.pr is not None:
                     try:
+                        # The worker returns the local commit it actually
+                        # published.  A later arbitrary remote push must not
+                        # acquire this implementation reply by being read as
+                        # the current head.
                         state = ctx.github.gh_pr_state(item.pr)
-                        head_sha = (
-                            str(state.get("headRefOid") or "") if isinstance(state, dict) else ""
-                        )
+                        if not _pr_is_current_open_head(state, published_head):
+                            raise RuntimeError("published implementation head no longer current")
                         reply_result = ctx.github.post_implementation_thread_replies(
                             item.pr,
-                            expected_head_sha=head_sha,
+                            expected_head_sha=published_head,
                             threads=thread_snapshots,
                             replies=replies,
                         )
@@ -1268,13 +1318,21 @@ class PrReviewStage(Stage):
             completed_ids = set(reconciliation.resolved_thread_ids) | set(
                 reconciliation.feedback_thread_ids
             )
-            if (
-                None in expected_ids
-                or completed_ids != expected_ids
-                or reconciliation.blocked_thread_ids
-            ):
+            if None in expected_ids or not completed_ids.issubset(expected_ids):
                 item.payload["review_audit_failure"] = True
                 return Continue(next_state=EVAL)
+            # A concurrent mutation can make one receipt ineligible after a
+            # previous receipt was safely resolved or received feedback.  Do
+            # not retain that stale, partially consumed receipt set: doing so
+            # wedges the next validation pass because the completed thread is
+            # no longer open.  Drop all receipts and rebuild remediation from
+            # the fresh complete live snapshot below.  The adapter's snapshot
+            # checks prevent duplicate mutations for the blocked IDs.
+            if completed_ids != expected_ids or reconciliation.blocked_thread_ids:
+                logger.info(
+                    "pr_review:%s: reviewer reconciliation was partial; refreshing live threads",
+                    item.issue,
+                )
             item.payload.pop("pending_thread_reply_receipts", None)
 
         try:
@@ -1342,7 +1400,6 @@ class PrReviewStage(Stage):
         item.payload["remediation_threads"] = remediation_threads
         item.payload["remediation_thread_snapshots"] = [dict(thread) for thread in live_threads]
         item.payload["unresolved_threads_before_address"] = len(remediation_threads)
-        item.payload["unresolved_human"] = 0
         if not remediation_threads:
             return Continue(next_state=EVAL)
         return Continue(next_state=DIFFICULTY_WAIT)

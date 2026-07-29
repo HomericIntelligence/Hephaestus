@@ -96,7 +96,7 @@ class TestValidatePriorCommentsAddressed:
         with patch.object(
             review_validator,
             "_run_validation_session",
-            return_value=(unaddressed, []),
+            return_value=unaddressed,
         ):
             reopened, is_clean, _ = review_validator.validate_prior_comments_addressed(
                 pr_number=1,
@@ -120,7 +120,7 @@ class TestRunValidationAndReconcile:
         with patch.object(
             review_validator,
             "_run_validation_session",
-            return_value=(unaddressed, []),
+            return_value=unaddressed,
         ):
             result = review_validator._run_validation_and_reconcile(
                 pr_number=1,
@@ -141,13 +141,13 @@ class TestRunValidationSession:
     """Provider output is parsed structurally through the existing read-only seam."""
 
     def test_direct_agent_parses_unaddressed_json(self, tmp_path: Path) -> None:
-        response = json.dumps({"unaddressed": [{"thread_id": "T1"}], "wont_fix": []})
+        response = json.dumps({"resolved": [], "unaddressed": [{"thread_id": "T1"}]})
         result = AgentRunResult(stdout=f"```json\n{response}\n```", stderr="")
         with (
             patch.object(review_validator, "uses_direct_agent_runner", return_value=True),
             patch.object(review_validator, "run_agent_text", return_value=result),
         ):
-            unaddressed, wont_fix = review_validator._run_validation_session(
+            unaddressed = review_validator._run_validation_session(
                 pr_number=1,
                 issue_number=2,
                 worktree_path=tmp_path,
@@ -160,7 +160,6 @@ class TestRunValidationSession:
             )
 
         assert unaddressed == [{"thread_id": "T1"}]
-        assert wont_fix == []
 
     def test_failed_session_returns_empty_report(self, tmp_path: Path) -> None:
         with (
@@ -179,4 +178,4 @@ class TestRunValidationSession:
                 timeout=60,
             )
 
-        assert result == ([], [])
+        assert result == []

@@ -257,6 +257,37 @@ class TestAllThreadReplyAndReviewerResolution:
         assert len(live) == 1
         assert "Reviewer validation found this still unresolved" in calls[-1]
 
+    def test_reconciliation_rejects_a_receipt_without_the_host_read_reply(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Metadata alone cannot authorize a thread resolution."""
+        thread = _external_reviewer_thread()
+        receipt = {
+            **thread,
+            "implementation_reply_id": "missing-comment",
+            "implementation_reply_body": "Fixed it.\n<!-- hephaestus-implementation-reply:x -->",
+            "implementation_head_sha": "a" * 40,
+        }
+        graphql = MagicMock()
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+
+        result = adapter.reconcile_reviewer_validated_threads(
+            7,
+            reviewed_head_sha="a" * 40,
+            receipts=[receipt],
+            resolved_thread_ids={thread["id"]},
+            feedback={},
+        )
+
+        assert result.blocked_thread_ids == (thread["id"],)
+        graphql.assert_not_called()
+
+
+def test_unscoped_adapter_rejects_legacy_review_thread_fallback(adapter: pg.PipelineGitHub) -> None:
+    """Review-thread lifecycle needs complete repo-scoped GraphQL snapshots."""
+    with pytest.raises(RuntimeError, match="repo-scoped"):
+        adapter.list_unresolved_review_threads(7)
+
 
 class TestConditionalMerge:
     """The conditional REST merge seam preserves the server's exact outcome."""

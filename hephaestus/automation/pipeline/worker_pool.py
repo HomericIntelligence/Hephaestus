@@ -1578,20 +1578,20 @@ class WorkerPool:
         return None
 
     def _publish_commit_push(self, job: GitJob, branch: str, worktree_path: Path) -> JobResult:
-        """Publish a newly created commit through the configured branch mode."""
+        """Publish a newly created commit and return its exact immutable SHA."""
         branch = branch or "HEAD"
         expected_remote_sha = job.kwargs.get("expected_remote_sha")
         if expected_remote_sha is not None and not _is_full_commit_sha(expected_remote_sha):
             return JobResult(ok=False, error="direct scope base pin invalid")
+        source_sha = self._read_detached_push_head(worktree_path, timeout=job.timeout_s)
+        if isinstance(source_sha, JobResult):
+            return source_sha
         if bool(job.kwargs.get("publish_detached_head", False)):
             if not isinstance(expected_remote_sha, str):
                 return JobResult(
                     ok=False,
                     error="detached PR push requires the reviewed remote head",
                 )
-            source_sha = self._read_detached_push_head(worktree_path, timeout=job.timeout_s)
-            if isinstance(source_sha, JobResult):
-                return source_sha
             detached_push_result = self._publish_detached_head(
                 job,
                 branch,
@@ -1600,7 +1600,9 @@ class WorkerPool:
                 source_sha=source_sha,
                 timeout=job.timeout_s,
             )
-            return detached_push_result or JobResult(ok=True, value=True)
+            return detached_push_result or JobResult(
+                ok=True, value={"pushed": True, "head_sha": source_sha}
+            )
         if isinstance(expected_remote_sha, str):
             git_utils.push_branch_if_remote_matches(
                 branch,
@@ -1610,7 +1612,7 @@ class WorkerPool:
             )
         else:
             git_utils.push_branch(branch, worktree_path, timeout=job.timeout_s)
-        return JobResult(ok=True, value=True)
+        return JobResult(ok=True, value={"pushed": True, "head_sha": source_sha})
 
     def _detached_push_retry_result(self, job: GitJob, worktree_path: Path) -> JobResult | None:
         """Return the push-only retry result when a detached retry receipt exists."""
@@ -1695,7 +1697,7 @@ class WorkerPool:
             source_sha=source_sha,
             timeout=timeout,
         )
-        return result or JobResult(ok=True, value=True)
+        return result or JobResult(ok=True, value={"pushed": True, "head_sha": source_sha})
 
     def _publish_detached_head(
         self,

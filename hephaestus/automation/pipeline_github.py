@@ -258,8 +258,9 @@ class PipelineGitHub:
 
         Args:
             org: GitHub organization.
-            repo: Optional repository name. When set, every supported gh CLI
-                read/write is explicitly scoped with ``--repo org/repo``.
+            repo: Repository name for repository-scoped pipeline work. The
+                org-only form is retained solely for discovery setup; review
+                thread reads and all mutations require a concrete repository.
             dry_run: When True, every mutator logs-and-skips.
             repo_root: Repo checkout root anchoring the drive-green arming
                 state dir (defaults to the current working directory).
@@ -1040,12 +1041,19 @@ class PipelineGitHub:
             thread_id = str(receipt.get("id") or "")
             reply_id = receipt.get("implementation_reply_id")
             reply_body = receipt.get("implementation_reply_body")
+            implementation_head_sha = receipt.get("implementation_head_sha")
+            snapshot = self._thread_comment_snapshot(receipt)
             if (
                 not thread_id
                 or thread_id in by_id
                 or not isinstance(reply_id, str)
                 or not isinstance(reply_body, str)
-                or self._thread_comment_snapshot(receipt) is None
+                or not isinstance(implementation_head_sha, str)
+                or implementation_head_sha != reviewed_head_sha
+                or "<!-- hephaestus-implementation-reply:" not in reply_body
+                or snapshot is None
+                or snapshot[-1][0] != reply_id
+                or snapshot[-1][2] != reply_body
             ):
                 return ReviewerThreadReconciliationResult(blocked_thread_ids=candidate_ids)
             by_id[thread_id] = receipt
@@ -1302,7 +1310,7 @@ class PipelineGitHub:
         return pr_manager.pr_has_implementation_state_label(pr_number)
 
     def _unresolved_threads(self, pr_number: int) -> list[dict[str, Any]]:
-        """Fetch unresolved threads (repo-scoped or legacy).
+        """Fetch unresolved threads through the complete repo-scoped GraphQL view.
 
         Fail-closed: a fetch error (subprocess, JSON, or GraphQL error)
         propagates to the caller on BOTH paths (#1868). The pipeline
@@ -1311,9 +1319,9 @@ class PipelineGitHub:
         crashing the run, so failing closed here costs one item, not a
         silent GO on unreviewed open threads.
         """
-        if self._repo_slug is not None:
-            return self._repo_unresolved_threads(pr_number)
-        return github_api.gh_pr_list_unresolved_threads(pr_number, dry_run=False)
+        if self._repo_slug is None:
+            raise RuntimeError("review-thread operations require a repo-scoped PipelineGitHub")
+        return self._repo_unresolved_threads(pr_number)
 
     def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
         """Return complete current snapshots for every unresolved review thread."""

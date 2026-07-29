@@ -277,7 +277,9 @@ class ReviewPhase(StageMixin):
         pr_number: int | None,
         advise_findings: str,
     ) -> tuple[int, str | None, str | None]:
-        """Bind phase I/O to the pure review-loop state machine."""
+        """Reject the retired standalone review-loop coordinator."""
+        raise RuntimeError("review_phase_retired_use_pipeline")
+
         operations = ReviewLoopOperations(
             resolve_conflict=lambda: (
                 pr_number is None

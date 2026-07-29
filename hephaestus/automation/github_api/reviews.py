@@ -117,37 +117,6 @@ def gh_pr_inline_comment_index(
     return index
 
 
-def gh_pr_wont_fix_line_index(pr_number: int) -> set[ReviewCommentIndexKey]:
-    """Return ``(path, line[, side])`` keys of WON'T-FIX-dismissed review threads.
-
-    A thread is "won't-fix" when it is RESOLVED and any of its comments starts
-    with :data:`~hephaestus.automation.protocol.WONT_FIX_MARKER` — a human
-    dismissed the finding as intentional-by-design (#1163). The
-    reviewer dedup (:func:`_edit_or_keep_comments`) uses this to SUPPRESS a
-    re-raised finding on such a line, so an intentional-design comment cannot
-    stack duplicate threads across runs. Fails open: ``set()`` on any error.
-    """
-    from ..protocol import WONT_FIX_MARKER
-
-    keys: set[ReviewCommentIndexKey] = set()
-    for node in _api._fetch_pr_inline_review_thread_nodes(pr_number):
-        if not node.get("isResolved"):
-            continue
-        comment_nodes = node.get("comments", {}).get("nodes", [])
-        if not any(
-            str(c.get("body") or "").lstrip().startswith(WONT_FIX_MARKER)
-            for c in comment_nodes
-            if isinstance(c, dict)
-        ):
-            continue
-        path = node.get("path") or ""
-        line = node.get("line")
-        side = node.get("side") or "RIGHT"
-        keys.add((path, line, side))
-        keys.add((path, line))
-    return keys
-
-
 def gh_pr_update_review_comment(comment_node_id: str, body: str) -> None:
     """Replace a PR review comment's body via ``updatePullRequestReviewComment``.
 
@@ -375,8 +344,7 @@ def _edit_or_keep_comments(pr_number: int, comments: list[dict[str, Any]]) -> li
     raises falls back to posting that comment fresh.
     """
     editable_index = _api.gh_pr_inline_comment_index(pr_number)
-    wont_fix_lines = _api.gh_pr_wont_fix_line_index(pr_number)
-    if not editable_index and not wont_fix_lines:
+    if not editable_index:
         return comments
     fresh: list[dict[str, Any]] = []
     for c in comments:
@@ -384,20 +352,6 @@ def _edit_or_keep_comments(pr_number: int, comments: list[dict[str, Any]]) -> li
         line = c.get("line")
         side = c.get("side") or "RIGHT"
         body = c.get("body") or ""
-
-        # WON'T-FIX suppression (#1163): the finding's line was dismissed as
-        # intentional-by-design, so do NOT re-post it (that is the whole point of
-        # the dismissal — otherwise a re-raised finding stacks a new thread every
-        # run since the dismissed thread is resolved, not unresolved).
-        if (path, line, side) in wont_fix_lines or (path, line) in wont_fix_lines:
-            _api.logger.info(
-                "PR #%s: skipped re-raise of won't-fix (intentional-design) finding on %s:%s (%s)",
-                pr_number,
-                path,
-                line,
-                side,
-            )
-            continue
 
         editable = editable_index.get((path, line, side)) or editable_index.get((path, line))
         if editable is None:
@@ -589,8 +543,9 @@ def gh_pr_review_post(
     review = json.loads(result.stdout)
     # The REST payload returns both the numeric ``id`` and the GraphQL global
     # ``node_id``. Keep it so review receipts can identify only the threads
-    # created by *this* review (the #375 guarantee); any later thread resolution
-    # is a human action.
+    # created by *this* review (the #375 guarantee). The pipeline's fresh
+    # reviewer may later resolve a thread only after validating a host-read
+    # implementation reply on the exact reviewed head.
     review_node_id = review.get("node_id")
     if not review_node_id:
         _api.logger.warning("Posted PR review on #%s but no review node id returned", pr_number)

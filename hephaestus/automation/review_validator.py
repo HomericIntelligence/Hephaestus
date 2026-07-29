@@ -58,13 +58,13 @@ def _run_validation_session(
     review_agent: str,
     state_dir: Path,
     timeout: int = DEFAULT_AGENT_TIMEOUT,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Run the read-only validation sub-agent; return ``(unaddressed, wont_fix)``.
+) -> list[dict[str, Any]]:
+    """Run the read-only validation sub-agent; return unresolved feedback only.
 
     Mirrors :func:`pr_reviewer.run_pr_review_analysis`'s invocation shape (a
     fresh read-only reviewer session, ``allowed_tools="Read,Glob,Grep"``). On any
-    agent failure this returns ``([], [])`` — a failed validation must not block
-    the loop, fabricate re-opens, or fabricate won't-fix dismissals.
+    agent failure this returns ``[]`` — a failed validation must not block the
+    loop or fabricate re-opens.
     """
     prompt = get_review_validation_prompt(
         pr_number=pr_number,
@@ -117,19 +117,15 @@ def _run_validation_session(
             pr_number,
             exc,
         )
-        return [], []
+        return []
 
     unaddressed = parsed.get("unaddressed", [])
     if not isinstance(unaddressed, list):
         unaddressed = []
-    wont_fix = parsed.get("wont_fix", [])
-    if not isinstance(wont_fix, list):
-        wont_fix = []
-    # Keep only well-formed dict entries.
-    return (
-        [u for u in unaddressed if isinstance(u, dict)],
-        [w for w in wont_fix if isinstance(w, dict)],
-    )
+    # Keep only well-formed dict entries. There is no dismiss/"wont fix"
+    # outcome: a reviewer must either validate a fix or leave actionable
+    # feedback for the implementation agent.
+    return [u for u in unaddressed if isinstance(u, dict)]
 
 
 def validate_prior_comments_addressed(
@@ -229,7 +225,7 @@ def _run_validation_and_reconcile(
         ]
     )
 
-    unaddressed, wont_fix = _run_validation_session(
+    unaddressed = _run_validation_session(
         pr_number=pr_number,
         issue_number=issue_number,
         worktree_path=worktree_path,
@@ -241,5 +237,4 @@ def _run_validation_and_reconcile(
         timeout=timeout,
     )
 
-    del wont_fix
     return unaddressed

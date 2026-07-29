@@ -7,21 +7,20 @@ into two layers:
   (:func:`_parse_addressed_block`), its diagnostic helper
   (:func:`_log_address_parse_error`), the agent-invoking fix session
   (:func:`run_address_fix_session`). These are consumed directly by the
-  pipeline ``pr_review`` stage collaborators (``_review_phase`` /
-  ``review_thread_resolver``) and by the standalone
-  :class:`~hephaestus.automation.address_review.AddressReviewer`. Every symbol
-  here is reachable with mocked subprocess/agent seams, so the module carries
+  pipeline ``pr_review`` stage collaborators. The retired standalone
+  :class:`~hephaestus.automation.address_review.AddressReviewer` no longer
+  calls this core. Every symbol here is reachable with mocked subprocess/agent
+  seams, so the module carries
   direct unit coverage and is **not** on the ``[tool.coverage.run].omit``
   allowlist.
 
-* :mod:`hephaestus.automation.address_review` remains the standalone reviewer
-  around the live worktree/agent orchestration. It re-exports the cores below
-  (``name as name``) so long-pinned patch sites keep resolving.
+* :mod:`hephaestus.automation.address_review` is a retired compatibility
+  facade. It re-exports the cores below (``name as name``) so long-pinned
+  imports keep resolving without reviving standalone orchestration.
 
 The cores are intentionally free of the ``AddressReviewer``/``BaseReviewer``
 scaffolding: they take everything they need as explicit keyword arguments, so
-the in-loop implementer address step (Stage 2, #28) and the standalone reviewer
-share exactly one invocation body (DRY).
+the pipeline address stage can own the complete thread lifecycle explicitly.
 """
 
 from __future__ import annotations
@@ -61,9 +60,9 @@ _ADDRESS_PARSE_DEFAULT: dict[str, Any] = {"addressed": [], "replies": {}}
 def _parse_addressed_block(text: str) -> dict[str, Any]:
     """Extract the last ```json``` block as an ``{"addressed", "replies"}`` dict.
 
-    Trace-free parser shared by the in-loop address step (#28). The standalone
-    :class:`AddressReviewer` path wraps the same parser with a diagnostic
-    trace-file writer; callers that don't need the trace use this directly.
+    Trace-free parser shared by the pipeline address step. Callers that need
+    diagnostics provide a trace writer explicitly; the retired standalone
+    command does not invoke this function.
 
     Args:
         text: Claude's full response text.
