@@ -9,12 +9,6 @@ The phase modules split into three categories:
   ``ci_driver`` owns Session 3 (``AGENT_CI_DRIVER``): drive-green polls CI,
   runs its own fix sessions, and captures its own learnings on a transcript
   independent of the implementer.
-- **Per-iteration reviewer phases** (`plan_reviewer`, `pr_reviewer`) must run
-  as a *fresh* session every review-loop iteration so the reviewer never
-  inherits its own prior verdict (the #455/#468/#484 self-review bug). They
-  derive their per-iteration agent token via
-  ``reviewer_agent(AGENT_*_REVIEWER, iteration)`` rather than a static
-  ``agent=AGENT_*_REVIEWER`` kwarg, so the guard asserts that wiring instead.
 - **Continuation phases** (`address_review`) deliberately resume the
   implementer's session. Address-review applies code fixes to satisfy PR
   review feedback, continuing the same line of work the implementer started,
@@ -69,28 +63,6 @@ SELF_AGENT_PHASES: list[tuple[str, str, tuple[str, ...]]] = [
         "AGENT_CI_DRIVER",
         ("ci_fix_orchestrator.py", "post_merge_processor.py"),
     ),
-]
-
-
-# Per-iteration reviewer phases: a fresh session every review-loop iteration.
-#
-# Each entry is ``(module_file, base_agent_constant, in_loop_caller_files)``.
-# The reviewer derives its per-iteration token via
-# ``reviewer_agent(base, iteration)`` so successive iterations land on distinct
-# session UUIDs and the reviewer never reviews its own prior verdict.
-#
-# The PR reviewer carries its own in-loop callable (``review_pr_inline``)
-# inside ``pr_reviewer.py``, so it is scanned standalone. The plan reviewer's
-# per-iteration freshness is now owned by the queue-based pipeline stage
-# (``pipeline/stages/plan_review.py`` sets ``session_agent=AGENT_PLAN_REVIEWER``
-# and the worker layer applies the per-iteration session suffix, #1817), so the
-# legacy ``reviewer_agent(...)`` wrapper assertion no longer applies to it —
-# see ``tests/unit/automation/pipeline/stages/test_stage_plan_review.py``.
-PER_ITERATION_REVIEWER_PHASES: list[tuple[str, str, tuple[str, ...]]] = [
-    # The per-iteration reviewer_agent() wiring moved into pr_review_core.py in
-    # the #1823 omit-reduction split; pr_reviewer.py is now a thin CLI wrapper
-    # that re-exports the cores. Scan the core (its in-loop caller is empty).
-    ("pr_review_core.py", "AGENT_PR_REVIEWER", ()),
 ]
 
 
@@ -195,55 +167,6 @@ def test_continuation_phase_resumes_implementer_session(module_file: str) -> Non
 # ``pipeline/stages/plan_review.py`` (both asserted by their own stage tests).
 # ``planner.py`` is now a thin CLI wrapper with no ``agent=`` call sites, so the
 # former ``test_planner_module_uses_its_expected_agents`` guard was removed.
-
-
-@pytest.mark.parametrize("module_file, base_agent, in_loop_callers", PER_ITERATION_REVIEWER_PHASES)
-def test_per_iteration_reviewer_uses_reviewer_agent_wrapper(
-    module_file: str, base_agent: str, in_loop_callers: tuple[str, ...]
-) -> None:
-    """Each reviewer derives a FRESH session per iteration via reviewer_agent().
-
-    A per-iteration reviewer must NOT pin a single session across the review
-    loop — that is precisely the self-review bug (#455/#468/#484). Somewhere in
-    its call path (the reviewer module itself or its in-loop caller) the token
-    ``reviewer_agent(base, iteration)`` must be produced and forwarded into the
-    Claude session call. We scan module + in-loop callers together because the
-    wrapper lives in the planner loop for the plan reviewer but inside the
-    module for the PR reviewer.
-    """
-    src = _read_phase_sources(module_file, in_loop_callers)
-    assert re.search(r"from\s+\.session_naming\s+import\s+[^\n]*\breviewer_agent\b", src), (
-        f"{module_file} (and callers {in_loop_callers}) must import reviewer_agent "
-        f"from .session_naming"
-    )
-    assert re.search(rf"\b{base_agent}\b", src), (
-        f"{module_file} (and callers {in_loop_callers}) must reference {base_agent}"
-    )
-    assert re.search(rf"\breviewer_agent\(\s*{base_agent}\s*,", src), (
-        f"{module_file} (and callers {in_loop_callers}) must derive the per-iteration "
-        f"session via reviewer_agent({base_agent}, iteration) so each review round "
-        f"is a fresh session"
-    )
-
-
-@pytest.mark.parametrize("module_file, base_agent, in_loop_callers", PER_ITERATION_REVIEWER_PHASES)
-def test_per_iteration_reviewer_does_not_pin_foreign_agent(
-    module_file: str, base_agent: str, in_loop_callers: tuple[str, ...]
-) -> None:
-    """A reviewer module must not pin any non-reviewer AGENT_* via a bare agent=.
-
-    Scoped to the reviewer module itself (NOT its callers — the planner loop
-    legitimately uses AGENT_PLANNER/AGENT_ADVISE). The only bare
-    ``agent=AGENT_*`` constant the reviewer module may pin is its own base
-    (e.g. the standalone CLI default); it must never resume a foreign session
-    such as ``AGENT_IMPLEMENTER``.
-    """
-    src = (AUTOMATION_DIR / module_file).read_text()
-    found = set(re.findall(r"\bagent\s*=\s*(?:[A-Za-z_][A-Za-z0-9_]*\.)?(AGENT_[A-Z_]+)\b", src))
-    assert found <= {base_agent}, (
-        f"{module_file} pins unexpected AGENT_* constants via agent=: "
-        f"{found - {base_agent}}; a reviewer module may only pin its own base {base_agent}"
-    )
 
 
 def test_implementer_prepends_advise_context_for_all_agents() -> None:

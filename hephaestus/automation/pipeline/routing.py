@@ -80,8 +80,8 @@ class Route:
 # The rows below transcribe docs/architecture.md §6 "ROUTES
 # table" exactly: named fail-route keys are the doc's reason vocabulary, "*"
 # is the doc's default target. Budget provenance:
-#   plan_review_iter=3, pr_review_iter=3  <- _review_phase.py MAX_REVIEW_ITERATIONS (=3)
-#   pr_review_hard=6                       <- _review_phase.py MAX_REVIEW_ITERATIONS_HARD_CAP (=3*2)
+#   plan_review_iter=3, pr_review_iter=3, pr_review_hard=6
+#                                             <- architecture doc stage sections
 #   clone=2, plan=2, plan_cycles=2,
 #   implement=2, test_fix=1                <- architecture doc stage sections
 #   merge=DEFAULT_DRIVE_GREEN_LOOPS        <- loop_runner.py LoopConfig.drive_green_loops

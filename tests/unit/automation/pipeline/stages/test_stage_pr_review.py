@@ -25,8 +25,13 @@ from hephaestus.automation.pipeline.stages.pr_review import (
     REVIEW_ERROR_RETRY_CAP,
     PrReviewStage,
     _address_replies,
+    _implementation_reply_handoff,
+    _is_postable_finding,
     _normalize_remediation_threads,
+    _parse_validation_result,
+    _pr_is_current_open_head,
     _reviewer_thread_decisions,
+    _validation_receipt_fingerprints,
     _validation_thread_snapshots,
 )
 from hephaestus.automation.pipeline.work_item import ItemKind
@@ -1297,6 +1302,176 @@ class TestReviewThreadLifecycle:
             "thread-1": "Fixed the first concern.",
             "thread-2": "Fixed the second concern.",
         }
+
+    @pytest.mark.parametrize(
+        ("result", "threads"),
+        [
+            (None, []),
+            ({"addressed": "thread-1", "replies": {}}, []),
+            ({"addressed": [], "replies": {}}, ["not-a-thread"]),
+            (
+                {"addressed": ["thread-1"], "replies": {"thread-1": "fixed"}},
+                [{"id": ""}],
+            ),
+            (
+                {"addressed": ["thread-1"], "replies": {"thread-1": "fixed"}},
+                [{"id": "thread-1"}, {"thread_id": "thread-1"}],
+            ),
+            (
+                {"addressed": [None], "replies": {"thread-1": "fixed"}},
+                [{"id": "thread-1"}],
+            ),
+            (
+                {
+                    "addressed": ["thread-1", "thread-1"],
+                    "replies": {"thread-1": "fixed"},
+                },
+                [{"id": "thread-1"}],
+            ),
+            (
+                {"addressed": ["thread-1"], "replies": {"thread-1": "   "}},
+                [{"id": "thread-1"}],
+            ),
+        ],
+    )
+    def test_implementation_reply_mapping_fails_closed_for_invalid_input(
+        self, result: object, threads: list[object]
+    ) -> None:
+        """Malformed implementation handoffs cannot skip or forge a reply."""
+        assert _address_replies(result, threads) is None  # type: ignore[arg-type]
+
+    def test_implementation_reply_handoff_is_immutable_and_well_formed(self) -> None:
+        """The retry journal preserves only a valid, copied host snapshot."""
+        thread = self._thread("thread-1", 3, "first")
+        handoff = _implementation_reply_handoff(
+            "a" * 40,
+            [thread],
+            {"thread-1": "  Fixed the first concern.  "},
+        )
+
+        assert handoff == {
+            "head_sha": "a" * 40,
+            "threads": [thread],
+            "replies": {"thread-1": "Fixed the first concern."},
+        }
+        thread["body"] = "mutated after the handoff"
+        assert handoff["threads"][0]["body"] != thread["body"]
+        assert (
+            _implementation_reply_handoff("not-a-sha", [self._thread("thread-1", 3, "x")], {})
+            is None
+        )
+        assert _implementation_reply_handoff("a" * 40, ["not-a-thread"], {}) is None
+        assert _implementation_reply_handoff("a" * 40, [{"id": ""}], {"": "fixed"}) is None
+
+    def test_validation_receipts_require_one_complete_immutable_thread_snapshot(self) -> None:
+        """Validation binds a thread decision to its exact host-read reply."""
+        reply = "Fixed the first concern."
+        thread = self._thread("thread-1", 3, "first")
+        receipt = {
+            **thread,
+            "comments": [
+                *thread["comments"],
+                {"id": "reply-1", "body": reply, "author": "hephaestus[bot]"},
+            ],
+            "implementation_reply_id": "reply-1",
+            "implementation_reply_body": reply,
+            "implementation_head_sha": "a" * 40,
+        }
+
+        fingerprints = _validation_receipt_fingerprints([receipt])
+        assert fingerprints is not None
+        assert set(fingerprints) == {"thread-1"}
+        assert len(fingerprints["thread-1"]) == 64
+        assert _validation_receipt_fingerprints([receipt, receipt]) is None
+        assert _validation_receipt_fingerprints([{**receipt, "comments": []}]) is None
+        assert (
+            _validation_receipt_fingerprints(
+                [{**receipt, "comments": [{"id": "reply-1", "body": 7}]}]
+            )
+            is None
+        )
+        assert (
+            _validation_receipt_fingerprints(
+                [{**receipt, "comments": [*receipt["comments"], dict(receipt["comments"][-1])]}]
+            )
+            is None
+        )
+
+    def test_validation_snapshot_and_head_guard_fail_closed_on_drift(self) -> None:
+        """Only an open, unarmed exact head and matching receipt enter validation."""
+        receipt = {
+            "id": "thread-1",
+            "implementation_reply_body": "fixed",
+            "implementation_reply_id": "reply-1",
+        }
+        assert _validation_thread_snapshots([{"id": "thread-1"}], [receipt]) == [
+            {
+                "id": "thread-1",
+                "implementation_reply_body": "fixed",
+                "implementation_reply_submitted": True,
+            }
+        ]
+        assert _validation_thread_snapshots([{"id": "thread-1"}], [receipt, receipt]) is None
+        assert _validation_thread_snapshots([{"id": "thread-1"}, {"id": "thread-1"}], []) is None
+        assert _validation_thread_snapshots([{"id": "thread-1"}], [{"id": "thread-2"}]) is None
+        state = {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None}
+        assert _pr_is_current_open_head(state, "a" * 40)
+        assert not _pr_is_current_open_head({**state, "autoMergeRequest": {}}, "a" * 40)
+        assert not _pr_is_current_open_head({**state, "headRefOid": "b" * 40}, "a" * 40)
+
+    def test_validation_parser_uses_only_a_complete_final_json_verdict(self) -> None:
+        """Prose and malformed JSON cannot become reviewer authorization."""
+        assert _parse_validation_result(None) is None
+        assert _parse_validation_result("not a verdict") is None
+        assert _parse_validation_result("```json\n[]\n```") is None
+        assert _parse_validation_result(
+            'earlier ```json\n{"resolved": ["old"], "unaddressed": []}\n```\n'
+            'final ```json\n{"resolved": ["thread-1"], "unaddressed": []}\n```'
+        ) == {"resolved": ["thread-1"], "unaddressed": []}
+
+    @pytest.mark.parametrize(
+        ("receipts", "verdict"),
+        [
+            ([{"id": "thread-1"}], None),
+            ([{"id": "thread-1"}], {"resolved": "thread-1", "unaddressed": []}),
+            ([{}], {"resolved": [], "unaddressed": []}),
+            (
+                [{"id": "thread-1"}, {"id": "thread-1"}],
+                {"resolved": [], "unaddressed": []},
+            ),
+            ([{"id": "thread-1"}], {"resolved": [7], "unaddressed": []}),
+            (
+                [{"id": "thread-1"}],
+                {"resolved": ["thread-1", "thread-1"], "unaddressed": []},
+            ),
+            ([{"id": "thread-1"}], {"resolved": [], "unaddressed": ["not-an-object"]}),
+            (
+                [{"id": "thread-1"}],
+                {"resolved": [], "unaddressed": [{"thread_id": "thread-1", "detail": ""}]},
+            ),
+        ],
+    )
+    def test_reviewer_decisions_fail_closed_for_malformed_or_ambiguous_verdicts(
+        self, receipts: list[dict[str, object]], verdict: object
+    ) -> None:
+        """Every receipt must have one well-formed, non-overlapping decision."""
+        assert _reviewer_thread_decisions(receipts, verdict) is None
+
+    def test_postable_audit_finding_requires_a_real_inline_location_and_body(self) -> None:
+        """Only structurally valid new audit findings can be published."""
+        valid = {
+            "path": "hephaestus/example.py",
+            "line": 3,
+            "side": "RIGHT",
+            "severity": "major",
+            "body": "Handle the null value before reading it.",
+        }
+        assert _is_postable_finding(valid)
+        assert not _is_postable_finding({**valid, "path": ""})
+        assert not _is_postable_finding({**valid, "line": True})
+        assert not _is_postable_finding({**valid, "side": "LEFT"})
+        assert not _is_postable_finding({**valid, "severity": "informational"})
+        assert not _is_postable_finding({**valid, "body": "<!-- hephaestus-severity: major -->"})
 
     def test_reviewer_feedback_is_preserved_for_the_next_implementer(self) -> None:
         """A rejection reply is present in the next remediation prompt payload."""
