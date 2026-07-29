@@ -23,6 +23,7 @@ from hephaestus.automation.pipeline.stages.pr_review import (
     REVIEW_CHECKOUT_WAIT,
     REVIEW_ERROR_RETRY_CAP,
     PrReviewStage,
+    _address_replies,
     _normalize_remediation_threads,
     _reviewer_thread_decisions,
     _validation_thread_snapshots,
@@ -616,7 +617,18 @@ class TestPrReviewStageStep:
         item.state = "DIFFICULTY_WAIT"
         stage.on_job_done(item, JobResult(ok=True, value="critical"), ctx)
         item.state = "ADDRESS_WAIT"
-        stage.on_job_done(item, JobResult(ok=True, value="addressed"), ctx)
+        thread_id = item.payload["remediation_threads"][0]["thread_id"]
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value={
+                    "addressed": [thread_id],
+                    "replies": {thread_id: "Fixed the review race."},
+                },
+            ),
+            ctx,
+        )
         item.state = "PUSH_WAIT"
         stage.on_job_done(
             item,
@@ -626,7 +638,10 @@ class TestPrReviewStageStep:
         item.state = "EVAL"
 
         assert stage.step(item, ctx) == Continue(next_state="COMPACT_REVIEWER_WAIT")
-        assert github.mutation_log == [("gh_pr_review_post", (1001, "COMMENT"))]
+        assert github.mutation_log == [
+            ("gh_pr_review_post", (1001, "COMMENT")),
+            ("post_implementation_thread_replies", (1001, (thread_id,))),
+        ]
         assert events == []
 
     def test_review_wait_forwards_nitpick_config(self, make_ctx: Any, make_work_item: Any) -> None:
@@ -1251,12 +1266,36 @@ class TestReviewThreadLifecycle:
         """A missing decision or legacy dismissal bucket cannot resolve a thread."""
         receipt = {"id": "thread-1"}
 
-        assert _reviewer_thread_decisions(
-            [receipt], {"resolved": [], "unaddressed": []}
-        ) is None
-        assert _reviewer_thread_decisions(
-            [receipt], {"unaddressed": [], "wont_fix": []}
-        ) is None
+        assert _reviewer_thread_decisions([receipt], {"resolved": [], "unaddressed": []}) is None
+        assert _reviewer_thread_decisions([receipt], {"unaddressed": [], "wont_fix": []}) is None
+
+    def test_implementation_replies_require_an_exact_all_thread_mapping(self) -> None:
+        """An address agent cannot complete a pass by silently omitting a thread."""
+        threads = [self._thread("thread-1", 3, "first"), self._thread("thread-2", 4, "second")]
+
+        assert (
+            _address_replies(
+                {
+                    "addressed": ["thread-1"],
+                    "replies": {"thread-1": "Fixed the first concern."},
+                },
+                threads,
+            )
+            is None
+        )
+        assert _address_replies(
+            {
+                "addressed": ["thread-1", "thread-2"],
+                "replies": {
+                    "thread-1": "Fixed the first concern.",
+                    "thread-2": "Fixed the second concern.",
+                },
+            },
+            threads,
+        ) == {
+            "thread-1": "Fixed the first concern.",
+            "thread-2": "Fixed the second concern.",
+        }
 
     def test_reviewer_feedback_is_preserved_for_the_next_implementer(self) -> None:
         """A rejection reply is present in the next remediation prompt payload."""
@@ -1289,7 +1328,7 @@ class TestReviewThreadLifecycle:
                 "comments": [
                     *thread["comments"],
                     {
-                        "id": f"reply-{thread['id']}",
+                        "id": f"implementation-reply-{thread['id']}",
                         "author": "hephaestus[bot]",
                         "body": "fixed",
                     },
@@ -1299,6 +1338,10 @@ class TestReviewThreadLifecycle:
         ]
 
         class PartialGitHub(FakeStageGitHub):
+            def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+                del pr_number
+                return [dict(thread) for thread in receipts]
+
             def reconcile_reviewer_validated_threads(self, *args: Any, **kwargs: Any) -> Any:
                 del args, kwargs
                 from hephaestus.automation.pipeline.stages.base import (
@@ -1314,7 +1357,6 @@ class TestReviewThreadLifecycle:
         item.payload.update(
             {
                 "reviewed_pr_head_sha": "a" * 40,
-                "pending_thread_reply_receipts": receipts,
                 "validation_result": {
                     "resolved": ["live-thread-1001-0", "live-thread-1001-1"],
                     "unaddressed": [],
@@ -1327,7 +1369,6 @@ class TestReviewThreadLifecycle:
         result = PrReviewStage().step(item, make_ctx(github=PartialGitHub(unresolved=[(2, 0)])))
 
         assert result == Continue(next_state="DIFFICULTY_WAIT")
-        assert "pending_thread_reply_receipts" not in item.payload
         assert item.payload.get("review_audit_failure") is not True
 
     def test_unaddressed_external_bot_thread_routes_to_remediation(
@@ -3253,8 +3294,10 @@ class TestFullWalks:
         # per round. Round 1 has 2 open blocking threads (NOGO address leg);
         # round 2 is clean (GO: skips difficulty/address, then advances).
         github = FakeStageGitHub(
-            unresolved=[(2, 0), (0, 0)],
+            unresolved=[(2, 0), (2, 0), (2, 0), (2, 0), (2, 0), (0, 0), (0, 0)],
             by_severity=[
+                (2, 0, 0),
+                (2, 0, 0),
                 (2, 0, 0),
                 (2, 0, 0),
                 (2, 0, 0),
@@ -3275,15 +3318,24 @@ class TestFullWalks:
             JobResult(ok=True, value="tier list"),  # difficulty
             JobResult(
                 ok=True,
-                value='{"addressed": ["live-thread-1001-0", "live-thread-1001-1"], '
-                '"replies": {"live-thread-1001-0": "Fixed it.", '
-                '"live-thread-1001-1": "Fixed it."}}',
+                value={
+                    "addressed": ["live-thread-1001-0", "live-thread-1001-1"],
+                    "replies": {
+                        "live-thread-1001-0": "Fixed it.",
+                        "live-thread-1001-1": "Fixed it.",
+                    },
+                },
             ),  # address
             JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),  # push
             JobResult(ok=True, value=True),  # compact reviewer before round 2
             JobResult(ok=True, value=True),  # compact writer before round 2
             JobResult(ok=True, value=_valid_audit()),  # review round 2
-            JobResult(ok=True, value='{"unaddressed": [], "wont_fix": []}'),  # validate round 2
+            JobResult(
+                ok=True,
+                value=(
+                    '{"resolved": ["live-thread-1001-0", "live-thread-1001-1"], "unaddressed": []}'
+                ),
+            ),  # validate round 2
         )
 
         outcome = _drive(stage, item, ctx, pool)

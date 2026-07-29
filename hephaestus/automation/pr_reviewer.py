@@ -15,12 +15,11 @@ The per-PR review orchestration the legacy ``PRReviewer`` used to own
 (discover → worktree → gather-context → analyze → post inline threads → GO/NOGO)
 now lives entirely in ``pipeline/stages/pr_review.py``. The pure/parse/context
 review cores it shares with the in-loop implementer review step (Stage 2, #28)
-live in :mod:`hephaestus.automation.pr_review_core` — this module re-exports
-them (``name as name``) so long-pinned patch sites and
-``from hephaestus.automation.pr_reviewer import review_pr_inline`` call sites
-keep resolving. :class:`PRReviewer` is retained as an importable placeholder for
-the package's public API surface (:mod:`hephaestus.automation`); it no longer
-carries orchestration.
+live in :mod:`hephaestus.automation.pr_review_core`. This module preserves
+their imports for compatibility; its historical direct review-thread mutator
+now fails closed. :class:`PRReviewer` is retained as an importable placeholder
+for the package's public API surface (:mod:`hephaestus.automation`); it no
+longer carries orchestration.
 
 Usage:
     hephaestus-review-prs --issues N ... [--dry-run] [--max-workers N] [--no-ui]
@@ -47,10 +46,9 @@ from .pipeline.routing import PipelineScope, StageName
 
 # The pure/parse/context review cores live in ``pr_review_core`` (unit-covered,
 # off the coverage omit-list). They are re-exported here (``name as name``) so
-# the long-pinned patch sites — ``hephaestus.automation.pr_reviewer.review_pr_inline``
-# / ``.run_pr_review_analysis`` / ``.gather_impl_review_context`` — and the
-# ``from hephaestus.automation.pr_reviewer import ...`` call sites keep resolving
-# after the #1823 split.
+# the long-pinned import sites — ``hephaestus.automation.pr_reviewer.review_pr_inline``
+# / ``.run_pr_review_analysis`` / ``.gather_impl_review_context`` — keep resolving
+# after the #1823 split. ``review_pr_inline`` is deliberately fail-closed.
 from .pr_review_core import (
     gather_impl_review_context as gather_impl_review_context,
     review_pr_inline as review_pr_inline,

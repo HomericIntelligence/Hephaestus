@@ -1,14 +1,9 @@
 """PR-review stage: review, validate, post, address, and evaluate.
 
-Re-houses the legacy implementation-review semantics now isolated in
-``_review_loop.ReviewLoopCoordinator`` and
-``_review_conflict_resolver.ReviewConflictResolver``. The queue stage remains
-the live implementation of the review/validate/address state machine. Its
-collaborators include
-(``pr_reviewer.review_pr_inline``, ``address_review
-.run_address_fix_session``) as a pipeline stage
-(docs/architecture.md §5.5 "pr_review" is the binding
-contract):
+The queue stage is the sole live implementation of the review/validate/address
+state machine (docs/architecture.md §5.5 "pr_review" is the binding contract).
+Retired direct helpers in ``pr_reviewer`` and ``address_review`` fail closed
+and are not collaborators of this stage:
 
 - States: ENTER -> REVIEW_WAIT -> VALIDATE_WAIT -> POST -> DIFFICULTY_WAIT
   -> ADDRESS_WAIT -> PUSH_WAIT -> EVAL -> COMPACT_REVIEWER_WAIT
@@ -474,49 +469,45 @@ def _normalize_remediation_threads(
     return normalized
 
 
-def _address_replies(address_result: Any, threads: list[dict[str, Any]]) -> dict[str, str]:
-    """Return only host-scoped implementation replies from one agent result."""
+def _address_replies(address_result: Any, threads: list[dict[str, Any]]) -> dict[str, str] | None:
+    """Validate one implementation reply for every supplied open thread.
+
+    An address pass is not complete when an agent silently omits a thread.
+    The host therefore accepts only an exact, duplicate-free mapping of every
+    snapshot ID to a bounded reply.  The agent may not resolve a thread; the
+    returned prose is posted by the host only after its fix commit is pushed.
+    """
     if not isinstance(address_result, dict):
-        return {}
+        return None
     addressed = address_result.get("addressed")
     replies = address_result.get("replies")
     if not isinstance(addressed, list) or not isinstance(replies, dict):
-        return {}
-    known_ids = {
-        str(thread.get("thread_id") or thread.get("id") or "").strip()
-        for thread in threads
-        if isinstance(thread, dict)
-    }
-    claimed = {str(thread_id).strip() for thread_id in addressed if str(thread_id).strip()}
-    return {
-        thread_id: reply.strip()
-        for thread_id in claimed & known_ids
-        if isinstance((reply := replies.get(thread_id)), str) and 0 < len(reply.strip()) <= 4_000
-    }
-
-
-def _pending_thread_reply_receipts(item: WorkItem) -> list[dict[str, Any]] | None:
-    """Load the process-local implementation-reply receipts for validation."""
-    raw = item.payload.get("pending_thread_reply_receipts", [])
-    if not isinstance(raw, list):
         return None
-    receipts: list[dict[str, Any]] = []
-    ids: set[str] = set()
-    for receipt in raw:
-        if not isinstance(receipt, dict):
+    known_ids: list[str] = []
+    for thread in threads:
+        if not isinstance(thread, dict):
             return None
-        thread_id = _durable_thread_id(receipt)
-        if (
-            thread_id is None
-            or thread_id in ids
-            or not isinstance(receipt.get("implementation_reply_id"), str)
-            or not isinstance(receipt.get("implementation_reply_body"), str)
-            or not isinstance(receipt.get("comments"), list)
-        ):
+        thread_id = str(thread.get("thread_id") or thread.get("id") or "").strip()
+        if not thread_id or thread_id in known_ids:
             return None
-        ids.add(thread_id)
-        receipts.append(dict(receipt))
-    return receipts
+        known_ids.append(thread_id)
+    claimed_ids: list[str] = []
+    for thread_id in addressed:
+        if not isinstance(thread_id, str) or not thread_id.strip():
+            return None
+        normalized_id = thread_id.strip()
+        if normalized_id in claimed_ids:
+            return None
+        claimed_ids.append(normalized_id)
+    if set(claimed_ids) != set(known_ids) or set(replies) != set(known_ids):
+        return None
+    normalized_replies: dict[str, str] = {}
+    for thread_id in known_ids:
+        reply = replies.get(thread_id)
+        if not isinstance(reply, str) or not 0 < len(reply.strip()) <= 4_000:
+            return None
+        normalized_replies[thread_id] = reply.strip()
+    return normalized_replies
 
 
 def _validation_thread_snapshots(
@@ -525,10 +516,10 @@ def _validation_thread_snapshots(
     """Decorate every open thread for reviewer validation.
 
     The reviewer always receives the full open-thread snapshot.  Only the
-    subset with a host-read implementation reply is eligible for a resolve or
-    reviewer-feedback mutation in this pass; the remainder stays open for the
-    implementation agent.  This keeps the model informed without granting it
-    authority to mutate arbitrary thread IDs.
+    subset with a host-verified implementation reply on the reviewed head is
+    eligible for a resolve or reviewer-feedback mutation in this pass; the
+    remainder stays open for the implementation agent.  Receipts come from a
+    fresh GitHub read, rather than this process's former work-item payload.
     """
     receipt_by_id: dict[str, dict[str, Any]] = {}
     for receipt in receipts:
@@ -900,15 +891,21 @@ class PrReviewStage(Stage):
             # address leg — EVAL's missing-verdict ERROR path handles it
             # without burning a round.
             return Continue(next_state=EVAL)
-        receipts = _pending_thread_reply_receipts(item)
-        if receipts is None:
-            item.payload["review_audit_failure"] = True
-            return Continue(next_state=EVAL)
+        reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
         try:
             live_threads = ctx.github.list_unresolved_review_threads(item.pr)
+            receipts = (
+                ctx.github.reviewer_validation_receipts(
+                    item.pr,
+                    reviewed_head_sha=reviewed_head,
+                    threads=live_threads,
+                )
+                if is_full_commit_sha(reviewed_head)
+                else []
+            )
         except Exception as error:
             logger.warning(
-                "pr_review:%s: could not fetch open review threads for validation (%s)",
+                "pr_review:%s: could not fetch validation receipts (%s)",
                 item.issue,
                 type(error).__name__,
             )
@@ -1089,7 +1086,14 @@ class PrReviewStage(Stage):
                 snapshots = item.payload.get("remediation_thread_snapshots")
                 thread_snapshots = snapshots if isinstance(snapshots, list) else []
                 replies = _address_replies(item.payload.get("address_output"), threads)
-                if replies and item.pr is not None:
+                reply_contract_failed = bool(threads) and replies is None
+                if reply_contract_failed:
+                    logger.warning(
+                        "pr_review:%s: implementation did not return one reply for every open "
+                        "thread; refusing to accept a partial address pass",
+                        item.issue,
+                    )
+                elif replies and item.pr is not None:
                     try:
                         # The worker returns the local commit it actually
                         # published.  A later arbitrary remote push must not
@@ -1114,23 +1118,30 @@ class PrReviewStage(Stage):
                         replied = set(getattr(reply_result, "replied_thread_ids", ()))
                         blocked = set(getattr(reply_result, "blocked_thread_ids", ()))
                         receipts = list(getattr(reply_result, "receipts", ()))
-                        if (
-                            replied == set(replies)
-                            and not blocked
-                            and len(receipts) == len(replied)
-                        ):
-                            item.payload["pending_thread_reply_receipts"] = receipts
-                        else:
+                        if replied != set(replies) or len(receipts) != len(replied):
                             logger.warning(
-                                "pr_review:%s: implementation replies were not fully revalidated; "
-                                "leaving affected threads open",
+                                "pr_review:%s: some implementation replies could not be verified; "
+                                "the next reviewer pass will derive every valid live receipt",
                                 item.issue,
+                            )
+                        if blocked:
+                            logger.info(
+                                "pr_review:%s: %d changed thread(s) remain open for a new "
+                                "implementation pass",
+                                item.issue,
+                                len(blocked),
                             )
                 # The old audit and checkout receipt describe the pre-push
                 # head. Discard the entire round before EVAL can bind the new
                 # head to any implementation-state transition.
                 _clear_round_review_state(item)
                 item.payload["review_refresh_required"] = True
+                if reply_contract_failed:
+                    # The code commit may already be durable, but accepting an
+                    # incomplete agent transcript would let one supplied open
+                    # thread disappear from the implementation handoff. Route
+                    # back through the normal bounded implementation recovery.
+                    item.payload["address_error"] = True
             else:
                 # Preserve the existing no-commit gate while requiring it to
                 # re-confirm the unchanged remote head before a negative write.
@@ -1285,16 +1296,31 @@ class PrReviewStage(Stage):
         threads = raw_threads
         item.payload["raw_review_threads"] = raw_threads
 
-        pending_receipts = _pending_thread_reply_receipts(item)
-        if pending_receipts is None:
+        reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
+        try:
+            live_for_reconciliation = ctx.github.list_unresolved_review_threads(item.pr)
+            validation_receipts = (
+                ctx.github.reviewer_validation_receipts(
+                    item.pr,
+                    reviewed_head_sha=reviewed_head,
+                    threads=live_for_reconciliation,
+                )
+                if is_full_commit_sha(reviewed_head)
+                else []
+            )
+        except Exception as error:
+            logger.warning(
+                "pr_review:%s: could not refresh reviewer validation receipts (%s)",
+                item.issue,
+                type(error).__name__,
+            )
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
-        if pending_receipts:
+        if validation_receipts:
             decisions = _reviewer_thread_decisions(
-                pending_receipts, item.payload.get("validation_result")
+                validation_receipts, item.payload.get("validation_result")
             )
-            reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
-            if decisions is None or not reviewed_head:
+            if decisions is None:
                 item.payload["review_audit_failure"] = True
                 return Continue(next_state=EVAL)
             resolved_ids, feedback = decisions
@@ -1302,7 +1328,7 @@ class PrReviewStage(Stage):
                 reconciliation = ctx.github.reconcile_reviewer_validated_threads(
                     item.pr,
                     reviewed_head_sha=reviewed_head,
-                    receipts=pending_receipts,
+                    receipts=validation_receipts,
                     resolved_thread_ids=resolved_ids,
                     feedback=feedback,
                 )
@@ -1314,13 +1340,25 @@ class PrReviewStage(Stage):
                 )
                 item.payload["review_audit_failure"] = True
                 return Continue(next_state=EVAL)
-            expected_ids = {_durable_thread_id(receipt) for receipt in pending_receipts}
+            expected_ids = {_durable_thread_id(receipt) for receipt in validation_receipts}
             completed_ids = set(reconciliation.resolved_thread_ids) | set(
                 reconciliation.feedback_thread_ids
             )
-            if None in expected_ids or not completed_ids.issubset(expected_ids):
+            restoration_failed = set(reconciliation.restoration_failed_thread_ids)
+            if (
+                None in expected_ids
+                or not completed_ids.issubset(expected_ids)
+                or not restoration_failed.issubset(expected_ids)
+            ):
                 item.payload["review_audit_failure"] = True
                 return Continue(next_state=EVAL)
+            if restoration_failed:
+                logger.error(
+                    "pr_review:%s: could not restore thread(s) after a resolution race: %s",
+                    item.issue,
+                    ", ".join(sorted(restoration_failed)),
+                )
+                return StageOutcome(Disposition.FINISH_FAIL, "review_thread_restore_failed")
             # A concurrent mutation can make one receipt ineligible after a
             # previous receipt was safely resolved or received feedback.  Do
             # not retain that stale, partially consumed receipt set: doing so
@@ -1333,8 +1371,6 @@ class PrReviewStage(Stage):
                     "pr_review:%s: reviewer reconciliation was partial; refreshing live threads",
                     item.issue,
                 )
-            item.payload.pop("pending_thread_reply_receipts", None)
-
         try:
             live_before_post = ctx.github.list_unresolved_review_threads(item.pr)
         except Exception as error:

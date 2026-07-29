@@ -537,7 +537,7 @@ class PipelineGitHub:
             "        pageInfo{ hasNextPage endCursor }"
             "        nodes{ id isResolved path line side:diffSide "
             "comments(first:20){ pageInfo{ hasNextPage } "
-            "nodes{ id body author{ login __typename } "
+            "nodes{ id body viewerDidAuthor author{ login __typename } "
             "pullRequestReview{ id body commit{ oid } } } } }"
             "      }"
             "    }"
@@ -567,7 +567,7 @@ class PipelineGitHub:
                     )
                 comment_nodes = comment_connection.get("nodes", [])
                 first_comment = comment_nodes[0] if comment_nodes else {}
-                comments: list[dict[str, str]] = []
+                comments: list[dict[str, Any]] = []
                 authors: list[str] = []
                 review_body = ""
                 review_commit_sha = ""
@@ -595,6 +595,7 @@ class PipelineGitHub:
                             "body": comment.get("body") or "",
                             "author": author,
                             "author_type": author_type,
+                            "viewer_did_author": bool(comment.get("viewerDidAuthor")),
                             "review_id": review_id or "",
                         }
                     )
@@ -806,7 +807,9 @@ class PipelineGitHub:
     def _pr_is_current_open_head(state: dict[str, Any] | None, expected_head_sha: str) -> bool:
         """Return whether a fresh PR state is open, unarmed, and on the reviewed head."""
         return bool(
-            isinstance(state, dict)
+            isinstance(expected_head_sha, str)
+            and re.fullmatch(r"[0-9a-f]{40}", expected_head_sha)
+            and isinstance(state, dict)
             and str(state.get("state") or "").upper() == "OPEN"
             and state.get("autoMergeRequest") is None
             and str(state.get("headRefOid") or "") == expected_head_sha
@@ -889,6 +892,65 @@ class PipelineGitHub:
         marker = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
         return f"{reply}\n\n<!-- hephaestus-implementation-reply:{marker} -->"
 
+    def reviewer_validation_receipts(
+        self,
+        pr_number: int,
+        *,
+        reviewed_head_sha: str,
+        threads: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Derive current implementation receipts from complete live threads.
+
+        The marker is recomputed from the exact reply body, thread id, PR, and
+        reviewed SHA.  This makes the GitHub snapshot, rather than ephemeral
+        work-item memory, the authority for the reviewer handoff after a
+        coordinator restart.
+        """
+        if not self._pr_is_current_open_head(self.gh_pr_state(pr_number), reviewed_head_sha):
+            raise RuntimeError("reviewed PR head is no longer current")
+        receipts: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for thread in threads:
+            if not isinstance(thread, dict):
+                raise RuntimeError("malformed live review thread")
+            thread_id = thread.get("id")
+            snapshot = self._thread_comment_snapshot(thread)
+            if (
+                not isinstance(thread_id, str)
+                or not thread_id
+                or thread_id in seen
+                or snapshot is None
+            ):
+                raise RuntimeError("malformed live review-thread snapshot")
+            seen.add(thread_id)
+            reply_id, _author, reply_body = snapshot[-1]
+            final_comment = thread.get("comments", [])[-1]
+            if not isinstance(final_comment, dict) or not final_comment.get("viewer_did_author"):
+                continue
+            marker_match = re.fullmatch(
+                r"(?s)(.*)\n\n<!-- hephaestus-implementation-reply:[0-9a-f]{24} -->",
+                reply_body,
+            )
+            if marker_match is None:
+                continue
+            reply = self._safe_thread_reply(marker_match.group(1))
+            if reply is None:
+                continue
+            expected_body = self._implementation_thread_reply_body(
+                pr_number, reviewed_head_sha, thread_id, reply
+            )
+            if reply_body != expected_body:
+                continue
+            receipts.append(
+                {
+                    **thread,
+                    "implementation_reply_id": reply_id,
+                    "implementation_reply_body": reply_body,
+                    "implementation_head_sha": reviewed_head_sha,
+                }
+            )
+        return receipts
+
     def _reviewer_thread_feedback_body(
         self, pr_number: int, head_sha: str, thread_id: str, feedback: str
     ) -> str:
@@ -920,6 +982,40 @@ class PipelineGitHub:
             return None
         return str(comment["id"])
 
+    def _restore_resolved_thread(self, pr_number: int, thread_id: str) -> bool:
+        """Compensate a resolve that raced a reviewed-head change.
+
+        GitHub does not expose a SHA-conditional review-thread resolution
+        mutation.  If the head changes between our pre-resolve fact check and
+        the mutation, immediately restore the thread and prove it is open
+        again.  A failed restoration is surfaced as terminally unsafe rather
+        than being mistaken for a successful review decision.
+        """
+        query = (
+            "mutation($threadId:ID!,$clientMutationId:String!){"
+            "unresolveReviewThread(input:{threadId:$threadId,clientMutationId:$clientMutationId})"
+            "{thread{id isResolved}}}"
+        )
+        data = self._graphql(
+            query,
+            threadId=thread_id,
+            clientMutationId=hashlib.sha256(
+                f"{pr_number}:{thread_id}:restore".encode()
+            ).hexdigest(),
+        )
+        thread = data.get("data", {}).get("unresolveReviewThread", {}).get("thread", {})
+        if (
+            not isinstance(thread, dict)
+            or thread.get("id") != thread_id
+            or thread.get("isResolved") is not False
+        ):
+            return False
+        return any(
+            str(current.get("id")) == thread_id
+            for current in self._unresolved_threads(pr_number)
+            if isinstance(current, dict)
+        )
+
     def post_implementation_thread_replies(  # noqa: C901
         self,
         pr_number: int,
@@ -939,7 +1035,7 @@ class PipelineGitHub:
             f"post {len(candidate_ids)} implementation review-thread replies on PR #{pr_number}"
         ):
             return ImplementationThreadReplyResult(blocked_thread_ids=candidate_ids)
-        if not candidate_ids or not isinstance(expected_head_sha, str) or not expected_head_sha:
+        if not candidate_ids or not re.fullmatch(r"[0-9a-f]{40}", expected_head_sha):
             return ImplementationThreadReplyResult(blocked_thread_ids=candidate_ids)
         snapshots: dict[str, dict[str, Any]] = {}
         for thread in threads:
@@ -1029,6 +1125,7 @@ class PipelineGitHub:
             or "" in expected_ids
             or set(resolved_thread_ids) & set(feedback)
             or expected_ids != set(resolved_thread_ids) | set(feedback)
+            or not re.fullmatch(r"[0-9a-f]{40}", reviewed_head_sha)
             or self._skip(
                 f"reconcile {len(candidate_ids)} reviewer-validated threads on PR #{pr_number}"
             )
@@ -1060,6 +1157,7 @@ class PipelineGitHub:
         resolved: list[str] = []
         replied: list[str] = []
         blocked: list[str] = []
+        restoration_failed: list[str] = []
         try:
             for thread_id in candidate_ids:
                 receipt = by_id[thread_id]
@@ -1121,15 +1219,21 @@ class PipelineGitHub:
                     not isinstance(resolved_thread, dict)
                     or resolved_thread.get("id") != thread_id
                     or resolved_thread.get("isResolved") is not True
-                    or not self._pr_is_current_open_head(
-                        self.gh_pr_state(pr_number), reviewed_head_sha
-                    )
-                    or any(
-                        str(thread.get("id")) == thread_id
-                        for thread in self._unresolved_threads(pr_number)
-                        if isinstance(thread, dict)
-                    )
                 ):
+                    blocked.append(thread_id)
+                    continue
+                state_after_resolve = self.gh_pr_state(pr_number)
+                thread_still_open = any(
+                    str(thread.get("id")) == thread_id
+                    for thread in self._unresolved_threads(pr_number)
+                    if isinstance(thread, dict)
+                )
+                if not self._pr_is_current_open_head(state_after_resolve, reviewed_head_sha):
+                    if not self._restore_resolved_thread(pr_number, thread_id):
+                        restoration_failed.append(thread_id)
+                    blocked.append(thread_id)
+                    continue
+                if thread_still_open:
                     blocked.append(thread_id)
                     continue
                 resolved.append(thread_id)
@@ -1139,11 +1243,13 @@ class PipelineGitHub:
                 resolved_thread_ids=tuple(resolved),
                 feedback_thread_ids=tuple(replied),
                 blocked_thread_ids=tuple(sorted(set(candidate_ids) - set(resolved) - set(replied))),
+                restoration_failed_thread_ids=tuple(restoration_failed),
             )
         return ReviewerThreadReconciliationResult(
             resolved_thread_ids=tuple(resolved),
             feedback_thread_ids=tuple(replied),
             blocked_thread_ids=tuple(blocked),
+            restoration_failed_thread_ids=tuple(restoration_failed),
         )
 
     # -- read surface --------------------------------------------------------

@@ -101,8 +101,9 @@ def get_review_validation_prompt(
 
     Used by :mod:`hephaestus.automation.review_validator` to re-check, with a
     fresh read-only sub-agent, that the implementer's fixes actually resolved
-    the previous iteration's review comments — re-opening (as new inline
-    threads) any the current diff leaves unaddressed.
+    the previous iteration's review comments.  It keeps an unaddressed
+    original thread open and supplies a concrete reviewer reply describing
+    what remains; it never creates a replacement inline thread.
 
     Both inputs are fenced as untrusted (prior comment bodies + the diff are
     GitHub-sourced).

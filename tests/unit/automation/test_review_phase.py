@@ -240,23 +240,13 @@ def test_fetch_plan_and_review_accepts_opaque_canonical_review_marker(tmp_path: 
     assert "state:plan-go" in review
 
 
-class TestRunImplReviewStepPromptTooLong:
-    """_run_impl_review_step surfaces reason=prompt_too_long distinctly (#1847)."""
+class TestRetiredDirectReviewStep:
+    """The legacy direct review step cannot bypass pipeline reconciliation."""
 
-    def test_prompt_too_long_error_records_error_with_distinct_reason(self, tmp_path: Path) -> None:
+    def test_direct_review_step_fails_closed(self, tmp_path: Path) -> None:
         phase = ReviewPhase(_make_ctx(tmp_path))
-
-        def _raise_prompt_too_long(**_: object) -> tuple[str, list[str]]:
-            raise RuntimeError(
-                "reason=prompt_too_long: PR review prompt exceeds model context "
-                "even at aggressive budget for Repo#1"
-            )
-
-        with mock.patch(
-            "hephaestus.automation._review_phase.review_pr_inline",
-            side_effect=_raise_prompt_too_long,
-        ):
-            review_text, thread_ids = phase._run_impl_review_step(
+        with pytest.raises(RuntimeError, match="review_phase_retired_use_pipeline"):
+            phase._run_impl_review_step(
                 issue_number=1,
                 issue_title="t",
                 issue_body="b",
@@ -266,34 +256,3 @@ class TestRunImplReviewStepPromptTooLong:
                 iteration=0,
                 prior_review=None,
             )
-
-        assert thread_ids == []
-        assert isinstance(review_text, ReviewAudit)
-        assert "In-loop reviewer invocation failed" in review_text.raw_feedback
-
-    def test_generic_error_still_recorded_as_plain_error(self, tmp_path: Path) -> None:
-        """A non-prompt_too_long failure keeps the original generic ERROR message."""
-        phase = ReviewPhase(_make_ctx(tmp_path))
-
-        def _raise_generic(**_: object) -> tuple[str, list[str]]:
-            raise RuntimeError("some other infra failure")
-
-        with mock.patch(
-            "hephaestus.automation._review_phase.review_pr_inline",
-            side_effect=_raise_generic,
-        ):
-            review_text, thread_ids = phase._run_impl_review_step(
-                issue_number=1,
-                issue_title="t",
-                issue_body="b",
-                branch_name="1-auto-impl",
-                worktree_path=tmp_path,
-                pr_number=99,
-                iteration=0,
-                prior_review=None,
-            )
-
-        assert thread_ids == []
-        assert isinstance(review_text, ReviewAudit)
-        assert "In-loop reviewer invocation failed" in review_text.raw_feedback
-        assert "prompt_too_long" not in review_text.raw_feedback

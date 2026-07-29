@@ -31,6 +31,7 @@ PLAN_REVIEW_PREFIX: Final[str] = "## 🔍 Plan Review"
 PLAN_REVIEW_CANONICAL_MARKER: Final[str] = "<!-- hephaestus-plan-review:canonical -->"
 """Opaque ownership/deduplication marker for the editable current review."""
 
+
 @runtime_checkable
 class ReviewerProtocol(Protocol):
     """Structural contract satisfied by all four reviewer classes.

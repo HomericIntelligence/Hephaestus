@@ -147,6 +147,7 @@ class ReviewerThreadReconciliationResult:
     resolved_thread_ids: tuple[str, ...] = ()
     feedback_thread_ids: tuple[str, ...] = ()
     blocked_thread_ids: tuple[str, ...] = ()
+    restoration_failed_thread_ids: tuple[str, ...] = ()
 
 
 @runtime_checkable
@@ -290,6 +291,22 @@ class StageGitHub(Protocol):
         host-provided snapshot.  This accessor verifies the PR head and exact
         live thread state before and after every reply, but never resolves a
         thread.
+        """
+        ...
+
+    def reviewer_validation_receipts(
+        self,
+        pr_number: int,
+        *,
+        reviewed_head_sha: str,
+        threads: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Return current, host-verifiable implementation reply receipts.
+
+        Receipts are derived afresh from the complete live-thread snapshot and
+        are bound to ``reviewed_head_sha``.  They are deliberately not backed
+        by process-local work-item state, so a restarted loop can validate an
+        implementation reply created by an earlier work item.
         """
         ...
 

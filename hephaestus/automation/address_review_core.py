@@ -3,20 +3,14 @@
 Epic #1809's final omit-reduction wave (#1823) split the address-review module
 into two layers:
 
-* This module holds the **shared address core** — the untraced parser
-  (:func:`_parse_addressed_block`), its diagnostic helper
-  (:func:`_log_address_parse_error`), the agent-invoking fix session
-  (:func:`run_address_fix_session`). These are consumed directly by the
-  pipeline ``pr_review`` stage collaborators. The retired standalone
-  :class:`~hephaestus.automation.address_review.AddressReviewer` no longer
-  calls this core. Every symbol here is reachable with mocked subprocess/agent
-  seams, so the module carries
-  direct unit coverage and is **not** on the ``[tool.coverage.run].omit``
-  allowlist.
+* This module holds the address-result parser and its diagnostic helper used by
+  the pipeline. The historical agent-invoking fix session
+  (:func:`run_address_fix_session`) is retained only as a fail-closed
+  compatibility entry point; the pipeline's address job owns agent execution,
+  commit/push, implementation replies, and reviewer reconciliation.
 
 * :mod:`hephaestus.automation.address_review` is a retired compatibility
-  facade. It re-exports the cores below (``name as name``) so long-pinned
-  imports keep resolving without reviving standalone orchestration.
+  facade. It preserves imports without reviving standalone orchestration.
 
 The cores are intentionally free of the ``AddressReviewer``/``BaseReviewer``
 scaffolding: they take everything they need as explicit keyword arguments, so
@@ -294,11 +288,9 @@ def run_address_fix_session(
     timeout: int = DEFAULT_AGENT_TIMEOUT,
     advise_timeout: int = DEFAULT_AGENT_TIMEOUT,
 ) -> dict[str, Any]:
-    """Run the address-review fix session and return the agent's parsed result.
+    """Reject the retired direct implementation-agent session; use the pipeline."""
+    raise RuntimeError("address_fix_session_retired_use_pipeline")
 
-    The public signature and observable provider, persistence, parsing, and
-    cleanup behavior are retained while focused private helpers own each step.
-    """
     if dry_run:
         logger.info("[DRY RUN] Would run fix session for PR #%s", pr_number)
         return {"addressed": [], "replies": {}}

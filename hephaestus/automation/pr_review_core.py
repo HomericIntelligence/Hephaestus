@@ -4,20 +4,15 @@ Epic #1809's final omit-reduction wave (#1823) split the PR-review module into
 two layers:
 
 * This module holds the **shared review core** — the pure context assembler
-  (:func:`gather_impl_review_context`), the agent-invoking analysis session
-  (:func:`run_pr_review_analysis`), and the in-loop review+post orchestration
-  (:func:`review_pr_inline`). These are consumed directly by the pipeline
-  ``pr_review`` stage collaborators (``_review_phase`` / ``review_validator``)
-  and by the standalone :class:`~hephaestus.automation.pr_reviewer.PRReviewer`.
-  Every symbol here is reachable with mocked subprocess/agent seams, so the
-  module carries direct unit coverage and is **not** on the
-  ``[tool.coverage.run].omit`` allowlist.
+  (:func:`gather_impl_review_context`) and agent-invoking analysis session
+  (:func:`run_pr_review_analysis`) used by the pipeline.  The historical
+  direct review+post helper (:func:`review_pr_inline`) is retained only as a
+  fail-closed compatibility entry point; GitHub review-thread mutation belongs
+  exclusively to the pipeline adapter.
 
 * :mod:`hephaestus.automation.pr_reviewer` remains the console-script wrapper
-  (``hephaestus-review-prs``) around the live worktree/agent orchestration. It
-  re-exports the three cores below (``name as name``) so long-pinned patch
-  sites — ``hephaestus.automation.pr_reviewer.run_pr_review_analysis`` etc. —
-  keep resolving.
+  (``hephaestus-review-prs``) around the pipeline. It preserves imports for
+  compatibility without restoring direct PR-thread mutation.
 
 The cores are intentionally free of the ``PRReviewer``/``BaseReviewer``
 scaffolding: they take everything they need as explicit keyword arguments, so
@@ -460,28 +455,9 @@ def review_pr_inline(
     dry_run: bool = False,
     timeout: int = DEFAULT_AGENT_TIMEOUT,
 ) -> tuple[ReviewAudit, list[str]]:
-    """Review an impl PR in-loop and return structural audit plus thread ids.
+    """Reject the retired direct review-thread mutator; use the pipeline."""
+    raise RuntimeError("review_pr_inline_retired_use_pipeline")
 
-    This is the in-loop equivalent of ``PRReviewer._review_pr`` used by the
-    Stage 2 implementer session (#28). It runs a fresh reviewer session per
-    iteration, posts normalized findings with an audit-only body, and never
-    treats review prose as authorization.
-
-    Args:
-        pr_number: GitHub PR number to review.
-        issue_number: Linked GitHub issue number.
-        worktree_path: Worktree CWD for the reviewer session.
-        context: PR context dict (see :func:`gather_impl_review_context`).
-        agent: Selected implementation agent (``"claude"`` / ``"codex"``).
-        iteration: Zero-based review-loop iteration (selects the fresh token).
-        state_dir: Directory for the reviewer log file.
-        dry_run: When True, skip the agent call and posting.
-
-    Returns:
-        ``(audit, posted_thread_ids)``. On dry-run, the audit is invalid and no
-        review threads are posted.
-
-    """
     review_token = reviewer_agent(AGENT_PR_REVIEWER, iteration)
     analysis = run_pr_review_analysis(
         pr_number=pr_number,

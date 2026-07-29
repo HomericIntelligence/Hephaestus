@@ -461,6 +461,49 @@ class FakeStageGitHub(FakeGitHub):
         blocked = tuple(sorted(set(replies) - set(replied)))
         return ImplementationThreadReplyResult(replied, blocked, tuple(receipts))
 
+    def reviewer_validation_receipts(
+        self,
+        pr_number: int,
+        *,
+        reviewed_head_sha: str,
+        threads: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Derive test receipts from the current live thread conversation.
+
+        The production adapter validates the signed marker.  The stage fake
+        instead preserves the same durable property needed here: only a final
+        host-posted implementation reply for the current reviewed head may
+        reach reconciliation, never a process-local payload receipt.
+        """
+        del pr_number
+        receipts: list[dict[str, Any]] = []
+        for thread in threads:
+            if not isinstance(thread, dict):
+                continue
+            comments = thread.get("comments")
+            if not isinstance(comments, list) or not comments:
+                continue
+            final_comment = comments[-1]
+            if not isinstance(final_comment, dict):
+                continue
+            reply_id = final_comment.get("id")
+            reply_body = final_comment.get("body")
+            if not (
+                isinstance(reply_id, str)
+                and reply_id.startswith("implementation-reply-")
+                and isinstance(reply_body, str)
+            ):
+                continue
+            receipts.append(
+                {
+                    **thread,
+                    "implementation_reply_id": reply_id,
+                    "implementation_reply_body": reply_body,
+                    "implementation_head_sha": reviewed_head_sha,
+                }
+            )
+        return receipts
+
     def reconcile_reviewer_validated_threads(
         self,
         pr_number: int,

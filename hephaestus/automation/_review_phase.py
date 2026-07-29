@@ -354,7 +354,9 @@ class ReviewPhase(StageMixin):
         pr_number: int | None,
         advise_findings: str,
     ) -> ReviewIterationOutcome:
-        """Run the phase-owned review work for one typed coordinator iteration."""
+        """Reject the retired review-loop callback before it can mutate GitHub."""
+        raise RuntimeError("review_phase_retired_use_pipeline")
+
         (
             verdict,
             grade,
@@ -407,7 +409,9 @@ class ReviewPhase(StageMixin):
         issue_title: str,
         issue_body: str,
     ) -> AddressOutcome:
-        """Run the phase-owned address work for one typed coordinator iteration."""
+        """Reject the retired address-loop callback before it can mutate GitHub."""
+        raise RuntimeError("review_phase_retired_use_pipeline")
+
         prior_addressed_threads, addressed = self._execute_address_iteration(
             issue_number=issue_number,
             pr_number=pr_number,
@@ -474,7 +478,7 @@ class ReviewPhase(StageMixin):
         thread_id: int | None,
         prior_reopened_keys: set[str],
     ) -> tuple[list[str], bool, set[str]]:
-        """Re-open prior review comments the current diff does not address.
+        """Reject the retired direct validation path before it can run agents.
 
         Runs the read-only validation sub-agent
         (:func:`review_validator.validate_prior_comments_addressed`) against the
@@ -488,6 +492,8 @@ class ReviewPhase(StageMixin):
         cumulative set of stable re-open keys to thread forward (#1329) so a
         documented by-design recurrence is accepted once and never re-added.
         """
+        raise RuntimeError("review_phase_retired_use_pipeline")
+
         if pr_number is None or not prior_threads or self.options.dry_run:
             return [], True, prior_reopened_keys
         diff_text = self.impl._collect_diff(worktree_path, branch_name)
@@ -581,7 +587,7 @@ class ReviewPhase(StageMixin):
         prior_reopened_keys: set[str],
         advise_findings: str,
     ) -> tuple[list[str], str, list[str], Any, bool, set[str]]:
-        """Validate prior threads, run one review, and parse the verdict.
+        """Reject the retired validate-and-review path before it can run agents.
 
         Step 1 (#1152): before the fresh review, verify (via the read-only
         sub-agent) that every PRIOR review comment was truly addressed by the
@@ -606,6 +612,8 @@ class ReviewPhase(StageMixin):
         finding (inline OR PR-level), and ``reopened_keys`` threads the
         recurrence state forward across rounds (#1329).
         """
+        raise RuntimeError("review_phase_retired_use_pipeline")
+
         impl = self.impl
         threads_to_validate = prior_addressed_threads
         if (
@@ -713,6 +721,8 @@ class ReviewPhase(StageMixin):
                       reopened_keys, validator_clean).
 
         """
+        raise RuntimeError("review_phase_retired_use_pipeline")
+
         (
             reopened,
             review_text,
@@ -797,6 +807,8 @@ class ReviewPhase(StageMixin):
         anything was addressed. When there is no PR, returns ``([], True)`` —
         the caller ``continue``s to the next iteration regardless.
         """
+        raise RuntimeError("review_phase_retired_use_pipeline")
+
         impl = self.impl
         if pr_number is None:
             return [], True
@@ -959,6 +971,8 @@ class ReviewPhase(StageMixin):
         reviewer (:meth:`_run_impl_review`) which posts nothing and is parsed
         into the same non-authoritative structural audit.
         """
+        raise RuntimeError("review_phase_retired_use_pipeline")
+
         impl = self.impl
         if pr_number is None:
             diff_text = impl._collect_diff(worktree_path, branch_name)
@@ -1080,6 +1094,8 @@ class ReviewPhase(StageMixin):
         to handle <finding>" directive to re-ground a resumed session (#1554).
 
         """
+        raise RuntimeError("review_phase_retired_use_pipeline")
+
         threads = gh_pr_list_unresolved_threads(pr_number, dry_run=False)
         if not threads:
             logger.info(

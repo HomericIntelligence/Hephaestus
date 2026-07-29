@@ -1,15 +1,9 @@
 """Retired standalone address-review compatibility surface.
 
-Provides:
-- Parallel processing of issues with unresolved review threads
-- Session resume for the original implementer's agent session when supported
-- Agent code-fix claims recorded for pipeline reviewer validation
-- State persistence and UI monitoring
-
-This module remains importable for compatibility, but its public entry points
-fail closed. It cannot safely post implementation replies or run the fresh
-reviewer reconciliation, so the queue pipeline is the only supported path for
-review-thread remediation.
+This module remains importable for compatibility, but it is retired and all
+entry points fail closed. Use ``hephaestus-automation-loop``: it is the sole
+workflow that can post implementation replies and have a fresh reviewer
+validate or resolve the live GitHub threads.
 """
 
 from __future__ import annotations
@@ -50,12 +44,9 @@ from ._review_utils import (
 from ._reviewer_base import BaseReviewer
 
 # The pure/parse/session address cores live in ``address_review_core``
-# (unit-covered, off the coverage omit-list). They are re-exported here
-# (``name as name``) so the long-pinned patch sites — e.g.
-# ``hephaestus.automation.address_review.run_address_fix_session`` /
-# ``._parse_addressed_block`` — and the
-# ``from hephaestus.automation.address_review import ...`` call sites keep
-# resolving after the #1823 split.
+# (unit-covered, off the coverage omit-list). They are re-exported here so
+# historical imports keep resolving after the #1823 split.
+# ``run_address_fix_session`` is deliberately fail-closed.
 from .address_review_core import (
     _ADDRESS_PARSE_DEFAULT as _ADDRESS_PARSE_DEFAULT,
     _log_address_parse_error as _log_address_parse_error,
@@ -82,18 +73,7 @@ _RETIRED_ERROR = "address_review_retired_use_pipeline"
 
 
 class AddressReviewer(BaseReviewer):
-    """Addresses unresolved PR review threads using Claude Code or Codex.
-
-    Features:
-    - Parallel processing across multiple issues
-    - Session resume from implementer's saved agent session when supported
-    - Agent fix claims retained for pipeline reviewer validation
-    - State persistence for observability
-    - Real-time curses UI for status monitoring
-
-    Inherits shared scaffolding (``__init__``, ``_log``, ``_fail``,
-    ``_save_state``) from :class:`BaseReviewer`.
-    """
+    """Retired compatibility placeholder; use ``hephaestus-automation-loop``."""
 
     options: AddressReviewOptions
 
@@ -590,25 +570,12 @@ def _build_parser() -> argparse.ArgumentParser:
     """Build the argparse parser for address review CLI."""
     parser = build_review_parser(
         description=(
-            "Find PRs with unresolved review threads and use Claude Code or Codex to fix the "
-            "code. This compatibility command records implementation work only; use "
-            "hephaestus-automation-loop for implementation replies and reviewer resolution."
+            "Retired compatibility command. Use hephaestus-automation-loop to address, "
+            "reply to, validate, and resolve PR review threads."
         ),
-        epilog="""
-Examples:
-  # Address review threads for specific issues
-  %(prog)s --issues 595 596
-
-  # Dry run — show what would be done without any GitHub writes or git pushes
-  %(prog)s --issues 595 --dry-run
-
-  # Use more parallel workers
-  %(prog)s --issues 595 596 597 --max-workers 5
-        """,
-        issues_help="Issue numbers whose linked PRs should have review threads addressed",
-        dry_run_prefix=(
-            "Show what would be done without pushing code or entering reviewer validation."
-        ),
+        epilog="Run hephaestus-automation-loop instead.",
+        issues_help="Retired; use hephaestus-automation-loop instead",
+        dry_run_prefix="Retired; no review-thread work is performed.",
     )
     add_agent_timeout_arg(parser)
     add_advise_timeout_arg(parser)

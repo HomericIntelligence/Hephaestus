@@ -243,19 +243,19 @@ class TestRunAddressFixSession:
             patch.object(core, "_invoke_address_fix_session") as invoke,
             patch.object(core, "write_secure") as write_secure,
         ):
-            result = core.run_address_fix_session(
-                issue_number=1,
-                pr_number=42,
-                worktree_path=tmp_path,
-                threads=[_thread()],
-                agent="claude",
-                repo_root=tmp_path,
-                parse_fn=parse_fn,
-                log_file=log_file,
-                dry_run=True,
-            )
+            with pytest.raises(RuntimeError, match="address_fix_session_retired_use_pipeline"):
+                core.run_address_fix_session(
+                    issue_number=1,
+                    pr_number=42,
+                    worktree_path=tmp_path,
+                    threads=[_thread()],
+                    agent="claude",
+                    repo_root=tmp_path,
+                    parse_fn=parse_fn,
+                    log_file=log_file,
+                    dry_run=True,
+                )
 
-        assert result == {"addressed": [], "replies": {}}
         build_prompt.assert_not_called()
         invoke.assert_not_called()
         parse_fn.assert_not_called()
@@ -295,19 +295,19 @@ class TestRunAddressFixSession:
                 side_effect=parse,
             ),
         ):
-            result = core.run_address_fix_session(
-                issue_number=1,
-                pr_number=42,
-                worktree_path=tmp_path,
-                threads=[_thread()],
-                agent="claude",
-                repo_root=tmp_path,
-                parse_fn=MagicMock(),
-                log_file=tmp_path / "address.log",
-            )
+            with pytest.raises(RuntimeError, match="address_fix_session_retired_use_pipeline"):
+                core.run_address_fix_session(
+                    issue_number=1,
+                    pr_number=42,
+                    worktree_path=tmp_path,
+                    threads=[_thread()],
+                    agent="claude",
+                    repo_root=tmp_path,
+                    parse_fn=MagicMock(),
+                    log_file=tmp_path / "address.log",
+                )
 
-        assert result == {"addressed": [], "replies": {}}
-        assert events == ["enter", "log", "parse", "exit"]
+        assert events == []
 
     def test_removes_prompt_file_after_parser_failure(self, tmp_path: Path) -> None:
         log_file = tmp_path / "address.log"
@@ -320,7 +320,7 @@ class TestRunAddressFixSession:
                 "_invoke_address_fix_session",
                 return_value=core._AddressFixSessionOutput("response", "raw log"),
             ),
-            pytest.raises(ValueError, match="invalid response"),
+            pytest.raises(RuntimeError, match="address_fix_session_retired_use_pipeline"),
         ):
             core.run_address_fix_session(
                 issue_number=1,
@@ -333,7 +333,7 @@ class TestRunAddressFixSession:
                 log_file=log_file,
             )
 
-        assert log_file.read_text() == "raw log"
+        assert not log_file.exists()
         assert not (tmp_path / ".claude-address-review-1.md").exists()
 
     def test_removes_prompt_file_after_provider_failure(self, tmp_path: Path) -> None:
@@ -348,7 +348,7 @@ class TestRunAddressFixSession:
         with (
             patch.object(core, "_build_address_fix_prompt", return_value="prompt"),
             patch.object(core, "_invoke_address_fix_session", side_effect=provider_error),
-            pytest.raises(RuntimeError, match="Fix session failed for PR Hephaestus#42: stderr"),
+            pytest.raises(RuntimeError, match="address_fix_session_retired_use_pipeline"),
         ):
             core.run_address_fix_session(
                 issue_number=1,
@@ -361,7 +361,7 @@ class TestRunAddressFixSession:
                 log_file=log_file,
             )
 
-        assert log_file.read_text() == "EXIT CODE: 2\n\nSTDOUT:\nstdout\n\nSTDERR:\nstderr"
+        assert not log_file.exists()
         assert not (tmp_path / ".claude-address-review-1.md").exists()
 
     def test_removes_prompt_file_after_timeout(self, tmp_path: Path) -> None:
@@ -371,7 +371,7 @@ class TestRunAddressFixSession:
         with (
             patch.object(core, "_build_address_fix_prompt", return_value="prompt"),
             patch.object(core, "_invoke_address_fix_session", side_effect=provider_error),
-            pytest.raises(RuntimeError, match="Fix session timed out for PR Hephaestus#42"),
+            pytest.raises(RuntimeError, match="address_fix_session_retired_use_pipeline"),
         ):
             core.run_address_fix_session(
                 issue_number=1,
@@ -384,7 +384,7 @@ class TestRunAddressFixSession:
                 log_file=log_file,
             )
 
-        assert log_file.read_text() == "TIMEOUT after 12s\n\nOutput:\npartial"
+        assert not log_file.exists()
         assert not (tmp_path / ".claude-address-review-1.md").exists()
 
     @pytest.mark.parametrize(

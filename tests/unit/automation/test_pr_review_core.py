@@ -533,62 +533,16 @@ class TestRunPrReviewAnalysis:
 
 
 class TestReviewPrInline:
-    """review_pr_inline runs a FRESH per-iteration reviewer and posts inline threads."""
+    """The retired direct review-posting helper fails closed."""
 
-    def test_posts_threads_and_returns_verdict(self, tmp_path: Path) -> None:
-        analysis = {
-            "comments": [{"path": "a.py", "line": 1, "body": "fix"}],
-            "summary": "Findings for GitHub.",
-            "review_text": "Full reviewer prose.",
-            "audit": ReviewAudit(
-                grade="C",
-                summary="Findings for GitHub.",
-                findings=(
-                    {
-                        "path": "a.py",
-                        "line": 1,
-                        "side": "RIGHT",
-                        "severity": "major",
-                        "body": "fix",
-                    },
-                ),
-                raw_feedback="Full reviewer prose.",
-                valid=True,
-            ),
-        }
+    @pytest.mark.parametrize("dry_run", [False, True])
+    def test_rejects_all_direct_review_posts(self, tmp_path: Path, dry_run: bool) -> None:
         with (
-            patch(
-                "hephaestus.automation.pr_review_core.run_pr_review_analysis",
-                return_value=analysis,
-            ) as mock_analysis,
-            patch(
-                "hephaestus.automation.pr_review_core.gh_pr_review_post",
-                return_value=["thread-1"],
-            ) as mock_post,
+            patch("hephaestus.automation.pr_review_core.run_pr_review_analysis") as analysis,
+            patch("hephaestus.automation.pr_review_core.gh_pr_review_post") as post,
+            pytest.raises(RuntimeError, match="review_pr_inline_retired_use_pipeline"),
         ):
-            audit, thread_ids = review_pr_inline(
-                pr_number=42,
-                issue_number=1,
-                worktree_path=tmp_path,
-                context={"pr_diff": "d"},
-                agent="claude",
-                iteration=2,
-                state_dir=tmp_path,
-                dry_run=False,
-            )
-
-        assert thread_ids == ["thread-1"]
-        assert isinstance(audit, ReviewAudit)
-        assert audit.grade == "C"
-        # FRESH per-iteration reviewer session: reviewer_agent(AGENT_PR_REVIEWER, 2).
-        assert mock_analysis.call_args.kwargs["review_agent"] == "pr-reviewer-r2"
-        mock_post.assert_called_once()
-        assert mock_post.call_args.kwargs["pr_number"] == 42
-        assert "Review summary: Findings for GitHub." in mock_post.call_args.kwargs["summary"]
-
-    def test_dry_run_skips_posting(self, tmp_path: Path) -> None:
-        with patch("hephaestus.automation.pr_review_core.gh_pr_review_post") as mock_post:
-            _summary, thread_ids = review_pr_inline(
+            review_pr_inline(
                 pr_number=42,
                 issue_number=1,
                 worktree_path=tmp_path,
@@ -596,10 +550,10 @@ class TestReviewPrInline:
                 agent="claude",
                 iteration=0,
                 state_dir=tmp_path,
-                dry_run=True,
+                dry_run=dry_run,
             )
-        assert thread_ids == []
-        mock_post.assert_not_called()
+        analysis.assert_not_called()
+        post.assert_not_called()
 
 
 class TestStructuralAuditNotProse:
@@ -638,49 +592,3 @@ class TestStructuralAuditNotProse:
         assert out["summary"] == "two defects"
         assert out["audit"].grade == "F"
         assert "Verdict: NOGO" in out["review_text"]
-
-    def test_review_pr_inline_returns_structural_audit_not_prose(self, tmp_path: Path) -> None:
-        """review_pr_inline returns the structural audit and audit-only comment."""
-        analysis = {
-            "comments": [
-                {"path": "a.py", "line": 1, "side": "RIGHT", "severity": "major", "body": "x"}
-            ],
-            "summary": "a defect (no verdict token here)",
-            "review_text": "## Review\nProse.\n\nVerdict: NOGO — a real defect.\n",
-            "audit": ReviewAudit(
-                grade="F",
-                summary="a defect",
-                findings=(
-                    {
-                        "path": "a.py",
-                        "line": 1,
-                        "side": "RIGHT",
-                        "severity": "major",
-                        "body": "x",
-                    },
-                ),
-                raw_feedback="## Review\nProse.",
-                valid=True,
-            ),
-        }
-        with (
-            patch(
-                "hephaestus.automation.pr_review_core.run_pr_review_analysis", return_value=analysis
-            ),
-            patch(
-                "hephaestus.automation.pr_review_core.gh_pr_review_post", return_value=["thread-1"]
-            ),
-        ):
-            audit, thread_ids = review_pr_inline(
-                pr_number=1,
-                issue_number=1,
-                worktree_path=tmp_path,
-                context={},
-                agent="claude",
-                iteration=0,
-                state_dir=tmp_path,
-                dry_run=False,
-            )
-        assert isinstance(audit, ReviewAudit)
-        assert audit.grade == "F"
-        assert thread_ids == ["thread-1"]
