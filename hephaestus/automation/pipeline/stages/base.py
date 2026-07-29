@@ -280,7 +280,7 @@ class StageGitHub(Protocol):
 
     def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
         """Return complete fresh snapshots of every unresolved review thread."""
-        ...
+        pass
 
     def post_implementation_thread_replies(
         self,
