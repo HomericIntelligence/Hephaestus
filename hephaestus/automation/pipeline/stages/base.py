@@ -78,11 +78,12 @@ __all__ = [
     "Continue",
     "Disposition",
     "GitJob",
+    "ImplementationThreadReplyResult",
     "ItemKind",
     "JobHandle",
     "JobRequest",
     "JobResult",
-    "ProcessThreadResolutionResult",
+    "ReviewerThreadReconciliationResult",
     "Stage",
     "StageContext",
     "StageEvent",
@@ -125,10 +126,26 @@ class ConditionalMergeResult:
 
 
 @dataclass(frozen=True)
-class ProcessThreadResolutionResult:
-    """The fail-closed outcome of reconciling durable process review receipts."""
+class ImplementationThreadReplyResult:
+    """Outcome of posting commit-gated implementation replies to review threads.
+
+    ``receipts`` are complete, host-read thread snapshots after the implementation
+    reply is visible.  They are the only input a later reviewer-validation
+    mutation may consume; model output never directly identifies a mutable
+    GitHub object.
+    """
+
+    replied_thread_ids: tuple[str, ...] = ()
+    blocked_thread_ids: tuple[str, ...] = ()
+    receipts: tuple[dict[str, Any], ...] = ()
+
+
+@dataclass(frozen=True)
+class ReviewerThreadReconciliationResult:
+    """Outcome of a fresh reviewer resolving or returning review threads."""
 
     resolved_thread_ids: tuple[str, ...] = ()
+    feedback_thread_ids: tuple[str, ...] = ()
     blocked_thread_ids: tuple[str, ...] = ()
 
 
@@ -255,28 +272,43 @@ class StageGitHub(Protocol):
         """
         ...
 
-    def count_unresolved_threads(self, pr_number: int) -> tuple[int, int]:
-        """Return ``(automation_unresolved, human_unresolved)`` thread counts.
-
-        Mirrors ``_review_phase._count_unresolved_threads_blocking_go``
-        (#1152): the pr_review EVAL gate — a GO only stands with zero of
-        both; open human threads yield HUMAN_BLOCKED. A pipeline-created
-        automation thread may be replied to and resolved only through the
-        receipt-scoped revalidation operation below; every other open thread
-        remains a human handoff. This read never resolves a GitHub thread.
-        """
-        ...
-
-    def count_unresolved_threads_by_severity(self, pr_number: int) -> tuple[int, int, int]:
-        """Return (blocking_automation, minor_automation, human) unresolved counts (#1856)."""
-        ...
-
     def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
         """Return fresh unresolved review-thread facts, including ownership."""
         ...
 
-    def list_restart_process_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
-        """Return host-proven canonical receipts eligible for restart adoption."""
+    def post_implementation_thread_replies(
+        self,
+        pr_number: int,
+        *,
+        expected_head_sha: str,
+        threads: list[dict[str, Any]],
+        replies: dict[str, str],
+    ) -> ImplementationThreadReplyResult:
+        """Post host-validated implementation replies after a successful push.
+
+        The implementation agent supplies only prose keyed by IDs from the
+        host-provided snapshot.  This accessor verifies the PR head and exact
+        live thread state before and after every reply, but never resolves a
+        thread.
+        """
+        ...
+
+    def reconcile_reviewer_validated_threads(
+        self,
+        pr_number: int,
+        *,
+        reviewed_head_sha: str,
+        receipts: list[dict[str, Any]],
+        resolved_thread_ids: set[str],
+        feedback: dict[str, str],
+    ) -> ReviewerThreadReconciliationResult:
+        """Resolve reviewer-validated threads or reply with remaining defects.
+
+        A fresh read-only reviewer supplies the disposition.  The adapter
+        revalidates the complete implementation-reply receipt immediately
+        before mutation, resolves only accepted IDs, and leaves feedback IDs
+        open after posting the reviewer's explanation.
+        """
         ...
 
     def create_pr(self, issue_number: int, branch: str, title: str, body: str) -> int:
@@ -296,8 +328,8 @@ class StageGitHub(Protocol):
         """Durably post an explanatory comment on the PR conversation.
 
         The coordinator maps this onto ``gh_issue_comment`` (PRs share the
-        issue comment channel). Used by pr_review's HUMAN_BLOCKED terminal
-        path to record WHY automation stood down before finishing failed.
+        issue comment channel). Used for neutral automation status notices
+        when an external race invalidates this process's review proof.
         """
         ...
 
@@ -323,25 +355,7 @@ class StageGitHub(Protocol):
     def post_review_threads(
         self, pr_number: int, threads: list[dict[str, Any]], summary: str
     ) -> list[dict[str, Any]]:
-        """Post review threads and return immutable post-time process receipts.
-
-        Each receipt identifies one created thread and proves its sole initial
-        comment's content and review identity at the post/readback boundary.
-        A reply observed before that proof must produce no receipt; later
-        process resolution therefore fails closed rather than treating a
-        same-login human reply as automation-owned.
-        """
-        ...
-
-    def reply_and_resolve_process_review_threads(
-        self,
-        pr_number: int,
-        *,
-        reviewed_head_sha: str,
-        receipts: list[dict[str, Any]],
-        dispositions: dict[str, str],
-    ) -> ProcessThreadResolutionResult:
-        """Reply then resolve exact, freshly revalidated thread receipts."""
+        """Post new reviewer findings and return their fresh thread snapshots."""
         ...
 
     def mark_pr_implementation_go(self, pr_number: int) -> None:

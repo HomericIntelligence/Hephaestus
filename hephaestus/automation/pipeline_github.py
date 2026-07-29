@@ -31,7 +31,6 @@ from typing import Any
 from urllib.parse import quote
 
 from hephaestus.automation import github_api, pr_manager
-from hephaestus.automation._review_phase import _is_automation_owned_thread
 from hephaestus.automation._review_utils import (
     close_issue_as_covered,
     ensure_state_dir,
@@ -50,7 +49,8 @@ from hephaestus.automation.pipeline.scope_retraction import (
 )
 from hephaestus.automation.pipeline.stages.base import (
     ConditionalMergeResult,
-    ProcessThreadResolutionResult,
+    ImplementationThreadReplyResult,
+    ReviewerThreadReconciliationResult,
 )
 from hephaestus.automation.prompts.pr_review import (
     BLOCKING_SEVERITIES,
@@ -118,19 +118,6 @@ def _parse_included_http_response(
     except json.JSONDecodeError:
         return status, None, True
     return (status, parsed, False) if isinstance(parsed, dict) else (status, None, True)
-
-
-def _split_threads(threads: list[dict[str, Any]]) -> tuple[int, int]:
-    """Return ``(automation_unresolved, human_unresolved)`` for unresolved threads."""
-    if not threads:
-        return (0, 0)
-    current_login = github_api.gh_current_login()
-    automation = sum(
-        1
-        for thread in threads
-        if _is_automation_owned_thread(thread, current_login) or _has_external_bot_receipt(thread)
-    )
-    return automation, len(threads) - automation
 
 
 def rate_limit_remaining() -> tuple[int, int] | None:
@@ -220,165 +207,6 @@ def _thread_severity_is_blocking(thread: dict[str, Any]) -> bool:
             return True
         severity = recovered
     return severity is None or severity in BLOCKING_SEVERITIES
-
-
-_AUTOMATED_REVIEW_PREFIX = "## Automated PR review"
-
-
-def _canonical_restart_process_receipt(thread: dict[str, Any]) -> dict[str, Any] | None:
-    """Return the one canonical receipt proven by an immutable automated review.
-
-    A worker restart loses its in-memory post receipt, but GitHub still holds
-    enough immutable provenance to reconstruct the same receipt: one initial
-    inline comment, its parent automated review, and that review's commit.
-    This is deliberately stricter than account ownership, because operators
-    and automation can share a GitHub login.
-    """
-    comments = thread.get("comments")
-    if not isinstance(comments, list) or len(comments) != 1:
-        return None
-    comment = comments[0]
-    if not isinstance(comment, dict):
-        return None
-    body = comment.get("body")
-    if not isinstance(body, str):
-        return None
-    marker = body.splitlines()[0].strip() if body.splitlines() else ""
-    if not marker.startswith(SEVERITY_MARKER_PREFIX) or not marker.endswith("-->"):
-        return None
-    severity = marker[len(SEVERITY_MARKER_PREFIX) : -3].strip().lower()
-    if severity not in VALID_SEVERITIES:
-        return None
-    review_body = thread.get("review_body")
-    review_commit_sha = thread.get("review_commit_sha")
-    if (
-        not isinstance(review_body, str)
-        or not review_body.startswith(_AUTOMATED_REVIEW_PREFIX)
-        or not isinstance(review_commit_sha, str)
-        or re.fullmatch(r"[0-9a-f]{40}", review_commit_sha) is None
-    ):
-        return None
-    thread_id = thread.get("id")
-    path = thread.get("path")
-    line = thread.get("line")
-    side = thread.get("side")
-    author = comment.get("author")
-    review_id = comment.get("review_id")
-    comment_id = comment.get("id")
-    if not (
-        isinstance(thread_id, str)
-        and thread_id
-        and isinstance(path, str)
-        and path
-        and (line is None or (isinstance(line, int) and not isinstance(line, bool) and line > 0))
-        and side == "RIGHT"
-        and isinstance(author, str)
-        and author
-        and isinstance(review_id, str)
-        and review_id
-        and isinstance(comment_id, str)
-        and comment_id
-    ):
-        return None
-    receipt = {
-        "id": thread_id,
-        "path": path,
-        "line": line,
-        "side": side,
-        "body": body,
-        "author": author,
-        "authors": [author],
-        "comments": [
-            {
-                "id": comment_id,
-                "author": author,
-                "body": body,
-                "review_id": review_id,
-            }
-        ],
-        "review_id": review_id,
-        "created_head_sha": review_commit_sha,
-    }
-    if line is None:
-        # GitHub clears the position when the reviewed diff moves.  This is
-        # restart-only provenance: newly posted threads must still have a
-        # current positive line at the post/readback boundary.
-        receipt["restart_stale_line"] = True
-    return receipt
-
-
-def _canonical_external_bot_receipt(thread: dict[str, Any]) -> dict[str, Any] | None:
-    """Return a restart receipt for one immutable GitHub Bot review thread.
-
-    A verified GitHub ``Bot`` actor is distinct from a user handoff, but its
-    finding remains untrusted and must still pass the same validator, changed
-    head, exact reply/readback, and resolution/readback boundaries as a
-    process-created thread.  Threads with replies or incomplete review
-    provenance deliberately remain outside this path.
-    """
-    comments = thread.get("comments")
-    if not isinstance(comments, list) or len(comments) != 1:
-        return None
-    comment = comments[0]
-    if not isinstance(comment, dict) or comment.get("author_type") != "Bot":
-        return None
-    thread_id = thread.get("id")
-    path = thread.get("path")
-    line = thread.get("line")
-    side = thread.get("side")
-    body = comment.get("body")
-    author = comment.get("author")
-    review_id = comment.get("review_id")
-    comment_id = comment.get("id")
-    review_commit_sha = thread.get("review_commit_sha")
-    if not (
-        isinstance(thread_id, str)
-        and thread_id
-        and isinstance(path, str)
-        and path
-        and isinstance(line, int)
-        and not isinstance(line, bool)
-        and line > 0
-        and side == "RIGHT"
-        and isinstance(body, str)
-        and isinstance(author, str)
-        and author
-        and isinstance(review_id, str)
-        and review_id
-        and isinstance(comment_id, str)
-        and comment_id
-        and isinstance(review_commit_sha, str)
-        and re.fullmatch(r"[0-9a-f]{40}", review_commit_sha) is not None
-    ):
-        return None
-    return {
-        "id": thread_id,
-        "path": path,
-        "line": line,
-        "side": side,
-        "body": body,
-        "author": author,
-        "author_type": "Bot",
-        "authors": [author],
-        "comments": [
-            {
-                "id": comment_id,
-                "author": author,
-                "author_type": "Bot",
-                "body": body,
-                "review_id": review_id,
-            }
-        ],
-        "review_id": review_id,
-        "created_head_sha": review_commit_sha,
-        "external_bot": True,
-    }
-
-
-def _has_external_bot_receipt(thread: dict[str, Any]) -> bool:
-    """Return whether a host-normalized thread is eligible for bot remediation."""
-    receipt = thread.get("process_receipt")
-    return isinstance(receipt, dict) and receipt.get("external_bot") is True
 
 
 def _has_no_explicit_pull_request_bypasses(protection: dict[str, Any]) -> bool:
@@ -783,11 +611,6 @@ class PipelineGitHub:
                     "review_body": review_body,
                     "review_commit_sha": review_commit_sha,
                 }
-                restart_receipt = _canonical_restart_process_receipt(
-                    thread
-                ) or _canonical_external_bot_receipt(thread)
-                if restart_receipt is not None:
-                    thread["process_receipt"] = restart_receipt
                 threads.append(thread)
             page_info = review_threads.get("pageInfo", {})
             if not page_info.get("hasNextPage"):
@@ -979,51 +802,6 @@ class PipelineGitHub:
         return False
 
     @staticmethod
-    def _is_immutable_process_receipt(receipt: dict[str, Any]) -> bool:
-        """Return whether a receipt proves one immutable process-created comment."""
-        thread_id = receipt.get("id")
-        review_id = receipt.get("review_id")
-        path = receipt.get("path")
-        line = receipt.get("line")
-        side = receipt.get("side")
-        author = receipt.get("author")
-        body = receipt.get("body")
-        comments = receipt.get("comments")
-        created_head_sha = receipt.get("created_head_sha")
-        initial = comments[0] if isinstance(comments, list) and len(comments) == 1 else None
-        external_bot = receipt.get("external_bot") is True
-        return bool(
-            isinstance(thread_id, str)
-            and thread_id.strip()
-            and isinstance(review_id, str)
-            and review_id.strip()
-            and isinstance(path, str)
-            and path.strip()
-            and (
-                (isinstance(line, int) and not isinstance(line, bool) and line > 0)
-                or (line is None and receipt.get("restart_stale_line") is True)
-            )
-            and side == "RIGHT"
-            and isinstance(author, str)
-            and author.strip()
-            and isinstance(body, str)
-            and isinstance(created_head_sha, str)
-            and created_head_sha.strip()
-            and isinstance(comments, list)
-            and len(comments) == 1
-            and isinstance(initial, dict)
-            and isinstance(initial.get("id"), str)
-            and initial["id"].strip()
-            and initial.get("author") == author
-            and initial.get("body") == body
-            and initial.get("review_id") == review_id
-            and (
-                not external_bot
-                or (receipt.get("author_type") == "Bot" and initial.get("author_type") == "Bot")
-            )
-        )
-
-    @staticmethod
     def _pr_is_current_open_head(state: dict[str, Any] | None, expected_head_sha: str) -> bool:
         """Return whether a fresh PR state is open, unarmed, and on the reviewed head."""
         return bool(
@@ -1034,147 +812,287 @@ class PipelineGitHub:
         )
 
     @staticmethod
-    def _same_initial_receipt(receipt: dict[str, Any], live: dict[str, Any]) -> bool:
-        """Return whether a live thread is still exactly the persisted first comment."""
+    def _thread_comment_snapshot(thread: dict[str, Any]) -> tuple[tuple[str, str, str], ...] | None:
+        """Return the complete immutable comment snapshot for one live thread.
+
+        Thread line positions can move when the implementation pushes a fix, so
+        they are deliberately not part of this concurrency guard.  Every
+        existing comment's opaque id, author, and body is instead preserved;
+        an external reply or edit makes the snapshot differ and prevents a
+        coordinator mutation.
+        """
+        comments = thread.get("comments")
+        if not isinstance(comments, list) or not comments:
+            return None
+        snapshot: list[tuple[str, str, str]] = []
+        for comment in comments:
+            if not isinstance(comment, dict):
+                return None
+            comment_id = comment.get("id")
+            author = comment.get("author")
+            body = comment.get("body")
+            if not (
+                isinstance(comment_id, str)
+                and comment_id.strip()
+                and isinstance(author, str)
+                and author.strip()
+                and isinstance(body, str)
+            ):
+                return None
+            snapshot.append((comment_id, author, body))
+        return tuple(snapshot)
+
+    @classmethod
+    def _same_thread_snapshot(cls, receipt: dict[str, Any], live: dict[str, Any]) -> bool:
+        """Return whether a live thread is unchanged since a host snapshot."""
         return bool(
-            live.get("id") == receipt.get("id")
-            and live.get("path") == receipt.get("path")
-            and live.get("line") == receipt.get("line")
-            and live.get("side") == receipt.get("side")
-            and live.get("review_id") == receipt.get("review_id")
-            and live.get("comments") == receipt.get("comments")
+            isinstance(receipt.get("id"), str)
+            and receipt.get("id") == live.get("id")
+            and cls._thread_comment_snapshot(receipt) == cls._thread_comment_snapshot(live)
+        )
+
+    @classmethod
+    def _same_snapshot_with_reply(
+        cls,
+        receipt: dict[str, Any],
+        live: dict[str, Any],
+        reply_body: str,
+        reply_comment_id: str,
+    ) -> bool:
+        """Return whether the only live change is this exact coordinator reply."""
+        before = cls._thread_comment_snapshot(receipt)
+        after = cls._thread_comment_snapshot(live)
+        return bool(
+            before is not None
+            and after is not None
+            and len(after) == len(before) + 1
+            and after[:-1] == before
+            and after[-1][0] == reply_comment_id
+            and after[-1][2] == reply_body
+            and receipt.get("id") == live.get("id")
         )
 
     @staticmethod
-    def _same_replied_receipt(
-        receipt: dict[str, Any], live: dict[str, Any], reply_body: str, reply_comment_id: str
-    ) -> bool:
-        """Return whether the only change is this loop's exact durable reply."""
-        comments = live.get("comments")
-        if not isinstance(comments, list) or len(comments) != 2:
-            return False
-        expected = list(receipt.get("comments") or [])
-        return bool(
-            len(expected) == 1
-            and comments[0] == expected[0]
-            and isinstance(comments[1], dict)
-            and comments[1].get("id") == reply_comment_id
-            and comments[1].get("body") == reply_body
-            and isinstance(comments[1].get("author"), str)
-            and comments[1].get("author")
-            and live.get("id") == receipt.get("id")
-        )
+    def _safe_thread_reply(value: object) -> str | None:
+        """Return a bounded non-empty agent/reviewer reply or ``None``."""
+        if not isinstance(value, str):
+            return None
+        reply = value.strip()
+        return reply if 0 < len(reply) <= 4_000 else None
 
-    def _process_thread_reply_body(
-        self, pr_number: int, reviewed_head_sha: str, receipt: dict[str, Any], disposition: str
+    def _implementation_thread_reply_body(
+        self, pr_number: int, head_sha: str, thread_id: str, reply: str
     ) -> str:
-        """Render a deterministic, human-visible reply for a handled receipt."""
+        """Bind an implementation reply to one exact thread and pushed head."""
+        seed = ":".join([self._repo_slug or self.org, str(pr_number), thread_id, head_sha, reply])
+        marker = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
+        return f"{reply}\n\n<!-- hephaestus-implementation-reply:{marker} -->"
+
+    def _reviewer_thread_feedback_body(
+        self, pr_number: int, head_sha: str, thread_id: str, feedback: str
+    ) -> str:
+        """Bind a reviewer rejection explanation to one exact thread and head."""
         seed = ":".join(
-            [
-                self._repo_slug or self.org,
-                str(pr_number),
-                str(receipt["id"]),
-                str(receipt["review_id"]),
-                reviewed_head_sha,
-                disposition,
-            ]
+            [self._repo_slug or self.org, str(pr_number), thread_id, head_sha, feedback]
         )
         marker = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
-        summary = (
-            "Addressed by automation and revalidated on the current PR head "
-            f"`{reviewed_head_sha[:12]}`."
+        return (
+            f"Reviewer validation found this still unresolved: {feedback}\n\n"
+            f"<!-- hephaestus-reviewer-validation:{marker} -->"
         )
-        return f"{summary}\n\n<!-- hephaestus-process-review-reply:{marker} -->"
 
-    def reply_and_resolve_process_review_threads(  # noqa: C901
+    def _add_thread_reply(self, thread_id: str, body: str) -> str | None:
+        """Post one coordinator-owned reply and return its opaque comment ID."""
+        query = (
+            "mutation($threadId:ID!,$body:String!,$clientMutationId:String!){"
+            "addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId,body:$body,"
+            "clientMutationId:$clientMutationId}){comment{id}}}"
+        )
+        data = self._graphql(
+            query,
+            threadId=thread_id,
+            body=body,
+            clientMutationId=hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        )
+        comment = data.get("data", {}).get("addPullRequestReviewThreadReply", {}).get("comment", {})
+        if not isinstance(comment, dict) or not isinstance(comment.get("id"), str):
+            return None
+        return str(comment["id"])
+
+    def post_implementation_thread_replies(  # noqa: C901
+        self,
+        pr_number: int,
+        *,
+        expected_head_sha: str,
+        threads: list[dict[str, Any]],
+        replies: dict[str, str],
+    ) -> ImplementationThreadReplyResult:
+        """Post implementation-agent replies after a real fix commit reached GitHub.
+
+        Every target must be an ID from the complete host-provided thread
+        snapshot.  The method never resolves threads: the next fresh reviewer
+        owns that decision.
+        """
+        candidate_ids = tuple(sorted(str(thread_id) for thread_id in replies))
+        if self._skip(
+            f"post {len(candidate_ids)} implementation review-thread replies on PR #{pr_number}"
+        ):
+            return ImplementationThreadReplyResult(blocked_thread_ids=candidate_ids)
+        if not candidate_ids or not isinstance(expected_head_sha, str) or not expected_head_sha:
+            return ImplementationThreadReplyResult(blocked_thread_ids=candidate_ids)
+        snapshots: dict[str, dict[str, Any]] = {}
+        for thread in threads:
+            if not isinstance(thread, dict) or not isinstance(thread.get("id"), str):
+                return ImplementationThreadReplyResult(blocked_thread_ids=candidate_ids)
+            thread_id = str(thread["id"])
+            if thread_id in snapshots or self._thread_comment_snapshot(thread) is None:
+                return ImplementationThreadReplyResult(blocked_thread_ids=candidate_ids)
+            snapshots[thread_id] = dict(thread)
+        if not set(candidate_ids).issubset(snapshots):
+            return ImplementationThreadReplyResult(blocked_thread_ids=candidate_ids)
+        replied: list[str] = []
+        blocked: list[str] = []
+        receipts: list[dict[str, Any]] = []
+        try:
+            for thread_id in candidate_ids:
+                reply = self._safe_thread_reply(replies.get(thread_id))
+                if reply is None or not self._pr_is_current_open_head(
+                    self.gh_pr_state(pr_number), expected_head_sha
+                ):
+                    blocked.append(thread_id)
+                    continue
+                live = {
+                    str(thread.get("id")): thread
+                    for thread in self._unresolved_threads(pr_number)
+                    if isinstance(thread, dict) and isinstance(thread.get("id"), str)
+                }.get(thread_id)
+                snapshot = snapshots[thread_id]
+                if not isinstance(live, dict) or not self._same_thread_snapshot(snapshot, live):
+                    blocked.append(thread_id)
+                    continue
+                body = self._implementation_thread_reply_body(
+                    pr_number, expected_head_sha, thread_id, reply
+                )
+                comment_id = self._add_thread_reply(thread_id, body)
+                if comment_id is None or not self._pr_is_current_open_head(
+                    self.gh_pr_state(pr_number), expected_head_sha
+                ):
+                    blocked.append(thread_id)
+                    continue
+                replied_live = {
+                    str(thread.get("id")): thread
+                    for thread in self._unresolved_threads(pr_number)
+                    if isinstance(thread, dict) and isinstance(thread.get("id"), str)
+                }.get(thread_id)
+                if not isinstance(replied_live, dict) or not self._same_snapshot_with_reply(
+                    snapshot, replied_live, body, comment_id
+                ):
+                    blocked.append(thread_id)
+                    continue
+                receipts.append(
+                    {
+                        **replied_live,
+                        "implementation_reply_id": comment_id,
+                        "implementation_reply_body": body,
+                        "implementation_head_sha": expected_head_sha,
+                    }
+                )
+                replied.append(thread_id)
+        except (OSError, RuntimeError, subprocess.SubprocessError, json.JSONDecodeError) as error:
+            logger.warning("Implementation thread replies failed on PR #%s: %s", pr_number, error)
+            return ImplementationThreadReplyResult(
+                replied_thread_ids=tuple(replied),
+                blocked_thread_ids=tuple(sorted(set(candidate_ids) - set(replied))),
+                receipts=tuple(receipts),
+            )
+        return ImplementationThreadReplyResult(
+            replied_thread_ids=tuple(replied),
+            blocked_thread_ids=tuple(blocked),
+            receipts=tuple(receipts),
+        )
+
+    def reconcile_reviewer_validated_threads(  # noqa: C901
         self,
         pr_number: int,
         *,
         reviewed_head_sha: str,
         receipts: list[dict[str, Any]],
-        dispositions: dict[str, str],
-    ) -> ProcessThreadResolutionResult:
-        """Reply then resolve exact, freshly revalidated review-thread receipts.
-
-        The stage may supply a receipt posted in this work item or a canonical
-        receipt reconstructed from a prior loop invocation. This accessor owns
-        no second persistence journal; it proves the submitted receipt still
-        exactly matches GitHub immediately before each mutation.
-        """
-        candidate_ids = tuple(sorted(dispositions))
-        if self._skip(
-            f"reply and resolve {len(candidate_ids)} process review thread(s) on PR #{pr_number}"
+        resolved_thread_ids: set[str],
+        feedback: dict[str, str],
+    ) -> ReviewerThreadReconciliationResult:
+        """Apply a fresh reviewer's per-thread decision, preserving races safely."""
+        expected_ids = {str(receipt.get("id") or "") for receipt in receipts}
+        candidate_ids = tuple(sorted(expected_ids | set(resolved_thread_ids) | set(feedback)))
+        if (
+            not expected_ids
+            or "" in expected_ids
+            or set(resolved_thread_ids) & set(feedback)
+            or expected_ids != set(resolved_thread_ids) | set(feedback)
+            or self._skip(
+                f"reconcile {len(candidate_ids)} reviewer-validated threads on PR #{pr_number}"
+            )
         ):
-            return ProcessThreadResolutionResult(blocked_thread_ids=candidate_ids)
-        if not candidate_ids or any(value != "addressed" for value in dispositions.values()):
-            return ProcessThreadResolutionResult(blocked_thread_ids=candidate_ids)
-        try:
-            submitted = {str(receipt.get("id") or ""): receipt for receipt in receipts}
+            return ReviewerThreadReconciliationResult(blocked_thread_ids=candidate_ids)
+        by_id: dict[str, dict[str, Any]] = {}
+        for receipt in receipts:
+            if not isinstance(receipt, dict):
+                return ReviewerThreadReconciliationResult(blocked_thread_ids=candidate_ids)
+            thread_id = str(receipt.get("id") or "")
+            reply_id = receipt.get("implementation_reply_id")
+            reply_body = receipt.get("implementation_reply_body")
             if (
-                len(submitted) != len(receipts)
-                or set(candidate_ids) - set(submitted)
-                or any(
-                    not self._is_immutable_process_receipt(submitted[thread_id])
-                    or submitted[thread_id].get("created_head_sha") == reviewed_head_sha
-                    for thread_id in candidate_ids
-                )
+                not thread_id
+                or thread_id in by_id
+                or not isinstance(reply_id, str)
+                or not isinstance(reply_body, str)
+                or self._thread_comment_snapshot(receipt) is None
             ):
-                return ProcessThreadResolutionResult(blocked_thread_ids=candidate_ids)
-            resolved: list[str] = []
-            blocked: list[str] = []
+                return ReviewerThreadReconciliationResult(blocked_thread_ids=candidate_ids)
+            by_id[thread_id] = receipt
+        resolved: list[str] = []
+        replied: list[str] = []
+        blocked: list[str] = []
+        try:
             for thread_id in candidate_ids:
-                receipt = submitted[thread_id]
+                receipt = by_id[thread_id]
                 if not self._pr_is_current_open_head(
                     self.gh_pr_state(pr_number), reviewed_head_sha
                 ):
                     blocked.append(thread_id)
                     continue
-                live_by_id = {
-                    str(thread.get("id")): thread
-                    for thread in self._unresolved_threads(pr_number)
-                    if isinstance(thread, dict) and isinstance(thread.get("id"), str)
-                }
-                live = live_by_id.get(thread_id)
-                if not self._same_initial_receipt(receipt, live or {}):
-                    blocked.append(thread_id)
-                    continue
-                reply_body = self._process_thread_reply_body(
-                    pr_number, reviewed_head_sha, receipt, dispositions[thread_id]
-                )
-                reply_query = (
-                    "mutation($threadId:ID!,$body:String!,$clientMutationId:String!){"
-                    "addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId,body:$body,"
-                    "clientMutationId:$clientMutationId}){comment{id}}}"
-                )
-                reply_data = self._graphql(
-                    reply_query,
-                    threadId=thread_id,
-                    body=reply_body,
-                    clientMutationId=hashlib.sha256(reply_body.encode("utf-8")).hexdigest(),
-                )
-                comment = (
-                    reply_data.get("data", {})
-                    .get("addPullRequestReviewThreadReply", {})
-                    .get("comment", {})
-                )
-                if not isinstance(comment, dict) or not comment.get("id"):
-                    blocked.append(thread_id)
-                    continue
-                reply_comment_id = str(comment["id"])
-                if not self._pr_is_current_open_head(
-                    self.gh_pr_state(pr_number), reviewed_head_sha
-                ):
-                    blocked.append(thread_id)
-                    continue
-                after_reply = {
+                live = {
                     str(thread.get("id")): thread
                     for thread in self._unresolved_threads(pr_number)
                     if isinstance(thread, dict) and isinstance(thread.get("id"), str)
                 }.get(thread_id)
-                if not self._same_replied_receipt(
-                    receipt, after_reply or {}, reply_body, reply_comment_id
-                ):
+                if not isinstance(live, dict) or not self._same_thread_snapshot(receipt, live):
                     blocked.append(thread_id)
+                    continue
+                if thread_id in feedback:
+                    detail = self._safe_thread_reply(feedback[thread_id])
+                    if detail is None:
+                        blocked.append(thread_id)
+                        continue
+                    body = self._reviewer_thread_feedback_body(
+                        pr_number, reviewed_head_sha, thread_id, detail
+                    )
+                    comment_id = self._add_thread_reply(thread_id, body)
+                    if comment_id is None or not self._pr_is_current_open_head(
+                        self.gh_pr_state(pr_number), reviewed_head_sha
+                    ):
+                        blocked.append(thread_id)
+                        continue
+                    after = {
+                        str(thread.get("id")): thread
+                        for thread in self._unresolved_threads(pr_number)
+                        if isinstance(thread, dict) and isinstance(thread.get("id"), str)
+                    }.get(thread_id)
+                    if not isinstance(after, dict) or not self._same_snapshot_with_reply(
+                        receipt, after, body, comment_id
+                    ):
+                        blocked.append(thread_id)
+                        continue
+                    replied.append(thread_id)
                     continue
                 resolve_query = (
                     "mutation($threadId:ID!,$clientMutationId:String!){"
@@ -1185,7 +1103,7 @@ class PipelineGitHub:
                     resolve_query,
                     threadId=thread_id,
                     clientMutationId=hashlib.sha256(
-                        (reply_body + ":resolve").encode("utf-8")
+                        f"{pr_number}:{reviewed_head_sha}:{thread_id}:resolve".encode()
                     ).hexdigest(),
                 )
                 resolved_thread = (
@@ -1198,23 +1116,27 @@ class PipelineGitHub:
                     or not self._pr_is_current_open_head(
                         self.gh_pr_state(pr_number), reviewed_head_sha
                     )
-                ):
-                    blocked.append(thread_id)
-                    continue
-                if any(
-                    str(thread.get("id")) == thread_id
-                    for thread in self._unresolved_threads(pr_number)
-                    if isinstance(thread, dict)
+                    or any(
+                        str(thread.get("id")) == thread_id
+                        for thread in self._unresolved_threads(pr_number)
+                        if isinstance(thread, dict)
+                    )
                 ):
                     blocked.append(thread_id)
                     continue
                 resolved.append(thread_id)
-            return ProcessThreadResolutionResult(tuple(resolved), tuple(blocked))
         except (OSError, RuntimeError, subprocess.SubprocessError, json.JSONDecodeError) as error:
-            logger.warning(
-                "Process review thread reconciliation failed on PR #%s: %s", pr_number, error
+            logger.warning("Reviewer thread reconciliation failed on PR #%s: %s", pr_number, error)
+            return ReviewerThreadReconciliationResult(
+                resolved_thread_ids=tuple(resolved),
+                feedback_thread_ids=tuple(replied),
+                blocked_thread_ids=tuple(sorted(set(candidate_ids) - set(resolved) - set(replied))),
             )
-            return ProcessThreadResolutionResult(blocked_thread_ids=candidate_ids)
+        return ReviewerThreadReconciliationResult(
+            resolved_thread_ids=tuple(resolved),
+            feedback_thread_ids=tuple(replied),
+            blocked_thread_ids=tuple(blocked),
+        )
 
     # -- read surface --------------------------------------------------------
 
@@ -1387,62 +1309,15 @@ class PipelineGitHub:
         coordinator already isolates a raised exception to the single
         work item mid-step (routes it to finished(fail)) rather than
         crashing the run, so failing closed here costs one item, not a
-        silent GO on unreviewed human threads.
+        silent GO on unreviewed open threads.
         """
         if self._repo_slug is not None:
             return self._repo_unresolved_threads(pr_number)
         return github_api.gh_pr_list_unresolved_threads(pr_number, dry_run=False)
 
-    def count_unresolved_threads(self, pr_number: int) -> tuple[int, int]:
-        """Return ``(automation_unresolved, human_unresolved)`` thread counts.
-
-        Mirrors ``_review_phase._count_unresolved_threads_blocking_go``
-        (#1152): resolves nothing. Both repo-scoped and legacy fetch paths
-        fail closed (#1868): a fetch error propagates rather than being
-        swallowed, so unresolved human threads are never hidden by a
-        transient GraphQL/API blip.
-        """
-        return _split_threads(self._unresolved_threads(pr_number))
-
-    def count_unresolved_threads_by_severity(self, pr_number: int) -> tuple[int, int, int]:
-        """Return ``(blocking_automation, minor_automation, human)`` (#1856).
-
-        Severity is read from the ``<!-- hephaestus-severity: X -->`` marker
-        prepended at post time; an automation thread with a missing/garbled marker
-        counts as BLOCKING (fail-safe). Resolves nothing.
-        """
-        threads = self._unresolved_threads(pr_number)
-        if not threads:
-            return (0, 0, 0)
-        current_login = github_api.gh_current_login()
-        blocking = minor = human = 0
-        for t in threads:
-            if _is_automation_owned_thread(t, current_login) or _has_external_bot_receipt(t):
-                if _thread_severity_is_blocking(t):
-                    blocking += 1
-                else:
-                    minor += 1
-            else:
-                human += 1
-        return (blocking, minor, human)
-
     def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
-        """Return fresh unresolved threads with durable ownership facts."""
-        threads = self._unresolved_threads(pr_number)
-        current_login = github_api.gh_current_login()
-        for thread in threads:
-            thread["automation_owned"] = _is_automation_owned_thread(
-                thread, current_login
-            ) or _has_external_bot_receipt(thread)
-        return threads
-
-    def list_restart_process_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
-        """Return only host-proven process or verified-bot restart receipts."""
-        return [
-            thread
-            for thread in self._unresolved_threads(pr_number)
-            if isinstance(thread.get("process_receipt"), dict)
-        ]
+        """Return complete current snapshots for every unresolved review thread."""
+        return self._unresolved_threads(pr_number)
 
     def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
         """Read shared PR state for seed, implementation, and merge_wait.

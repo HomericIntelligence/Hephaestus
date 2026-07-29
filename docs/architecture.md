@@ -501,8 +501,8 @@ Key fields:
  advancement.
 - `payload` — `dict[str, Any]`. The stage-local scratchpad for cross-step
  handoff (`retry_delay_s`, base-captured `base_branch`, validated audit facts,
- and process-owned thread receipts). It is not a durable authorization
- channel.
+ and host-read implementation-reply receipts). It is not a durable
+ authorization channel.
 - `result` ([`ItemResult`](hephaestus/automation/pipeline/work_item.py)) —
  final `passed / reason / final_stage` written by
  [`_finish`](hephaestus/automation/pipeline/coordinator.py).
@@ -920,8 +920,9 @@ flowchart LR
     PR["PR diff and requirements"] --> Review
     Review --> GitHub["GitHub review and inline threads"]
     GitHub --> Gate{"Blocking findings?"}
-    Gate -->|"automation-owned"| Address --> PublishFix --> Review
-    Gate -->|"human-owned"| Human["Human action"]
+    Gate -->|"open thread"| Address["Implementation fixes and replies"] --> Validate["Reviewer validates reply + diff"]
+    Validate -->|"resolved"| Review
+    Validate -->|"needs work"| Address
     Gate -->|"none"| Approve["state:implementation-go"]
     Approve --> MergeWait
 ```
@@ -943,8 +944,7 @@ stateDiagram-v2
     RetryReview --> Implementation: fresh implementation context required
     Validate --> Post: findings normalized
     Post --> Evaluate: GitHub review recorded
-    Evaluate --> HumanBlocked: human-owned finding
-    Evaluate --> Address: blocking automation finding
+    Evaluate --> Address: open review finding
     Evaluate --> ResolveMinor: advisory findings only
     Evaluate --> Approve: no unresolved findings
     Evaluate --> Skipped: no progress or review limit reached
@@ -953,7 +953,6 @@ stateDiagram-v2
     ResolveMinor --> Approve
     Approve --> MergeReady: implementation-go durable
     MergeReady --> [*]
-    HumanBlocked --> [*]
     Implementation --> [*]
     Skipped --> [*]
     Failed --> [*]
@@ -966,7 +965,9 @@ Architectural contract:
 - Prior rounds remain visible in the PR timeline.
 - Blocking findings produce `state:implementation-no-go`; only a clean review
   produces `state:implementation-go`.
-- Human-owned findings stop automation with an explanatory PR comment.
+- The implementation agent replies to every fixed open thread but never resolves it.
+- The reviewer validates each implementation reply against the current diff;
+  it resolves validated threads or posts corrective feedback and leaves them open.
 - The review proof is a fresh GitHub snapshot plus a clean checkout at that
   snapshot's head; it exists only in the current process.
 - No queue stage arms, disables, adopts, or polls auto-merge.
@@ -1094,7 +1095,7 @@ budgets. Every `routes.py` row and every doc row MUST agree.
 | `planning` | `PLAN_REVIEW` | `*` → `FINISHED` | `plan = 2` |
 | `plan_review` | `IMPLEMENTATION` | `nogo` → `PLANNING`; `plan_cycles_exhausted` → `FINISHED`; `*` → `PLANNING` | `plan_review_iter = 3`, `plan_cycles = 2` |
 | `implementation` | `PR_REVIEW` | `plan_not_go` → `PLAN_REVIEW`; `already_implementation_go_pr` → `MERGE_WAIT`; `*` → `FINISHED` | `implement = 2`, `test_fix = 1` |
-| `pr_review` | `MERGE_WAIT` | `agent_error` → `IMPLEMENTATION`; `human_blocked` → `FINISHED`; `exhaustion` → `FINISHED`; `*` → `PR_REVIEW` | `pr_review_iter = 3`, `pr_review_hard = 6` |
+| `pr_review` | `MERGE_WAIT` | `agent_error` → `IMPLEMENTATION`; `exhaustion` → `FINISHED`; `*` → `PR_REVIEW` | `pr_review_iter = 3`, `pr_review_hard = 6` |
 | `merge_wait` | `FINISHED` | `not_implementation_go`, `reviewed_head_missing`, or `reviewed_head_drift` → `PR_REVIEW`; `closed` → `FINISHED`; `*` → `FINISHED` | `merge = 5` |
 | `finished` | `FINISHED` | — (terminal) | — |
 

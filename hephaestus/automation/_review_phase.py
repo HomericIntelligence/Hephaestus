@@ -10,8 +10,9 @@ remains. It also owns the diff/changed-file collectors and review-log
 persistence helpers. An internal GO is informational only and does not label
 or arm the PR; the pipeline PR-review stage owns eligibility.
 
-The module-level helper ``_is_automation_owned_thread`` lives here because the
-GO-gate thread accounting is its only caller.
+This compatibility facade does not own GitHub review-thread replies or
+resolution. The queue pipeline is the only supported path for that two-role
+protocol.
 """
 
 from __future__ import annotations
@@ -68,10 +69,7 @@ from .git_utils import (
     push_current_branch_with_lease_on_divergence,
     run,
 )
-from .github_api import (
-    gh_current_login,
-    gh_pr_list_unresolved_threads,
-)
+from .github_api import gh_pr_list_unresolved_threads
 from .models import ImplementationState
 from .pr_reviewer import gather_impl_review_context, review_pr_inline
 from .prompts import get_impl_loop_review_prompt, get_impl_resume_feedback_prompt
@@ -175,28 +173,8 @@ def _review_thread_count_decreased(
     before: list[dict[str, Any]],
     after: list[dict[str, Any]],
 ) -> bool:
-    """Return True when live unresolved threads decreased, for example by human action."""
+    """Return True when live unresolved threads decreased after external reconciliation."""
     return bool(before) and len(after) < len(before)
-
-
-def _is_automation_owned_thread(thread: dict[str, Any], current_login: str | None) -> bool:
-    """Return True only when every known thread participant is automation."""
-    authors = {str(author).strip() for author in thread.get("authors", []) if str(author).strip()}
-    author = (thread.get("author") or "").strip()
-    if author:
-        authors.add(author)
-    for comment in thread.get("comments", []):
-        comment_author = (comment.get("author") or "").strip()
-        if comment_author:
-            authors.add(comment_author)
-
-    automation_bot_logins = {
-        "github-actions[bot]",
-        "hephaestus[bot]",
-    }
-    if current_login:
-        automation_bot_logins.add(current_login)
-    return bool(authors) and authors <= automation_bot_logins
 
 
 class ReviewPhase(StageMixin):
@@ -262,20 +240,27 @@ class ReviewPhase(StageMixin):
         pr_number: int | None = None,
         advise_findings: str = "",
     ) -> tuple[int, str | None, str | None]:
-        """Preserve the legacy tuple contract through the pure loop coordinator."""
-        return self._coordinate_review_loop(
-            issue_number=issue_number,
-            worktree_path=worktree_path,
-            branch_name=branch_name,
-            issue_title=issue_title,
-            issue_body=issue_body,
-            session_id=session_id,
-            slot_id=slot_id,
-            thread_id=thread_id,
-            state=state,
-            pr_number=pr_number,
-            advise_findings=advise_findings,
+        """Reject the retired standalone review loop.
+
+        The pipeline ``pr_review`` stage is the only review-thread lifecycle:
+        it posts implementation replies after a pushed fix, then has a fresh
+        reviewer validate and reconcile them.  This old facade could not prove
+        that handoff, so it must not remain an alternate execution path.
+        """
+        del (
+            issue_number,
+            worktree_path,
+            branch_name,
+            issue_title,
+            issue_body,
+            session_id,
+            slot_id,
+            thread_id,
+            state,
+            pr_number,
+            advise_findings,
         )
+        raise RuntimeError("review_phase_retired_use_pipeline")
 
     def _coordinate_review_loop(
         self,
@@ -455,9 +440,8 @@ class ReviewPhase(StageMixin):
         path. The queue makes an internal GO informational only; its separate
         pipeline PR-review stage owns the implementation-GO result.
 
-        An ``ERROR`` verdict (reviewer-infrastructure failure) or a
-        ``HUMAN_BLOCKED`` verdict (review reached GO but an unresolved human
-        review thread remains) applies **neither** label: the PR is not settled,
+        An ``ERROR`` verdict (reviewer-infrastructure failure) applies neither
+        label: the PR is not settled,
         so it must be left unlabeled for the "no go/no-go label → re-review" path
         to pick it up next loop (#911 / PR #1069). Labeling it no-go would falsely
         record a converged failure; internal GO labels remain reserved for the
@@ -544,54 +528,27 @@ class ReviewPhase(StageMixin):
         findings, or while prior automation threads remain open. This counts
         what is still open (resolving nothing) and maps it to a terminal state.
 
-        Returns ``(verdict, go_blocked_by_automation, should_break)``:
+        Returns ``(verdict, go_blocked_by_open_threads, should_break)``:
 
-        * ``verdict`` — ``"GO"`` (clean), ``"NOGO"`` (automation threads remain,
-          code-fix/human-handoff), or ``"HUMAN_BLOCKED"`` (a human thread is open).
-        * ``go_blocked_by_automation`` — force the address step to run even on a
+        * ``verdict`` — ``"GO"`` (clean) or ``"NOGO"`` (one or more threads remain).
+        * ``go_blocked_by_open_threads`` — force the address step to run even on a
           GO pass that posted no new threads.
-        * ``should_break`` — terminate the loop now (clean GO or HUMAN_BLOCKED).
+        * ``should_break`` — terminate the loop now only on a clean GO.
         """
         impl = self.impl
-        automation_unresolved = 0
-        human_unresolved = 0
+        unresolved = 0
         if pr_number is not None and not self.options.dry_run:
-            (
-                automation_unresolved,
-                human_unresolved,
-            ) = self._count_unresolved_threads_blocking_go(
+            unresolved = self._count_unresolved_threads_blocking_go(
                 issue_number=issue_number,
                 pr_number=pr_number,
                 thread_id=thread_id,
             )
-        if human_unresolved and pr_number is not None:
-            # A GO cannot stand while a HUMAN review thread is open. Automation
-            # must NOT resolve it. It can record a code-fix claim, but a human
-            # has to verify/reply/resolve the thread. Break with
-            # a distinct terminal state (no spin to exhaustion, no state:skip) so
-            # the PR stays unlabeled, awaiting the human; the loop re-runs next
-            # pass via the "no go/no-go label → re-review" path once a human
-            # resolves the thread.
+        if unresolved and pr_number is not None:
             impl._log(
                 "info",
                 f"{pr_ref(pr_number)}: reviewer said GO but "
-                f"{human_unresolved} unresolved human review thread(s) remain "
-                f"— not accepting GO; awaiting human resolution, "
-                f"leaving PR unlabeled",
-                thread_id,
-            )
-            return "HUMAN_BLOCKED", False, True
-        if automation_unresolved and pr_number is not None:
-            # GO + open automation thread(s): the work is NOT actually done.
-            # Downgrade to NOGO so the address step (below) fixes code and
-            # records claims for a human to verify/reply/resolve before GO.
-            # ``go_blocked_by_automation`` forces the address step to run even
-            # though this audit pass may have posted no new threads.
-            impl._log(
-                "info",
-                f"{pr_ref(pr_number)}: reviewer said GO but "
-                f"{automation_unresolved} unresolved automation review thread(s) "
-                "remain — recording code-fix claims for human resolution before GO can stand",
+                f"{unresolved} review thread(s) remain — queue pipeline must implement, "
+                "reply, validate, and reconcile them before GO can stand",
                 thread_id,
             )
             return "NOGO", True, False
@@ -626,8 +583,8 @@ class ReviewPhase(StageMixin):
 
         Step 1 (#1152): before the fresh review, verify (via the read-only
         sub-agent) that every PRIOR review comment was truly addressed by the
-        current diff — recording code-fix evidence for human verification and
-        re-opening the ones that are not addressed. On iteration 0 of the
+        current diff. The queue pipeline owns any subsequent implementation
+        reply and reviewer reconciliation. On iteration 0 of the
         existing-PR path there is no
         prior-address snapshot, so seed it with the PR's currently unresolved
         threads; otherwise pre-existing threads would never be verified and the
@@ -823,10 +780,10 @@ class ReviewPhase(StageMixin):
     ) -> tuple[list[dict[str, Any]], bool]:
         """Run the address step for one iteration.
 
-        Resumes Session 2 to fix the posted threads and commit/push code. It
-        records claims but leaves the GitHub threads for a human to verify,
-        reply if needed, and resolve. Skipped only when there is no PR (no
-        inline threads to address). ``session_id`` is informational — the
+        This retired helper may prepare code-fix context but must not be used
+        to process GitHub review threads. The queue pipeline posts the
+        implementation reply and has a reviewer validate/reconcile it.
+        ``session_id`` is informational — the
         address step resumes ``AGENT_IMPLEMENTER`` by its deterministic
         per-(repo,issue,agent) id (or starts a fresh implementer session when no
         transcript exists), so the existing-PR path (which has no initial
@@ -939,30 +896,17 @@ class ReviewPhase(StageMixin):
         issue_number: int,
         pr_number: int,
         thread_id: int | None,
-    ) -> tuple[int, int]:
-        """Count unresolved review threads that block a GO, by ownership.
+    ) -> int:
+        """Count all unresolved review threads that block a GO.
 
         A clean structural audit may NOT stand while ANY review thread is unresolved — not
-        even an automation-owned one. Earlier implementations automatically
-        resolved automation threads here so a GO could converge immediately;
-        that was wrong (#1152). A reviewer can post findings in the SAME pass
-        that posts new inline findings, and bypassing human verification would
-        accept GO without a verified fix. The GO label must only be earned once
-        every comment has been genuinely addressed, a human has resolved the
-        corresponding thread, and a clean re-review confirms zero unresolved
-        threads.
+        even one opened by an external actor. A reviewer can post
+        findings in the SAME pass that posts new inline findings, so a clean
+        audit alone does not establish convergence.
 
         This method therefore performs no thread mutation. It returns
-        ``(automation_unresolved, human_unresolved)``:
-
-        * ``human_unresolved > 0`` — automation cannot resolve human threads, so
-          the caller breaks with a distinct ``HUMAN_BLOCKED`` terminal state.
-        * ``automation_unresolved > 0`` — the caller downgrades GO to NOGO so the
-          address step fixes code and records claims for a human to verify/reply/
-          resolve. Convergence requires a GO pass that leaves zero unresolved
-          threads.
-
-        Returns ``(0, 0)`` when the thread list can't be fetched (fail-open:
+        the total number of unresolved threads. Returns ``0`` when the list
+        can't be fetched (fail-open:
         don't strand a GO on a transient API blip — a genuinely unresolved
         thread re-surfaces on the next loop's existing-PR re-review).
         """
@@ -976,27 +920,16 @@ class ReviewPhase(StageMixin):
                 f"after GO for {pr_ref(pr_number)}: {exc}",
                 thread_id,
             )
-            return (0, 0)
+            return 0
         if not threads:
-            return (0, 0)
-
-        current_login = gh_current_login()
-        automation_unresolved = 0
-        human_unresolved = 0
-        for thread in threads:
-            if _is_automation_owned_thread(thread, current_login):
-                automation_unresolved += 1
-            else:
-                human_unresolved += 1
-        if automation_unresolved or human_unresolved:
-            impl._log(
-                "info",
-                f"{issue_number}: GO pass left {automation_unresolved} automation + "
-                f"{human_unresolved} human unresolved thread(s) on {pr_ref(pr_number)} "
-                "— GO cannot stand until all are addressed and a clean re-review confirms",
-                thread_id,
-            )
-        return (automation_unresolved, human_unresolved)
+            return 0
+        impl._log(
+            "info",
+            f"{issue_number}: GO pass left {len(threads)} unresolved review thread(s) on "
+            f"{pr_ref(pr_number)} — GO cannot stand until the queue pipeline reconciles them",
+            thread_id,
+        )
+        return len(threads)
 
     def _run_impl_review_step(
         self,
@@ -1131,7 +1064,8 @@ class ReviewPhase(StageMixin):
         :func:`run_address_fix_session`, which fans out one sub-agent per COMMENT
         at the model tier matching its classified difficulty, #1083), then
         commits + pushes the fixes. It records code-fix claims but does not
-        mutate GitHub review threads: a human verifies/replies/resolves them.
+        mutate GitHub review threads: the queue pipeline posts implementation
+        replies and the reviewer validates or reconciles them.
         This step only counts as progress when a real commit was produced
         (#1085).
 
@@ -1211,9 +1145,9 @@ class ReviewPhase(StageMixin):
             return False
         self.runner._push_branch(branch_name, worktree_path)
 
-        # Thread resolution is NEVER done here. A human must verify the current
-        # diff, reply if appropriate, and resolve each thread. A self-reported
-        # fix with no diff change stays open for that human review.
+        # Thread resolution is NEVER done here. The queue pipeline must post
+        # implementation replies after the push, then obtain a fresh reviewer
+        # validation before it can resolve or return each thread.
         return True
 
     def _parse_address_result(self, text: str, issue_number: int, iteration: int) -> dict[str, Any]:

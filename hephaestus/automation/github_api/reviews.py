@@ -613,7 +613,7 @@ def _review_threads_for_review(pr_number: int, review_id: str) -> list[str]:
     using fields that actually exist in the GitHub GraphQL schema.
 
     Returns an empty list on any failure (the caller treats it as no durable
-    process receipt, which is safe).
+    thread snapshot, which is safe).
     """
     owner, repo = _api.get_repo_info()
     if not re.match(r"^[a-zA-Z0-9_-]+$", owner) or not re.match(r"^[a-zA-Z0-9_-]+$", repo):

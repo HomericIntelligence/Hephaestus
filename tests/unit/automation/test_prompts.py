@@ -994,13 +994,15 @@ class TestAddressReviewPrompt:
     def test_preserves_json_block_contract(self) -> None:
         """The final JSON-block contract the pipeline parses must be intact.
 
-        #1085 C4: ``replies`` was dropped — the address step no longer consumes
-        it (the reviewer resolves threads on its next pass), so the coordinator
-        must not be asked to generate per-thread replies.
+        The implementation agent must return one reply for every fixed thread.
+        The host posts that reply after verifying the pushed fix; a fresh
+        reviewer then decides whether to resolve the thread or leave feedback.
         """
         out = self._build()
         assert '"addressed"' in out
-        assert '"replies"' not in out
+        assert '"replies"' in out
+        assert "never resolves a thread in this implementation step" in out
+        assert "fresh reviewer validates the fix and reply" in out
 
     def test_threads_json_is_fenced_untrusted(self) -> None:
         """Reviewer bodies stay fenced as untrusted input."""

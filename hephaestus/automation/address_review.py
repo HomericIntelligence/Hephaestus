@@ -3,13 +3,14 @@
 Provides:
 - Parallel processing of issues with unresolved review threads
 - Session resume for the original implementer's agent session when supported
-- Agent code-fix claims recorded for human verification and thread resolution
+- Agent code-fix claims recorded for pipeline reviewer validation
 - State persistence and UI monitoring
 
 This module finds PRs with unresolved review threads, resumes the original
 implementer's session when supported (or starts a fresh one), runs the selected
-agent to fix the code, then records its claimed thread IDs. GitHub threads stay
-open: a human must verify the change, reply if appropriate, and resolve them.
+agent to fix the code, then records its claimed thread IDs. This compatibility
+entry point never resolves GitHub threads; the queue pipeline posts the
+implementation reply and a fresh reviewer validates and resolves or returns it.
 """
 
 from __future__ import annotations
@@ -88,7 +89,7 @@ class AddressReviewer(BaseReviewer):
     Features:
     - Parallel processing across multiple issues
     - Session resume from implementer's saved agent session when supported
-    - Agent fix claims retained for explicit human verification and resolution
+    - Agent fix claims retained for pipeline reviewer validation
     - State persistence for observability
     - Real-time curses UI for status monitoring
 
@@ -324,7 +325,7 @@ class AddressReviewer(BaseReviewer):
         slot_id: int,
         thread_id: int,
     ) -> None:
-        """Commit fixes, push branch, and record a human-resolution handoff.
+        """Commit fixes, push branch, and record reviewer-validation work.
 
         Args:
             issue_number: GitHub issue number.
@@ -346,27 +347,29 @@ class AddressReviewer(BaseReviewer):
         self._push_branch(branch_name, worktree_path)
 
         del replies, threads
-        self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Recording handoff")
+        self.status_tracker.update_slot(
+            slot_id, f"{issue_ref(issue_number)}: Awaiting reviewer validation"
+        )
 
         with self.state_lock:
             existing_ids = set(review_state.addressed_thread_ids)
             for tid in addressed:
                 existing_ids.add(tid)
             review_state.addressed_thread_ids = list(existing_ids)
-            review_state.phase = ReviewPhase.HUMAN_RESOLUTION_REQUIRED
+            review_state.phase = ReviewPhase.REVIEWER_VALIDATION_REQUIRED
             review_state.completed_at = None
             review_state.error = (
-                "Agent code-fix claims recorded; a human must verify, reply if needed, "
-                "and resolve the remaining GitHub review threads."
+                "Implementation changes were pushed; pipeline reviewer validation must "
+                "post a resolution or follow-up response for each open review thread."
             )
         self._save_review_state(review_state)
 
         iref = issue_ref(issue_number)
-        self.status_tracker.update_slot(slot_id, f"{iref}: Human thread resolution required")
+        self.status_tracker.update_slot(slot_id, f"{iref}: Reviewer validation required")
         self._log(
             "info",
             f"Address review code-fix claims recorded for issue {iref} (PR {pr_ref(pr_number)}); "
-            "human verification, reply, and thread resolution are required",
+            "pipeline reviewer validation and thread reconciliation are required",
             thread_id,
         )
 
@@ -430,7 +433,7 @@ class AddressReviewer(BaseReviewer):
                 return WorkerResult(
                     issue_number=issue_number,
                     success=False,
-                    error="human_review_thread_resolution_required",
+                    error="reviewer_validation_required",
                     pr_number=pr_number,
                     branch_name=branch_name,
                     worktree_path=str(worktree_path),
@@ -691,8 +694,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = build_review_parser(
         description=(
             "Find PRs with unresolved review threads and use Claude Code or Codex to fix the "
-            "code. Agent claims are recorded, while a human verifies, replies if needed, and "
-            "resolves the GitHub threads."
+            "code. This compatibility command records implementation work only; use "
+            "hephaestus-automation-loop for implementation replies and reviewer resolution."
         ),
         epilog="""
 Examples:
@@ -707,7 +710,7 @@ Examples:
         """,
         issues_help="Issue numbers whose linked PRs should have review threads addressed",
         dry_run_prefix=(
-            "Show what would be done without pushing code or requiring human thread resolution."
+            "Show what would be done without pushing code or entering reviewer validation."
         ),
     )
     add_agent_timeout_arg(parser)

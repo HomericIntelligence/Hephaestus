@@ -4,23 +4,21 @@ The in-loop review → address cycle (now owned by the pipeline PR-review stage,
 ``pipeline/stages/pr_review.py``)
 used to resolve review threads on the implementer's *self-report* — the
 implementer claimed it addressed a thread and the orchestrator resolved it,
-even when no commit was produced (#1083). A fresh read-only sub-agent still
-compares each prior comment against the current diff, but validation is now
-report-only: GitHub offers no conditional thread-resolution mutation, so the
-open thread remains a human merge gate.
+even when no commit was produced (#1083). A fresh read-only sub-agent now
+compares each prior comment against the current diff and the host-posted
+implementation reply. The pipeline adapter—not the model—uses that result to
+perform the exact-head, exact-snapshot reviewer resolution or feedback write.
 
-- **Addressed** — the diff genuinely resolves the comment, but a human must
-  verify and close the existing GitHub thread.
-- **Not addressed** — reported to the caller so it can request another code
-  change without mutating the thread.
+- **Addressed** — the diff and implementation reply genuinely resolve the
+  comment; the fresh reviewer may resolve that exact thread.
+- **Not addressed** — the reviewer supplies precise feedback; the adapter
+  posts it and leaves the thread open for implementation.
 
-The implementer's address step no longer resolves anything; it only applies the
-fix, commits, and pushes. A clean worktree (no real fix) therefore leaves the
-diff unchanged, the validator judges the thread NOT addressed, and it stays
-open — closing the "resolved without implementing" hole.
-
-This respects the #375 own-threads-only guarantee: validator output is never
-used to mutate a review thread.
+The implementer's address step never resolves anything. A clean worktree (no
+real fix) leaves the diff unchanged, the reviewer judges the thread NOT
+addressed, and the adapter leaves it open—closing the "resolved without
+implementing" hole. Model output never selects an arbitrary GitHub object;
+only a host-read implementation-reply receipt is eligible for mutation.
 """
 
 from __future__ import annotations
@@ -151,9 +149,9 @@ def validate_prior_comments_addressed(
     """Validate prior comments without mutating their GitHub threads.
 
     The read-only agent compares each ``prior_threads`` comment against the
-    current diff. Any open prior thread remains a human-resolution gate even
-    when the agent reports that its finding is addressed; there is no
-    conditional GitHub mutation that could safely close it.
+    current diff. This compatibility helper cannot mutate a thread: the queue
+    pipeline owns the required implementation reply and reviewer reconciliation
+    sequence.
 
     Args:
         pr_number / issue_number / worktree_path / prior_threads / diff_text /
@@ -162,10 +160,10 @@ def validate_prior_comments_addressed(
         prior_reopened_keys: Legacy caller state retained without changing it.
 
     Returns:
-        ``(thread_ids, is_clean, legacy_keys)``. ``is_clean`` is
-        false whenever prior threads exist: their GitHub resolution remains an
-        explicit human merge gate. ``reopened_keys`` is retained for the
-        historical caller contract.
+        ``(thread_ids, is_clean, legacy_keys)``. ``is_clean`` is false whenever
+        prior threads exist because this legacy helper cannot perform the
+        queue pipeline's reviewer reconciliation. ``reopened_keys`` is retained
+        for the historical caller contract.
 
     """
     seen_keys: set[str] = set(prior_reopened_keys or set())
@@ -189,7 +187,7 @@ def validate_prior_comments_addressed(
     if unaddressed:
         logger.info(
             "PR %s R%s: validator reported %s unaddressed review thread(s); "
-            "leaving all thread resolution to a human",
+            "leaving reconciliation to the queue pipeline reviewer",
             pr_number,
             iteration,
             len(unaddressed),

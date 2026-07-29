@@ -4,10 +4,11 @@ You are the COORDINATOR for fixing code in response to the review threads on PR 
 
 This runs IN-LOOP as part of the implement stage — it is no longer a separate
 pipeline phase. You are fixing the underlying code concerns raised against the
-current diff. These GitHub threads live on the PR, not on the issue. Do not
-reply to or resolve them yourself: only the coordinator may close an exact,
-process-owned receipt after a fresh validation and revalidation; every other
-thread remains a human gate.
+current diff. These GitHub threads live on the PR, not on the issue. You do
+not call GitHub yourself. After the coordinator confirms that your fix was
+committed and pushed, it posts your implementation reply on each addressed
+thread. A fresh reviewer then validates that reply and the fix; only that
+reviewer may resolve the thread.
 
 **Working Directory:** {{ worktree_path }}
 
@@ -68,8 +69,8 @@ CI/CD remains outside this remediation loop.
    b. Read the cited file/line in the working directory `{{ worktree_path }}` and apply the
       code fix for its ONE assigned review comment (you pass it the thread body, line, and
       thread_id).
-   c. Report back the `thread_id` and a one-line reply describing the fix — or, if the
-      comment is not addressable in code, say so and leave it out of the fixed set.
+  c. Report back the `thread_id` and a one-line reply describing the fix — or, if the
+     comment is not addressable in code, say so and leave it out of the fixed set.
 
    **Each sub-agent prompt MUST include these guardrails (critical):**
    - "Do NOT background your work, do NOT exit early, and do NOT defer. Complete the fix
@@ -93,15 +94,17 @@ Write your coordination notes in prose. At the very end of your response, emit a
 fenced JSON block:
 
 ```json
-{"addressed": ["<thread_id>", ...]}
+{"addressed": ["<thread_id>", ...], "replies": {"<thread_id>": "what was fixed"}}
 ```
 
 Rules for the JSON block:
-- `addressed`: array of thread_id strings for threads actually fixed in code
-  (any thread_id not in the unresolved-set we presented is dropped silently)
+- `addressed`: array of thread_id strings for threads actually fixed in code.
+- `replies`: a one-line explanation for EVERY id in `addressed`, keyed by that
+  exact id. The coordinator posts these only after it proves a real fix commit
+  reached the PR head; it never resolves a thread in this implementation step.
 - Only include threads genuinely fixed. Leave unaddressable threads out of `addressed`.
 - Emit only one JSON block, at the very end of your response (the parser takes the LAST one).
-- Do not attempt to reply to or resolve a GitHub thread. Your code-fix claim is
-  recorded by the coordinator; it may reply and resolve only its immutable,
-  revalidated process-owned receipt. Human or changed threads remain open for
-  a human to verify and resolve.
+- Do not attempt to resolve a GitHub thread. Return the required reply text in
+  the JSON instead; the coordinator posts it after the pushed fix is verified.
+  The fresh reviewer validates the fix and reply, resolves verified threads,
+  and explains what remains wrong on threads it leaves open.

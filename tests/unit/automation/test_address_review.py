@@ -311,10 +311,10 @@ class TestAddressIssue:
 
         assert results == {}
 
-    def test_address_issue_claimed_fixes_require_human_resolution(
+    def test_address_issue_claimed_fixes_require_reviewer_validation(
         self, reviewer: AddressReviewer, tmp_path: Path
     ) -> None:
-        """A code-fix claim is a handoff, not a completed address review."""
+        """A code-fix claim is reviewer-validation work, not a completion."""
         threads = [{"id": "thread-1", "path": "foo.py", "line": 5, "body": "Fix this"}]
         state = ReviewState(issue_number=123, pr_number=456, branch_name="branch-1")
 
@@ -338,12 +338,12 @@ class TestAddressIssue:
             result = reviewer._address_issue(123, 456)
 
         assert result.success is False
-        assert result.error == "human_review_thread_resolution_required"
-        assert state.phase is ReviewPhase.HUMAN_RESOLUTION_REQUIRED
+        assert result.error == "reviewer_validation_required"
+        assert state.phase is ReviewPhase.REVIEWER_VALIDATION_REQUIRED
         assert state.addressed_thread_ids == ["thread-1"]
         assert state.completed_at is None
         assert state.error is not None
-        assert "human" in state.error.lower()
+        assert "pipeline reviewer" in state.error.lower()
         mock_sleep.assert_called_once_with(1)
 
 
@@ -599,8 +599,8 @@ class TestCommitPushAndRecord:
         # Check that the state was updated with the new addressed thread IDs
         assert "old-t1" in review_state.addressed_thread_ids
         assert "t1" in review_state.addressed_thread_ids
-        assert review_state.phase == ReviewPhase.HUMAN_RESOLUTION_REQUIRED
+        assert review_state.phase == ReviewPhase.REVIEWER_VALIDATION_REQUIRED
         assert review_state.completed_at is None
         assert review_state.error is not None
-        assert "human" in review_state.error.lower()
+        assert "pipeline reviewer" in review_state.error.lower()
         mock_save.assert_called_once()

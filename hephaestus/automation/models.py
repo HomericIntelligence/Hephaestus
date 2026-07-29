@@ -224,7 +224,7 @@ class ReviewPhase(str, Enum):
     PUSHING = "pushing"
     LEARN = "learn"
     COMPLETED = "completed"
-    HUMAN_RESOLUTION_REQUIRED = "human_resolution_required"
+    REVIEWER_VALIDATION_REQUIRED = "reviewer_validation_required"
     FAILED = "failed"
     POSTING = "posting"  # posting inline review comments to GitHub
     WAITING_CI = "waiting_ci"  # waiting for CI checks
@@ -248,7 +248,8 @@ class ReviewState(BaseModel):
     error: str | None = None
     posted_thread_ids: list[str] = Field(default_factory=list)  # GitHub review thread IDs posted
     # Thread IDs whose underlying code an agent claims to have fixed. These
-    # claims are not GitHub thread resolution: a human must verify/reply/resolve.
+    # claims are not GitHub thread resolution: the pipeline reviewer must
+    # validate the pushed fix and reply before it can resolve or return them.
     addressed_thread_ids: list[str] = Field(default_factory=list)
 
 

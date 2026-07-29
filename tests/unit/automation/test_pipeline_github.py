@@ -100,466 +100,162 @@ def test_adapter_satisfies_stage_github_protocol(adapter: pg.PipelineGitHub) -> 
     assert isinstance(adapter, StageGitHub)
 
 
-def _process_thread_receipt(thread_id: str, review_id: str, body: str) -> dict[str, Any]:
-    """Return one exact process-created thread receipt fixture."""
+def _external_reviewer_thread(thread_id: str = "reviewer-thread") -> dict[str, Any]:
+    """Return an arbitrary reviewer-owned thread eligible for the new protocol."""
     return {
         "id": thread_id,
         "path": "a.py",
         "line": 7,
         "side": "RIGHT",
-        "body": body,
-        "author": "hephaestus[bot]",
-        "authors": ["hephaestus[bot]"],
+        "body": "Please fix this.",
+        "author": "maintainer",
+        "authors": ["maintainer"],
         "comments": [
-            {
-                "id": f"comment-{thread_id}",
-                "author": "hephaestus[bot]",
-                "body": body,
-                "review_id": review_id,
-            }
+            {"id": f"comment-{thread_id}", "author": "maintainer", "body": "Please fix this."}
         ],
-        "review_id": review_id,
-        "created_head_sha": "b" * 40,
     }
 
 
-class TestProcessReviewThreadReceipts:
-    """Durable receipts limit automated thread actions to this loop's threads."""
+class TestAllThreadReplyAndReviewerResolution:
+    """The implementation/reviewer split applies to every open thread author."""
 
-    def test_live_automated_thread_exposes_a_canonical_restart_receipt(
+    def test_external_thread_is_replied_to_then_resolved_by_fresh_reviewer(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Only an immutable, marked automated review may be re-adopted after restart."""
-        review_id = "PRR_automation"
-        review_head = "b" * 40
-        automated_comment = "<!-- hephaestus-severity: major -->\nfix this"
-
-        monkeypatch.setattr(
-            adapter,
-            "_graphql",
-            lambda *_args, **_kwargs: {
-                "data": {
-                    "repository": {
-                        "pullRequest": {
-                            "reviewThreads": {
-                                "pageInfo": {"hasNextPage": False, "endCursor": None},
-                                "nodes": [
-                                    {
-                                        "id": "automated-thread",
-                                        "isResolved": False,
-                                        "path": "a.py",
-                                        "line": 7,
-                                        "side": "RIGHT",
-                                        "comments": {
-                                            "pageInfo": {"hasNextPage": False},
-                                            "nodes": [
-                                                {
-                                                    "id": "automated-comment",
-                                                    "body": automated_comment,
-                                                    "author": {"login": "mvillmow"},
-                                                    "pullRequestReview": {
-                                                        "id": review_id,
-                                                        "body": (
-                                                            "## Automated PR review\n\nSummary."
-                                                        ),
-                                                        "commit": {"oid": review_head},
-                                                    },
-                                                }
-                                            ],
-                                        },
-                                    },
-                                    {
-                                        "id": "human-thread",
-                                        "isResolved": False,
-                                        "path": "a.py",
-                                        "line": 9,
-                                        "side": "RIGHT",
-                                        "comments": {
-                                            "pageInfo": {"hasNextPage": False},
-                                            "nodes": [
-                                                {
-                                                    "id": "human-comment",
-                                                    "body": (
-                                                        "<!-- hephaestus-severity: major -->\n"
-                                                        "Keep the original text."
-                                                    ),
-                                                    "author": {"login": "mvillmow"},
-                                                    "pullRequestReview": {
-                                                        "id": "PRR_human",
-                                                        "body": "",
-                                                        "commit": {"oid": review_head},
-                                                    },
-                                                }
-                                            ],
-                                        },
-                                    },
-                                    {
-                                        "id": "replied-thread",
-                                        "isResolved": False,
-                                        "path": "a.py",
-                                        "line": 11,
-                                        "side": "RIGHT",
-                                        "comments": {
-                                            "pageInfo": {"hasNextPage": False},
-                                            "nodes": [
-                                                {
-                                                    "id": "replied-comment",
-                                                    "body": automated_comment,
-                                                    "author": {"login": "mvillmow"},
-                                                    "pullRequestReview": {
-                                                        "id": review_id,
-                                                        "body": (
-                                                            "## Automated PR review\n\nSummary."
-                                                        ),
-                                                        "commit": {"oid": review_head},
-                                                    },
-                                                },
-                                                {
-                                                    "id": "human-reply",
-                                                    "body": "Please leave this open.",
-                                                    "author": {"login": "reviewer"},
-                                                    "pullRequestReview": {
-                                                        "id": review_id,
-                                                        "body": (
-                                                            "## Automated PR review\n\nSummary."
-                                                        ),
-                                                        "commit": {"oid": review_head},
-                                                    },
-                                                },
-                                            ],
-                                        },
-                                    },
-                                    {
-                                        "id": "stale-thread",
-                                        "isResolved": False,
-                                        "path": "stale.py",
-                                        "line": None,
-                                        "side": "RIGHT",
-                                        "comments": {
-                                            "pageInfo": {"hasNextPage": False},
-                                            "nodes": [
-                                                {
-                                                    "id": "stale-comment",
-                                                    "body": automated_comment,
-                                                    "author": {"login": "mvillmow"},
-                                                    "pullRequestReview": {
-                                                        "id": review_id,
-                                                        "body": (
-                                                            "## Automated PR review\n\nSummary."
-                                                        ),
-                                                        "commit": {"oid": review_head},
-                                                    },
-                                                }
-                                            ],
-                                        },
-                                    },
-                                    {
-                                        "id": "bot-thread",
-                                        "isResolved": False,
-                                        "path": "bot.py",
-                                        "line": 13,
-                                        "side": "RIGHT",
-                                        "comments": {
-                                            "pageInfo": {"hasNextPage": False},
-                                            "nodes": [
-                                                {
-                                                    "id": "bot-comment",
-                                                    "body": "Please handle this finding.",
-                                                    "author": {
-                                                        "login": "github-code-quality",
-                                                        "__typename": "Bot",
-                                                    },
-                                                    "pullRequestReview": {
-                                                        "id": "PRR_bot",
-                                                        "body": "Automated quality review.",
-                                                        "commit": {"oid": review_head},
-                                                    },
-                                                }
-                                            ],
-                                        },
-                                    },
-                                ],
-                            }
-                        }
-                    }
-                }
-            },
-        )
-
-        threads = adapter._repo_unresolved_threads(7)
-
-        assert threads[0]["process_receipt"] == {
-            "id": "automated-thread",
-            "path": "a.py",
-            "line": 7,
-            "side": "RIGHT",
-            "body": automated_comment,
-            "author": "mvillmow",
-            "authors": ["mvillmow"],
-            "comments": [
-                {
-                    "id": "automated-comment",
-                    "author": "mvillmow",
-                    "body": automated_comment,
-                    "review_id": review_id,
-                }
-            ],
-            "review_id": review_id,
-            "created_head_sha": review_head,
-        }
-        assert "process_receipt" not in threads[1]
-        assert "process_receipt" not in threads[2]
-        assert threads[3]["process_receipt"] == {
-            "id": "stale-thread",
-            "path": "stale.py",
-            "line": None,
-            "side": "RIGHT",
-            "body": automated_comment,
-            "author": "mvillmow",
-            "authors": ["mvillmow"],
-            "comments": [
-                {
-                    "id": "stale-comment",
-                    "author": "mvillmow",
-                    "body": automated_comment,
-                    "review_id": review_id,
-                }
-            ],
-            "review_id": review_id,
-            "created_head_sha": review_head,
-            "restart_stale_line": True,
-        }
-        assert threads[4]["process_receipt"] == {
-            "id": "bot-thread",
-            "path": "bot.py",
-            "line": 13,
-            "side": "RIGHT",
-            "body": "Please handle this finding.",
-            "author": "github-code-quality",
-            "author_type": "Bot",
-            "authors": ["github-code-quality"],
-            "comments": [
-                {
-                    "id": "bot-comment",
-                    "author": "github-code-quality",
-                    "author_type": "Bot",
-                    "body": "Please handle this finding.",
-                    "review_id": "PRR_bot",
-                }
-            ],
-            "review_id": "PRR_bot",
-            "created_head_sha": review_head,
-            "external_bot": True,
-        }
-
-    def test_stale_line_receipt_requires_restart_provenance(
-        self, adapter: pg.PipelineGitHub
-    ) -> None:
-        """A null line is eligible only for the host-normalized restart shape."""
-        receipt = _process_thread_receipt("PRRT_stale", "PRR_stale", "finding")
-        receipt["line"] = None
-
-        assert not adapter._is_immutable_process_receipt(receipt)
-
-        receipt["restart_stale_line"] = True
-
-        assert adapter._is_immutable_process_receipt(receipt)
-
-    def test_verified_bot_receipt_is_automation_owned_without_login_matching(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A host-proven Bot receipt does not rely on a login allowlist."""
-        thread = {
-            "id": "bot-thread",
-            "process_receipt": {"external_bot": True},
-            "author": "github-code-quality",
-            "authors": ["github-code-quality"],
-        }
-        monkeypatch.setattr(adapter, "_unresolved_threads", lambda _pr: [dict(thread)])
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "mvillmow")
-
-        threads = adapter.list_unresolved_review_threads(7)
-
-        assert threads[0]["automation_owned"] is True
-
-    @pytest.mark.parametrize("external_bot", [False, True], ids=["process", "verified-bot"])
-    def test_replies_before_resolving_a_revalidated_process_receipt(
-        self,
-        adapter: pg.PipelineGitHub,
-        monkeypatch: pytest.MonkeyPatch,
-        external_bot: bool,
-    ) -> None:
-        """A handled process or verified-bot receipt replies before resolution."""
-        adapter.repo = "repo"
-        receipt = _process_thread_receipt("PRRT_process_1", "PRR_process_1", "finding")
-        if external_bot:
-            receipt.update({"external_bot": True, "author_type": "Bot"})
-            receipt["comments"][0]["author_type"] = "Bot"
-        reply_body: dict[str, str] = {}
-        live_reads = 0
-
-        def unresolved_threads(_pr_number: int) -> list[dict[str, Any]]:
-            nonlocal live_reads
-            live_reads += 1
-            if live_reads == 1:
-                return [dict(receipt)]
-            if live_reads == 2:
-                replied = dict(receipt)
-                replied["comments"] = [
-                    *receipt["comments"],
-                    {"id": "c1", "author": "hephaestus[bot]", "body": reply_body["body"]},
-                ]
-                return [replied]
-            return []
-
-        mutation_order: list[str] = []
+        """An externally authored thread receives the standard two-role handoff."""
+        thread = _external_reviewer_thread()
+        live = [thread]
+        calls: list[str] = []
 
         def graphql(query: str, **fields: str | int) -> dict[str, Any]:
             if "addPullRequestReviewThreadReply" in query:
-                mutation_order.append("reply")
-                reply_body["body"] = str(fields["body"])
-                return {"data": {"addPullRequestReviewThreadReply": {"comment": {"id": "c1"}}}}
-            if "resolveReviewThread" in query:
-                mutation_order.append("resolve")
+                calls.append("implementation-reply")
+                live[0] = {
+                    **live[0],
+                    "comments": [
+                        *live[0]["comments"],
+                        {
+                            "id": "implementation-comment",
+                            "author": "hephaestus[bot]",
+                            "body": fields["body"],
+                        },
+                    ],
+                }
                 return {
                     "data": {
-                        "resolveReviewThread": {"thread": {"id": receipt["id"], "isResolved": True}}
+                        "addPullRequestReviewThreadReply": {
+                            "comment": {"id": "implementation-comment"}
+                        }
+                    }
+                }
+            if "resolveReviewThread" in query:
+                calls.append("resolve")
+                live.clear()
+                return {
+                    "data": {
+                        "resolveReviewThread": {"thread": {"id": thread["id"], "isResolved": True}}
                     }
                 }
             raise AssertionError(query)
 
-        monkeypatch.setattr(adapter, "_unresolved_threads", unresolved_threads)
         monkeypatch.setattr(
-            adapter,
-            "gh_pr_state",
-            lambda _pr_number: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
+            adapter, "_unresolved_threads", lambda _pr: [dict(item) for item in live]
         )
-        monkeypatch.setattr(adapter, "_graphql", graphql)
-
-        result = adapter.reply_and_resolve_process_review_threads(
-            7,
-            reviewed_head_sha="a" * 40,
-            receipts=[receipt],
-            dispositions={receipt["id"]: "addressed"},
-        )
-
-        assert result.resolved_thread_ids == (receipt["id"],)
-        assert result.blocked_thread_ids == ()
-        assert mutation_order == ["reply", "resolve"]
-
-    def test_refuses_a_thread_with_an_unexpected_human_reply(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A live thread with any non-receipted reply remains a human gate."""
-        receipt = _process_thread_receipt("PRRT_process_1", "PRR_process_1", "finding")
-        changed = dict(receipt)
-        changed["comments"] = [
-            *receipt["comments"],
-            {"author": "maintainer", "body": "Please keep this open."},
-        ]
-        monkeypatch.setattr(adapter, "_unresolved_threads", lambda _pr: [changed])
         monkeypatch.setattr(
             adapter,
             "gh_pr_state",
             lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
         )
-        monkeypatch.setattr(
-            adapter,
-            "_graphql",
-            lambda *_args, **_kwargs: pytest.fail("changed thread must not mutate"),
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+
+        implementation = adapter.post_implementation_thread_replies(
+            7,
+            expected_head_sha="a" * 40,
+            threads=[thread],
+            replies={thread["id"]: "Fixed the missing guard and added a regression test."},
         )
 
-        result = adapter.reply_and_resolve_process_review_threads(
+        assert implementation.replied_thread_ids == (thread["id"],)
+        assert implementation.blocked_thread_ids == ()
+        assert (
+            "hephaestus-implementation-reply:" in implementation.receipts[0]["comments"][-1]["body"]
+        )
+
+        reviewer = adapter.reconcile_reviewer_validated_threads(
             7,
             reviewed_head_sha="a" * 40,
-            receipts=[receipt],
-            dispositions={receipt["id"]: "addressed"},
+            receipts=list(implementation.receipts),
+            resolved_thread_ids={thread["id"]},
+            feedback={},
         )
 
-        assert result.resolved_thread_ids == ()
-        assert result.blocked_thread_ids == (receipt["id"],)
+        assert reviewer.resolved_thread_ids == (thread["id"],)
+        assert reviewer.feedback_thread_ids == ()
+        assert reviewer.blocked_thread_ids == ()
+        assert calls == ["implementation-reply", "resolve"]
 
-    def test_does_not_mutate_when_the_pr_head_is_already_stale(
+    def test_reviewer_rejection_posts_explanation_and_keeps_thread_open(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A head changed before reconciliation prevents both reply and close."""
-        receipt = _process_thread_receipt("PRRT_process_1", "PRR_process_1", "finding")
-        monkeypatch.setattr(
-            adapter,
-            "gh_pr_state",
-            lambda _pr: {"state": "OPEN", "headRefOid": "c" * 40, "autoMergeRequest": None},
-        )
-        monkeypatch.setattr(
-            adapter,
-            "_graphql",
-            lambda *_args, **_kwargs: pytest.fail("stale head must not mutate"),
-        )
+        """A rejected fix yields a reviewer reply rather than a premature close."""
+        thread = _external_reviewer_thread()
+        live = [thread]
+        calls: list[str] = []
 
-        result = adapter.reply_and_resolve_process_review_threads(
-            7,
-            reviewed_head_sha="a" * 40,
-            receipts=[receipt],
-            dispositions={receipt["id"]: "addressed"},
-        )
-
-        assert result.resolved_thread_ids == ()
-        assert result.blocked_thread_ids == (receipt["id"],)
-
-    def test_receipt_readback_preserves_the_initial_review_identity(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The durable receipt includes the review identity needed after restart."""
-        adapter.repo = "repo"
-
-        def graphql(_query: str, **_fields: str | int) -> dict[str, Any]:
-            return {
-                "data": {
-                    "repository": {
-                        "pullRequest": {
-                            "reviewThreads": {
-                                "pageInfo": {"hasNextPage": False, "endCursor": None},
-                                "nodes": [
-                                    {
-                                        "id": "PRRT_process_1",
-                                        "isResolved": False,
-                                        "path": "a.py",
-                                        "line": 7,
-                                        "side": "RIGHT",
-                                        "comments": {
-                                            "pageInfo": {"hasNextPage": False},
-                                            "nodes": [
-                                                {
-                                                    "id": "PRRC_process_1",
-                                                    "body": "finding",
-                                                    "author": {"login": "hephaestus[bot]"},
-                                                    "pullRequestReview": {"id": "PRR_process_1"},
-                                                }
-                                            ],
-                                        },
-                                    }
-                                ],
-                            }
+        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+            if "addPullRequestReviewThreadReply" in query:
+                calls.append(str(fields["body"]))
+                live[0] = {
+                    **live[0],
+                    "comments": [
+                        *live[0]["comments"],
+                        {
+                            "id": f"reply-{len(calls)}",
+                            "author": "hephaestus[bot]",
+                            "body": fields["body"],
+                        },
+                    ],
+                }
+                return {
+                    "data": {
+                        "addPullRequestReviewThreadReply": {
+                            "comment": {"id": f"reply-{len(calls)}"}
                         }
                     }
                 }
-            }
+            if "resolveReviewThread" in query:
+                pytest.fail("reviewer rejection must leave the thread open")
+            raise AssertionError(query)
 
+        monkeypatch.setattr(
+            adapter, "_unresolved_threads", lambda _pr: [dict(item) for item in live]
+        )
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_state",
+            lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
+        )
         monkeypatch.setattr(adapter, "_graphql", graphql)
-
-        receipts = adapter._repo_review_thread_receipts_for_review(
+        implementation = adapter.post_implementation_thread_replies(
             7,
-            "PRR_process_1",
-            [{"path": "a.py", "line": 7, "side": "RIGHT", "body": "finding"}],
+            expected_head_sha="a" * 40,
+            threads=[thread],
+            replies={thread["id"]: "Fixed it."},
         )
 
-        assert receipts[0]["comments"] == [
-            {
-                "id": "PRRC_process_1",
-                "author": "hephaestus[bot]",
-                "body": "finding",
-                "review_id": "PRR_process_1",
-            }
-        ]
+        reviewer = adapter.reconcile_reviewer_validated_threads(
+            7,
+            reviewed_head_sha="a" * 40,
+            receipts=list(implementation.receipts),
+            resolved_thread_ids=set(),
+            feedback={thread["id"]: "The null case is still unguarded."},
+        )
+
+        assert reviewer.resolved_thread_ids == ()
+        assert reviewer.feedback_thread_ids == (thread["id"],)
+        assert reviewer.blocked_thread_ids == ()
+        assert len(live) == 1
+        assert "Reviewer validation found this still unresolved" in calls[-1]
 
 
 class TestConditionalMerge:
@@ -1548,7 +1244,7 @@ class TestRepoScoping:
         adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
         assert adapter.find_merged_pr_for_issue(5) == 5
 
-    def test_repo_scoped_unresolved_threads_counts_automation_and_human(
+    def test_repo_scoped_unresolved_threads_returns_every_open_thread(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         calls: list[list[str]] = []
@@ -1600,11 +1296,11 @@ class TestRepoScoping:
             return SimpleNamespace(stdout=json.dumps(payload))
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "ci-bot")
+        threads = pg.PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path
+        ).list_unresolved_review_threads(7)
 
-        assert pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).count_unresolved_threads(
-            7
-        ) == (1, 1)
+        assert [thread["id"] for thread in threads] == ["T1", "T2"]
 
         assert calls[0][:2] == ["api", "graphql"]
         assert "-F" in calls[0]
@@ -1614,7 +1310,7 @@ class TestRepoScoping:
     def test_repo_scoped_unresolved_threads_fetches_page_after_first_hundred(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A human thread after the first page must still block a GO decision."""
+        """Every open thread is returned even when it appears after page one."""
         calls: list[list[str]] = []
         first_page_nodes = [
             {
@@ -1655,18 +1351,18 @@ class TestRepoScoping:
             return SimpleNamespace(stdout=json.dumps(payload))
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "ci-bot")
+        threads = pg.PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path
+        ).list_unresolved_review_threads(7)
 
-        assert pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).count_unresolved_threads(
-            7
-        ) == (100, 1)
+        assert len(threads) == 101
         assert len(calls) == 2
         assert "after=cursor-1" in calls[1]
 
     def test_repo_scoped_unresolved_threads_fail_closed_on_truncated_comments(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A human reply after 20 bot comments cannot be omitted from ownership."""
+        """A truncated comment page cannot produce an incomplete thread snapshot."""
         all_comments = [
             {"body": f"bot reply {index}", "author": {"login": "ci-bot"}} for index in range(20)
         ]
@@ -1700,16 +1396,14 @@ class TestRepoScoping:
             "gh_call",
             lambda _argv, **_kwargs: SimpleNamespace(stdout=json.dumps(payload)),
         )
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "ci-bot")
-
         adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
         with pytest.raises(RuntimeError, match=r"could not fetch all comments.*T1"):
-            adapter.count_unresolved_threads_by_severity(7)
+            adapter.list_unresolved_review_threads(7)
 
     def test_repo_scoped_fetch_error_fails_closed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """#1868: repo-scoped path must propagate GraphQL errors, matching legacy."""
+        """A repo-scoped GraphQL failure must not hide open review threads."""
 
         def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
             raise RuntimeError("gh: GraphQL: Head sha can't be blank")
@@ -1718,7 +1412,7 @@ class TestRepoScoping:
 
         adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
         with pytest.raises(RuntimeError, match="Head sha"):
-            adapter.count_unresolved_threads(7)
+            adapter.list_unresolved_review_threads(7)
 
     def test_repo_scoped_upsert_plan_comment_updates_marker_comment(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2465,52 +2159,6 @@ class TestReadSurface:
         assert adapter.pr_has_implementation_state_label(7) == (True, False)
 
 
-class TestUnresolvedThreads:
-    """count_unresolved_threads mirrors #1152: counts only, resolves nothing."""
-
-    def test_count_unresolved_threads_uses_split_helper(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """count_unresolved_threads delegates ownership splitting to _split_threads."""
-        threads = [{"id": "a"}, {"id": "b"}]
-        monkeypatch.setattr(adapter, "_unresolved_threads", lambda n: threads)
-        split = MagicMock(return_value=(3, 4))
-        monkeypatch.setattr(pg, "_split_threads", split)
-
-        assert adapter.count_unresolved_threads(7) == (3, 4)
-        split.assert_called_once_with(threads)
-
-    def test_counts_by_ownership(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        threads = [{"id": "a"}, {"id": "b"}, {"id": "c"}]
-        monkeypatch.setattr(
-            github_api_mod, "gh_pr_list_unresolved_threads", lambda n, dry_run: threads
-        )
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "bot")
-        monkeypatch.setattr(pg, "_is_automation_owned_thread", lambda t, login: t["id"] == "a")
-
-        assert adapter.count_unresolved_threads(7) == (1, 2)
-
-    def test_empty_result_returns_zero(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(github_api_mod, "gh_pr_list_unresolved_threads", lambda n, dry_run: [])
-        assert adapter.count_unresolved_threads(7) == (0, 0)
-
-    def test_legacy_fetch_error_fails_closed(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """#1868: legacy path must propagate fetch errors, not fail open to (0, 0)."""
-
-        def boom(n: int, dry_run: bool) -> list[dict[str, Any]]:
-            raise RuntimeError("api")
-
-        monkeypatch.setattr(github_api_mod, "gh_pr_list_unresolved_threads", boom)
-        with pytest.raises(RuntimeError, match="api"):
-            adapter.count_unresolved_threads(7)
-
-
 class TestGhPrState:
     """The merge_wait single PR-state read (re-housed CIDriver._gh_pr_state)."""
 
@@ -2761,81 +2409,3 @@ class TestSeverityMarker:
         }
         # Should find 'critical' in marker, not 'minor' in prose
         assert pg._thread_severity_is_blocking(thread) is True
-
-    def test_count_unresolved_threads_by_severity_classifies(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """count_unresolved_threads_by_severity classifies threads by severity."""
-        automation_thread_critical = {
-            "body": "<!-- hephaestus-severity: critical -->\nIssue",
-            "author": "automation-bot",
-        }
-        automation_thread_minor = {
-            "body": "<!-- hephaestus-severity: minor -->\nNit",
-            "author": "automation-bot",
-        }
-        human_thread = {
-            "body": "Human comment",
-            "author": "reviewer",
-        }
-
-        threads = [automation_thread_critical, automation_thread_minor, human_thread]
-
-        monkeypatch.setattr(adapter, "_unresolved_threads", lambda pr: threads)
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "automation-bot")
-
-        blocking, minor, human = adapter.count_unresolved_threads_by_severity(42)
-
-        assert blocking == 1
-        assert minor == 1
-        assert human == 1
-
-    def test_count_unresolved_threads_by_severity_unmarked_is_blocking(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """count_unresolved_threads_by_severity treats unmarked automation as blocking."""
-        automation_thread_unmarked = {
-            "body": "No marker",
-            "author": "automation-bot",
-        }
-
-        threads = [automation_thread_unmarked]
-
-        monkeypatch.setattr(adapter, "_unresolved_threads", lambda pr: threads)
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "automation-bot")
-
-        blocking, minor, human = adapter.count_unresolved_threads_by_severity(42)
-
-        assert blocking == 1
-        assert minor == 0
-        assert human == 0
-
-    @pytest.mark.parametrize(
-        "marker",
-        [
-            "<!-- hephaestus-severity: unknown -->",
-            "<!-- hephaestus-severity: -->",
-        ],
-        ids=["unknown", "malformed"],
-    )
-    def test_unrecognized_severity_stays_blocking(
-        self,
-        adapter: pg.PipelineGitHub,
-        monkeypatch: pytest.MonkeyPatch,
-        marker: str,
-    ) -> None:
-        """Unknown or malformed durable severities remain blocking end to end."""
-        thread = {
-            "id": "corrupt_thread_id",
-            "body": f"{marker}\nFinding",
-            "author": "automation-bot",
-        }
-        monkeypatch.setattr(adapter, "_unresolved_threads", lambda _pr: [thread])
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "automation-bot")
-        mark_go = MagicMock()
-        monkeypatch.setattr(adapter, "mark_pr_implementation_go", mark_go)
-
-        counts = adapter.count_unresolved_threads_by_severity(42)
-
-        assert counts == (1, 0, 0)
-        mark_go.assert_not_called()

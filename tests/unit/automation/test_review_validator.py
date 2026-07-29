@@ -42,7 +42,7 @@ class TestReviewValidatorStructure:
 
 
 class TestValidatePriorCommentsAddressed:
-    """Open prior threads always remain human-owned merge gates."""
+    """Compatibility validation defers reconciliation to the queue pipeline."""
 
     def test_no_prior_threads_is_clean_noop(self, tmp_path: Path) -> None:
         reopened, is_clean, keys = review_validator.validate_prior_comments_addressed(
@@ -75,7 +75,7 @@ class TestValidatePriorCommentsAddressed:
         assert result == ([], True, set())
         run.assert_not_called()
 
-    def test_addressed_threads_still_require_human_resolution(self, tmp_path: Path) -> None:
+    def test_addressed_threads_still_require_pipeline_reconciliation(self, tmp_path: Path) -> None:
         with patch.object(review_validator, "_run_validation_session", return_value=([], [])):
             reopened, is_clean, keys = review_validator.validate_prior_comments_addressed(
                 pr_number=1,

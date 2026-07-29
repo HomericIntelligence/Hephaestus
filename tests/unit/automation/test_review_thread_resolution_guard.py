@@ -1,16 +1,16 @@
-"""Regression guards for human-owned PR review-thread resolution."""
+"""Regression guards for retiring the legacy code-only thread resolver."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from hephaestus.automation.models import CIDriverOptions
 from hephaestus.automation.review_thread_resolver import ReviewThreadResolver
 
 
-def test_claimed_drive_green_fix_requires_human_thread_resolution(tmp_path: Path) -> None:
-    """A successful code push must not rearm a PR while its thread remains open."""
+def test_legacy_drive_green_resolver_refuses_to_mutate_threads(tmp_path: Path) -> None:
+    """The former code-only path cannot bypass pipeline reviewer validation."""
     push = MagicMock(return_value=True)
     resolver = ReviewThreadResolver(
         options_provider=lambda: CIDriverOptions(dry_run=False),
@@ -24,19 +24,15 @@ def test_claimed_drive_green_fix_requires_human_thread_resolution(tmp_path: Path
         list_threads=lambda pr, dry_run: [{"id": "still-open"}],
     )
 
-    with patch(
-        "hephaestus.automation.review_thread_resolver.run_address_fix_session",
-        return_value={"addressed": ["still-open"]},
-    ):
-        result = resolver.resolve_blocked_pr(1, 2, 0)
+    result = resolver.resolve_blocked_pr(1, 2, 0)
 
     assert result.success is False
-    assert result.error == "human_review_thread_resolution_required"
-    push.assert_called_once()
+    assert result.error == "review_thread_resolver_retired_use_pipeline"
+    push.assert_not_called()
 
 
-def test_thread_lookup_failure_requires_human_intervention(tmp_path: Path) -> None:
-    """A failed thread read cannot be converted into a successful no-op."""
+def test_legacy_resolver_is_retired_before_a_thread_read(tmp_path: Path) -> None:
+    """No legacy path may hand a thread to a human or make a code-only push."""
     resolver = ReviewThreadResolver(
         options_provider=lambda: CIDriverOptions(dry_run=False),
         repo_root_provider=lambda: tmp_path,
@@ -52,10 +48,10 @@ def test_thread_lookup_failure_requires_human_intervention(tmp_path: Path) -> No
     result = resolver.resolve_blocked_pr(1, 2, 0)
 
     assert result.success is False
-    assert result.error == "review_threads_unavailable"
+    assert result.error == "review_thread_resolver_retired_use_pipeline"
 
 
-def test_only_pipeline_adapter_may_resolve_a_process_review_thread() -> None:
+def test_only_pipeline_adapter_may_resolve_a_review_thread() -> None:
     """Stages cannot access a generic GitHub thread-resolution mutation."""
     repo = Path(__file__).resolve().parents[3]
     targets = [

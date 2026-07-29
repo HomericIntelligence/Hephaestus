@@ -23,8 +23,7 @@ from hephaestus.automation._implement_phase import ImplementPhase, _prepend_advi
 from hephaestus.automation._plan_phase import PlanPhase, _phase_env
 from hephaestus.automation._pr_create_phase import PRCreatePhase
 from hephaestus.automation._review_conflict_resolver import ConflictResolutionRequest
-from hephaestus.automation._review_loop import ReviewLoopResult
-from hephaestus.automation._review_phase import ReviewPhase, _is_automation_owned_thread
+from hephaestus.automation._review_phase import ReviewPhase
 from hephaestus.automation._stage_context import StageContext, StageMixin
 
 
@@ -341,25 +340,12 @@ def test_followup_can_resume_matches_agent(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_is_automation_owned_thread_recognizes_bot() -> None:
-    """A github-actions[bot] thread is automation-owned."""
-    thread = {"comments": [{"author": "github-actions[bot]"}]}
-    assert _is_automation_owned_thread(thread, current_login=None) is True
-
-
-def test_is_automation_owned_thread_human_not_owned() -> None:
-    """A human-authored thread is not automation-owned."""
-    thread = {"comments": [{"author": "mvillmow"}]}
-    assert _is_automation_owned_thread(thread, current_login="hephaestus-bot") is False
-
-
 @pytest.mark.parametrize(
     "verdict",
     [
         "GO",
         "NOGO",
         "AMBIGUOUS",
-        "HUMAN_BLOCKED",
         "ERROR",
     ],
 )
@@ -434,26 +420,24 @@ def test_review_phase_commit_if_changes_clean_returns_false(tmp_path: Path) -> N
     )
 
 
-def test_review_phase_loop_facade_preserves_tuple_contract(tmp_path: Path) -> None:
-    """The review-loop compatibility facade returns its historical tuple."""
+def test_review_phase_loop_facade_is_retired(tmp_path: Path) -> None:
+    """The standalone loop cannot bypass the pipeline thread protocol."""
     phase = ReviewPhase(_make_ctx(tmp_path))
-    outcome = ReviewLoopResult(iterations_run=2, verdict="GO", grade="A")
     with mock.patch("hephaestus.automation._review_phase.ReviewLoopCoordinator") as coordinator:
-        coordinator.return_value.run.return_value = outcome
-        result = phase._run_impl_review_loop(
-            issue_number=7,
-            worktree_path=tmp_path,
-            branch_name="b",
-            issue_title="title",
-            issue_body="body",
-            session_id="session",
-            slot_id=None,
-            thread_id=None,
-            pr_number=12,
-        )
+        with pytest.raises(RuntimeError, match="review_phase_retired_use_pipeline"):
+            phase._run_impl_review_loop(
+                issue_number=7,
+                worktree_path=tmp_path,
+                branch_name="b",
+                issue_title="title",
+                issue_body="body",
+                session_id="session",
+                slot_id=None,
+                thread_id=None,
+                pr_number=12,
+            )
 
-    assert result == (2, "GO", "A")
-    assert coordinator.return_value.run.call_args.kwargs == {"has_pr": True}
+    coordinator.assert_not_called()
 
 
 def test_review_phase_conflict_facade_constructs_request(tmp_path: Path) -> None:
