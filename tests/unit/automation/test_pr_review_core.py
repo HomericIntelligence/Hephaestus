@@ -1,7 +1,6 @@
 """Tests for the pure/parse/context PR-review cores (pr_review_core.py).
 
-Split out of ``test_pr_reviewer_posting.py`` in the #1823 omit-reduction wave:
-these exercise the extracted, unit-covered cores
+Extracted in the #1823 omit-reduction wave, these exercise the unit-covered cores
 (:func:`gather_impl_review_context`, :func:`run_pr_review_analysis`) directly,
 patching the ``pr_review_core`` seams the cores actually bind.
 """

@@ -249,18 +249,18 @@ def run_pr_review_analysis(
 ) -> dict[str, Any]:
     """Run a read-only reviewer session and return its parsed analysis.
 
-    Shared core of the standalone ``PRReviewer._run_analysis_session`` and the
-    in-loop implementer review step (Stage 2, #28). Builds the PR-review
-    analysis prompt, invokes the selected reviewer agent (Claude or Codex), and
-    returns a dict with a structural ``audit`` value, normalized inline
-    findings, an informational summary, and bounded supplemental feedback.
-    Review prose never carries authorization.
+    Shared core of the pipeline's read-only review analysis and the in-loop
+    implementer review step (Stage 2, #28). Builds the PR-review analysis
+    prompt, invokes the selected reviewer agent (Claude or Codex), and returns
+    a dict with a structural ``audit`` value, normalized inline findings, an
+    informational summary, and bounded supplemental feedback. Review prose
+    never carries authorization.
 
     Args:
         pr_number: GitHub PR number being reviewed.
         issue_number: Linked GitHub issue number.
         worktree_path: Worktree CWD for the reviewer session (read-only usage).
-        context: PR context dict (see :meth:`PRReviewer._gather_pr_context`).
+        context: Pipeline-supplied PR review context.
         agent: Selected implementation agent (``"claude"`` or ``"codex"``);
             determines the runtime used to invoke the reviewer.
         review_agent: Session-naming agent token for the Claude path. Defaults

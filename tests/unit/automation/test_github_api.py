@@ -3314,7 +3314,7 @@ class TestGhPrReviewPost:
         )
         mock_index.return_value = {
             (
-                "tests/unit/automation/test_pr_reviewer_posting.py",
+                "tests/unit/automation/test_pr_review_core.py",
                 540,
             ): (
                 "COMMENT_NODE_540",
@@ -3331,7 +3331,7 @@ class TestGhPrReviewPost:
             pr_number=1116,
             comments=[
                 {
-                    "path": "tests/unit/automation/test_pr_reviewer_posting.py",
+                    "path": "tests/unit/automation/test_pr_review_core.py",
                     "line": 540,
                     "side": "RIGHT",
                     "body": (
@@ -3422,7 +3422,7 @@ class TestGhPrReviewPost:
         )
         mock_index.return_value = {
             (
-                "tests/unit/automation/test_pr_reviewer_posting.py",
+                "tests/unit/automation/test_pr_review_core.py",
                 540,
             ): (
                 "COMMENT_NODE_540",
@@ -3465,7 +3465,7 @@ class TestGhPrReviewPost:
                 pr_number=1116,
                 comments=[
                     {
-                        "path": "tests/unit/automation/test_pr_reviewer_posting.py",
+                        "path": "tests/unit/automation/test_pr_review_core.py",
                         "line": 540,
                         "side": "RIGHT",
                         "body": body,
@@ -3497,7 +3497,7 @@ class TestGhPrReviewPost:
         )
         mock_index.return_value = {
             (
-                "tests/unit/automation/test_pr_reviewer_posting.py",
+                "tests/unit/automation/test_pr_review_core.py",
                 589,
             ): (
                 "COMMENT_NODE_589",
@@ -3514,7 +3514,7 @@ class TestGhPrReviewPost:
             pr_number=1116,
             comments=[
                 {
-                    "path": "tests/unit/automation/test_pr_reviewer_posting.py",
+                    "path": "tests/unit/automation/test_pr_review_core.py",
                     "line": 589,
                     "side": "RIGHT",
                     "body": (
