@@ -936,12 +936,9 @@ stateDiagram-v2
     VerifyUnarmed --> OperatorOwned: external arm or incomplete state
     Review --> Checkout: GitHub snapshot captured
     Checkout --> Review: clean checkout matches snapshot head
-    Checkout --> RetryReview: checkout or head drift
-    RetryReview --> Review: bounded retry
+    Checkout --> Review: checkout or head drift requires a fresh snapshot
     Review --> Validate: review produced
-    Review --> RetryReview: invalid output
-    RetryReview --> Review: retry available
-    RetryReview --> Implementation: fresh implementation context required
+    Review --> Implementation: invalid output requires fresh implementation context
     Validate --> Post: findings normalized
     Post --> Evaluate: GitHub review recorded
     Evaluate --> Address: any open review thread
@@ -959,18 +956,19 @@ stateDiagram-v2
 Architectural contract:
 
 - Every implementation review is posted to the pull request.
-- Actionable findings use durable inline threads and severity.
+- Actionable findings use durable inline threads. Severity describes newly
+  posted findings only; it never makes an existing unresolved thread advisory.
 - Prior rounds remain visible in the PR timeline.
 - Any open review thread produces `state:implementation-no-go`; only a fresh
   review with no open threads produces `state:implementation-go`.
 - The implementation agent replies to every fixed open thread but never resolves it.
 - The reviewer validates each implementation reply against the current diff;
   it resolves validated threads or posts corrective feedback and leaves them open.
-- After a fix push, an ambiguous implementation-reply transport/read failure
-  keeps the exact outstanding batch for bounded host-only retry at that pushed
-  head; a complete changed-thread mismatch instead returns through fresh
-  review. Neither path asks an implementation agent to manufacture a no-op
-  follow-up commit.
+- Validation stores an immutable fingerprint of every implementation reply
+  receipt. If the current receipts differ at validation time, the stage returns
+  to validation without reconciling; it never resolves based on a stale
+  receipt. An unproven resolution similarly returns through fresh review and
+  never attempts an unsafe compensating unresolve mutation.
 - Open-thread pagination and multi-page conversation reads are stabilized by
   matching complete rereads before they become remediation or mutation facts.
 - The review decision proof is a fresh GitHub snapshot plus a clean checkout
@@ -1560,10 +1558,9 @@ Exit-code priority is:
 - **Review posture** — the falsification-first rubric prefix [`REVIEW POSTURE`](hephaestus/prompts/templates/default/review_rubrics/reviewer.j2); combined with anti-inflation grading rules, the max grade is `C` for any dimension the reviewer did not actively attempt to falsify (#2302).
 - **Push retry** — [`_git_retry(item, "commit_push failed")`](hephaestus/automation/pipeline/stages/implementation.py) re-attempts a transient push before PR_CREATE; the retry is budget-untouched so the next `implement` attempt remains available (#2274).
 
-- **Severity-aware GO gate** — logic that classifies posted review
- comments by marker (`critical|major|minor|nitpick`) and decides
- whether the `pr_review` round can advance. **See [§5.5 _Gate
- logic_](#55-pr_review) for the authoritative definition and routing
- matrix.**
+- **Review-thread GO gate** — every unresolved review thread, regardless of
+ severity marker, prevents a `pr_review` round from advancing. Severity
+ (`critical|major|minor|nitpick`) is retained as annotation on newly posted
+ findings, not as a waiver for an existing thread.
 
 ---

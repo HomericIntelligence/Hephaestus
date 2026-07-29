@@ -423,21 +423,18 @@ def test_review_phase_commit_if_changes_clean_returns_false(tmp_path: Path) -> N
 def test_review_phase_loop_facade_is_retired(tmp_path: Path) -> None:
     """The standalone loop cannot bypass the pipeline thread protocol."""
     phase = ReviewPhase(_make_ctx(tmp_path))
-    with mock.patch("hephaestus.automation._review_phase.ReviewLoopCoordinator") as coordinator:
-        with pytest.raises(RuntimeError, match="review_phase_retired_use_pipeline"):
-            phase._run_impl_review_loop(
-                issue_number=7,
-                worktree_path=tmp_path,
-                branch_name="b",
-                issue_title="title",
-                issue_body="body",
-                session_id="session",
-                slot_id=None,
-                thread_id=None,
-                pr_number=12,
-            )
-
-    coordinator.assert_not_called()
+    with pytest.raises(RuntimeError, match="review_phase_retired_use_pipeline"):
+        phase._run_impl_review_loop(
+            issue_number=7,
+            worktree_path=tmp_path,
+            branch_name="b",
+            issue_title="title",
+            issue_body="body",
+            session_id="session",
+            slot_id=None,
+            thread_id=None,
+            pr_number=12,
+        )
 
 
 def test_review_phase_conflict_facade_constructs_request(tmp_path: Path) -> None:

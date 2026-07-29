@@ -152,7 +152,6 @@ class ReviewerThreadReconciliationResult:
     resolved_thread_ids: tuple[str, ...] = ()
     feedback_thread_ids: tuple[str, ...] = ()
     blocked_thread_ids: tuple[str, ...] = ()
-    restoration_failed_thread_ids: tuple[str, ...] = ()
 
 
 @runtime_checkable
@@ -375,9 +374,20 @@ class StageGitHub(Protocol):
         ...
 
     def post_review_threads(
-        self, pr_number: int, threads: list[dict[str, Any]], summary: str
+        self,
+        pr_number: int,
+        threads: list[dict[str, Any]],
+        summary: str,
+        *,
+        expected_head_sha: str,
     ) -> list[dict[str, Any]]:
-        """Post new reviewer findings and return their fresh thread snapshots."""
+        """Post findings only on the fresh reviewed open, unarmed head.
+
+        The accessor verifies ``expected_head_sha`` immediately before the
+        write and binds the provider's review request to that commit.  A
+        stage-side guard is intentionally duplicated here: a direct adapter
+        call must not regain a stale-head publication path.
+        """
         ...
 
     def mark_pr_implementation_go(self, pr_number: int) -> None:

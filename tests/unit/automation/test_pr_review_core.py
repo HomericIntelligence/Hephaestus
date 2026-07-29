@@ -537,11 +537,7 @@ class TestReviewPrInline:
 
     @pytest.mark.parametrize("dry_run", [False, True])
     def test_rejects_all_direct_review_posts(self, tmp_path: Path, dry_run: bool) -> None:
-        with (
-            patch("hephaestus.automation.pr_review_core.run_pr_review_analysis") as analysis,
-            patch("hephaestus.automation.pr_review_core.gh_pr_review_post") as post,
-            pytest.raises(RuntimeError, match="review_pr_inline_retired_use_pipeline"),
-        ):
+        with pytest.raises(RuntimeError, match="review_pr_inline_retired_use_pipeline"):
             review_pr_inline(
                 pr_number=42,
                 issue_number=1,
@@ -552,8 +548,6 @@ class TestReviewPrInline:
                 state_dir=tmp_path,
                 dry_run=dry_run,
             )
-        analysis.assert_not_called()
-        post.assert_not_called()
 
 
 class TestStructuralAuditNotProse:

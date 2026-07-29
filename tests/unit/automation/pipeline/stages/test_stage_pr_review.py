@@ -1315,10 +1315,10 @@ class TestReviewThreadLifecycle:
         assert "guard None first" in normalized[0]["body"]
         assert "Thread conversation:" in normalized[0]["body"]
 
-    def test_partial_reconciliation_refreshes_live_threads_without_stale_receipts(
+    def test_partial_reconciliation_restarts_fresh_review_without_stale_receipts(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A partial race cannot permanently wedge a now-consumed receipt set."""
+        """A partial race discards the validator decision for a fresh review."""
         first = self._thread("live-thread-1001-0", 3, "first")
         second = self._thread("live-thread-1001-1", 4, "second")
         receipts = [
@@ -1369,13 +1369,13 @@ class TestReviewThreadLifecycle:
 
         result = PrReviewStage().step(item, make_ctx(github=PartialGitHub(unresolved=[(2, 0)])))
 
-        assert result == Continue(next_state="DIFFICULTY_WAIT")
+        assert result == Continue(next_state="REVIEW_WAIT")
         assert item.payload.get("review_audit_failure") is not True
 
-    def test_reconciliation_restore_failure_is_terminally_unsafe(
+    def test_reconciliation_blocked_receipt_restarts_fresh_review(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A thread that cannot be reopened after a resolution race must not reach GO."""
+        """An unproven resolution discards the validator decision for a fresh review."""
         thread = self._thread("live-thread-restore-failed", 3, "first")
         thread["comments"].append(
             {
@@ -1385,7 +1385,7 @@ class TestReviewThreadLifecycle:
             }
         )
 
-        class RestoreFailureGitHub(FakeStageGitHub):
+        class BlockedReconciliationGitHub(FakeStageGitHub):
             def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
                 del pr_number
                 return [dict(thread)]
@@ -1397,7 +1397,7 @@ class TestReviewThreadLifecycle:
                 )
 
                 return ReviewerThreadReconciliationResult(
-                    restoration_failed_thread_ids=("live-thread-restore-failed",)
+                    blocked_thread_ids=("live-thread-restore-failed",)
                 )
 
         item = make_work_item(issue=1, pr=1001, state="POST")
@@ -1414,8 +1414,8 @@ class TestReviewThreadLifecycle:
         )
 
         assert PrReviewStage().step(
-            item, make_ctx(github=RestoreFailureGitHub(unresolved=[(2, 0)]))
-        ) == StageOutcome(Disposition.FINISH_FAIL, "review_thread_restore_failed")
+            item, make_ctx(github=BlockedReconciliationGitHub(unresolved=[(2, 0)]))
+        ) == Continue(next_state="REVIEW_WAIT")
 
     def test_unaddressed_external_bot_thread_routes_to_remediation(
         self, make_ctx: Any, make_work_item: Any
@@ -1526,9 +1526,14 @@ class TestReviewThreadLifecycle:
                 return [dict(thread) for thread in self.live]
 
             def post_review_threads(
-                self, pr_number: int, threads: list[dict[str, Any]], summary: str
+                self,
+                pr_number: int,
+                threads: list[dict[str, Any]],
+                summary: str,
+                *,
+                expected_head_sha: str,
             ) -> list[dict[str, Any]]:
-                del summary
+                del summary, expected_head_sha
                 self.posted_batches.append([dict(thread) for thread in threads])
                 thread_ids: list[str] = []
                 for thread in threads:
@@ -1674,10 +1679,17 @@ class TestReviewThreadLifecycle:
                 self.posted_batches: list[list[dict[str, Any]]] = []
 
             def post_review_threads(
-                self, pr_number: int, threads: list[dict[str, Any]], summary: str
+                self,
+                pr_number: int,
+                threads: list[dict[str, Any]],
+                summary: str,
+                *,
+                expected_head_sha: str,
             ) -> list[dict[str, Any]]:
                 self.posted_batches.append([dict(thread) for thread in threads])
-                return super().post_review_threads(pr_number, threads, summary)
+                return super().post_review_threads(
+                    pr_number, threads, summary, expected_head_sha=expected_head_sha
+                )
 
         github = CapturePostsGitHub()
         item = make_work_item(issue=1, pr=1001, state="POST")
@@ -1750,9 +1762,14 @@ class TestReviewThreadLifecycle:
                 return [dict(thread) for thread in self.live]
 
             def post_review_threads(
-                self, pr_number: int, threads: list[dict[str, Any]], summary: str
+                self,
+                pr_number: int,
+                threads: list[dict[str, Any]],
+                summary: str,
+                *,
+                expected_head_sha: str,
             ) -> list[dict[str, Any]]:
-                del summary
+                del summary, expected_head_sha
                 self.posted = [dict(thread) for thread in threads]
                 posted_ids = [f"reopened-{index}" for index, _ in enumerate(threads)]
                 for thread_id, thread in zip(posted_ids, threads, strict=True):
@@ -1808,9 +1825,14 @@ class TestReviewThreadLifecycle:
                 return [dict(thread) for thread in self.live]
 
             def post_review_threads(
-                self, pr_number: int, threads: list[dict[str, Any]], summary: str
+                self,
+                pr_number: int,
+                threads: list[dict[str, Any]],
+                summary: str,
+                *,
+                expected_head_sha: str,
             ) -> list[dict[str, Any]]:
-                del summary
+                del summary, expected_head_sha
                 self.posted = [dict(thread) for thread in threads]
                 posted_ids = [f"reopened-{index}" for index, _ in enumerate(threads)]
                 for thread_id, thread in zip(posted_ids, threads, strict=True):
@@ -1857,6 +1879,71 @@ class TestReviewThreadLifecycle:
         assert github.posted == []
         assert item.payload["remediation_threads"][0]["thread_id"] == "thread-1"
 
+    def test_replaced_validation_receipt_restarts_validation_without_reconciliation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A reviewer decision for reply A cannot act on a later reply B."""
+        reply_a = self._thread("thread-1", 3, "fix this")
+        reply_a["comments"].append(
+            {
+                "id": "implementation-reply-a",
+                "author": "hephaestus[bot]",
+                "body": "Fixed it with receipt A.",
+            }
+        )
+        reply_b = {
+            **reply_a,
+            "comments": [
+                *reply_a["comments"],
+                {
+                    "id": "implementation-reply-b",
+                    "author": "hephaestus[bot]",
+                    "body": "Fixed it differently with receipt B.",
+                },
+            ],
+        }
+
+        class ReceiptRaceGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__()
+                self.live = [reply_a]
+                self.reconciliation_calls: list[dict[str, Any]] = []
+
+            def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+                del pr_number
+                return [dict(thread) for thread in self.live]
+
+            def reconcile_reviewer_validated_threads(self, *args: Any, **kwargs: Any) -> Any:
+                self.reconciliation_calls.append(dict(kwargs))
+                return super().reconcile_reviewer_validated_threads(*args, **kwargs)
+
+        github = ReceiptRaceGitHub()
+        ctx = make_ctx(github=github)
+        stage = PrReviewStage()
+        item = make_work_item(issue=1, pr=1001, state="VALIDATE_WAIT")
+        item.payload["reviewed_pr_head_sha"] = "a" * 40
+
+        validation = stage.step(item, ctx)
+        assert isinstance(validation, JobRequest)
+        assert item.payload["validation_threads"][-1]["comments"][-1]["id"] == (
+            "implementation-reply-a"
+        )
+
+        github.live = [reply_b]
+        item.state = "POST"
+        item.payload.update(
+            {
+                "validation_result": {"resolved": ["thread-1"], "unaddressed": []},
+                "review_audit": _valid_audit(),
+                "review_threads": [],
+            }
+        )
+
+        result = stage.step(item, ctx)
+
+        assert result == Continue(next_state="VALIDATE_WAIT")
+        assert github.reconciliation_calls == []
+
     @pytest.mark.parametrize(
         ("pr_state", "validation_result", "authors"),
         [
@@ -1902,8 +1989,14 @@ class TestReviewThreadLifecycle:
                 return [dict(thread) for thread in self.live]
 
             def post_review_threads(
-                self, pr_number: int, threads: list[dict[str, Any]], summary: str
+                self,
+                pr_number: int,
+                threads: list[dict[str, Any]],
+                summary: str,
+                *,
+                expected_head_sha: str,
             ) -> list[dict[str, Any]]:
+                del expected_head_sha
                 self._log("gh_pr_review_post", pr_number, "COMMENT")
                 return []
 
@@ -3398,6 +3491,7 @@ class TestFullWalks:
             "compact_session",
             "review",
             "validate",
+            "validate",
         ]
         assert item.attempts["pr_review_iter"] == 1  # only the fresh-head round counts
         assert not any(name == "mark_pr_implementation_no_go" for name, _ in github.mutation_log)
@@ -4145,6 +4239,75 @@ class TestAuditPublication:
         assert [t["thread_id"] for t in item.payload["raw_review_threads"]] == ["t1", "t2"]
         assert [t.get("thread_id") for t in item.payload["review_threads"]] == ["t1"]
         assert [t.get("thread_id") for t in posted] == ["t1"]
+
+    @pytest.mark.parametrize(
+        ("pr_state", "expected"),
+        [
+            pytest.param(
+                {"state": "OPEN", "headRefOid": "b" * 40, "autoMergeRequest": None},
+                Continue(next_state="REVIEW_WAIT"),
+                id="head-drift",
+            ),
+            pytest.param(
+                {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": {}},
+                StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed"),
+                id="auto-merge-armed",
+            ),
+        ],
+    )
+    def test_fresh_audit_publication_requires_current_unarmed_reviewed_head(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        pr_state: dict[str, Any],
+        expected: Continue | StageOutcome,
+    ) -> None:
+        """A stale or armed PR cannot receive a newly published review finding."""
+
+        class PublishForbiddenGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__(pr_state=pr_state)
+                self.publish_calls = 0
+
+            def post_review_threads(
+                self,
+                pr_number: int,
+                threads: list[dict[str, Any]],
+                summary: str,
+                *,
+                expected_head_sha: str,
+            ) -> list[dict[str, Any]]:
+                del pr_number, threads, summary, expected_head_sha
+                self.publish_calls += 1
+                pytest.fail("fresh-audit publication must verify the reviewed PR head first")
+
+        finding = {
+            "path": "x.py",
+            "line": 3,
+            "side": "RIGHT",
+            "severity": "major",
+            "body": "Current code loses the review receipt.",
+        }
+        github = PublishForbiddenGitHub()
+        item = make_work_item(issue=50, pr=1001, state="POST")
+        item.payload.update(
+            {
+                "reviewed_pr_head_sha": "a" * 40,
+                "review_threads": [finding],
+                "review_audit": ReviewAudit(
+                    grade="F",
+                    summary="Needs review",
+                    findings=(finding,),
+                    raw_feedback="review feedback",
+                    valid=True,
+                ),
+            }
+        )
+
+        result = PrReviewStage().step(item, make_ctx(github=github))
+
+        assert result == expected
+        assert github.publish_calls == 0
 
 
 class TestProgressCounts:

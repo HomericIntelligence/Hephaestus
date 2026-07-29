@@ -53,7 +53,6 @@ from hephaestus.automation.pipeline.stages.base import (
     ReviewerThreadReconciliationResult,
 )
 from hephaestus.automation.prompts.pr_review import (
-    BLOCKING_SEVERITIES,
     SEVERITY_MARKER_PREFIX,
     VALID_SEVERITIES,
 )
@@ -190,23 +189,6 @@ def _with_severity_marker(comment: dict[str, Any]) -> str:
         markers.append(scope_retraction_marker(paths))
     markers.append(body)
     return "\n".join(markers)
-
-
-def _thread_severity_is_blocking(thread: dict[str, Any]) -> bool:
-    """Return True unless the thread has one recognized advisory severity marker."""
-    body = str(thread.get("body") or "")
-    severity: str | None = None
-    for line in body.splitlines():
-        stripped = line.strip()
-        if not stripped.startswith(SEVERITY_MARKER_PREFIX):
-            continue
-        if severity is not None or not stripped.endswith("-->"):
-            return True
-        recovered = stripped[len(SEVERITY_MARKER_PREFIX) : -3].strip().lower()
-        if recovered not in VALID_SEVERITIES:
-            return True
-        severity = recovered
-    return severity is None or severity in BLOCKING_SEVERITIES
 
 
 def _has_no_explicit_pull_request_bypasses(protection: dict[str, Any]) -> bool:
@@ -1300,59 +1282,6 @@ class PipelineGitHub:
             return None
         return second[0]
 
-    def _restore_after_unproven_resolution(self, pr_number: int, thread_id: str) -> bool:
-        """Best-effort compensation for a resolution whose outcome is unsafe."""
-        try:
-            return self._restore_resolved_thread(pr_number, thread_id)
-        except (
-            AttributeError,
-            OSError,
-            RuntimeError,
-            TypeError,
-            subprocess.SubprocessError,
-            json.JSONDecodeError,
-        ) as error:
-            logger.warning("Could not restore review thread %s: %s", thread_id, error)
-            return False
-
-    def _restore_resolved_thread(self, pr_number: int, thread_id: str) -> bool:
-        """Compensate a resolve that raced a reviewed-head change.
-
-        GitHub does not expose a SHA-conditional review-thread resolution
-        mutation.  If the head changes between our pre-resolve fact check and
-        the mutation, immediately restore the thread and prove it is open
-        again.  A failed restoration is surfaced as terminally unsafe rather
-        than being mistaken for a successful review decision.
-        """
-        query = (
-            "mutation($threadId:ID!,$clientMutationId:String!){"
-            "unresolveReviewThread(input:{threadId:$threadId,clientMutationId:$clientMutationId})"
-            "{thread{id isResolved}}}"
-        )
-        data = self._graphql(
-            query,
-            threadId=thread_id,
-            clientMutationId=hashlib.sha256(
-                f"{pr_number}:{thread_id}:restore".encode()
-            ).hexdigest(),
-        )
-        response_data = data.get("data") if isinstance(data, dict) else None
-        mutation = (
-            response_data.get("unresolveReviewThread") if isinstance(response_data, dict) else None
-        )
-        thread = mutation.get("thread") if isinstance(mutation, dict) else None
-        if (
-            not isinstance(thread, dict)
-            or thread.get("id") != thread_id
-            or thread.get("isResolved") is not False
-        ):
-            return False
-        return any(
-            str(current.get("id")) == thread_id
-            for current in self._unresolved_threads(pr_number)
-            if isinstance(current, dict)
-        )
-
     def post_implementation_thread_replies(  # noqa: C901
         self,
         pr_number: int,
@@ -1526,7 +1455,6 @@ class PipelineGitHub:
         resolved: list[str] = []
         replied: list[str] = []
         blocked: list[str] = []
-        restoration_failed: list[str] = []
         try:
             for thread_id in candidate_ids:
                 receipt = by_id[thread_id]
@@ -1571,7 +1499,6 @@ class PipelineGitHub:
                         continue
                     replied.append(thread_id)
                     continue
-                resolve_issued = False
                 try:
                     resolve_query = (
                         "mutation($threadId:ID!,$clientMutationId:String!){"
@@ -1582,7 +1509,6 @@ class PipelineGitHub:
                     # the mutation.  Treat every issued resolve as unsafe
                     # until both the complete resolved snapshot and final
                     # exact-head read prove this receipt remained current.
-                    resolve_issued = True
                     resolve_data = self._graphql(
                         resolve_query,
                         threadId=thread_id,
@@ -1627,18 +1553,12 @@ class PipelineGitHub:
                     )
                     resolution_proven = False
                 if not resolution_proven:
-                    if resolve_issued and not self._restore_after_unproven_resolution(
-                        pr_number, thread_id
-                    ):
-                        restoration_failed.append(thread_id)
-                        return ReviewerThreadReconciliationResult(
-                            resolved_thread_ids=tuple(resolved),
-                            feedback_thread_ids=tuple(replied),
-                            blocked_thread_ids=tuple(
-                                sorted(set(candidate_ids) - set(resolved) - set(replied))
-                            ),
-                            restoration_failed_thread_ids=tuple(restoration_failed),
-                        )
+                    # GitHub has no SHA-conditional unresolve mutation.
+                    # We cannot prove that this process resolved the current
+                    # discussion, so compensation could reopen a thread a
+                    # human or another reviewer legitimately resolved.  Leave
+                    # the outcome untouched and make the stage obtain a fresh
+                    # review proof instead.
                     blocked.append(thread_id)
                     continue
                 resolved.append(thread_id)
@@ -1655,13 +1575,11 @@ class PipelineGitHub:
                 resolved_thread_ids=tuple(resolved),
                 feedback_thread_ids=tuple(replied),
                 blocked_thread_ids=tuple(sorted(set(candidate_ids) - set(resolved) - set(replied))),
-                restoration_failed_thread_ids=tuple(restoration_failed),
             )
         return ReviewerThreadReconciliationResult(
             resolved_thread_ids=tuple(resolved),
             feedback_thread_ids=tuple(replied),
             blocked_thread_ids=tuple(blocked),
-            restoration_failed_thread_ids=tuple(restoration_failed),
         )
 
     # -- read surface --------------------------------------------------------
@@ -2339,11 +2257,18 @@ class PipelineGitHub:
             raise RuntimeError(f"PR #{pr_number} implementation-go label read-back failed")
 
     def post_review_threads(
-        self, pr_number: int, threads: list[dict[str, Any]], summary: str
+        self,
+        pr_number: int,
+        threads: list[dict[str, Any]],
+        summary: str,
+        *,
+        expected_head_sha: str,
     ) -> list[dict[str, Any]]:
-        """Post review threads and return immutable process-created receipts."""
+        """Post review threads only on a fresh, exact reviewed PR head."""
         if self._skip(f"post {len(threads)} review thread(s) on PR #{pr_number}"):
             return []
+        if not self._pr_is_current_open_head(self.gh_pr_state(pr_number), expected_head_sha):
+            raise RuntimeError("review publication head is stale, closed, or auto-merge armed")
         if self._repo_slug is not None:
             if threads:
                 diff_result = self._gh(["pr", "diff", str(pr_number)], check=False)
@@ -2366,7 +2291,12 @@ class PipelineGitHub:
             ]
             owner, name = self._owner_name()
             request_body = json.dumps(
-                {"body": summary, "event": "COMMENT", "comments": review_comments}
+                {
+                    "body": summary,
+                    "commit_id": expected_head_sha,
+                    "event": "COMMENT",
+                    "comments": review_comments,
+                }
             )
             with github_api._body_file(request_body) as input_path:
                 result = gh_call(
@@ -2398,6 +2328,8 @@ class PipelineGitHub:
                     pr_number,
                     len(review_comments),
                 )
+            if not self._pr_is_current_open_head(self.gh_pr_state(pr_number), expected_head_sha):
+                raise RuntimeError("review publication head changed during receipt proof")
             return receipts
         return []
 

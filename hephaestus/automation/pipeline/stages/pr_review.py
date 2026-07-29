@@ -98,6 +98,7 @@ and are not collaborators of this stage:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -307,6 +308,7 @@ _ROUND_PAYLOAD_KEYS = (
     "review_refresh_required",
     "prior_comments_json",
     "validation_threads",
+    "validation_receipt_fingerprints",
     "scope_retraction_paths",
     "reviewed_pr_base_sha",
 )
@@ -600,6 +602,67 @@ def _validation_thread_snapshots(
     if not set(receipt_by_id).issubset(seen):
         return None
     return snapshots
+
+
+def _validation_receipt_fingerprints(
+    receipts: list[dict[str, Any]],
+) -> dict[str, str] | None:
+    """Bind a validator decision to the exact host-read reply receipt.
+
+    A thread ID alone is not an immutable decision target: another reply can
+    be appended on the same thread and head while the validation job is
+    running.  Store a canonical digest of the complete comment receipt that
+    the reviewer was shown, then require an identical fresh receipt before
+    consuming its decision in ``POST``.
+    """
+    fingerprints: dict[str, str] = {}
+    for receipt in receipts:
+        thread_id = _durable_thread_id(receipt)
+        comments = receipt.get("comments") if isinstance(receipt, dict) else None
+        reply_id = receipt.get("implementation_reply_id") if isinstance(receipt, dict) else None
+        reply_body = receipt.get("implementation_reply_body") if isinstance(receipt, dict) else None
+        head_sha = receipt.get("implementation_head_sha") if isinstance(receipt, dict) else None
+        if (
+            thread_id is None
+            or thread_id in fingerprints
+            or not isinstance(comments, list)
+            or not isinstance(reply_id, str)
+            or not isinstance(reply_body, str)
+            or not is_full_commit_sha(head_sha)
+        ):
+            return None
+        snapshot: list[tuple[str, str]] = []
+        seen_comment_ids: set[str] = set()
+        for comment in comments:
+            if not isinstance(comment, dict):
+                return None
+            comment_id = comment.get("id")
+            body = comment.get("body")
+            if (
+                not isinstance(comment_id, str)
+                or not comment_id
+                or comment_id in seen_comment_ids
+                or not isinstance(body, str)
+            ):
+                return None
+            seen_comment_ids.add(comment_id)
+            snapshot.append((comment_id, body))
+        if not snapshot or snapshot[-1] != (reply_id, reply_body):
+            return None
+        canonical = json.dumps(
+            {
+                "comments": snapshot,
+                "head_sha": head_sha,
+                "implementation_reply_body": reply_body,
+                "implementation_reply_id": reply_id,
+                "thread_id": thread_id,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        fingerprints[thread_id] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return fingerprints
 
 
 def _reviewer_thread_decisions(  # noqa: C901
@@ -962,10 +1025,12 @@ class PrReviewStage(Stage):
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
         validation_threads = _validation_thread_snapshots(live_threads, receipts)
-        if validation_threads is None:
+        receipt_fingerprints = _validation_receipt_fingerprints(receipts)
+        if validation_threads is None or receipt_fingerprints is None:
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
         item.payload["validation_threads"] = validation_threads
+        item.payload["validation_receipt_fingerprints"] = receipt_fingerprints
         item.payload["prior_comments_json"] = json.dumps(
             validation_threads, ensure_ascii=False, sort_keys=True
         )
@@ -1429,6 +1494,27 @@ class PrReviewStage(Stage):
             )
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
+        live_receipt_fingerprints = _validation_receipt_fingerprints(validation_receipts)
+        validated_receipt_fingerprints = item.payload.get("validation_receipt_fingerprints")
+        if live_receipt_fingerprints is None:
+            item.payload["review_audit_failure"] = True
+            return Continue(next_state=EVAL)
+        if validated_receipt_fingerprints is not None and (
+            not isinstance(validated_receipt_fingerprints, dict)
+            or validated_receipt_fingerprints != live_receipt_fingerprints
+        ):
+            # The validation agent reviewed a different immutable receipt than
+            # the one currently open on GitHub.  Its decision must not act on
+            # a replacement reply, even if the durable thread ID is unchanged.
+            item.payload.pop("validation_result", None)
+            item.payload.pop("validation_threads", None)
+            item.payload.pop("validation_receipt_fingerprints", None)
+            logger.info(
+                "pr_review:%s: implementation reply receipt changed after validation; "
+                "revalidating before reconciliation",
+                item.issue,
+            )
+            return Continue(next_state=VALIDATE_WAIT)
         if validation_receipts:
             decisions = _reviewer_thread_decisions(
                 validation_receipts, item.payload.get("validation_result")
@@ -1457,21 +1543,18 @@ class PrReviewStage(Stage):
             completed_ids = set(reconciliation.resolved_thread_ids) | set(
                 reconciliation.feedback_thread_ids
             )
-            restoration_failed = set(reconciliation.restoration_failed_thread_ids)
-            if (
-                None in expected_ids
-                or not completed_ids.issubset(expected_ids)
-                or not restoration_failed.issubset(expected_ids)
-            ):
+            if None in expected_ids or not completed_ids.issubset(expected_ids):
                 item.payload["review_audit_failure"] = True
                 return Continue(next_state=EVAL)
-            if restoration_failed:
-                logger.error(
-                    "pr_review:%s: could not restore thread(s) after a resolution race: %s",
-                    item.issue,
-                    ", ".join(sorted(restoration_failed)),
-                )
-                return StageOutcome(Disposition.FINISH_FAIL, "review_thread_restore_failed")
+            if reconciliation.blocked_thread_ids:
+                # Resolution status was not proven for at least one exact
+                # receipt.  The adapter deliberately does not issue an
+                # unresolve compensation mutation; discard this validator's
+                # decisions and obtain a new audit/check-out proof instead.
+                item.payload.pop("validation_result", None)
+                item.payload.pop("validation_threads", None)
+                item.payload.pop("validation_receipt_fingerprints", None)
+                return Continue(next_state=REVIEW_WAIT)
             # A concurrent mutation can make one receipt ineligible after a
             # previous receipt was safely resolved or received feedback.  Do
             # not retain that stale, partially consumed receipt set: doing so
@@ -1479,7 +1562,7 @@ class PrReviewStage(Stage):
             # no longer open.  Drop all receipts and rebuild remediation from
             # the fresh complete live snapshot below.  The adapter's snapshot
             # checks prevent duplicate mutations for the blocked IDs.
-            if completed_ids != expected_ids or reconciliation.blocked_thread_ids:
+            if completed_ids != expected_ids:
                 logger.info(
                     "pr_review:%s: reviewer reconciliation was partial; refreshing live threads",
                     item.issue,
@@ -1511,12 +1594,17 @@ class PrReviewStage(Stage):
         # The surviving audit set is what gets posted. Classification and
         # addressing use the normalized live read-back installed below.
         item.payload["review_threads"] = threads
+        if threads and is_full_commit_sha(reviewed_head):
+            publication_guard = self._require_reviewed_unarmed(item, ctx)
+            if publication_guard is not None:
+                return publication_guard
         try:
             post_receipts = list(
                 ctx.github.post_review_threads(
                     item.pr,
                     list(threads),
                     self._final_review_comment(audit),
+                    expected_head_sha=reviewed_head,
                 )
             )
         except Exception as error:

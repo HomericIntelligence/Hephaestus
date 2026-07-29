@@ -456,10 +456,10 @@ class TestAllThreadReplyAndReviewerResolution:
         assert result.blocked_thread_ids == (thread["id"],)
         graphql.assert_not_called()
 
-    def test_head_race_after_resolve_is_compensated_by_unresolving(
+    def test_head_race_after_resolve_blocks_without_unresolving(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A stale-head resolution is restored before the adapter reports it blocked."""
+        """A stale-head resolution blocks for fresh review without reopening it."""
         thread = _external_reviewer_thread()
         reply = "Fixed the missing guard."
         reply_body = adapter._implementation_thread_reply_body(7, "a" * 40, thread["id"], reply)
@@ -563,11 +563,10 @@ class TestAllThreadReplyAndReviewerResolution:
 
         assert result.resolved_thread_ids == ()
         assert result.blocked_thread_ids == (thread["id"],)
-        assert result.restoration_failed_thread_ids == ()
-        assert calls == ["resolve", "unresolve"]
-        assert [item["id"] for item in live] == [thread["id"]]
+        assert calls == ["resolve"]
+        assert live == []
 
-    def test_post_resolve_comment_race_is_unresolved_before_returning_blocked(
+    def test_post_resolve_comment_race_blocks_without_unresolving(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A reply racing resolution is never hidden by the resolved-thread list."""
@@ -648,14 +647,13 @@ class TestAllThreadReplyAndReviewerResolution:
 
         assert result.resolved_thread_ids == ()
         assert result.blocked_thread_ids == (thread["id"],)
-        assert result.restoration_failed_thread_ids == ()
-        assert calls == ["resolve", "unresolve"]
-        assert [item["id"] for item in live] == [thread["id"]]
+        assert calls == ["resolve"]
+        assert live == []
 
-    def test_unproven_resolve_with_failed_restore_is_terminally_unsafe(
+    def test_unproven_resolve_blocks_for_fresh_review(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """An unknown resolve outcome cannot be downgraded to a retryable block."""
+        """An unknown resolve outcome is blocked without an unsafe compensation write."""
         thread = _external_reviewer_thread()
         reply_body = adapter._implementation_thread_reply_body(
             7, "a" * 40, thread["id"], "Fixed the missing guard."
@@ -690,9 +688,6 @@ class TestAllThreadReplyAndReviewerResolution:
 
         monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
         monkeypatch.setattr(
-            adapter, "_restore_after_unproven_resolution", lambda _pr, _thread: False
-        )
-        monkeypatch.setattr(
             adapter,
             "_graphql",
             lambda query, **_fields: (
@@ -715,12 +710,12 @@ class TestAllThreadReplyAndReviewerResolution:
         )
 
         assert result.resolved_thread_ids == ()
-        assert result.restoration_failed_thread_ids == (thread["id"],)
+        assert result.blocked_thread_ids == (thread["id"],)
 
-    def test_malformed_resolve_payload_is_compensated_before_returning_blocked(
+    def test_malformed_resolve_payload_blocks_without_compensation(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A structurally malformed success response cannot strand a resolved thread."""
+        """A malformed response blocks without reopening a possibly foreign resolution."""
         thread = _external_reviewer_thread()
         reply_body = adapter._implementation_thread_reply_body(
             7, "a" * 40, thread["id"], "Fixed the missing guard."
@@ -784,13 +779,74 @@ class TestAllThreadReplyAndReviewerResolution:
 
         assert result.resolved_thread_ids == ()
         assert result.blocked_thread_ids == (thread["id"],)
-        assert result.restoration_failed_thread_ids == ()
-        assert calls == ["resolve", "unresolve"]
+        assert calls == ["resolve"]
 
-    def test_malformed_unresolve_payload_is_terminally_unsafe(
+    def test_ambiguous_resolve_never_emits_an_unresolve_mutation(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A malformed compensation response remains a terminal restoration failure."""
+        """An uncertain resolve stops for re-review instead of reopening a thread."""
+        thread = _external_reviewer_thread()
+        reply_body = adapter._implementation_thread_reply_body(
+            7, "a" * 40, thread["id"], "Fixed the missing guard."
+        )
+        receipt = {
+            **thread,
+            "comments": [
+                *thread["comments"],
+                {
+                    "id": "implementation-comment",
+                    "author": "hephaestus[bot]",
+                    "body": reply_body,
+                    "viewer_did_author": True,
+                },
+            ],
+            "implementation_reply_id": "implementation-comment",
+            "implementation_reply_body": reply_body,
+            "implementation_head_sha": "a" * 40,
+        }
+        calls: list[str] = []
+        monkeypatch.setattr(
+            adapter,
+            "_review_thread_snapshot",
+            lambda _pr, _thread: _open_thread_snapshot(receipt),
+        )
+        monkeypatch.setattr(adapter, "_unresolved_threads", lambda _pr: [dict(receipt)])
+
+        def graphql(query: str, **_fields: str) -> dict[str, Any]:
+            if "unresolveReviewThread" in query:
+                calls.append("unresolve")
+                return {
+                    "data": {
+                        "unresolveReviewThread": {
+                            "thread": {"id": thread["id"], "isResolved": False}
+                        }
+                    }
+                }
+            if "resolveReviewThread" in query:
+                calls.append("resolve")
+                # A transport/protocol ambiguity cannot prove whether the
+                # mutation took effect.
+                return {"data": {"resolveReviewThread": None}}
+            raise AssertionError(query)
+
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+
+        result = adapter.reconcile_reviewer_validated_threads(
+            7,
+            reviewed_head_sha="a" * 40,
+            receipts=[receipt],
+            resolved_thread_ids={thread["id"]},
+            feedback={},
+        )
+
+        assert result.resolved_thread_ids == ()
+        assert result.blocked_thread_ids == (thread["id"],)
+        assert calls == ["resolve"]
+
+    def test_unproven_resolve_never_attempts_an_unresolve_mutation(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An uncertain resolve is blocked without issuing a compensating mutation."""
         thread = _external_reviewer_thread()
         reply_body = adapter._implementation_thread_reply_body(
             7, "a" * 40, thread["id"], "Fixed the missing guard."
@@ -846,8 +902,8 @@ class TestAllThreadReplyAndReviewerResolution:
         )
 
         assert result.resolved_thread_ids == ()
-        assert result.restoration_failed_thread_ids == (thread["id"],)
-        assert calls == ["resolve", "unresolve"]
+        assert result.blocked_thread_ids == (thread["id"],)
+        assert calls == ["resolve"]
 
     def test_resolve_proof_uses_the_atomic_thread_and_pr_snapshot(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
@@ -2571,9 +2627,13 @@ class TestRepoScoping:
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
 
-        posted = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).post_review_threads(
-            7, [], "summary"
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_state",
+            lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
         )
+        posted = adapter.post_review_threads(7, [], "summary", expected_head_sha="a" * 40)
 
         assert posted == []
         assert any("repos/org/repo-a/pulls/7/reviews" in call for call in calls)
@@ -2594,6 +2654,11 @@ class TestRepoScoping:
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
 
         adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_state",
+            lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
+        )
         with pytest.raises(RuntimeError, match="anchor outside the current PR diff"):
             adapter.post_review_threads(
                 7,
@@ -2602,6 +2667,7 @@ class TestRepoScoping:
                     {"path": "a.py", "line": 2, "side": "RIGHT", "body": "stale"},
                 ],
                 "summary",
+                expected_head_sha="a" * 40,
             )
 
         assert len(calls) == 1
@@ -2653,9 +2719,22 @@ class TestRepoScoping:
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
 
         with caplog.at_level("WARNING", logger=pg.__name__):
-            posted = pg.PipelineGitHub(
-                "org", repo="repo-a", repo_root=tmp_path
-            ).post_review_threads(7, [{"path": "a.py", "line": 1, "body": "x"}], "summary")
+            adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+            monkeypatch.setattr(
+                adapter,
+                "gh_pr_state",
+                lambda _pr: {
+                    "state": "OPEN",
+                    "headRefOid": "a" * 40,
+                    "autoMergeRequest": None,
+                },
+            )
+            posted = adapter.post_review_threads(
+                7,
+                [{"path": "a.py", "line": 1, "body": "x"}],
+                "summary",
+                expected_head_sha="a" * 40,
+            )
 
         assert posted == []
         assert any(
@@ -2717,10 +2796,17 @@ class TestRepoScoping:
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
 
-        posted = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).post_review_threads(
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_state",
+            lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
+        )
+        posted = adapter.post_review_threads(
             7,
             [{"path": "a.py", "line": 1, "side": "RIGHT", "severity": "major", "body": "finding"}],
             "summary",
+            expected_head_sha="a" * 40,
         )
 
         assert posted == []
@@ -3397,7 +3483,7 @@ class TestRateBudget:
 
 
 class TestSeverityMarker:
-    """Severity marker embedding and classification for the GO gate (#1856)."""
+    """Severity marker embedding for published review findings (#1856)."""
 
     def test_with_severity_marker_embeds(self) -> None:
         """_with_severity_marker embeds severity marker in body."""
@@ -3440,36 +3526,3 @@ class TestSeverityMarker:
         assert "<!-- hephaestus-severity: nitpick -->" not in result
         assert "Verdict: GO" not in result
         assert result.count("<!-- hephaestus-severity:") == 1
-
-    def test_thread_severity_is_blocking_critical(self) -> None:
-        """_thread_severity_is_blocking returns True for critical severity."""
-        thread = {"body": "<!-- hephaestus-severity: critical -->\nSome issue"}
-        assert pg._thread_severity_is_blocking(thread) is True
-
-    def test_thread_severity_is_blocking_major(self) -> None:
-        """_thread_severity_is_blocking returns True for major severity."""
-        thread = {"body": "<!-- hephaestus-severity: major -->\nSome issue"}
-        assert pg._thread_severity_is_blocking(thread) is True
-
-    def test_thread_severity_is_blocking_minor_false(self) -> None:
-        """_thread_severity_is_blocking returns False for minor severity."""
-        thread = {"body": "<!-- hephaestus-severity: minor -->\nSome issue"}
-        assert pg._thread_severity_is_blocking(thread) is False
-
-    def test_thread_severity_is_blocking_nitpick_false(self) -> None:
-        """_thread_severity_is_blocking returns False for nitpick severity."""
-        thread = {"body": "<!-- hephaestus-severity: nitpick -->\nSome issue"}
-        assert pg._thread_severity_is_blocking(thread) is False
-
-    def test_thread_severity_is_blocking_missing_defaults_true(self) -> None:
-        """_thread_severity_is_blocking returns True (blocking) for missing marker."""
-        thread = {"body": "No marker here\nJust plain text"}
-        assert pg._thread_severity_is_blocking(thread) is True
-
-    def test_thread_severity_anchors_on_marker_line(self) -> None:
-        """_thread_severity_is_blocking anchors on marker line, not substring."""
-        thread = {
-            "body": "Some text mentioning minor\n<!-- hephaestus-severity: critical -->\nMore text"
-        }
-        # Should find 'critical' in marker, not 'minor' in prose
-        assert pg._thread_severity_is_blocking(thread) is True

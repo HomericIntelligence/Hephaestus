@@ -159,15 +159,8 @@ def test_codex_fix_session_is_retired_before_resume_attempt(
     """A saved session cannot bypass the pipeline's thread lifecycle."""
     reviewer.options.agent = "codex"
     threads = [{"id": "thread-1", "path": "file.py", "line": 10, "body": "fix this"}]
-    with (
-        patch(
-            "hephaestus.automation.address_review.resume_agent_session",
-        ) as mock_resume,
-    ):
-        with pytest.raises(RuntimeError, match="address_review_retired_use_pipeline"):
-            reviewer._run_fix_session(123, 456, tmp_path, threads, session_id="old-session")
-
-    mock_resume.assert_not_called()
+    with pytest.raises(RuntimeError, match="address_review_retired_use_pipeline"):
+        reviewer._run_fix_session(123, 456, tmp_path, threads, session_id="old-session")
 
 
 class TestCommitIfChanges:

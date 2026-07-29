@@ -9,27 +9,20 @@ validate or resolve the live GitHub threads.
 from __future__ import annotations
 
 import argparse
-import json
 import logging
-import subprocess
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.runtime import (
-    direct_agent_model,
     resolve_agent,
-    resume_agent_session,
-    uses_direct_agent_runner,
 )
 from hephaestus.cli.utils import (
     add_advise_timeout_arg,
     add_agent_timeout_arg,
     emit_json_status,
 )
-from hephaestus.io.utils import write_secure
 
-from . import _review_utils
 from ._review_utils import (
     _discover_prs_simple,
     build_review_parser,
@@ -37,7 +30,6 @@ from ._review_utils import (
     find_pr_for_issue,
     instance_log,
     load_impl_session_id,
-    log_file_path,
     print_worker_summary,
     setup_review_logging,
 )
@@ -55,17 +47,14 @@ from .address_review_core import (
 )
 from .agent_config import DEFAULT_AGENT_TIMEOUT
 from .git_utils import (
-    commit_if_changes,
     issue_auto_impl_branch_name,
     issue_ref,
     pr_ref,
-    push_branch,
 )
 from .github_api import (
     gh_pr_list_unresolved_threads,
 )
 from .models import AddressReviewOptions, ReviewPhase, ReviewState, WorkerResult
-from .prompts import get_address_review_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -289,40 +278,19 @@ class AddressReviewer(BaseReviewer):
             thread_id: Current thread id for logging.
 
         """
-        raise RuntimeError(_RETIRED_ERROR)
-
-        self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Committing")
-        self._commit_if_changes(issue_number, worktree_path)
-
-        self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Pushing")
-        self._push_branch(branch_name, worktree_path)
-
-        del replies, threads
-        self.status_tracker.update_slot(
-            slot_id, f"{issue_ref(issue_number)}: Awaiting reviewer validation"
-        )
-
-        with self.state_lock:
-            existing_ids = set(review_state.addressed_thread_ids)
-            for tid in addressed:
-                existing_ids.add(tid)
-            review_state.addressed_thread_ids = list(existing_ids)
-            review_state.phase = ReviewPhase.REVIEWER_VALIDATION_REQUIRED
-            review_state.completed_at = None
-            review_state.error = (
-                "Implementation changes were pushed; pipeline reviewer validation must "
-                "post a resolution or follow-up response for each open review thread."
-            )
-        self._save_review_state(review_state)
-
-        iref = issue_ref(issue_number)
-        self.status_tracker.update_slot(slot_id, f"{iref}: Reviewer validation required")
-        self._log(
-            "info",
-            f"Address review code-fix claims recorded for issue {iref} (PR {pr_ref(pr_number)}); "
-            "pipeline reviewer validation and thread reconciliation are required",
+        del (
+            issue_number,
+            pr_number,
+            branch_name,
+            worktree_path,
+            addressed,
+            replies,
+            threads,
+            review_state,
+            slot_id,
             thread_id,
         )
+        raise RuntimeError(_RETIRED_ERROR)
 
     def _address_issue(self, issue_number: int, pr_number: int) -> WorkerResult:
         """Refuse direct review-thread remediation outside the queue pipeline."""
@@ -438,87 +406,8 @@ class AddressReviewer(BaseReviewer):
             Parsed dict with "addressed" and "replies" keys
 
         """
+        del issue_number, pr_number, worktree_path, threads, session_id
         raise RuntimeError(_RETIRED_ERROR)
-
-        log_file = log_file_path(self.state_dir, "address-review", issue_number)
-
-        def parse_with_trace(text: str) -> dict[str, Any]:
-            return _review_utils.parse_json_block(
-                text,
-                default=_ADDRESS_PARSE_DEFAULT,
-                trace_dir=self.state_dir,
-                trace_name=f"address-{issue_number}.parse-error.log",
-                on_error=lambda reason, path, error: _log_address_parse_error(
-                    issue_number,
-                    reason,
-                    path,
-                    error,
-                ),
-            )
-
-        if not self.options.dry_run and uses_direct_agent_runner(self.options.agent) and session_id:
-            threads_json = json.dumps(
-                [
-                    {
-                        "thread_id": t["id"],
-                        "path": t["path"],
-                        "line": t.get("line"),
-                        "body": t["body"],
-                    }
-                    for t in threads
-                ]
-            )
-            prompt = get_address_review_prompt(
-                pr_number=pr_number,
-                issue_number=issue_number,
-                worktree_path=str(worktree_path),
-                threads_json=threads_json,
-            )
-            try:
-                direct_result = resume_agent_session(
-                    agent=self.options.agent,
-                    session_id=session_id,
-                    prompt=prompt,
-                    cwd=worktree_path,
-                    timeout=self.options.agent_timeout,
-                    model=direct_agent_model(self.options.agent, "HEPH_IMPLEMENTER_MODEL"),
-                )
-            except subprocess.CalledProcessError as e:
-                logger.warning(
-                    "Issue #%s: %s resume session %r failed for PR #%s; "
-                    "falling back to fresh session: %s",
-                    issue_number,
-                    self.options.agent,
-                    session_id,
-                    pr_number,
-                    (e.stderr or e.stdout or "")[:300],
-                )
-            else:
-                log = direct_result.stdout
-                if direct_result.session_id:
-                    log = f"SESSION_ID: {direct_result.session_id}\n\n{log}"
-                write_secure(log_file, log)
-                parsed = parse_with_trace(direct_result.stdout)
-                logger.info(
-                    "Fix session complete for PR #%s; addressed %s thread(s)",
-                    pr_number,
-                    len(parsed.get("addressed", [])),
-                )
-                return parsed
-
-        return run_address_fix_session(
-            issue_number=issue_number,
-            pr_number=pr_number,
-            worktree_path=worktree_path,
-            threads=threads,
-            agent=self.options.agent,
-            repo_root=self.repo_root,
-            parse_fn=parse_with_trace,
-            log_file=log_file,
-            dry_run=self.options.dry_run,
-            timeout=self.options.agent_timeout,
-            advise_timeout=self.options.advise_timeout,
-        )
 
     def _commit_if_changes(self, issue_number: int, worktree_path: Path) -> None:
         """Reject standalone commits outside the pipeline lifecycle.
@@ -528,14 +417,8 @@ class AddressReviewer(BaseReviewer):
             worktree_path: Path to git worktree
 
         """
+        del issue_number, worktree_path
         raise RuntimeError(_RETIRED_ERROR)
-
-        commit_if_changes(
-            issue_number,
-            worktree_path,
-            self.options.agent,
-            committed_log_message="Committed fix changes for issue #%s",
-        )
 
     def _push_branch(self, branch_name: str, worktree_path: Path) -> None:
         """Reject standalone pushes outside the pipeline lifecycle.
@@ -548,9 +431,8 @@ class AddressReviewer(BaseReviewer):
             RuntimeError: If push fails
 
         """
+        del branch_name, worktree_path
         raise RuntimeError(_RETIRED_ERROR)
-
-        push_branch(branch_name, worktree_path)
 
     def _print_summary(self, results: dict[int, WorkerResult]) -> None:
         """Print address review summary.

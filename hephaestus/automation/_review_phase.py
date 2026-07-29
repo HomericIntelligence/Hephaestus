@@ -46,13 +46,10 @@ from ._review_conflict_resolver import (
 from ._review_loop import (
     AddressOutcome,
     ReviewIterationOutcome,
-    ReviewLoopCoordinator,
-    ReviewLoopOperations,
     ReviewLoopState,
 )
 from ._review_utils import log_file_path
 from ._stage_context import StageMixin
-from .address_review import run_address_fix_session
 from .agent_config import pr_reviewer_claude_timeout
 from .claude_invoke import (
     SESSION_EXPIRED_PHRASES,
@@ -71,13 +68,11 @@ from .git_utils import (
 )
 from .github_api import gh_pr_list_unresolved_threads
 from .models import ImplementationState
-from .pr_reviewer import gather_impl_review_context, review_pr_inline
 from .prompts import get_impl_loop_review_prompt, get_impl_resume_feedback_prompt
 from .prompts.pr_review import BLOCKING_SEVERITIES, VALID_SEVERITIES
-from .review_audit import ReviewAudit, parse_review_audit, render_review_audit
+from .review_audit import ReviewAudit
 from .review_journal import is_plan_comment, is_plan_review_comment
 from .review_types import ReviewVerdict
-from .review_validator import validate_prior_comments_addressed
 from .session_naming import AGENT_IMPLEMENTER, current_trunk_githash  # noqa: F401
 from .state.review import _fetch_issue_comments_graphql
 
@@ -278,66 +273,20 @@ class ReviewPhase(StageMixin):
         advise_findings: str,
     ) -> tuple[int, str | None, str | None]:
         """Reject the retired standalone review-loop coordinator."""
-        raise RuntimeError("review_phase_retired_use_pipeline")
-
-        operations = ReviewLoopOperations(
-            resolve_conflict=lambda: (
-                pr_number is None
-                or self._resolve_conflict_before_review(
-                    issue_number=issue_number,
-                    pr_number=pr_number,
-                    worktree_path=worktree_path,
-                    branch_name=branch_name,
-                    session_id=session_id,
-                    slot_id=slot_id,
-                    thread_id=thread_id,
-                    state=state,
-                )
-            ),
-            review_iteration=lambda loop_state: self._process_review_iteration(
-                loop_state,
-                issue_number=issue_number,
-                issue_title=issue_title,
-                issue_body=issue_body,
-                branch_name=branch_name,
-                worktree_path=worktree_path,
-                session_id=session_id,
-                slot_id=slot_id,
-                thread_id=thread_id,
-                pr_number=pr_number,
-                advise_findings=advise_findings,
-            ),
-            address_iteration=lambda loop_state: self._run_address_iteration(
-                loop_state,
-                issue_number=issue_number,
-                pr_number=pr_number,
-                branch_name=branch_name,
-                worktree_path=worktree_path,
-                session_id=session_id,
-                slot_id=slot_id,
-                thread_id=thread_id,
-                issue_title=issue_title,
-                issue_body=issue_body,
-            ),
-            finalize=lambda result: self._apply_review_finalization(
-                issue_number=issue_number,
-                pr_number=pr_number,
-                last_verdict=result.verdict,
-                iterations_run=result.iterations_run,
-            ),
-            budget_extended=lambda budget: self.impl._log(
-                "info",
-                f"{issue_ref(issue_number)}: extending review budget to "
-                f"{budget}/{MAX_REVIEW_ITERATIONS_HARD_CAP} iteration(s)",
-                thread_id,
-            ),
+        del (
+            issue_number,
+            worktree_path,
+            branch_name,
+            issue_title,
+            issue_body,
+            session_id,
+            slot_id,
+            thread_id,
+            state,
+            pr_number,
+            advise_findings,
         )
-        result = ReviewLoopCoordinator(
-            soft_limit=MAX_REVIEW_ITERATIONS,
-            hard_limit=MAX_REVIEW_ITERATIONS_HARD_CAP,
-            operations=operations,
-        ).run(has_pr=pr_number is not None)
-        return result.iterations_run, result.verdict, result.grade
+        raise RuntimeError("review_phase_retired_use_pipeline")
 
     def _process_review_iteration(
         self,
@@ -355,45 +304,20 @@ class ReviewPhase(StageMixin):
         advise_findings: str,
     ) -> ReviewIterationOutcome:
         """Reject the retired review-loop callback before it can mutate GitHub."""
+        del (
+            loop_state,
+            issue_number,
+            issue_title,
+            issue_body,
+            branch_name,
+            worktree_path,
+            session_id,
+            slot_id,
+            thread_id,
+            pr_number,
+            advise_findings,
+        )
         raise RuntimeError("review_phase_retired_use_pipeline")
-
-        (
-            verdict,
-            grade,
-            review_text,
-            posted_thread_ids,
-            go_blocked_by_automation,
-            reopened,
-            should_break,
-            reopened_keys,
-            validator_clean,
-        ) = self._execute_review_iteration(
-            issue_number=issue_number,
-            issue_title=issue_title,
-            issue_body=issue_body,
-            branch_name=branch_name,
-            worktree_path=worktree_path,
-            session_id=session_id,
-            slot_id=slot_id,
-            thread_id=thread_id,
-            pr_number=pr_number,
-            iteration=loop_state.iteration,
-            prior_review=loop_state.prior_review,
-            prior_addressed_threads=list(loop_state.prior_addressed_threads),
-            prior_reopened_keys=set(loop_state.reopened_keys),
-            advise_findings=advise_findings,
-        )
-        return ReviewIterationOutcome(
-            verdict=verdict,
-            grade=grade,
-            review_text=review_text,
-            posted_thread_ids=tuple(posted_thread_ids),
-            go_blocked_by_automation=go_blocked_by_automation,
-            reopened=tuple(reopened),
-            should_break=should_break,
-            reopened_keys=frozenset(reopened_keys),
-            validator_clean=validator_clean,
-        )
 
     def _run_address_iteration(
         self,
@@ -410,22 +334,19 @@ class ReviewPhase(StageMixin):
         issue_body: str,
     ) -> AddressOutcome:
         """Reject the retired address-loop callback before it can mutate GitHub."""
-        raise RuntimeError("review_phase_retired_use_pipeline")
-
-        prior_addressed_threads, addressed = self._execute_address_iteration(
-            issue_number=issue_number,
-            pr_number=pr_number,
-            branch_name=branch_name,
-            worktree_path=worktree_path,
-            iteration=loop_state.iteration,
-            session_id=session_id,
-            slot_id=slot_id,
-            thread_id=thread_id,
-            issue_title=issue_title,
-            issue_body=issue_body,
-            unaddressed_findings=list(loop_state.pending_unaddressed),
+        del (
+            loop_state,
+            issue_number,
+            pr_number,
+            branch_name,
+            worktree_path,
+            session_id,
+            slot_id,
+            thread_id,
+            issue_title,
+            issue_body,
         )
-        return AddressOutcome(tuple(prior_addressed_threads), addressed)
+        raise RuntimeError("review_phase_retired_use_pipeline")
 
     # ------------------------------------------------------------------
     # Final-verdict labeling
@@ -492,31 +413,17 @@ class ReviewPhase(StageMixin):
         cumulative set of stable re-open keys to thread forward (#1329) so a
         documented by-design recurrence is accepted once and never re-added.
         """
-        raise RuntimeError("review_phase_retired_use_pipeline")
-
-        if pr_number is None or not prior_threads or self.options.dry_run:
-            return [], True, prior_reopened_keys
-        diff_text = self.impl._collect_diff(worktree_path, branch_name)
-        reopened, is_clean, reopened_keys = validate_prior_comments_addressed(
-            pr_number=pr_number,
-            issue_number=issue_number,
-            worktree_path=worktree_path,
-            prior_threads=prior_threads,
-            diff_text=diff_text,
-            agent=self.options.agent,
-            iteration=iteration,
-            state_dir=self.state_dir,
-            dry_run=False,
-            prior_reopened_keys=prior_reopened_keys,
+        del (
+            issue_number,
+            pr_number,
+            branch_name,
+            worktree_path,
+            prior_threads,
+            iteration,
+            thread_id,
+            prior_reopened_keys,
         )
-        if not is_clean:
-            self.impl._log(
-                "warning",
-                f"{issue_ref(issue_number)} R{iteration}: validator re-opened "
-                f"{len(reopened)} prior review comment(s) the diff did not address",
-                thread_id,
-            )
-        return reopened, is_clean, reopened_keys
+        raise RuntimeError("review_phase_retired_use_pipeline")
 
     # ------------------------------------------------------------------
     # Review convergence loop
@@ -612,71 +519,23 @@ class ReviewPhase(StageMixin):
         finding (inline OR PR-level), and ``reopened_keys`` threads the
         recurrence state forward across rounds (#1329).
         """
-        raise RuntimeError("review_phase_retired_use_pipeline")
-
-        impl = self.impl
-        threads_to_validate = prior_addressed_threads
-        if (
-            not threads_to_validate
-            and session_id is None
-            and pr_number is not None
-            and not self.options.dry_run
-        ):
-            with contextlib.suppress(Exception):
-                threads_to_validate = gh_pr_list_unresolved_threads(pr_number, dry_run=False)
-        reopened, validator_clean, reopened_keys = self.runner._validate_prior_threads(
-            issue_number=issue_number,
-            pr_number=pr_number,
-            branch_name=branch_name,
-            worktree_path=worktree_path,
-            prior_threads=threads_to_validate,
-            iteration=iteration,
-            thread_id=thread_id,
-            prior_reopened_keys=prior_reopened_keys,
-        )
-
-        # Review step: a fresh reviewer session posts inline PR threads and
-        # returns a structural audit. ``prior_review`` carries only bounded
-        # informational context forward; it cannot select implementation state.
-        if slot_id is not None:
-            review_ref = pr_ref(pr_number) if pr_number is not None else issue_ref(issue_number)
-            self.status_tracker.update_slot(slot_id, f"{review_ref}: reviewing impl [R{iteration}]")
-        review_result, posted_thread_ids = impl._run_impl_review_step(
-            issue_number=issue_number,
-            issue_title=issue_title,
-            issue_body=issue_body,
-            branch_name=branch_name,
-            worktree_path=worktree_path,
-            pr_number=pr_number,
-            iteration=iteration,
-            prior_review=prior_review,
-            advise_findings=advise_findings,
-        )
-        if isinstance(review_result, ReviewAudit):
-            audit = review_result
-            review_text = render_review_audit(audit)
-            verdict = _audit_verdict(audit)
-        else:
-            # The no-PR compatibility loop remains label-inert, but it uses
-            # the same structural audit format as PR review. Textual verdicts
-            # are never an authority or a loop-control input.
-            audit = parse_review_audit(review_result)
-            review_text = render_review_audit(audit)
-            verdict = _audit_verdict(audit)
-        impl._save_review_log(issue_number, iteration, review_text)
-        impl._log(
-            "info",
-            f"{issue_ref(issue_number)} R{iteration}: structural result={verdict.verdict} "
-            f"Grade={verdict.grade or '?'} threads={len(posted_thread_ids)} "
-            f"reopened={len(reopened)}",
+        del (
+            issue_number,
+            issue_title,
+            issue_body,
+            branch_name,
+            worktree_path,
+            session_id,
+            slot_id,
             thread_id,
+            pr_number,
+            iteration,
+            prior_review,
+            prior_addressed_threads,
+            prior_reopened_keys,
+            advise_findings,
         )
-
-        # A2-005: Persist review iteration progress so --resume can skip
-        # already-completed iterations.  Persist BEFORE the caller may break out
-        # so the final iteration's data is always on disk.
-        impl._save_review_iteration_state(issue_number, iteration + 1, review_text)
-        return reopened, review_text, posted_thread_ids, verdict, validator_clean, reopened_keys
+        raise RuntimeError("review_phase_retired_use_pipeline")
 
     def _execute_review_iteration(
         self,
@@ -721,59 +580,23 @@ class ReviewPhase(StageMixin):
                       reopened_keys, validator_clean).
 
         """
+        del (
+            issue_number,
+            issue_title,
+            issue_body,
+            branch_name,
+            worktree_path,
+            session_id,
+            slot_id,
+            thread_id,
+            pr_number,
+            iteration,
+            prior_review,
+            prior_addressed_threads,
+            prior_reopened_keys,
+            advise_findings,
+        )
         raise RuntimeError("review_phase_retired_use_pipeline")
-
-        (
-            reopened,
-            review_text,
-            posted_thread_ids,
-            verdict,
-            validator_clean,
-            reopened_keys,
-        ) = self._validate_and_review(
-            issue_number=issue_number,
-            issue_title=issue_title,
-            issue_body=issue_body,
-            branch_name=branch_name,
-            worktree_path=worktree_path,
-            session_id=session_id,
-            slot_id=slot_id,
-            thread_id=thread_id,
-            pr_number=pr_number,
-            iteration=iteration,
-            prior_review=prior_review,
-            prior_addressed_threads=prior_addressed_threads,
-            prior_reopened_keys=prior_reopened_keys,
-            advise_findings=advise_findings,
-        )
-        last_verdict = verdict.verdict
-        last_grade = verdict.grade
-
-        go_blocked_by_automation = False
-        should_break = False
-        # A validator re-open (inline thread id present) OR an unclean pass with
-        # only PR-level findings (#1329, no thread id) both mean prior comments
-        # are unaddressed → force NOGO so the address step runs.
-        if reopened or not validator_clean:
-            last_verdict = "NOGO"
-        elif verdict.is_go:
-            last_verdict, go_blocked_by_automation, should_break = self._evaluate_go_verdict(
-                issue_number=issue_number,
-                pr_number=pr_number,
-                thread_id=thread_id,
-            )
-
-        return (
-            last_verdict,
-            last_grade,
-            review_text,
-            posted_thread_ids,
-            go_blocked_by_automation,
-            reopened,
-            should_break,
-            reopened_keys,
-            validator_clean,
-        )
 
     def _execute_address_iteration(
         self,
@@ -807,59 +630,20 @@ class ReviewPhase(StageMixin):
         anything was addressed. When there is no PR, returns ``([], True)`` —
         the caller ``continue``s to the next iteration regardless.
         """
-        raise RuntimeError("review_phase_retired_use_pipeline")
-
-        impl = self.impl
-        if pr_number is None:
-            return [], True
-        # Snapshot the unresolved threads the address step is about to fix so
-        # the NEXT iteration's validator can check they were truly addressed.
-        prior_addressed_threads = gh_pr_list_unresolved_threads(pr_number, dry_run=False)
-        if slot_id is not None:
-            self.status_tracker.update_slot(
-                slot_id, f"{pr_ref(pr_number)}: addressing review [R{iteration}]"
-            )
-        addressed = impl._run_address_review_step(
-            issue_number=issue_number,
-            pr_number=pr_number,
-            branch_name=branch_name,
-            worktree_path=worktree_path,
-            iteration=iteration,
-            # When the loop started without an initial implementer session
-            # (existing-PR review path), the address session may run fresh
-            # with no transcript to resume — give it the task + task-review
-            # + diff so it can read the work and continue. The fresh-impl
-            # path already carries this in its long-lived transcript.
-            include_bootstrap_context=session_id is None,
-            issue_title=issue_title,
-            issue_body=issue_body,
-            unaddressed_findings=unaddressed_findings,
+        del (
+            issue_number,
+            pr_number,
+            branch_name,
+            worktree_path,
+            iteration,
+            session_id,
+            slot_id,
+            thread_id,
+            issue_title,
+            issue_body,
+            unaddressed_findings,
         )
-        if not addressed:
-            current_unresolved = self._list_unresolved_threads_after_address(
-                pr_number=pr_number,
-                issue_number=issue_number,
-                iteration=iteration,
-            )
-            if current_unresolved is not None and _review_thread_count_decreased(
-                prior_addressed_threads, current_unresolved
-            ):
-                impl._log(
-                    "info",
-                    f"{issue_ref(issue_number)}: address step produced no commit on "
-                    f"iteration {iteration}, but unresolved review threads decreased "
-                    f"from {len(prior_addressed_threads)} to {len(current_unresolved)}; "
-                    "re-reviewing instead of treating the turn as stuck",
-                    thread_id,
-                )
-                return prior_addressed_threads, True
-            impl._log(
-                "info",
-                f"{issue_ref(issue_number)}: address step recorded no code-fix claims on "
-                f"iteration {iteration}; stopping review loop",
-                thread_id,
-            )
-        return prior_addressed_threads, addressed
+        raise RuntimeError("review_phase_retired_use_pipeline")
 
     def _list_unresolved_threads_after_address(
         self,
@@ -971,94 +755,18 @@ class ReviewPhase(StageMixin):
         reviewer (:meth:`_run_impl_review`) which posts nothing and is parsed
         into the same non-authoritative structural audit.
         """
-        raise RuntimeError("review_phase_retired_use_pipeline")
-
-        impl = self.impl
-        if pr_number is None:
-            diff_text = impl._collect_diff(worktree_path, branch_name)
-            files_changed = impl._collect_changed_files(worktree_path, branch_name)
-            review_text = impl._run_impl_review(
-                issue_number=issue_number,
-                issue_title=issue_title,
-                issue_body=issue_body,
-                diff_text=diff_text,
-                files_changed=files_changed,
-                iteration=iteration,
-                prior_review=prior_review,
-            )
-            return parse_review_audit(review_text), []
-
-        if self.options.dry_run:
-            logger.info("[DRY RUN] Would run in-loop PR review for #%s", pr_number)
-            return ReviewAudit(
-                grade=None,
-                summary="No structured reviewer summary was provided.",
-                findings=(),
-                raw_feedback="[DRY RUN] in-loop review skipped",
-                valid=False,
-            ), []
-
-        diff_text = impl._collect_diff(worktree_path, branch_name)
-        plan_text, plan_review_text = self.runner._fetch_plan_and_review(issue_number)
-        context = gather_impl_review_context(
-            pr_number=pr_number,
-            issue_number=issue_number,
-            issue_title=issue_title,
-            issue_body=issue_body,
-            plan_text=plan_text,
-            plan_review_text=plan_review_text,
-            diff_text=diff_text,
-            advise_findings=advise_findings,
-            include_nitpicks=self.options.include_nitpicks,
+        del (
+            issue_number,
+            issue_title,
+            issue_body,
+            branch_name,
+            worktree_path,
+            pr_number,
+            iteration,
+            prior_review,
+            advise_findings,
         )
-        try:
-            return review_pr_inline(
-                pr_number=pr_number,
-                issue_number=issue_number,
-                worktree_path=worktree_path,
-                context=context,
-                agent=self.options.agent,
-                iteration=iteration,
-                state_dir=self.state_dir,
-                dry_run=False,
-            )
-        except Exception as e:
-            # A 429 quota cap / 529 overload must pause the loop, not spin fresh
-            # reviewer sessions against an exhausted quota (issue #1528). After
-            # any wait, still record ERROR so a transient infra failure re-reviews
-            # next loop and is never mistaken for a NOGO.
-            _handle_reviewer_quota_or_overload(e, issue_number=issue_number, iteration=iteration)
-            if "reason=prompt_too_long" in str(e):
-                logger.error(
-                    "#%s R%s: in-loop PR review failed — prompt too long even at "
-                    "aggressive diff budget; recording ERROR (reason=prompt_too_long) "
-                    "so operators can see why this PR needs manual review",
-                    issue_number,
-                    iteration,
-                )
-                return ReviewAudit(
-                    grade=None,
-                    summary="No structured reviewer summary was provided.",
-                    findings=(),
-                    raw_feedback=(
-                        f"In-loop reviewer invocation failed at iteration {iteration}: {e}"
-                    ),
-                    valid=False,
-                ), []
-            logger.error(
-                "#%s R%s: in-loop PR review failed: %s; recording ERROR (re-review next "
-                "loop, no skip/label) so an infra failure isn't mistaken for a NOGO",
-                issue_number,
-                iteration,
-                e,
-            )
-            return ReviewAudit(
-                grade=None,
-                summary="No structured reviewer summary was provided.",
-                findings=(),
-                raw_feedback=f"In-loop reviewer invocation failed at iteration {iteration}: {e}",
-                valid=False,
-            ), []
+        raise RuntimeError("review_phase_retired_use_pipeline")
 
     def _run_address_review_step(
         self,
@@ -1094,79 +802,18 @@ class ReviewPhase(StageMixin):
         to handle <finding>" directive to re-ground a resumed session (#1554).
 
         """
-        raise RuntimeError("review_phase_retired_use_pipeline")
-
-        threads = gh_pr_list_unresolved_threads(pr_number, dry_run=False)
-        if not threads:
-            logger.info(
-                "#%s R%s: no unresolved threads to address on PR %s",
-                issue_number,
-                iteration,
-                pr_ref(pr_number),
-            )
-            return False
-
-        # On the existing-PR path the address session may run fresh (no
-        # implementer transcript to resume), so it has no memory of the task or
-        # the implementation. Bootstrap it with the task, the plan-review, and
-        # the current diff. The fresh-impl path already carries this in its
-        # long-lived transcript, so the blocks stay empty there (no extra cost).
-        task_block = ""
-        task_review_block = ""
-        diff_text = ""
-        if include_bootstrap_context:
-            task_block = f"#{issue_number} {issue_title}\n\n{issue_body}".strip()
-            _, task_review_block = self.runner._fetch_plan_and_review(issue_number)
-            diff_text = self.impl._collect_diff(worktree_path, branch_name)
-
-        log_file = log_file_path(
-            self.state_dir,
-            "address-review",
+        del (
             issue_number,
-            iteration=iteration,
+            pr_number,
+            branch_name,
+            worktree_path,
+            iteration,
+            include_bootstrap_context,
+            issue_title,
+            issue_body,
+            unaddressed_findings,
         )
-        fix_result = run_address_fix_session(
-            issue_number=issue_number,
-            pr_number=pr_number,
-            worktree_path=worktree_path,
-            threads=threads,
-            agent=self.options.agent,
-            repo_root=self.repo_root,
-            parse_fn=lambda text: self.runner._parse_address_result(text, issue_number, iteration),
-            log_file=log_file,
-            dry_run=False,
-            task_block=task_block,
-            task_review_block=task_review_block,
-            diff_text=diff_text,
-            unaddressed_findings=unaddressed_findings,
-            timeout=self.options.agent_timeout,
-            advise_timeout=self.options.advise_timeout,
-        )
-        addressed: list[str] = fix_result.get("addressed", [])
-
-        # #1083 Bug 1: gate "addressed" on a REAL commit. The fix session's
-        # self-reported ``addressed`` list is not trusted on its own — a session
-        # can claim it fixed a thread while leaving the worktree clean (e.g.
-        # replying "documented as a limitation" with no code change). Only when
-        # _commit_if_changes actually produced a commit do we push and report
-        # progress, so a no-op fix can never advance the loop.
-        committed = self.runner._commit_if_changes(issue_number, worktree_path)
-        if not (addressed and committed):
-            logger.info(
-                "#%s R%s: address step produced no committed change "
-                "(addressed=%s, committed=%s) — not counted as progress",
-                issue_number,
-                iteration,
-                bool(addressed),
-                committed,
-            )
-            return False
-        self.runner._push_branch(branch_name, worktree_path)
-
-        # Thread resolution is NEVER done here. The queue pipeline must post
-        # implementation replies after the push, then obtain a fresh reviewer
-        # validation before it can resolve or return each thread.
-        return True
+        raise RuntimeError("review_phase_retired_use_pipeline")
 
     def _parse_address_result(self, text: str, issue_number: int, iteration: int) -> dict[str, Any]:
         """Parse the address-session JSON block, tracing parse failures.

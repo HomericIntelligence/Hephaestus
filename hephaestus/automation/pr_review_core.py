@@ -43,10 +43,9 @@ from .agent_config import DEFAULT_AGENT_TIMEOUT
 from .claude_invoke import invoke_claude_with_session, raise_for_error_envelope
 from .claude_models import reviewer_model
 from .git_utils import get_repo_root, get_repo_slug, pr_ref
-from .github_api import gh_pr_review_post
 from .prompts import get_pr_review_analysis_prompt
-from .review_audit import ReviewAudit, parse_review_audit, render_review_audit
-from .session_naming import AGENT_PR_REVIEWER, reviewer_agent
+from .review_audit import ReviewAudit, parse_review_audit
+from .session_naming import AGENT_PR_REVIEWER
 
 logger = logging.getLogger(__name__)
 
@@ -456,46 +455,15 @@ def review_pr_inline(
     timeout: int = DEFAULT_AGENT_TIMEOUT,
 ) -> tuple[ReviewAudit, list[str]]:
     """Reject the retired direct review-thread mutator; use the pipeline."""
-    raise RuntimeError("review_pr_inline_retired_use_pipeline")
-
-    review_token = reviewer_agent(AGENT_PR_REVIEWER, iteration)
-    analysis = run_pr_review_analysis(
-        pr_number=pr_number,
-        issue_number=issue_number,
-        worktree_path=worktree_path,
-        context=context,
-        agent=agent,
-        review_agent=review_token,
-        state_dir=state_dir,
-        dry_run=dry_run,
-        timeout=timeout,
-    )
-    audit = analysis.get("audit")
-    if not isinstance(audit, ReviewAudit):
-        audit = parse_review_audit(str(analysis.get("review_text") or ""))
-    comments = [dict(comment) for comment in audit.findings]
-
-    if dry_run:
-        logger.info(
-            "[DRY RUN] Would post %s inline comment(s) on PR %s",
-            len(comments),
-            pr_ref(pr_number),
-        )
-        return audit, []
-
-    thread_ids = gh_pr_review_post(
-        pr_number=pr_number,
-        comments=comments,
-        summary=render_review_audit(audit),
-        dry_run=False,
-        # #1083: a later review iteration commenting on a line an earlier
-        # iteration already flagged edits that comment instead of duplicating.
-        dedupe_existing=True,
-    )
-    logger.info(
-        "In-loop review R%s posted %s thread(s) on PR %s",
+    del (
+        pr_number,
+        issue_number,
+        worktree_path,
+        context,
+        agent,
         iteration,
-        len(thread_ids),
-        pr_ref(pr_number),
+        state_dir,
+        dry_run,
+        timeout,
     )
-    return audit, thread_ids
+    raise RuntimeError("review_pr_inline_retired_use_pipeline")
