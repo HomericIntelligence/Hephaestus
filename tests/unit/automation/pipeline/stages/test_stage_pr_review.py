@@ -1435,6 +1435,13 @@ class TestReviewThreadLifecycle:
             )
             is None
         )
+        assert (
+            _parse_validation_result(
+                '```json\n{"resolved": ["thread-1"], "unaddressed": []}\n```\n'
+                "untrusted trailing text"
+            )
+            is None
+        )
 
     @pytest.mark.parametrize(
         ("receipts", "verdict"),

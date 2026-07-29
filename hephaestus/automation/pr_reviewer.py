@@ -11,15 +11,11 @@ trimmed to the ``pr_review`` stage scope via
 requested issues, and dispatches to
 :func:`~hephaestus.automation.pipeline.coordinator.run_pipeline`.
 
-The per-PR review orchestration the legacy ``PRReviewer`` used to own
-(discover → worktree → gather-context → analyze → post inline threads → GO/NOGO)
-now lives entirely in ``pipeline/stages/pr_review.py``. The pure/parse/context
-review cores it shares with the in-loop implementer review step (Stage 2, #28)
-live in :mod:`hephaestus.automation.pr_review_core`. This module preserves
-their imports for compatibility; its historical direct review-thread mutator
-now fails closed. :class:`PRReviewer` is retained as an importable placeholder
-for the package's public API surface (:mod:`hephaestus.automation`); it no
-longer carries orchestration.
+The per-PR review orchestration lives entirely in
+``pipeline/stages/pr_review.py``. The pure/parse/context review cores it
+shares with the in-loop implementer review step (Stage 2, #28) live in
+:mod:`hephaestus.automation.pr_review_core`. This module is only the CLI
+entry point; it does not expose a direct review-thread lifecycle.
 
 Usage:
     hephaestus-review-prs --issues N ... [--dry-run] [--max-workers N] [--no-ui]
@@ -43,17 +39,6 @@ from hephaestus.config.paths import resolve_projects_dir
 from ._review_utils import build_review_parser
 from .git_utils import get_repo_slug
 from .pipeline.routing import PipelineScope, StageName
-
-# The pure/parse/context review cores live in ``pr_review_core`` (unit-covered,
-# off the coverage omit-list). They are re-exported here (``name as name``) so
-# the long-pinned import sites — ``hephaestus.automation.pr_reviewer.review_pr_inline``
-# / ``.run_pr_review_analysis`` / ``.gather_impl_review_context`` — keep resolving
-# after the #1823 split. ``review_pr_inline`` is deliberately fail-closed.
-from .pr_review_core import (
-    gather_impl_review_context as gather_impl_review_context,
-    review_pr_inline as review_pr_inline,
-    run_pr_review_analysis as run_pr_review_analysis,
-)
 
 logger = logging.getLogger(__name__)
 

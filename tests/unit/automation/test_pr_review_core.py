@@ -2,10 +2,8 @@
 
 Split out of ``test_pr_reviewer_posting.py`` in the #1823 omit-reduction wave:
 these exercise the extracted, unit-covered cores
-(:func:`gather_impl_review_context`, :func:`run_pr_review_analysis`,
-:func:`review_pr_inline`) directly, patching the ``pr_review_core`` seams the
-cores actually bind. The standalone ``PRReviewer`` class-method tests stay in
-``test_pr_reviewer_posting.py``.
+(:func:`gather_impl_review_context`, :func:`run_pr_review_analysis`) directly,
+patching the ``pr_review_core`` seams the cores actually bind.
 """
 
 import json
@@ -19,7 +17,6 @@ from hephaestus.automation.pr_review_core import (
     DEFAULT_DIFF_BUDGET_CHARS,
     budget_diff_for_prompt,
     gather_impl_review_context,
-    review_pr_inline,
     run_pr_review_analysis,
 )
 from hephaestus.automation.review_audit import ReviewAudit
@@ -530,24 +527,6 @@ class TestRunPrReviewAnalysis:
     def test_prompt_too_long_not_confused_with_usage_cap(self) -> None:
         """PromptTooLongError is a distinct type from ClaudeUsageCapError."""
         assert issubclass(PromptTooLongError, RuntimeError)
-
-
-class TestReviewPrInline:
-    """The retired direct review-posting helper fails closed."""
-
-    @pytest.mark.parametrize("dry_run", [False, True])
-    def test_rejects_all_direct_review_posts(self, tmp_path: Path, dry_run: bool) -> None:
-        with pytest.raises(RuntimeError, match="review_pr_inline_retired_use_pipeline"):
-            review_pr_inline(
-                pr_number=42,
-                issue_number=1,
-                worktree_path=tmp_path,
-                context={},
-                agent="claude",
-                iteration=0,
-                state_dir=tmp_path,
-                dry_run=dry_run,
-            )
 
 
 class TestStructuralAuditNotProse:

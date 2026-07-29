@@ -3501,11 +3501,11 @@ class TestGhPrReviewPost:
                 589,
             ): (
                 "COMMENT_NODE_589",
-                "This test proves `review_pr_inline()` returns `review_text`, but it does "
-                "not assert the other half of the contract: GitHub still receives the JSON "
-                "`summary` as the review body. Capture this mock and assert "
+                "This test proves review publication receives the structural-audit summary, "
+                "but it does not assert the matching body is preserved. Capture this mock "
+                "and assert "
                 '`gh_pr_review_post(..., summary="a defect (no verdict token here)")` so a '
-                "future regression cannot post the full verdict prose.",
+                "future regression cannot post untrusted review prose.",
                 True,
             ),
         }
@@ -3518,12 +3518,12 @@ class TestGhPrReviewPost:
                     "line": 589,
                     "side": "RIGHT",
                     "body": (
-                        "This test verifies that `review_pr_inline()` returns the prose, but "
-                        "it does not assert the other half of the contract: GitHub should "
-                        "still receive the JSON `summary` as the review body. Capture the "
+                        "This test verifies review publication receives a structural-audit "
+                        "summary, but it does not assert the matching body is preserved. "
+                        "Capture the "
                         "`gh_pr_review_post` mock and assert "
                         '`summary == "a defect (no verdict token here)"` so a future change '
-                        "cannot accidentally post `review_text` instead."
+                        "cannot accidentally post untrusted review prose instead."
                     ),
                 }
             ],

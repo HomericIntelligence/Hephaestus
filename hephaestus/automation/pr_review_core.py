@@ -5,14 +5,11 @@ two layers:
 
 * This module holds the **shared review core** — the pure context assembler
   (:func:`gather_impl_review_context`) and agent-invoking analysis session
-  (:func:`run_pr_review_analysis`) used by the pipeline.  The historical
-  direct review+post helper (:func:`review_pr_inline`) is retained only as a
-  fail-closed compatibility entry point; GitHub review-thread mutation belongs
-  exclusively to the pipeline adapter.
+  (:func:`run_pr_review_analysis`) used by the pipeline. GitHub review-thread
+  mutation belongs exclusively to the pipeline adapter.
 
-* :mod:`hephaestus.automation.pr_reviewer` remains the console-script wrapper
-  (``hephaestus-review-prs``) around the pipeline. It preserves imports for
-  compatibility without restoring direct PR-thread mutation.
+* :mod:`hephaestus.automation.pr_reviewer` is the console-script wrapper
+  (``hephaestus-review-prs``) around the pipeline.
 
 The core is intentionally free of reviewer-class scaffolding: it takes
 everything it needs as explicit keyword arguments, so
@@ -440,30 +437,3 @@ def gather_impl_review_context(
         "advise_findings": advise_findings,
         "include_nitpicks": include_nitpicks,
     }
-
-
-def review_pr_inline(
-    *,
-    pr_number: int,
-    issue_number: int,
-    worktree_path: Path,
-    context: dict[str, Any],
-    agent: str,
-    iteration: int,
-    state_dir: Path,
-    dry_run: bool = False,
-    timeout: int = DEFAULT_AGENT_TIMEOUT,
-) -> tuple[ReviewAudit, list[str]]:
-    """Reject the retired direct review-thread mutator; use the pipeline."""
-    del (
-        pr_number,
-        issue_number,
-        worktree_path,
-        context,
-        agent,
-        iteration,
-        state_dir,
-        dry_run,
-        timeout,
-    )
-    raise RuntimeError("review_pr_inline_retired_use_pipeline")

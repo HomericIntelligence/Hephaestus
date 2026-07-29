@@ -5,7 +5,7 @@ These tests validate that the 11 automation modules omitted from coverage
 console entry points work correctly.
 
 Module enumeration and entry-point discovery verified at plan time:
-- All 12 omitted modules are importable (guards against import regressions)
+- All 11 omitted modules are importable (guards against import regressions)
 - 4 omitted modules have console scripts: implementer, planner, loop_runner,
     audit_reviewer
 - 1 omitted module is script-less but has main(): ci_driver
@@ -18,11 +18,11 @@ Module enumeration and entry-point discovery verified at plan time:
     (#1821), dropping the omit list from 16 to 13 entries. The #1823 wave then
     split pr_reviewer.py into a thin ``hephaestus-review-prs`` pipeline wrapper
     plus the unit-covered ``pr_review_core`` module, removing pr_reviewer.py
-    from omit (13 -> 12).
+    from omit (13 -> 12). The retired standalone address-review lifecycle was
+    then removed, reducing the list to 11.
     ``hephaestus-review-prs`` is still asserted below via CONSOLE_SCRIPTS —
     its wrapper remains importable and --help-able — but it is no longer
-    omitted, so it is not enumerated in OMITTED_MODULES. The retired standalone
-    address-review lifecycle was then removed, leaving the queue stage as the
+    omitted, so it is not enumerated in OMITTED_MODULES. The queue stage is the
     sole review-thread workflow.
 """
 
