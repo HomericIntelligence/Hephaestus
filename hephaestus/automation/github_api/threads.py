@@ -9,9 +9,15 @@ from typing import Any
 import hephaestus.automation.github_api as _api
 
 
-def _unresolved_thread_fact(node: dict[str, Any]) -> dict[str, Any] | None:
+def _unresolved_thread_fact(  # noqa: C901 - malformed GraphQL facts fail closed
+    node: dict[str, Any],
+) -> dict[str, Any] | None:
     """Normalize one complete unresolved GraphQL thread into a host fact."""
-    if node.get("isResolved"):
+    is_resolved = node.get("isResolved")
+    thread_id = node.get("id")
+    if not isinstance(is_resolved, bool) or not isinstance(thread_id, str) or not thread_id:
+        return None
+    if is_resolved:
         return None
     comment_connection = node.get("comments", {})
     comment_nodes = (
@@ -32,16 +38,26 @@ def _unresolved_thread_fact(node: dict[str, Any]) -> dict[str, Any] | None:
         if not isinstance(comment, dict):
             return None
         comment_author = ""
+        if "author" not in comment:
+            return None
         author_node = comment.get("author")
         if isinstance(author_node, dict):
-            comment_author = author_node.get("login") or ""
+            author_login = author_node.get("login")
+            if not isinstance(author_login, str):
+                return None
+            comment_author = author_login
         elif isinstance(author_node, str):
             comment_author = author_node
+        elif author_node is not None:
+            return None
         if comment_author:
             authors.append(comment_author)
-        comments.append({"body": comment.get("body") or "", "author": comment_author})
+        body = comment.get("body")
+        if not isinstance(body, str):
+            return None
+        comments.append({"body": body, "author": comment_author})
     return {
-        "id": node["id"],
+        "id": thread_id,
         "path": node.get("path", ""),
         "line": node.get("line"),
         "side": node.get("side") or "RIGHT",
@@ -71,110 +87,161 @@ def _complete_thread_snapshot(  # noqa: C901 - GraphQL response validation is fa
         "id isResolved path line side:diffSide pullRequest{"
         "id number repository{name owner{login}}}"
         "comments(first:100,after:$after){pageInfo{hasNextPage endCursor}"
-        "nodes{body author{login}}}}}}"
+        "nodes{id body author{login}}}}}}"
     )
-    comments: list[dict[str, Any]] = []
-    after: str | None = None
-    requested_pr_id: str | None = None
-    expected_thread_fields: tuple[bool, str, int | None, str] | None = None
-    while True:
-        argv = [
-            "api",
-            "graphql",
-            "-f",
-            f"query={query}",
-            "-F",
-            f"owner={owner}",
-            "-F",
-            f"name={repo}",
-            "-F",
-            f"number={int(pr_number)}",
-            "-F",
-            f"threadId={thread_id}",
-        ]
-        if after is not None:
-            argv.extend(["-F", f"after={after}"])
-        result = _api._gh_call(argv)
-        data = json.loads(result.stdout)
-        _api._check_graphql_errors(
-            data,
-            f"review-thread snapshot(pr={pr_number}, thread={thread_id})",
-        )
-        data_node = data.get("data") if isinstance(data, dict) else None
-        repository = data_node.get("repository") if isinstance(data_node, dict) else None
-        requested_pr = repository.get("pullRequest") if isinstance(repository, dict) else None
-        node = data_node.get("node") if isinstance(data_node, dict) else None
-        if not isinstance(requested_pr, dict) or not isinstance(node, dict):
-            return None
-        pr_id = requested_pr.get("id")
-        if not isinstance(pr_id, str) or not pr_id or node.get("id") != thread_id:
-            return None
-        if requested_pr_id is None:
-            requested_pr_id = pr_id
-        elif requested_pr_id != pr_id:
-            return None
-        pull_request = node.get("pullRequest")
-        thread_repository = (
-            pull_request.get("repository") if isinstance(pull_request, dict) else None
-        )
-        thread_owner = (
-            thread_repository.get("owner") if isinstance(thread_repository, dict) else None
-        )
-        if (
-            not isinstance(pull_request, dict)
-            or pull_request.get("id") != requested_pr_id
-            or pull_request.get("number") != pr_number
-            or not isinstance(thread_repository, dict)
-            or thread_repository.get("name") != repo
-            or not isinstance(thread_owner, dict)
-            or thread_owner.get("login") != owner
-            or not isinstance(node.get("isResolved"), bool)
-            or not isinstance(node.get("path"), str)
-            or (
-                node.get("line") is not None
-                and (isinstance(node.get("line"), bool) or not isinstance(node.get("line"), int))
+
+    def read_once() -> tuple[dict[str, Any], bool] | None:  # noqa: C901
+        comments: list[dict[str, Any]] = []
+        seen_comment_ids: set[str] = set()
+        seen_cursors: set[str] = set()
+        after: str | None = None
+        page_count = 0
+        requested_pr_id: str | None = None
+        expected_thread_fields: tuple[bool, str, int | None, str | None] | None = None
+        while True:
+            page_count += 1
+            argv = [
+                "api",
+                "graphql",
+                "-f",
+                f"query={query}",
+                "-F",
+                f"owner={owner}",
+                "-F",
+                f"name={repo}",
+                "-F",
+                f"number={int(pr_number)}",
+                "-F",
+                f"threadId={thread_id}",
+            ]
+            if after is not None:
+                argv.extend(["-F", f"after={after}"])
+            result = _api._gh_call(argv)
+            data = json.loads(result.stdout)
+            _api._check_graphql_errors(
+                data,
+                f"review-thread snapshot(pr={pr_number}, thread={thread_id})",
             )
-            or not isinstance(node.get("side"), str)
-            or not node.get("side")
-        ):
-            return None
-        thread_fields = (node["isResolved"], node["path"], node.get("line"), node["side"])
-        if expected_thread_fields is None:
-            expected_thread_fields = thread_fields
-        elif expected_thread_fields != thread_fields:
-            return None
-        connection = node.get("comments")
-        comment_nodes = connection.get("nodes") if isinstance(connection, dict) else None
-        page_info = connection.get("pageInfo") if isinstance(connection, dict) else None
-        if not isinstance(comment_nodes, list) or not isinstance(page_info, dict):
-            return None
-        for comment in comment_nodes:
-            if not isinstance(comment, dict):
+            data_node = data.get("data") if isinstance(data, dict) else None
+            repository = data_node.get("repository") if isinstance(data_node, dict) else None
+            requested_pr = repository.get("pullRequest") if isinstance(repository, dict) else None
+            node = data_node.get("node") if isinstance(data_node, dict) else None
+            if not isinstance(requested_pr, dict) or not isinstance(node, dict):
                 return None
-            author_node = comment.get("author")
-            author = author_node.get("login") if isinstance(author_node, dict) else ""
-            body = comment.get("body")
-            if not isinstance(author, str) or not isinstance(body, str):
+            pr_id = requested_pr.get("id")
+            if not isinstance(pr_id, str) or not pr_id or node.get("id") != thread_id:
                 return None
-            comments.append({"body": body, "author": author})
-        has_next_page = page_info.get("hasNextPage")
-        if not isinstance(has_next_page, bool):
-            return None
-        if not has_next_page:
+            if requested_pr_id is None:
+                requested_pr_id = pr_id
+            elif requested_pr_id != pr_id:
+                return None
+            pull_request = node.get("pullRequest")
+            thread_pr_number = (
+                pull_request.get("number") if isinstance(pull_request, dict) else None
+            )
+            thread_repository = (
+                pull_request.get("repository") if isinstance(pull_request, dict) else None
+            )
+            thread_owner = (
+                thread_repository.get("owner") if isinstance(thread_repository, dict) else None
+            )
+            if (
+                not isinstance(pull_request, dict)
+                or pull_request.get("id") != requested_pr_id
+                or isinstance(thread_pr_number, bool)
+                or not isinstance(thread_pr_number, int)
+                or thread_pr_number != pr_number
+                or not isinstance(thread_repository, dict)
+                or thread_repository.get("name") != repo
+                or not isinstance(thread_owner, dict)
+                or thread_owner.get("login") != owner
+                or not isinstance(node.get("isResolved"), bool)
+                or not isinstance(node.get("path"), str)
+                or (
+                    node.get("line") is not None
+                    and (
+                        isinstance(node.get("line"), bool) or not isinstance(node.get("line"), int)
+                    )
+                )
+                or (node.get("side") is not None and not isinstance(node.get("side"), str))
+            ):
+                return None
+            thread_fields = (
+                node["isResolved"],
+                node["path"],
+                node.get("line"),
+                node.get("side"),
+            )
             if expected_thread_fields is None:
+                expected_thread_fields = thread_fields
+            elif expected_thread_fields != thread_fields:
                 return None
-            return {
-                "id": thread_id,
-                "isResolved": expected_thread_fields[0],
-                "path": expected_thread_fields[1],
-                "line": expected_thread_fields[2],
-                "side": expected_thread_fields[3],
-                "comments": comments,
-            }
-        next_cursor = page_info.get("endCursor")
-        if not isinstance(next_cursor, str) or not next_cursor or next_cursor == after:
-            raise RuntimeError(f"could not fetch all comments for PR review thread {thread_id}")
-        after = next_cursor
+            connection = node.get("comments")
+            comment_nodes = connection.get("nodes") if isinstance(connection, dict) else None
+            page_info = connection.get("pageInfo") if isinstance(connection, dict) else None
+            if not isinstance(comment_nodes, list) or not isinstance(page_info, dict):
+                return None
+            for comment in comment_nodes:
+                if not isinstance(comment, dict):
+                    return None
+                if "author" not in comment:
+                    return None
+                author_node = comment.get("author")
+                if author_node is None:
+                    author = ""
+                elif isinstance(author_node, dict):
+                    author_login = author_node.get("login")
+                    if not isinstance(author_login, str):
+                        return None
+                    author = author_login
+                else:
+                    return None
+                comment_id = comment.get("id")
+                body = comment.get("body")
+                if (
+                    not isinstance(comment_id, str)
+                    or not comment_id
+                    or not isinstance(author, str)
+                    or not isinstance(body, str)
+                ):
+                    return None
+                if comment_id in seen_comment_ids:
+                    return None
+                seen_comment_ids.add(comment_id)
+                comments.append({"id": comment_id, "body": body, "author": author})
+            has_next_page = page_info.get("hasNextPage")
+            if not isinstance(has_next_page, bool):
+                return None
+            if not has_next_page:
+                if expected_thread_fields is None:
+                    return None
+                return (
+                    {
+                        "id": thread_id,
+                        "isResolved": expected_thread_fields[0],
+                        "path": expected_thread_fields[1],
+                        "line": expected_thread_fields[2],
+                        "side": expected_thread_fields[3],
+                        "comments": comments,
+                    },
+                    page_count > 1,
+                )
+            next_cursor = page_info.get("endCursor")
+            if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen_cursors:
+                raise RuntimeError(f"could not fetch all comments for PR review thread {thread_id}")
+            seen_cursors.add(next_cursor)
+            after = next_cursor
+
+    first = read_once()
+    if first is None:
+        return None
+    snapshot, was_paginated = first
+    if not was_paginated:
+        return snapshot
+    second = read_once()
+    if second is None or snapshot != second[0]:
+        return None
+    return second[0]
 
 
 def gh_pr_list_unresolved_threads(  # noqa: C901 - complete thread pagination is fail-closed
@@ -217,56 +284,80 @@ def gh_pr_list_unresolved_threads(  # noqa: C901 - complete thread pagination is
         "}"
     )
 
+    def read_thread_ids() -> tuple[str, ...]:
+        """Read one complete unresolved-thread traversal without hydrating it."""
+        thread_ids: list[str] = []
+        seen: set[str] = set()
+        seen_cursors: set[str] = set()
+        after: str | None = None
+        while True:
+            argv = [
+                "api",
+                "graphql",
+                "-f",
+                f"query={query}",
+                "-F",
+                f"owner={owner}",
+                "-F",
+                f"name={repo}",
+                "-F",
+                f"number={int(pr_number)}",
+            ]
+            if after is not None:
+                argv.extend(["-F", f"after={after}"])
+            result = _api._gh_call(argv)
+            data = json.loads(result.stdout)
+            _api._check_graphql_errors(data, f"gh_pr_list_unresolved_threads(pr={pr_number})")
+            data_node = data.get("data") if isinstance(data, dict) else None
+            repository = data_node.get("repository") if isinstance(data_node, dict) else None
+            pull_request = repository.get("pullRequest") if isinstance(repository, dict) else None
+            review_threads = (
+                pull_request.get("reviewThreads") if isinstance(pull_request, dict) else None
+            )
+            if not isinstance(review_threads, dict):
+                raise RuntimeError("could not fetch all PR review threads")
+            nodes = review_threads.get("nodes", [])
+            if not isinstance(nodes, list):
+                raise RuntimeError("could not fetch all PR review threads")
+            for node in nodes:
+                if not isinstance(node, dict):
+                    raise RuntimeError("could not fetch all PR review threads")
+                is_resolved = node.get("isResolved")
+                thread_id = node.get("id")
+                if (
+                    not isinstance(is_resolved, bool)
+                    or not isinstance(thread_id, str)
+                    or not thread_id
+                    or thread_id in seen
+                ):
+                    raise RuntimeError("could not fetch all PR review threads")
+                seen.add(thread_id)
+                if not is_resolved:
+                    thread_ids.append(thread_id)
+            page_info = review_threads.get("pageInfo")
+            if not isinstance(page_info, dict) or not isinstance(
+                page_info.get("hasNextPage"), bool
+            ):
+                raise RuntimeError("could not fetch all PR review threads")
+            if not page_info["hasNextPage"]:
+                return tuple(thread_ids)
+            next_cursor = page_info.get("endCursor")
+            if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen_cursors:
+                raise RuntimeError("could not fetch all PR review threads")
+            seen_cursors.add(next_cursor)
+            after = next_cursor
+
+    first_ids = read_thread_ids()
+    if first_ids != read_thread_ids():
+        raise RuntimeError("could not stabilize all PR review threads")
     threads: list[dict[str, Any]] = []
-    after: str | None = None
-    while True:
-        argv = [
-            "api",
-            "graphql",
-            "-f",
-            f"query={query}",
-            "-F",
-            f"owner={owner}",
-            "-F",
-            f"name={repo}",
-            "-F",
-            f"number={int(pr_number)}",
-        ]
-        if after is not None:
-            argv.extend(["-F", f"after={after}"])
-        result = _api._gh_call(argv)
-        data = json.loads(result.stdout)
-        _api._check_graphql_errors(data, f"gh_pr_list_unresolved_threads(pr={pr_number})")
-        review_threads = (
-            data.get("data", {})
-            .get("repository", {})
-            .get("pullRequest", {})
-            .get("reviewThreads", {})
-        )
-        nodes = review_threads.get("nodes", [])
-        if not isinstance(nodes, list):
-            raise RuntimeError("could not fetch all PR review threads")
-        for node in nodes:
-            if not isinstance(node, dict):
-                raise RuntimeError("could not fetch all PR review threads")
-            if node.get("isResolved"):
-                continue
-            thread_id = node.get("id")
-            if not isinstance(thread_id, str) or not thread_id:
-                raise RuntimeError("could not fetch all PR review threads")
-            snapshot = _complete_thread_snapshot(owner, repo, pr_number, thread_id)
-            if snapshot is None:
-                raise RuntimeError(f"could not fetch all comments for PR review thread {thread_id}")
-            fact = _unresolved_thread_fact(snapshot)
-            if fact is not None:
-                threads.append(fact)
-        page_info = review_threads.get("pageInfo", {})
-        if not page_info.get("hasNextPage"):
-            break
-        next_cursor = page_info.get("endCursor")
-        if not isinstance(next_cursor, str) or not next_cursor or next_cursor == after:
-            raise RuntimeError("could not fetch all PR review threads")
-        after = next_cursor
+    for thread_id in first_ids:
+        snapshot = _complete_thread_snapshot(owner, repo, pr_number, thread_id)
+        if snapshot is None:
+            raise RuntimeError(f"could not fetch all comments for PR review thread {thread_id}")
+        fact = _unresolved_thread_fact(snapshot)
+        if fact is not None:
+            threads.append(fact)
 
     _api.logger.debug("Found %s unresolved thread(s) on PR #%s", len(threads), pr_number)
     return threads

@@ -543,91 +543,116 @@ class PipelineGitHub:
             "  }"
             "}"
         )
-        threads: list[dict[str, Any]] = []
-        after: str | None = None
-        while True:
-            fields: dict[str, int | str] = {"number": int(pr_number)}
-            if after is not None:
-                fields["after"] = after
-            data = self._graphql(query, **fields)
-            review_threads = (
-                data.get("data", {})
-                .get("repository", {})
-                .get("pullRequest", {})
-                .get("reviewThreads", {})
-            )
-            nodes = review_threads.get("nodes", [])
-            if not isinstance(nodes, list):
-                raise RuntimeError("could not fetch all PR review threads")
-            for node in nodes:
-                if not isinstance(node, dict):
+
+        def read_thread_ids() -> tuple[str, ...]:
+            """Read one complete unresolved-thread traversal without hydrating it."""
+            thread_ids: list[str] = []
+            seen: set[str] = set()
+            seen_cursors: set[str] = set()
+            after: str | None = None
+            while True:
+                fields: dict[str, int | str] = {"number": int(pr_number)}
+                if after is not None:
+                    fields["after"] = after
+                data = self._graphql(query, **fields)
+                data_node = data.get("data") if isinstance(data, dict) else None
+                repository = data_node.get("repository") if isinstance(data_node, dict) else None
+                pull_request = (
+                    repository.get("pullRequest") if isinstance(repository, dict) else None
+                )
+                review_threads = (
+                    pull_request.get("reviewThreads") if isinstance(pull_request, dict) else None
+                )
+                if not isinstance(review_threads, dict):
                     raise RuntimeError("could not fetch all PR review threads")
-                if node.get("isResolved"):
-                    continue
-                thread_id = node.get("id")
-                if not isinstance(thread_id, str) or not thread_id:
+                nodes = review_threads.get("nodes", [])
+                if not isinstance(nodes, list):
                     raise RuntimeError("could not fetch all PR review threads")
-                # A review-thread list deliberately does not request a bounded
-                # nested comments connection.  Fetch the complete, paginated
-                # node snapshot instead: all turns must reach the implementer
-                # and reviewer, including long-lived conversations.
-                snapshot = self._review_thread_snapshot(pr_number, thread_id)
-                if snapshot is None:
-                    raise RuntimeError(
-                        f"could not fetch all comments for PR review thread {thread_id}"
-                    )
-                if snapshot.get("isResolved") is True:
-                    # The thread was closed between the list and node reads.
-                    continue
-                comments = snapshot.get("comments")
-                if (
-                    not isinstance(comments, list)
-                    or self._thread_comment_snapshot(snapshot) is None
+                for node in nodes:
+                    if not isinstance(node, dict):
+                        raise RuntimeError("could not fetch all PR review threads")
+                    is_resolved = node.get("isResolved")
+                    thread_id = node.get("id")
+                    if (
+                        not isinstance(is_resolved, bool)
+                        or not isinstance(thread_id, str)
+                        or not thread_id
+                        or thread_id in seen
+                    ):
+                        raise RuntimeError("could not fetch all PR review threads")
+                    seen.add(thread_id)
+                    if not is_resolved:
+                        thread_ids.append(thread_id)
+                page_info = review_threads.get("pageInfo")
+                if not isinstance(page_info, dict) or not isinstance(
+                    page_info.get("hasNextPage"), bool
                 ):
+                    raise RuntimeError("could not fetch all PR review threads")
+                if not page_info["hasNextPage"]:
+                    return tuple(thread_ids)
+                next_cursor = page_info.get("endCursor")
+                if (
+                    not isinstance(next_cursor, str)
+                    or not next_cursor
+                    or next_cursor in seen_cursors
+                ):
+                    raise RuntimeError("could not fetch all PR review threads")
+                seen_cursors.add(next_cursor)
+                after = next_cursor
+
+        first_ids = read_thread_ids()
+        if first_ids != read_thread_ids():
+            raise RuntimeError("could not stabilize all PR review threads")
+        threads: list[dict[str, Any]] = []
+        for thread_id in first_ids:
+            # A review-thread list deliberately does not request a bounded
+            # nested comments connection.  Fetch the complete, paginated
+            # node snapshot instead: all turns must reach the implementer
+            # and reviewer, including long-lived conversations.
+            snapshot = self._review_thread_snapshot(pr_number, thread_id)
+            if snapshot is None:
+                raise RuntimeError(f"could not fetch all comments for PR review thread {thread_id}")
+            if snapshot.get("isResolved") is True:
+                # The thread was closed between the list and node reads.
+                continue
+            comments = snapshot.get("comments")
+            if not isinstance(comments, list) or self._thread_comment_snapshot(snapshot) is None:
+                raise RuntimeError(f"could not fetch all comments for PR review thread {thread_id}")
+            first_comment = comments[0]
+            authors: list[str] = []
+            review_body = ""
+            review_commit_sha = ""
+            for comment in comments:
+                if not isinstance(comment, dict):
                     raise RuntimeError(
                         f"could not fetch all comments for PR review thread {thread_id}"
                     )
-                first_comment = comments[0]
-                authors: list[str] = []
-                review_body = ""
-                review_commit_sha = ""
-                for comment in comments:
-                    if not isinstance(comment, dict):
-                        raise RuntimeError(
-                            f"could not fetch all comments for PR review thread {thread_id}"
-                        )
-                    author = comment.get("author")
-                    if not isinstance(author, str) or not author:
-                        raise RuntimeError(
-                            f"could not fetch all comments for PR review thread {thread_id}"
-                        )
-                    if author:
-                        authors.append(author)
-                    if not review_body:
-                        review_body = str(comment.get("review_body") or "")
-                        review_commit_sha = str(comment.get("review_commit_sha") or "")
-                thread = {
-                    "id": thread_id,
-                    "path": snapshot.get("path", ""),
-                    "line": snapshot.get("line"),
-                    "side": snapshot.get("side") or "RIGHT",
-                    "body": first_comment.get("body", ""),
-                    "author": authors[0] if authors else "",
-                    "author_type": comments[0].get("author_type", "") if comments else "",
-                    "authors": authors,
-                    "comments": [dict(comment) for comment in comments],
-                    "review_id": comments[0].get("review_id", "") if comments else "",
-                    "review_body": review_body,
-                    "review_commit_sha": review_commit_sha,
-                }
-                threads.append(thread)
-            page_info = review_threads.get("pageInfo", {})
-            if not page_info.get("hasNextPage"):
-                break
-            next_cursor = page_info.get("endCursor")
-            if not isinstance(next_cursor, str) or not next_cursor or next_cursor == after:
-                raise RuntimeError("could not fetch all PR review threads")
-            after = next_cursor
+                author = comment.get("author")
+                if not isinstance(author, str):
+                    raise RuntimeError(
+                        f"could not fetch all comments for PR review thread {thread_id}"
+                    )
+                if author:
+                    authors.append(author)
+                if not review_body:
+                    review_body = str(comment.get("review_body") or "")
+                    review_commit_sha = str(comment.get("review_commit_sha") or "")
+            thread = {
+                "id": thread_id,
+                "path": snapshot.get("path", ""),
+                "line": snapshot.get("line"),
+                "side": snapshot.get("side") or "RIGHT",
+                "body": first_comment.get("body", ""),
+                "author": authors[0] if authors else "",
+                "author_type": comments[0].get("author_type", "") if comments else "",
+                "authors": authors,
+                "comments": [dict(comment) for comment in comments],
+                "review_id": comments[0].get("review_id", "") if comments else "",
+                "review_body": review_body,
+                "review_commit_sha": review_commit_sha,
+                "pr_state": snapshot.get("pr_state"),
+            }
+            threads.append(thread)
         return threads
 
     def _repo_issue_comments(self, issue_number: int) -> list[dict[str, Any]]:
@@ -823,19 +848,20 @@ class PipelineGitHub:
         )
 
     @staticmethod
-    def _thread_comment_snapshot(thread: dict[str, Any]) -> tuple[tuple[str, str, str], ...] | None:
+    def _thread_comment_snapshot(thread: dict[str, Any]) -> tuple[tuple[str, str], ...] | None:
         """Return the complete immutable comment snapshot for one live thread.
 
         Thread line positions can move when the implementation pushes a fix, so
         they are deliberately not part of this concurrency guard.  Every
-        existing comment's opaque id, author, and body is instead preserved;
+        existing comment's opaque id and body are instead preserved;
         an external reply or edit makes the snapshot differ and prevents a
         coordinator mutation.
         """
         comments = thread.get("comments")
         if not isinstance(comments, list) or not comments:
             return None
-        snapshot: list[tuple[str, str, str]] = []
+        snapshot: list[tuple[str, str]] = []
+        seen_comment_ids: set[str] = set()
         for comment in comments:
             if not isinstance(comment, dict):
                 return None
@@ -846,11 +872,13 @@ class PipelineGitHub:
                 isinstance(comment_id, str)
                 and comment_id.strip()
                 and isinstance(author, str)
-                and author.strip()
                 and isinstance(body, str)
             ):
                 return None
-            snapshot.append((comment_id, author, body))
+            if comment_id in seen_comment_ids:
+                return None
+            seen_comment_ids.add(comment_id)
+            snapshot.append((comment_id, body))
         return tuple(snapshot)
 
     @classmethod
@@ -879,8 +907,43 @@ class PipelineGitHub:
             and len(after) == len(before) + 1
             and after[:-1] == before
             and after[-1][0] == reply_comment_id
-            and after[-1][2] == reply_body
+            and after[-1][1] == reply_body
             and receipt.get("id") == live.get("id")
+        )
+
+    @classmethod
+    def _host_reply_receipt(
+        cls,
+        receipt: dict[str, Any],
+        live: dict[str, Any],
+        reply_body: str,
+        expected_comment_id: str | None = None,
+    ) -> str | None:
+        """Return a proven coordinator reply appended to one exact snapshot.
+
+        ``expected_comment_id`` is unavailable when GitHub accepted a mutation
+        but the response body was malformed.  In that ambiguous case the
+        complete post-mutation read still proves the exact host-owned body and
+        one-comment extension before recovering a receipt.
+        """
+        after = cls._thread_comment_snapshot(live)
+        comments = live.get("comments")
+        if (
+            after is None
+            or not after
+            or not isinstance(comments, list)
+            or not comments
+            or not isinstance(comments[-1], dict)
+            or comments[-1].get("viewer_did_author") is not True
+        ):
+            return None
+        comment_id = after[-1][0]
+        if expected_comment_id is not None and comment_id != expected_comment_id:
+            return None
+        return (
+            comment_id
+            if cls._same_snapshot_with_reply(receipt, live, reply_body, comment_id)
+            else None
         )
 
     @staticmethod
@@ -914,7 +977,7 @@ class PipelineGitHub:
             or not comments
         ):
             return None
-        reply_id, _author, reply_body = snapshot[-1]
+        reply_id, reply_body = snapshot[-1]
         final_comment = comments[-1]
         if not isinstance(final_comment, dict) or not final_comment.get("viewer_did_author"):
             return None
@@ -1006,7 +1069,13 @@ class PipelineGitHub:
             body=body,
             clientMutationId=hashlib.sha256(body.encode("utf-8")).hexdigest(),
         )
-        comment = data.get("data", {}).get("addPullRequestReviewThreadReply", {}).get("comment", {})
+        response_data = data.get("data") if isinstance(data, dict) else None
+        mutation = (
+            response_data.get("addPullRequestReviewThreadReply")
+            if isinstance(response_data, dict)
+            else None
+        )
+        comment = mutation.get("comment") if isinstance(mutation, dict) else None
         if not isinstance(comment, dict) or not isinstance(comment.get("id"), str):
             return None
         return str(comment["id"])
@@ -1020,9 +1089,10 @@ class PipelineGitHub:
         ``resolveReviewThread`` hides it.  This node-scoped read is therefore
         the post-mutation proof that no comment raced the reviewed receipt and
         that the resolved node still belongs to this exact pull request.  The
-        PR's open/unarmed/head fields are selected in the *same GraphQL
-        operation* as the thread comments, so reconciliation never combines a
-        complete conversation read with a later, racy PR-state read.
+        PR's open/unarmed/head fields are selected with every comment page, so
+        reconciliation never combines a complete conversation read with a
+        later, racy PR-state read.  Conversations spanning multiple pages are
+        reread to a matching fixed point before they become a mutation proof.
         """
         query = (
             "query($owner:String!,$name:String!,$number:Int!,$threadId:ID!,$after:String){"
@@ -1035,150 +1105,200 @@ class PipelineGitHub:
             "nodes{id body viewerDidAuthor author{login __typename} "
             "pullRequestReview{id body commit{oid}}}}}}}"
         )
-        comments: list[dict[str, Any]] = []
-        after: str | None = None
-        expected_pr_id: str | None = None
-        expected_pr_state: dict[str, Any] | None = None
-        expected_thread_fields: tuple[bool, str, int | None, str] | None = None
-        while True:
-            fields: dict[str, int | str] = {
-                "number": int(pr_number),
-                "threadId": thread_id,
-            }
-            if after is not None:
-                fields["after"] = after
-            data = self._graphql(query, **fields)
-            data_node = data.get("data") if isinstance(data, dict) else None
-            repository = data_node.get("repository") if isinstance(data_node, dict) else None
-            requested_pr = repository.get("pullRequest") if isinstance(repository, dict) else None
-            if not isinstance(requested_pr, dict):
-                return None
-            pr_id = requested_pr.get("id")
-            auto_merge_request = requested_pr.get("autoMergeRequest")
-            if (
-                not isinstance(pr_id, str)
-                or not pr_id
-                or not isinstance(requested_pr.get("state"), str)
-                or not isinstance(requested_pr.get("headRefOid"), str)
-                or "autoMergeRequest" not in requested_pr
-                or (auto_merge_request is not None and not isinstance(auto_merge_request, dict))
-            ):
-                return None
-            pr_state = {
-                "state": requested_pr["state"],
-                "headRefOid": requested_pr["headRefOid"],
-                "autoMergeRequest": auto_merge_request,
-            }
-            if expected_pr_id is None:
-                expected_pr_id = pr_id
-                expected_pr_state = pr_state
-            elif expected_pr_id != pr_id or expected_pr_state != pr_state:
-                # Pagination may require multiple reads. Do not assemble a
-                # proof from pages that observed different PR state.
-                return None
-            node = data_node.get("node") if isinstance(data_node, dict) else None
-            if not isinstance(node, dict) or node.get("id") != thread_id:
-                return None
-            pull_request = node.get("pullRequest")
-            thread_repository = (
-                pull_request.get("repository") if isinstance(pull_request, dict) else None
-            )
-            owner = thread_repository.get("owner") if isinstance(thread_repository, dict) else None
-            if (
-                not isinstance(pull_request, dict)
-                or pull_request.get("id") != expected_pr_id
-                or pull_request.get("number") != pr_number
-                or not isinstance(thread_repository, dict)
-                or thread_repository.get("name") != self.repo
-                or not isinstance(owner, dict)
-                or owner.get("login") != self.org
-                or not isinstance(node.get("isResolved"), bool)
-            ):
-                return None
-            path = node.get("path")
-            line = node.get("line")
-            side = node.get("side")
-            if (
-                not isinstance(path, str)
-                or (line is not None and (isinstance(line, bool) or not isinstance(line, int)))
-                or not isinstance(side, str)
-                or not side
-            ):
-                return None
-            thread_fields = (node["isResolved"], path, line, side)
-            if expected_thread_fields is None:
-                expected_thread_fields = thread_fields
-            elif expected_thread_fields != thread_fields:
-                return None
-            comment_connection = node.get("comments")
-            if not isinstance(comment_connection, dict):
-                return None
-            comment_nodes = comment_connection.get("nodes")
-            if not isinstance(comment_nodes, list):
-                return None
-            for comment in comment_nodes:
-                if not isinstance(comment, dict):
+
+        def read_once() -> tuple[dict[str, Any], bool] | None:  # noqa: C901
+            comments: list[dict[str, Any]] = []
+            seen_comment_ids: set[str] = set()
+            seen_cursors: set[str] = set()
+            after: str | None = None
+            page_count = 0
+            expected_pr_id: str | None = None
+            expected_pr_state: dict[str, Any] | None = None
+            expected_thread_fields: tuple[bool, str, int | None, str | None] | None = None
+            while True:
+                page_count += 1
+                fields: dict[str, int | str] = {
+                    "number": int(pr_number),
+                    "threadId": thread_id,
+                }
+                if after is not None:
+                    fields["after"] = after
+                data = self._graphql(query, **fields)
+                data_node = data.get("data") if isinstance(data, dict) else None
+                repository = data_node.get("repository") if isinstance(data_node, dict) else None
+                requested_pr = (
+                    repository.get("pullRequest") if isinstance(repository, dict) else None
+                )
+                if not isinstance(requested_pr, dict):
                     return None
-                author_node = comment.get("author")
-                author = author_node.get("login") if isinstance(author_node, dict) else ""
-                author_type = author_node.get("__typename") if isinstance(author_node, dict) else ""
-                review = comment.get("pullRequestReview")
-                if review is not None and not isinstance(review, dict):
-                    return None
-                commit = review.get("commit") if isinstance(review, dict) else None
-                if commit is not None and not isinstance(commit, dict):
-                    return None
-                comment_id = comment.get("id")
-                body = comment.get("body")
-                review_id = review.get("id") if isinstance(review, dict) else ""
-                review_body = review.get("body") if isinstance(review, dict) else ""
-                review_commit_sha = commit.get("oid") if isinstance(commit, dict) else ""
+                pr_id = requested_pr.get("id")
+                auto_merge_request = requested_pr.get("autoMergeRequest")
                 if (
-                    not isinstance(comment_id, str)
-                    or not comment_id
-                    or not isinstance(body, str)
-                    or not isinstance(author, str)
-                    or not author
-                    or not isinstance(author_type, str)
-                    or not isinstance(comment.get("viewerDidAuthor"), bool)
-                    or not isinstance(review_id, str)
-                    or not isinstance(review_body, str)
-                    or not isinstance(review_commit_sha, str)
+                    not isinstance(pr_id, str)
+                    or not pr_id
+                    or not isinstance(requested_pr.get("state"), str)
+                    or not isinstance(requested_pr.get("headRefOid"), str)
+                    or "autoMergeRequest" not in requested_pr
+                    or (auto_merge_request is not None and not isinstance(auto_merge_request, dict))
                 ):
                     return None
-                comments.append(
-                    {
-                        "id": comment_id,
-                        "body": body,
-                        "author": author,
-                        "author_type": author_type,
-                        "viewer_did_author": comment["viewerDidAuthor"],
-                        "review_id": review_id,
-                        "review_body": review_body,
-                        "review_commit_sha": review_commit_sha,
-                    }
-                )
-            page_info = comment_connection.get("pageInfo")
-            if not isinstance(page_info, dict) or not isinstance(
-                page_info.get("hasNextPage"), bool
-            ):
-                return None
-            if not page_info["hasNextPage"]:
-                if expected_thread_fields is None or expected_pr_state is None:
-                    return None
-                return {
-                    "id": thread_id,
-                    "isResolved": expected_thread_fields[0],
-                    "path": expected_thread_fields[1],
-                    "line": expected_thread_fields[2],
-                    "side": expected_thread_fields[3],
-                    "comments": comments,
-                    "pr_state": expected_pr_state,
+                pr_state = {
+                    "state": requested_pr["state"],
+                    "headRefOid": requested_pr["headRefOid"],
+                    "autoMergeRequest": auto_merge_request,
                 }
-            next_cursor = page_info.get("endCursor")
-            if not isinstance(next_cursor, str) or not next_cursor or next_cursor == after:
-                raise RuntimeError(f"could not fetch all comments for PR review thread {thread_id}")
-            after = next_cursor
+                if expected_pr_id is None:
+                    expected_pr_id = pr_id
+                    expected_pr_state = pr_state
+                elif expected_pr_id != pr_id or expected_pr_state != pr_state:
+                    return None
+                node = data_node.get("node") if isinstance(data_node, dict) else None
+                if not isinstance(node, dict) or node.get("id") != thread_id:
+                    return None
+                pull_request = node.get("pullRequest")
+                thread_pr_number = (
+                    pull_request.get("number") if isinstance(pull_request, dict) else None
+                )
+                thread_repository = (
+                    pull_request.get("repository") if isinstance(pull_request, dict) else None
+                )
+                owner = (
+                    thread_repository.get("owner") if isinstance(thread_repository, dict) else None
+                )
+                if (
+                    not isinstance(pull_request, dict)
+                    or pull_request.get("id") != expected_pr_id
+                    or isinstance(thread_pr_number, bool)
+                    or not isinstance(thread_pr_number, int)
+                    or thread_pr_number != pr_number
+                    or not isinstance(thread_repository, dict)
+                    or thread_repository.get("name") != self.repo
+                    or not isinstance(owner, dict)
+                    or owner.get("login") != self.org
+                    or not isinstance(node.get("isResolved"), bool)
+                ):
+                    return None
+                path = node.get("path")
+                line = node.get("line")
+                side = node.get("side")
+                if (
+                    not isinstance(path, str)
+                    or (line is not None and (isinstance(line, bool) or not isinstance(line, int)))
+                    or (side is not None and not isinstance(side, str))
+                ):
+                    return None
+                thread_fields = (node["isResolved"], path, line, side)
+                if expected_thread_fields is None:
+                    expected_thread_fields = thread_fields
+                elif expected_thread_fields != thread_fields:
+                    return None
+                comment_connection = node.get("comments")
+                if not isinstance(comment_connection, dict):
+                    return None
+                comment_nodes = comment_connection.get("nodes")
+                if not isinstance(comment_nodes, list):
+                    return None
+                for comment in comment_nodes:
+                    if not isinstance(comment, dict):
+                        return None
+                    if "author" not in comment:
+                        return None
+                    author_node = comment.get("author")
+                    if author_node is None:
+                        author = ""
+                        author_type = ""
+                    elif isinstance(author_node, dict):
+                        author_login = author_node.get("login")
+                        actor_type = author_node.get("__typename")
+                        if not isinstance(author_login, str) or not isinstance(actor_type, str):
+                            return None
+                        author = author_login
+                        author_type = actor_type
+                    else:
+                        return None
+                    review = comment.get("pullRequestReview")
+                    if review is not None and not isinstance(review, dict):
+                        return None
+                    commit = review.get("commit") if isinstance(review, dict) else None
+                    if commit is not None and not isinstance(commit, dict):
+                        return None
+                    comment_id = comment.get("id")
+                    body = comment.get("body")
+                    review_id = review.get("id") if isinstance(review, dict) else ""
+                    review_body = review.get("body") if isinstance(review, dict) else ""
+                    review_commit_sha = commit.get("oid") if isinstance(commit, dict) else ""
+                    if (
+                        not isinstance(comment_id, str)
+                        or not comment_id
+                        or not isinstance(body, str)
+                        or not isinstance(author, str)
+                        or not isinstance(author_type, str)
+                        or not isinstance(comment.get("viewerDidAuthor"), bool)
+                        or not isinstance(review_id, str)
+                        or not isinstance(review_body, str)
+                        or not isinstance(review_commit_sha, str)
+                    ):
+                        return None
+                    if comment_id in seen_comment_ids:
+                        return None
+                    seen_comment_ids.add(comment_id)
+                    comments.append(
+                        {
+                            "id": comment_id,
+                            "body": body,
+                            "author": author,
+                            "author_type": author_type,
+                            "viewer_did_author": comment["viewerDidAuthor"],
+                            "review_id": review_id,
+                            "review_body": review_body,
+                            "review_commit_sha": review_commit_sha,
+                        }
+                    )
+                page_info = comment_connection.get("pageInfo")
+                if not isinstance(page_info, dict) or not isinstance(
+                    page_info.get("hasNextPage"), bool
+                ):
+                    return None
+                if not page_info["hasNextPage"]:
+                    if expected_thread_fields is None or expected_pr_state is None:
+                        return None
+                    return (
+                        {
+                            "id": thread_id,
+                            "isResolved": expected_thread_fields[0],
+                            "path": expected_thread_fields[1],
+                            "line": expected_thread_fields[2],
+                            "side": expected_thread_fields[3],
+                            "comments": comments,
+                            "pr_state": expected_pr_state,
+                        },
+                        page_count > 1,
+                    )
+                next_cursor = page_info.get("endCursor")
+                if (
+                    not isinstance(next_cursor, str)
+                    or not next_cursor
+                    or next_cursor in seen_cursors
+                ):
+                    raise RuntimeError(
+                        f"could not fetch all comments for PR review thread {thread_id}"
+                    )
+                seen_cursors.add(next_cursor)
+                after = next_cursor
+
+        first = read_once()
+        if first is None:
+            return None
+        snapshot, was_paginated = first
+        if not was_paginated:
+            return snapshot
+        # A multi-page connection cannot be one atomic read.  Stabilize it
+        # with a complete second traversal; any comment or PR-state change
+        # makes the proof unusable instead of resolving a raced discussion.
+        second = read_once()
+        if second is None or snapshot != second[0]:
+            return None
+        return second[0]
 
     def _restore_after_unproven_resolution(self, pr_number: int, thread_id: str) -> bool:
         """Best-effort compensation for a resolution whose outcome is unsafe."""
@@ -1267,57 +1387,86 @@ class PipelineGitHub:
         replied: list[str] = []
         blocked: list[str] = []
         receipts: list[dict[str, Any]] = []
+        pending_candidate_ids = candidate_ids
         try:
-            for thread_id in candidate_ids:
+            for next_candidate_index, thread_id in enumerate(candidate_ids):
+                pending_candidate_ids = candidate_ids[next_candidate_index:]
                 reply = self._safe_thread_reply(replies.get(thread_id))
-                if reply is None or not self._pr_is_current_open_head(
-                    self.gh_pr_state(pr_number), expected_head_sha
-                ):
-                    blocked.append(thread_id)
-                    continue
-                live = {
-                    str(thread.get("id")): thread
-                    for thread in self._unresolved_threads(pr_number)
-                    if isinstance(thread, dict) and isinstance(thread.get("id"), str)
-                }.get(thread_id)
                 snapshot = snapshots[thread_id]
-                if not isinstance(live, dict) or not self._same_thread_snapshot(snapshot, live):
+                live = self._review_thread_snapshot(pr_number, thread_id)
+                if (
+                    reply is None
+                    or not isinstance(live, dict)
+                    or live.get("isResolved") is not False
+                    or not self._pr_is_current_open_head(live.get("pr_state"), expected_head_sha)
+                ):
                     blocked.append(thread_id)
                     continue
                 body = self._implementation_thread_reply_body(
                     pr_number, expected_head_sha, thread_id, reply
                 )
+                # A prior transport failure may have applied this exact reply.
+                # Recover its host proof before treating the saved snapshot as
+                # stale or attempting a duplicate mutation.
+                recovered_id = self._host_reply_receipt(snapshot, live, body)
+                if recovered_id is not None:
+                    receipts.append(
+                        {
+                            **live,
+                            "implementation_reply_id": recovered_id,
+                            "implementation_reply_body": body,
+                            "implementation_head_sha": expected_head_sha,
+                        }
+                    )
+                    replied.append(thread_id)
+                    continue
+                if not self._same_thread_snapshot(snapshot, live):
+                    blocked.append(thread_id)
+                    continue
                 comment_id = self._add_thread_reply(thread_id, body)
-                if comment_id is None or not self._pr_is_current_open_head(
-                    self.gh_pr_state(pr_number), expected_head_sha
+                replied_live = self._review_thread_snapshot(pr_number, thread_id)
+                if (
+                    not isinstance(replied_live, dict)
+                    or replied_live.get("isResolved") is not False
+                    or not self._pr_is_current_open_head(
+                        replied_live.get("pr_state"), expected_head_sha
+                    )
                 ):
                     blocked.append(thread_id)
                     continue
-                replied_live = {
-                    str(thread.get("id")): thread
-                    for thread in self._unresolved_threads(pr_number)
-                    if isinstance(thread, dict) and isinstance(thread.get("id"), str)
-                }.get(thread_id)
-                if not isinstance(replied_live, dict) or not self._same_snapshot_with_reply(
+                proved_comment_id = self._host_reply_receipt(
                     snapshot, replied_live, body, comment_id
-                ):
+                )
+                if proved_comment_id is None:
                     blocked.append(thread_id)
                     continue
                 receipts.append(
                     {
                         **replied_live,
-                        "implementation_reply_id": comment_id,
+                        "implementation_reply_id": proved_comment_id,
                         "implementation_reply_body": body,
                         "implementation_head_sha": expected_head_sha,
                     }
                 )
                 replied.append(thread_id)
-        except (OSError, RuntimeError, subprocess.SubprocessError, json.JSONDecodeError) as error:
+        except (
+            AttributeError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            subprocess.SubprocessError,
+            json.JSONDecodeError,
+        ) as error:
             logger.warning("Implementation thread replies failed on PR #%s: %s", pr_number, error)
+            retryable_ids = tuple(
+                thread_id for thread_id in pending_candidate_ids if thread_id not in set(replied)
+            )
             return ImplementationThreadReplyResult(
                 replied_thread_ids=tuple(replied),
-                blocked_thread_ids=tuple(sorted(set(candidate_ids) - set(replied))),
+                blocked_thread_ids=tuple(blocked),
                 receipts=tuple(receipts),
+                retryable_thread_ids=retryable_ids,
+                retryable=bool(retryable_ids),
             )
         return ImplementationThreadReplyResult(
             replied_thread_ids=tuple(replied),
@@ -1369,7 +1518,7 @@ class PipelineGitHub:
                 or implementation_head_sha != reviewed_head_sha
                 or snapshot is None
                 or snapshot[-1][0] != reply_id
-                or snapshot[-1][2] != reply_body
+                or snapshot[-1][1] != reply_body
                 or validated_reply != (reply_id, reply_body)
             ):
                 return ReviewerThreadReconciliationResult(blocked_thread_ids=candidate_ids)
@@ -1381,17 +1530,13 @@ class PipelineGitHub:
         try:
             for thread_id in candidate_ids:
                 receipt = by_id[thread_id]
-                if not self._pr_is_current_open_head(
-                    self.gh_pr_state(pr_number), reviewed_head_sha
+                live = self._review_thread_snapshot(pr_number, thread_id)
+                if (
+                    not isinstance(live, dict)
+                    or live.get("isResolved") is not False
+                    or not self._pr_is_current_open_head(live.get("pr_state"), reviewed_head_sha)
+                    or not self._same_thread_snapshot(receipt, live)
                 ):
-                    blocked.append(thread_id)
-                    continue
-                live = {
-                    str(thread.get("id")): thread
-                    for thread in self._unresolved_threads(pr_number)
-                    if isinstance(thread, dict) and isinstance(thread.get("id"), str)
-                }.get(thread_id)
-                if not isinstance(live, dict) or not self._same_thread_snapshot(receipt, live):
                     blocked.append(thread_id)
                     continue
                 # The caller's receipt is untrusted input to this adapter.
@@ -1413,18 +1558,14 @@ class PipelineGitHub:
                         pr_number, reviewed_head_sha, thread_id, detail
                     )
                     comment_id = self._add_thread_reply(thread_id, body)
-                    if comment_id is None or not self._pr_is_current_open_head(
-                        self.gh_pr_state(pr_number), reviewed_head_sha
-                    ):
-                        blocked.append(thread_id)
-                        continue
-                    after = {
-                        str(thread.get("id")): thread
-                        for thread in self._unresolved_threads(pr_number)
-                        if isinstance(thread, dict) and isinstance(thread.get("id"), str)
-                    }.get(thread_id)
-                    if not isinstance(after, dict) or not self._same_snapshot_with_reply(
-                        receipt, after, body, comment_id
+                    after = self._review_thread_snapshot(pr_number, thread_id)
+                    if (
+                        not isinstance(after, dict)
+                        or after.get("isResolved") is not False
+                        or not self._pr_is_current_open_head(
+                            after.get("pr_state"), reviewed_head_sha
+                        )
+                        or self._host_reply_receipt(receipt, after, body, comment_id) is None
                     ):
                         blocked.append(thread_id)
                         continue
@@ -1501,7 +1642,14 @@ class PipelineGitHub:
                     blocked.append(thread_id)
                     continue
                 resolved.append(thread_id)
-        except (OSError, RuntimeError, subprocess.SubprocessError, json.JSONDecodeError) as error:
+        except (
+            AttributeError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            subprocess.SubprocessError,
+            json.JSONDecodeError,
+        ) as error:
             logger.warning("Reviewer thread reconciliation failed on PR #%s: %s", pr_number, error)
             return ReviewerThreadReconciliationResult(
                 resolved_thread_ids=tuple(resolved),

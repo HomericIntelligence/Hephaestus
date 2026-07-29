@@ -13,6 +13,7 @@ from hephaestus.automation.pipeline.jobs import AgentJob, CompactJob, GitJob, Jo
 from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import (
     Continue,
+    ImplementationThreadReplyResult,
     JobRequest,
     StageOutcome,
 )
@@ -3820,6 +3821,135 @@ class TestRealCommitGate:
         assert github.reply_attempts == 2
         assert "pending_implementation_reply_handoff" not in item.payload
         assert item.payload["push_no_commit"] is False
+
+    def test_stale_reply_handoff_restarts_fresh_review_without_retrying(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A post/read-back race must not exhaust retries on a stale snapshot."""
+
+        class ReplyRacedGitHub(FakeStageGitHub):
+            def post_implementation_thread_replies(
+                self,
+                pr_number: int,
+                *,
+                expected_head_sha: str,
+                threads: list[dict[str, Any]],
+                replies: dict[str, str],
+            ) -> ImplementationThreadReplyResult:
+                del pr_number, expected_head_sha, threads, replies
+                # The reply may already be visible, but a reviewer comment
+                # raced the post-read.  This is a factual stale handoff, not
+                # a transport ambiguity that can be replayed.
+                return ImplementationThreadReplyResult(blocked_thread_ids=("thread-1",))
+
+        stage = PrReviewStage()
+        ctx = make_ctx(github=ReplyRacedGitHub())
+        item = make_work_item(issue=40, pr=1001, state="PUSH_WAIT")
+        snapshot = {
+            "id": "thread-1",
+            "path": "a.py",
+            "line": 3,
+            "side": "RIGHT",
+            "body": "fix this",
+            "comments": [{"id": "comment-1", "author": "reviewer", "body": "fix this"}],
+        }
+        item.payload.update(
+            {
+                "remediation_threads": [{"thread_id": "thread-1", "body": "fix this"}],
+                "remediation_thread_snapshots": [snapshot],
+                "address_output": {
+                    "addressed": ["thread-1"],
+                    "replies": {"thread-1": "Fixed the guard."},
+                },
+            }
+        )
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),
+            ctx,
+        )
+
+        assert "pending_implementation_reply_handoff" not in item.payload
+        item.state = "EVAL"
+        assert stage.step(item, ctx) == Continue(next_state="REVIEW_WAIT")
+
+    def test_mixed_stale_and_transport_reply_batch_retries_only_ambiguous_thread(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A known-stale thread cannot remain in a later transport retry batch."""
+
+        class MixedReplyOutcomeGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__()
+                self.reply_batches: list[tuple[str, ...]] = []
+
+            def post_implementation_thread_replies(
+                self,
+                pr_number: int,
+                *,
+                expected_head_sha: str,
+                threads: list[dict[str, Any]],
+                replies: dict[str, str],
+            ) -> ImplementationThreadReplyResult:
+                del pr_number, expected_head_sha, threads
+                self.reply_batches.append(tuple(sorted(replies)))
+                return ImplementationThreadReplyResult(
+                    blocked_thread_ids=("stale-thread",),
+                    retryable_thread_ids=("ambiguous-thread",),
+                    retryable=True,
+                )
+
+        stage = PrReviewStage()
+        ctx = make_ctx(github=MixedReplyOutcomeGitHub())
+        item = make_work_item(issue=40, pr=1001, state="PUSH_WAIT")
+        snapshots = [
+            {
+                "id": thread_id,
+                "path": "a.py",
+                "line": 3,
+                "side": "RIGHT",
+                "body": "fix this",
+                "comments": [
+                    {"id": f"comment-{thread_id}", "author": "reviewer", "body": "fix this"}
+                ],
+            }
+            for thread_id in ("stale-thread", "ambiguous-thread")
+        ]
+        item.payload.update(
+            {
+                "remediation_threads": [
+                    {"thread_id": snapshot["id"], "body": "fix this"} for snapshot in snapshots
+                ],
+                "remediation_thread_snapshots": snapshots,
+                "address_output": {
+                    "addressed": ["stale-thread", "ambiguous-thread"],
+                    "replies": {
+                        "stale-thread": "Fixed stale thread.",
+                        "ambiguous-thread": "Fixed ambiguous thread.",
+                    },
+                },
+            }
+        )
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),
+            ctx,
+        )
+
+        handoff = item.payload["pending_implementation_reply_handoff"]
+        assert [snapshot["id"] for snapshot in handoff["threads"]] == ["ambiguous-thread"]
+        assert handoff["replies"] == {"ambiguous-thread": "Fixed ambiguous thread."}
+
+        item.state = "EVAL"
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.RETRY, "implementation_reply_handoff_retry"
+        )
+        assert ctx.github.reply_batches == [
+            ("ambiguous-thread", "stale-thread"),
+            ("ambiguous-thread",),
+        ]
 
     def test_first_no_commit_retries_address_with_directive(
         self, make_ctx: Any, make_work_item: Any

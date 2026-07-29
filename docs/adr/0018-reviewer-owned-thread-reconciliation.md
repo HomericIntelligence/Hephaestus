@@ -31,9 +31,15 @@ prose or a stale PR snapshot.
    a candidate reply from the final, viewer-owned thread comment on GitHub only
    when its marker recomputes for that exact thread and head; fresh GitHub
    state, not process-local memory, remains the authority for reconciliation.
-   If posting fails after that fix is pushed, the host preserves the exact
-   outstanding snapshot/reply batch and retries it at the same verified head
-   without asking the implementation agent for a second code commit.
+   An ambiguous transport/read failure after that fix is pushed preserves the
+   exact outstanding snapshot/reply batch for bounded retry at the same
+   verified head without asking the implementation agent for a second code
+   commit. A complete mismatch is stale evidence instead: it is discarded and
+   the workflow returns through fresh review rather than replaying a snapshot
+   that can no longer match.
+   The host requires two equal complete traversals of the open-thread set and,
+   for multi-page conversations, two equal complete comment traversals before
+   it derives a remediation or mutation snapshot.
 3. The reviewer reads every open thread. It may decide only the current
    implementation-reply receipts: it resolves a validated fix, or posts
    precise corrective feedback and leaves the thread open. The adapter repeats
@@ -61,5 +67,7 @@ prose or a stale PR snapshot.
   resolve a current GitHub thread.
 - A transient reply-post failure cannot strand a valid fix in a no-commit
   implementation loop; only the host may replay its exact saved reply batch.
+  It retries only the thread IDs with ambiguous host outcomes; a changed thread
+  is deliberately rereviewed rather than retried.
 - The queue can apply implementation approval only after the fresh open-thread
   read is empty; review prose and CI remain non-authoritative for that label.

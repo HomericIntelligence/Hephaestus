@@ -132,12 +132,17 @@ class ImplementationThreadReplyResult:
     ``receipts`` are complete, host-read thread snapshots after the implementation
     reply is visible.  They are the only input a later reviewer-validation
     mutation may consume; model output never directly identifies a mutable
-    GitHub object.
+    GitHub object. ``retryable_thread_ids`` identifies only replies whose host
+    outcome is transport/read-ambiguous. An ordinary ``blocked_thread_ids``
+    result means the saved snapshot is stale and must return through a fresh
+    reviewer pass rather than replay.
     """
 
     replied_thread_ids: tuple[str, ...] = ()
     blocked_thread_ids: tuple[str, ...] = ()
     receipts: tuple[dict[str, Any], ...] = ()
+    retryable_thread_ids: tuple[str, ...] = ()
+    retryable: bool = False
 
 
 @dataclass(frozen=True)

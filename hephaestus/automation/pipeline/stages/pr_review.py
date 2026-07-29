@@ -67,11 +67,11 @@ and are not collaborators of this stage:
   step is retried ONCE with the ``build_unaddressed_directive`` block
   (via ``get_address_review_prompt``'s ``unaddressed_findings``), and a
   second consecutive no-commit turn is evaluated as an unaddressed round.
-- Reply-handoff recovery: if GitHub reply posting fails after a fix reaches
-  its verified head, the host preserves the exact outstanding thread snapshot
-  and reply batch. EVAL retries this host-only handoff before requesting a
-  second implementation turn, so a valid fix cannot be stranded by a no-op
-  follow-up commit.
+- Reply-handoff recovery: an ambiguous GitHub transport/read failure after a
+  fix reaches its verified head preserves the exact outstanding snapshot and
+  reply batch for bounded host-only retry. A complete but mismatched read is
+  stale evidence, not retryable: the host clears it and routes through fresh
+  review so a changed conversation cannot wedge on an unreplayable snapshot.
 - If the one-shot no-commit retry's address/push leg hard-fails, EVAL treats
   that as an explicit agent infrastructure failure, not as a second no-commit
   review round: it consumes the retry sentinel/directive, fails back
@@ -677,7 +677,7 @@ class PrReviewStage(Stage):
       straight to EVAL when the review job failed — the ERROR path burns
       no downstream work).
     - POST [M]: durably post surviving review threads, refresh the
-      unresolved-thread counts; zero open automation threads skip the
+      unresolved-thread counts; zero open review threads skip the
       address leg straight to EVAL.
     - DIFFICULTY_WAIT: submit the comment-difficulty classification job.
     - ADDRESS_WAIT: fresh-PR path resumes the implementer with the review
@@ -1186,28 +1186,53 @@ class PrReviewStage(Stage):
                         replied = set(getattr(reply_result, "replied_thread_ids", ()))
                         blocked = set(getattr(reply_result, "blocked_thread_ids", ()))
                         receipts = list(getattr(reply_result, "receipts", ()))
+                        retryable = bool(getattr(reply_result, "retryable", False))
+                        expected_ids = set(replies)
+                        remaining_ids = expected_ids - replied
+                        result_retryable_ids = set(
+                            getattr(reply_result, "retryable_thread_ids", ())
+                        )
+                        retryable_ids = (
+                            result_retryable_ids
+                            if result_retryable_ids and result_retryable_ids.issubset(remaining_ids)
+                            else remaining_ids
+                            if retryable and not result_retryable_ids
+                            else set()
+                        )
                         if replied != set(replies) or len(receipts) != len(replied):
                             logger.warning(
-                                "pr_review:%s: some implementation replies could not be verified; "
-                                "retrying the exact outstanding handoff before re-review",
+                                "pr_review:%s: some implementation replies could not be verified",
                                 item.issue,
                             )
-                            if handoff is not None and replied and len(receipts) == len(replied):
-                                remaining = set(replies) - replied
+                            if retryable_ids and handoff is not None:
                                 item.payload[_PENDING_IMPLEMENTATION_REPLY_HANDOFF] = (
                                     _implementation_reply_handoff(
                                         published_head,
                                         [
                                             snapshot
                                             for snapshot in thread_snapshots
-                                            if str(snapshot.get("id") or "") in remaining
+                                            if str(snapshot.get("id") or "") in retryable_ids
                                         ],
                                         {
                                             thread_id: reply
                                             for thread_id, reply in replies.items()
-                                            if thread_id in remaining
+                                            if thread_id in retryable_ids
                                         },
                                     )
+                                )
+                            elif retryable_ids:
+                                logger.info(
+                                    "pr_review:%s: retaining an exact reply handoff after an "
+                                    "ambiguous host failure",
+                                    item.issue,
+                                )
+                            else:
+                                # A verified mismatch means the conversation changed.  Replaying
+                                # a stale snapshot can never repair it and eventually wedges the
+                                # work item; the pending review refresh will obtain new facts.
+                                item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
+                                item.payload.pop(
+                                    _PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None
                                 )
                         else:
                             item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
@@ -1704,20 +1729,34 @@ class PrReviewStage(Stage):
             item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
             item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
             return "completed"
-        if replied and replied.issubset(expected_ids) and len(receipts) == len(replied):
-            remaining = expected_ids - replied
-            replacement = _implementation_reply_handoff(
-                head_sha,
-                [snapshot for snapshot in threads if str(snapshot.get("id") or "") in remaining],
-                {
-                    thread_id: reply
-                    for thread_id, reply in replies.items()
-                    if thread_id in remaining
-                },
-            )
-            if replacement is None:
-                return "invalid"
-            item.payload[_PENDING_IMPLEMENTATION_REPLY_HANDOFF] = replacement
+        remaining_ids = expected_ids - replied
+        retryable = bool(getattr(result, "retryable", False))
+        result_retryable_ids = set(getattr(result, "retryable_thread_ids", ()))
+        retryable_ids = (
+            result_retryable_ids
+            if result_retryable_ids and result_retryable_ids.issubset(remaining_ids)
+            else remaining_ids
+            if retryable and not result_retryable_ids
+            else set()
+        )
+        if not retryable_ids:
+            item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
+            item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+            return "stale"
+        if not replied.issubset(expected_ids) or len(receipts) != len(replied):
+            return "invalid"
+        replacement = _implementation_reply_handoff(
+            head_sha,
+            [snapshot for snapshot in threads if str(snapshot.get("id") or "") in retryable_ids],
+            {
+                thread_id: reply
+                for thread_id, reply in replies.items()
+                if thread_id in retryable_ids
+            },
+        )
+        if replacement is None:
+            return "invalid"
+        item.payload[_PENDING_IMPLEMENTATION_REPLY_HANDOFF] = replacement
         return "retry"
 
     def _eval(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901 - state-machine gate
