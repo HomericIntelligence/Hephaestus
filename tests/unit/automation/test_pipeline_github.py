@@ -2021,6 +2021,7 @@ class TestRepoScoping:
     @pytest.mark.parametrize(
         "review_threads",
         [
+            {"pageInfo": {"hasNextPage": False, "endCursor": None}},
             {"nodes": [], "pageInfo": {}},
             {"nodes": [], "pageInfo": {"hasNextPage": "false"}},
             {"nodes": [], "pageInfo": {"hasNextPage": None}},

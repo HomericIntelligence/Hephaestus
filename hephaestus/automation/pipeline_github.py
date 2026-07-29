@@ -565,7 +565,7 @@ class PipelineGitHub:
                 )
                 if not isinstance(review_threads, dict):
                     raise RuntimeError("could not fetch all PR review threads")
-                nodes = review_threads.get("nodes", [])
+                nodes = review_threads.get("nodes")
                 if not isinstance(nodes, list):
                     raise RuntimeError("could not fetch all PR review threads")
                 for node in nodes:

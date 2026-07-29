@@ -27,7 +27,7 @@ def _unresolved_thread_fact(  # noqa: C901 - malformed GraphQL facts fail closed
         if isinstance(comment_connection, dict)
         else None
     )
-    if not isinstance(comment_nodes, list):
+    if not isinstance(comment_nodes, list) or not comment_nodes:
         return None
     first_comment = comment_nodes[0] if comment_nodes else {}
     if not isinstance(first_comment, dict):
@@ -316,7 +316,7 @@ def gh_pr_list_unresolved_threads(  # noqa: C901 - complete thread pagination is
             )
             if not isinstance(review_threads, dict):
                 raise RuntimeError("could not fetch all PR review threads")
-            nodes = review_threads.get("nodes", [])
+            nodes = review_threads.get("nodes")
             if not isinstance(nodes, list):
                 raise RuntimeError("could not fetch all PR review threads")
             for node in nodes:
@@ -358,6 +358,11 @@ def gh_pr_list_unresolved_threads(  # noqa: C901 - complete thread pagination is
         fact = _unresolved_thread_fact(snapshot)
         if fact is not None:
             threads.append(fact)
+        elif snapshot.get("isResolved") is not True:
+            # The outer traversal established this as unresolved.  Do not
+            # silently lose it if its hydrated snapshot lacks the comment
+            # history needed for an agent to investigate it.
+            raise RuntimeError(f"could not fetch all comments for PR review thread {thread_id}")
 
     _api.logger.debug("Found %s unresolved thread(s) on PR #%s", len(threads), pr_number)
     return threads

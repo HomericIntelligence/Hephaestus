@@ -164,6 +164,89 @@ class TestListUnresolvedThreadsParameterisation:
 
     @patch("hephaestus.automation.github_api._gh_call")
     @patch("hephaestus.automation.github_api.get_repo_info")
+    def test_rejects_missing_thread_nodes(self, mock_repo_info: Any, mock_gh_call: Any) -> None:
+        """A partial thread page cannot be mistaken for a proven empty set."""
+        mock_repo_info.return_value = ("owner", "repo")
+        result = Mock()
+        result.stdout = json.dumps(
+            {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {"pageInfo": {"hasNextPage": False, "endCursor": None}}
+                        }
+                    }
+                }
+            }
+        )
+        mock_gh_call.return_value = result
+
+        with pytest.raises(RuntimeError, match="could not fetch all PR review threads"):
+            gh_pr_list_unresolved_threads(42)
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    @patch("hephaestus.automation.github_api.get_repo_info")
+    def test_rejects_unresolved_thread_without_comment_history(
+        self, mock_repo_info: Any, mock_gh_call: Any
+    ) -> None:
+        """An open thread without a readable comment cannot be handed to an agent."""
+        mock_repo_info.return_value = ("owner", "repo")
+
+        def side_effect(argv: list[str], **_: Any) -> Mock:
+            result = Mock()
+            if any(entry.startswith("threadId=") for entry in argv):
+                result.stdout = json.dumps(
+                    {
+                        "data": {
+                            "repository": {"pullRequest": {"id": "PR1"}},
+                            "node": {
+                                "id": "T1",
+                                "isResolved": False,
+                                "path": "a.py",
+                                "line": 1,
+                                "side": "RIGHT",
+                                "pullRequest": {
+                                    "id": "PR1",
+                                    "number": 42,
+                                    "repository": {
+                                        "name": "repo",
+                                        "owner": {"login": "owner"},
+                                    },
+                                },
+                                "comments": {
+                                    "nodes": [],
+                                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                },
+                            },
+                        }
+                    }
+                )
+            else:
+                result.stdout = json.dumps(
+                    {
+                        "data": {
+                            "repository": {
+                                "pullRequest": {
+                                    "reviewThreads": {
+                                        "nodes": [{"id": "T1", "isResolved": False}],
+                                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                    }
+                                }
+                            }
+                        }
+                    }
+                )
+            return result
+
+        mock_gh_call.side_effect = side_effect
+
+        with pytest.raises(
+            RuntimeError, match="could not fetch all comments for PR review thread T1"
+        ):
+            gh_pr_list_unresolved_threads(42)
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    @patch("hephaestus.automation.github_api.get_repo_info")
     def test_rejects_an_unstable_thread_traversal(
         self, mock_repo_info: Any, mock_gh_call: Any
     ) -> None:
