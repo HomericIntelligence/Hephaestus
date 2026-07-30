@@ -336,7 +336,10 @@ class TestSessionTranscriptResolver:
         sid = session_uuid("Repo", 2284, AGENT_PLAN_REVIEWER, "fable")
         transcript = session_jsonl_path(sid, repo_root)
         transcript.parent.mkdir(parents=True, exist_ok=True)
-        transcript.write_text(f'{{"cwd": "{removed_worktree.resolve()}"}}\n', encoding="utf-8")
+        transcript.write_text(
+            f'{{"cwd": "{repo_root.resolve()}"}}\n{{"cwd": "{removed_worktree.resolve()}"}}\n',
+            encoding="utf-8",
+        )
         removed_worktree.rmdir()
 
         with patch.object(
@@ -369,6 +372,30 @@ class TestSessionTranscriptResolver:
             resolved = resolve_session_jsonl_path(sid, local_worktree)
 
         assert resolved is None
+
+    def test_foreign_project_path_with_forged_local_cwd_is_ignored(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A scanned candidate must live in its recorded cwd's project directory."""
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        local = tmp_path / "owner-a" / "Repo"
+        foreign = tmp_path / "owner-b" / "Repo"
+        local.mkdir(parents=True)
+        foreign.mkdir(parents=True)
+        sid = session_uuid("Repo", 2284, AGENT_PLAN_REVIEWER, "fable")
+
+        foreign_transcript = session_jsonl_path(sid, foreign)
+        local_transcript = session_jsonl_path(sid, local)
+        assert foreign_transcript.parent != local_transcript.parent
+        foreign_transcript.parent.mkdir(parents=True, exist_ok=True)
+        foreign_transcript.write_text(f'{{"cwd": "{local.resolve()}"}}\n', encoding="utf-8")
+
+        with patch.object(
+            agent_config,
+            "_registered_worktree_roots",
+            return_value=(local.resolve(),),
+        ):
+            assert resolve_session_jsonl_path(sid, local) is None
 
     def test_lossy_cwd_encoding_does_not_resume_foreign_transcript(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -472,7 +499,17 @@ class TestSessionTranscriptResolver:
 
         assert resolved == transcript
 
-    def test_operational_git_failure_is_not_treated_as_non_repository(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            "fatal: detected dubious ownership in repository\n",
+            "fatal: cannot access '.git': Permission denied\n",
+            "fatal: invalid gitfile format: .git\n",
+        ],
+    )
+    def test_operational_git_failure_is_not_treated_as_non_repository(
+        self, tmp_path: Path, stderr: str
+    ) -> None:
         cwd = tmp_path / "checkout"
         cwd.mkdir()
 
@@ -482,7 +519,7 @@ class TestSessionTranscriptResolver:
             side_effect=subprocess.CalledProcessError(
                 128,
                 ["git"],
-                stderr="fatal: detected dubious ownership in repository\n",
+                stderr=stderr,
             ),
         ):
             with pytest.raises(RuntimeError, match="unable to determine whether"):

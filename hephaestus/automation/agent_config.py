@@ -684,9 +684,9 @@ def _transcript_belongs_to_worktree_family(
     transcript: Path,
     roots: set[Path],
     common_dir: Path | None,
+    recorded_cwds: set[Path],
 ) -> bool:
     """Return whether *transcript* belongs to this exact Git worktree family."""
-    recorded_cwds = _recorded_transcript_cwds(transcript)
     if not recorded_cwds:
         logger.warning("Ignoring Claude transcript without recorded cwd: %s", transcript)
         return False
@@ -711,6 +711,25 @@ def _transcript_belongs_to_worktree_family(
 
     logger.warning(
         "Ignoring Claude transcript outside the current Git worktree family: %s",
+        transcript,
+    )
+    return False
+
+
+def _transcript_matches_recorded_project_dir(
+    transcript: Path,
+    uuid_str: str,
+    recorded_cwds: set[Path],
+) -> bool:
+    """Return whether Claude stored *transcript* for one of its recorded cwd values."""
+    expected_dirs = {
+        session_jsonl_path(uuid_str, recorded_cwd).parent for recorded_cwd in recorded_cwds
+    }
+    if transcript.parent in expected_dirs:
+        return True
+
+    logger.warning(
+        "Ignoring Claude transcript outside its recorded cwd project directory: %s",
         transcript,
     )
     return False
@@ -747,7 +766,15 @@ def resolve_session_jsonl_path(uuid_str: str, cwd: Path) -> Path | None:
         key=str,
     )
     for candidate in existing:
-        if _transcript_belongs_to_worktree_family(candidate, roots, common_dir):
+        recorded_cwds = _recorded_transcript_cwds(candidate)
+        if not _transcript_matches_recorded_project_dir(candidate, uuid_str, recorded_cwds):
+            continue
+        if _transcript_belongs_to_worktree_family(
+            candidate,
+            roots,
+            common_dir,
+            recorded_cwds,
+        ):
             return candidate
     return None
 
