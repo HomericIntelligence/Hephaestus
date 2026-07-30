@@ -109,10 +109,15 @@ def _bounded_job_log_field(value: object) -> str:
 
 
 def _completion_rejection_log_fields(handle: JobHandle) -> tuple[str, str, str, str]:
-    """Return bounded identifiers without rendering untrusted job payloads."""
+    """Return bounded identifiers without rendering a job or handle wholesale.
+
+    In particular, never call ``str`` or ``repr`` on ``handle``/``job`` here:
+    agent jobs carry prompt kwargs and session identifiers that can contain
+    untrusted, sensitive, and arbitrarily large review content.
+    """
     job = handle.job
     return (
-        type(job).__name__,
+        _bounded_job_log_field(type(job).__name__),
         _bounded_job_log_field(job.repo),
         _bounded_job_log_field(getattr(job, "issue", "")),
         _bounded_job_log_field(job.descr),

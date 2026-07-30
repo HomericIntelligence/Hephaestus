@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -156,6 +157,73 @@ def _list_open_issue_meta(org: str, repo: str) -> list[dict[str, Any]]:
         for e in entries
         if isinstance(e, dict) and "number" in e
     ]
+
+
+def _iter_open_issue_meta(org: str, repo: str) -> Iterator[dict[str, Any]]:
+    """Yield normalized open-issue metadata one GitHub page at a time.
+
+    The REST endpoint is requested page-by-page so repository discovery never
+    materializes every open issue before coordinator admission can apply
+    backpressure. GitHub's issues endpoint also returns pull requests; those
+    rows are skipped to preserve the historical ``gh issue list`` contract.
+
+    Raises:
+        RuntimeError: On a network, JSON, or malformed-response failure.
+
+    """
+    page = 1
+    while True:
+        try:
+            out = gh_call(
+                [
+                    "api",
+                    f"/repos/{org}/{repo}/issues?state=open&per_page=100"
+                    f"&sort=created&direction=asc&page={page}",
+                ],
+                timeout=NETWORK_TIMEOUT,
+            )
+            entries = json.loads(out.stdout or "[]")
+            if not isinstance(entries, list):
+                raise ValueError("expected an issue-list page")
+        except (
+            subprocess.SubprocessError,
+            RuntimeError,
+            OSError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as exc:
+            raise RuntimeError(f"failed to list open issues for {org}/{repo}: {exc}") from exc
+
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise RuntimeError(
+                    f"failed to list open issues for {org}/{repo}: malformed issue row"
+                )
+            if "pull_request" in entry:
+                continue
+            number = entry.get("number")
+            title = entry.get("title", "")
+            labels = entry.get("labels", [])
+            if not isinstance(number, int) or number <= 0:
+                raise RuntimeError(
+                    f"failed to list open issues for {org}/{repo}: malformed issue number"
+                )
+            if not isinstance(title, str) or not isinstance(labels, list):
+                raise RuntimeError(
+                    f"failed to list open issues for {org}/{repo}: malformed issue metadata"
+                )
+            label_names: list[str] = []
+            for label in labels:
+                if not isinstance(label, dict) or not isinstance(label.get("name"), str):
+                    raise RuntimeError(
+                        f"failed to list open issues for {org}/{repo}: malformed issue label"
+                    )
+                label_names.append(label["name"])
+            yield {"number": number, "labels": label_names, "title": title}
+
+        if len(entries) < 100:
+            return
+        page += 1
 
 
 def _list_open_pr_meta(org: str, repo: str) -> list[dict[str, Any]]:

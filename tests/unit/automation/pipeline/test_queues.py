@@ -21,6 +21,7 @@ class TestStageQueue:
         q = StageQueue(capacity=2)
         assert len(q) == 0
         assert q.capacity == 2
+        assert q.occupancy == 0
 
     def test_stage_queue_push_pop(self) -> None:
         """Push and pop items in FIFO order."""
@@ -28,8 +29,8 @@ class TestStageQueue:
         item1 = WorkItem(repo="repo1", kind=ItemKind.REPO)
         item2 = WorkItem(repo="repo2", kind=ItemKind.ISSUE, issue=1)
 
-        assert q.push(item1)
-        assert q.push(item2)
+        q.push(item1)
+        q.push(item2)
 
         assert len(q) == 2
         first = q.pop()
@@ -51,9 +52,9 @@ class TestStageQueue:
         item2 = WorkItem(repo="repo2", kind=ItemKind.ISSUE, issue=1)
         item3 = WorkItem(repo="repo3", kind=ItemKind.PR, pr=2)
 
-        assert q.push(item1)
-        assert q.push(item2)
-        assert q.push(item3)
+        q.push(item1)
+        q.push(item2)
+        q.push(item3)
 
         snap = q.snapshot()
         assert len(snap) == 3
@@ -77,7 +78,7 @@ class TestStageQueue:
         assert len(q) == 0
 
         for i in range(5):
-            assert q.push(WorkItem(repo=f"repo{i}", kind=ItemKind.REPO))
+            q.push(WorkItem(repo=f"repo{i}", kind=ItemKind.REPO))
             assert len(q) == i + 1
 
         for i in range(5, 0, -1):
@@ -96,9 +97,18 @@ class TestStageQueue:
         first = WorkItem(repo="repo1", kind=ItemKind.REPO)
         second = WorkItem(repo="repo2", kind=ItemKind.REPO)
 
-        assert q.push(first)
-        assert q.push(second) is False
+        assert q.offer(first) is True
+        assert q.offer(second) is False
+        assert q.occupancy == q.capacity == 1
         assert q.snapshot() == [first]
+
+    def test_stage_queue_push_raises_when_full(self) -> None:
+        """Strict push callers cannot silently lose ownership on saturation."""
+        q = StageQueue(capacity=1)
+        q.push(WorkItem(repo="repo1", kind=ItemKind.REPO))
+
+        with pytest.raises(OverflowError, match="full"):
+            q.push(WorkItem(repo="repo2", kind=ItemKind.REPO))
 
 
 class TestCompletionQueue:

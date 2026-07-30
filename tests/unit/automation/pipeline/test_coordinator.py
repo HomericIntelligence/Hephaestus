@@ -31,7 +31,7 @@ from hephaestus.automation.pipeline.events import (
     ZeroThreadNogoAction,
 )
 from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobHandle, JobResult
-from hephaestus.automation.pipeline.queues import CompletionQueue
+from hephaestus.automation.pipeline.queues import CompletionQueue, StageQueue
 from hephaestus.automation.pipeline.routing import (
     Disposition,
     PipelineScope,
@@ -553,7 +553,7 @@ class TestDrainOrder:
 
     def test_downstream_first(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """merge_wait drains before review, planning, and repo."""
-        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
         for stage in (
             StageName.PLANNING,
             StageName.MERGE_WAIT,
@@ -576,6 +576,36 @@ class TestDrainOrder:
         assert drained.index("merge_wait") < drained.index("pr_review")
         assert drained.index("pr_review") < drained.index("planning")
         assert drained.index("planning") < drained.index("repo")
+
+    def test_full_destination_retains_source_lease_until_handoff(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A completed action stays source-owned until its target has capacity."""
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+        coordinator.stages[StageName.PLANNING] = StubStage(
+            StageOutcome(Disposition.ADVANCE, "planned")
+        )
+        coordinator.queues[StageName.PLAN_REVIEW] = StageQueue(capacity=1)
+        source = _issue_item(1, StageName.PLANNING)
+        blocker = _issue_item(2, StageName.PLAN_REVIEW)
+        assert coordinator._push_item(source, StageName.PLANNING, enter=True)
+        coordinator.queues[StageName.PLAN_REVIEW].push(blocker)
+
+        claimed = coordinator._claim_item(StageName.PLANNING)
+        assert claimed is source
+        coordinator._run_item(source)
+
+        assert coordinator.queues[StageName.PLANNING].occupancy == 1
+        assert coordinator.queues[StageName.PLAN_REVIEW].snapshot() == [blocker]
+        assert coordinator._pending_handoffs[id(source)].target is StageName.PLAN_REVIEW
+
+        assert coordinator.queues[StageName.PLAN_REVIEW].pop() is blocker
+        coordinator._drain_pending_handoffs()
+
+        assert coordinator.queues[StageName.PLANNING].occupancy == 0
+        assert coordinator.queues[StageName.PLAN_REVIEW].snapshot() == [source]
+        assert id(source) not in coordinator._leases
+        assert id(source) not in coordinator._pending_handoffs
 
 
 class TestAdmission:

@@ -81,6 +81,7 @@ import threading
 import time
 from collections import Counter, deque
 from collections.abc import Callable, Iterator
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -92,7 +93,7 @@ from hephaestus.automation.models import DEFAULT_STATE_DIR, IssueInfo
 from hephaestus.automation.pipeline import admission as _admission, seeding as _seeding
 from hephaestus.automation.pipeline.events import StageEvent, encode_stage_event
 from hephaestus.automation.pipeline.jobs import AgentJob, JobHandle, JobResult
-from hephaestus.automation.pipeline.queues import CompletionQueue, StageQueue
+from hephaestus.automation.pipeline.queues import CompletionQueue, StageQueue, StageQueueLease
 from hephaestus.automation.pipeline.routing import (
     PIPELINE_ORDER,
     ROUTES,
@@ -117,7 +118,7 @@ from hephaestus.automation.pipeline.stages import (
     StageGitHub,
 )
 from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARGV
-from hephaestus.automation.pipeline.stages.repo import product_to_work_item
+from hephaestus.automation.pipeline.stages.repo import RepoIssueSource, product_to_work_item
 from hephaestus.automation.pipeline.summary import RunStats, latest_logical_items, print_summary
 from hephaestus.automation.pipeline.work_item import (
     ItemKind,
@@ -125,7 +126,11 @@ from hephaestus.automation.pipeline.work_item import (
     PreservedWorktree,
     WorkItem,
 )
-from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_GO, STATE_PLAN_BLOCKED
+from hephaestus.automation.state_labels import (
+    STATE_IMPLEMENTATION_GO,
+    STATE_PLAN_BLOCKED,
+    is_epic,
+)
 from hephaestus.prompts import PromptCatalog
 
 logger = logging.getLogger(__name__)
@@ -331,6 +336,28 @@ class _Paths:
     projects_dir: Path
 
 
+@dataclass
+class _ActiveRepoIssueSource:
+    """One bounded repository metadata cursor detached from setup work."""
+
+    repo: str
+    source: RepoIssueSource
+
+
+@dataclass(frozen=True)
+class _PendingHandoff:
+    """A completed route retained by its source-stage lease.
+
+    Only the transition intent is retained. The item stays owned by its source
+    lease until the destination accepts it, so this map is bounded by the
+    coordinator's global live-work permits and cannot become a spill queue.
+    """
+
+    target: StageName
+    enter: bool
+    result: ItemResult | None = None
+
+
 def _effective_repo_root(config: PipelineConfig, repo: str) -> Path:
     """Resolve *repo* to its explicit checkout or conventional projects path."""
     return Path(config.repo_roots.get(repo, Path(config.projects_dir) / repo))
@@ -405,6 +432,10 @@ class Coordinator:
         }
         self.timers: list[tuple[float, int, WorkItem]] = []
         self.in_flight: dict[JobHandle, WorkItem] = {}
+        self._leases: dict[int, StageQueueLease] = {}
+        self._pending_handoffs: dict[int, _PendingHandoff] = {}
+        self._live_work_permit_ids: set[int] = set()
+        self._seed_entries: Iterator[_seeding.SeedEntry] | None = None
         self.inflight_per_repo: Counter[str] = Counter()
         self.ledger: list[ItemResult] = []
         self.preserved: list[PreservedWorktree] = []
@@ -421,6 +452,10 @@ class Coordinator:
         self._pending_admissions: deque[tuple[WorkItem, StageName, bool]] = deque(
             maxlen=self._admission_spool_capacity
         )
+        # At most C repositories retain one page cursor plus one pending
+        # metadata row each. This is the bounded replacement for the former
+        # repo WorkItem ``payload["products"]`` list.
+        self._repo_issue_sources: deque[_ActiveRepoIssueSource] = deque()
         self._admission_saturated = False
         self._saturated_queues: set[str] = set()
         self._saturation_totals: Counter[str] = Counter()
@@ -635,7 +670,7 @@ class Coordinator:
                 logger.exception("circuit-breaker snapshot provider failed")
 
         return {
-            "queue_depths": {name.value: len(queue) for name, queue in self.queues.items()},
+            "queue_depths": {name.value: queue.occupancy for name, queue in self.queues.items()},
             "queue_capacities": {name.value: queue.capacity for name, queue in self.queues.items()},
             "completion_depth": self.completion_q.qsize(),
             "completion_capacity": self.completion_q.capacity,
@@ -804,6 +839,8 @@ class Coordinator:
                     continue
                 self._drain_queues()
                 self._drain_pending_admissions()
+                self._drain_repo_issue_sources()
+                self._drain_seed_entries()
                 if self._all_idle():
                     if not self._reseed_if_converged():
                         break
@@ -889,7 +926,11 @@ class Coordinator:
             all(len(q) == 0 for q in self.queues.values())
             and not self.timers
             and not self.in_flight
+            and not self._leases
+            and not self._pending_handoffs
             and not self._pending_admissions
+            and not self._repo_issue_sources
+            and self._seed_entries is None
         )
 
     def _grace_exceeded(self) -> bool:
@@ -928,7 +969,9 @@ class Coordinator:
         for stage_name in _DRAIN_ORDER:
             q = self.queues[stage_name]
             if len(q):
-                item = q.pop()
+                item = self._claim_item(stage_name)
+                if item is None:  # pragma: no cover - coordinator-thread invariant
+                    continue
                 logger.error(
                     "pipeline stalled with no in-flight work; "
                     "force-running %s item %s; inflight_per_repo=%s",
@@ -943,6 +986,7 @@ class Coordinator:
 
     def _timer_park(self, item: WorkItem, delay_s: float) -> None:
         """Park *item* on the timer heap for ``delay_s`` seconds."""
+        self._release_source_lease(item)
         wake = time.monotonic() + max(0.0, delay_s)
         heapq.heappush(self.timers, (wake, self._seq, item))
         self._seq += 1
@@ -1028,7 +1072,7 @@ class Coordinator:
         return False
 
     def _begin_graceful_shutdown(self, reason: str) -> None:
-        """Start a grace-bounded shutdown for any externally requested stop."""
+        """Start a grace-bounded shutdown without classifying it as a signal."""
         self.shutdown.set()
         if self._grace_deadline is None:
             self._grace_deadline = time.monotonic() + max(0.0, self.config.grace_s)
@@ -1042,6 +1086,131 @@ class Coordinator:
         self.inflight_per_repo[item.repo] -= 1
         if self.inflight_per_repo[item.repo] <= 0:
             del self.inflight_per_repo[item.repo]
+
+    @property
+    def live_work_count(self) -> int:
+        """Return the number of globally permitted nonterminal work items."""
+        return len(self._live_work_permit_ids)
+
+    def _try_acquire_work_permit(self, item: WorkItem) -> bool:
+        """Reserve one of the coordinator's C global live-work slots."""
+        item_id = id(item)
+        if item_id in self._live_work_permit_ids:
+            return True
+        if self.live_work_count >= self._work_window:
+            return False
+        self._live_work_permit_ids.add(item_id)
+        return True
+
+    def _release_work_permit(self, item: WorkItem) -> None:
+        """Release an item's global permit after terminal ownership ends."""
+        self._live_work_permit_ids.discard(id(item))
+
+    def _claim_item(self, stage_name: StageName, *, index: int = 0) -> WorkItem | None:
+        """Claim ready work while retaining its source-stage capacity."""
+        lease = self.queues[stage_name].claim_at(index)
+        if lease is None:
+            return None
+        item = lease.item
+        item_id = id(item)
+        if item_id in self._leases:  # pragma: no cover - internal invariant
+            lease.restore()
+            raise RuntimeError(f"duplicate active lease for {self._item_key(item)}")
+        self._leases[item_id] = lease
+        return item
+
+    def _restore_source_lease(self, item: WorkItem) -> bool:
+        """Restore an active item lease to its exact source FIFO position."""
+        self._pending_handoffs.pop(id(item), None)
+        lease = self._leases.pop(id(item), None)
+        if lease is None:
+            return False
+        lease.restore()
+        return True
+
+    def _release_source_lease(self, item: WorkItem) -> bool:
+        """Release a source reservation when a non-queue owner takes the item."""
+        self._pending_handoffs.pop(id(item), None)
+        lease = self._leases.pop(id(item), None)
+        if lease is None:
+            return False
+        lease.release()
+        return True
+
+    def _activate_handoff(
+        self,
+        item: WorkItem,
+        target: StageName,
+        *,
+        enter: bool,
+        result: ItemResult | None,
+    ) -> None:
+        """Publish a transition only after destination admission succeeds."""
+        item.stage = target
+        if enter:
+            item.state = "ENTER"
+            item.payload["_enter_pending"] = True
+            item.add_history_event(target, item.state, note="enqueued")
+        if result is not None:
+            item.result = result
+        self._record_event("push", target.value, self._item_key(item))
+
+    def _handoff_item(
+        self,
+        item: WorkItem,
+        target: StageName,
+        *,
+        enter: bool,
+        result: ItemResult | None = None,
+    ) -> bool:
+        """Route destination-first, retaining a bounded intent if target is full."""
+        lease = self._leases.get(id(item))
+        if lease is None:
+            if result is not None:
+                item.result = result
+            return self._push_item(item, target, enter=enter)
+        if target is item.stage:
+            if result is not None:  # pragma: no cover - terminal target differs
+                raise RuntimeError("terminal result cannot route to its source stage")
+            return self._restore_source_lease(item)
+        if lease.handoff(self.queues[target]):
+            self._leases.pop(id(item), None)
+            self._pending_handoffs.pop(id(item), None)
+            self._activate_handoff(item, target, enter=enter, result=result)
+            self._progress = True
+            return True
+        pending = _PendingHandoff(target=target, enter=enter, result=result)
+        existing = self._pending_handoffs.setdefault(id(item), pending)
+        if existing != pending:  # pragma: no cover - one route per active lease
+            raise RuntimeError(f"conflicting pending handoff for {self._item_key(item)}")
+        self._record_event(
+            "handoff_pending",
+            item.stage.value,
+            target.value,
+            self._item_key(item),
+        )
+        return False
+
+    def _drain_pending_handoffs(self) -> None:
+        """Retry retained routes after downstream queues may have opened."""
+        for item_id, pending in list(self._pending_handoffs.items()):
+            lease = self._leases.get(item_id)
+            if lease is None:  # pragma: no cover - defensive repair
+                self._pending_handoffs.pop(item_id, None)
+                continue
+            item = lease.item
+            if not lease.handoff(self.queues[pending.target]):
+                continue
+            self._leases.pop(item_id, None)
+            self._pending_handoffs.pop(item_id, None)
+            self._activate_handoff(
+                item,
+                pending.target,
+                enter=pending.enter,
+                result=pending.result,
+            )
+            self._record_event("handoff_retry", item.stage.value, self._item_key(item))
+            self._progress = True
 
     def _handle_completion(self, handle: JobHandle, result: JobResult) -> None:
         """Route one completed job back to its item.
@@ -1130,6 +1299,8 @@ class Coordinator:
         seeding reconstruction resumes exactly here with no shutdown
         bookkeeping.
         """
+        self._release_source_lease(item)
+        self._release_work_permit(item)
         resumable_reason = f"resumable at {item.stage.value}"
         if reason:
             resumable_reason = f"{resumable_reason}: {reason}"
@@ -1174,22 +1345,27 @@ class Coordinator:
 
     def _drain_queues(self) -> None:
         """Drain queues downstream-first with admission control."""
+        self._drain_pending_handoffs()
         for stage_name in _DRAIN_ORDER:
             if self.shutdown.is_set():
                 return
             if stage_name is StageName.IMPLEMENTATION:
                 self._drain_implementation()
+                self._drain_pending_handoffs()
                 continue
             q = self.queues[stage_name]
             for _ in range(len(q)):
                 if self.shutdown.is_set():
                     return
-                item = q.pop()
+                item = self._claim_item(stage_name)
+                if item is None:  # pragma: no cover - coordinator-thread invariant
+                    break
                 if not self._admit(item):
-                    self._push_item(item, stage_name, enter=False)
+                    self._restore_source_lease(item)
                     continue
                 self._record_event("drain", stage_name.value, self._item_key(item))
                 self._run_item(item)
+            self._drain_pending_handoffs()
 
     def _drain_pending_admissions(self) -> None:
         """Admit deferred items as stage queue slots become available.
@@ -1204,7 +1380,7 @@ class Coordinator:
         for _ in range(len(self._pending_admissions)):
             item, stage, enter = self._pending_admissions.popleft()
             queue = self.queues[stage]
-            if not queue.push(item):
+            if not queue.offer(item):
                 self._pending_admissions.append((item, stage, enter))
                 continue
             if enter:
@@ -1213,6 +1389,130 @@ class Coordinator:
                 item.add_history_event(stage, item.state, note="enqueued")
             self._record_event("push", stage.value, self._item_key(item))
             self._progress = True
+
+    def _externalize_repo_issue_source(self, item: WorkItem, source: RepoIssueSource) -> bool:
+        """Move completed repo setup into the C-bounded discovery registry."""
+        if len(self._repo_issue_sources) >= self._work_window:
+            return False
+        item.payload.pop("_repo_issue_source", None)
+        self._repo_issue_sources.append(_ActiveRepoIssueSource(item.repo, source))
+        self._release_source_lease(item)
+        self._release_work_permit(item)
+        self._seen_item_ids.discard(id(item))
+        with suppress(ValueError):
+            self.items.remove(item)
+        self._record_event("repo_source_activate", item.repo, len(self._repo_issue_sources))
+        return True
+
+    def _repo_source_can_admit(self) -> bool:
+        """Return whether one not-yet-classified issue has bounded ownership."""
+        if self.live_work_count >= self._work_window:
+            return False
+        if len(self._pending_admissions) < self._admission_spool_capacity:
+            return True
+        # With no spool slot, classification is safe only when every possible
+        # destination can accept the resulting item directly.
+        return all(
+            queue.can_offer() for stage, queue in self.queues.items() if stage is not StageName.REPO
+        )
+
+    def _drain_repo_issue_sources(self) -> None:
+        """Run one fair admission attempt for each active repository cursor."""
+        for _ in range(len(self._repo_issue_sources)):
+            active = self._repo_issue_sources.popleft()
+            if self._drain_repo_issue_source(active):
+                self._repo_issue_sources.append(active)
+
+    def _drain_repo_issue_source(  # noqa: C901 - source lifecycle is intentionally linear
+        self, active: _ActiveRepoIssueSource
+    ) -> bool:
+        """Consume source rows until one is admitted, deferred, or exhausted."""
+        source = active.source
+        ctx = self._ctx_for_repo(active.repo)
+        while True:
+            metadata = source.pending
+            if metadata is None:
+                try:
+                    metadata = next(source.metadata)
+                except StopIteration:
+                    self._record_event("repo_source_complete", active.repo, source.seeded_count)
+                    return False
+                except Exception as exc:
+                    self._record_repo_source_failure(active.repo, f"discovery failed: {exc}")
+                    return False
+
+            try:
+                number = int(metadata["number"])
+                labels = list(metadata.get("labels") or [])
+                title = str(metadata.get("title") or "")
+            except (KeyError, TypeError, ValueError) as exc:
+                self._record_repo_source_failure(
+                    active.repo, f"discovery failed: malformed metadata: {exc}"
+                )
+                return False
+
+            if is_epic(labels, title):
+                try:
+                    ctx.github.skip_epics({number: labels})
+                except Exception as exc:
+                    self._record_repo_source_failure(active.repo, f"epic skip tag failed: {exc}")
+                    return False
+                source.pending = None
+                self._progress = True
+                return True
+
+            if not self._repo_source_can_admit():
+                source.pending = metadata
+                return True
+
+            try:
+                facts = _seeding.seed_issue_from_github(number, ctx.github)
+                if STATE_PLAN_BLOCKED in facts.labels:
+                    ctx.github.ensure_blocked_audit(number)
+                entry = _seeding.seed_entry_from_facts(facts)
+                scope_stages = self.config.scope.stages if self.config.scope is not None else None
+                stage, reason, passed = self._scope_seed_decision(
+                    number, entry.stage, entry.reason, scope_stages
+                )
+                entry = replace(entry, stage=stage, reason=reason, passed=passed)
+            except Exception as exc:
+                self._record_repo_source_failure(active.repo, f"discovery failed: {exc}")
+                return False
+
+            if entry.stage is None:
+                try:
+                    if entry.skip_tag_obligation is not None:
+                        ctx.github.skip_epics({entry.skip_tag_obligation.issue: []})
+                except Exception as exc:
+                    self._record_repo_source_failure(active.repo, f"epic skip tag failed: {exc}")
+                    return False
+                source.pending = None
+                self._progress = True
+                return True
+
+            new_item = self._entry_to_item(entry, active.repo)
+            if new_item.stage is StageName.FINISHED and new_item.result is None:
+                new_item.result = ItemResult(
+                    passed=entry.passed,
+                    reason=entry.reason,
+                    final_stage=StageName.FINISHED,
+                )
+            source.pending = None
+            if self._push_item(new_item, new_item.stage, enter=True):
+                source.seeded_count += 1
+                if new_item.stage not in (StageName.REPO, StageName.FINISHED):
+                    self._pass_work_count += 1
+            self._progress = True
+            return True
+
+    def _record_repo_source_failure(self, repo: str, reason: str) -> None:
+        """Record a bounded terminal failure when a discovery cursor aborts."""
+        item = WorkItem(repo=repo, kind=ItemKind.REPO, stage=StageName.FINISHED)
+        item.result = ItemResult(passed=False, reason=reason, final_stage=StageName.REPO)
+        item.payload["entry_stage"] = StageName.REPO.value
+        self.items.append(item)
+        self.ledger.append(item.result)
+        self._fatal = True
 
     def _drain_implementation(self) -> None:
         """Drain the implementation queue under topo order + file-overlap gating.
@@ -1236,7 +1536,23 @@ class Coordinator:
         q = self.queues[StageName.IMPLEMENTATION]
         if not len(q):
             return
-        items = self._dedup_implementation_items([q.pop() for _ in range(len(q))])
+        for duplicate in self._implementation_duplicates(q.snapshot()):
+            if not self._claim_selected_implementation_item(duplicate):
+                return
+            logger.warning(
+                "implementation %s#%s already queued; dropping duplicate work item",
+                duplicate.repo,
+                duplicate.issue,
+            )
+            self._finish(
+                duplicate,
+                passed=True,
+                reason=f"{duplicate.repo}#{duplicate.issue} superseded by queued duplicate",
+            )
+            if id(duplicate) in self._leases:
+                return
+
+        items = q.snapshot()
         issue_items, ambiguous = self._index_issue_items(items)
         infos = [
             IssueInfo(
@@ -1259,21 +1575,41 @@ class Coordinator:
             dispatch, deferred = _admission._select_non_overlapping(ordered, repo_of=repo_of)
             for number in deferred:
                 logger.info("implementation #%s deferred (file overlap)", number)
-        ran: set[int] = set()
         # Cross-repo same-number items bypass the number-keyed gates and dispatch
         # directly — they are distinct work that the ordering model cannot rank.
         dispatch_items = [issue_items[number] for number in dispatch]
         dispatch_items.extend(it for group in ambiguous.values() for it in group)
         for item in dispatch_items:
             if self.shutdown.is_set() or not self._admit(item):
-                continue  # stays queued (re-pushed below)
-            ran.add(id(item))
+                continue
+            if not self._claim_selected_implementation_item(item):
+                continue
             self._record_event("drain", StageName.IMPLEMENTATION.value, self._item_key(item))
             self._run_item(item)
-        # Preserve original queue order for deferred / non-admitted / non-issue items.
-        for it in items:
-            if id(it) not in ran:
-                self._push_item(it, StageName.IMPLEMENTATION, enter=False)
+
+    @staticmethod
+    def _implementation_duplicates(items: list[WorkItem]) -> list[WorkItem]:
+        """Return non-first duplicates keyed by ``(repo, issue)``."""
+        seen: set[tuple[str, int]] = set()
+        duplicates: list[WorkItem] = []
+        for item in items:
+            if item.issue is None:
+                continue
+            key = (item.repo, item.issue)
+            if key in seen:
+                duplicates.append(item)
+            else:
+                seen.add(key)
+        return duplicates
+
+    def _claim_selected_implementation_item(self, item: WorkItem) -> bool:
+        """Claim a selected implementation item by identity."""
+        ready = self.queues[StageName.IMPLEMENTATION].snapshot()
+        try:
+            index = next(index for index, candidate in enumerate(ready) if candidate is item)
+        except StopIteration:
+            return False
+        return self._claim_item(StageName.IMPLEMENTATION, index=index) is item
 
     def _dedup_implementation_items(self, items: list[WorkItem]) -> list[WorkItem]:
         """Drop transient duplicate work items, keyed by ``(repo, issue)`` (#2057).
@@ -1363,6 +1699,19 @@ class Coordinator:
                 if isinstance(result, Continue):
                     item.state = result.next_state
                     item.add_history_event(item.stage, item.state)
+                    if (
+                        item.kind is ItemKind.REPO
+                        and item.state == "SOURCE"
+                        and isinstance(item.payload.get("_repo_issue_source"), RepoIssueSource)
+                    ):
+                        source = item.payload["_repo_issue_source"]
+                        if self._externalize_repo_issue_source(item, source):
+                            return
+                        # The registry is bounded. Retain the setup item in
+                        # the existing bounded admission path until a cursor
+                        # slot becomes available.
+                        self._restore_source_lease(item)
+                        return
                     continue
                 if isinstance(result, JobRequest):
                     if self.config.dry_run:
@@ -1479,6 +1828,8 @@ class Coordinator:
         if item.stage is StageName.FINISHED:
             # Sink outcomes are terminal: the result is already recorded.
             self._record_event("done", self._item_key(item), outcome.note)
+            self._release_source_lease(item)
+            self._release_work_permit(item)
             return
 
         if disposition is Disposition.ADVANCE:
@@ -1487,7 +1838,7 @@ class Coordinator:
             if target is StageName.FINISHED:
                 self._finish(item, passed=True, reason=outcome.note or "advance")
             else:
-                self._push_item(item, target, enter=True)
+                self._handoff_item(item, target, enter=True)
             return
 
         if disposition is Disposition.RETRY:
@@ -1522,7 +1873,7 @@ class Coordinator:
         """
         delay = item.payload.pop("retry_delay_s", None)
         if delay is None:
-            self._push_item(item, item.stage, enter=False)
+            self._handoff_item(item, item.stage, enter=False)
         elif self.config.dry_run:
             self._finish(
                 item, passed=False, reason=f"[dry-run] would wait {delay}s: {outcome.note}"
@@ -1555,24 +1906,35 @@ class Coordinator:
         if target is StageName.FINISHED:
             self._finish(item, passed=False, reason=outcome.note or "fail_back")
         else:
-            self._push_item(item, target, enter=True)
+            self._handoff_item(item, target, enter=True)
 
     def _finish(self, item: WorkItem, *, passed: bool, reason: str) -> None:
         """Set the item's result and hand it to the finished sink."""
-        item.result = ItemResult(passed=passed, reason=reason, final_stage=item.stage)
+        result = ItemResult(passed=passed, reason=reason, final_stage=item.stage)
         if item.stage is StageName.FINISHED:
             # Poisoned inside the sink: record directly, never re-queue.
             if not item.payload.get("_recorded", False):
-                self.ledger.append(item.result)
+                item.result = result
+                self.ledger.append(result)
                 item.payload["_recorded"] = True
+            self._release_source_lease(item)
+            self._release_work_permit(item)
             return
-        self._push_item(item, StageName.FINISHED, enter=True)
+        self._handoff_item(item, StageName.FINISHED, enter=True, result=result)
 
     def _seed_products(self, item: WorkItem) -> None:
         """Push a terminal repo item's discovered products into entry queues."""
         if item.kind is not ItemKind.REPO:
             return
-        for product in item.payload.pop("products", []):
+        products = item.payload.pop("products", [])
+        actionable = [product for product in products if product.get("stage") is not None]
+        available = self._work_window - self.live_work_count
+        if len(actionable) > available:
+            raise RuntimeError(
+                "eager repository products exceed the global work window; "
+                "RepoStage must stream discovery through RepoIssueSource"
+            )
+        for product in products:
             if self._admission_saturated:
                 break
             if product.get("stage") is None:
@@ -1609,6 +1971,13 @@ class Coordinator:
         for it in self.in_flight.values():
             if it.kind is ItemKind.ISSUE and it.issue is not None:
                 keys.add((it.repo, it.issue))
+        for _wake, _sequence, it in self.timers:
+            if it.kind is ItemKind.ISSUE and it.issue is not None:
+                keys.add((it.repo, it.issue))
+        for lease in self._leases.values():
+            it = lease.item
+            if it.kind is ItemKind.ISSUE and it.issue is not None:
+                keys.add((it.repo, it.issue))
         for it, _stage, _enter in self._pending_admissions:
             if it.kind is ItemKind.ISSUE and it.issue is not None:
                 keys.add((it.repo, it.issue))
@@ -1642,6 +2011,8 @@ class Coordinator:
         ):
             logger.info("seed skipped: #%s already queued/in-flight in %s", item.issue, item.repo)
             return False
+        if is_new and not self._try_acquire_work_permit(item):
+            return False
         # Register a novel item before attempting bounded admission. This makes
         # ``items`` the accounting source of truth for every seed that reaches
         # the queue-capacity decision: it is present whether admitted directly,
@@ -1651,7 +2022,7 @@ class Coordinator:
             self.items.append(item)
             item.payload.setdefault("entry_stage", stage.value)
         queue = self.queues[stage]
-        if not queue.push(item):
+        if not queue.offer(item):
             item.stage = stage
             if enter:
                 item.state = "ENTER"
@@ -1711,13 +2082,28 @@ class Coordinator:
 
         """
         self._pass_work_count = 0
+        if self._seed_entries is not None:
+            raise RuntimeError("cannot start a seed pass while its source is active")
         default_repo = self.config.repos[0] if self.config.repos else ""
         if self.config.issues or self.config.prs:
             entries = self._seed_direct_scope(default_repo)
         else:
             entries = _seeding.seed_from_cli(self.config.repos, [], [])
+        self._seed_entries = iter(entries)
+        return self._drain_seed_entries()
+
+    def _drain_seed_entries(self) -> int:
+        """Lazily admit source entries while global work permits remain."""
+        entries = self._seed_entries
+        if entries is None or self.shutdown.is_set():
+            return 0
         pushed = 0
-        for entry in entries:
+        while self.live_work_count < self._work_window:
+            try:
+                entry = next(entries)
+            except StopIteration:
+                self._seed_entries = None
+                break
             if entry.stage is None:
                 # Epic tagging is the ONE sanctioned seeding write, executed
                 # here through the skip_epics chokepoint BEFORE the exclusion
@@ -2069,16 +2455,22 @@ class Coordinator:
         """Mark every still-live item RESUMABLE at its stage (never FAILED)."""
         if not self.shutdown.is_set() and not self._fatal:
             return
-        leftovers: list[WorkItem] = [item for _, _, item in self.timers]
-        for stage_name, q in self.queues.items():
-            if stage_name is StageName.FINISHED:
-                continue
-            leftovers.extend(q.snapshot())
-        leftovers.extend(self.in_flight.values())
-        leftovers.extend(item for item, _stage, _enter in self._pending_admissions)
-        for item in leftovers:
+        candidates: dict[int, WorkItem] = {id(item): item for _, _, item in self.timers}
+        for q in self.queues.values():
+            for item in q.snapshot():
+                candidates[id(item)] = item
+        for item in self.in_flight.values():
+            candidates[id(item)] = item
+        for item, _stage, _enter in self._pending_admissions:
+            candidates[id(item)] = item
+        for lease in self._leases.values():
+            candidates[id(lease.item)] = lease.item
+        for item in candidates.values():
             if item.result is None:
                 self._park_resumable(item)
+            else:
+                self._release_source_lease(item)
+                self._release_work_permit(item)
 
 
 def run_pipeline(config: PipelineConfig) -> int:
