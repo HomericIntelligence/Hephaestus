@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import deque
 from types import SimpleNamespace
 from typing import Any
@@ -1348,12 +1349,14 @@ class TestReviewThreadLifecycle:
             "a" * 40,
             [thread],
             {"thread-1": "  Fixed the first concern.  "},
+            "b" * 32,
         )
 
         assert handoff == {
             "head_sha": "a" * 40,
             "threads": [thread],
             "replies": {"thread-1": "Fixed the first concern."},
+            "batch_nonce": "b" * 32,
         }
         thread["body"] = "mutated after the handoff"
         assert handoff["threads"][0]["body"] != thread["body"]
@@ -2329,6 +2332,29 @@ class TestEvalVerdicts:
         )
         body = github.comments[1001][-1]
         assert "No review thread was resolved and no current draft was deleted." in body
+
+    def test_pending_reply_draft_conflict_is_terminally_diagnosed(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A foreign pending draft is retained and explained, never retried as transport failure."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="EVAL")
+        item.payload["implementation_reply_pending_draft_conflict"] = {
+            "head_sha": "a" * 40,
+            "draft_ids": ("foreign-pending-draft",),
+        }
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(
+            Disposition.FINISH_FAIL, "implementation_reply_draft_conflict"
+        )
+        assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
+        body = github.comments[1001][-1]
+        assert "No review thread was resolved and no current draft was deleted." in body
+        assert "foreign-pending-draft" in body
 
     def test_on_enter_stands_down_without_auto_merge_mutation(
         self, make_ctx: Any, make_work_item: Any
@@ -4083,6 +4109,7 @@ class TestRealCommitGate:
                 expected_head_sha: str,
                 threads: list[dict[str, Any]],
                 replies: dict[str, str],
+                batch_nonce: str,
             ) -> Any:
                 self.reply_attempts += 1
                 if self.reply_attempts == 1:
@@ -4092,6 +4119,7 @@ class TestRealCommitGate:
                     expected_head_sha=expected_head_sha,
                     threads=threads,
                     replies=replies,
+                    batch_nonce=batch_nonce,
                 )
 
         stage = PrReviewStage()
@@ -4160,6 +4188,7 @@ class TestRealCommitGate:
                 expected_head_sha: str,
                 threads: list[dict[str, Any]],
                 replies: dict[str, str],
+                batch_nonce: str,
             ) -> ImplementationThreadReplyResult:
                 self.reply_attempts += 1
                 return super().post_implementation_thread_replies(
@@ -4167,6 +4196,7 @@ class TestRealCommitGate:
                     expected_head_sha=expected_head_sha,
                     threads=threads,
                     replies=replies,
+                    batch_nonce=batch_nonce,
                 )
 
         stage = PrReviewStage()
@@ -4230,6 +4260,7 @@ class TestRealCommitGate:
                 expected_head_sha: str,
                 threads: list[dict[str, Any]],
                 replies: dict[str, str],
+                batch_nonce: str,
             ) -> ImplementationThreadReplyResult:
                 self.reply_attempts += 1
                 return super().post_implementation_thread_replies(
@@ -4237,6 +4268,7 @@ class TestRealCommitGate:
                     expected_head_sha=expected_head_sha,
                     threads=threads,
                     replies=replies,
+                    batch_nonce=batch_nonce,
                 )
 
         stage = PrReviewStage()
@@ -4276,10 +4308,10 @@ class TestRealCommitGate:
         assert stage.step(item, ctx) == Continue(next_state="REVIEW_WAIT")
         assert github.reply_attempts == 0
         assert "pending_implementation_reply_handoff" not in item.payload
-        assert github.mutation_log[-1] == (
-            "discard_stale_implementation_thread_reply_batch",
-            (1001, "a" * 40, "b" * 40, ("thread-1",)),
-        )
+        name, args = github.mutation_log[-1]
+        assert name == "discard_stale_implementation_thread_reply_batch"
+        assert args[:4] == (1001, "a" * 40, "b" * 40, ("thread-1",))
+        assert re.fullmatch(r"[0-9a-f]{32}", args[4]) is not None
 
     def test_stale_reply_handoff_restarts_fresh_review_without_retrying(
         self, make_ctx: Any, make_work_item: Any
@@ -4294,8 +4326,9 @@ class TestRealCommitGate:
                 expected_head_sha: str,
                 threads: list[dict[str, Any]],
                 replies: dict[str, str],
+                batch_nonce: str,
             ) -> ImplementationThreadReplyResult:
-                del pr_number, expected_head_sha, threads, replies
+                del pr_number, expected_head_sha, threads, replies, batch_nonce
                 # The reply may already be visible, but a reviewer comment
                 # raced the post-read.  This is a factual stale handoff, not
                 # a transport ambiguity that can be replayed.
@@ -4350,8 +4383,9 @@ class TestRealCommitGate:
                 expected_head_sha: str,
                 threads: list[dict[str, Any]],
                 replies: dict[str, str],
+                batch_nonce: str,
             ) -> ImplementationThreadReplyResult:
-                del pr_number, expected_head_sha, threads, replies
+                del pr_number, expected_head_sha, threads, replies, batch_nonce
                 self.reply_attempts += 1
                 if self.reply_attempts == 1:
                     raise OSError("temporary GitHub transport failure")
@@ -4415,8 +4449,9 @@ class TestRealCommitGate:
                 expected_head_sha: str,
                 threads: list[dict[str, Any]],
                 replies: dict[str, str],
+                batch_nonce: str,
             ) -> ImplementationThreadReplyResult:
-                del pr_number, expected_head_sha, threads
+                del pr_number, expected_head_sha, threads, batch_nonce
                 self.reply_batches.append(tuple(sorted(replies)))
                 return ImplementationThreadReplyResult(
                     blocked_thread_ids=("stale-thread",),

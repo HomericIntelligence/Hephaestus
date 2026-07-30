@@ -98,6 +98,7 @@ import hashlib
 import json
 import logging
 import re
+import secrets
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass
@@ -283,6 +284,8 @@ _PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES = (
     "pending_implementation_reply_handoff_visibility_retries"
 )
 _IMPLEMENTATION_REPLY_BATCH_CONFLICT = "implementation_reply_batch_conflict"
+_IMPLEMENTATION_REPLY_PENDING_DRAFT_CONFLICT = "implementation_reply_pending_draft_conflict"
+_IMPLEMENTATION_REPLY_BATCH_NONCE_RE = re.compile(r"[0-9a-f]{32}")
 
 #: Round-scoped payload keys cleared at REVIEW_WAIT submission so a failed
 #: later round can never replay an earlier round's results.
@@ -537,6 +540,7 @@ def _implementation_reply_handoff(
     head_sha: object,
     threads: object,
     replies: object,
+    batch_nonce: object | None = None,
 ) -> dict[str, Any] | None:
     """Return a replay-safe outstanding implementation-reply handoff.
 
@@ -545,10 +549,14 @@ def _implementation_reply_handoff(
     nor an authority to mutate: the adapter rechecks the live PR and thread
     state before each retry.
     """
+    if batch_nonce is None:
+        batch_nonce = secrets.token_hex(16)
     if (
         not is_full_commit_sha(head_sha)
         or not isinstance(threads, list)
         or not isinstance(replies, dict)
+        or not isinstance(batch_nonce, str)
+        or _IMPLEMENTATION_REPLY_BATCH_NONCE_RE.fullmatch(batch_nonce) is None
     ):
         return None
     snapshots = [dict(thread) for thread in threads if isinstance(thread, dict)]
@@ -566,6 +574,7 @@ def _implementation_reply_handoff(
         "head_sha": head_sha,
         "threads": deepcopy(snapshots),
         "replies": dict(normalized_replies),
+        "batch_nonce": batch_nonce,
     }
 
 
@@ -1234,6 +1243,7 @@ class PrReviewStage(Stage):
                         # code commit has already changed the review head.
                         item.payload[_PENDING_IMPLEMENTATION_REPLY_HANDOFF] = handoff
                         item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+                    batch_nonce = handoff["batch_nonce"] if handoff is not None else ""
                     try:
                         # The worker returns the local commit it actually
                         # published.  A later arbitrary remote push must not
@@ -1247,6 +1257,7 @@ class PrReviewStage(Stage):
                             expected_head_sha=published_head,
                             threads=thread_snapshots,
                             replies=replies,
+                            batch_nonce=batch_nonce,
                         )
                     except Exception as error:
                         logger.warning(
@@ -1270,6 +1281,19 @@ class PrReviewStage(Stage):
                             item.payload[_IMPLEMENTATION_REPLY_BATCH_CONFLICT] = {
                                 "head_sha": published_head,
                                 "draft_ids": duplicate_drafts,
+                            }
+                        pending_draft_conflicts = tuple(
+                            sorted(
+                                str(review_id)
+                                for review_id in getattr(
+                                    reply_result, "conflicting_pending_draft_ids", ()
+                                )
+                            )
+                        )
+                        if pending_draft_conflicts:
+                            item.payload[_IMPLEMENTATION_REPLY_PENDING_DRAFT_CONFLICT] = {
+                                "head_sha": published_head,
+                                "draft_ids": pending_draft_conflicts,
                             }
                         retryable = bool(getattr(reply_result, "retryable", False))
                         expected_ids = set(replies)
@@ -1303,6 +1327,7 @@ class PrReviewStage(Stage):
                                             for thread_id, reply in replies.items()
                                             if thread_id in retryable_ids
                                         },
+                                        batch_nonce,
                                     )
                                 )
                             elif retryable_ids:
@@ -1795,6 +1820,7 @@ class PrReviewStage(Stage):
         expected_head_sha: str,
         current_state: object,
         replies: dict[str, str],
+        batch_nonce: str,
     ) -> None:
         """Best-effort cleanup after a saved implementation head was replaced."""
         if not (
@@ -1813,6 +1839,7 @@ class PrReviewStage(Stage):
                 expected_head_sha=expected_head_sha,
                 current_head_sha=current_state["headRefOid"],
                 replies=replies,
+                batch_nonce=batch_nonce,
             )
         except Exception as error:
             logger.warning(
@@ -1821,11 +1848,19 @@ class PrReviewStage(Stage):
                 type(error).__name__,
             )
 
-    def _consume_implementation_reply_batch_conflict(
-        self, item: WorkItem, ctx: StageContext
+    def _consume_implementation_reply_draft_conflict(
+        self,
+        item: WorkItem,
+        ctx: StageContext,
+        *,
+        payload_key: str,
+        marker_kind: str,
+        minimum_draft_count: int,
+        explanation: str,
+        remediation: str,
     ) -> StepResult | None:
-        """Record one terminal diagnostic for an ambiguous current batch."""
-        conflict = item.payload.pop(_IMPLEMENTATION_REPLY_BATCH_CONFLICT, None)
+        """Record one terminal diagnostic without mutating unowned drafts."""
+        conflict = item.payload.pop(payload_key, None)
         if conflict is None:
             return None
         if item.pr is None or item.issue is None or not isinstance(conflict, dict):
@@ -1837,7 +1872,7 @@ class PrReviewStage(Stage):
         if (
             not is_full_commit_sha(head_sha)
             or not isinstance(draft_ids, tuple)
-            or len(draft_ids) < 2
+            or len(draft_ids) < minimum_draft_count
             or any(
                 not isinstance(review_id, str)
                 or not review_id
@@ -1856,31 +1891,70 @@ class PrReviewStage(Stage):
         marker_hash = hashlib.sha256(
             f"{item.pr}:{head_sha}:{','.join(draft_ids)}".encode()
         ).hexdigest()[:24]
-        marker = f"<!-- hephaestus-implementation-reply-draft-conflict:{marker_hash} -->"
+        marker = f"<!-- hephaestus-implementation-reply-{marker_kind}:{marker_hash} -->"
         body = (
             f"{marker}\n\n"
-            "Automation stopped before posting implementation replies because multiple "
-            "current-head draft reviews claim the same reply batch.\n\n"
+            f"Automation stopped before posting implementation replies because {explanation}.\n\n"
             f"Head: `{head_sha}`\n\n"
             f"Draft review IDs: {', '.join(f'`{review_id}`' for review_id in draft_ids)}\n\n"
             "No review thread was resolved and no current draft was deleted. "
-            "Remove the duplicate drafts, then run a fresh implementation-review pass."
+            f"{remediation}"
         )
         try:
             ctx.github.upsert_pr_comment(item.pr, marker, body)
         except Exception as error:
             logger.warning(
-                "pr_review:%d: failed to record duplicate-draft conflict (%s)",
+                "pr_review:%d: failed to record implementation-reply draft conflict (%s)",
                 item.issue,
                 type(error).__name__,
             )
             return StageOutcome(
-                Disposition.FINISH_FAIL, "implementation_reply_batch_conflict_comment_failed"
+                Disposition.FINISH_FAIL,
+                "implementation_reply_batch_conflict_comment_failed"
+                if payload_key == _IMPLEMENTATION_REPLY_BATCH_CONFLICT
+                else "implementation_reply_draft_conflict_comment_failed",
             )
-        return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_batch_conflict")
+        return StageOutcome(
+            Disposition.FINISH_FAIL,
+            "implementation_reply_batch_conflict"
+            if payload_key == _IMPLEMENTATION_REPLY_BATCH_CONFLICT
+            else "implementation_reply_draft_conflict",
+        )
+
+    def _consume_implementation_reply_batch_conflict(
+        self, item: WorkItem, ctx: StageContext
+    ) -> StepResult | None:
+        """Diagnose a duplicate exact batch without deleting either draft."""
+        return self._consume_implementation_reply_draft_conflict(
+            item,
+            ctx,
+            payload_key=_IMPLEMENTATION_REPLY_BATCH_CONFLICT,
+            marker_kind="draft-conflict",
+            minimum_draft_count=2,
+            explanation="multiple current-head draft reviews claim the same reply batch",
+            remediation="Remove the duplicate drafts, then run a fresh implementation-review pass.",
+        )
+
+    def _consume_implementation_reply_pending_draft_conflict(
+        self, item: WorkItem, ctx: StageContext
+    ) -> StepResult | None:
+        """Diagnose a non-owned pending draft without taking ownership of it."""
+        return self._consume_implementation_reply_draft_conflict(
+            item,
+            ctx,
+            payload_key=_IMPLEMENTATION_REPLY_PENDING_DRAFT_CONFLICT,
+            marker_kind="pending-draft-conflict",
+            minimum_draft_count=1,
+            explanation="a non-owned pending review prevents this reply batch",
+            remediation=(
+                "Remove or submit the pending review, then run a fresh implementation-review pass."
+            ),
+        )
 
     @staticmethod
-    def _retry_pending_implementation_reply_handoff(item: WorkItem, ctx: StageContext) -> str:
+    def _retry_pending_implementation_reply_handoff(  # noqa: C901 - recovery state machine
+        item: WorkItem, ctx: StageContext
+    ) -> str:
         """Retry one exact post-push reply batch without invoking an agent.
 
         Returns ``none`` when no handoff exists, ``completed`` when every
@@ -1898,12 +1972,14 @@ class PrReviewStage(Stage):
             raw_handoff.get("head_sha") if isinstance(raw_handoff, dict) else None,
             raw_handoff.get("threads") if isinstance(raw_handoff, dict) else None,
             raw_handoff.get("replies") if isinstance(raw_handoff, dict) else None,
+            raw_handoff.get("batch_nonce") if isinstance(raw_handoff, dict) else None,
         )
         if handoff is None or item.pr is None:
             return "invalid"
         head_sha = handoff["head_sha"]
         threads = handoff["threads"]
         replies = handoff["replies"]
+        batch_nonce = handoff["batch_nonce"]
         try:
             state = ctx.github.gh_pr_state(item.pr)
             if not _pr_is_current_open_head(state, head_sha):
@@ -1940,6 +2016,7 @@ class PrReviewStage(Stage):
                     expected_head_sha=head_sha,
                     current_state=state,
                     replies=replies,
+                    batch_nonce=batch_nonce,
                 )
                 item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
                 item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
@@ -1951,6 +2028,7 @@ class PrReviewStage(Stage):
                 expected_head_sha=head_sha,
                 threads=threads,
                 replies=replies,
+                batch_nonce=batch_nonce,
             )
         except Exception as error:
             logger.warning(
@@ -1977,6 +2055,20 @@ class PrReviewStage(Stage):
             item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
             item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES, None)
             return "duplicate_conflict"
+        pending_draft_conflicts = tuple(
+            sorted(
+                str(review_id) for review_id in getattr(result, "conflicting_pending_draft_ids", ())
+            )
+        )
+        if pending_draft_conflicts:
+            item.payload[_IMPLEMENTATION_REPLY_PENDING_DRAFT_CONFLICT] = {
+                "head_sha": head_sha,
+                "draft_ids": pending_draft_conflicts,
+            }
+            item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
+            item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+            item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES, None)
+            return "pending_draft_conflict"
         if replied == expected_ids and len(receipts) == len(replied):
             item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
             item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
@@ -2005,6 +2097,7 @@ class PrReviewStage(Stage):
                 for thread_id, reply in replies.items()
                 if thread_id in retryable_ids
             },
+            batch_nonce,
         )
         if replacement is None:
             return "invalid"
@@ -2028,6 +2121,9 @@ class PrReviewStage(Stage):
         conflict_outcome = self._consume_implementation_reply_batch_conflict(item, ctx)
         if conflict_outcome is not None:
             return conflict_outcome
+        conflict_outcome = self._consume_implementation_reply_pending_draft_conflict(item, ctx)
+        if conflict_outcome is not None:
+            return conflict_outcome
 
         if payload.pop("scope_retraction_failure", False):
             logger.warning(
@@ -2043,6 +2139,13 @@ class PrReviewStage(Stage):
                 return conflict_outcome
             return StageOutcome(
                 Disposition.FINISH_FAIL, "implementation_reply_batch_conflict_invalid"
+            )
+        if handoff_status == "pending_draft_conflict":
+            conflict_outcome = self._consume_implementation_reply_pending_draft_conflict(item, ctx)
+            if conflict_outcome is not None:
+                return conflict_outcome
+            return StageOutcome(
+                Disposition.FINISH_FAIL, "implementation_reply_draft_conflict_invalid"
             )
         if handoff_status == "visibility_wait":
             return StageOutcome(Disposition.RETRY, "implementation_reply_handoff_visibility_wait")

@@ -435,9 +435,10 @@ class FakeStageGitHub(FakeGitHub):
         expected_head_sha: str,
         threads: list[dict[str, Any]],
         replies: dict[str, str],
+        batch_nonce: str,
     ) -> ImplementationThreadReplyResult:
         """Record commit-gated implementation replies for stage tests."""
-        del expected_head_sha
+        del expected_head_sha, batch_nonce
         by_id = {
             str(thread.get("thread_id") or thread.get("id") or ""): thread for thread in threads
         }
@@ -474,6 +475,7 @@ class FakeStageGitHub(FakeGitHub):
         expected_head_sha: str,
         current_head_sha: str,
         replies: dict[str, str],
+        batch_nonce: str,
     ) -> bool:
         """Record stale draft cleanup without modelling GitHub pending reviews."""
         self._log(
@@ -482,6 +484,7 @@ class FakeStageGitHub(FakeGitHub):
             expected_head_sha,
             current_head_sha,
             tuple(sorted(replies)),
+            batch_nonce,
         )
         return True
 

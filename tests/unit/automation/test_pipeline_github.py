@@ -35,6 +35,55 @@ from hephaestus.automation.review_journal import (
 )
 from hephaestus.utils.file_lock import LockUnavailableError
 
+_BATCH_NONCE = "b" * 32
+
+
+class PipelineGitHubForTest(pg.PipelineGitHub):
+    """Production adapter with an explicit test-only operation nonce default."""
+
+    def _implementation_reply_review_body(
+        self,
+        pr_number: int,
+        head_sha: str,
+        replies: dict[str, str],
+        batch_nonce: str | None = _BATCH_NONCE,
+    ) -> str:
+        return super()._implementation_reply_review_body(pr_number, head_sha, replies, batch_nonce)
+
+    def post_implementation_thread_replies(
+        self,
+        pr_number: int,
+        *,
+        expected_head_sha: str,
+        threads: list[dict[str, Any]],
+        replies: dict[str, str],
+        batch_nonce: str | None = _BATCH_NONCE,
+    ) -> Any:
+        return super().post_implementation_thread_replies(
+            pr_number,
+            expected_head_sha=expected_head_sha,
+            threads=threads,
+            replies=replies,
+            batch_nonce=batch_nonce,
+        )
+
+    def discard_stale_implementation_thread_reply_batch(
+        self,
+        pr_number: int,
+        *,
+        expected_head_sha: str,
+        current_head_sha: str,
+        replies: dict[str, str],
+        batch_nonce: str | None = _BATCH_NONCE,
+    ) -> bool:
+        return super().discard_stale_implementation_thread_reply_batch(
+            pr_number,
+            expected_head_sha=expected_head_sha,
+            current_head_sha=current_head_sha,
+            replies=replies,
+            batch_nonce=batch_nonce,
+        )
+
 
 def _claim_drive_green_learn_from_process(repo_root: str, start_barrier: Any, results: Any) -> None:
     """Race one real adapter claim from a separate process for lock coverage."""
@@ -51,15 +100,15 @@ def _claim_drive_green_learn_from_process(repo_root: str, start_barrier: Any, re
 
 
 @pytest.fixture
-def adapter(tmp_path: Path) -> pg.PipelineGitHub:
+def adapter(tmp_path: Path) -> PipelineGitHubForTest:
     """Live-mutator adapter anchored at a temp repo root."""
-    return pg.PipelineGitHub("org", dry_run=False, repo_root=tmp_path)
+    return PipelineGitHubForTest("org", dry_run=False, repo_root=tmp_path)
 
 
 @pytest.fixture
-def dry_adapter(tmp_path: Path) -> pg.PipelineGitHub:
+def dry_adapter(tmp_path: Path) -> PipelineGitHubForTest:
     """Dry-run adapter: every mutator must log-and-skip."""
-    return pg.PipelineGitHub("org", dry_run=True, repo_root=tmp_path)
+    return PipelineGitHubForTest("org", dry_run=True, repo_root=tmp_path)
 
 
 @pytest.fixture
@@ -683,8 +732,8 @@ class TestAllThreadReplyAndReviewerResolution:
         thread = _external_reviewer_thread()
         reply = "Fixed the missing guard."
         head_sha = "a" * 40
-        first_adapter = pg.PipelineGitHub("org", dry_run=False, repo_root=tmp_path / "one")
-        second_adapter = pg.PipelineGitHub("org", dry_run=False, repo_root=tmp_path / "two")
+        first_adapter = PipelineGitHubForTest("org", dry_run=False, repo_root=tmp_path / "one")
+        second_adapter = PipelineGitHubForTest("org", dry_run=False, repo_root=tmp_path / "two")
         review_body = first_adapter._implementation_reply_review_body(
             7,
             head_sha,
@@ -754,6 +803,73 @@ class TestAllThreadReplyAndReviewerResolution:
         ]
         assert all(result.retryable is False for result in results)
         assert all(result.blocked_thread_ids == (thread["id"],) for result in results)
+
+    def test_cross_checkout_foreign_nonce_draft_stops_without_mutation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A different work item cannot reuse a pending draft from another checkout."""
+        thread = _external_reviewer_thread()
+        reply = "Fixed the missing guard."
+        head_sha = "a" * 40
+        adapter = PipelineGitHubForTest("org", dry_run=False, repo_root=tmp_path / "two")
+        foreign_body = adapter._implementation_reply_review_body(
+            7,
+            head_sha,
+            {
+                thread["id"]: adapter._implementation_thread_reply_body(
+                    7, head_sha, thread["id"], reply
+                )
+            },
+            "c" * 32,
+        )
+
+        def graphql(query: str, **_fields: str | int) -> dict[str, Any]:
+            if "reviews(first:100" not in query:
+                pytest.fail(f"foreign pending draft must not mutate: {query}")
+            return {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "id": "pr-7",
+                            "state": "OPEN",
+                            "headRefOid": head_sha,
+                            "autoMergeRequest": None,
+                            "reviews": {
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                "nodes": [
+                                    {
+                                        "id": "foreign-pending-draft",
+                                        "state": "PENDING",
+                                        "body": foreign_body,
+                                        "viewerDidAuthor": True,
+                                        "commit": {"oid": head_sha},
+                                    }
+                                ],
+                            },
+                        }
+                    }
+                }
+            }
+
+        monkeypatch.setattr(
+            adapter,
+            "_review_thread_snapshot",
+            lambda _pr, _thread: _open_thread_snapshot(thread),
+        )
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+
+        result = adapter.post_implementation_thread_replies(
+            7,
+            expected_head_sha=head_sha,
+            threads=[thread],
+            replies={thread["id"]: reply},
+            batch_nonce="d" * 32,
+        )
+
+        assert result.replied_thread_ids == ()
+        assert result.blocked_thread_ids == (thread["id"],)
+        assert result.conflicting_pending_draft_ids == ("foreign-pending-draft",)
+        assert result.retryable is False
 
     def test_submitted_batch_remains_a_receipt_beside_an_unrelated_draft(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
@@ -975,11 +1091,30 @@ class TestAllThreadReplyAndReviewerResolution:
                 )
             },
         )
+        foreign_old_body = adapter._implementation_reply_review_body(
+            7,
+            "a" * 40,
+            {
+                "thread-one": adapter._implementation_thread_reply_body(
+                    7, "a" * 40, "thread-one", replies["thread-one"]
+                )
+            },
+            "c" * 32,
+        )
         reviews = [
             {
                 "id": "old-automation-draft",
                 "state": "PENDING",
                 "body": old_body,
+                "viewerDidAuthor": True,
+                "commit": {"oid": "a" * 40},
+            },
+            {
+                "id": "foreign-old-draft",
+                "state": "PENDING",
+                # A valid body from another opaque operation must remain
+                # untouched even when its reply text and commit match.
+                "body": foreign_old_body,
                 "viewerDidAuthor": True,
                 "commit": {"oid": "a" * 40},
             },
@@ -1035,7 +1170,7 @@ class TestAllThreadReplyAndReviewerResolution:
             replies=replies,
         )
         assert deleted_review_ids == ["old-automation-draft"]
-        assert [review["id"] for review in reviews] == ["manual-draft"]
+        assert [review["id"] for review in reviews] == ["foreign-old-draft", "manual-draft"]
 
     def test_dry_run_never_inventories_or_deletes_stale_reply_drafts(
         self, dry_adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
