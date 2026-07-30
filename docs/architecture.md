@@ -7,8 +7,8 @@ The [`docs/adr/`](adr/) records remain the bind-points for individual
 architectural decisions (`0006-queue-based-in-process-automation-pipeline`,
 …) — this document is the unified reference; ADRs are the historical record.
 This file is source-grounded: every operational claim links to the module
-that backs it, in the form `[module/file.py](path/to/file.py)` or
-`[§module/Class.func](path/to/file.py)`. Per the project convention
+that backs it, in the form ``module/file.py`` or
+``§module/Class.func``. Per the project convention
 (`"Code References": 'DO'` in [`AGENTS.md`](../AGENTS.md) §"Claude Code
 Optimization"), file paths are repo-relative.
 
@@ -48,16 +48,16 @@ Optimization"), file paths are repo-relative.
  `ArmingStateStore` records are the only
  crash-resistant truth. Stages may not persist any other state. Restart =
 re-run: queue reconstruction reads the journal
-([`coordinator._seed_pass`](hephaestus/automation/pipeline/coordinator.py),
-[`seed_from_cli`](hephaestus/automation/pipeline/seeding.py)) — distinct from
-the per-repo seed-side [`repo._seed_pass`](hephaestus/automation/pipeline/stages/repo.py)
+([`coordinator._seed_pass`](../hephaestus/automation/pipeline/coordinator.py),
+[`seed_from_cli`](../hephaestus/automation/pipeline/seeding.py)) — distinct from
+the per-repo seed-side [`repo._seed_pass`](../hephaestus/automation/pipeline/stages/repo.py)
 in §5.1, which tags `state:skip` on epics before any other durable mutation.
 - **Interrupt = resumable, never failed.** A SIGINT/SIGTERM/SIGHUP during a
  run parks the touched item with `ItemResult(passed=False,
  reason="resumable at <stage>", …)`. A subsequent restart seeds it back
  into the same queue and the loop reconverges
- ([`_park_resumable`](hephaestus/automation/pipeline/coordinator.py),
- [`_finalize_resumable`](hephaestus/automation/pipeline/coordinator.py)).
+ ([`_park_resumable`](../hephaestus/automation/pipeline/coordinator.py),
+ [`_finalize_resumable`](../hephaestus/automation/pipeline/coordinator.py)).
 - **Reviewed-head proof, conditional queue merge.** `state:implementation-go`
  is applied only by `pr_review._eval`, which is the sole stage authorized to
  write the label. Before the reviewer runs, `pr_review` snapshots the GitHub
@@ -72,33 +72,33 @@ in §5.1, which tags `state:skip` on epics before any other durable mutation.
  The direct adapter makes one request per call and never retries. No queue
  stage invokes `gh pr merge`, creates, disables, adopts, or polls native
  auto-merge, manages a merge queue, or uses an administrator bypass
- ([`pr_review.py`](hephaestus/automation/pipeline/stages/pr_review.py),
- [`worker_pool.py`](hephaestus/automation/pipeline/worker_pool.py),
- [`merge_wait.py`](hephaestus/automation/pipeline/stages/merge_wait.py)).
+ ([`pr_review.py`](../hephaestus/automation/pipeline/stages/pr_review.py),
+ [`worker_pool.py`](../hephaestus/automation/pipeline/worker_pool.py),
+ [`merge_wait.py`](../hephaestus/automation/pipeline/stages/merge_wait.py)).
 - **Globally bounded budgets.** Stages count retries on `_on_job_done` so
  `agent_error` retries consume the same per-item budget as ordinary
  attempts; cross-stage regression cycles terminate in finite steps
- ([`_FAIL_BACK_CAP`](hephaestus/automation/pipeline/coordinator.py),
- [`ROUTES`](hephaestus/automation/pipeline/routing.py)).
+ ([`_FAIL_BACK_CAP`](../hephaestus/automation/pipeline/coordinator.py),
+ [`ROUTES`](../hephaestus/automation/pipeline/routing.py)).
 - **Globally bounded live work.** The coordinator admits at most
  `C = max(1, parallel_repos × max_workers)` nonterminal work items at once.
  A work permit remains with an item while it is queued, leased, running,
  timer-parked, or waiting for a full destination queue; it is released only
  after the finished sink records the terminal result
- ([`_work_window`](hephaestus/automation/pipeline/coordinator.py),
- [`Coordinator._push_item`](hephaestus/automation/pipeline/coordinator.py),
- [`Coordinator._release_work_permit`](hephaestus/automation/pipeline/coordinator.py)).
+ ([`_work_window`](../hephaestus/automation/pipeline/coordinator.py),
+ [`Coordinator._push_item`](../hephaestus/automation/pipeline/coordinator.py),
+ [`Coordinator._release_work_permit`](../hephaestus/automation/pipeline/coordinator.py)).
 
 ### Non-goals
 
 - **No persisted queue snapshot.** Queues are in-memory; reconstruction
- reads GitHub via [`seeding.py`](hephaestus/automation/pipeline/seeding.py)
- ([`_all_idle`](hephaestus/automation/pipeline/coordinator.py) +
- [`_reseed_if_converged`](hephaestus/automation/pipeline/coordinator.py)).
+ reads GitHub via [`seeding.py`](../hephaestus/automation/pipeline/seeding.py)
+ ([`_all_idle`](../hephaestus/automation/pipeline/coordinator.py) +
+ [`_reseed_if_converged`](../hephaestus/automation/pipeline/coordinator.py)).
 - **No OS-level agent sandbox.** Each agent call site declares its explicit
  `--allowedTools` scope and runs in a scoped worktree
- ([`_run_agent`](hephaestus/automation/pipeline/worker_pool.py),
- [`agent_config.py`](hephaestus/automation/agent_config.py)).
+ ([`_run_agent`](../hephaestus/automation/pipeline/worker_pool.py),
+ [`agent_config.py`](../hephaestus/automation/agent_config.py)).
 - **No MCP runtime dependency.** `.mcp.json` is intentionally empty. Plugin
  marketplaces, NATS JetStream and HTTP REST remain the maintained
  integration contracts ([ADR-0011](adr/0011-mcp-integration-posture.md)).
@@ -110,14 +110,14 @@ in §5.1, which tags `state:skip` on epics before any other durable mutation.
  (issues #468, #469) are intentionally NOT built yet.
 - **DRY / one-way dependency.** `automation → library` only — library
  subpackages may not import from
- [`hephaestus.automation`](hephaestus/automation/), as defined by
+ [`hephaestus.automation`](../hephaestus/automation/), as defined by
  [`ADR-0001`](adr/0001-automation-library-boundary.md).
-- **SOLID / substitutable providers.** [`hephaestus.agents.runtime`](hephaestus/agents/runtime.py)
+- **SOLID / substitutable providers.** [`hephaestus.agents.runtime`](../hephaestus/agents/runtime.py)
  abstracts over Claude Code and Codex behind a uniform `--agent` flag.
 - **POLA. Least privilege, least astonishment.** Per-call
  `--allowedTools`, scoped worktrees, fenced untrusted GitHub content
  via `_fence_untrusted` in
- [`prompts/_shared.py`](hephaestus/automation/prompts/_shared.py) and
+ [`prompts/_shared.py`](../hephaestus/automation/prompts/_shared.py) and
  admin-free human-gated merge.
 
 ---
@@ -128,7 +128,7 @@ in §5.1, which tags `state:skip` on epics before any other durable mutation.
 
 The default path is **`hephaestus-automation-loop`**, the queue-based
 in-process pipeline whose coordinator lives at
-[`hephaestus.automation.pipeline.coordinator`](hephaestus/automation/pipeline/coordinator.py).
+[`hephaestus.automation.pipeline.coordinator`](../hephaestus/automation/pipeline/coordinator.py).
 The coordinator owns **seven in-memory stage queues** and dispatches
 agent / build-test / git-network jobs to a single `WorkerPool`. Each agent
 job runs Claude or Codex, chosen by `--agent` (default Claude).
@@ -151,97 +151,97 @@ flowchart LR
 ```
 
 Every back-edge in the diagram is **named** in
-[`ROUTES`](hephaestus/automation/pipeline/routing.py) and is the "fail-route
+[`ROUTES`](../hephaestus/automation/pipeline/routing.py) and is the "fail-route
 reason vocabulary" stages must reference verbatim in `StageOutcome.note`.
 
 ### Coordinator / worker contract
 
 The main thread (coordinator) OWNS:
 
-- all seven stage queues ([`self.queues`](hephaestus/automation/pipeline/coordinator.py))
-- the timer heap ([`self.timers`](hephaestus/automation/pipeline/coordinator.py))
-- the in-flight registry ([`self.in_flight`](hephaestus/automation/pipeline/coordinator.py))
-- all routing and disposition semantics ([`_route`](hephaestus/automation/pipeline/coordinator.py))
+- all seven stage queues ([`self.queues`](../hephaestus/automation/pipeline/coordinator.py))
+- the timer heap ([`self.timers`](../hephaestus/automation/pipeline/coordinator.py))
+- the in-flight registry ([`self.in_flight`](../hephaestus/automation/pipeline/coordinator.py))
+- all routing and disposition semantics ([`_route`](../hephaestus/automation/pipeline/coordinator.py))
 - every GitHub API mutation, through
- [`StageGitHub`](hephaestus/automation/pipeline/stages/base.py)
+ [`StageGitHub`](../hephaestus/automation/pipeline/stages/base.py)
  (label writes, comment upserts, and PR creation; the queue does not mutate
  auto-merge)
 It NEVER launches agents, builds/tests or git/network operations. It never
 sleeps — wakeups are the timer's responsibility.
-The single worker pool ([`WorkerPool`](hephaestus/automation/pipeline/worker_pool.py))
+The single worker pool ([`WorkerPool`](../hephaestus/automation/pipeline/worker_pool.py))
 executes everything else: agent invocations (Claude or Codex), build/test
 subprocesses and git/network operations. Every Claude agent invocation
 routed through the worker pool binds to an explicit least-privilege
-`--allowedTools` scope. An explicit [`AgentJob.allowed_tools`](hephaestus/automation/pipeline/jobs.py)
+`--allowedTools` scope. An explicit [`AgentJob.allowed_tools`](../hephaestus/automation/pipeline/jobs.py)
 grant wins (the `pr_review` job uses it for the reviewer skill); absent that,
-read-only sandbox jobs use [`DEFAULT_TOOL_SCOPE`](hephaestus/automation/pipeline/tool_scopes.py),
+read-only sandbox jobs use [`DEFAULT_TOOL_SCOPE`](../hephaestus/automation/pipeline/tool_scopes.py),
 and all other jobs resolve through
-[`tool_scope_for(agent)`](hephaestus/automation/pipeline/tool_scopes.py) from
-[`AGENT_TOOL_SCOPES`](hephaestus/automation/pipeline/tool_scopes.py). An
+[`tool_scope_for(agent)`](../hephaestus/automation/pipeline/tool_scopes.py) from
+[`AGENT_TOOL_SCOPES`](../hephaestus/automation/pipeline/tool_scopes.py). An
 unmapped role therefore falls through to the same read-only default rather
 than the most permissive scope (#2319). Every git operation crosses
-[`_repo_lock`](hephaestus/automation/pipeline/worker_pool.py) (in-process
+[`_repo_lock`](../hephaestus/automation/pipeline/worker_pool.py) (in-process
 thread lock, outer) **and**
-[`_interruptible_file_lock`](hephaestus/automation/pipeline/worker_pool.py)
+[`_interruptible_file_lock`](../hephaestus/automation/pipeline/worker_pool.py)
 (cross-process flock, inner). Worktrees share `.git`, so two concurrent
 operations on the same checkout would race.
 The only cross-thread **payload** channel is the bounded
-[`CompletionQueue`](hephaestus/automation/pipeline/queues.py)
+[`CompletionQueue`](../hephaestus/automation/pipeline/queues.py)
 (`queue.Queue[(JobHandle, JobResult)]`, capacity `C`). A separate
 `threading.Event` latch is control-plane-only: workers set it after a
 non-blocking completion publish, and signal handlers set it to wake an idle
 coordinator. Neither writes a sentinel into the completion queue or blocks on
 queue capacity
-([`WorkerPool._on_future_done`](hephaestus/automation/pipeline/worker_pool.py),
-[`Coordinator._wait_for_completion`](hephaestus/automation/pipeline/coordinator.py),
-[`Coordinator._wake_completion_wait`](hephaestus/automation/pipeline/coordinator.py)).
+([`WorkerPool._on_future_done`](../hephaestus/automation/pipeline/worker_pool.py),
+[`Coordinator._wait_for_completion`](../hephaestus/automation/pipeline/coordinator.py),
+[`Coordinator._wake_completion_wait`](../hephaestus/automation/pipeline/coordinator.py)).
 The idle coordinator may wait on that event for its bounded poll interval
-([`_IDLE_POLL_S = 1.0`](hephaestus/automation/pipeline/coordinator.py)); it
+([`_IDLE_POLL_S = 1.0`](../hephaestus/automation/pipeline/coordinator.py)); it
 does not make a producer or signal handler wait. Pool size = `parallel_repos × max_workers`.
 Each stage-queue capacity and the
 completion-queue capacity are `C = max(1, parallel_repos × max_workers)`
-([`_work_window`](hephaestus/automation/pipeline/coordinator.py),
-[`WorkerPool(size=…)`](hephaestus/automation/pipeline/worker_pool.py)).
+([`_work_window`](../hephaestus/automation/pipeline/coordinator.py),
+[`WorkerPool(size=…)`](../hephaestus/automation/pipeline/worker_pool.py)).
 
 ### Ticks
 
 The per-tick event loop is defined in
-[`Coordinator.run`](hephaestus/automation/pipeline/coordinator.py). One
+[`Coordinator.run`](../hephaestus/automation/pipeline/coordinator.py). One
 tick does, in order:
 
 1. **Shutdown check** — graceful drain or immediate teardown after the
  grace window / a second signal
- ([`_grace_exceeded`](hephaestus/automation/pipeline/coordinator.py),
- [`_immediate`](hephaestus/automation/pipeline/coordinator.py)).
+ ([`_grace_exceeded`](../hephaestus/automation/pipeline/coordinator.py),
+ [`_immediate`](../hephaestus/automation/pipeline/coordinator.py)).
 2. **Wake timers** — pop every expired entry back into its stage queue
- ([`_wake_timers`](hephaestus/automation/pipeline/coordinator.py)).
+ ([`_wake_timers`](../hephaestus/automation/pipeline/coordinator.py)).
 3. **Drain completions** — handle ALL ready completions without blocking;
  interrupted results park the item RESUMABLE and never reach
  `on_job_done`
- ([`_drain_completions`](hephaestus/automation/pipeline/coordinator.py),
- [`_park_resumable`](hephaestus/automation/pipeline/coordinator.py)).
+ ([`_drain_completions`](../hephaestus/automation/pipeline/coordinator.py),
+ [`_park_resumable`](../hephaestus/automation/pipeline/coordinator.py)).
 4. **Emit observability tick** — push queue-depth / in-flight / circuit
  breaker gauges and record alert transitions
- ([`_emit_observability_tick`](hephaestus/automation/pipeline/coordinator.py)).
+ ([`_emit_observability_tick`](../hephaestus/automation/pipeline/coordinator.py)).
 5. **Drain queues down-stream first** — `finished → merge_wait →
  pr_review → implementation → plan_review → planning → repo`
- ([`_DRAIN_ORDER`](hephaestus/automation/pipeline/coordinator.py)).
+ ([`_DRAIN_ORDER`](../hephaestus/automation/pipeline/coordinator.py)).
  Implementation drains separately to enforce dependency topo-order
  and file-overlap serialization; other queues drain with the per-repo
  in-flight cap. Pending destination-first handoffs are retried before and
  between drains, and bounded direct/repository sources are admitted only at
- safe capacity points ([`_drain_implementation`](hephaestus/automation/pipeline/coordinator.py),
- [`_drain_queues`](hephaestus/automation/pipeline/coordinator.py),
- [`_drain_pending_handoffs`](hephaestus/automation/pipeline/coordinator.py),
- [`_drain_repo_issue_sources`](hephaestus/automation/pipeline/coordinator.py),
- [`_admit`](hephaestus/automation/pipeline/coordinator.py)).
+ safe capacity points ([`_drain_implementation`](../hephaestus/automation/pipeline/coordinator.py),
+ [`_drain_queues`](../hephaestus/automation/pipeline/coordinator.py),
+ [`_drain_pending_handoffs`](../hephaestus/automation/pipeline/coordinator.py),
+ [`_drain_repo_issue_sources`](../hephaestus/automation/pipeline/coordinator.py),
+ [`_admit`](../hephaestus/automation/pipeline/coordinator.py)).
 6. **Idle-or-loop check** — if all queues + timers + in-flight are empty,
  re-seed up to `--loops` and either exit on zero work or continue
- ([`_all_idle`](hephaestus/automation/pipeline/coordinator.py),
- [`_reseed_if_converged`](hephaestus/automation/pipeline/coordinator.py)).
+ ([`_all_idle`](../hephaestus/automation/pipeline/coordinator.py),
+ [`_reseed_if_converged`](../hephaestus/automation/pipeline/coordinator.py)).
  Otherwise wait on the completion/signal latch and drain the bounded
  completion queue.
-A defensive step watchdog ([`_STEP_WATCHDOG_S = 15.0`](hephaestus/automation/pipeline/coordinator.py))
+A defensive step watchdog ([`_STEP_WATCHDOG_S = 15.0`](../hephaestus/automation/pipeline/coordinator.py))
 warns when any `stage.step()` call exceeds ~15 s. 5 s proved too tight in
 practice: routine repo-stage steps (clone + label reads over the network)
 breached it on nearly every multi-repo run, burying real stalls in noise
@@ -249,7 +249,7 @@ breached it on nearly every multi-repo run, burying real stalls in noise
 
 ### Library → product layer boundary
 
-[`hephaestus.automation`](hephaestus/automation/) is the product layer. The
+[`hephaestus.automation`](../hephaestus/automation/) is the product layer. The
 base import surface (`import hephaestus`) MUST NOT pull `curses`, `fcntl`,
 `pydantic` or any `hephaestus.automation.*` module. Library subpackages
 therefore cannot import `hephaestus.automation`.
@@ -272,10 +272,10 @@ work. Interrupts therefore leave items RESUMABLE, never FAILED — a restart's
 seeding classifies them back into the same entry queue and `on_enter`
 restarts from the same state.
 Implementation: each stage method performs its durable op via a single
-[`ctx.github`](hephaestus/automation/pipeline/stages/base.py) accessor call
-on the coordinator-owned [`StageGitHub`](hephaestus/automation/pipeline/stages/base.py)
+[`ctx.github`](../hephaestus/automation/pipeline/stages/base.py) accessor call
+on the coordinator-owned [`StageGitHub`](../hephaestus/automation/pipeline/stages/base.py)
 protocol, then returns `StageOutcome(…)`. The coordinator's
-[`_route`](hephaestus/automation/pipeline/coordinator.py) applies the
+[`_route`](../hephaestus/automation/pipeline/coordinator.py) applies the
 disposition to the queue.
 
 ### Global capacity, leases, and source cursors
@@ -289,7 +289,7 @@ moves through the pipeline and releases it only after `finished` records its
 outcome.
 
 Queue draining claims an item through a
-[`StageQueueLease`](hephaestus/automation/pipeline/queues.py). The lease keeps
+[`StageQueueLease`](../hephaestus/automation/pipeline/queues.py). The lease keeps
 the source queue slot occupied while a stage runs. A transition is
 destination-first: the destination must accept the item before the source
 lease is released and the item stage/history/result are changed. When the
@@ -297,9 +297,9 @@ destination is full, the coordinator retains exactly one pending handoff on
 that source lease and retries it after downstream drains. The completed stage
 action is therefore not replayed, and a full destination is ordinary
 backpressure rather than a spill list, shutdown, or failure
-([`StageQueueLease.handoff`](hephaestus/automation/pipeline/queues.py),
-[`Coordinator._handoff_item`](hephaestus/automation/pipeline/coordinator.py),
-[`Coordinator._drain_pending_handoffs`](hephaestus/automation/pipeline/coordinator.py)).
+([`StageQueueLease.handoff`](../hephaestus/automation/pipeline/queues.py),
+[`Coordinator._handoff_item`](../hephaestus/automation/pipeline/coordinator.py),
+[`Coordinator._drain_pending_handoffs`](../hephaestus/automation/pipeline/coordinator.py)).
 Leases carry stable FIFO tickets, so multiple ready items can be claimed and
 run concurrently up to `C`; a retry restores ahead of later-admitted work
 without serializing the whole stage.
@@ -328,11 +328,11 @@ Intake is also source-driven rather than an eager list of classified products:
   for fail-closed direct evaluation, but cannot supply missing requirements.
 
 The implementation is in
-[`Coordinator._drain_direct_issue_source`](hephaestus/automation/pipeline/coordinator.py),
-[`Coordinator._drain_repo_entry_source`](hephaestus/automation/pipeline/coordinator.py),
-[`Coordinator._drain_repo_issue_sources`](hephaestus/automation/pipeline/coordinator.py),
-[`RepoIssueSource`](hephaestus/automation/pipeline/stages/repo.py), and
-[`loop_repo_manager`](hephaestus/automation/loop_repo_manager.py).
+[`Coordinator._drain_direct_issue_source`](../hephaestus/automation/pipeline/coordinator.py),
+[`Coordinator._drain_repo_entry_source`](../hephaestus/automation/pipeline/coordinator.py),
+[`Coordinator._drain_repo_issue_sources`](../hephaestus/automation/pipeline/coordinator.py),
+[`RepoIssueSource`](../hephaestus/automation/pipeline/stages/repo.py), and
+[`loop_repo_manager`](../hephaestus/automation/loop_repo_manager.py).
 
 ### Non-blocking retry / timer-park contract
 
@@ -340,26 +340,26 @@ Stages never sleep — the coordinator's timer heap owns every delay.
 When a stage wants to wait (typically on a CI poll), it writes the delay
 into `item.payload["retry_delay_s"]` and returns
 `StageOutcome(Disposition.RETRY, note)`. The coordinator's
-[`_route_retry`](hephaestus/automation/pipeline/coordinator.py) reads that
+[`_route_retry`](../hephaestus/automation/pipeline/coordinator.py) reads that
 key and parks the item on the heap
-([`_timer_park`](hephaestus/automation/pipeline/coordinator.py)).
+([`_timer_park`](../hephaestus/automation/pipeline/coordinator.py)).
 A missing key means "retry on the next drain tick" (no delay).
-[`BACKOFF_CAP_S = 60`](hephaestus/automation/pipeline/stages/base.py) is
+[`BACKOFF_CAP_S = 60`](../hephaestus/automation/pipeline/stages/base.py) is
 shared by every stage that uses the legacy exponential poll delay.
 Timer parking releases the source-stage lease but retains the item's global
 work permit. On expiry, the timer heap remains the item's owner until its
 stage queue accepts it; an occupied stage queue leaves the expired entry at
 the heap head for a later tick. That is bounded backpressure, not an overflow
 or a reason to repeat the delayed stage action
-([`_timer_park`](hephaestus/automation/pipeline/coordinator.py),
-[`_wake_timers`](hephaestus/automation/pipeline/coordinator.py)).
+([`_timer_park`](../hephaestus/automation/pipeline/coordinator.py),
+[`_wake_timers`](../hephaestus/automation/pipeline/coordinator.py)).
 
 ### Interrupt semantics
 
 `Coordinator.run` installs SIGINT, SIGTERM, SIGHUP handlers
-([`_install_signal_handlers`](hephaestus/automation/pipeline/coordinator.py)).
+([`_install_signal_handlers`](../hephaestus/automation/pipeline/coordinator.py)).
 A first signal sets `shutdown` and starts a graceful drain window
-([`_DEFAULT_GRACE_S = 30.0`](hephaestus/automation/pipeline/coordinator.py)).
+([`_DEFAULT_GRACE_S = 30.0`](../hephaestus/automation/pipeline/coordinator.py)).
 The coordinator stops admitting new work, drains in-flight to RESUMABLE and parks touched items at their current stage. A second signal or an
 expired grace window, tears the pool down immediately and the coordinator
 synthesizes interrupted results for remaining in-flight jobs.
@@ -374,22 +374,22 @@ to, or waits on, the bounded completion queue. Completion-queue saturation is
 an internal invariant violation: the worker callback records a latch without
 blocking or spilling, the coordinator fails the run, and still-live work is
 finalized resumably. It does not set `shutdown` and does not turn into exit
-code 130 ([`WorkerPool._on_future_done`](hephaestus/automation/pipeline/worker_pool.py),
-[`Coordinator._drain_completions`](hephaestus/automation/pipeline/coordinator.py)).
+code 130 ([`WorkerPool._on_future_done`](../hephaestus/automation/pipeline/worker_pool.py),
+[`Coordinator._drain_completions`](../hephaestus/automation/pipeline/coordinator.py)).
 
 ### Exit codes
 
 - `130` — interrupted by SIGINT, SIGTERM, or SIGHUP.
 - `1` — any effective item failed, skipped, blocked; or the coordinator hit a fatal error.
 - `0` — clean run.
-[`_exit_code`](hephaestus/automation/pipeline/coordinator.py) deliberately
+[`_exit_code`](../hephaestus/automation/pipeline/coordinator.py) deliberately
 gives `130` priority over non-passing ledger entries and fatal coordinator
 errors: a signal means the run did not complete.
 
 ### Effective-item rule
 
 The summary uses `latest_logical_items(self.items)` from
-[`summary.py`](hephaestus/automation/pipeline/summary.py) so a re-seeded
+[`summary.py`](../hephaestus/automation/pipeline/summary.py) so a re-seeded
 item's superseded attempts are collapsed before per-row / exit-code /
 preserved-worktree calculation. The current item's own failed, skipped or blocked result still counts; an old failed attempt that was superseded
 by a later passing attempt does not. Pull requests already merged/closed are
@@ -399,9 +399,9 @@ terminalized before summary collapse so stale attempts cannot re-enter the queue
 
 The legacy `_maybe_sleep_for_rate_budget` SLEEPS its loop thread — fatal
 for a single coordinator thread. The new gate lives at the submit
-chokepoint ([`_submit`](hephaestus/automation/pipeline/coordinator.py)):
-[`_rate_budget_ok`](hephaestus/automation/pipeline/coordinator.py) calls
-[`hephaestus.automation.pipeline_github.rate_budget_ok`](hephaestus/automation/pipeline_github.py)
+chokepoint ([`_submit`](../hephaestus/automation/pipeline/coordinator.py)):
+[`_rate_budget_ok`](../hephaestus/automation/pipeline/coordinator.py) calls
+[`hephaestus.automation.pipeline_github.rate_budget_ok`](../hephaestus/automation/pipeline_github.py)
 and timer-parks an `AgentJob` until the upstream reset when the GraphQL
 budget is low. Git/build jobs are unaffected. No `time.sleep` lives in any
 stage module.
@@ -411,18 +411,18 @@ stage module.
 When `--dry-run` is set, the coordinator:
 
 - logs would-submit job descriptions and ADVANCEs the item
- ([`_run_item`](hephaestus/automation/pipeline/coordinator.py));
+ ([`_run_item`](../hephaestus/automation/pipeline/coordinator.py));
 - asserts no job is EVER submitted
- ([`_submit`](hephaestus/automation/pipeline/coordinator.py));
+ ([`_submit`](../hephaestus/automation/pipeline/coordinator.py));
 - log-and-skip mutators in
- [`StageGitHub`](hephaestus/automation/pipeline/stages/base.py);
+ [`StageGitHub`](../hephaestus/automation/pipeline/stages/base.py);
 - finishes items instead of parking on RETRY with `retry_delay_s` (the
  preview will never see real-world CI / merge progress)
- ([`_route_retry`](hephaestus/automation/pipeline/coordinator.py));
+ ([`_route_retry`](../hephaestus/automation/pipeline/coordinator.py));
 - finishes items instead of failing back on FAIL_BACK (a dry-run mutator
  never writes the labels an earlier stage would re-check, so a regression
  would ping-pong until the safety cap)
- ([`_route_fail_back`](hephaestus/automation/pipeline/coordinator.py)).
+ ([`_route_fail_back`](../hephaestus/automation/pipeline/coordinator.py)).
 The fleet-sync `--dry-run` is also a preview contract (see
 [`AGENTS.md`](../AGENTS.md) §"Claude non-interactive permission policy").
 
@@ -430,7 +430,7 @@ The fleet-sync `--dry-run` is also a preview contract (see
 
 Every `_run_item` call is wrapped in a per-item `try/except`; an item that
 raises an unhandled exception inside a stage accessor is logged and routed
-to [`FINISH_FAIL`](hephaestus/automation/pipeline/routing.py) instead of
+to [`FINISH_FAIL`](../hephaestus/automation/pipeline/routing.py) instead of
 terminating the loop, so one bad item never poisons the whole run (#2295).
 Equivalently, when a `scope.trimmed_routes()` rewrite or a stage's own
 `ROUTES` row has no `next`/`fail` mapping, the item lands at the next valid
@@ -439,62 +439,62 @@ mapping or `finished(fail)` rather than raising `KeyError`.
 ### Closed-schema stage events
 
 Stage-originated JSONL events use the closed schema in
-[`events.py`](hephaestus/automation/pipeline/events.py). The event surface is
+[`events.py`](../hephaestus/automation/pipeline/events.py). The event surface is
 intentionally minimal: `encode_stage_event` currently rejects every event, so
 no stage event can carry reviewer text, GitHub bodies, or authorization facts.
 
 ### Scope trimming
 
-[`PipelineScope`](hephaestus/automation/pipeline/routing.py) lets the
+[`PipelineScope`](../hephaestus/automation/pipeline/routing.py) lets the
 coordinator route items through a contiguous subset of stages
 (`hephaestus-plan-issues` runs `planning → plan_review`;
 `hephaestus-implement-issues` runs `implementation → pr_review`).
 `hephaestus-merge-prs` is the manual merge-driving command outside the queue
-coordinator (see [`hephaestus.github.pr_merge`](hephaestus/github/pr_merge.py)). `trimmed_routes()` rewrites every out-of-scope next/fail
+coordinator (see [`hephaestus.github.pr_merge`](../hephaestus/github/pr_merge.py)). `trimmed_routes()` rewrites every out-of-scope next/fail
 target to `FINISHED`, so the partial route table is closed under
 `scope ∪ {FINISHED}`. The coordinator always re-adds the universal sink:
-see [`_routes = config.scope.trimmed_routes()`](hephaestus/automation/pipeline/coordinator.py).
+see [`_routes = config.scope.trimmed_routes()`](../hephaestus/automation/pipeline/coordinator.py).
 `--force` on the planner CLI re-routes any at-or-past-scope stage back to
 the scope's first stage so the scoped work is redone
-([`_scope_seed_decision`](hephaestus/automation/pipeline/coordinator.py)).
+([`_scope_seed_decision`](../hephaestus/automation/pipeline/coordinator.py)).
 
 ### Cross-stage ping-pong bound
 
 Some regression edges (`pr_review → implementation` for `agent_error`)
 can ping-pong. The
-[`_FAIL_BACK_CAP`](hephaestus/automation/pipeline/coordinator.py)
+[`_FAIL_BACK_CAP`](../hephaestus/automation/pipeline/coordinator.py)
 constant is the sum of every budget in
-[`ROUTES`](hephaestus/automation/pipeline/routing.py). Stages enforce the
+[`ROUTES`](../hephaestus/automation/pipeline/routing.py). Stages enforce the
 real per-key budgets themselves; the safety cap only guarantees
 cross-stage cycles terminate even if a stage has a budget bookkeeping bug
-([`_route_fail_back`](hephaestus/automation/pipeline/coordinator.py)).
+([`_route_fail_back`](../hephaestus/automation/pipeline/coordinator.py)).
 
 ---
 
 ## 4. WorkItem and the durable journal
 
-### [§`WorkItem`](hephaestus/automation/pipeline/work_item.py)
+### [§`WorkItem`](../hephaestus/automation/pipeline/work_item.py)
 
 The single per-item record moving through the queue. Thread-safety is by
 construction: a `WorkItem` and its `StageQueue` are only ever touched by
 the coordinator thread; the only cross-thread payload channel is the bounded
-[`CompletionQueue`](hephaestus/automation/pipeline/queues.py). Event latches
+[`CompletionQueue`](../hephaestus/automation/pipeline/queues.py). Event latches
 carry wake/fault signals only, never `WorkItem` or `JobResult` payloads.
 Key fields:
 
-- `repo`, `kind` ([`ItemKind`](hephaestus/automation/pipeline/work_item.py)) —
+- `repo`, `kind` ([`ItemKind`](../hephaestus/automation/pipeline/work_item.py)) —
  repo / issue / PR.
 - `issue` (optional), `pr` (optional) — the GitHub identifier.
-- `stage` ([`StageName`](hephaestus/automation/pipeline/routing.py)) —
+- `stage` ([`StageName`](../hephaestus/automation/pipeline/routing.py)) —
  current queue.
 - `state` — stage-local mini-state string (never a label).
 - `attempts` — `dict` keyed by ROUTES budget names. Per-item-lifetime
  counter; never reset when an item re-enters a stage
- ([`_default_attempts`](hephaestus/automation/pipeline/work_item.py),
- [`routing.py`](hephaestus/automation/pipeline/routing.py) module
+ ([`_default_attempts`](../hephaestus/automation/pipeline/work_item.py),
+ [`routing.py`](../hephaestus/automation/pipeline/routing.py) module
  docstring).
 - `history` — `deque[HistoryEvent]` capped at
- [`HISTORY_CAP = 200`](hephaestus/automation/pipeline/work_item.py).
+ [`HISTORY_CAP = 200`](../hephaestus/automation/pipeline/work_item.py).
 - `session_ids` — `dict[str, str]`, populated by agent invocations.
 - `labels_cache` — last-known diagnostic label set. Planning and plan-review
  transition gates require a fresh GitHub read; cached labels never authorize
@@ -503,12 +503,12 @@ Key fields:
  handoff (`retry_delay_s`, base-captured `base_branch`, validated audit facts,
  and host-read implementation-reply receipts). It is not a durable
  authorization channel.
-- `result` ([`ItemResult`](hephaestus/automation/pipeline/work_item.py)) —
+- `result` ([`ItemResult`](../hephaestus/automation/pipeline/work_item.py)) —
  final `passed / reason / final_stage` written by
- [`_finish`](hephaestus/automation/pipeline/coordinator.py).
-- `worktree`, `branch` — populated by [`implementation`](hephaestus/automation/pipeline/stages/implementation.py).
+ [`_finish`](../hephaestus/automation/pipeline/coordinator.py).
+- `worktree`, `branch` — populated by [`implementation`](../hephaestus/automation/pipeline/stages/implementation.py).
 
-### [§`StageName`](hephaestus/automation/pipeline/routing.py)
+### [§`StageName`](../hephaestus/automation/pipeline/routing.py)
 
 `str`-flavored `Enum`:
 
@@ -518,14 +518,14 @@ REPO → PLANNING → PLAN_REVIEW → IMPLEMENTATION → PR_REVIEW →
 ```
 
 Declaration order matches
-[`PIPELINE_ORDER`](hephaestus/automation/pipeline/routing.py) and the
-[`_DRAIN_ORDER`](hephaestus/automation/pipeline/coordinator.py) reversed.
+[`PIPELINE_ORDER`](../hephaestus/automation/pipeline/routing.py) and the
+[`_DRAIN_ORDER`](../hephaestus/automation/pipeline/coordinator.py) reversed.
 DO NOT REORDER — the `PipelineScope` contiguity check indexes by position.
 
-### [§`Disposition`](hephaestus/automation/pipeline/routing.py)
+### [§`Disposition`](../hephaestus/automation/pipeline/routing.py)
 
 `str`-flavored `Enum` returned in
-[`StageOutcome.disposition`](hephaestus/automation/pipeline/routing.py):
+[`StageOutcome.disposition`](../hephaestus/automation/pipeline/routing.py):
 
 - `ADVANCE` — route to `ROUTES[stage].next`.
 - `RETRY` — read `payload["retry_delay_s"]`, timer-park (or re-push if
@@ -538,46 +538,46 @@ DO NOT REORDER — the `PipelineScope` contiguity check indexes by position.
 - `FINISH_PASS` / `FINISH_FAIL` — terminal; pass with reason `<note>` /
  fail with reason `<note>`.
 The disposition funnel is exhaustive: every layer in
-[`Disposition`](hephaestus/automation/pipeline/routing.py) has a branch
-in [`_route`](hephaestus/automation/pipeline/coordinator.py), so a new
+[`Disposition`](../hephaestus/automation/pipeline/routing.py) has a branch
+in [`_route`](../hephaestus/automation/pipeline/coordinator.py), so a new
 value would be a static `TypeError` and a safe routing table edit.
 
 ### State-label vocabulary
 
-Defined in [`state_labels.py`](hephaestus/automation/state_labels.py) and
+Defined in [`state_labels.py`](../hephaestus/automation/state_labels.py) and
 imported throughout the pipeline. Seven labels: four mutually exclusive
 planning states, two mutually exclusive implementation-review states, and one
 absolute operator state:
 
 | Label | Group | Authoritative stage |
 |--------------------------------|--------------|---------------------------------|
-| `state:needs-plan` | planner-scope| [`planning.on_enter`](hephaestus/automation/pipeline/stages/planning.py) |
-| `state:plan-no-go` | planner-scope| [`plan_review._eval`](hephaestus/automation/pipeline/stages/plan_review.py) |
-| `state:plan-go` | planner-scope| [`plan_review._eval`](hephaestus/automation/pipeline/stages/plan_review.py) |
-| `state:plan-blocked` | planner-scope| [`plan_review._eval`](hephaestus/automation/pipeline/stages/plan_review.py) |
-| `state:implementation-no-go` | review-scope | [`pr_review._eval`](hephaestus/automation/pipeline/stages/pr_review.py) |
-| `state:implementation-go` | review-scope | [`pr_review._eval`](hephaestus/automation/pipeline/stages/pr_review.py) — **sole authority** |
-| `state:skip` | absolute | operator / exhaustion in [`pr_review`](hephaestus/automation/pipeline/stages/pr_review.py) / [`implementation`](hephaestus/automation/pipeline/stages/implementation.py) |
+| `state:needs-plan` | planner-scope| [`planning.on_enter`](../hephaestus/automation/pipeline/stages/planning.py) |
+| `state:plan-no-go` | planner-scope| [`plan_review._eval`](../hephaestus/automation/pipeline/stages/plan_review.py) |
+| `state:plan-go` | planner-scope| [`plan_review._eval`](../hephaestus/automation/pipeline/stages/plan_review.py) |
+| `state:plan-blocked` | planner-scope| [`plan_review._eval`](../hephaestus/automation/pipeline/stages/plan_review.py) |
+| `state:implementation-no-go` | review-scope | [`pr_review._eval`](../hephaestus/automation/pipeline/stages/pr_review.py) |
+| `state:implementation-go` | review-scope | [`pr_review._eval`](../hephaestus/automation/pipeline/stages/pr_review.py) — **sole authority** |
+| `state:skip` | absolute | operator / exhaustion in [`pr_review`](../hephaestus/automation/pipeline/stages/pr_review.py) / [`implementation`](../hephaestus/automation/pipeline/stages/implementation.py) |
 
 Every **stage-issued** `state:skip` durable write (the `pr_review` and
 `implementation` write paths, plus repo-stage epic tagging) has a
 best-effort `gh_issue_upsert_comment` companion produced via
-[`format_skip_reason_comment`](hephaestus/automation/state_labels.py), using
-the [`SKIP_REASON_MARKER`](hephaestus/automation/state_labels.py) prefix
+[`format_skip_reason_comment`](../hephaestus/automation/state_labels.py), using
+the [`SKIP_REASON_MARKER`](../hephaestus/automation/state_labels.py) prefix
 `<!-- hephaestus-state-skip-reason -->` so the reason survives outside the
 run log (#2264). Epic tagging in
-[`repo._seed_pass`](hephaestus/automation/pipeline/stages/repo.py) is the
+[`repo._seed_pass`](../hephaestus/automation/pipeline/stages/repo.py) is the
 sole sanctioned seeding write: it adds both the skip label and this comment
 before excluding the epic from the rest of the pipeline.
 
-Label colors per [`STATE_LABEL_SPECS`](hephaestus/automation/state_labels.py).
+Label colors per [`STATE_LABEL_SPECS`](../hephaestus/automation/state_labels.py).
 Provisioning script
-([`hephaestus-ensure-state-labels`](scripts/)) creates them on a repo.
+([`hephaestus-ensure-state-labels`](../scripts/)) creates them on a repo.
 
 #### Ordered rank (`_LABEL_RANK`)
 
-Used by [`seeding.py`](hephaestus/automation/pipeline/seeding.py) and
-[`planning.on_enter`](hephaestus/automation/pipeline/stages/planning.py).
+Used by [`seeding.py`](../hephaestus/automation/pipeline/seeding.py) and
+[`planning.on_enter`](../hephaestus/automation/pipeline/stages/planning.py).
 **NEVER use equality.** The at-or-past comparison is the only read the
 gate trusts:
 
@@ -598,7 +598,7 @@ proof permits a bounded sequence (default: five) of individual
 SHA-conditional ordinary REST squash-merge requests. Before a request, a
 read-only, per-fresh-reviewed-head-proof readiness wait may park for up to 15 minutes;
 readiness never authorizes merging, and fresh admission precedes every request
-([`merge_wait.py`](hephaestus/automation/pipeline/stages/merge_wait.py)).
+([`merge_wait.py`](../hephaestus/automation/pipeline/stages/merge_wait.py)).
 
 Plan-review labels are the sole durable authority. Review comments explain and
 audit a decision but never authorize a transition, block a stage, or backfill a
@@ -1088,7 +1088,7 @@ Architectural contract:
 
 ## 6. The ROUTES table — single source of truth
 
-[`ROUTES`](hephaestus/automation/pipeline/routing.py) (and its mirror in
+[`ROUTES`](../hephaestus/automation/pipeline/routing.py) (and its mirror in
 [`docs/architecture.md`](architecture.md))
 is the **single source of truth** for next-stage targets and per-stage
 budgets. Every `routes.py` row and every doc row MUST agree.
@@ -1106,19 +1106,19 @@ budgets. Every `routes.py` row and every doc row MUST agree.
 Budget provenance (cross-check):
 
 - `plan_review_iter = 3`, `pr_review_iter = 3`, and `pr_review_hard = 6`
-  are defined in [`pipeline/routing.py`](hephaestus/automation/pipeline/routing.py),
+  are defined in [`pipeline/routing.py`](../hephaestus/automation/pipeline/routing.py),
   with the latter as the progress-aware extension cap.
 - `clone = 2`, `plan = 2`, `plan_cycles = 2`, `implement = 2`,
  `test_fix = 1`, `merge =
  DEFAULT_DRIVE_GREEN_LOOPS = 5` ←
- [`loop_runner.py LoopConfig.drive_green_loops`](hephaestus/automation/loop_runner.py).
+ [`loop_runner.py LoopConfig.drive_green_loops`](../hephaestus/automation/loop_runner.py).
 - `merge = 5` (CLI default for `--drive-green-loops`,
- [`DEFAULT_DRIVE_GREEN_LOOPS`](hephaestus/automation/pipeline/routing.py))
+ [`DEFAULT_DRIVE_GREEN_LOOPS`](../hephaestus/automation/pipeline/routing.py))
  bounds queue `merge_wait` conditional requests and transport-ambiguity
  retries. Operational readiness waits use a separate 15-minute monotonic
  deadline keyed to the current reviewed-head proof.
 All per-item-lifetime counters live in
-[`WorkItem.attempts`](hephaestus/automation/pipeline/work_item.py);
+[`WorkItem.attempts`](../hephaestus/automation/pipeline/work_item.py);
 they are NEVER reset when an item re-enters a stage, so cross-stage
 regression cycles (e.g. pr_review → implementation) remain
 globally bounded.
@@ -1127,7 +1127,7 @@ globally bounded.
 
 ## 7. Seeding and restart reconstruction
 
-[`seeding.py`](hephaestus/automation/pipeline/seeding.py) is the pure
+[`seeding.py`](../hephaestus/automation/pipeline/seeding.py) is the pure
 classifier the coordinator consults on every restart. It maps
 `(labels, PR existence/state)` to a single entry stage using **ordered
 label rank**:
@@ -1142,12 +1142,12 @@ strands issues already past target.
 
 ### Tri-state PR fetch
 
-[`seed_issue_from_github`](hephaestus/automation/pipeline/seeding.py)
+[`seed_issue_from_github`](../hephaestus/automation/pipeline/seeding.py)
 (or its CLI counterpart
-[`seed_issue`](hephaestus/automation/pipeline/seeding.py)) runs the
+[`seed_issue`](../hephaestus/automation/pipeline/seeding.py)) runs the
 two-lookup PR fetch in a strict order: open first
-([`find_pr_for_issue`](hephaestus/automation/pipeline/seeding.py)),
-then merged ([`find_merged_pr_for_issue`](hephaestus/automation/pipeline/seeding.py)).
+([`find_pr_for_issue`](../hephaestus/automation/pipeline/seeding.py)),
+then merged ([`find_merged_pr_for_issue`](../hephaestus/automation/pipeline/seeding.py)).
 A closed PR is invisible to both lookups and is normalized to
 `pr_number = None` — the classifier then ONLY ever sees a clean
 `{no live PR | open PR | merged PR}` tri-state. Fail-closed: any GitHub
@@ -1170,11 +1170,11 @@ PR-probe failure cannot misclassify toward IMPLEMENTATION).
 
 Epic tagging is the **ONE sanctioned seeding write**. GitHub mutations are
 forbidden in `seeding.py`, so
-[`EpicSkipTagObligation`](hephaestus/automation/pipeline/seeding.py)
+[`EpicSkipTagObligation`](../hephaestus/automation/pipeline/seeding.py)
 is discharged by the coordinator through
-[`ctx.github.skip_epics`](hephaestus/automation/pipeline/stages/base.py)
+[`ctx.github.skip_epics`](../hephaestus/automation/pipeline/stages/base.py)
 BEFORE the exclusion is honored
-([`_seed_pass`](hephaestus/automation/pipeline/coordinator.py)).
+([`_seed_pass`](../hephaestus/automation/pipeline/coordinator.py)).
 
 ### Seeding and re-seed scope
 
@@ -1189,41 +1189,41 @@ BEFORE the exclusion is honored
  repository names are not materialized up front. Linked-issue discovery uses
  100-row REST pages rather than a 500-item
  CLI limit; it does not bulk-scan every open PR
- ([`loop_repo_manager.py`](hephaestus/automation/loop_repo_manager.py)).
+ ([`loop_repo_manager.py`](../hephaestus/automation/loop_repo_manager.py)).
 When `--issues` or `--prs` is set, the resolved `--repos` list is used
 ONLY for context — repo discovery is NOT enqueued, so a scoped run
 cannot reconstruct every open issue in the repo (deliberate scope
 isolation).
 After `coordinator._seed_pass`, if all queues, active leases, source cursors,
 timers, and in-flight jobs are empty,
-[`_reseed_if_converged`](hephaestus/automation/pipeline/coordinator.py)
+[`_reseed_if_converged`](../hephaestus/automation/pipeline/coordinator.py)
 re-seeds up to `--loops` and either exits on a zero-work pass or
 continues.
 
 ### Merge-wait restart semantics
 
 The queue is in-memory: a restart re-seeds normally through the ordinary
-[`classifier`](hephaestus/automation/pipeline/seeding.py) and does not recover
+[`classifier`](../hephaestus/automation/pipeline/seeding.py) and does not recover
 the process-local reviewed-head proof. A direct PR seed or restart therefore
 cannot use a durable implementation-GO label by itself: merge wait first
 requires a confirmed-unarmed read, then returns the PR to review without
 mutating its labels. Other-run auto-merge requests are
-[blocked without adoption or mutation](hephaestus/automation/pipeline/stages/merge_wait.py)
+[blocked without adoption or mutation](../hephaestus/automation/pipeline/stages/merge_wait.py)
 and require operator handling.
 
 ---
 
 ## 8. The worker pool and job contract
 
-[`WorkerPool`](hephaestus/automation/pipeline/worker_pool.py) is the
+[`WorkerPool`](../hephaestus/automation/pipeline/worker_pool.py) is the
 single executor. It receives frozen specs and returns bounded
-[`JobResult`](hephaestus/automation/pipeline/jobs.py) tuples. Workers
+[`JobResult`](../hephaestus/automation/pipeline/jobs.py) tuples. Workers
 never touch WorkItems or stage queues and never perform GitHub API
 mutations.
 
 ### Job kinds
 
-- [`AgentJob`](hephaestus/automation/pipeline/jobs.py) — Claude or
+- [`AgentJob`](../hephaestus/automation/pipeline/jobs.py) — Claude or
  Codex (`agent = resolve_agent(job.agent)`) with
  `prompt_builder(**prompt_kwargs)` composed in-worker.
  `resume_session_id`, when set for a direct runner, selects its persisted
@@ -1234,24 +1234,24 @@ mutations.
  it as a `verify_pr_review_checkout` Git job.
  `sandbox = "read-only"` activates `allowed_tools = "Read,Glob,Grep"`
  and `permission_mode = "dontAsk"` on the Claude call site.
-- [`BuildTestJob`](hephaestus/automation/pipeline/jobs.py) — subprocess
+- [`BuildTestJob`](../hephaestus/automation/pipeline/jobs.py) — subprocess
  argv. Security: argv MUST NOT carry untrusted strings; only the
  coordinator constructs them from vetted templates
  (`PRE_PR_TEST_ARGV` for the pre-PR test gate).
-- [`GitJob`](hephaestus/automation/pipeline/jobs.py) — `op ∈ {clone,
+- [`GitJob`](../hephaestus/automation/pipeline/jobs.py) — `op ∈ {clone,
  sync_checkout, create_worktree, verify_pr_review_checkout, remove_worktree,
  rebase, push, commit_push}`, validated by `__post_init__`. Before a PR-review
  agent job, `verify_pr_review_checkout` receives the worktree path, branch,
  expected snapshot SHA, and PR number. The worker rejects a dirty checkout,
  synchronizes the branch, requires `git rev-parse HEAD` to equal that SHA, and
- checks cleanliness again ([`_git_verify_pr_review_checkout`](hephaestus/automation/pipeline/worker_pool.py)).
-- [`CompactJob`](hephaestus/automation/pipeline/jobs.py) — a best-effort
+ checks cleanliness again ([`_git_verify_pr_review_checkout`](../hephaestus/automation/pipeline/worker_pool.py)).
+- [`CompactJob`](../hephaestus/automation/pipeline/jobs.py) — a best-effort
  `/compact` turn for a persisted Claude, Codex, or Pi session; it never blocks
  the retry lifecycle.
 
 ### Result semantics
 
-[`JobResult.ok = False, value = None, error`](hephaestus/automation/pipeline/jobs.py)
+[`JobResult.ok = False, value = None, error`](../hephaestus/automation/pipeline/jobs.py)
 on any failure (return code != 0, `subprocess.TimeoutExpired`,
 exception). Stdout/stderr tails are trimmed to 4 KiB in the `JobResult`;
 the error message is truncated to 500 chars.
@@ -1260,7 +1260,7 @@ the error message is truncated to 500 chars.
 
 Every non-cancelled `submit()` produces EXACTLY ONE
 `(JobHandle, JobResult)` tuple on the completion queue
-([`_on_future_done`](hephaestus/automation/pipeline/worker_pool.py)).
+([`_on_future_done`](../hephaestus/automation/pipeline/worker_pool.py)).
 Normal job failures are converted to error results in `_run`; anything
 that escapes `future.result()` (exception + process-control escapes
 `KeyboardInterrupt`/`SystemExit`/`GeneratorExit`) is converted to a
@@ -1279,22 +1279,22 @@ and selects exit code 130.
 
 ### Per-repo lock layering
 
-[`_run_git`](hephaestus/automation/pipeline/worker_pool.py) wraps every
+[`_run_git`](../hephaestus/automation/pipeline/worker_pool.py) wraps every
 git operation in two locks:
 
-1. **Outer**: in-process `threading.Lock` per repo ([`_repo_lock`](hephaestus/automation/pipeline/worker_pool.py))
+1. **Outer**: in-process `threading.Lock` per repo ([`_repo_lock`](../hephaestus/automation/pipeline/worker_pool.py))
  — single-thread per process serializes at most one thread per
  repo, sidestepping `flock`'s same-process ambiguity.
 2. **Inner**: cross-process
- [`file_lock`](hephaestus/utils/file_lock.py) at
+ [`file_lock`](../hephaestus/utils/file_lock.py) at
  `<repo_root>/<DEFAULT_STATE_DIR>/locks/git-<repo>.lock`
- ([`_repo_lock_path`](hephaestus/automation/pipeline/worker_pool.py))
+ ([`_repo_lock_path`](../hephaestus/automation/pipeline/worker_pool.py))
  with a bounded wait using interruptible polling.
 Both locks are held for the entire operation because worktrees share
 `.git`.
 
 `sync_checkout` additionally takes the status-safe Git-metadata lock resolved
-by [`WorktreeManager.git_metadata_lock_path`](hephaestus/automation/worktree_manager.py).
+by [`WorktreeManager.git_metadata_lock_path`](../hephaestus/automation/worktree_manager.py).
 For linked worktrees this resolves Git's common directory, so the primary
 checkout and every linked worktree serialize synchronization and worktree
 metadata mutations without leaving an untracked sentinel in the worktree.
@@ -1305,7 +1305,7 @@ from a reusable checkout.
 
 ### Resilience wiring
 
-[`hephaestus.resilience.resilient_call`](hephaestus/resilience/__init__.py)
+[`hephaestus.resilience.resilient_call`](../hephaestus/resilience/__init__.py)
 wraps agent invocation. The retry predicate is
 `retry_predicate=lambda _exc: not self._shutdown.is_set()` — we accept
 the cost of re-running the whole agent session on a transient blip
@@ -1317,13 +1317,13 @@ are NOT retried.
 ### Rate budget + timeout mapping
 
 - `phase_timeout_s` (CLI `--phase-timeout`) bounds each AgentJob at
- [`_submit`](hephaestus/automation/pipeline/coordinator.py), not the
+ [`_submit`](../hephaestus/automation/pipeline/coordinator.py), not the
  whole phase subprocess.
 - `agent_default_timeout()` / `planner_claude_timeout()` /
  `implementer_claude_timeout()` / `pr_reviewer_claude_timeout()` /
  `ci_driver_claude_timeout()` /
  `learn_claude_timeout()` /
- [`...`](hephaestus/automation/agent_config.py) are
+ [`...`](../hephaestus/automation/agent_config.py) are
  phase-specific CLI-time defaults; every per-phase timeout reads
  `HEPH_<PHASE>_AGENT_TIMEOUT` so operators can tune without code
  change.
@@ -1338,15 +1338,15 @@ out-of-band.
 
 | Console script | Stage slice | Entry module |
 |--------------------------------------|-----------------------------------|---------------------------------------------------|
-| `hephaestus-plan-issues` | `planning → plan_review` | [`planner`](hephaestus/automation/planner.py) |
-| `hephaestus-implement-issues` | `implementation → pr_review` | [`implementer`](hephaestus/automation/implementer.py) |
-| `hephaestus-review-prs` | `pr_review` (internal slice) | [`pr_reviewer`](hephaestus/automation/pr_reviewer.py) |
-| `hephaestus-drive-prs-green` | `pr_review → merge_wait` | [`ci_driver`](hephaestus/automation/ci_driver.py) |
-| `hephaestus-merge-prs` | (manual merge-driving, queues disabled) | [`hephaestus.github.pr_merge`](hephaestus/github/pr_merge.py) |
-| `hephaestus-agent-stage` | (one-shot stage invocation) | [`agent_stage`](hephaestus/automation/agent_stage.py) |
+| `hephaestus-plan-issues` | `planning → plan_review` | [`planner`](../hephaestus/automation/planner.py) |
+| `hephaestus-implement-issues` | `implementation → pr_review` | [`implementer`](../hephaestus/automation/implementer.py) |
+| `hephaestus-review-prs` | `pr_review` (internal slice) | [`pr_reviewer`](../hephaestus/automation/pr_reviewer.py) |
+| `hephaestus-drive-prs-green` | `pr_review → merge_wait` | [`ci_driver`](../hephaestus/automation/ci_driver.py) |
+| `hephaestus-merge-prs` | (manual merge-driving, queues disabled) | [`hephaestus.github.pr_merge`](../hephaestus/github/pr_merge.py) |
+| `hephaestus-agent-stage` | (one-shot stage invocation) | [`agent_stage`](../hephaestus/automation/agent_stage.py) |
 
 `--run-pre-pr-tests` is an opt-in queue-runner flag enabling the
-[`implementation`](hephaestus/automation/pipeline/stages/implementation.py)
+[`implementation`](../hephaestus/automation/pipeline/stages/implementation.py)
 pre-PR test gate. Its vetted default is `uv run pytest tests -q --tb=short`;
 programmatic callers can supply `PipelineConfig.pre_pr_test_argv` for a
 different vetted test command.
@@ -1354,7 +1354,7 @@ different vetted test command.
 Three Codex-only flags control per-role reasoning effort:
 `--planner-reasoning-effort {default|low|medium|high|xhigh}` and the
 analogous `--reviewer-reasoning-effort` and `--implementer-reasoning-effort`
-([`_build_parser`](hephaestus/automation/loop_runner.py)). A role-specific
+([`_build_parser`](../hephaestus/automation/loop_runner.py)). A role-specific
 value takes precedence over the selected model alias's `model_reasoning_effort`
 default; `default` deliberately omits the setting so the alias keeps its
 established baseline. These flags are applied only to the Codex provider
@@ -1369,7 +1369,7 @@ controls:
 Each takes `default | low | medium | high | xhigh`. `default` deliberately
 omits Codex's `model_reasoning_effort` setting. When omitted the
 selected model alias's default takes over. The values are injected
-through [`stage_model`](hephaestus/automation/pipeline/stages/base.py),
+through [`stage_model`](../hephaestus/automation/pipeline/stages/base.py),
 which re-cuts the model id with `:effort` for Codex only.
 
 ---
@@ -1378,12 +1378,12 @@ which re-cuts the model id with `:effort` for Codex only.
 
 Observability is **opt-in**: it is built only when
 `PipelineConfig.metrics_port > 0`. The coordinator imports
-[`MetricsRegistry`](hephaestus/observability/metrics.py),
-[`MetricsHTTPServer`](hephaestus/observability/server.py) and
-[`AlertTracker`](hephaestus/observability/alerts.py) lazily inside
+[`MetricsRegistry`](../hephaestus/observability/metrics.py),
+[`MetricsHTTPServer`](../hephaestus/observability/server.py) and
+[`AlertTracker`](../hephaestus/observability/alerts.py) lazily inside
 the constructor so the default construction path keeps its zero-I/O
 import contract
-([`Coordinator.__init__`](hephaestus/automation/pipeline/coordinator.py)).
+([`Coordinator.__init__`](../hephaestus/automation/pipeline/coordinator.py)).
 
 ### Bounded diagnostics and non-authoritative JSONL
 
@@ -1392,9 +1392,9 @@ event deque defaults to 1,024 records, detailed terminal items/ledger/
 preserved-worktree entries default to 128, and the per-repository stage-context
 cache is an LRU capped at `C`. A constant-space terminal summary still
 aggregates the entire run's pass/fail totals after older details are trimmed
-([`PipelineConfig.event_log_capacity`](hephaestus/automation/pipeline/coordinator.py),
-[`PipelineConfig.terminal_detail_capacity`](hephaestus/automation/pipeline/coordinator.py),
-[`Coordinator._record_terminal_result`](hephaestus/automation/pipeline/coordinator.py)).
+([`PipelineConfig.event_log_capacity`](../hephaestus/automation/pipeline/coordinator.py),
+[`PipelineConfig.terminal_detail_capacity`](../hephaestus/automation/pipeline/coordinator.py),
+[`Coordinator._record_terminal_result`](../hephaestus/automation/pipeline/coordinator.py)).
 
 When `event_log_path` is configured, the coordinator also appends diagnostic
 records to JSONL. That file is best-effort: an I/O failure logs a
@@ -1404,7 +1404,7 @@ PR state remain the only restart authority.
 
 ### Gauges
 
-[`_emit_observability_tick`](hephaestus/automation/pipeline/coordinator.py)
+[`_emit_observability_tick`](../hephaestus/automation/pipeline/coordinator.py)
 publishes the following gauges once per coordinator tick. Each gauge
 retains its label series across ticks so a completed job or
 state-transition is rendered as zero, not as stale active work.
@@ -1419,21 +1419,21 @@ state-transition is rendered as zero, not as stale active work.
 
 The `circuit_breaker_snapshot_provider` is **product-layer supplied**;
 the coordinator never imports the resilience capability directly
-([`PipelineConfig.circuit_breaker_snapshot_provider`](hephaestus/automation/pipeline/coordinator.py)).
+([`PipelineConfig.circuit_breaker_snapshot_provider`](../hephaestus/automation/pipeline/coordinator.py)).
 A broken provider is swallowed by a `logger.exception` and treated as
 "no breakers known this tick" — observability must NEVER be able to
 terminate a production automation loop.
 
 ### AlertTracker behavior
 
-[`AlertTracker.observe(snapshot)`](hephaestus/observability/alerts.py) is
+[`AlertTracker.observe(snapshot)`](../hephaestus/observability/alerts.py) is
 called once per tick with the coordinator's
-[`_observability_snapshot`](hephaestus/automation/pipeline/coordinator.py).
+[`_observability_snapshot`](../hephaestus/automation/pipeline/coordinator.py).
 Emitted events drive `hephaestus_pipeline_alert_active` and a best-effort
 `alert_<fired|resolved>` diagnostic event-log entry.
 
 - **Default trigger**: queue-depth threshold is read from
- [`PipelineConfig.alert_queue_depth_threshold`](hephaestus/automation/pipeline/coordinator.py)
+ [`PipelineConfig.alert_queue_depth_threshold`](../hephaestus/automation/pipeline/coordinator.py)
  (int, non-negative; the CLI tool validates this in `[tool.coverage]`-style
  pre-flight before it ever reaches the coordinator). The constructor
  fails fast on a negative input.
@@ -1454,7 +1454,7 @@ represented as ordinary queue-depth pressure.
 
 ### Health endpoint
 
-[`_health_snapshot`](hephaestus/automation/pipeline/coordinator.py)
+[`_health_snapshot`](../hephaestus/automation/pipeline/coordinator.py)
 serves the JSON shape:
 
 ```json
@@ -1478,7 +1478,7 @@ The canonical operator check is
 `hephaestus-automation-loop --dry-run --loops 1 -v`. Stage accessors
 log-and-skip mutators; when a stage requests a job the coordinator
 logs `[dry-run] would <descr>` and ADVANCEs the item instead of
-submitting ([`_run_item`](hephaestus/automation/pipeline/coordinator.py)).
+submitting ([`_run_item`](../hephaestus/automation/pipeline/coordinator.py)).
 `--dry-run --loops 1` validates seed classification and route
 reconstruction end-to-end without consuming rate budget.
 Dry-run also overrides two retry semantics that would otherwise stall:
@@ -1486,11 +1486,11 @@ Dry-run also overrides two retry semantics that would otherwise stall:
 - **RETRY with `retry_delay_s`**: under dry-run a delayed retry waits on
  real-world progress (CI runs, PR merges) the preview will never make,
  so the item finishes with reason `[dry-run] would wait {delay}s`
- ([`_route_retry`](hephaestus/automation/pipeline/coordinator.py)).
+ ([`_route_retry`](../hephaestus/automation/pipeline/coordinator.py)).
 - **FAIL_BACK**: a dry-run mutator never writes the gate labels the
  earlier stage would re-check, so a regression would ping-pong until
  the safety cap; dry-run finishes with reason `[dry-run] would
- fail_back` instead ([`_route_fail_back`](hephaestus/automation/pipeline/coordinator.py)).
+ fail_back` instead ([`_route_fail_back`](../hephaestus/automation/pipeline/coordinator.py)).
 
 ---
 
@@ -1516,24 +1516,24 @@ Exit-code priority is:
 
 - **Coordinator** — pip line's main thread; owns all queues, the
  timer heap, in-flight registry, routing, signal handlers, GitHub
- APIs. See [`coordinator.py`](hephaestus/automation/pipeline/coordinator.py).
+ APIs. See [`coordinator.py`](../hephaestus/automation/pipeline/coordinator.py).
 - **Worker pool** — the executor for agent / build/test / git jobs.
- [`WorkerPool`](hephaestus/automation/pipeline/worker_pool.py).
+ [`WorkerPool`](../hephaestus/automation/pipeline/worker_pool.py).
 - **WorkItem** — single in-memory record moving through the pipeline.
- [`work_item.py`](hephaestus/automation/pipeline/work_item.py).
+ [`work_item.py`](../hephaestus/automation/pipeline/work_item.py).
 - **StageQueue** — FIFO queue for one
- [`StageName`](hephaestus/automation/pipeline/routing.py), owned only
- by the coordinator. [`queues.py`](hephaestus/automation/pipeline/queues.py).
+ [`StageName`](../hephaestus/automation/pipeline/routing.py), owned only
+ by the coordinator. [`queues.py`](../hephaestus/automation/pipeline/queues.py).
 - **CompletionQueue** — the bounded cross-thread payload channel
  (`queue.Queue[(JobHandle, JobResult)]`, capacity `C`). Event latches carry
  wake and saturation signals without queue payloads.
- [`queues.py`](hephaestus/automation/pipeline/queues.py).
+ [`queues.py`](../hephaestus/automation/pipeline/queues.py).
 - **Durable journal** — GitHub labels, comments, PR state, and
  `ArmingStateStore` records. Restart reconstruction reads this;
  nothing else.
 - **Timer-park** — non-blocking retry/backoff by pushing an item onto
  the coordinator timer heap
- ([`_timer_park`](hephaestus/automation/pipeline/coordinator.py)).
+ ([`_timer_park`](../hephaestus/automation/pipeline/coordinator.py)).
 - **Resumable** — interrupt outcome. `ItemResult.passed = False`,
  `reason = "resumable at <stage>"`.
 - **At-or-past** — label-rank comparison that allows an item to
@@ -1545,13 +1545,13 @@ Exit-code priority is:
  on that SHA; it rechecks the proof before writing the GO label. `merge_wait`
  compares that proof with the confirmed-unarmed live PR and issues a normal
  SHA-conditional merge rather than arming or polling auto-merge.
-- **Skip-reason marker** — the `<!-- hephaestus-state-skip-reason -->` HTML-comment marker ([`SKIP_REASON_MARKER`](hephaestus/automation/state_labels.py)) that prefixes every `state:skip` reason-comment body produced by [`format_skip_reason_comment`](hephaestus/automation/state_labels.py), so a repo reader can deterministically trace the automated skip reason.
-- **File-system loader** — the Jinja `FileSystemLoader` resolved from `__file__`-relative paths in [`prompts/catalog.py`](hephaestus/prompts/catalog.py); deliberately NOT `PackageLoader` to avoid importlib editable-install staleness (#2308).
-- **Advise-skipped breadcrumb** — the [`advise_skipped(reason)`](hephaestus/automation/advise_runner.py) marker string returned by [`run_advise`](hephaestus/automation/advise_runner.py) when Mnemosyne is unavailable, so a stage aborts as `SKIP` rather than failing; the reason is forwarded verbatim from [`resolve_marketplace`](hephaestus/automation/advise_runner.py) (e.g. `clone_failed`, `manifest_missing`).
-- **Tool scope** — the explicit `(allowed_tools, permission_mode)` pair in [`AGENT_TOOL_SCOPES`](hephaestus/automation/pipeline/tool_scopes.py) for one of the 9 pipeline agent roles (advise, planner, plan-reviewer, implementer, pr-reviewer, comment-classifier, address-review, ci-driver, learnings); unmapped roles fall through to the read-only [`DEFAULT_TOOL_SCOPE`](hephaestus/automation/pipeline/tool_scopes.py) per the fail-closed security contract (#2319).
+- **Skip-reason marker** — the `<!-- hephaestus-state-skip-reason -->` HTML-comment marker ([`SKIP_REASON_MARKER`](../hephaestus/automation/state_labels.py)) that prefixes every `state:skip` reason-comment body produced by [`format_skip_reason_comment`](../hephaestus/automation/state_labels.py), so a repo reader can deterministically trace the automated skip reason.
+- **File-system loader** — the Jinja `FileSystemLoader` resolved from `__file__`-relative paths in [`prompts/catalog.py`](../hephaestus/prompts/catalog.py); deliberately NOT `PackageLoader` to avoid importlib editable-install staleness (#2308).
+- **Advise-skipped breadcrumb** — the [`advise_skipped(reason)`](../hephaestus/automation/advise_runner.py) marker string returned by [`run_advise`](../hephaestus/automation/advise_runner.py) when Mnemosyne is unavailable, so a stage aborts as `SKIP` rather than failing; the reason is forwarded verbatim from [`resolve_marketplace`](../hephaestus/automation/advise_runner.py) (e.g. `clone_failed`, `manifest_missing`).
+- **Tool scope** — the explicit `(allowed_tools, permission_mode)` pair in [`AGENT_TOOL_SCOPES`](../hephaestus/automation/pipeline/tool_scopes.py) for one of the 9 pipeline agent roles (advise, planner, plan-reviewer, implementer, pr-reviewer, comment-classifier, address-review, ci-driver, learnings); unmapped roles fall through to the read-only [`DEFAULT_TOOL_SCOPE`](../hephaestus/automation/pipeline/tool_scopes.py) per the fail-closed security contract (#2319).
 - **Reasoning effort** — explicit Codex-only `--<role>-reasoning-effort` CLI flag value (`default|low|medium|high|xhigh`) mapped onto Codex's `model_reasoning_effort`; `default` omits the setting, `low|medium|high|xhigh` override per-role, and omitted flags preserve the model-alias default (#2287).
-- **Review posture** — the falsification-first rubric prefix [`REVIEW POSTURE`](hephaestus/prompts/templates/default/review_rubrics/reviewer.j2); combined with anti-inflation grading rules, the max grade is `C` for any dimension the reviewer did not actively attempt to falsify (#2302).
-- **Push retry** — [`_git_retry(item, "commit_push failed")`](hephaestus/automation/pipeline/stages/implementation.py) re-attempts a transient push before PR_CREATE; the retry is budget-untouched so the next `implement` attempt remains available (#2274).
+- **Review posture** — the falsification-first rubric prefix [`REVIEW POSTURE`](../hephaestus/prompts/templates/default/review_rubrics/reviewer.j2); combined with anti-inflation grading rules, the max grade is `C` for any dimension the reviewer did not actively attempt to falsify (#2302).
+- **Push retry** — [`_git_retry(item, "commit_push failed")`](../hephaestus/automation/pipeline/stages/implementation.py) re-attempts a transient push before PR_CREATE; the retry is budget-untouched so the next `implement` attempt remains available (#2274).
 
 - **Review-thread GO gate** — every unresolved review thread, regardless of
  severity marker, prevents a `pr_review` round from advancing. Severity

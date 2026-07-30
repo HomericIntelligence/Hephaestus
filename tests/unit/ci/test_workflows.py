@@ -1075,6 +1075,16 @@ class TestAutomationRuntimeInstall:
         assert "uv sync --all-groups --all-extras --locked" in unit_section
         assert "uv sync --all-groups --all-extras --locked" in integration_section
 
+    def test_required_lint_validates_documentation_links(self) -> None:
+        """The required lint job must fail when repository documentation links break."""
+        workflow = yaml.safe_load(REQUIRED_WORKFLOW.read_text(encoding="utf-8"))
+        steps = workflow["jobs"]["lint"]["steps"]
+        link_step = next(
+            step for step in steps if step.get("name") == "Validate documentation links"
+        )
+
+        assert link_step["run"] == "uv run hephaestus-validate-links docs --repo-root ."
+
     def test_shell_tests_install_just_before_running_bats(self) -> None:
         """The BATS suite exercises ``just --list`` on a bare runner."""
         workflow = yaml.safe_load(REQUIRED_WORKFLOW.read_text(encoding="utf-8"))

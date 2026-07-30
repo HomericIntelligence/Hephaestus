@@ -54,7 +54,7 @@ def test_architecture_md_documents_current_drive_green_scope() -> None:
 
     drive_green_row = (
         "| `hephaestus-drive-prs-green` | `pr_review → merge_wait` | "
-        "[`ci_driver`](hephaestus/automation/ci_driver.py) |"
+        "[`ci_driver`](../hephaestus/automation/ci_driver.py) |"
     )
     assert drive_green_row in text
     assert "| `hephaestus-merge-prs` | (manual merge-driving, queues disabled) |" in text
