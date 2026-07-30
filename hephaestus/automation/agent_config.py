@@ -556,6 +556,35 @@ def session_jsonl_path(uuid_str: str, cwd: Path) -> Path:
     return Path.home() / ".claude" / "projects" / encoded / f"{uuid_str}.jsonl"
 
 
+def _is_expected_non_repository_error(exc: subprocess.CalledProcessError, cwd: Path) -> bool:
+    """Return whether *exc* is Git's ordinary no-checkout result for *cwd*.
+
+    A corrupt ``.git`` entry can produce Git's generic "not a git repository"
+    diagnostic too.  Treat that as a discovery failure rather than an ordinary
+    non-repository directory: resuming must fail closed instead of silently
+    creating a second deterministic session.
+    """
+    expected_stderr = "fatal: not a git repository (or any of the parent directories): .git"
+    if (
+        exc.returncode != 128
+        or not isinstance(exc.stderr, str)
+        or exc.stderr.strip().lower() != expected_stderr
+    ):
+        return False
+
+    for directory in (cwd, *cwd.parents):
+        try:
+            (directory / ".git").lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as marker_error:
+            raise RuntimeError(
+                f"unable to inspect Git metadata while discovering {cwd}"
+            ) from marker_error
+        return False
+    return True
+
+
 def _registered_worktree_roots(cwd: Path) -> tuple[Path, ...]:
     """Return worktree roots registered to cwd's exact Git repository."""
     resolved_cwd = cwd.resolve()
@@ -575,12 +604,7 @@ def _registered_worktree_roots(cwd: Path) -> tuple[Path, ...]:
         # or corrupt metadata). Only the former is an exact-cwd transcript
         # owner; silently treating the latter as non-repository would recreate
         # sessions after a Git discovery failure.
-        stderr = exc.stderr
-        if (
-            exc.returncode == 128
-            and isinstance(stderr, str)
-            and "not a git repository" in stderr.lower()
-        ):
+        if _is_expected_non_repository_error(exc, resolved_cwd):
             return (resolved_cwd,)
         raise RuntimeError(f"unable to determine whether {resolved_cwd} is a Git checkout") from exc
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -754,9 +778,28 @@ def resolve_session_jsonl_path(uuid_str: str, cwd: Path) -> Path | None:
     transcripts whose recorded cwd belongs to the current checkout root. This
     preserves the session across replacement while rejecting transcripts from
     another checkout that collide under Claude's lossy cwd path encoding.
+
+    The caller's exact cwd remains available without Git discovery. A transcript
+    recorded only for that cwd can be resumed directly; if wider worktree-family
+    discovery fails, returning ``None`` still lets the caller create its exact-cwd
+    session without trusting a transcript from another checkout.
     """
-    roots = set(_registered_worktree_roots(cwd))
-    common_dir = _git_common_dir(cwd)
+    resolved_cwd = cwd.resolve()
+    exact = session_jsonl_path(uuid_str, resolved_cwd)
+    if exact.is_file() and _recorded_transcript_cwds(exact) == {resolved_cwd}:
+        return exact
+
+    try:
+        roots = set(_registered_worktree_roots(resolved_cwd))
+        common_dir = _git_common_dir(resolved_cwd)
+    except RuntimeError as exc:
+        logger.warning(
+            "Git worktree discovery unavailable for %s; using exact-cwd session availability: %s",
+            resolved_cwd,
+            exc,
+        )
+        return None
+
     existing = sorted(
         (
             candidate

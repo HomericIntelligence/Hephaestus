@@ -114,6 +114,51 @@ class TestCreateThenResume:
         assert "--session-id" not in argv
         assert "--name" not in argv
 
+    @pytest.mark.parametrize(
+        ("cwd_suffix", "transcript_exists", "expected_mode"),
+        [
+            (Path("owner/Repo"), False, "--session-id"),
+            (Path("owner/Repo"), True, "--resume"),
+            (Path("owner/Repo/build/.worktrees/issue-1"), False, "--session-id"),
+            (Path("owner/Repo/build/.worktrees/issue-1"), True, "--resume"),
+        ],
+    )
+    def test_exact_cwd_availability_survives_git_discovery_failure_across_callers(
+        self,
+        stub_run: MagicMock,
+        fake_home: Path,
+        cwd_suffix: Path,
+        transcript_exists: bool,
+        expected_mode: str,
+    ) -> None:
+        """Repo-root and worktree callers can create or resume without Git discovery."""
+        cwd = fake_home / cwd_suffix
+        cwd.mkdir(parents=True)
+        sid = session_uuid("Repo", 1, AGENT_PLANNER, "sonnet")
+        if transcript_exists:
+            _make_existing_jsonl(fake_home, cwd, sid)
+
+        with patch.object(
+            agent_config,
+            "_registered_worktree_roots",
+            side_effect=RuntimeError("transient Git discovery failure"),
+        ):
+            invoke_claude_with_session(
+                repo="Repo",
+                issue=1,
+                agent=AGENT_PLANNER,
+                prompt="hi",
+                model="sonnet",
+                cwd=cwd,
+            )
+
+        argv = _argv(stub_run.call_args)
+        assert expected_mode in argv
+        if expected_mode == "--resume":
+            assert "--session-id" not in argv
+        else:
+            assert "--resume" not in argv
+
     def test_registered_worktree_resumes_repo_root_transcript(
         self,
         fake_home: Path,
