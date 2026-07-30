@@ -23,12 +23,16 @@ import json
 import logging
 import traceback
 from datetime import datetime, timezone
+from threading import Lock
 from typing import TYPE_CHECKING, Any
+from weakref import WeakKeyDictionary
 
 if TYPE_CHECKING:
     from hephaestus._localization import Localizer
 
 _LOCALIZER_RECORD_ATTR = "_hephaestus_localizer"
+_RECORD_LOCALIZERS: WeakKeyDictionary[logging.LogRecord, Localizer] = WeakKeyDictionary()
+_RECORD_LOCALIZERS_LOCK = Lock()
 
 # Fields that are reserved for the formatter and cannot be overridden by
 # context or extra data.  If a context key collides with one of these, it
@@ -36,6 +40,18 @@ _LOCALIZER_RECORD_ATTR = "_hephaestus_localizer"
 RESERVED_FIELDS: frozenset[str] = frozenset(
     {"timestamp", "level", "logger", "message", "exception", "stack_info"}
 )
+
+
+def _capture_record_localizer(record: logging.LogRecord, localizer: Localizer) -> None:
+    """Associate localization state without reserving a public record field."""
+    with _RECORD_LOCALIZERS_LOCK:
+        _RECORD_LOCALIZERS[record] = localizer
+
+
+def _get_record_localizer(record: logging.LogRecord) -> Localizer | None:
+    """Return localization state captured when *record* entered our handlers."""
+    with _RECORD_LOCALIZERS_LOCK:
+        return _RECORD_LOCALIZERS.get(record)
 
 
 class _LocalizedFormatter(logging.Formatter):
@@ -67,7 +83,7 @@ class _LocalizedFormatter(logging.Formatter):
         """Format a translated shallow copy without mutating the record."""
         copied = copy.copy(record)
         if isinstance(copied.msg, str):
-            localizer = getattr(copied, _LOCALIZER_RECORD_ATTR, self._localizer)
+            localizer = _get_record_localizer(record) or self._localizer
             copied.msg = localizer.template(copied.msg)
         return super().format(copied)
 
@@ -134,4 +150,4 @@ class JsonFormatter(logging.Formatter):
 # neither should be promoted to a top-level JSON key via the extras path.
 _DEFAULT_RECORD_ATTRS: frozenset[str] = frozenset(
     logging.LogRecord("", 0, "", 0, None, None, None).__dict__.keys()
-) | {"asctime", "stack_info", _LOCALIZER_RECORD_ATTR}
+) | {"asctime", "stack_info"}

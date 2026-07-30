@@ -8,11 +8,12 @@ from datetime import datetime
 
 import pytest
 
-from hephaestus.cli.localization import using_localizer
+from hephaestus.cli.localization import Localizer, using_localizer
 from hephaestus.logging.formatters import (
     _LOCALIZER_RECORD_ATTR,
     RESERVED_FIELDS,
     JsonFormatter,
+    _capture_record_localizer,
     _LocalizedFormatter,
 )
 
@@ -118,7 +119,7 @@ class TestJsonFormatterExtras:
     ) -> None:
         """The internal record localizer is not emitted as a JSON extra."""
         record = make_record()
-        setattr(record, _LOCALIZER_RECORD_ATTR, object())
+        _capture_record_localizer(record, Localizer())
 
         assert set(json.loads(formatter.format(record))) == {
             "timestamp",
@@ -126,6 +127,14 @@ class TestJsonFormatterExtras:
             "logger",
             "message",
         }
+
+    def test_caller_field_named_like_localizer_is_preserved(
+        self, formatter: JsonFormatter, make_record: Callable[..., logging.LogRecord]
+    ) -> None:
+        """An arbitrary caller extra cannot be mistaken for internal state."""
+        record = make_record(extra={_LOCALIZER_RECORD_ATTR: "caller-value"})
+
+        assert json.loads(formatter.format(record))[_LOCALIZER_RECORD_ATTR] == "caller-value"
 
     def test_reserved_field_collision_prefixed(
         self, formatter: JsonFormatter, make_record: Callable[..., logging.LogRecord]
@@ -269,3 +278,12 @@ class TestLocalizedFormatter:
         """Non-string logging payloads retain standard formatter behavior."""
         record = logging.LogRecord("test", logging.INFO, "test.py", 1, 42, (), None)
         assert _LocalizedFormatter("%(message)s").format(record) == "42"
+
+    def test_caller_field_named_like_localizer_cannot_break_plain_output(self) -> None:
+        """A same-named caller extra falls back to the formatter's localizer."""
+        record = logging.LogRecord("test", logging.INFO, "test.py", 1, "Ready", (), None)
+        setattr(record, _LOCALIZER_RECORD_ATTR, "caller-value")
+        _capture_record_localizer(record, Localizer({"Ready": "Prêt"}))
+        formatter = _LocalizedFormatter("%(message)s")
+
+        assert formatter.format(record) == "Prêt"

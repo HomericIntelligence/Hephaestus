@@ -22,6 +22,7 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, resolve_repo_root
 from hephaestus.io.toml import import_tomllib
 
@@ -214,10 +215,10 @@ def find_violations(
 def format_report(findings: list[TierDocFinding]) -> str:
     """Render *findings* as a human-readable text report."""
     if not findings:
-        return "OK: every [project.scripts] entry has a documented tier in COMPATIBILITY.md."
-    lines = [f"FAIL: {len(findings)} tier-doc violation(s):"]
+        return text("OK: every [project.scripts] entry has a documented tier in COMPATIBILITY.md.")
+    lines = [text("FAIL: %(count)d tier-doc violation(s):", count=len(findings))]
     for f in findings:
-        lines.append(f"  [{f.kind}] {f.detail}")
+        lines.append(text("  [%(kind)s] %(detail)s", kind=f.kind, detail=f.detail))
     return "\n".join(lines)
 
 

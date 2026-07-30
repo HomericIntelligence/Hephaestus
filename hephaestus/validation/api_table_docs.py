@@ -25,6 +25,7 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, resolve_repo_root
 
 # Modules whose API tables are completeness-guarded. Add a name here only
@@ -175,9 +176,9 @@ def find_violations(
 def format_report(findings: list[ApiTableFinding]) -> str:
     """Render *findings* as a human-readable text report."""
     if not findings:
-        return "OK: every guarded module's __all__ is fully documented in COMPATIBILITY.md."
-    lines = [f"FAIL: {len(findings)} API-table violation(s):"]
-    lines.extend(f"  [{f.kind}] {f.detail}" for f in findings)
+        return text("OK: every guarded module's __all__ is fully documented in COMPATIBILITY.md.")
+    lines = [text("FAIL: %(count)d API-table violation(s):", count=len(findings))]
+    lines.extend(text("  [%(kind)s] %(detail)s", kind=f.kind, detail=f.detail) for f in findings)
     return "\n".join(lines)
 
 

@@ -24,7 +24,11 @@ from pathlib import Path
 from typing import Any, Literal
 
 from hephaestus.constants import LOG_FORMAT
-from hephaestus.logging.formatters import _LOCALIZER_RECORD_ATTR, JsonFormatter, _LocalizedFormatter
+from hephaestus.logging.formatters import (
+    JsonFormatter,
+    _capture_record_localizer,
+    _LocalizedFormatter,
+)
 
 # Module-level lock protects the check-then-add TOCTOU in get_logger()
 _handler_setup_lock = threading.Lock()
@@ -44,10 +48,9 @@ class _LocalizingFilter(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         """Attach the emission-context localizer without global logging hooks."""
-        if not hasattr(record, _LOCALIZER_RECORD_ATTR):
-            from hephaestus._localization import get_localizer
+        from hephaestus._localization import get_localizer
 
-            setattr(record, _LOCALIZER_RECORD_ATTR, get_localizer())
+        _capture_record_localizer(record, get_localizer())
         return True
 
 

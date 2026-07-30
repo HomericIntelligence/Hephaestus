@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 import hephaestus.validation.unlinked_todo as unlinked_todo
+from hephaestus.cli.localization import using_localizer
 from hephaestus.utils.helpers import get_repo_root
 
 
@@ -112,6 +113,23 @@ class TestMain:
         rc = unlinked_todo.main(["--json", "--repo-root", str(tmp_path)])
         assert rc == 1
         assert '"violations"' in capsys.readouterr().out
+
+    def test_human_report_localizes_without_changing_json(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Non-literal report output uses the catalog while JSON remains stable."""
+        (tmp_path / "hephaestus").mkdir()
+        (tmp_path / "hephaestus" / "bad.py").write_text("# TODO nope\n")
+        source = "FAIL: %(count)d unlinked marker(s):"
+        with using_localizer({source: "ÉCHEC : %(count)d marqueur(s) sans lien :"}):
+            assert unlinked_todo.main(["--repo-root", str(tmp_path)]) == 1
+        assert "ÉCHEC : 1 marqueur(s) sans lien" in capsys.readouterr().out
+
+        with using_localizer({source: "ÉCHEC : %(count)d marqueur(s) sans lien :"}):
+            assert unlinked_todo.main(["--json", "--repo-root", str(tmp_path)]) == 1
+        json_output = capsys.readouterr().out
+        assert '"violations"' in json_output
+        assert "ÉCHEC" not in json_output
 
     def test_main_repo_root_default(
         self,
