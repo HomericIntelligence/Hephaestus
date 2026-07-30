@@ -2018,6 +2018,26 @@ class PipelineGitHub:
                     )
                 )
                 if post_create_conflicts:
+                    # This draft is proven to be this invocation's exact,
+                    # still-empty PENDING review.  Retain every competing
+                    # review, but remove our own orphan before issuing the
+                    # terminal diagnostic so a fresh pass is not blocked by
+                    # an unreported local draft.
+                    if (
+                        confirmed_pr_id != pr_id
+                        or post_create_review != (review_id, "PENDING")
+                        or not self._discard_current_implementation_reply_review(
+                            pr_number,
+                            expected_head_sha,
+                            review_body,
+                            pr_id,
+                            review_id,
+                        )
+                    ):
+                        return ImplementationThreadReplyResult(
+                            retryable_thread_ids=candidate_ids,
+                            retryable=True,
+                        )
                     return ImplementationThreadReplyResult(
                         blocked_thread_ids=candidate_ids,
                         conflicting_current_review_ids=post_create_conflicts,

@@ -886,6 +886,7 @@ class TestAllThreadReplyAndReviewerResolution:
         reviews: list[dict[str, Any]] = []
         added_replies: list[str] = []
         submitted_reviews: list[str] = []
+        deleted_reviews: list[str] = []
 
         def graphql(query: str, **fields: str | int) -> dict[str, Any]:
             if "reviews(first:100" in query:
@@ -943,6 +944,14 @@ class TestAllThreadReplyAndReviewerResolution:
             if "submitPullRequestReview" in query:
                 submitted_reviews.append(str(fields["reviewId"]))
                 pytest.fail("must not submit a competing batch")
+            if "deletePullRequestReview" in query:
+                review_id = str(fields["reviewId"])
+                assert review_id == "worker-b-draft"
+                deleted_reviews.append(review_id)
+                reviews[:] = [review for review in reviews if review["id"] != review_id]
+                return {
+                    "data": {"deletePullRequestReview": {"pullRequestReview": {"id": review_id}}}
+                }
             raise AssertionError(query)
 
         monkeypatch.setattr(
@@ -964,6 +973,7 @@ class TestAllThreadReplyAndReviewerResolution:
         assert result.conflicting_current_review_ids == ("worker-a-review",)
         assert added_replies == []
         assert submitted_reviews == []
+        assert deleted_reviews == ["worker-b-draft"]
 
     def test_submitted_batch_remains_a_receipt_beside_an_unrelated_draft(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
