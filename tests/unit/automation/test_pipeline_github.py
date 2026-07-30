@@ -868,8 +868,102 @@ class TestAllThreadReplyAndReviewerResolution:
 
         assert result.replied_thread_ids == ()
         assert result.blocked_thread_ids == (thread["id"],)
-        assert result.conflicting_pending_draft_ids == ("foreign-pending-draft",)
+        assert result.conflicting_current_review_ids == ("foreign-pending-draft",)
         assert result.retryable is False
+
+    def test_cross_checkout_submitted_batch_between_inventory_and_create_is_a_conflict(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A competing completed batch prevents this worker from adding a draft reply."""
+        thread = _external_reviewer_thread()
+        reply = "Fixed the missing guard."
+        head_sha = "a" * 40
+        adapter = PipelineGitHubForTest("org", dry_run=False, repo_root=tmp_path / "two")
+        reply_body = adapter._implementation_thread_reply_body(7, head_sha, thread["id"], reply)
+        submitted_body = adapter._implementation_reply_review_body(
+            7, head_sha, {thread["id"]: reply_body}, "c" * 32
+        )
+        reviews: list[dict[str, Any]] = []
+        added_replies: list[str] = []
+        submitted_reviews: list[str] = []
+
+        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+            if "reviews(first:100" in query:
+                return {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "id": "pr-7",
+                                "state": "OPEN",
+                                "headRefOid": head_sha,
+                                "autoMergeRequest": None,
+                                "reviews": {
+                                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                    "nodes": reviews,
+                                },
+                            }
+                        }
+                    }
+                }
+            if "addPullRequestReview(input" in query:
+                batch_body = str(fields["body"])
+                # Worker A submits a distinct nonce batch after worker B's
+                # inventory but before B has created its own draft.
+                reviews[:] = [
+                    {
+                        "id": "worker-a-review",
+                        "state": "COMMENTED",
+                        "body": submitted_body,
+                        "viewerDidAuthor": True,
+                        "commit": {"oid": head_sha},
+                    },
+                    {
+                        "id": "worker-b-draft",
+                        "state": "PENDING",
+                        "body": batch_body,
+                        "viewerDidAuthor": True,
+                        "commit": {"oid": head_sha},
+                    },
+                ]
+                return {
+                    "data": {
+                        "addPullRequestReview": {
+                            "pullRequestReview": {
+                                "id": "worker-b-draft",
+                                "state": "PENDING",
+                                "body": batch_body,
+                                "commit": {"oid": head_sha},
+                            }
+                        }
+                    }
+                }
+            if "addPullRequestReviewThreadReply" in query:
+                added_replies.append(str(fields["threadId"]))
+                pytest.fail("must not add a reply after a competing submitted batch")
+            if "submitPullRequestReview" in query:
+                submitted_reviews.append(str(fields["reviewId"]))
+                pytest.fail("must not submit a competing batch")
+            raise AssertionError(query)
+
+        monkeypatch.setattr(
+            adapter,
+            "_review_thread_snapshot",
+            lambda _pr, _thread: _open_thread_snapshot(thread),
+        )
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+
+        result = adapter.post_implementation_thread_replies(
+            7,
+            expected_head_sha=head_sha,
+            threads=[thread],
+            replies={thread["id"]: reply},
+        )
+
+        assert result.replied_thread_ids == ()
+        assert result.blocked_thread_ids == (thread["id"],)
+        assert result.conflicting_current_review_ids == ("worker-a-review",)
+        assert added_replies == []
+        assert submitted_reviews == []
 
     def test_submitted_batch_remains_a_receipt_beside_an_unrelated_draft(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch

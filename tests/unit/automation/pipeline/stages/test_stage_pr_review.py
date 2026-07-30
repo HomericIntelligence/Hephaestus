@@ -1361,11 +1361,15 @@ class TestReviewThreadLifecycle:
         thread["body"] = "mutated after the handoff"
         assert handoff["threads"][0]["body"] != thread["body"]
         assert (
-            _implementation_reply_handoff("not-a-sha", [self._thread("thread-1", 3, "x")], {})
+            _implementation_reply_handoff(
+                "not-a-sha", [self._thread("thread-1", 3, "x")], {}, "b" * 32
+            )
             is None
         )
-        assert _implementation_reply_handoff("a" * 40, ["not-a-thread"], {}) is None
-        assert _implementation_reply_handoff("a" * 40, [{"id": ""}], {"": "fixed"}) is None
+        assert _implementation_reply_handoff("a" * 40, ["not-a-thread"], {}, "b" * 32) is None
+        assert (
+            _implementation_reply_handoff("a" * 40, [{"id": ""}], {"": "fixed"}, "b" * 32) is None
+        )
 
     def test_validation_receipts_require_one_complete_immutable_thread_snapshot(self) -> None:
         """Validation binds a thread decision to its exact host-read reply."""
@@ -2315,7 +2319,7 @@ class TestEvalVerdicts:
         item = make_work_item(issue=1, pr=1001, state="EVAL")
         item.payload["implementation_reply_batch_conflict"] = {
             "head_sha": "a" * 40,
-            "draft_ids": ("draft-one", "draft-two"),
+            "review_ids": ("draft-one", "draft-two"),
         }
 
         result = stage.step(item, ctx)
@@ -2327,33 +2331,38 @@ class TestEvalVerdicts:
         assert any(
             name == "gh_issue_upsert_comment"
             and args[0] == 1001
-            and args[1].startswith("<!-- hephaestus-implementation-reply-draft-conflict:")
+            and args[1].startswith(
+                "<!-- hephaestus-implementation-reply-duplicate-review-conflict:"
+            )
             for name, args in github.mutation_log
         )
         body = github.comments[1001][-1]
-        assert "No review thread was resolved and no current draft was deleted." in body
+        assert "No review thread was resolved and no conflicting review was mutated." in body
 
-    def test_pending_reply_draft_conflict_is_terminally_diagnosed(
+    def test_current_reply_review_conflict_is_terminally_diagnosed(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A foreign pending draft is retained and explained, never retried as transport failure."""
+        """A foreign current review is retained and explained, never retried as transport failure.
+
+        The terminal record covers both pending drafts and completed conflicting batches.
+        """
         stage = PrReviewStage()
         github = FakeStageGitHub()
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, pr=1001, state="EVAL")
-        item.payload["implementation_reply_pending_draft_conflict"] = {
+        item.payload["implementation_reply_review_conflict"] = {
             "head_sha": "a" * 40,
-            "draft_ids": ("foreign-pending-draft",),
+            "review_ids": ("foreign-pending-draft",),
         }
 
         result = stage.step(item, ctx)
 
         assert result == StageOutcome(
-            Disposition.FINISH_FAIL, "implementation_reply_draft_conflict"
+            Disposition.FINISH_FAIL, "implementation_reply_review_conflict"
         )
         assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
         body = github.comments[1001][-1]
-        assert "No review thread was resolved and no current draft was deleted." in body
+        assert "No review thread was resolved and no conflicting review was mutated." in body
         assert "foreign-pending-draft" in body
 
     def test_on_enter_stands_down_without_auto_merge_mutation(
@@ -4159,6 +4168,33 @@ class TestRealCommitGate:
         assert github.reply_attempts == 2
         assert "pending_implementation_reply_handoff" not in item.payload
         assert item.payload["push_no_commit"] is False
+
+    def test_retry_rejects_handoff_without_a_persisted_batch_nonce(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A recovered handoff cannot mint a replacement ownership nonce."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub()
+        item = make_work_item(issue=40, pr=1001, state="EVAL")
+        item.payload["pending_implementation_reply_handoff"] = {
+            "head_sha": "a" * 40,
+            "threads": [
+                {
+                    "id": "thread-1",
+                    "path": "a.py",
+                    "line": 3,
+                    "side": "RIGHT",
+                    "body": "fix this",
+                    "comments": [{"id": "comment-1", "author": "reviewer", "body": "fix this"}],
+                }
+            ],
+            "replies": {"thread-1": "Fixed the guard."},
+        }
+
+        assert stage.step(item, make_ctx(github=github)) == StageOutcome(
+            Disposition.FINISH_FAIL, "implementation_reply_handoff_invalid"
+        )
+        assert github.mutation_log == []
 
     def test_reply_handoff_waits_for_post_push_head_visibility(
         self, make_ctx: Any, make_work_item: Any

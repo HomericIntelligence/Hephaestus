@@ -136,8 +136,8 @@ class ImplementationThreadReplyResult:
     outcome is transport/read-ambiguous. An ordinary ``blocked_thread_ids``
     result means the saved snapshot is stale and must return through a fresh
     reviewer pass rather than replay. ``duplicate_current_draft_ids`` and
-    ``conflicting_pending_draft_ids`` are terminal ownership conflicts; no
-    current draft is deleted and the stage records a durable no-go diagnostic
+    ``conflicting_current_review_ids`` are terminal ownership conflicts; no
+    current review is mutated and the stage records a durable no-go diagnostic
     instead of retrying into its handoff cap.
     """
 
@@ -147,7 +147,7 @@ class ImplementationThreadReplyResult:
     retryable_thread_ids: tuple[str, ...] = ()
     retryable: bool = False
     duplicate_current_draft_ids: tuple[str, ...] = ()
-    conflicting_pending_draft_ids: tuple[str, ...] = ()
+    conflicting_current_review_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

@@ -284,7 +284,7 @@ _PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES = (
     "pending_implementation_reply_handoff_visibility_retries"
 )
 _IMPLEMENTATION_REPLY_BATCH_CONFLICT = "implementation_reply_batch_conflict"
-_IMPLEMENTATION_REPLY_PENDING_DRAFT_CONFLICT = "implementation_reply_pending_draft_conflict"
+_IMPLEMENTATION_REPLY_REVIEW_CONFLICT = "implementation_reply_review_conflict"
 _IMPLEMENTATION_REPLY_BATCH_NONCE_RE = re.compile(r"[0-9a-f]{32}")
 
 #: Round-scoped payload keys cleared at REVIEW_WAIT submission so a failed
@@ -540,7 +540,7 @@ def _implementation_reply_handoff(
     head_sha: object,
     threads: object,
     replies: object,
-    batch_nonce: object | None = None,
+    batch_nonce: object,
 ) -> dict[str, Any] | None:
     """Return a replay-safe outstanding implementation-reply handoff.
 
@@ -549,8 +549,6 @@ def _implementation_reply_handoff(
     nor an authority to mutate: the adapter rechecks the live PR and thread
     state before each retry.
     """
-    if batch_nonce is None:
-        batch_nonce = secrets.token_hex(16)
     if (
         not is_full_commit_sha(head_sha)
         or not isinstance(threads, list)
@@ -1229,6 +1227,7 @@ class PrReviewStage(Stage):
                         published_head,
                         thread_snapshots,
                         replies,
+                        secrets.token_hex(16),
                     )
                     if handoff is None:
                         logger.warning(
@@ -1280,20 +1279,20 @@ class PrReviewStage(Stage):
                         if duplicate_drafts:
                             item.payload[_IMPLEMENTATION_REPLY_BATCH_CONFLICT] = {
                                 "head_sha": published_head,
-                                "draft_ids": duplicate_drafts,
+                                "review_ids": duplicate_drafts,
                             }
-                        pending_draft_conflicts = tuple(
+                        conflicting_current_reviews = tuple(
                             sorted(
                                 str(review_id)
                                 for review_id in getattr(
-                                    reply_result, "conflicting_pending_draft_ids", ()
+                                    reply_result, "conflicting_current_review_ids", ()
                                 )
                             )
                         )
-                        if pending_draft_conflicts:
-                            item.payload[_IMPLEMENTATION_REPLY_PENDING_DRAFT_CONFLICT] = {
+                        if conflicting_current_reviews:
+                            item.payload[_IMPLEMENTATION_REPLY_REVIEW_CONFLICT] = {
                                 "head_sha": published_head,
-                                "draft_ids": pending_draft_conflicts,
+                                "review_ids": conflicting_current_reviews,
                             }
                         retryable = bool(getattr(reply_result, "retryable", False))
                         expected_ids = set(replies)
@@ -1848,18 +1847,18 @@ class PrReviewStage(Stage):
                 type(error).__name__,
             )
 
-    def _consume_implementation_reply_draft_conflict(
+    def _consume_implementation_reply_review_conflict(
         self,
         item: WorkItem,
         ctx: StageContext,
         *,
         payload_key: str,
         marker_kind: str,
-        minimum_draft_count: int,
+        minimum_review_count: int,
         explanation: str,
         remediation: str,
     ) -> StepResult | None:
-        """Record one terminal diagnostic without mutating unowned drafts."""
+        """Record one terminal diagnostic without mutating conflicting reviews."""
         conflict = item.payload.pop(payload_key, None)
         if conflict is None:
             return None
@@ -1868,43 +1867,43 @@ class PrReviewStage(Stage):
                 Disposition.FINISH_FAIL, "implementation_reply_batch_conflict_invalid"
             )
         head_sha = conflict.get("head_sha")
-        draft_ids = conflict.get("draft_ids")
+        review_ids = conflict.get("review_ids")
         if (
             not is_full_commit_sha(head_sha)
-            or not isinstance(draft_ids, tuple)
-            or len(draft_ids) < minimum_draft_count
+            or not isinstance(review_ids, tuple)
+            or len(review_ids) < minimum_review_count
             or any(
                 not isinstance(review_id, str)
                 or not review_id
                 or len(review_id) > 256
                 or re.fullmatch(r"[A-Za-z0-9_=-]+", review_id) is None
-                for review_id in draft_ids
+                for review_id in review_ids
             )
         ):
             return StageOutcome(
-                Disposition.FINISH_FAIL, "implementation_reply_batch_conflict_invalid"
+                Disposition.FINISH_FAIL, "implementation_reply_review_conflict_invalid"
             )
         item.payload["reviewed_pr_head_sha"] = head_sha
         no_go_outcome = self._write_no_go(item, ctx)
         if no_go_outcome is not None:
             return no_go_outcome
         marker_hash = hashlib.sha256(
-            f"{item.pr}:{head_sha}:{','.join(draft_ids)}".encode()
+            f"{item.pr}:{head_sha}:{','.join(review_ids)}".encode()
         ).hexdigest()[:24]
         marker = f"<!-- hephaestus-implementation-reply-{marker_kind}:{marker_hash} -->"
         body = (
             f"{marker}\n\n"
             f"Automation stopped before posting implementation replies because {explanation}.\n\n"
             f"Head: `{head_sha}`\n\n"
-            f"Draft review IDs: {', '.join(f'`{review_id}`' for review_id in draft_ids)}\n\n"
-            "No review thread was resolved and no current draft was deleted. "
+            f"Conflicting review IDs: {', '.join(f'`{review_id}`' for review_id in review_ids)}\n\n"
+            "No review thread was resolved and no conflicting review was mutated. "
             f"{remediation}"
         )
         try:
             ctx.github.upsert_pr_comment(item.pr, marker, body)
         except Exception as error:
             logger.warning(
-                "pr_review:%d: failed to record implementation-reply draft conflict (%s)",
+                "pr_review:%d: failed to record implementation-reply review conflict (%s)",
                 item.issue,
                 type(error).__name__,
             )
@@ -1912,42 +1911,42 @@ class PrReviewStage(Stage):
                 Disposition.FINISH_FAIL,
                 "implementation_reply_batch_conflict_comment_failed"
                 if payload_key == _IMPLEMENTATION_REPLY_BATCH_CONFLICT
-                else "implementation_reply_draft_conflict_comment_failed",
+                else "implementation_reply_review_conflict_comment_failed",
             )
         return StageOutcome(
             Disposition.FINISH_FAIL,
             "implementation_reply_batch_conflict"
             if payload_key == _IMPLEMENTATION_REPLY_BATCH_CONFLICT
-            else "implementation_reply_draft_conflict",
+            else "implementation_reply_review_conflict",
         )
 
     def _consume_implementation_reply_batch_conflict(
         self, item: WorkItem, ctx: StageContext
     ) -> StepResult | None:
         """Diagnose a duplicate exact batch without deleting either draft."""
-        return self._consume_implementation_reply_draft_conflict(
+        return self._consume_implementation_reply_review_conflict(
             item,
             ctx,
             payload_key=_IMPLEMENTATION_REPLY_BATCH_CONFLICT,
-            marker_kind="draft-conflict",
-            minimum_draft_count=2,
+            marker_kind="duplicate-review-conflict",
+            minimum_review_count=2,
             explanation="multiple current-head draft reviews claim the same reply batch",
             remediation="Remove the duplicate drafts, then run a fresh implementation-review pass.",
         )
 
-    def _consume_implementation_reply_pending_draft_conflict(
+    def _consume_implementation_reply_current_review_conflict(
         self, item: WorkItem, ctx: StageContext
     ) -> StepResult | None:
-        """Diagnose a non-owned pending draft without taking ownership of it."""
-        return self._consume_implementation_reply_draft_conflict(
+        """Diagnose a non-owned current review without taking ownership of it."""
+        return self._consume_implementation_reply_review_conflict(
             item,
             ctx,
-            payload_key=_IMPLEMENTATION_REPLY_PENDING_DRAFT_CONFLICT,
-            marker_kind="pending-draft-conflict",
-            minimum_draft_count=1,
-            explanation="a non-owned pending review prevents this reply batch",
+            payload_key=_IMPLEMENTATION_REPLY_REVIEW_CONFLICT,
+            marker_kind="review-conflict",
+            minimum_review_count=1,
+            explanation="a non-owned current implementation review prevents this reply batch",
             remediation=(
-                "Remove or submit the pending review, then run a fresh implementation-review pass."
+                "Inspect the conflicting review, then run a fresh implementation-review pass."
             ),
         )
 
@@ -2049,26 +2048,27 @@ class PrReviewStage(Stage):
         if duplicate_drafts:
             item.payload[_IMPLEMENTATION_REPLY_BATCH_CONFLICT] = {
                 "head_sha": head_sha,
-                "draft_ids": duplicate_drafts,
+                "review_ids": duplicate_drafts,
             }
             item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
             item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
             item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES, None)
             return "duplicate_conflict"
-        pending_draft_conflicts = tuple(
+        conflicting_current_reviews = tuple(
             sorted(
-                str(review_id) for review_id in getattr(result, "conflicting_pending_draft_ids", ())
+                str(review_id)
+                for review_id in getattr(result, "conflicting_current_review_ids", ())
             )
         )
-        if pending_draft_conflicts:
-            item.payload[_IMPLEMENTATION_REPLY_PENDING_DRAFT_CONFLICT] = {
+        if conflicting_current_reviews:
+            item.payload[_IMPLEMENTATION_REPLY_REVIEW_CONFLICT] = {
                 "head_sha": head_sha,
-                "draft_ids": pending_draft_conflicts,
+                "review_ids": conflicting_current_reviews,
             }
             item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
             item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
             item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES, None)
-            return "pending_draft_conflict"
+            return "review_conflict"
         if replied == expected_ids and len(receipts) == len(replied):
             item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
             item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
@@ -2121,7 +2121,7 @@ class PrReviewStage(Stage):
         conflict_outcome = self._consume_implementation_reply_batch_conflict(item, ctx)
         if conflict_outcome is not None:
             return conflict_outcome
-        conflict_outcome = self._consume_implementation_reply_pending_draft_conflict(item, ctx)
+        conflict_outcome = self._consume_implementation_reply_current_review_conflict(item, ctx)
         if conflict_outcome is not None:
             return conflict_outcome
 
@@ -2140,12 +2140,12 @@ class PrReviewStage(Stage):
             return StageOutcome(
                 Disposition.FINISH_FAIL, "implementation_reply_batch_conflict_invalid"
             )
-        if handoff_status == "pending_draft_conflict":
-            conflict_outcome = self._consume_implementation_reply_pending_draft_conflict(item, ctx)
+        if handoff_status == "review_conflict":
+            conflict_outcome = self._consume_implementation_reply_current_review_conflict(item, ctx)
             if conflict_outcome is not None:
                 return conflict_outcome
             return StageOutcome(
-                Disposition.FINISH_FAIL, "implementation_reply_draft_conflict_invalid"
+                Disposition.FINISH_FAIL, "implementation_reply_review_conflict_invalid"
             )
         if handoff_status == "visibility_wait":
             return StageOutcome(Disposition.RETRY, "implementation_reply_handoff_visibility_wait")

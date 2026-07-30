@@ -24,7 +24,6 @@ import json
 import logging
 import os
 import re
-import secrets
 import subprocess
 import time
 from pathlib import Path
@@ -973,9 +972,7 @@ class PipelineGitHub:
         batch_nonce: str | None = None,
     ) -> str:
         """Return the durable summary marker for one implementation reply batch."""
-        if batch_nonce is None:
-            batch_nonce = secrets.token_hex(16)
-        if re.fullmatch(r"[0-9a-f]{32}", batch_nonce) is None:
+        if not isinstance(batch_nonce, str) or re.fullmatch(r"[0-9a-f]{32}", batch_nonce) is None:
             raise ValueError(
                 "implementation reply batch nonce must be 32 lowercase hexadecimal chars"
             )
@@ -1013,8 +1010,10 @@ class PipelineGitHub:
 
     def _implementation_reply_review_inventory(  # noqa: C901 - paginated GraphQL proof is fail-closed
         self, pr_number: int, expected_head_sha: str, review_body: str
-    ) -> tuple[str, tuple[str, str] | None, tuple[str, ...], tuple[str, ...]] | None:
-        """Return the exact batch review plus stale and conflicting pending drafts.
+    ) -> (
+        tuple[str, tuple[str, str] | None, tuple[str, ...], tuple[str, ...], tuple[str, ...]] | None
+    ):
+        """Return the exact batch review plus stale and conflicting current reviews.
 
         Only a viewer-owned pending review carrying the opaque implementation
         marker and an *older* commit is eligible for automatic discard.  A
@@ -1032,6 +1031,7 @@ class PipelineGitHub:
         commented_matches: list[tuple[str, str]] = []
         stale_pending_ids: list[str] = []
         pending_conflict_ids: list[str] = []
+        commented_conflict_ids: list[str] = []
         seen_cursors: set[str] = set()
         after: str | None = None
         while True:
@@ -1088,6 +1088,13 @@ class PipelineGitHub:
                         pending_conflict_ids.append(review_id)
                     continue
                 if body != review_body:
+                    if (
+                        state == "COMMENTED"
+                        and isinstance(commit_oid, str)
+                        and commit_oid == expected_head_sha
+                        and self._is_implementation_reply_review_body(body)
+                    ):
+                        commented_conflict_ids.append(review_id)
                     continue
                 if (
                     state != "COMMENTED"
@@ -1120,6 +1127,7 @@ class PipelineGitHub:
                 commented_matches[0],
                 tuple(sorted(set(stale_pending_ids))),
                 tuple(sorted(set(pending_conflict_ids))),
+                tuple(sorted(set(commented_conflict_ids))),
             )
         if len(pending_matches) > 1:
             raise DuplicateImplementationReplyDraftsError(
@@ -1130,6 +1138,7 @@ class PipelineGitHub:
             pending_matches[0] if pending_matches else None,
             tuple(sorted(set(stale_pending_ids))),
             tuple(sorted(set(pending_conflict_ids))),
+            tuple(sorted(set(commented_conflict_ids))),
         )
 
     def _find_implementation_reply_review(
@@ -1146,9 +1155,10 @@ class PipelineGitHub:
         )
         if inventory is None:
             return None
-        pr_id, review, stale_pending_ids, pending_conflict_ids = inventory
+        pr_id, review, stale_pending_ids, pending_conflict_ids, commented_conflict_ids = inventory
         if stale_pending_ids or (
-            pending_conflict_ids and (review is None or review[1] != "COMMENTED")
+            (pending_conflict_ids or commented_conflict_ids)
+            and (review is None or review[1] != "COMMENTED")
         ):
             return None
         return pr_id, review
@@ -1259,9 +1269,18 @@ class PipelineGitHub:
             )
             if inventory is None:
                 return None
-            pr_id, review, stale_pending_ids, pending_conflict_ids = inventory
+            (
+                pr_id,
+                review,
+                stale_pending_ids,
+                pending_conflict_ids,
+                commented_conflict_ids,
+            ) = inventory
+            conflicting_review_ids = tuple(
+                sorted(set(pending_conflict_ids).union(commented_conflict_ids))
+            )
             if not stale_pending_ids:
-                return pr_id, review, pending_conflict_ids
+                return pr_id, review, conflicting_review_ids
             stale_review_id = stale_pending_ids[0]
             if not self._delete_implementation_reply_review(stale_review_id):
                 # GitHub may have applied the delete before losing its response.
@@ -1286,7 +1305,7 @@ class PipelineGitHub:
         )
         if current is None:
             return False
-        current_pr_id, review, _pending_conflict_ids = current
+        current_pr_id, review, _conflicting_review_ids = current
         if current_pr_id != pr_id or review != (review_id, "PENDING"):
             return False
         if self._delete_implementation_reply_review(review_id):
@@ -1931,7 +1950,7 @@ class PipelineGitHub:
                     retryable_thread_ids=candidate_ids,
                     retryable=True,
                 )
-            pr_id, existing_review, pending_conflict_ids = current_batch
+            pr_id, existing_review, conflicting_review_ids = current_batch
             if blocked:
                 # A PENDING review is not a receipt.  Abort the exact
                 # coordinator draft if any target changed, rather than
@@ -1954,12 +1973,12 @@ class PipelineGitHub:
                 return ImplementationThreadReplyResult(
                     blocked_thread_ids=tuple(sorted(blocked)),
                 )
-            if pending_conflict_ids and (
+            if conflicting_review_ids and (
                 existing_review is None or existing_review[1] != "COMMENTED"
             ):
                 return ImplementationThreadReplyResult(
                     blocked_thread_ids=candidate_ids,
-                    conflicting_pending_draft_ids=pending_conflict_ids,
+                    conflicting_current_review_ids=conflicting_review_ids,
                 )
             if existing_review is None:
                 # A reply from an old per-comment review is not a successful
@@ -1978,6 +1997,36 @@ class PipelineGitHub:
                         retryable=True,
                     )
                 review_state = "PENDING"
+                post_create_batch = self._implementation_reply_review_inventory(
+                    pr_number, expected_head_sha, review_body
+                )
+                if post_create_batch is None:
+                    return ImplementationThreadReplyResult(
+                        retryable_thread_ids=candidate_ids,
+                        retryable=True,
+                    )
+                (
+                    confirmed_pr_id,
+                    post_create_review,
+                    _stale_pending_ids,
+                    post_create_pending_conflicts,
+                    post_create_commented_conflicts,
+                ) = post_create_batch
+                post_create_conflicts = tuple(
+                    sorted(
+                        set(post_create_pending_conflicts).union(post_create_commented_conflicts)
+                    )
+                )
+                if post_create_conflicts:
+                    return ImplementationThreadReplyResult(
+                        blocked_thread_ids=candidate_ids,
+                        conflicting_current_review_ids=post_create_conflicts,
+                    )
+                if post_create_review != (review_id, "PENDING") or confirmed_pr_id != pr_id:
+                    return ImplementationThreadReplyResult(
+                        retryable_thread_ids=candidate_ids,
+                        retryable=True,
+                    )
             else:
                 review_id, review_state = existing_review
 
