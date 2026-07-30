@@ -260,6 +260,7 @@ class TestGetLogger:
             parsed = json.loads(output)
             assert parsed["message"] == "hello json"
             assert parsed["level"] == "INFO"
+            assert set(parsed) == {"timestamp", "level", "logger", "message"}
         finally:
             logger.logger.removeHandler(handler)
 
