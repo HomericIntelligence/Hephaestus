@@ -328,7 +328,10 @@ config, endpoint URLs, hostnames, checkpoint names, model identifiers, or local
 aliases. Configure the OpenAI-compatible provider in the local Pi config, set
 `HEPH_PI_MODEL=<operator-local-alias>`, and see
 [`docs/pi-private-provider.md`](docs/pi-private-provider.md) for the sanitized
-setup and denylist guard.
+setup and denylist guard. Pi is not yet admitted to normal Hephaestus
+automation: `--agent pi` fails closed until #2516 verifies the required
+packages and #2518 enforces lifecycle and tool scopes. The local setup is for
+the explicit adapter-smoke seam only.
 
 #### Running the automation loop from a source checkout (macOS / Codex)
 

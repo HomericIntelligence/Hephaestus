@@ -36,8 +36,16 @@ Before committing, run:
 python3 scripts/check_private_denylist.py --staged --tracked
 ```
 
-The guard prints only file paths and line numbers. It intentionally never prints
-matched values or source lines.
+The guard prints only file paths and line numbers. It intentionally never
+prints matched values or source lines.
+
+## Automation admission
+
+This configuration supports explicit local adapter-smoke validation. Normal
+Hephaestus automation intentionally rejects `--agent pi` until #2516 verifies
+the required package/capability inventory and #2518 enforces lifecycle and
+tool scopes. Do not treat a local model configuration or a successful smoke
+command as automation admission evidence.
 
 ## Project-level denylist (committed)
 

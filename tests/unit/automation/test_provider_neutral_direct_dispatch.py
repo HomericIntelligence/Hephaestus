@@ -9,25 +9,15 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
-PROVIDER_NEUTRAL_FILES = [
-    "hephaestus/automation/agent_stage.py",
-    "hephaestus/automation/planner.py",
-    "hephaestus/automation/plan_reviewer.py",
-    "hephaestus/automation/_implement_phase.py",
-    "hephaestus/automation/implementer.py",
-    "hephaestus/automation/pr_reviewer.py",
-    "hephaestus/automation/pr_review_core.py",
-    "hephaestus/automation/audit_reviewer.py",
-    "hephaestus/automation/comment_difficulty.py",
-    "hephaestus/automation/ci_driver.py",
-    "hephaestus/automation/ci_fix_orchestrator.py",
-    "hephaestus/automation/post_merge_processor.py",
-    "hephaestus/automation/learn.py",
-    "hephaestus/automation/follow_up.py",
-    "hephaestus/automation/pr_manager.py",
-    "hephaestus/github/tidy.py",
-    "hephaestus/github/fleet_sync/conflict_resolver.py",
-]
+NEUTRAL_RUNTIME_CALL_NAMES = {
+    "resolve_agent",
+    "direct_agent_model",
+    "run_agent_text",
+    "run_agent_session",
+    "resume_agent_session",
+    "session_agent_matches",
+    "uses_direct_agent_runner",
+}
 
 DIRECT_PROVIDER_ONLY_NAMES = {
     "is_codex",
@@ -41,6 +31,10 @@ DIRECT_PROVIDER_ONLY_NAMES = {
     "resume_pi_session",
 }
 
+DIRECT_PROVIDER_ADAPTER_EXCEPTIONS = {
+    "scripts/pi_smoke.py": {"run_pi_session"},
+}
+
 
 def _node_name(node: ast.AST) -> str:
     if isinstance(node, ast.Name):
@@ -50,6 +44,48 @@ def _node_name(node: ast.AST) -> str:
     return ""
 
 
+def _provider_neutral_runtime_files() -> list[str]:
+    """Discover every non-adapter source file that invokes the neutral runtime.
+
+    The guarded set is derived from the actual entry points rather than a
+    hand-maintained inventory, so a new automation session or resume caller
+    cannot silently escape the provider-neutral dispatch contract.
+    """
+    runtime_path = REPO_ROOT / "hephaestus" / "agents" / "runtime.py"
+    paths: list[str] = []
+    for path in sorted((REPO_ROOT / "hephaestus").rglob("*.py")):
+        if path == runtime_path:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        if any(
+            isinstance(node, ast.Call) and _node_name(node.func) in NEUTRAL_RUNTIME_CALL_NAMES
+            for node in ast.walk(tree)
+        ):
+            paths.append(path.relative_to(REPO_ROOT).as_posix())
+    return paths
+
+
+def _provider_adapter_violations(
+    tree: ast.AST,
+    *,
+    allowed_names: set[str] | None = None,
+) -> list[str]:
+    """Return imports or calls that bypass the shared runtime adapter."""
+    allowed = allowed_names or set()
+    violations: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            imported = {alias.name for alias in node.names}
+            offenders = (imported & DIRECT_PROVIDER_ONLY_NAMES) - allowed
+            if offenders:
+                violations.append(f"line {node.lineno}: imports {sorted(offenders)}")
+        elif isinstance(node, ast.Call):
+            name = _node_name(node.func)
+            if name in DIRECT_PROVIDER_ONLY_NAMES and name not in allowed:
+                violations.append(f"line {node.lineno}: calls {name}()")
+    return violations
+
+
 def _direct_provider_string_compare(node: ast.Compare) -> bool:
     comparators = [node.left, *node.comparators]
     return any(
@@ -57,26 +93,48 @@ def _direct_provider_string_compare(node: ast.Compare) -> bool:
     )
 
 
-@pytest.mark.parametrize("relative_path", PROVIDER_NEUTRAL_FILES)
+@pytest.mark.parametrize("relative_path", _provider_neutral_runtime_files())
 def test_direct_agent_dispatch_has_no_provider_specific_runtime_branches(
     relative_path: str,
 ) -> None:
     """Automation call sites must route Codex and Pi through neutral runtime helpers."""
     path = REPO_ROOT / relative_path
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    violations: list[str] = []
+    violations = _provider_adapter_violations(tree)
+    violations.extend(
+        f"line {node.lineno}: compares against a direct provider"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Compare) and _direct_provider_string_compare(node)
+    )
 
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom):
-            imported = {alias.name for alias in node.names}
-            offenders = imported & DIRECT_PROVIDER_ONLY_NAMES
-            if offenders:
-                violations.append(f"line {node.lineno}: imports {sorted(offenders)}")
-        elif isinstance(node, ast.Call):
-            name = _node_name(node.func)
-            if name in DIRECT_PROVIDER_ONLY_NAMES:
-                violations.append(f"line {node.lineno}: calls {name}()")
-        elif isinstance(node, ast.Compare) and _direct_provider_string_compare(node):
-            violations.append(f"line {node.lineno}: compares against a direct provider")
+    assert violations == []
+
+
+def test_direct_agent_dispatch_guard_discovers_all_current_runtime_callers() -> None:
+    """The automatic inventory covers text, session, and resume call sites."""
+    relative_paths = _provider_neutral_runtime_files()
+
+    assert relative_paths
+    assert "hephaestus/automation/ci_fix_flow.py" in relative_paths
+    assert "hephaestus/automation/pipeline/worker_pool.py" in relative_paths
+
+
+def test_direct_provider_adapters_are_confined_to_runtime() -> None:
+    """Only the explicit, read-only smoke seam may bypass the neutral boundary."""
+    runtime_path = REPO_ROOT / "hephaestus" / "agents" / "runtime.py"
+    violations: list[str] = []
+    for root in (REPO_ROOT / "hephaestus", REPO_ROOT / "scripts"):
+        for path in sorted(root.rglob("*.py")):
+            if path == runtime_path:
+                continue
+            relative_path = path.relative_to(REPO_ROOT).as_posix()
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            violations.extend(
+                f"{relative_path} {violation}"
+                for violation in _provider_adapter_violations(
+                    tree,
+                    allowed_names=DIRECT_PROVIDER_ADAPTER_EXCEPTIONS.get(relative_path),
+                )
+            )
 
     assert violations == []

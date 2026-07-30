@@ -56,6 +56,11 @@ PI_MODEL_CONFIG_RELATIVE_PATH = Path(".pi") / "agent" / "models.json"
 PI_PRIVATE_DENYLIST_FILENAME = ".heph-private-denylist"
 PI_PRIVATE_REDACTION = "<redacted-pi-private-value>"
 PI_READ_ONLY_TOOLS = "read,grep,find,ls"
+PI_AUTOMATION_PREFLIGHT_ERROR = (
+    "Pi automation preflight is unavailable until #2516 verifies the required "
+    "package/capability inventory and #2518 enforces lifecycle and tool scopes. "
+    "Use Claude or Codex for automation until those stages are complete."
+)
 REQUIRED_ALIAS_ENVS: tuple[str, ...] = (PI_PROVIDER_ENV, PI_MODEL_ENV)
 AGENT_AUTH_STATUS_COMMANDS: dict[AgentName, tuple[tuple[str, ...], ...]] = {
     "claude": (("claude", "auth", "status"),),
@@ -231,6 +236,8 @@ def resolve_agent(agent: str | None) -> AgentName:
     if agent is not None:
         if agent not in AGENT_CHOICES:
             raise ValueError(f"Unsupported agent: {agent}")
+        if agent == "pi":
+            raise RuntimeError(PI_AUTOMATION_PREFLIGHT_ERROR)
         if not is_agent_authenticated(agent):
             if shutil.which(agent) is None:
                 raise RuntimeError(
@@ -249,8 +256,14 @@ def resolve_agent(agent: str | None) -> AgentName:
             )
         return agent
 
-    installed_agents = tuple(agent_name for agent_name in AGENT_CHOICES if shutil.which(agent_name))
+    installed_agents = tuple(
+        agent_name
+        for agent_name in AGENT_CHOICES
+        if agent_name != "pi" and shutil.which(agent_name)
+    )
     if not installed_agents:
+        if shutil.which("pi") is not None:
+            raise RuntimeError(PI_AUTOMATION_PREFLIGHT_ERROR)
         raise RuntimeError(
             "No supported agent backend found on PATH. Install `claude`, `codex`, or `pi`, "
             "or pass --agent after installing the selected backend."
