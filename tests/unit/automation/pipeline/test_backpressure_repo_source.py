@@ -161,3 +161,52 @@ def test_repo_source_is_lossless_and_ordered_at_capacity_one(
     issues = [item for item in coordinator.items if item.kind is ItemKind.ISSUE]
     assert [item.issue for item in issues] == [101, 102]
     assert all(item.result is not None and item.result.passed for item in issues)
+
+
+def test_repo_source_deduplicates_metadata_after_completed_work_at_capacity_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A repeated source row cannot re-run after its first item finishes."""
+    events: list[tuple[str, int]] = []
+    metadata = [
+        {"number": 1, "labels": ["state:needs-plan"], "title": "first"},
+        {"number": 2, "labels": ["state:needs-plan"], "title": "second"},
+        {"number": 1, "labels": ["state:needs-plan"], "title": "duplicate"},
+    ]
+    monkeypatch.setattr(
+        loop_repo_manager, "_iter_open_issue_meta", lambda _org, _repo: iter(metadata)
+    )
+
+    def classify(issue: int, github: Any) -> IssueFacts:
+        del github
+        events.append(("classify", issue))
+        return _facts(issue)
+
+    monkeypatch.setattr(seeding_mod, "seed_issue_from_github", classify)
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            loops=1,
+            parallel_repos=1,
+            max_workers=1,
+            stage_queue_capacity=1,
+            dry_run=True,
+            projects_dir=tmp_path,
+        ),
+        github=FakeStageGitHub(labels=["state:needs-plan"]),
+        pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+    coordinator.stages[StageName.PLANNING] = _ImmediatePassStage(events)
+
+    assert coordinator.run() == 0
+    assert events == [
+        ("classify", 1),
+        ("complete", 1),
+        ("classify", 2),
+        ("complete", 2),
+    ]
+    issues = [item for item in coordinator.items if item.kind is ItemKind.ISSUE]
+    assert [item.issue for item in issues] == [1, 2]
+    assert all(item.result is not None and item.result.passed for item in issues)

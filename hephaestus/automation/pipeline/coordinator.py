@@ -338,10 +338,17 @@ class _Paths:
 
 @dataclass
 class _ActiveRepoIssueSource:
-    """One bounded repository metadata cursor detached from setup work."""
+    """One bounded repository metadata cursor detached from setup work.
+
+    GitHub issue numbers increase with creation time, and the source requests
+    metadata in ascending creation order. ``seen_through_issue`` therefore
+    provides constant-space deduplication: a repeated or stale row cannot
+    re-enter the pipeline after its first work item releases its live permit.
+    """
 
     repo: str
     source: RepoIssueSource
+    seen_through_issue: int | None = None
 
 
 @dataclass(frozen=True)
@@ -906,14 +913,14 @@ class Coordinator:
 
     def _exit_code(self) -> int:
         """130 on a signal; 1 on internal stop/fail/skip/blocked; 0 clean."""
-        if self._journal_failure:
-            return 1
         if self._signal_received:
             # Interrupt deliberately takes priority over non-passing ledger
             # entries and fatal coordinator errors: a signal means the run did
             # not complete, so wrappers must classify it as cancellation even
             # if earlier work had already failed.
             return 130
+        if self._journal_failure:
+            return 1
         effective_results = [item.result for item in self._effective_items() if item.result]
         results = effective_results or self.ledger
         if self.shutdown.is_set() or self._fatal or any(not result.passed for result in results):
@@ -1451,12 +1458,19 @@ class Coordinator:
                 )
                 return False
 
+            if active.seen_through_issue is not None and number <= active.seen_through_issue:
+                source.pending = None
+                self._record_event("repo_source_duplicate", active.repo, number)
+                self._progress = True
+                return True
+
             if is_epic(labels, title):
                 try:
                     ctx.github.skip_epics({number: labels})
                 except Exception as exc:
                     self._record_repo_source_failure(active.repo, f"epic skip tag failed: {exc}")
                     return False
+                active.seen_through_issue = number
                 source.pending = None
                 self._progress = True
                 return True
@@ -1478,6 +1492,7 @@ class Coordinator:
             except Exception as exc:
                 self._record_repo_source_failure(active.repo, f"discovery failed: {exc}")
                 return False
+            active.seen_through_issue = number
 
             if entry.stage is None:
                 try:

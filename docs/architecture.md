@@ -176,7 +176,8 @@ The only cross-thread channel is
 (`queue.Queue[(JobHandle, JobResult)]`). Let
 `C = max(1, parallel_repos × max_workers)`: the result queue has capacity `C`,
 and global admission keeps at most `C` handles in flight. Each stage queue has
-the independent `PipelineConfig.stage_queue_capacity` bound; a full stage
+the independent `PipelineConfig.stage_queue_capacity` bound (default `64`), not
+the worker-window capacity `C`; a full stage
 queue defers admission into the coordinator-owned spool until the next drain.
 That spool has capacity `number of stages × stage_queue_capacity`, providing
 one additional full batch per stage. If it fills, the exact rejected item is
@@ -1267,7 +1268,7 @@ state-transition is rendered as zero, not as stale active work.
 | `hephaestus_pipeline_completion_capacity` | Gauge | — | `C` | Configured result-queue capacity. |
 | `hephaestus_pipeline_admission_depth` | Gauge | — | `0` | Deferred items waiting for a stage-queue slot. |
 | `hephaestus_pipeline_admission_capacity` | Gauge | — | `stages × stage capacity` | Configured admission-spool capacity. |
-| `hephaestus_pipeline_queue_rejections_total` | Counter | `queue` | `0` | Completion-publication rejections plus admission-spool and completion-rejection-mailbox saturation events; normal stage-queue deferrals are excluded. |
+| `hephaestus_pipeline_queue_rejections_total` | Counter | `queue` | `0` | Irrecoverable admission-spool saturation plus completion-publication and completion-rejection-mailbox rejections; ordinary full-stage deferrals are retried and excluded. |
 | `hephaestus_pipeline_inflight_jobs` | Gauge | (none) | `0` | Total in-flight jobs across all worker pools. |
 | `hephaestus_pipeline_inflight_per_repo` | Gauge | `repo` | `0` | In-flight jobs by repo, capped by `max_workers`. |
 | `hephaestus_circuit_breaker_state` | Gauge | `name`,`state` | `0` | `1` for the active state, `0` for prior states (only emitted from the optional `circuit_breaker_snapshot_provider`). |
