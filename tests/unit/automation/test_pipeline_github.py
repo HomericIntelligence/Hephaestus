@@ -515,6 +515,9 @@ class TestAllThreadReplyAndReviewerResolution:
             root.mkdir()
             git_dir = common_git_dir / "worktrees" / name
             git_dir.mkdir(parents=True)
+            (common_git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+            (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+            (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
             (root / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
 
         first_adapter = PipelineGitHubForTest("org", repo="repo-a", repo_root=first_root)
@@ -596,6 +599,41 @@ class TestAllThreadReplyAndReviewerResolution:
                 adapter,
                 "_graphql",
                 lambda *_args, **_kwargs: pytest.fail("invalid metadata must not reply"),
+            )
+
+        results = [
+            adapter.post_implementation_thread_replies(
+                7,
+                expected_head_sha="a" * 40,
+                threads=[thread],
+                replies={thread["id"]: "Fixed the finding."},
+                batch_nonce="c" * 32,
+            )
+            for adapter in adapters
+        ]
+
+        assert all(result.retryable_thread_ids == (thread["id"],) for result in results)
+        assert all(result.retryable for result in results)
+
+    def test_linked_worktrees_with_unusable_git_dir_fail_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A shaped-but-invalid worktree target cannot create a private lock."""
+        adapters: list[PipelineGitHubForTest] = []
+        for name in ("first", "second"):
+            root = tmp_path / f"worktree-{name}"
+            root.mkdir()
+            (root / ".git").write_text(
+                f"gitdir: /missing/.git/worktrees/{name}\n", encoding="utf-8"
+            )
+            adapters.append(PipelineGitHubForTest("org", repo="repo-a", repo_root=root))
+
+        thread = _external_reviewer_thread("thread-one")
+        for adapter in adapters:
+            monkeypatch.setattr(
+                adapter,
+                "_graphql",
+                lambda *_args, **_kwargs: pytest.fail("unusable gitdir must not reply"),
             )
 
         results = [

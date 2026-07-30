@@ -1393,10 +1393,39 @@ class PipelineGitHub:
             git_dir = Path(raw_git_dir.strip())
             if not git_dir.is_absolute():
                 git_dir = git_metadata.parent / git_dir
-            if git_dir.parent.name == "worktrees":
-                lock_root = git_dir.parent.parent / "hephaestus-automation-locks"
-            else:
-                lock_root = git_dir / "hephaestus-automation-locks"
+            common_git_dir = git_dir.parent.parent
+            common_dir_file = git_dir / "commondir"
+            if (
+                git_dir.parent.name != "worktrees"
+                or not git_dir.is_dir()
+                or not (git_dir / "HEAD").is_file()
+                or not common_git_dir.is_dir()
+                or not (common_git_dir / "HEAD").is_file()
+                or not common_dir_file.is_file()
+            ):
+                raise LockUnavailableError(
+                    "invalid linked-worktree Git metadata for implementation reply lock at "
+                    f"{git_metadata}"
+                )
+            try:
+                common_dir_text = common_dir_file.read_text(encoding="utf-8").strip()
+                common_dir_from_metadata = Path(common_dir_text)
+                if not common_dir_from_metadata.is_absolute():
+                    common_dir_from_metadata = git_dir / common_dir_from_metadata
+                if (
+                    not common_dir_text
+                    or common_dir_from_metadata.resolve() != common_git_dir.resolve()
+                ):
+                    raise LockUnavailableError(
+                        "invalid common Git directory for implementation reply lock at "
+                        f"{git_metadata}"
+                    )
+            except (OSError, UnicodeDecodeError) as error:
+                raise LockUnavailableError(
+                    "could not read common Git directory for implementation reply lock at "
+                    f"{git_metadata}"
+                ) from error
+            lock_root = common_git_dir / "hephaestus-automation-locks"
         return lock_root / f"implementation-replies-{repo_key}-{pr_number}.lock"
 
     def post_implementation_thread_replies(
