@@ -13,6 +13,7 @@ import tempfile
 import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
 
@@ -79,14 +80,42 @@ class AgentRunResult:
     session_id: str | None = None
 
 
+class AgentCapability(str, Enum):
+    """Provider capability names used by the provider-neutral parity contract."""
+
+    FILE_READ = "file-read"
+    FILE_WRITE = "file-write"
+    SHELL = "shell"
+    SEARCH = "search"
+    SESSION = "session"
+    RESUME = "resume"
+    SKILL = "skill"
+    TOOL_ALLOWLIST = "tool-allowlist"
+    SUBAGENT = "subagent"
+    WEB_ACCESS = "web-access"
+    INTERACTIVE_APPROVAL = "interactive-approval"
+    OS_SANDBOX = "os-sandbox"
+
+
 @dataclass(frozen=True)
 class AgentCapabilities:
-    """Backend capabilities used by provider-neutral call sites."""
+    """Backend capabilities used by provider-neutral call sites.
+
+    ``core_capabilities`` are provided by the provider's base CLI.
+    ``package_capabilities`` require an explicit, separately verified package.
+    ``unavailable_capabilities`` must fail closed rather than being inferred from
+    a similarly named provider feature. The Pi entries form the executable
+    companion to ADR-0019; later bootstrap and pipeline stages consume this
+    distinction instead of creating stage-specific provider forks.
+    """
 
     direct_runner: bool
     supports_approval: bool
     supports_sandbox: bool
     supports_sessions: bool
+    core_capabilities: frozenset[AgentCapability] = frozenset()
+    package_capabilities: frozenset[AgentCapability] = frozenset()
+    unavailable_capabilities: frozenset[AgentCapability] = frozenset()
 
 
 AGENT_CAPABILITIES: dict[AgentName, AgentCapabilities] = {
@@ -105,8 +134,32 @@ AGENT_CAPABILITIES: dict[AgentName, AgentCapabilities] = {
     "pi": AgentCapabilities(
         direct_runner=True,
         supports_approval=False,
-        supports_sandbox=True,
+        supports_sandbox=False,
         supports_sessions=True,
+        core_capabilities=frozenset(
+            {
+                AgentCapability.FILE_READ,
+                AgentCapability.FILE_WRITE,
+                AgentCapability.SHELL,
+                AgentCapability.SEARCH,
+                AgentCapability.SESSION,
+                AgentCapability.RESUME,
+                AgentCapability.SKILL,
+                AgentCapability.TOOL_ALLOWLIST,
+            }
+        ),
+        package_capabilities=frozenset(
+            {
+                AgentCapability.SUBAGENT,
+                AgentCapability.WEB_ACCESS,
+            }
+        ),
+        unavailable_capabilities=frozenset(
+            {
+                AgentCapability.INTERACTIVE_APPROVAL,
+                AgentCapability.OS_SANDBOX,
+            }
+        ),
     ),
 }
 

@@ -14,6 +14,37 @@ import pytest
 from hephaestus.agents import runtime as agent_runtime
 
 
+def test_pi_capability_contract_separates_native_packages_and_unsupported_controls() -> None:
+    """Pi's runtime boundary must expose its fail-closed parity contract."""
+    capabilities = agent_runtime.AGENT_CAPABILITIES["pi"]
+
+    assert capabilities.core_capabilities == frozenset(
+        {
+            agent_runtime.AgentCapability.FILE_READ,
+            agent_runtime.AgentCapability.FILE_WRITE,
+            agent_runtime.AgentCapability.SHELL,
+            agent_runtime.AgentCapability.SEARCH,
+            agent_runtime.AgentCapability.SESSION,
+            agent_runtime.AgentCapability.RESUME,
+            agent_runtime.AgentCapability.SKILL,
+            agent_runtime.AgentCapability.TOOL_ALLOWLIST,
+        }
+    )
+    assert capabilities.package_capabilities == frozenset(
+        {
+            agent_runtime.AgentCapability.SUBAGENT,
+            agent_runtime.AgentCapability.WEB_ACCESS,
+        }
+    )
+    assert capabilities.unavailable_capabilities == frozenset(
+        {
+            agent_runtime.AgentCapability.INTERACTIVE_APPROVAL,
+            agent_runtime.AgentCapability.OS_SANDBOX,
+        }
+    )
+    assert capabilities.supports_sandbox is False
+
+
 def _write_pi_models_config(home: Path) -> None:
     """Create a minimal Pi model config under a fake home directory."""
     config_path = home / ".pi" / "agent" / "models.json"

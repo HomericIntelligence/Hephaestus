@@ -29,12 +29,16 @@ PROVIDER_NEUTRAL_FILES = [
     "hephaestus/github/fleet_sync/conflict_resolver.py",
 ]
 
-CODEX_ONLY_NAMES = {
+DIRECT_PROVIDER_ONLY_NAMES = {
     "is_codex",
+    "is_pi",
     "run_codex_text",
     "run_codex_session",
     "resume_codex_session",
     "codex_json_stdout",
+    "run_pi_text",
+    "run_pi_session",
+    "resume_pi_session",
 }
 
 
@@ -46,13 +50,17 @@ def _node_name(node: ast.AST) -> str:
     return ""
 
 
-def _codex_string_compare(node: ast.Compare) -> bool:
+def _direct_provider_string_compare(node: ast.Compare) -> bool:
     comparators = [node.left, *node.comparators]
-    return any(isinstance(item, ast.Constant) and item.value == "codex" for item in comparators)
+    return any(
+        isinstance(item, ast.Constant) and item.value in {"codex", "pi"} for item in comparators
+    )
 
 
 @pytest.mark.parametrize("relative_path", PROVIDER_NEUTRAL_FILES)
-def test_direct_agent_dispatch_has_no_codex_only_runtime_branches(relative_path: str) -> None:
+def test_direct_agent_dispatch_has_no_provider_specific_runtime_branches(
+    relative_path: str,
+) -> None:
     """Automation call sites must route Codex and Pi through neutral runtime helpers."""
     path = REPO_ROOT / relative_path
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -61,14 +69,14 @@ def test_direct_agent_dispatch_has_no_codex_only_runtime_branches(relative_path:
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             imported = {alias.name for alias in node.names}
-            offenders = imported & CODEX_ONLY_NAMES
+            offenders = imported & DIRECT_PROVIDER_ONLY_NAMES
             if offenders:
                 violations.append(f"line {node.lineno}: imports {sorted(offenders)}")
         elif isinstance(node, ast.Call):
             name = _node_name(node.func)
-            if name in CODEX_ONLY_NAMES:
+            if name in DIRECT_PROVIDER_ONLY_NAMES:
                 violations.append(f"line {node.lineno}: calls {name}()")
-        elif isinstance(node, ast.Compare) and _codex_string_compare(node):
-            violations.append(f"line {node.lineno}: compares against 'codex'")
+        elif isinstance(node, ast.Compare) and _direct_provider_string_compare(node):
+            violations.append(f"line {node.lineno}: compares against a direct provider")
 
     assert violations == []
