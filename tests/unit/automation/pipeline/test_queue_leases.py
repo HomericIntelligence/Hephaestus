@@ -121,7 +121,8 @@ class TestStageQueueLeases:
         assert source.offer(_item("replacement")) is True
         assert destination.occupancy == 1
         assert destination.snapshot() == [item]
-        assert destination.pop() is item
+        popped = destination.pop()
+        assert popped is item
         assert destination.occupancy == 0
 
     def test_full_destination_retains_source_lease_for_retry(self) -> None:
@@ -140,11 +141,13 @@ class TestStageQueueLeases:
         assert source.offer(_item("must-not-enter-while-leased")) is False
         assert destination.snapshot() == [destination_item]
 
-        assert destination.pop() is destination_item
+        popped_destination_item = destination.pop()
+        assert popped_destination_item is destination_item
         assert lease.handoff(destination) is True
         assert source.occupancy == 0
         assert destination.snapshot() == [item]
-        assert destination.pop() is item
+        handed_off_item = destination.pop()
+        assert handed_off_item is item
         assert destination.occupancy == 0
 
     def test_empty_claim_is_explicit(self) -> None:
