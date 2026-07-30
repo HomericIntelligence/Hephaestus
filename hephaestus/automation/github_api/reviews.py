@@ -448,16 +448,17 @@ def gh_pr_review_post(
     Args:
         pr_number: PR number
         comments: List of dicts with keys: path (str), line (int), side (str), body (str)
-        summary: Overall review summary body
+        summary: Deprecated summary text. It is deliberately not published:
+            every review publication must contain source-anchored comments only.
         event: Review event type: COMMENT, APPROVE, or REQUEST_CHANGES
         dry_run: If True, log intent and return empty list without posting
         dedupe_existing: When True (#1083), a comment whose ``(path, line)``
             already has an unresolved bot review comment is EDITED in place
             (the new body is appended) rather than posted as a duplicate thread.
             Only the genuinely new comments are posted as fresh threads. If
-            dedupe/editing consumes every inline comment, no summary-only review
-            is posted; a duplicate-only re-review should be a no-op, not another
-            review submission. Fails open: if the existing-comment index cannot
+            dedupe/editing consumes every inline comment, no review is posted;
+            a duplicate-only re-review should be a no-op, not another review
+            submission. Fails open: if the existing-comment index cannot
             be fetched, every comment is posted as before.
 
     Returns:
@@ -469,6 +470,17 @@ def gh_pr_review_post(
             "[dry_run] Would post PR review on #%s with %s inline comments",
             pr_number,
             len(comments),
+        )
+        return []
+
+    # A review body without an inline comment creates an unanchored, general
+    # review comment. The automation contract requires every published finding
+    # to identify a source path and line, so do not use ``summary`` as a
+    # fallback publication surface.
+    if not comments:
+        _api.logger.info(
+            "PR #%s: skipped review publication without source-anchored comments",
+            pr_number,
         )
         return []
 
@@ -486,7 +498,8 @@ def gh_pr_review_post(
     #   2. Even passed as a typed array, ``line``/``side`` are undefined on
     #      ``DraftPullRequestReviewComment``.
     # POST /pulls/{n}/reviews is the correct surface for ``line``/``side``
-    # comments and for summary-only (empty ``comments``) reviews alike.
+    # comments. Summary-only reviews are prohibited because GitHub would render
+    # their body as an unanchored general review comment.
     #
     # #1039: GitHub returns HTTP 422 and rejects the WHOLE review if any inline
     # comment targets a line outside the PR diff hunks. The reviewer model can
@@ -496,6 +509,13 @@ def gh_pr_review_post(
     if comments:
         diff_result = _api._gh_call(["pr", "diff", str(pr_number)], check=False)
         comments = _api._filter_comments_to_diff(comments, diff_result.stdout or "")
+
+    if not comments:
+        _api.logger.info(
+            "PR #%s: skipped review publication after no source anchors remained",
+            pr_number,
+        )
+        return []
 
     # #1083: edit-in-place instead of duplicating. If a comment targets a line
     # that already has an unresolved bot comment, append the new body to that
@@ -521,7 +541,7 @@ def gh_pr_review_post(
         for c in comments
     ]
 
-    request_body = json.dumps({"body": summary, "event": event, "comments": review_comments})
+    request_body = json.dumps({"event": event, "comments": review_comments})
     fd, input_path = tempfile.mkstemp(prefix="gh-review-", suffix=".json")
     try:
         os.close(fd)

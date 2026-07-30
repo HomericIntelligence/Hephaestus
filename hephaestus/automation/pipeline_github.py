@@ -82,13 +82,17 @@ from hephaestus.automation.state_labels import (
 )
 from hephaestus.constants import read_timeout_env
 from hephaestus.github.client import gh_call
-from hephaestus.utils.file_lock import file_lock
+from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 
 logger = logging.getLogger(__name__)
 
 _CLOSES_ISSUE_LINE_RE = re.compile(r"^Closes #(\d+)\s*$", re.MULTILINE)
 _STANDALONE_VERDICT_LINE_RE = re.compile(r"(?i)^\s*verdict\s*:")
 _HTTP_STATUS_RE = re.compile(r"^HTTP/\S+\s+(\d{3})\b", re.MULTILINE)
+_IMPLEMENTATION_REPLY_BODY_RE = re.compile(
+    r"(?s)\A(.*)\n\n<!-- hephaestus-implementation-reply:[0-9a-f]{24} -->\n"
+    r"<!-- hephaestus-implementation-batch:([0-9a-f]{32}) -->\Z"
+)
 
 
 def _parse_included_http_response(
@@ -937,12 +941,30 @@ class PipelineGitHub:
         return reply if 0 < len(reply) <= 4_000 else None
 
     def _implementation_thread_reply_body(
-        self, pr_number: int, head_sha: str, thread_id: str, reply: str
+        self, pr_number: int, head_sha: str, thread_id: str, reply: str, batch_nonce: str
     ) -> str:
-        """Bind an implementation reply to one exact thread and pushed head."""
-        seed = ":".join([self._repo_slug or self.org, str(pr_number), thread_id, head_sha, reply])
+        """Bind an implementation reply to one exact thread, head, and batch."""
+        if re.fullmatch(r"[0-9a-f]{32}", batch_nonce) is None:
+            raise ValueError(
+                "implementation reply batch nonce must be 32 lowercase hexadecimal chars"
+            )
+        seed = ":".join(
+            [self._repo_slug or self.org, str(pr_number), thread_id, head_sha, reply, batch_nonce]
+        )
         marker = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
-        return f"{reply}\n\n<!-- hephaestus-implementation-reply:{marker} -->"
+        return (
+            f"{reply}\n\n"
+            f"<!-- hephaestus-implementation-reply:{marker} -->\n"
+            f"<!-- hephaestus-implementation-batch:{batch_nonce} -->"
+        )
+
+    @staticmethod
+    def _implementation_reply_batch_nonce(review_body: object) -> str | None:
+        """Return the nonce carried by one source-attached implementation reply."""
+        if not isinstance(review_body, str):
+            return None
+        match = _IMPLEMENTATION_REPLY_BODY_RE.fullmatch(review_body)
+        return match.group(2) if match is not None else None
 
     def _validated_implementation_reply(
         self, pr_number: int, reviewed_head_sha: str, thread: dict[str, Any]
@@ -961,23 +983,74 @@ class PipelineGitHub:
             return None
         reply_id, reply_body = snapshot[-1]
         final_comment = comments[-1]
-        if not isinstance(final_comment, dict) or not final_comment.get("viewer_did_author"):
+        if (
+            not isinstance(final_comment, dict)
+            or not final_comment.get("viewer_did_author")
+            or not isinstance(final_comment.get("review_id"), str)
+            or not final_comment["review_id"]
+            or final_comment.get("review_state") != "COMMENTED"
+            or final_comment.get("review_commit_sha") != reviewed_head_sha
+        ):
             return None
-        marker_match = re.fullmatch(
-            r"(?s)(.*)\n\n<!-- hephaestus-implementation-reply:[0-9a-f]{24} -->",
-            reply_body,
-        )
+        marker_match = _IMPLEMENTATION_REPLY_BODY_RE.fullmatch(reply_body)
         if marker_match is None:
             return None
         reply = self._safe_thread_reply(marker_match.group(1))
-        if reply is None:
+        batch_nonce = marker_match.group(2)
+        if reply is None or batch_nonce is None:
             return None
         expected_body = self._implementation_thread_reply_body(
-            pr_number, reviewed_head_sha, thread_id, reply
+            pr_number, reviewed_head_sha, thread_id, reply, batch_nonce
         )
         if reply_body != expected_body:
             return None
         return reply_id, reply_body
+
+    def _validated_implementation_reply_batch(
+        self,
+        pr_number: int,
+        reviewed_head_sha: str,
+        threads: list[dict[str, Any]],
+    ) -> list[tuple[dict[str, Any], str, str]]:
+        """Return one complete, submitted implementation reply batch.
+
+        A per-thread reply marker binds one response to a thread and head. The
+        shared CSPRNG batch nonce binds the complete implementation pass without
+        publishing an unanchored review-level summary.
+        """
+        candidates: list[tuple[dict[str, Any], str, str, str]] = []
+        seen_thread_ids: set[str] = set()
+        for thread in threads:
+            if not isinstance(thread, dict):
+                return []
+            thread_id = thread.get("id")
+            comments = thread.get("comments")
+            implementation_reply = self._validated_implementation_reply(
+                pr_number, reviewed_head_sha, thread
+            )
+            if implementation_reply is None:
+                continue
+            if (
+                not isinstance(thread_id, str)
+                or not thread_id
+                or thread_id in seen_thread_ids
+                or not isinstance(comments, list)
+                or not comments
+                or not isinstance(comments[-1], dict)
+            ):
+                return []
+            reply_id, reply_body = implementation_reply
+            batch_nonce = self._implementation_reply_batch_nonce(reply_body)
+            if batch_nonce is None:
+                return []
+            seen_thread_ids.add(thread_id)
+            candidates.append((thread, reply_id, reply_body, batch_nonce))
+        if not candidates:
+            return []
+        batch_nonces = {candidate[3] for candidate in candidates}
+        if len(batch_nonces) != 1:
+            return []
+        return [(thread, reply_id, reply_body) for thread, reply_id, reply_body, _ in candidates]
 
     def reviewer_validation_receipts(
         self,
@@ -1009,12 +1082,9 @@ class PipelineGitHub:
             ):
                 raise RuntimeError("malformed live review-thread snapshot")
             seen.add(thread_id)
-            implementation_reply = self._validated_implementation_reply(
-                pr_number, reviewed_head_sha, thread
-            )
-            if implementation_reply is None:
-                continue
-            reply_id, reply_body = implementation_reply
+        for thread, reply_id, reply_body in self._validated_implementation_reply_batch(
+            pr_number, reviewed_head_sha, threads
+        ):
             receipts.append(
                 {
                     **thread,
@@ -1039,17 +1109,25 @@ class PipelineGitHub:
         )
 
     def _add_thread_reply(self, thread_id: str, body: str) -> str | None:
-        """Post one coordinator-owned reply and return its opaque comment ID."""
+        """Post one response on an existing review thread.
+
+        Both implementation receipts and fresh reviewer feedback use this one
+        mutation.  It intentionally cannot attach a reply to a review-level
+        envelope: every response is anchored by ``pullRequestReviewThreadId``.
+        """
         query = (
             "mutation($threadId:ID!,$body:String!,$clientMutationId:String!){"
             "addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId,body:$body,"
             "clientMutationId:$clientMutationId}){comment{id}}}"
         )
+        mutation_fields: dict[str, str] = {
+            "threadId": thread_id,
+            "body": body,
+            "clientMutationId": hashlib.sha256(f"{thread_id}:{body}".encode()).hexdigest(),
+        }
         data = self._graphql(
             query,
-            threadId=thread_id,
-            body=body,
-            clientMutationId=hashlib.sha256(body.encode("utf-8")).hexdigest(),
+            **mutation_fields,
         )
         response_data = data.get("data") if isinstance(data, dict) else None
         mutation = (
@@ -1085,7 +1163,7 @@ class PipelineGitHub:
             "id number repository{name owner{login}}}"
             "comments(first:100,after:$after){pageInfo{hasNextPage endCursor}"
             "nodes{id body viewerDidAuthor author{login __typename} "
-            "pullRequestReview{id body commit{oid}}}}}}}"
+            "pullRequestReview{id state body commit{oid}}}}}}}"
         )
 
         def read_once() -> tuple[dict[str, Any], bool] | None:  # noqa: C901
@@ -1207,6 +1285,7 @@ class PipelineGitHub:
                     comment_id = comment.get("id")
                     body = comment.get("body")
                     review_id = review.get("id") if isinstance(review, dict) else ""
+                    review_state = review.get("state") if isinstance(review, dict) else ""
                     review_body = review.get("body") if isinstance(review, dict) else ""
                     review_commit_sha = commit.get("oid") if isinstance(commit, dict) else ""
                     if (
@@ -1217,6 +1296,7 @@ class PipelineGitHub:
                         or not isinstance(author_type, str)
                         or not isinstance(comment.get("viewerDidAuthor"), bool)
                         or not isinstance(review_id, str)
+                        or not isinstance(review_state, str)
                         or not isinstance(review_body, str)
                         or not isinstance(review_commit_sha, str)
                     ):
@@ -1232,6 +1312,7 @@ class PipelineGitHub:
                             "author_type": author_type,
                             "viewer_did_author": comment["viewerDidAuthor"],
                             "review_id": review_id,
+                            "review_state": review_state,
                             "review_body": review_body,
                             "review_commit_sha": review_commit_sha,
                         }
@@ -1282,13 +1363,119 @@ class PipelineGitHub:
             return None
         return second[0]
 
-    def post_implementation_thread_replies(  # noqa: C901
+    def _implementation_reply_lock_path(self, pr_number: int) -> Path:
+        """Return a local worktree-shared lock for one repository PR reply batch.
+
+        A linked worktree has a ``.git`` file pointing at the common
+        repository's ``.git/worktrees/<name>`` directory.  Reply publication
+        must use the common directory rather than the worktree-local state
+        directory, otherwise separate loop processes can both pass the
+        snapshot read and attach duplicate responses.  A standalone checkout
+        retains its repository-local state fallback.
+        """
+        repo_key = hashlib.sha256((self._repo_slug or self.org).encode("utf-8")).hexdigest()[:16]
+        git_metadata = self._repo_root / ".git"
+        lock_root = ensure_state_dir(self._repo_root) / "locks"
+        if git_metadata.is_dir():
+            lock_root = git_metadata / "hephaestus-automation-locks"
+        elif git_metadata.is_file():
+            try:
+                first_line = git_metadata.read_text(encoding="utf-8").splitlines()[0]
+            except (IndexError, OSError, UnicodeDecodeError) as error:
+                raise LockUnavailableError(
+                    f"could not read Git metadata for implementation reply lock at {git_metadata}"
+                ) from error
+            prefix, separator, raw_git_dir = first_line.partition(":")
+            if prefix != "gitdir" or not separator or not raw_git_dir.strip():
+                raise LockUnavailableError(
+                    f"invalid Git metadata for implementation reply lock at {git_metadata}"
+                )
+            git_dir = Path(raw_git_dir.strip())
+            if not git_dir.is_absolute():
+                git_dir = git_metadata.parent / git_dir
+            common_git_dir = git_dir.parent.parent
+            common_dir_file = git_dir / "commondir"
+            if (
+                git_dir.parent.name != "worktrees"
+                or not git_dir.is_dir()
+                or not (git_dir / "HEAD").is_file()
+                or not common_git_dir.is_dir()
+                or not (common_git_dir / "HEAD").is_file()
+                or not common_dir_file.is_file()
+            ):
+                raise LockUnavailableError(
+                    "invalid linked-worktree Git metadata for implementation reply lock at "
+                    f"{git_metadata}"
+                )
+            try:
+                common_dir_text = common_dir_file.read_text(encoding="utf-8").strip()
+                common_dir_from_metadata = Path(common_dir_text)
+                if not common_dir_from_metadata.is_absolute():
+                    common_dir_from_metadata = git_dir / common_dir_from_metadata
+                if (
+                    not common_dir_text
+                    or common_dir_from_metadata.resolve() != common_git_dir.resolve()
+                ):
+                    raise LockUnavailableError(
+                        "invalid common Git directory for implementation reply lock at "
+                        f"{git_metadata}"
+                    )
+            except (OSError, UnicodeDecodeError) as error:
+                raise LockUnavailableError(
+                    "could not read common Git directory for implementation reply lock at "
+                    f"{git_metadata}"
+                ) from error
+            lock_root = common_git_dir / "hephaestus-automation-locks"
+        return lock_root / f"implementation-replies-{repo_key}-{pr_number}.lock"
+
+    def post_implementation_thread_replies(
         self,
         pr_number: int,
         *,
         expected_head_sha: str,
         threads: list[dict[str, Any]],
         replies: dict[str, str],
+        batch_nonce: str | None = None,
+    ) -> ImplementationThreadReplyResult:
+        """Serialize one repository-local implementation reply batch per PR.
+
+        GitHub's client mutation id is a tracing field rather than a
+        compare-and-swap primitive.  Cooperating loop processes therefore
+        hold one worktree-shared PR-scoped lock across discovery and direct
+        thread replies.  The adapter fails closed on platforms without an
+        exclusive lock instead of risking duplicate thread replies.
+        """
+        candidate_ids = tuple(sorted(str(thread_id) for thread_id in replies))
+        if not isinstance(batch_nonce, str) or re.fullmatch(r"[0-9a-f]{32}", batch_nonce) is None:
+            return ImplementationThreadReplyResult(blocked_thread_ids=candidate_ids)
+        if self._skip(
+            f"post {len(candidate_ids)} implementation review-thread replies on PR #{pr_number}"
+        ):
+            return ImplementationThreadReplyResult(blocked_thread_ids=candidate_ids)
+        try:
+            with file_lock(self._implementation_reply_lock_path(pr_number), require_exclusive=True):
+                return self._post_implementation_thread_replies_locked(
+                    pr_number,
+                    expected_head_sha=expected_head_sha,
+                    threads=threads,
+                    replies=replies,
+                    batch_nonce=batch_nonce,
+                )
+        except (LockUnavailableError, OSError) as error:
+            logger.warning("Implementation reply batch lock failed on PR #%s: %s", pr_number, error)
+            return ImplementationThreadReplyResult(
+                retryable_thread_ids=candidate_ids,
+                retryable=True,
+            )
+
+    def _post_implementation_thread_replies_locked(  # noqa: C901
+        self,
+        pr_number: int,
+        *,
+        expected_head_sha: str,
+        threads: list[dict[str, Any]],
+        replies: dict[str, str],
+        batch_nonce: str,
     ) -> ImplementationThreadReplyResult:
         """Post implementation-agent replies after a real fix commit reached GitHub.
 
@@ -1297,11 +1484,11 @@ class PipelineGitHub:
         performs a fresh review and owns that decision.
         """
         candidate_ids = tuple(sorted(str(thread_id) for thread_id in replies))
-        if self._skip(
-            f"post {len(candidate_ids)} implementation review-thread replies on PR #{pr_number}"
+        if (
+            not candidate_ids
+            or not re.fullmatch(r"[0-9a-f]{40}", expected_head_sha)
+            or re.fullmatch(r"[0-9a-f]{32}", batch_nonce) is None
         ):
-            return ImplementationThreadReplyResult(blocked_thread_ids=candidate_ids)
-        if not candidate_ids or not re.fullmatch(r"[0-9a-f]{40}", expected_head_sha):
             return ImplementationThreadReplyResult(blocked_thread_ids=candidate_ids)
         snapshots: dict[str, dict[str, Any]] = {}
         for thread in threads:
@@ -1313,45 +1500,53 @@ class PipelineGitHub:
             snapshots[thread_id] = dict(thread)
         if not set(candidate_ids).issubset(snapshots):
             return ImplementationThreadReplyResult(blocked_thread_ids=candidate_ids)
-        replied: list[str] = []
         blocked: list[str] = []
-        receipts: list[dict[str, Any]] = []
-        pending_candidate_ids = candidate_ids
+
+        def receipt(live: dict[str, Any], comment_id: str, body: str) -> dict[str, Any]:
+            return {
+                **live,
+                "implementation_reply_id": comment_id,
+                "implementation_reply_body": body,
+                "implementation_head_sha": expected_head_sha,
+            }
+
+        prepared: list[tuple[str, dict[str, Any], str]] = []
+        recovered: dict[str, dict[str, Any]] = {}
         try:
-            for next_candidate_index, thread_id in enumerate(candidate_ids):
-                pending_candidate_ids = candidate_ids[next_candidate_index:]
+            for thread_id in candidate_ids:
                 reply = self._safe_thread_reply(replies.get(thread_id))
                 snapshot = snapshots[thread_id]
+                if reply is None:
+                    blocked.append(thread_id)
+                    continue
+                body = self._implementation_thread_reply_body(
+                    pr_number, expected_head_sha, thread_id, reply, batch_nonce
+                )
                 live = self._review_thread_snapshot(pr_number, thread_id)
                 if (
-                    reply is None
-                    or not isinstance(live, dict)
+                    not isinstance(live, dict)
                     or live.get("isResolved") is not False
                     or not self._pr_is_current_open_head(live.get("pr_state"), expected_head_sha)
                 ):
                     blocked.append(thread_id)
                     continue
-                body = self._implementation_thread_reply_body(
-                    pr_number, expected_head_sha, thread_id, reply
-                )
                 # A prior transport failure may have applied this exact reply.
                 # Recover its host proof before treating the saved snapshot as
                 # stale or attempting a duplicate mutation.
                 recovered_id = self._host_reply_receipt(snapshot, live, body)
                 if recovered_id is not None:
-                    receipts.append(
-                        {
-                            **live,
-                            "implementation_reply_id": recovered_id,
-                            "implementation_reply_body": body,
-                            "implementation_head_sha": expected_head_sha,
-                        }
-                    )
-                    replied.append(thread_id)
+                    recovered[thread_id] = receipt(live, recovered_id, body)
                     continue
                 if not self._same_thread_snapshot(snapshot, live):
                     blocked.append(thread_id)
                     continue
+                prepared.append((thread_id, snapshot, body))
+
+            if blocked:
+                return ImplementationThreadReplyResult(
+                    blocked_thread_ids=tuple(sorted(blocked)),
+                )
+            for thread_id, snapshot, body in prepared:
                 comment_id = self._add_thread_reply(thread_id, body)
                 replied_live = self._review_thread_snapshot(pr_number, thread_id)
                 if (
@@ -1361,23 +1556,22 @@ class PipelineGitHub:
                         replied_live.get("pr_state"), expected_head_sha
                     )
                 ):
-                    blocked.append(thread_id)
-                    continue
+                    return ImplementationThreadReplyResult(
+                        retryable_thread_ids=candidate_ids,
+                        retryable=True,
+                    )
                 proved_comment_id = self._host_reply_receipt(
-                    snapshot, replied_live, body, comment_id
+                    snapshot,
+                    replied_live,
+                    body,
+                    comment_id,
                 )
                 if proved_comment_id is None:
-                    blocked.append(thread_id)
-                    continue
-                receipts.append(
-                    {
-                        **replied_live,
-                        "implementation_reply_id": proved_comment_id,
-                        "implementation_reply_body": body,
-                        "implementation_head_sha": expected_head_sha,
-                    }
-                )
-                replied.append(thread_id)
+                    return ImplementationThreadReplyResult(
+                        retryable_thread_ids=candidate_ids,
+                        retryable=True,
+                    )
+                recovered[thread_id] = receipt(replied_live, proved_comment_id, body)
         except (
             AttributeError,
             OSError,
@@ -1387,20 +1581,13 @@ class PipelineGitHub:
             json.JSONDecodeError,
         ) as error:
             logger.warning("Implementation thread replies failed on PR #%s: %s", pr_number, error)
-            retryable_ids = tuple(
-                thread_id for thread_id in pending_candidate_ids if thread_id not in set(replied)
-            )
             return ImplementationThreadReplyResult(
-                replied_thread_ids=tuple(replied),
-                blocked_thread_ids=tuple(blocked),
-                receipts=tuple(receipts),
-                retryable_thread_ids=retryable_ids,
-                retryable=bool(retryable_ids),
+                retryable_thread_ids=candidate_ids,
+                retryable=True,
             )
         return ImplementationThreadReplyResult(
-            replied_thread_ids=tuple(replied),
-            blocked_thread_ids=tuple(blocked),
-            receipts=tuple(receipts),
+            replied_thread_ids=candidate_ids,
+            receipts=tuple(recovered[thread_id] for thread_id in candidate_ids),
         )
 
     def reconcile_reviewer_validated_threads(  # noqa: C901
@@ -1424,6 +1611,21 @@ class PipelineGitHub:
             or self._skip(
                 f"reconcile {len(candidate_ids)} reviewer-validated threads on PR #{pr_number}"
             )
+        ):
+            return ReviewerThreadReconciliationResult(blocked_thread_ids=candidate_ids)
+        batch = self._validated_implementation_reply_batch(pr_number, reviewed_head_sha, receipts)
+        batch_by_id = {
+            str(thread.get("id") or ""): (reply_id, reply_body)
+            for thread, reply_id, reply_body in batch
+        }
+        if set(batch_by_id) != expected_ids or any(
+            not isinstance(receipt, dict)
+            or batch_by_id.get(str(receipt.get("id") or ""))
+            != (
+                receipt.get("implementation_reply_id"),
+                receipt.get("implementation_reply_body"),
+            )
+            for receipt in receipts
         ):
             return ReviewerThreadReconciliationResult(blocked_thread_ids=candidate_ids)
         by_id: dict[str, dict[str, Any]] = {}
@@ -2171,67 +2373,6 @@ class PipelineGitHub:
             )
         return github_api.gh_pr_create(branch, title, body)
 
-    def post_pr_comment(self, pr_number: int, body: str) -> None:
-        """Post an explanatory PR comment (``gh_issue_comment`` channel)."""
-        if self._skip(f"post comment on PR #{pr_number}"):
-            return
-        if self._repo_slug is not None:
-            with github_api._body_file(body) as path:
-                self._gh(["issue", "comment", str(pr_number), "--body-file", path])
-            return
-        github_api.gh_issue_comment(pr_number, body)
-
-    def upsert_pr_comment(self, pr_number: int, marker_prefix: str, body: str) -> bool:
-        """Create-or-update a marker-keyed PR comment (issue comment channel)."""
-        if self._skip(f"upsert comment on PR #{pr_number}"):
-            return False
-        if self._repo_slug is None:
-            github_api.gh_issue_upsert_comment(pr_number, marker_prefix, body)
-            return True
-        self._upsert_repo_issue_comment(pr_number, marker_prefix, body)
-        return True
-
-    def _upsert_repo_issue_comment(
-        self, issue_number: int, marker_prefix: str, body: str
-    ) -> int | None:
-        """Repo-scoped version of ``gh_issue_upsert_comment``."""
-        comments = self._repo_issue_comments(issue_number)
-        matching = [
-            comment
-            for comment in comments
-            if str(comment.get("body", "")).startswith(marker_prefix)
-            and comment.get("databaseId") is not None
-        ]
-        if not matching:
-            self.post_pr_comment(issue_number, body)
-            return None
-
-        owner, name = self._owner_name()
-        target_id = int(matching[-1]["databaseId"])
-        for duplicate in matching[:-1]:
-            duplicate_id = duplicate.get("databaseId")
-            if duplicate_id is not None:
-                gh_call(
-                    [
-                        "api",
-                        "--method",
-                        "DELETE",
-                        f"/repos/{owner}/{name}/issues/comments/{int(duplicate_id)}",
-                    ]
-                )
-        with github_api._body_file(body) as path:
-            gh_call(
-                [
-                    "api",
-                    "--method",
-                    "PATCH",
-                    f"/repos/{owner}/{name}/issues/comments/{target_id}",
-                    "-F",
-                    f"body=@{path}",
-                ]
-            )
-        return target_id
-
     def mark_pr_implementation_no_go(self, pr_number: int) -> None:
         """Apply and read back exclusive ``state:implementation-no-go``."""
         if self._skip(f"mark PR #{pr_number} implementation-no-go"):
@@ -2262,11 +2403,18 @@ class PipelineGitHub:
         self,
         pr_number: int,
         threads: list[dict[str, Any]],
-        summary: str,
         *,
         expected_head_sha: str,
     ) -> list[dict[str, Any]]:
         """Post review threads only on a fresh, exact reviewed PR head."""
+        # GitHub renders a review-level ``body`` as an unanchored general
+        # comment. Publish only reviews that contain source-positioned threads.
+        if not threads:
+            logger.info(
+                "PR #%s: skipped review publication without source-anchored threads",
+                pr_number,
+            )
+            return []
         if self._skip(f"post {len(threads)} review thread(s) on PR #{pr_number}"):
             return []
         if not self._pr_is_current_open_head(self.gh_pr_state(pr_number), expected_head_sha):
@@ -2294,7 +2442,6 @@ class PipelineGitHub:
             owner, name = self._owner_name()
             request_body = json.dumps(
                 {
-                    "body": summary,
                     "commit_id": expected_head_sha,
                     "event": "COMMENT",
                     "comments": review_comments,

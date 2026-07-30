@@ -397,13 +397,12 @@ class FakeStageGitHub(FakeGitHub):
         self,
         pr_number: int,
         threads: list[dict[str, Any]],
-        summary: str,
         *,
         expected_head_sha: str,
     ) -> list[dict[str, Any]]:
         """Mirror a post-time immutable receipt returned by the coordinator."""
         del expected_head_sha
-        ids = self.gh_pr_review_post(pr_number, threads, summary)
+        ids = self.gh_pr_review_post(pr_number, threads, "")
         self._posted_thread_ids[pr_number] = list(ids)
         review_id = f"review-{pr_number}-{len(self.reviews.get(pr_number, []))}"
         return [
@@ -435,9 +434,10 @@ class FakeStageGitHub(FakeGitHub):
         expected_head_sha: str,
         threads: list[dict[str, Any]],
         replies: dict[str, str],
+        batch_nonce: str,
     ) -> ImplementationThreadReplyResult:
         """Record commit-gated implementation replies for stage tests."""
-        del expected_head_sha
+        del expected_head_sha, batch_nonce
         by_id = {
             str(thread.get("thread_id") or thread.get("id") or ""): thread for thread in threads
         }
@@ -541,20 +541,6 @@ class FakeStageGitHub(FakeGitHub):
         """Mirror pr_manager.mark_pr_implementation_no_go (records mutation)."""
         self._pr_impl_state = (False, True)
         self._log("mark_pr_implementation_no_go", pr_number)
-
-    def post_pr_comment(self, pr_number: int, body: str) -> None:
-        """Mirror the coordinator PR-comment post (delegates to gh_issue_comment).
-
-        PRs share the issue comment channel, so the canonical
-        ``gh_issue_comment`` recorder keeps the mutation_log format and
-        stores the body for content assertions.
-        """
-        self.gh_issue_comment(pr_number, body)
-
-    def upsert_pr_comment(self, pr_number: int, marker_prefix: str, body: str) -> bool:
-        """Mirror the coordinator PR-comment upsert (delegates to issue comments)."""
-        self.gh_issue_upsert_comment(pr_number, marker_prefix, body)
-        return True
 
     def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
         """Mirror ci_driver.CIDriver._gh_pr_state (canned answer)."""

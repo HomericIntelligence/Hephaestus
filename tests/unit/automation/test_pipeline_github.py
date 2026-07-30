@@ -35,6 +35,41 @@ from hephaestus.automation.review_journal import (
 )
 from hephaestus.utils.file_lock import LockUnavailableError
 
+_BATCH_NONCE = "b" * 32
+
+
+class PipelineGitHubForTest(pg.PipelineGitHub):
+    """Production adapter with an explicit test-only operation nonce default."""
+
+    def _implementation_thread_reply_body(
+        self,
+        pr_number: int,
+        head_sha: str,
+        thread_id: str,
+        reply: str,
+        batch_nonce: str = _BATCH_NONCE,
+    ) -> str:
+        return super()._implementation_thread_reply_body(
+            pr_number, head_sha, thread_id, reply, batch_nonce
+        )
+
+    def post_implementation_thread_replies(
+        self,
+        pr_number: int,
+        *,
+        expected_head_sha: str,
+        threads: list[dict[str, Any]],
+        replies: dict[str, str],
+        batch_nonce: str | None = _BATCH_NONCE,
+    ) -> Any:
+        return super().post_implementation_thread_replies(
+            pr_number,
+            expected_head_sha=expected_head_sha,
+            threads=threads,
+            replies=replies,
+            batch_nonce=batch_nonce,
+        )
+
 
 def _claim_drive_green_learn_from_process(repo_root: str, start_barrier: Any, results: Any) -> None:
     """Race one real adapter claim from a separate process for lock coverage."""
@@ -51,15 +86,15 @@ def _claim_drive_green_learn_from_process(repo_root: str, start_barrier: Any, re
 
 
 @pytest.fixture
-def adapter(tmp_path: Path) -> pg.PipelineGitHub:
+def adapter(tmp_path: Path) -> PipelineGitHubForTest:
     """Live-mutator adapter anchored at a temp repo root."""
-    return pg.PipelineGitHub("org", dry_run=False, repo_root=tmp_path)
+    return PipelineGitHubForTest("org", dry_run=False, repo_root=tmp_path)
 
 
 @pytest.fixture
-def dry_adapter(tmp_path: Path) -> pg.PipelineGitHub:
+def dry_adapter(tmp_path: Path) -> PipelineGitHubForTest:
     """Dry-run adapter: every mutator must log-and-skip."""
-    return pg.PipelineGitHub("org", dry_run=True, repo_root=tmp_path)
+    return PipelineGitHubForTest("org", dry_run=True, repo_root=tmp_path)
 
 
 @pytest.fixture
@@ -129,8 +164,491 @@ def _open_thread_snapshot(thread: dict[str, Any], *, resolved: bool = False) -> 
     }
 
 
+def _submitted_implementation_receipt(
+    adapter: pg.PipelineGitHub,
+    thread: dict[str, Any],
+    reply: str,
+    *,
+    head_sha: str = "a" * 40,
+) -> dict[str, Any]:
+    """Return a complete host snapshot for one source-attached reply."""
+    reply_body = adapter._implementation_thread_reply_body(
+        7, head_sha, thread["id"], reply, _BATCH_NONCE
+    )
+    return {
+        **thread,
+        "comments": [
+            *thread["comments"],
+            {
+                "id": "implementation-comment",
+                "author": "hephaestus[bot]",
+                "body": reply_body,
+                "viewer_did_author": True,
+                "review_id": "implementation-review",
+                "review_state": "COMMENTED",
+                "review_commit_sha": head_sha,
+            },
+        ],
+        "implementation_reply_id": "implementation-comment",
+        "implementation_reply_body": reply_body,
+        "implementation_head_sha": head_sha,
+    }
+
+
 class TestAllThreadReplyAndReviewerResolution:
     """The implementation/reviewer split applies to every open thread author."""
+
+    def test_implementation_responses_use_only_thread_reply_mutations(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Implementation output has no general PullRequestReview body."""
+        thread = _external_reviewer_thread("thread-one")
+        live = thread
+        queries: list[str] = []
+
+        def snapshot(_pr: int, _thread_id: str) -> dict[str, Any]:
+            return _open_thread_snapshot(live)
+
+        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+            nonlocal live
+            queries.append(query)
+            if "addPullRequestReviewThreadReply" not in query:
+                raise AssertionError(f"unexpected review-envelope mutation: {query}")
+            assert "pullRequestReviewId" not in query
+            body = str(fields["body"])
+            live = {
+                **live,
+                "comments": [
+                    *live["comments"],
+                    {
+                        "id": "implementation-comment",
+                        "author": "hephaestus[bot]",
+                        "body": body,
+                        "viewer_did_author": True,
+                    },
+                ],
+            }
+            return {
+                "data": {
+                    "addPullRequestReviewThreadReply": {"comment": {"id": "implementation-comment"}}
+                }
+            }
+
+        monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+
+        result = adapter.post_implementation_thread_replies(
+            7,
+            expected_head_sha="a" * 40,
+            threads=[thread],
+            replies={thread["id"]: "Fixed the missing guard."},
+            batch_nonce="b" * 32,
+        )
+
+        assert result.replied_thread_ids == (thread["id"],)
+        assert len(result.receipts) == 1
+        assert len(queries) == 1
+
+    def test_implementation_replies_share_one_source_attached_batch(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One implementation pass attaches every response to its own thread."""
+        first = _external_reviewer_thread("thread-one")
+        second = _external_reviewer_thread("thread-two")
+        live_by_id = {first["id"]: first, second["id"]: second}
+        reply_bodies: list[str] = []
+
+        def snapshot(_pr: int, thread_id: str) -> dict[str, Any]:
+            return _open_thread_snapshot(live_by_id[thread_id])
+
+        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+            if "addPullRequestReviewThreadReply" in query:
+                assert "pullRequestReviewId" not in query
+                assert "reviewId" not in fields
+                thread_id = str(fields["threadId"])
+                reply_bodies.append(str(fields["body"]))
+                comment_id = f"implementation-{thread_id}"
+                live_by_id[thread_id] = {
+                    **live_by_id[thread_id],
+                    "comments": [
+                        *live_by_id[thread_id]["comments"],
+                        {
+                            "id": comment_id,
+                            "author": "hephaestus[bot]",
+                            "body": fields["body"],
+                            "viewer_did_author": True,
+                            "review_id": "implementation-review",
+                            "review_state": "COMMENTED",
+                            "review_body": "",
+                            "review_commit_sha": "a" * 40,
+                        },
+                    ],
+                }
+                return {
+                    "data": {"addPullRequestReviewThreadReply": {"comment": {"id": comment_id}}}
+                }
+            raise AssertionError(query)
+
+        monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+
+        result = adapter.post_implementation_thread_replies(
+            7,
+            expected_head_sha="a" * 40,
+            threads=[first, second],
+            replies={
+                first["id"]: "Fixed the first finding.",
+                second["id"]: "Fixed the second finding.",
+            },
+        )
+
+        assert result.replied_thread_ids == (first["id"], second["id"])
+        assert len(reply_bodies) == 2
+        assert {adapter._implementation_reply_batch_nonce(body) for body in reply_bodies} == {
+            _BATCH_NONCE
+        }
+
+    def test_reply_batch_retry_recovers_attached_replies_and_adds_only_missing_one(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A retry recognizes its source-attached reply before posting again."""
+        first = _external_reviewer_thread("thread-one")
+        second = _external_reviewer_thread("thread-two")
+        live_by_id = {first["id"]: first, second["id"]: second}
+        reply_calls: list[str] = []
+
+        def snapshot(_pr: int, thread_id: str) -> dict[str, Any]:
+            return _open_thread_snapshot(live_by_id[thread_id])
+
+        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+            if "addPullRequestReviewThreadReply" in query:
+                assert "pullRequestReviewId" not in query
+                assert "reviewId" not in fields
+                thread_id = str(fields["threadId"])
+                reply_calls.append(thread_id)
+                if thread_id == second["id"] and reply_calls.count(thread_id) == 1:
+                    raise OSError("transient GitHub reply failure")
+                comment_id = f"implementation-{thread_id}"
+                live_by_id[thread_id] = {
+                    **live_by_id[thread_id],
+                    "comments": [
+                        *live_by_id[thread_id]["comments"],
+                        {
+                            "id": comment_id,
+                            "author": "hephaestus[bot]",
+                            "body": fields["body"],
+                            "viewer_did_author": True,
+                            "review_id": "implementation-review",
+                            "review_state": "COMMENTED",
+                            "review_body": "",
+                            "review_commit_sha": "a" * 40,
+                        },
+                    ],
+                }
+                return {
+                    "data": {"addPullRequestReviewThreadReply": {"comment": {"id": comment_id}}}
+                }
+            raise AssertionError(query)
+
+        monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+        replies = {
+            first["id"]: "Fixed the first finding.",
+            second["id"]: "Fixed the second finding.",
+        }
+
+        failed = adapter.post_implementation_thread_replies(
+            7,
+            expected_head_sha="a" * 40,
+            threads=[first, second],
+            replies=replies,
+        )
+        retried = adapter.post_implementation_thread_replies(
+            7,
+            expected_head_sha="a" * 40,
+            threads=[first, second],
+            replies=replies,
+        )
+
+        assert failed.replied_thread_ids == ()
+        assert failed.retryable_thread_ids == (first["id"], second["id"])
+        assert retried.replied_thread_ids == (first["id"], second["id"])
+        assert reply_calls == [first["id"], second["id"], second["id"]]
+
+    def test_reply_batch_recovers_after_a_lost_thread_reply_response(
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A direct reply may apply before its response is lost without replaying it."""
+        first = _external_reviewer_thread("thread-one")
+        second = _external_reviewer_thread("thread-two")
+        live_by_id = {first["id"]: first, second["id"]: second}
+        reply_calls: list[str] = []
+
+        def snapshot(_pr: int, thread_id: str) -> dict[str, Any]:
+            return _open_thread_snapshot(live_by_id[thread_id])
+
+        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+            if "addPullRequestReviewThreadReply" in query:
+                assert "pullRequestReviewId" not in query
+                thread_id = str(fields["threadId"])
+                reply_calls.append(thread_id)
+                comment_id = f"implementation-{thread_id}"
+                live_by_id[thread_id] = {
+                    **live_by_id[thread_id],
+                    "comments": [
+                        *live_by_id[thread_id]["comments"],
+                        {
+                            "id": comment_id,
+                            "author": "hephaestus[bot]",
+                            "body": fields["body"],
+                            "viewer_did_author": True,
+                            "review_id": "implementation-review",
+                            "review_state": "COMMENTED",
+                            "review_body": "",
+                            "review_commit_sha": "a" * 40,
+                        },
+                    ],
+                }
+                return {"data": {"addPullRequestReviewThreadReply": None}}
+            raise AssertionError(query)
+
+        monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+        replies = {
+            first["id"]: "Fixed the first finding.",
+            second["id"]: "Fixed the second finding.",
+        }
+
+        first_attempt = adapter.post_implementation_thread_replies(
+            7,
+            expected_head_sha="a" * 40,
+            threads=[first, second],
+            replies=replies,
+        )
+        second_attempt = adapter.post_implementation_thread_replies(
+            7,
+            expected_head_sha="a" * 40,
+            threads=[first, second],
+            replies=replies,
+        )
+
+        assert first_attempt.replied_thread_ids == (first["id"], second["id"])
+        assert second_attempt.replied_thread_ids == (first["id"], second["id"])
+        assert reply_calls == [first["id"], second["id"]]
+
+    def test_parallel_reply_batches_recover_one_attached_reply_per_thread(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The PR-scoped lock prevents two local loops duplicating thread replies."""
+        first = _external_reviewer_thread("thread-one")
+        second = _external_reviewer_thread("thread-two")
+        live_by_id = {first["id"]: first, second["id"]: second}
+        reply_calls: list[str] = []
+
+        def snapshot(_pr: int, thread_id: str) -> dict[str, Any]:
+            return _open_thread_snapshot(live_by_id[thread_id])
+
+        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+            if "addPullRequestReviewThreadReply" in query:
+                assert "pullRequestReviewId" not in query
+                thread_id = str(fields["threadId"])
+                reply_calls.append(thread_id)
+                sleep(0.05)
+                comment_id = f"implementation-{thread_id}"
+                live_by_id[thread_id] = {
+                    **live_by_id[thread_id],
+                    "comments": [
+                        *live_by_id[thread_id]["comments"],
+                        {
+                            "id": comment_id,
+                            "author": "hephaestus[bot]",
+                            "body": fields["body"],
+                            "viewer_did_author": True,
+                            "review_id": "implementation-review",
+                            "review_state": "COMMENTED",
+                            "review_body": "",
+                            "review_commit_sha": "a" * 40,
+                        },
+                    ],
+                }
+                return {
+                    "data": {"addPullRequestReviewThreadReply": {"comment": {"id": comment_id}}}
+                }
+            raise AssertionError(query)
+
+        monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+        replies = {
+            first["id"]: "Fixed the first finding.",
+            second["id"]: "Fixed the second finding.",
+        }
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(
+                pool.map(
+                    lambda _: adapter.post_implementation_thread_replies(
+                        7,
+                        expected_head_sha="a" * 40,
+                        threads=[first, second],
+                        replies=replies,
+                    ),
+                    range(2),
+                )
+            )
+
+        assert [result.replied_thread_ids for result in results] == [
+            (first["id"], second["id"]),
+            (first["id"], second["id"]),
+        ]
+        assert reply_calls == [first["id"], second["id"]]
+
+    def test_linked_worktrees_share_one_reply_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Separate worktree roots serialize direct replies through common Git metadata."""
+        common_git_dir = tmp_path / "repository" / ".git"
+        first_root = tmp_path / "worktree-first"
+        second_root = tmp_path / "worktree-second"
+        for root, name in ((first_root, "first"), (second_root, "second")):
+            root.mkdir()
+            git_dir = common_git_dir / "worktrees" / name
+            git_dir.mkdir(parents=True)
+            (common_git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+            (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+            (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+            (root / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+
+        first_adapter = PipelineGitHubForTest("org", repo="repo-a", repo_root=first_root)
+        second_adapter = PipelineGitHubForTest("org", repo="repo-a", repo_root=second_root)
+        assert first_adapter._implementation_reply_lock_path(7) == (
+            second_adapter._implementation_reply_lock_path(7)
+        )
+
+        thread = _external_reviewer_thread("thread-one")
+        live = thread
+        reply_calls: list[str] = []
+
+        def snapshot(_pr: int, _thread_id: str) -> dict[str, Any]:
+            return _open_thread_snapshot(live)
+
+        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+            nonlocal live
+            assert "addPullRequestReviewThreadReply" in query
+            reply_calls.append(str(fields["body"]))
+            sleep(0.05)
+            live = {
+                **live,
+                "comments": [
+                    *live["comments"],
+                    {
+                        "id": "implementation-comment",
+                        "author": "hephaestus[bot]",
+                        "body": fields["body"],
+                        "viewer_did_author": True,
+                    },
+                ],
+            }
+            return {
+                "data": {
+                    "addPullRequestReviewThreadReply": {"comment": {"id": "implementation-comment"}}
+                }
+            }
+
+        for candidate in (first_adapter, second_adapter):
+            monkeypatch.setattr(candidate, "_review_thread_snapshot", snapshot)
+            monkeypatch.setattr(candidate, "_graphql", graphql)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = [
+                pool.submit(
+                    candidate.post_implementation_thread_replies,
+                    7,
+                    expected_head_sha="a" * 40,
+                    threads=[thread],
+                    replies={thread["id"]: "Fixed the finding."},
+                    batch_nonce=batch_nonce,
+                )
+                for candidate, batch_nonce in (
+                    (first_adapter, "c" * 32),
+                    (second_adapter, "d" * 32),
+                )
+            ]
+            resolved = [result.result() for result in results]
+
+        assert len(reply_calls) == 1
+        assert sum(result.replied_thread_ids == (thread["id"],) for result in resolved) == 1
+        assert sum(result.blocked_thread_ids == (thread["id"],) for result in resolved) == 1
+
+    def test_linked_worktrees_with_invalid_git_metadata_fail_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Malformed linked-worktree metadata cannot fall back to private locks."""
+        first_root = tmp_path / "worktree-first"
+        second_root = tmp_path / "worktree-second"
+        adapters: list[PipelineGitHubForTest] = []
+        for root in (first_root, second_root):
+            root.mkdir()
+            (root / ".git").write_text("not valid git metadata\n", encoding="utf-8")
+            adapters.append(PipelineGitHubForTest("org", repo="repo-a", repo_root=root))
+
+        thread = _external_reviewer_thread("thread-one")
+        for adapter in adapters:
+            monkeypatch.setattr(
+                adapter,
+                "_graphql",
+                lambda *_args, **_kwargs: pytest.fail("invalid metadata must not reply"),
+            )
+
+        results = [
+            adapter.post_implementation_thread_replies(
+                7,
+                expected_head_sha="a" * 40,
+                threads=[thread],
+                replies={thread["id"]: "Fixed the finding."},
+                batch_nonce="c" * 32,
+            )
+            for adapter in adapters
+        ]
+
+        assert all(result.retryable_thread_ids == (thread["id"],) for result in results)
+        assert all(result.retryable for result in results)
+
+    def test_linked_worktrees_with_unusable_git_dir_fail_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A shaped-but-invalid worktree target cannot create a private lock."""
+        adapters: list[PipelineGitHubForTest] = []
+        for name in ("first", "second"):
+            root = tmp_path / f"worktree-{name}"
+            root.mkdir()
+            (root / ".git").write_text(
+                f"gitdir: /missing/.git/worktrees/{name}\n", encoding="utf-8"
+            )
+            adapters.append(PipelineGitHubForTest("org", repo="repo-a", repo_root=root))
+
+        thread = _external_reviewer_thread("thread-one")
+        for adapter in adapters:
+            monkeypatch.setattr(
+                adapter,
+                "_graphql",
+                lambda *_args, **_kwargs: pytest.fail("unusable gitdir must not reply"),
+            )
+
+        results = [
+            adapter.post_implementation_thread_replies(
+                7,
+                expected_head_sha="a" * 40,
+                threads=[thread],
+                replies={thread["id"]: "Fixed the finding."},
+                batch_nonce="c" * 32,
+            )
+            for adapter in adapters
+        ]
+
+        assert all(result.retryable_thread_ids == (thread["id"],) for result in results)
+        assert all(result.retryable for result in results)
 
     def test_external_thread_is_replied_to_then_resolved_by_fresh_reviewer(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
@@ -143,6 +661,7 @@ class TestAllThreadReplyAndReviewerResolution:
         def graphql(query: str, **fields: str | int) -> dict[str, Any]:
             if "addPullRequestReviewThreadReply" in query:
                 calls.append("implementation-reply")
+                reply_body = str(fields["body"])
                 live[0] = {
                     **live[0],
                     "comments": [
@@ -150,8 +669,11 @@ class TestAllThreadReplyAndReviewerResolution:
                         {
                             "id": "implementation-comment",
                             "author": "hephaestus[bot]",
-                            "body": fields["body"],
+                            "body": reply_body,
                             "viewer_did_author": True,
+                            "review_id": "implementation-review",
+                            "review_state": "COMMENTED",
+                            "review_commit_sha": "a" * 40,
                         },
                     ],
                 }
@@ -245,6 +767,8 @@ class TestAllThreadReplyAndReviewerResolution:
         def graphql(query: str, **fields: str | int) -> dict[str, Any]:
             if "addPullRequestReviewThreadReply" in query:
                 calls.append(str(fields["body"]))
+                is_implementation_reply = len(calls) == 1
+                reply_body = str(fields["body"])
                 live[0] = {
                     **live[0],
                     "comments": [
@@ -252,8 +776,15 @@ class TestAllThreadReplyAndReviewerResolution:
                         {
                             "id": f"reply-{len(calls)}",
                             "author": "hephaestus[bot]",
-                            "body": fields["body"],
+                            "body": reply_body,
                             "viewer_did_author": True,
+                            "review_id": (
+                                "implementation-review"
+                                if is_implementation_reply
+                                else "reviewer-review"
+                            ),
+                            "review_state": "COMMENTED" if is_implementation_reply else "",
+                            "review_commit_sha": "a" * 40 if is_implementation_reply else "",
                         },
                     ],
                 }
@@ -308,6 +839,12 @@ class TestAllThreadReplyAndReviewerResolution:
         reviewed_head_sha = "a" * 40
         resolving = _external_reviewer_thread("thread-resolve")
         feedback = _external_reviewer_thread("thread-feedback")
+        resolving_reply = adapter._implementation_thread_reply_body(
+            7, reviewed_head_sha, resolving["id"], "Resolved the finding.", _BATCH_NONCE
+        )
+        feedback_reply = adapter._implementation_thread_reply_body(
+            7, reviewed_head_sha, feedback["id"], "Attempted a fix.", _BATCH_NONCE
+        )
         live_by_id = {
             resolving["id"]: {
                 **resolving,
@@ -316,10 +853,11 @@ class TestAllThreadReplyAndReviewerResolution:
                     {
                         "id": "implementation-resolve",
                         "author": "hephaestus[bot]",
-                        "body": adapter._implementation_thread_reply_body(
-                            7, reviewed_head_sha, resolving["id"], "Resolved the finding."
-                        ),
+                        "body": resolving_reply,
                         "viewer_did_author": True,
+                        "review_id": "implementation-review",
+                        "review_state": "COMMENTED",
+                        "review_commit_sha": reviewed_head_sha,
                     },
                 ],
             },
@@ -330,10 +868,11 @@ class TestAllThreadReplyAndReviewerResolution:
                     {
                         "id": "implementation-feedback",
                         "author": "hephaestus[bot]",
-                        "body": adapter._implementation_thread_reply_body(
-                            7, reviewed_head_sha, feedback["id"], "Attempted a fix."
-                        ),
+                        "body": feedback_reply,
                         "viewer_did_author": True,
+                        "review_id": "implementation-review",
+                        "review_state": "COMMENTED",
+                        "review_commit_sha": reviewed_head_sha,
                     },
                 ],
             },
@@ -407,13 +946,144 @@ class TestAllThreadReplyAndReviewerResolution:
         assert result.blocked_thread_ids == ()
         assert calls == [("feedback", feedback["id"]), ("resolve", resolving["id"])]
 
+    def test_noncommented_direct_reply_is_not_a_reviewer_validation_receipt(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only a COMMENTED, exact-head direct reply may be resolved."""
+        thread = _external_reviewer_thread()
+        head_sha = "a" * 40
+        reply_body = adapter._implementation_thread_reply_body(
+            7, head_sha, thread["id"], "Fixed the missing guard.", _BATCH_NONCE
+        )
+        pending = {
+            **thread,
+            "comments": [
+                *thread["comments"],
+                {
+                    "id": "implementation-comment",
+                    "author": "hephaestus[bot]",
+                    "body": reply_body,
+                    "viewer_did_author": True,
+                    "review_id": "implementation-review",
+                    "review_state": "PENDING",
+                    "review_commit_sha": head_sha,
+                },
+            ],
+        }
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_state",
+            lambda _pr: {"state": "OPEN", "headRefOid": head_sha, "autoMergeRequest": None},
+        )
+
+        assert (
+            adapter.reviewer_validation_receipts(7, reviewed_head_sha=head_sha, threads=[pending])
+            == []
+        )
+
+        submitted = {
+            **pending,
+            "comments": [
+                *pending["comments"][:-1],
+                {**pending["comments"][-1], "review_state": "COMMENTED"},
+            ],
+        }
+        receipts = adapter.reviewer_validation_receipts(
+            7, reviewed_head_sha=head_sha, threads=[submitted]
+        )
+        assert [receipt["implementation_reply_id"] for receipt in receipts] == [
+            "implementation-comment"
+        ]
+
+    def test_direct_replies_share_nonce_even_when_github_assigns_distinct_reviews(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The source-attached nonce is the batch receipt, not a review envelope."""
+        head_sha = "a" * 40
+        first = _external_reviewer_thread("thread-one")
+        second = _external_reviewer_thread("thread-two")
+
+        def singleton(thread: dict[str, Any], reply: str, review_id: str) -> dict[str, Any]:
+            reply_body = adapter._implementation_thread_reply_body(
+                7, head_sha, thread["id"], reply, _BATCH_NONCE
+            )
+            return {
+                **thread,
+                "comments": [
+                    *thread["comments"],
+                    {
+                        "id": f"implementation-{thread['id']}",
+                        "author": "hephaestus[bot]",
+                        "body": reply_body,
+                        "viewer_did_author": True,
+                        "review_id": review_id,
+                        "review_state": "COMMENTED",
+                        "review_commit_sha": head_sha,
+                    },
+                ],
+            }
+
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_state",
+            lambda _pr: {"state": "OPEN", "headRefOid": head_sha, "autoMergeRequest": None},
+        )
+        receipts = adapter.reviewer_validation_receipts(
+            7,
+            reviewed_head_sha=head_sha,
+            threads=[
+                singleton(first, "Fixed the first finding.", "review-one"),
+                singleton(second, "Fixed the second finding.", "review-two"),
+            ],
+        )
+
+        assert [receipt["id"] for receipt in receipts] == [first["id"], second["id"]]
+
+    def test_validation_receipt_ignores_unanchored_review_body(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only the attached direct-reply marker contributes to validation."""
+        thread = _external_reviewer_thread()
+        head_sha = "a" * 40
+        reply_body = adapter._implementation_thread_reply_body(
+            7, head_sha, thread["id"], "Fixed the missing guard.", _BATCH_NONCE
+        )
+        malformed = {
+            **thread,
+            "comments": [
+                *thread["comments"],
+                {
+                    "id": "implementation-comment",
+                    "author": "hephaestus[bot]",
+                    "body": reply_body,
+                    "viewer_did_author": True,
+                    "review_id": "implementation-review",
+                    "review_state": "COMMENTED",
+                    "review_commit_sha": head_sha,
+                },
+            ],
+        }
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_state",
+            lambda _pr: {"state": "OPEN", "headRefOid": head_sha, "autoMergeRequest": None},
+        )
+
+        receipts = adapter.reviewer_validation_receipts(
+            7, reviewed_head_sha=head_sha, threads=[malformed]
+        )
+
+        assert [receipt["implementation_reply_id"] for receipt in receipts] == [
+            "implementation-comment"
+        ]
+
     def test_malformed_reply_response_recovers_an_exact_host_read_receipt(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A reply mutation applied before a malformed response remains recoverable."""
         thread = _external_reviewer_thread()
         body = adapter._implementation_thread_reply_body(
-            7, "a" * 40, thread["id"], "Fixed the guard."
+            7, "a" * 40, thread["id"], "Fixed the guard.", _BATCH_NONCE
         )
         after = {
             **thread,
@@ -424,6 +1094,7 @@ class TestAllThreadReplyAndReviewerResolution:
                     "author": "hephaestus[bot]",
                     "body": body,
                     "viewer_did_author": True,
+                    "review_id": "implementation-review",
                 },
             ],
         }
@@ -456,6 +1127,44 @@ class TestAllThreadReplyAndReviewerResolution:
         assert result.blocked_thread_ids == ()
         assert result.receipts[0]["implementation_reply_id"] == "implementation-comment"
 
+    def test_recovered_direct_reply_is_not_reposted_after_response_loss(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An exact source-attached reply is recovered without another mutation."""
+        thread = _external_reviewer_thread()
+        body = adapter._implementation_thread_reply_body(
+            7, "a" * 40, thread["id"], "Fixed the guard.", _BATCH_NONCE
+        )
+        after = {
+            **thread,
+            "comments": [
+                *thread["comments"],
+                {
+                    "id": "legacy-comment",
+                    "author": "hephaestus[bot]",
+                    "body": body,
+                    "viewer_did_author": True,
+                    "review_id": "legacy-review",
+                },
+            ],
+        }
+        monkeypatch.setattr(
+            adapter, "_review_thread_snapshot", lambda _pr, _thread: _open_thread_snapshot(after)
+        )
+        graphql = MagicMock()
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+
+        result = adapter.post_implementation_thread_replies(
+            7,
+            expected_head_sha="a" * 40,
+            threads=[thread],
+            replies={thread["id"]: "Fixed the guard."},
+        )
+
+        assert result.replied_thread_ids == (thread["id"],)
+        assert result.retryable is False
+        graphql.assert_not_called()
+
     def test_reconciliation_rejects_a_receipt_without_the_host_read_reply(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -487,7 +1196,7 @@ class TestAllThreadReplyAndReviewerResolution:
         """Only the host viewer's final comment can carry a resolve receipt."""
         thread = _external_reviewer_thread()
         reply_body = adapter._implementation_thread_reply_body(
-            7, "a" * 40, thread["id"], "Fixed the missing guard."
+            7, "a" * 40, thread["id"], "Fixed the missing guard.", _BATCH_NONCE
         )
         foreign_reply = {
             **thread,
@@ -568,21 +1277,9 @@ class TestAllThreadReplyAndReviewerResolution:
         """A stale-head resolution blocks for fresh review without reopening it."""
         thread = _external_reviewer_thread()
         reply = "Fixed the missing guard."
-        reply_body = adapter._implementation_thread_reply_body(7, "a" * 40, thread["id"], reply)
-        live = [
-            {
-                **thread,
-                "comments": [
-                    *thread["comments"],
-                    {
-                        "id": "implementation-comment",
-                        "author": "hephaestus[bot]",
-                        "body": reply_body,
-                        "viewer_did_author": True,
-                    },
-                ],
-            }
-        ]
+        receipt = _submitted_implementation_receipt(adapter, thread, reply)
+        reply_body = str(receipt["implementation_reply_body"])
+        live = [receipt]
         receipts = adapter.reviewer_validation_receipts
         monkeypatch.setattr(
             adapter,
@@ -677,24 +1374,7 @@ class TestAllThreadReplyAndReviewerResolution:
     ) -> None:
         """A reply racing resolution is never hidden by the resolved-thread list."""
         thread = _external_reviewer_thread()
-        reply_body = adapter._implementation_thread_reply_body(
-            7, "a" * 40, thread["id"], "Fixed the missing guard."
-        )
-        receipt = {
-            **thread,
-            "comments": [
-                *thread["comments"],
-                {
-                    "id": "implementation-comment",
-                    "author": "hephaestus[bot]",
-                    "body": reply_body,
-                    "viewer_did_author": True,
-                },
-            ],
-            "implementation_reply_id": "implementation-comment",
-            "implementation_reply_body": reply_body,
-            "implementation_head_sha": "a" * 40,
-        }
+        receipt = _submitted_implementation_receipt(adapter, thread, "Fixed the missing guard.")
         live = [dict(receipt)]
         calls: list[str] = []
         monkeypatch.setattr(
@@ -761,24 +1441,7 @@ class TestAllThreadReplyAndReviewerResolution:
     ) -> None:
         """An unknown resolve outcome is blocked without an unsafe compensation write."""
         thread = _external_reviewer_thread()
-        reply_body = adapter._implementation_thread_reply_body(
-            7, "a" * 40, thread["id"], "Fixed the missing guard."
-        )
-        receipt = {
-            **thread,
-            "comments": [
-                *thread["comments"],
-                {
-                    "id": "implementation-comment",
-                    "author": "hephaestus[bot]",
-                    "body": reply_body,
-                    "viewer_did_author": True,
-                },
-            ],
-            "implementation_reply_id": "implementation-comment",
-            "implementation_reply_body": reply_body,
-            "implementation_head_sha": "a" * 40,
-        }
+        receipt = _submitted_implementation_receipt(adapter, thread, "Fixed the missing guard.")
         monkeypatch.setattr(
             adapter,
             "gh_pr_state",
@@ -823,24 +1486,7 @@ class TestAllThreadReplyAndReviewerResolution:
     ) -> None:
         """A malformed response blocks without reopening a possibly foreign resolution."""
         thread = _external_reviewer_thread()
-        reply_body = adapter._implementation_thread_reply_body(
-            7, "a" * 40, thread["id"], "Fixed the missing guard."
-        )
-        receipt = {
-            **thread,
-            "comments": [
-                *thread["comments"],
-                {
-                    "id": "implementation-comment",
-                    "author": "hephaestus[bot]",
-                    "body": reply_body,
-                    "viewer_did_author": True,
-                },
-            ],
-            "implementation_reply_id": "implementation-comment",
-            "implementation_reply_body": reply_body,
-            "implementation_head_sha": "a" * 40,
-        }
+        receipt = _submitted_implementation_receipt(adapter, thread, "Fixed the missing guard.")
         calls: list[str] = []
         monkeypatch.setattr(
             adapter,
@@ -892,24 +1538,7 @@ class TestAllThreadReplyAndReviewerResolution:
     ) -> None:
         """An uncertain resolve stops for re-review instead of reopening a thread."""
         thread = _external_reviewer_thread()
-        reply_body = adapter._implementation_thread_reply_body(
-            7, "a" * 40, thread["id"], "Fixed the missing guard."
-        )
-        receipt = {
-            **thread,
-            "comments": [
-                *thread["comments"],
-                {
-                    "id": "implementation-comment",
-                    "author": "hephaestus[bot]",
-                    "body": reply_body,
-                    "viewer_did_author": True,
-                },
-            ],
-            "implementation_reply_id": "implementation-comment",
-            "implementation_reply_body": reply_body,
-            "implementation_head_sha": "a" * 40,
-        }
+        receipt = _submitted_implementation_receipt(adapter, thread, "Fixed the missing guard.")
         calls: list[str] = []
         monkeypatch.setattr(
             adapter,
@@ -954,24 +1583,7 @@ class TestAllThreadReplyAndReviewerResolution:
     ) -> None:
         """An uncertain resolve is blocked without issuing a compensating mutation."""
         thread = _external_reviewer_thread()
-        reply_body = adapter._implementation_thread_reply_body(
-            7, "a" * 40, thread["id"], "Fixed the missing guard."
-        )
-        receipt = {
-            **thread,
-            "comments": [
-                *thread["comments"],
-                {
-                    "id": "implementation-comment",
-                    "author": "hephaestus[bot]",
-                    "body": reply_body,
-                    "viewer_did_author": True,
-                },
-            ],
-            "implementation_reply_id": "implementation-comment",
-            "implementation_reply_body": reply_body,
-            "implementation_head_sha": "a" * 40,
-        }
+        receipt = _submitted_implementation_receipt(adapter, thread, "Fixed the missing guard.")
         calls: list[str] = []
         monkeypatch.setattr(
             adapter,
@@ -1016,24 +1628,7 @@ class TestAllThreadReplyAndReviewerResolution:
     ) -> None:
         """The post-resolve proof must not make a second, racy PR-state read."""
         thread = _external_reviewer_thread()
-        reply_body = adapter._implementation_thread_reply_body(
-            7, "a" * 40, thread["id"], "Fixed the missing guard."
-        )
-        receipt = {
-            **thread,
-            "comments": [
-                *thread["comments"],
-                {
-                    "id": "implementation-comment",
-                    "author": "hephaestus[bot]",
-                    "body": reply_body,
-                    "viewer_did_author": True,
-                },
-            ],
-            "implementation_reply_id": "implementation-comment",
-            "implementation_reply_body": reply_body,
-            "implementation_head_sha": "a" * 40,
-        }
+        receipt = _submitted_implementation_receipt(adapter, thread, "Fixed the missing guard.")
         state_reads = 0
 
         def pr_state(_pr: int) -> dict[str, Any]:
@@ -1309,13 +1904,6 @@ _MUTATOR_CASES = [
     ("add_labels", (5, ["x"]), "github_api", "gh_issue_add_labels"),
     ("remove_labels", (5, ["x"]), "github_api", "gh_issue_remove_labels"),
     ("close_issue_as_covered", (5, 7), "module", "close_issue_as_covered"),
-    ("post_pr_comment", (7, "why"), "github_api", "gh_issue_comment"),
-    (
-        "upsert_pr_comment",
-        (7, "<!-- marker -->", "<!-- marker -->\nbody"),
-        "github_api",
-        "gh_issue_upsert_comment",
-    ),
     ("mark_pr_implementation_go", (7,), "pr_manager", "mark_pr_implementation_go"),
     ("mark_pr_implementation_no_go", (7,), "pr_manager", "mark_pr_implementation_no_go"),
     ("skip_epics", ({5: ["epic"]},), "github_api", "skip_epics"),
@@ -1381,19 +1969,6 @@ class TestMutatorMapping:
 
         mock.assert_not_called()
         assert any("[dry-run] would" in record.message for record in caplog.records)
-
-    def test_dry_run_pr_comment_upsert_reports_not_written(
-        self,
-        dry_adapter: pg.PipelineGitHub,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Dry-run artifacts must be reported as absent in durable stage events."""
-        mock = _patch_target(monkeypatch, "github_api", "gh_issue_upsert_comment")
-
-        written = dry_adapter.upsert_pr_comment(7, "<!-- marker -->", "body")
-
-        assert written is False
-        mock.assert_not_called()
 
     def test_upsert_plan_comment_keys_on_marker(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
@@ -1792,34 +2367,6 @@ class TestRepoScoping:
                 "org/repo-a",
             ],
         ]
-
-    def test_repo_scoped_pr_comment_upsert_reads_pr_comments_via_rest_issue_channel(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """PR numbers are valid issue-comment REST targets but not GraphQL issue nodes."""
-        calls: list[list[str]] = []
-
-        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
-            calls.append(argv)
-            if argv == [
-                "api",
-                "/repos/org/repo-a/issues/1001/comments?per_page=100&page=1",
-            ]:
-                payload = [{"id": 42, "body": "<!-- marker -->\nstale"}]
-                return SimpleNamespace(stdout=json.dumps(payload))
-            return SimpleNamespace(stdout="")
-
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
-
-        pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).upsert_pr_comment(
-            1001, "<!-- marker -->", "<!-- marker -->\nupdated"
-        )
-
-        assert calls[0] == [
-            "api",
-            "/repos/org/repo-a/issues/1001/comments?per_page=100&page=1",
-        ]
-        assert all("graphql" not in call for call in calls)
 
     def test_repo_scoped_has_existing_plan_detects_plan_comment(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2522,6 +3069,7 @@ class TestRepoScoping:
                 "author": {"login": "reviewer", "__typename": "User"},
                 "pullRequestReview": {
                     "id": "R1",
+                    "state": "COMMENTED",
                     "body": "review body",
                     "commit": {"oid": "a" * 40},
                 },
@@ -2671,33 +3219,7 @@ class TestRepoScoping:
         assert any("/repos/org/repo-a/issues/comments/9" in call for call in calls)
         assert not any(call[:2] == ["issue", "comment"] for call in calls)
 
-    def test_repo_scoped_upsert_pr_comment_updates_marker_comment(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        calls: list[list[str]] = []
-        marker = "<!-- hephaestus-pr-review-go -->"
-
-        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
-            calls.append(argv)
-            if argv == [
-                "api",
-                "/repos/org/repo-a/issues/7/comments?per_page=100&page=1",
-            ]:
-                payload = [{"id": 12, "body": f"{marker}\nold"}]
-                return SimpleNamespace(stdout=json.dumps(payload))
-            return SimpleNamespace(stdout="")
-
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
-
-        pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).upsert_pr_comment(
-            7, marker, f"{marker}\nnew"
-        )
-
-        assert any(call[:3] == ["api", "--method", "PATCH"] for call in calls)
-        assert any("/repos/org/repo-a/issues/comments/12" in call for call in calls)
-        assert not any(call[:2] == ["issue", "comment"] for call in calls)
-
-    def test_repo_scoped_review_post_uses_repo_endpoint(
+    def test_repo_scoped_review_post_skips_an_unanchored_summary(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         calls: list[list[str]] = []
@@ -2739,10 +3261,59 @@ class TestRepoScoping:
             "gh_pr_state",
             lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
         )
-        posted = adapter.post_review_threads(7, [], "summary", expected_head_sha="a" * 40)
+        posted = adapter.post_review_threads(7, [], expected_head_sha="a" * 40)
 
         assert posted == []
-        assert any("repos/org/repo-a/pulls/7/reviews" in call for call in calls)
+        assert calls == []
+
+    def test_repo_scoped_review_post_has_no_review_level_response_parameter(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A source-anchored finding has no review-level response pathway."""
+        diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+ok\n"
+        review_payloads: list[dict[str, object]] = []
+
+        def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            if argv[:2] == ["pr", "diff"]:
+                return SimpleNamespace(stdout=diff)
+            if argv[:3] == ["api", "-X", "POST"]:
+                review_payloads.append(json.loads(Path(argv[-1]).read_text()))
+                return SimpleNamespace(stdout=json.dumps({"node_id": "review-node"}))
+            raise AssertionError(f"unexpected GitHub call: {argv}")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_state",
+            lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
+        )
+        monkeypatch.setattr(
+            adapter,
+            "_repo_review_thread_receipts_for_review",
+            lambda *_args: [],
+        )
+
+        adapter.post_review_threads(
+            7,
+            [{"path": "a.py", "line": 1, "side": "RIGHT", "body": "finding"}],
+            expected_head_sha="a" * 40,
+        )
+
+        assert review_payloads == [
+            {
+                "commit_id": "a" * 40,
+                "event": "COMMENT",
+                "comments": [
+                    {
+                        "path": "a.py",
+                        "line": 1,
+                        "side": "RIGHT",
+                        "body": "<!-- hephaestus-severity: major -->\nfinding",
+                    }
+                ],
+            }
+        ]
 
     def test_repo_scoped_review_post_rejects_mixed_anchor_batch_before_write(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2772,7 +3343,6 @@ class TestRepoScoping:
                     {"path": "a.py", "line": 1, "side": "RIGHT", "body": "valid"},
                     {"path": "a.py", "line": 2, "side": "RIGHT", "body": "stale"},
                 ],
-                "summary",
                 expected_head_sha="a" * 40,
             )
 
@@ -2811,7 +3381,6 @@ class TestRepoScoping:
             adapter.post_review_threads(
                 7,
                 [{"path": "a.py", "line": 1, "side": "RIGHT", "body": "finding"}],
-                "summary",
                 expected_head_sha="a" * 40,
             )
 
@@ -2877,7 +3446,6 @@ class TestRepoScoping:
             posted = adapter.post_review_threads(
                 7,
                 [{"path": "a.py", "line": 1, "body": "x"}],
-                "summary",
                 expected_head_sha="a" * 40,
             )
 
@@ -2950,7 +3518,6 @@ class TestRepoScoping:
         posted = adapter.post_review_threads(
             7,
             [{"path": "a.py", "line": 1, "side": "RIGHT", "severity": "major", "body": "finding"}],
-            "summary",
             expected_head_sha="a" * 40,
         )
 
@@ -3158,6 +3725,13 @@ class TestRepoScopedAutoMerge:
 
         assert not hasattr(adapter, "arm_auto_merge")
         assert not hasattr(adapter, "defer_auto_merge")
+
+    def test_pipeline_adapter_has_no_unanchored_pr_comment_surface(self, tmp_path: Path) -> None:
+        """PR responses must be review-thread replies, never issue comments."""
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+
+        assert not hasattr(adapter, "post_pr_comment")
+        assert not hasattr(adapter, "upsert_pr_comment")
 
 
 class TestCreatePr:

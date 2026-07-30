@@ -795,10 +795,10 @@ class TestPrReviewStageStep:
         assert item.payload["posted_thread_ids"] == ["thread-1001-0", "thread-1001-1"]
         assert item.payload["unresolved_threads_before_address"] == 2
 
-    def test_post_with_zero_open_automation_threads_skips_to_eval(
+    def test_post_with_zero_open_automation_threads_is_a_publication_no_op(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A zero-finding review still posts its final structured audit."""
+        """A zero-finding review emits no unanchored review-level response."""
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(0, 0)])
         ctx = make_ctx(github=github)
@@ -815,9 +815,8 @@ class TestPrReviewStageStep:
 
         assert isinstance(result, Continue)
         assert result.next_state == "EVAL"
-        assert github.mutation_log == [("gh_pr_review_post", (1001, "COMMENT"))]
-        assert github.reviews[1001][0]["comments"] == []
-        assert "Total grade: A" in github.reviews[1001][0]["summary"]
+        assert github.mutation_log == []
+        assert 1001 not in github.reviews
 
     @pytest.mark.parametrize("existing_pr", [False, True], ids=["fresh-pr", "existing-pr"])
     def test_empty_audit_addresses_pre_existing_live_blocking_thread(
@@ -844,7 +843,7 @@ class TestPrReviewStageStep:
         post_result = stage.step(item, ctx)
 
         assert post_result == Continue(next_state="DIFFICULTY_WAIT")
-        assert github.reviews[1001][0]["comments"] == []
+        assert 1001 not in github.reviews
         remediation = [
             {
                 "thread_id": "live-thread-1001-0",
@@ -1348,21 +1347,27 @@ class TestReviewThreadLifecycle:
             "a" * 40,
             [thread],
             {"thread-1": "  Fixed the first concern.  "},
+            "b" * 32,
         )
 
         assert handoff == {
             "head_sha": "a" * 40,
             "threads": [thread],
             "replies": {"thread-1": "Fixed the first concern."},
+            "batch_nonce": "b" * 32,
         }
         thread["body"] = "mutated after the handoff"
         assert handoff["threads"][0]["body"] != thread["body"]
         assert (
-            _implementation_reply_handoff("not-a-sha", [self._thread("thread-1", 3, "x")], {})
+            _implementation_reply_handoff(
+                "not-a-sha", [self._thread("thread-1", 3, "x")], {}, "b" * 32
+            )
             is None
         )
-        assert _implementation_reply_handoff("a" * 40, ["not-a-thread"], {}) is None
-        assert _implementation_reply_handoff("a" * 40, [{"id": ""}], {"": "fixed"}) is None
+        assert _implementation_reply_handoff("a" * 40, ["not-a-thread"], {}, "b" * 32) is None
+        assert (
+            _implementation_reply_handoff("a" * 40, [{"id": ""}], {"": "fixed"}, "b" * 32) is None
+        )
 
     def test_validation_receipts_require_one_complete_immutable_thread_snapshot(self) -> None:
         """Validation binds a thread decision to its exact host-read reply."""
@@ -1719,11 +1724,10 @@ class TestReviewThreadLifecycle:
                 self,
                 pr_number: int,
                 threads: list[dict[str, Any]],
-                summary: str,
                 *,
                 expected_head_sha: str,
             ) -> list[dict[str, Any]]:
-                del summary, expected_head_sha
+                del expected_head_sha
                 self.posted_batches.append([dict(thread) for thread in threads])
                 thread_ids: list[str] = []
                 for thread in threads:
@@ -1872,13 +1876,12 @@ class TestReviewThreadLifecycle:
                 self,
                 pr_number: int,
                 threads: list[dict[str, Any]],
-                summary: str,
                 *,
                 expected_head_sha: str,
             ) -> list[dict[str, Any]]:
                 self.posted_batches.append([dict(thread) for thread in threads])
                 return super().post_review_threads(
-                    pr_number, threads, summary, expected_head_sha=expected_head_sha
+                    pr_number, threads, expected_head_sha=expected_head_sha
                 )
 
         github = CapturePostsGitHub()
@@ -1901,7 +1904,7 @@ class TestReviewThreadLifecycle:
         result = PrReviewStage().step(item, make_ctx(github=github))
 
         assert result == Continue(next_state="EVAL")
-        assert github.posted_batches == [[]]
+        assert github.posted_batches == []
 
     def test_validation_receives_all_live_thread_facts(
         self, make_ctx: Any, make_work_item: Any
@@ -1955,11 +1958,10 @@ class TestReviewThreadLifecycle:
                 self,
                 pr_number: int,
                 threads: list[dict[str, Any]],
-                summary: str,
                 *,
                 expected_head_sha: str,
             ) -> list[dict[str, Any]]:
-                del summary, expected_head_sha
+                del expected_head_sha
                 self.posted = [dict(thread) for thread in threads]
                 posted_ids = [f"reopened-{index}" for index, _ in enumerate(threads)]
                 for thread_id, thread in zip(posted_ids, threads, strict=True):
@@ -2018,11 +2020,10 @@ class TestReviewThreadLifecycle:
                 self,
                 pr_number: int,
                 threads: list[dict[str, Any]],
-                summary: str,
                 *,
                 expected_head_sha: str,
             ) -> list[dict[str, Any]]:
-                del summary, expected_head_sha
+                del expected_head_sha
                 self.posted = [dict(thread) for thread in threads]
                 posted_ids = [f"reopened-{index}" for index, _ in enumerate(threads)]
                 for thread_id, thread in zip(posted_ids, threads, strict=True):
@@ -2182,7 +2183,6 @@ class TestReviewThreadLifecycle:
                 self,
                 pr_number: int,
                 threads: list[dict[str, Any]],
-                summary: str,
                 *,
                 expected_head_sha: str,
             ) -> list[dict[str, Any]]:
@@ -2386,22 +2386,6 @@ class TestEvalVerdicts:
         assert result == StageOutcome(Disposition.RETRY, "review audit format failure")
         assert not any(name == "mark_pr_implementation_go" for name, _ in github.mutation_log)
 
-    def test_final_comment_contains_audit_only(self) -> None:
-        """The durable review comment contains no textual decision field."""
-        body = PrReviewStage._final_review_comment(
-            ReviewAudit(
-                grade="A",
-                summary="Safe summary",
-                findings=(),
-                raw_feedback="Private reviewer detail",
-                valid=True,
-            )
-        )
-
-        assert "Total grade: A" in body
-        assert "Safe summary" in body
-        assert "private reviewer detail" not in body
-
     def test_go_with_zero_threads_marks_implementation_go_and_advances_to_merge_wait(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -2467,7 +2451,8 @@ class TestEvalVerdicts:
             for name, _args in github.mutation_log
         )
         assert github.pr_has_implementation_state_label(1001) == (False, True)
-        assert "review activity changed" in github.comments[1001][0].lower()
+        assert github.comments.get(1001, []) == []
+        assert not any(name == "gh_issue_comment" for name, _args in github.mutation_log)
 
     def test_clean_go_does_not_call_the_removed_auto_merge_mutator(
         self, make_ctx: Any, make_work_item: Any
@@ -3684,7 +3669,7 @@ class TestFullWalks:
         assert item.attempts["pr_review_iter"] == 1  # only the fresh-head round counts
         assert not any(name == "mark_pr_implementation_no_go" for name, _ in github.mutation_log)
         assert ("mark_pr_implementation_go", (1001,)) in github.mutation_log
-        assert github.mutation_log.count(("gh_pr_review_post", (1001, "COMMENT"))) == 2
+        assert github.mutation_log.count(("gh_pr_review_post", (1001, "COMMENT"))) == 0
 
     def test_unresolved_thread_walk_exhausts_without_terminal_handoff(
         self, make_ctx: Any, make_work_item: Any
@@ -4055,6 +4040,7 @@ class TestRealCommitGate:
                 expected_head_sha: str,
                 threads: list[dict[str, Any]],
                 replies: dict[str, str],
+                batch_nonce: str,
             ) -> Any:
                 self.reply_attempts += 1
                 if self.reply_attempts == 1:
@@ -4064,6 +4050,7 @@ class TestRealCommitGate:
                     expected_head_sha=expected_head_sha,
                     threads=threads,
                     replies=replies,
+                    batch_nonce=batch_nonce,
                 )
 
         stage = PrReviewStage()
@@ -4104,6 +4091,33 @@ class TestRealCommitGate:
         assert "pending_implementation_reply_handoff" not in item.payload
         assert item.payload["push_no_commit"] is False
 
+    def test_retry_rejects_handoff_without_a_persisted_batch_nonce(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A recovered handoff cannot mint a replacement ownership nonce."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub()
+        item = make_work_item(issue=40, pr=1001, state="EVAL")
+        item.payload["pending_implementation_reply_handoff"] = {
+            "head_sha": "a" * 40,
+            "threads": [
+                {
+                    "id": "thread-1",
+                    "path": "a.py",
+                    "line": 3,
+                    "side": "RIGHT",
+                    "body": "fix this",
+                    "comments": [{"id": "comment-1", "author": "reviewer", "body": "fix this"}],
+                }
+            ],
+            "replies": {"thread-1": "Fixed the guard."},
+        }
+
+        assert stage.step(item, make_ctx(github=github)) == StageOutcome(
+            Disposition.FINISH_FAIL, "implementation_reply_handoff_invalid"
+        )
+        assert github.mutation_log == []
+
     def test_reply_handoff_waits_for_post_push_head_visibility(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -4132,6 +4146,7 @@ class TestRealCommitGate:
                 expected_head_sha: str,
                 threads: list[dict[str, Any]],
                 replies: dict[str, str],
+                batch_nonce: str,
             ) -> ImplementationThreadReplyResult:
                 self.reply_attempts += 1
                 return super().post_implementation_thread_replies(
@@ -4139,6 +4154,7 @@ class TestRealCommitGate:
                     expected_head_sha=expected_head_sha,
                     threads=threads,
                     replies=replies,
+                    batch_nonce=batch_nonce,
                 )
 
         stage = PrReviewStage()
@@ -4184,7 +4200,7 @@ class TestRealCommitGate:
     def test_reply_handoff_stops_waiting_when_the_head_stays_drifted(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A persistent different open head cannot inherit the saved reply."""
+        """A persistent different open head drops its stale direct-reply handoff."""
 
         class HeadStaysDriftedGitHub(FakeStageGitHub):
             def __init__(self) -> None:
@@ -4202,6 +4218,7 @@ class TestRealCommitGate:
                 expected_head_sha: str,
                 threads: list[dict[str, Any]],
                 replies: dict[str, str],
+                batch_nonce: str,
             ) -> ImplementationThreadReplyResult:
                 self.reply_attempts += 1
                 return super().post_implementation_thread_replies(
@@ -4209,6 +4226,7 @@ class TestRealCommitGate:
                     expected_head_sha=expected_head_sha,
                     threads=threads,
                     replies=replies,
+                    batch_nonce=batch_nonce,
                 )
 
         stage = PrReviewStage()
@@ -4248,6 +4266,7 @@ class TestRealCommitGate:
         assert stage.step(item, ctx) == Continue(next_state="REVIEW_WAIT")
         assert github.reply_attempts == 0
         assert "pending_implementation_reply_handoff" not in item.payload
+        assert github.mutation_log == []
 
     def test_stale_reply_handoff_restarts_fresh_review_without_retrying(
         self, make_ctx: Any, make_work_item: Any
@@ -4262,8 +4281,9 @@ class TestRealCommitGate:
                 expected_head_sha: str,
                 threads: list[dict[str, Any]],
                 replies: dict[str, str],
+                batch_nonce: str,
             ) -> ImplementationThreadReplyResult:
-                del pr_number, expected_head_sha, threads, replies
+                del pr_number, expected_head_sha, threads, replies, batch_nonce
                 # The reply may already be visible, but a reviewer comment
                 # raced the post-read.  This is a factual stale handoff, not
                 # a transport ambiguity that can be replayed.
@@ -4318,8 +4338,9 @@ class TestRealCommitGate:
                 expected_head_sha: str,
                 threads: list[dict[str, Any]],
                 replies: dict[str, str],
+                batch_nonce: str,
             ) -> ImplementationThreadReplyResult:
-                del pr_number, expected_head_sha, threads
+                del pr_number, expected_head_sha, threads, batch_nonce
                 self.reply_batches.append(tuple(sorted(replies)))
                 return ImplementationThreadReplyResult(
                     blocked_thread_ids=("stale-thread",),
@@ -4606,11 +4627,10 @@ class TestAuditPublication:
                 self,
                 pr_number: int,
                 threads: list[dict[str, Any]],
-                summary: str,
                 *,
                 expected_head_sha: str,
             ) -> list[dict[str, Any]]:
-                del pr_number, threads, summary, expected_head_sha
+                del pr_number, threads, expected_head_sha
                 self.publish_calls += 1
                 pytest.fail("fresh-audit publication must verify the reviewed PR head first")
 

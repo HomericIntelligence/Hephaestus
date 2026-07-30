@@ -339,9 +339,8 @@ class TestAuditReviewerRun:
 
     @mock.patch("hephaestus.automation.audit_reviewer.fetch_open_prs")
     @mock.patch("hephaestus.automation.audit_reviewer.run_audit_coordinator")
-    @mock.patch("hephaestus.automation.audit_reviewer.gh_pr_review_post")
-    def test_happy_path_posts_summary_review(
-        self, mock_post: mock.Mock, mock_coord: mock.Mock, mock_fetch: mock.Mock
+    def test_happy_path_does_not_post_an_unanchored_summary_review(
+        self, mock_coord: mock.Mock, mock_fetch: mock.Mock
     ) -> None:
         mock_fetch.return_value = [{"number": 100, "title": "Test"}]
         mock_coord.return_value = [{"pr_number": 100, "verdict": "GO", "summary": "Good"}]
@@ -349,7 +348,6 @@ class TestAuditReviewerRun:
         rc, audits = reviewer.run()
         assert rc == 0
         assert len(audits) == 1
-        assert mock_post.called
 
     def test_post_init_always_sets_state_dir(self, tmp_path: Path) -> None:
         """#1426: ``__post_init__`` guarantees ``state_dir`` is non-None.
@@ -392,13 +390,11 @@ class TestAuditReviewerRun:
 
     @mock.patch("hephaestus.automation.audit_reviewer.fetch_open_prs")
     @mock.patch("hephaestus.automation.audit_reviewer.run_audit_coordinator")
-    @mock.patch("hephaestus.automation.audit_reviewer.gh_pr_review_post")
-    def test_posting_failure_logged_run_continues(
-        self, mock_post: mock.Mock, mock_coord: mock.Mock, mock_fetch: mock.Mock
+    def test_audit_run_does_not_attempt_an_unanchored_summary_post(
+        self, mock_coord: mock.Mock, mock_fetch: mock.Mock
     ) -> None:
         mock_fetch.return_value = [{"number": 100, "title": "Test"}]
         mock_coord.return_value = [{"pr_number": 100, "verdict": "GO", "summary": "Good"}]
-        mock_post.side_effect = Exception("GitHub error")
         reviewer = AuditReviewer()
         rc, audits = reviewer.run()
         assert rc == 0
@@ -415,19 +411,16 @@ class TestAuditReviewerRun:
         _, _ = reviewer.run()
         assert mock_fetch_nums.called
 
-    @mock.patch("hephaestus.automation.audit_reviewer.gh_pr_review_post")
     @mock.patch("hephaestus.automation.audit_reviewer.fetch_open_prs")
     @mock.patch("hephaestus.automation.audit_reviewer.run_audit_coordinator")
-    def test_dry_run_passes_dry_run_to_gh_pr_review_post(
-        self, mock_coord: mock.Mock, mock_fetch: mock.Mock, mock_post: mock.Mock
+    def test_dry_run_does_not_attempt_an_unanchored_summary_post(
+        self, mock_coord: mock.Mock, mock_fetch: mock.Mock
     ) -> None:
         mock_fetch.return_value = [{"number": 100, "title": "Test"}]
         mock_coord.return_value = [{"pr_number": 100, "verdict": "GO", "summary": "Good"}]
         reviewer = AuditReviewer(dry_run=True)
         _, _ = reviewer.run()
         assert mock_coord.call_args[1]["dry_run"] is True
-        mock_post.assert_called_once()
-        assert mock_post.call_args[1]["dry_run"] is True
 
     def test_state_dir_default_under_build(self, tmp_path: Path) -> None:
         with mock.patch(
@@ -441,11 +434,10 @@ class TestAuditReviewerRun:
 
     @mock.patch("hephaestus.automation.audit_reviewer.fetch_open_prs")
     @mock.patch("hephaestus.automation.audit_reviewer.run_audit_coordinator")
-    @mock.patch("hephaestus.automation.audit_reviewer.gh_pr_review_post")
-    def test_shutdown_event_stops_remaining_postings(
-        self, mock_post: mock.Mock, mock_coord: mock.Mock, mock_fetch: mock.Mock
+    def test_shutdown_event_does_not_publish_unanchored_reviews(
+        self, mock_coord: mock.Mock, mock_fetch: mock.Mock
     ) -> None:
-        """A set shutdown_event stops posting further PR reviews mid-loop."""
+        """A shutdown request never causes review summaries to be published."""
         import threading
 
         mock_fetch.return_value = [{"number": 100}, {"number": 101}]
@@ -458,16 +450,14 @@ class TestAuditReviewerRun:
         reviewer = AuditReviewer(shutdown_event=shutdown)
         rc, audits = reviewer.run()
         assert rc == 0
-        assert len(audits) == 2  # audits themselves still returned
-        mock_post.assert_not_called()  # but posting loop stopped immediately
+        assert len(audits) == 2
 
     @mock.patch("hephaestus.automation.audit_reviewer.fetch_open_prs")
     @mock.patch("hephaestus.automation.audit_reviewer.run_audit_coordinator")
-    @mock.patch("hephaestus.automation.audit_reviewer.gh_pr_review_post")
-    def test_unset_shutdown_event_posts_all(
-        self, mock_post: mock.Mock, mock_coord: mock.Mock, mock_fetch: mock.Mock
+    def test_unset_shutdown_event_keeps_reports_local(
+        self, mock_coord: mock.Mock, mock_fetch: mock.Mock
     ) -> None:
-        """An unset shutdown_event does not interrupt the posting loop."""
+        """An unset shutdown event does not publish general review comments."""
         import threading
 
         mock_fetch.return_value = [{"number": 100}]
@@ -475,7 +465,6 @@ class TestAuditReviewerRun:
         reviewer = AuditReviewer(shutdown_event=threading.Event())
         rc, _audits = reviewer.run()
         assert rc == 0
-        mock_post.assert_called_once()
 
 
 class TestAuditReviewerMainSignalWiring:
@@ -483,9 +472,8 @@ class TestAuditReviewerMainSignalWiring:
 
     @mock.patch("hephaestus.automation.audit_reviewer.fetch_open_prs")
     @mock.patch("hephaestus.automation.audit_reviewer.run_audit_coordinator")
-    @mock.patch("hephaestus.automation.audit_reviewer.gh_pr_review_post")
     def test_main_installs_cooperative_terminal_guard(
-        self, mock_post: mock.Mock, mock_coord: mock.Mock, mock_fetch: mock.Mock
+        self, mock_coord: mock.Mock, mock_fetch: mock.Mock
     ) -> None:
         from hephaestus.automation.audit_reviewer import main
 
