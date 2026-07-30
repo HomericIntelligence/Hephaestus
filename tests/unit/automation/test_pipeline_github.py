@@ -1027,10 +1027,10 @@ class TestAllThreadReplyAndReviewerResolution:
         assert result.receipts[0]["implementation_reply_id"] == "implementation-comment"
         assert result.retryable is False
 
-    def test_stale_target_aborts_a_partial_pending_reply_batch(
+    def test_stale_target_preserves_a_partial_pending_batch_on_a_current_conflict(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A changed target cannot leave a recovered reply trapped in a draft."""
+        """A current-review conflict prevents cleanup of an otherwise-owned pending batch."""
         first = _external_reviewer_thread("thread-one")
         second = _external_reviewer_thread("thread-two")
         live_by_id = {first["id"]: first, second["id"]: second}
@@ -1127,13 +1127,7 @@ class TestAllThreadReplyAndReviewerResolution:
                     }
                 }
             if "deletePullRequestReview" in query:
-                deleted_review_ids.append(str(fields["reviewId"]))
-                review_exists = False
-                return {
-                    "data": {
-                        "deletePullRequestReview": {"pullRequestReview": {"id": fields["reviewId"]}}
-                    }
-                }
+                pytest.fail("a current-review conflict must not delete any draft")
             raise AssertionError(query)
 
         monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
@@ -1171,14 +1165,18 @@ class TestAllThreadReplyAndReviewerResolution:
         assert first_attempt.retryable is True
         assert second_attempt.replied_thread_ids == ()
         assert second_attempt.receipts == ()
-        assert second_attempt.blocked_thread_ids == (second["id"],)
+        assert second_attempt.blocked_thread_ids == (first["id"], second["id"])
+        assert second_attempt.conflicting_current_review_ids == (
+            "implementation-review",
+            "manual-draft",
+        )
         assert reply_calls == [first["id"], second["id"]]
-        assert deleted_review_ids == ["implementation-review"]
+        assert deleted_review_ids == []
 
-    def test_head_drift_discards_only_the_owned_stale_pending_batch(
+    def test_head_drift_preserves_stale_batches_when_current_conflicts_exist(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Old automation drafts are cleaned up without touching a manual draft."""
+        """Any current conflict prevents stale-draft cleanup from mutating reviews."""
         replies = {"thread-one": "Fixed the finding."}
         old_body = adapter._implementation_reply_review_body(
             7,
@@ -1267,8 +1265,12 @@ class TestAllThreadReplyAndReviewerResolution:
             current_head_sha="b" * 40,
             replies=replies,
         )
-        assert deleted_review_ids == ["old-automation-draft"]
-        assert [review["id"] for review in reviews] == ["foreign-old-draft", "manual-draft"]
+        assert deleted_review_ids == []
+        assert [review["id"] for review in reviews] == [
+            "old-automation-draft",
+            "foreign-old-draft",
+            "manual-draft",
+        ]
 
     def test_dry_run_never_inventories_or_deletes_stale_reply_drafts(
         self, dry_adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch

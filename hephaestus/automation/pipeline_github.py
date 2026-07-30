@@ -1259,9 +1259,9 @@ class PipelineGitHub:
         """Discard only proven stale drafts and return the current batch state.
 
         The review inventory is reread before every deletion, so a head move
-        or a new manual pending review turns into a retry instead of deleting
-        a draft whose identity is no longer proved.  A PENDING review for the
-        current head but another body is intentionally left alone.
+        or a new current review preserves every draft instead of deleting one
+        whose identity is no longer proved.  A PENDING review for the current
+        head but another body is intentionally left alone.
         """
         while True:
             inventory = self._implementation_reply_review_inventory(
@@ -1279,7 +1279,11 @@ class PipelineGitHub:
             conflicting_review_ids = tuple(
                 sorted(set(pending_conflict_ids).union(commented_conflict_ids))
             )
-            if not stale_pending_ids:
+            # GitHub offers no compare-and-swap delete.  Once a conflicting
+            # current review exists, a stale-looking coordinator draft might
+            # receive content before a deletion reaches GitHub.  Preserve all
+            # reviews and let the caller report the conflict instead.
+            if conflicting_review_ids or not stale_pending_ids:
                 return pr_id, review, conflicting_review_ids
             stale_review_id = stale_pending_ids[0]
             if not self._delete_implementation_reply_review(stale_review_id):
@@ -1305,8 +1309,8 @@ class PipelineGitHub:
         )
         if current is None:
             return False
-        current_pr_id, review, _conflicting_review_ids = current
-        if current_pr_id != pr_id or review != (review_id, "PENDING"):
+        current_pr_id, review, conflicting_review_ids = current
+        if current_pr_id != pr_id or review != (review_id, "PENDING") or conflicting_review_ids:
             return False
         if self._delete_implementation_reply_review(review_id):
             return True
@@ -1951,6 +1955,21 @@ class PipelineGitHub:
                     retryable=True,
                 )
             pr_id, existing_review, conflicting_review_ids = current_batch
+            if conflicting_review_ids and (
+                existing_review is None or existing_review[1] != "COMMENTED"
+            ):
+                # A blocked target must not trigger cleanup once a competing
+                # current review exists: GitHub cannot conditionally delete
+                # this draft, and the competing actor may still append to it.
+                # Include the local pending draft so operators can identify
+                # every review preserved by the terminal conflict.
+                reported_conflict_ids = set(conflicting_review_ids)
+                if blocked and existing_review is not None and existing_review[1] == "PENDING":
+                    reported_conflict_ids.add(existing_review[0])
+                return ImplementationThreadReplyResult(
+                    blocked_thread_ids=candidate_ids,
+                    conflicting_current_review_ids=tuple(sorted(reported_conflict_ids)),
+                )
             if blocked:
                 # A PENDING review is not a receipt.  Abort the exact
                 # coordinator draft if any target changed, rather than
@@ -1972,13 +1991,6 @@ class PipelineGitHub:
                     )
                 return ImplementationThreadReplyResult(
                     blocked_thread_ids=tuple(sorted(blocked)),
-                )
-            if conflicting_review_ids and (
-                existing_review is None or existing_review[1] != "COMMENTED"
-            ):
-                return ImplementationThreadReplyResult(
-                    blocked_thread_ids=candidate_ids,
-                    conflicting_current_review_ids=conflicting_review_ids,
                 )
             if existing_review is None:
                 # A reply from an old per-comment review is not a successful
