@@ -4333,6 +4333,71 @@ class TestRealCommitGate:
         item.state = "EVAL"
         assert stage.step(item, ctx) == Continue(next_state="REVIEW_WAIT")
 
+    def test_retry_duplicate_reply_drafts_are_terminally_diagnosed(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A duplicate found on host-only retry cannot become ordinary stale work."""
+
+        class ReplyFailsThenFindsDuplicatesGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__()
+                self.reply_attempts = 0
+
+            def post_implementation_thread_replies(
+                self,
+                pr_number: int,
+                *,
+                expected_head_sha: str,
+                threads: list[dict[str, Any]],
+                replies: dict[str, str],
+            ) -> ImplementationThreadReplyResult:
+                del pr_number, expected_head_sha, threads, replies
+                self.reply_attempts += 1
+                if self.reply_attempts == 1:
+                    raise OSError("temporary GitHub transport failure")
+                return ImplementationThreadReplyResult(
+                    blocked_thread_ids=("thread-1",),
+                    duplicate_current_draft_ids=("draft-one", "draft-two"),
+                )
+
+        stage = PrReviewStage()
+        github = ReplyFailsThenFindsDuplicatesGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=40, pr=1001, state="PUSH_WAIT")
+        snapshot = {
+            "id": "thread-1",
+            "path": "a.py",
+            "line": 3,
+            "side": "RIGHT",
+            "body": "fix this",
+            "comments": [{"id": "comment-1", "author": "reviewer", "body": "fix this"}],
+        }
+        item.payload.update(
+            {
+                "remediation_threads": [{"thread_id": "thread-1", "body": "fix this"}],
+                "remediation_thread_snapshots": [snapshot],
+                "address_output": {
+                    "addressed": ["thread-1"],
+                    "replies": {"thread-1": "Fixed the guard."},
+                },
+            }
+        )
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),
+            ctx,
+        )
+
+        assert "pending_implementation_reply_handoff" in item.payload
+        item.state = "EVAL"
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "implementation_reply_batch_conflict"
+        )
+        assert github.reply_attempts == 2
+        assert "pending_implementation_reply_handoff" not in item.payload
+        assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
+
     def test_mixed_stale_and_transport_reply_batch_retries_only_ambiguous_thread(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

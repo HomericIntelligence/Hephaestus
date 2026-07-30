@@ -510,9 +510,9 @@ class TestAllThreadReplyAndReviewerResolution:
                 submit_calls.append(str(fields["reviewId"]))
                 review_state = "COMMENTED"
                 review = {
-                    "id": fields["reviewId"],
+                    "id": str(fields["reviewId"]),
                     "state": "COMMENTED",
-                    "body": fields["body"],
+                    "body": str(fields["body"]),
                 }
                 return {
                     "data": {
@@ -755,6 +755,64 @@ class TestAllThreadReplyAndReviewerResolution:
         assert all(result.retryable is False for result in results)
         assert all(result.blocked_thread_ids == (thread["id"],) for result in results)
 
+    def test_submitted_batch_remains_a_receipt_beside_an_unrelated_draft(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A manual draft cannot make a complete exact batch retry forever."""
+        thread = _external_reviewer_thread()
+        reply = "Fixed the missing guard."
+        live = _open_thread_snapshot(_submitted_implementation_receipt(adapter, thread, reply))
+        review_body = str(live["comments"][-1]["review_body"])
+
+        def graphql(query: str, **_fields: str | int) -> dict[str, Any]:
+            if "reviews(first:100" not in query:
+                pytest.fail(f"submitted batch recovery must not mutate: {query}")
+            return {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "id": "pr-7",
+                            "state": "OPEN",
+                            "headRefOid": "a" * 40,
+                            "autoMergeRequest": None,
+                            "reviews": {
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                "nodes": [
+                                    {
+                                        "id": "implementation-review",
+                                        "state": "COMMENTED",
+                                        "body": review_body,
+                                        "viewerDidAuthor": True,
+                                        "commit": {"oid": "a" * 40},
+                                    },
+                                    {
+                                        "id": "manual-draft",
+                                        "state": "PENDING",
+                                        "body": "Unrelated reviewer draft.",
+                                        "viewerDidAuthor": True,
+                                        "commit": {"oid": "a" * 40},
+                                    },
+                                ],
+                            },
+                        }
+                    }
+                }
+            }
+
+        monkeypatch.setattr(adapter, "_review_thread_snapshot", lambda _pr, _id: live)
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+
+        result = adapter.post_implementation_thread_replies(
+            7,
+            expected_head_sha="a" * 40,
+            threads=[thread],
+            replies={thread["id"]: reply},
+        )
+
+        assert result.replied_thread_ids == (thread["id"],)
+        assert result.receipts[0]["implementation_reply_id"] == "implementation-comment"
+        assert result.retryable is False
+
     def test_stale_target_aborts_a_partial_pending_reply_batch(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -764,6 +822,7 @@ class TestAllThreadReplyAndReviewerResolution:
         live_by_id = {first["id"]: first, second["id"]: second}
         review_body = ""
         review_exists = False
+        manual_draft_exists = False
         reply_calls: list[str] = []
         deleted_review_ids: list[str] = []
 
@@ -786,6 +845,16 @@ class TestAllThreadReplyAndReviewerResolution:
                     if review_exists
                     else []
                 )
+                if manual_draft_exists:
+                    nodes.append(
+                        {
+                            "id": "manual-draft",
+                            "state": "PENDING",
+                            "body": "Unrelated reviewer draft.",
+                            "viewerDidAuthor": True,
+                            "commit": {"oid": "a" * 40},
+                        }
+                    )
                 return {
                     "data": {
                         "repository": {
@@ -877,6 +946,7 @@ class TestAllThreadReplyAndReviewerResolution:
                 },
             ],
         }
+        manual_draft_exists = True
         second_attempt = adapter.post_implementation_thread_replies(
             7,
             expected_head_sha="a" * 40,

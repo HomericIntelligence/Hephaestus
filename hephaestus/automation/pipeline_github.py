@@ -1125,7 +1125,9 @@ class PipelineGitHub:
         if inventory is None:
             return None
         pr_id, review, stale_pending_ids, has_pending_conflict = inventory
-        if stale_pending_ids or has_pending_conflict:
+        if stale_pending_ids or (
+            has_pending_conflict and (review is None or review[1] != "COMMENTED")
+        ):
             return None
         return pr_id, review
 
@@ -1262,20 +1264,15 @@ class PipelineGitHub:
         )
         if current is None:
             return False
-        current_pr_id, review, has_pending_conflict = current
-        if current_pr_id != pr_id or has_pending_conflict or review != (review_id, "PENDING"):
+        current_pr_id, review, _has_pending_conflict = current
+        if current_pr_id != pr_id or review != (review_id, "PENDING"):
             return False
         if self._delete_implementation_reply_review(review_id):
             return True
         recovered = self._reconcile_implementation_reply_reviews(
             pr_number, expected_head_sha, review_body
         )
-        return bool(
-            recovered is not None
-            and recovered[0] == pr_id
-            and recovered[1] is None
-            and not recovered[2]
-        )
+        return bool(recovered is not None and recovered[0] == pr_id and recovered[1] is None)
 
     @staticmethod
     def _final_comment_review_id(thread: dict[str, Any]) -> str | None:
@@ -1892,11 +1889,6 @@ class PipelineGitHub:
                     retryable=True,
                 )
             pr_id, existing_review, has_pending_conflict = current_batch
-            if has_pending_conflict:
-                return ImplementationThreadReplyResult(
-                    retryable_thread_ids=candidate_ids,
-                    retryable=True,
-                )
             if blocked:
                 # A PENDING review is not a receipt.  Abort the exact
                 # coordinator draft if any target changed, rather than
@@ -1918,6 +1910,13 @@ class PipelineGitHub:
                     )
                 return ImplementationThreadReplyResult(
                     blocked_thread_ids=tuple(sorted(blocked)),
+                )
+            if has_pending_conflict and (
+                existing_review is None or existing_review[1] != "COMMENTED"
+            ):
+                return ImplementationThreadReplyResult(
+                    retryable_thread_ids=candidate_ids,
+                    retryable=True,
                 )
             if existing_review is None:
                 # A reply from an old per-comment review is not a successful
