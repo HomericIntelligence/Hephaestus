@@ -1778,11 +1778,12 @@ class PrReviewStage(Stage):
         """Retry one exact post-push reply batch without invoking an agent.
 
         Returns ``none`` when no handoff exists, ``completed`` when every
-        reply has a host receipt, ``stale`` when the exact pushed head can no
-        longer safely receive the saved response, ``invalid`` for malformed
-        persisted state, and ``retry`` for a bounded transient/incomplete
-        host operation.  No outcome grants reviewer authority; normal fresh
-        review still validates and resolves the replies.
+        reply has a host receipt, ``visibility_wait`` while GitHub is briefly
+        catching up with the pushed head, ``stale`` when the exact pushed head
+        can no longer safely receive the saved response, ``invalid`` for
+        malformed persisted state, and ``retry`` for a bounded
+        transient/incomplete host operation.  No outcome grants reviewer
+        authority; normal fresh review still validates and resolves the replies.
         """
         raw_handoff = item.payload.get(_PENDING_IMPLEMENTATION_REPLY_HANDOFF)
         if raw_handoff is None:
