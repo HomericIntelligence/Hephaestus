@@ -132,6 +132,246 @@ def _open_thread_snapshot(thread: dict[str, Any], *, resolved: bool = False) -> 
 class TestAllThreadReplyAndReviewerResolution:
     """The implementation/reviewer split applies to every open thread author."""
 
+    def test_implementation_replies_share_one_submitted_review(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One implementation pass submits every thread reply in one review."""
+        first = _external_reviewer_thread("thread-one")
+        second = _external_reviewer_thread("thread-two")
+        live_by_id = {first["id"]: first, second["id"]: second}
+        review_ids: list[str] = []
+        reply_review_ids: list[str] = []
+        submitted_review_ids: list[str] = []
+        review_body = ""
+
+        def snapshot(_pr: int, thread_id: str) -> dict[str, Any]:
+            return _open_thread_snapshot(live_by_id[thread_id])
+
+        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+            nonlocal review_body
+            if "reviews(first:100" in query:
+                return {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "id": "pr-7",
+                                "state": "OPEN",
+                                "headRefOid": "a" * 40,
+                                "autoMergeRequest": None,
+                                "reviews": {
+                                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                    "nodes": (
+                                        [
+                                            {
+                                                "id": "implementation-review",
+                                                "state": "PENDING",
+                                                "body": review_body,
+                                                "viewerDidAuthor": True,
+                                                "commit": {"oid": "a" * 40},
+                                            }
+                                        ]
+                                        if review_body
+                                        else []
+                                    ),
+                                },
+                            }
+                        }
+                    }
+                }
+            if "addPullRequestReview(input" in query:
+                review_ids.append("implementation-review")
+                review_body = str(fields["body"])
+                return {
+                    "data": {
+                        "addPullRequestReview": {
+                            "pullRequestReview": {
+                                "id": "implementation-review",
+                                "state": "PENDING",
+                                "body": review_body,
+                                "commit": {"oid": "a" * 40},
+                            }
+                        }
+                    }
+                }
+            if "addPullRequestReviewThreadReply" in query:
+                thread_id = str(fields["threadId"])
+                review_id = str(fields["reviewId"])
+                reply_review_ids.append(review_id)
+                comment_id = f"implementation-{thread_id}"
+                live_by_id[thread_id] = {
+                    **live_by_id[thread_id],
+                    "comments": [
+                        *live_by_id[thread_id]["comments"],
+                        {
+                            "id": comment_id,
+                            "author": "hephaestus[bot]",
+                            "body": fields["body"],
+                            "viewer_did_author": True,
+                            "review_id": review_id,
+                        },
+                    ],
+                }
+                return {
+                    "data": {"addPullRequestReviewThreadReply": {"comment": {"id": comment_id}}}
+                }
+            if "submitPullRequestReview" in query:
+                submitted_review_ids.append(str(fields["reviewId"]))
+                return {
+                    "data": {
+                        "submitPullRequestReview": {
+                            "pullRequestReview": {
+                                "id": fields["reviewId"],
+                                "state": "COMMENTED",
+                                "body": fields["body"],
+                            }
+                        }
+                    }
+                }
+            raise AssertionError(query)
+
+        monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+
+        result = adapter.post_implementation_thread_replies(
+            7,
+            expected_head_sha="a" * 40,
+            threads=[first, second],
+            replies={
+                first["id"]: "Fixed the first finding.",
+                second["id"]: "Fixed the second finding.",
+            },
+        )
+
+        assert result.replied_thread_ids == (first["id"], second["id"])
+        assert review_ids == ["implementation-review"]
+        assert reply_review_ids == ["implementation-review", "implementation-review"]
+        assert submitted_review_ids == ["implementation-review"]
+
+    def test_reply_batch_retry_reuses_pending_review_and_adds_only_missing_replies(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed batch resumes the same draft review without duplicate replies."""
+        first = _external_reviewer_thread("thread-one")
+        second = _external_reviewer_thread("thread-two")
+        live_by_id = {first["id"]: first, second["id"]: second}
+        review_body = ""
+        review_created = False
+        reply_calls: list[str] = []
+        submit_calls: list[str] = []
+
+        def snapshot(_pr: int, thread_id: str) -> dict[str, Any]:
+            return _open_thread_snapshot(live_by_id[thread_id])
+
+        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+            nonlocal review_body, review_created
+            if "reviews(first:100" in query:
+                nodes = (
+                    [
+                        {
+                            "id": "implementation-review",
+                            "state": "PENDING",
+                            "body": review_body,
+                            "viewerDidAuthor": True,
+                            "commit": {"oid": "a" * 40},
+                        }
+                    ]
+                    if review_created
+                    else []
+                )
+                return {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "id": "pr-7",
+                                "state": "OPEN",
+                                "headRefOid": "a" * 40,
+                                "autoMergeRequest": None,
+                                "reviews": {
+                                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                    "nodes": nodes,
+                                },
+                            }
+                        }
+                    }
+                }
+            if "addPullRequestReview(input" in query:
+                review_created = True
+                review_body = str(fields["body"])
+                return {
+                    "data": {
+                        "addPullRequestReview": {
+                            "pullRequestReview": {
+                                "id": "implementation-review",
+                                "state": "PENDING",
+                                "body": review_body,
+                                "commit": {"oid": "a" * 40},
+                            }
+                        }
+                    }
+                }
+            if "addPullRequestReviewThreadReply" in query:
+                thread_id = str(fields["threadId"])
+                reply_calls.append(thread_id)
+                if thread_id == second["id"] and reply_calls.count(thread_id) == 1:
+                    raise OSError("transient GitHub reply failure")
+                comment_id = f"implementation-{thread_id}"
+                live_by_id[thread_id] = {
+                    **live_by_id[thread_id],
+                    "comments": [
+                        *live_by_id[thread_id]["comments"],
+                        {
+                            "id": comment_id,
+                            "author": "hephaestus[bot]",
+                            "body": fields["body"],
+                            "viewer_did_author": True,
+                            "review_id": fields["reviewId"],
+                        },
+                    ],
+                }
+                return {
+                    "data": {"addPullRequestReviewThreadReply": {"comment": {"id": comment_id}}}
+                }
+            if "submitPullRequestReview" in query:
+                submit_calls.append(str(fields["reviewId"]))
+                return {
+                    "data": {
+                        "submitPullRequestReview": {
+                            "pullRequestReview": {
+                                "id": fields["reviewId"],
+                                "state": "COMMENTED",
+                                "body": fields["body"],
+                            }
+                        }
+                    }
+                }
+            raise AssertionError(query)
+
+        monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+        replies = {
+            first["id"]: "Fixed the first finding.",
+            second["id"]: "Fixed the second finding.",
+        }
+
+        failed = adapter.post_implementation_thread_replies(
+            7,
+            expected_head_sha="a" * 40,
+            threads=[first, second],
+            replies=replies,
+        )
+        retried = adapter.post_implementation_thread_replies(
+            7,
+            expected_head_sha="a" * 40,
+            threads=[first, second],
+            replies=replies,
+        )
+
+        assert failed.replied_thread_ids == ()
+        assert failed.retryable_thread_ids == (first["id"], second["id"])
+        assert retried.replied_thread_ids == (first["id"], second["id"])
+        assert reply_calls == [first["id"], second["id"], second["id"]]
+        assert submit_calls == ["implementation-review"]
+
     def test_external_thread_is_replied_to_then_resolved_by_fresh_reviewer(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -152,6 +392,7 @@ class TestAllThreadReplyAndReviewerResolution:
                             "author": "hephaestus[bot]",
                             "body": fields["body"],
                             "viewer_did_author": True,
+                            "review_id": "implementation-review",
                         },
                     ],
                 }
@@ -184,6 +425,17 @@ class TestAllThreadReplyAndReviewerResolution:
             lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
         )
         monkeypatch.setattr(adapter, "_graphql", graphql)
+        monkeypatch.setattr(
+            adapter,
+            "_find_implementation_reply_review",
+            lambda *_args: ("pr-7", ("implementation-review", "PENDING")),
+        )
+        monkeypatch.setattr(
+            adapter,
+            "_create_implementation_reply_review",
+            lambda *_args: "implementation-review",
+        )
+        monkeypatch.setattr(adapter, "_submit_implementation_reply_review", lambda *_args: True)
 
         implementation = adapter.post_implementation_thread_replies(
             7,
@@ -254,6 +506,11 @@ class TestAllThreadReplyAndReviewerResolution:
                             "author": "hephaestus[bot]",
                             "body": fields["body"],
                             "viewer_did_author": True,
+                            "review_id": (
+                                "implementation-review"
+                                if "reviewId" in fields
+                                else "reviewer-review"
+                            ),
                         },
                     ],
                 }
@@ -280,6 +537,17 @@ class TestAllThreadReplyAndReviewerResolution:
             lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
         )
         monkeypatch.setattr(adapter, "_graphql", graphql)
+        monkeypatch.setattr(
+            adapter,
+            "_find_implementation_reply_review",
+            lambda *_args: ("pr-7", ("implementation-review", "PENDING")),
+        )
+        monkeypatch.setattr(
+            adapter,
+            "_create_implementation_reply_review",
+            lambda *_args: "implementation-review",
+        )
+        monkeypatch.setattr(adapter, "_submit_implementation_reply_review", lambda *_args: True)
         implementation = adapter.post_implementation_thread_replies(
             7,
             expected_head_sha="a" * 40,
@@ -424,6 +692,7 @@ class TestAllThreadReplyAndReviewerResolution:
                     "author": "hephaestus[bot]",
                     "body": body,
                     "viewer_did_author": True,
+                    "review_id": "implementation-review",
                 },
             ],
         }
@@ -435,6 +704,17 @@ class TestAllThreadReplyAndReviewerResolution:
             return _open_thread_snapshot(thread if snapshot_reads == 1 else after)
 
         monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
+        monkeypatch.setattr(
+            adapter,
+            "_find_implementation_reply_review",
+            lambda *_args: ("pr-7", ("implementation-review", "PENDING")),
+        )
+        monkeypatch.setattr(
+            adapter,
+            "_create_implementation_reply_review",
+            lambda *_args: "implementation-review",
+        )
+        monkeypatch.setattr(adapter, "_submit_implementation_reply_review", lambda *_args: True)
         monkeypatch.setattr(
             adapter,
             "_graphql",
