@@ -1428,6 +1428,65 @@ class TestAllThreadReplyAndReviewerResolution:
             "manual-draft",
         ]
 
+    def test_old_submitted_batch_does_not_hide_a_current_preserved_draft(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An old completed batch is inert while current drafts remain terminally visible."""
+        replies = {"thread-one": "Fixed the finding."}
+        old_body = adapter._implementation_reply_review_body(
+            7,
+            "a" * 40,
+            {
+                "thread-one": adapter._implementation_thread_reply_body(
+                    7, "a" * 40, "thread-one", replies["thread-one"]
+                )
+            },
+        )
+
+        def graphql(query: str, **_fields: str | int) -> dict[str, Any]:
+            if "reviews(first:100" not in query:
+                pytest.fail("stale preservation must not mutate any review")
+            return {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "id": "pr-7",
+                            "state": "OPEN",
+                            "headRefOid": "b" * 40,
+                            "autoMergeRequest": None,
+                            "reviews": {
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                "nodes": [
+                                    {
+                                        "id": "old-submitted-review",
+                                        "state": "COMMENTED",
+                                        "body": old_body,
+                                        "viewerDidAuthor": True,
+                                        "commit": {"oid": "a" * 40},
+                                    },
+                                    {
+                                        "id": "current-pending-draft",
+                                        "state": "PENDING",
+                                        "body": "Incomplete current draft.",
+                                        "viewerDidAuthor": True,
+                                        "commit": {"oid": "b" * 40},
+                                    },
+                                ],
+                            },
+                        }
+                    }
+                }
+            }
+
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+
+        assert adapter.preserve_stale_implementation_thread_reply_batch(
+            7,
+            expected_head_sha="a" * 40,
+            current_head_sha="b" * 40,
+            replies=replies,
+        ) == ("current-pending-draft",)
+
     def test_dry_run_never_inventories_or_mutates_stale_reply_drafts(
         self, dry_adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:

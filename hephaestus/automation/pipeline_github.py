@@ -1106,6 +1106,16 @@ class PipelineGitHub:
                         commented_conflict_ids.append(review_id)
                     continue
                 if (
+                    state == "COMMENTED"
+                    and isinstance(commit_oid, str)
+                    and re.fullmatch(r"[0-9a-f]{40}", commit_oid) is not None
+                    and commit_oid != expected_head_sha
+                ):
+                    # A submitted old-head batch is immutable history, not a
+                    # recoverable pending draft.  Keep inventorying so a
+                    # current incomplete review cannot be hidden behind it.
+                    continue
+                if (
                     state != "COMMENTED"
                     or not isinstance(commit_oid, str)
                     or commit_oid != expected_head_sha
