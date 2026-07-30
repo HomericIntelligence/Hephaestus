@@ -29,13 +29,24 @@ Pi until #2516 and #2518 deliver their prerequisites.
 | Runtime entry point | Current non-adapter callers | Pi contract |
 | --- | --- | --- |
 | `resolve_agent` | `automation/agent_stage.py`, `automation/audit_reviewer.py`, `automation/ci_driver.py`, `automation/implementer.py`, `automation/loop_runner.py`, `automation/plan_reviewer.py`, `automation/planner.py`, `automation/pr_reviewer.py`, `automation/pipeline/worker_pool.py`, `github/fleet_sync/cli.py`, `github/tidy.py` | Resolve once at the neutral boundary. Pi fails closed for normal automation until #2516 verifies its package/capability inventory and #2518 enforces lifecycle and tool scopes; it never falls back to another provider. |
-| `direct_agent_model` | `automation/_implement_phase.py`, `automation/audit_reviewer.py`, `automation/ci_fix_flow.py`, `automation/ci_fix_orchestrator.py`, `automation/comment_difficulty.py`, `automation/follow_up.py`, `automation/learn.py`, `automation/plan_reviewer.py`, `automation/post_merge_processor.py`, `automation/pr_manager.py`, `automation/pr_review_core.py`, `github/tidy.py` | Select a model only through the shared adapter. Normal Pi automation remains blocked; #2516 must replace the current environment-alias seam with Pi-native provider/model configuration that honors `PI_CODING_AGENT_DIR` and redacts values. |
+| `direct_agent_model` | `automation/_implement_phase.py`, `automation/audit_reviewer.py`, `automation/ci_fix_flow.py`, `automation/ci_fix_orchestrator.py`, `automation/comment_difficulty.py`, `automation/follow_up.py`, `automation/learn.py`, `automation/plan_reviewer.py`, `automation/post_merge_processor.py`, `automation/pr_manager.py`, `automation/pr_review_core.py`, `github/tidy.py` | Select a model only through the shared adapter. Normal Pi automation remains blocked; #2516 owns environment-aware configuration discovery and preflight, while #2518 owns applying a verified provider/model selection through Pi's native invocation and redacting values. |
 | `uses_direct_agent_runner` | `automation/_followup_phase.py`, `automation/_implement_phase.py`, `automation/agent_stage.py`, `automation/audit_reviewer.py`, `automation/ci_fix_flow.py`, `automation/ci_fix_orchestrator.py`, `automation/comment_difficulty.py`, `automation/follow_up.py`, `automation/learn.py`, `automation/plan_reviewer.py`, `automation/post_merge_processor.py`, `automation/pr_manager.py`, `automation/pr_review_core.py`, `automation/prompts/advise.py`, `github/fleet_sync/conflict_resolver.py`, `github/tidy.py` | Choose the shared direct-runner behavior without testing a provider name. Fleet conflict resolution is a safe Pi N/A until #2518 because it rejects direct runners today. |
 | `run_agent_text` | `automation/_implement_phase.py`, `automation/audit_reviewer.py`, `automation/comment_difficulty.py`, `automation/plan_reviewer.py`, `automation/pr_manager.py`, `automation/pr_review_core.py`, `github/tidy.py` | Native non-interactive Pi invocation with the role-derived tool grant. The caller may not branch on `codex` or `pi`. |
 | `run_agent_session` | `automation/_implement_phase.py`, `automation/agent_stage.py`, `automation/ci_fix_flow.py`, `automation/ci_fix_orchestrator.py`, `automation/pipeline/worker_pool.py`, `automation/post_merge_processor.py` | Preserve cwd, timeout, output, and opaque session identity through the shared adapter. Managed process tracking is a required #2518 boundary. |
 | `resume_agent_session` | `automation/ci_fix_orchestrator.py`, `automation/follow_up.py`, `automation/learn.py`, `automation/pipeline/worker_pool.py` | Resume the persisted opaque identity through the shared adapter; a missing or malformed identity is a provider error, not a new session. |
 | `session_agent_matches` | `automation/_followup_phase.py`, `automation/_review_utils.py`, `automation/follow_up.py`, `automation/learn.py` | Keep a persisted session provider bound to its selected agent; #2518 owns fail-closed Pi session-identity enforcement. |
-| `run_pi_session` operator exception | `scripts/pi_smoke.py` | Explicit local, read-only adapter smoke only. It has no queue, GitHub, worktree, or merge authority and is not evidence that Pi is admitted to automation. `scripts/pi_smoke_slurm.py` and `scripts/slurm/pi_smoke.sbatch` only submit this same smoke command. |
+| `run_pi_session` operator exception | `scripts/pi_smoke.py` | Explicit local, read-only adapter smoke only. It has no queue, GitHub, worktree, or merge authority and is not evidence that Pi is admitted to automation. The default Slurm template submits this same smoke command; an operator-supplied `pi_smoke_slurm.py --template` is outside this conformance boundary. |
+
+### Pipeline model resolution
+
+`pipeline.stages.base.stage_model` resolves the `AgentJob.model` value for all
+model-driven pipeline jobs. It is a pipeline configuration boundary, not a
+second direct-provider adapter: it currently adds a reasoning-effort suffix
+only for Codex and leaves Pi model values unchanged. Its callers are the
+model-driven paths in `planning`, `plan_review`, `implementation`, `pr_review`,
+and `merge_wait`; `repo` and `finished` have no model job. Pi remains
+fail-closed at the generic runner until #2516 verifies configuration and
+packages, then #2518 applies the verified native selection and role scope.
 
 ### Queue pipeline stages
 
@@ -70,7 +81,7 @@ stage contract above; no command may introduce a second Pi path.
 | `hephaestus-fleet-sync` | Safe N/A for Pi until #2518: its conflict resolver currently rejects direct-runtime providers rather than using a scoped shared adapter. |
 | `hephaestus-tidy` | Shared direct adapter with the cleanup role's explicit grant. |
 | `python scripts/pi_smoke.py` | Explicit operator-only read-only adapter smoke; it is not normal automation admission. |
-| `python scripts/pi_smoke_slurm.py` / `sbatch scripts/slurm/pi_smoke.sbatch` | Submit the same operator-only smoke seam without queue or merge authority. |
+| `python scripts/pi_smoke_slurm.py` / `sbatch scripts/slurm/pi_smoke.sbatch` | The default template submits the operator-only smoke seam without queue or merge authority. An explicit `--template` is an operator-controlled scheduler submission and is not smoke or Pi-admission evidence. |
 
 The remaining `project.scripts` entries do not invoke an agent and are safe
 provider N/A boundaries:
@@ -104,7 +115,7 @@ provider N/A boundaries:
 | --- | --- | --- |
 | Session identity | Pi JSON event `session.id` must be opaque and returned through `AgentRunResult`. | Direct-runtime positive-path parsing/capture tests exist. #2518 adds stage-level enforcement for malformed or absent identity. |
 | Resume | A resume must supply a persisted identity; malformed or absent replacement identity is a provider error. | The direct-runtime test proves native resume argv construction. #2518 owns fail-closed identity validation and managed-session behavior. |
-| Model and configuration | Provider/model selection must be explicit, private aliases redacted, and prompts kept out of argv. | #2516 owns an operator config/preflight that honors `PI_CODING_AGENT_DIR`; normal automation is fail-closed until then. |
+| Model and configuration | Provider/model selection must be explicit, private aliases redacted, and prompts kept out of argv. | #2516 owns an operator config/preflight that honors `PI_CODING_AGENT_DIR`; #2518 owns applying the verified provider/model selection to Pi's native invocation. Normal automation is fail-closed until both boundaries exist. |
 | Authentication | A compliant Pi stage requires a successful #2516 preflight, not a particular private model file. | Normal `resolve_agent` selection fails closed until #2516 and #2518 establish an authenticated config honoring `PI_CODING_AGENT_DIR`, an immutable package/capability inventory, and lifecycle/tool-scope enforcement. |
 | Timeout and process lifecycle | Timeout and output must be bounded and redacted. Process-group tracking is required for managed pipeline use. | Pi timeout/redaction tests cover direct runtime behavior; #2518 owns tracked-process parity. |
 | Tool, command, or event failure | Missing package/tool, non-zero command, malformed event, or absent session identity must be actionable and cannot fall back to Claude or Codex mid-stage. | ADR-0019 defines the required fail-closed contract; #2516 and #2518 add preflight and stage-level executable coverage. |

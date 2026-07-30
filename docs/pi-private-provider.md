@@ -8,6 +8,7 @@ or operator-local aliases.
 Use placeholders in documentation:
 
 - `<operator-local-alias>`
+- `<operator-local-provider-alias>`
 - `<private-provider-url>`
 - `<private-model-name>`
 
@@ -19,12 +20,19 @@ npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.80.2
 pi --version
 ```
 
-Set the local alias at runtime:
+Set the local smoke sentinels at runtime:
 
 ```bash
+export HEPH_PI_PROVIDER=<operator-local-provider-alias>
 export HEPH_PI_MODEL=<operator-local-alias>
 python3 scripts/pi_smoke.py
 ```
+
+Both variables are required by the explicit smoke seam. They are not yet
+forwarded as Pi native provider/model selection arguments, so a successful
+smoke validates only the bounded adapter path, not a requested provider/model
+selection. #2516 owns configuration discovery and preflight; #2518 owns native
+selection and scoped pipeline admission.
 
 Create `.heph-private-denylist` at the repository root on machines that know
 private values. Add one fixed string per line, including any private alias,

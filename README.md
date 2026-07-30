@@ -326,12 +326,14 @@ The package currently installs 56 console scripts from `[project.scripts]`.
 Pi uses operator-local provider configuration only. Do not commit Pi provider
 config, endpoint URLs, hostnames, checkpoint names, model identifiers, or local
 aliases. Configure the OpenAI-compatible provider in the local Pi config, set
-`HEPH_PI_MODEL=<operator-local-alias>`, and see
+`HEPH_PI_PROVIDER=<operator-local-provider-alias>` and
+`HEPH_PI_MODEL=<operator-local-alias>` for the explicit smoke sentinel, and see
 [`docs/pi-private-provider.md`](docs/pi-private-provider.md) for the sanitized
-setup and denylist guard. Pi is not yet admitted to normal Hephaestus
-automation: `--agent pi` fails closed until #2516 verifies the required
-packages and #2518 enforces lifecycle and tool scopes. The local setup is for
-the explicit adapter-smoke seam only.
+setup and denylist guard. That smoke seam does not yet select those values
+through Pi's native provider/model contract. Pi is not yet admitted to normal
+Hephaestus automation: `--agent pi` fails closed until #2516 verifies the
+required packages and #2518 enforces native selection, lifecycle, and tool
+scopes. The local setup is for the explicit adapter-smoke seam only.
 
 #### Running the automation loop from a source checkout (macOS / Codex)
 

@@ -82,15 +82,16 @@ is descriptive; Hephaestus owns the enforcement boundary passed to Pi.
 ### Authentication, configuration, and errors
 
 Pi configuration is operator-local. A valid provider can use Pi's supported
-OAuth/API-key flow or local model configuration; Hephaestus must not require a
-specific private `models.json` path. `PI_CODING_AGENT_DIR` is respected when Pi
-configuration is inspected. The current operator-only smoke seam does **not**
-yet turn `HEPH_PI_PROVIDER` / `HEPH_PI_MODEL` into Pi's native provider/model
-selection arguments, so it is not automation-admission evidence. #2516 owns
-the concrete authentication and security-cleared package probes; #2518 owns
-native provider/model selection, role-derived tool grants, and lifecycle parity.
-Those later stages must keep prompts and private aliases out of publishable
-diagnostics.
+OAuth/API-key flow or local model configuration. The legacy, smoke-only
+`is_agent_authenticated("pi")` probe currently reads the default
+`~/.pi/agent/models.json` location; it neither honors `PI_CODING_AGENT_DIR` nor
+constitutes automation-admission evidence. #2516 owns environment-aware
+configuration discovery, concrete authentication, and security-cleared package
+probes. The current operator-only smoke seam does **not** turn
+`HEPH_PI_PROVIDER` / `HEPH_PI_MODEL` into Pi's native provider/model selection
+arguments. #2518 owns applying the verified selection, role-derived tool grants,
+and lifecycle parity. Those later stages must keep prompts and private aliases
+out of publishable diagnostics.
 
 The Pi adapter uses JSON mode and explicit non-interactive execution.  A
 timeout, unavailable tool, missing command, malformed event, or absent session
