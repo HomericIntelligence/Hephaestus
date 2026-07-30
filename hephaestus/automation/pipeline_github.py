@@ -1015,10 +1015,10 @@ class PipelineGitHub:
     ):
         """Return the exact batch review plus stale and conflicting current reviews.
 
-        Only a viewer-owned pending review carrying the opaque implementation
-        marker and an *older* commit is eligible for automatic discard.  A
-        manual or malformed pending review is a conflict: leave it untouched
-        and fail closed rather than taking ownership of another actor's work.
+        Every visible current pending review and every visible marked current
+        implementation review is a conflict unless it is this exact batch.
+        Stale drafts are preserved for manual cleanup; GitHub offers no
+        conditional delete that could prove a later actor had not changed one.
         """
         query = (
             "query($owner:String!,$name:String!,$number:Int!,$after:String){"
@@ -1061,8 +1061,6 @@ class PipelineGitHub:
             for review in reviews["nodes"]:
                 if not isinstance(review, dict):
                     return None
-                if review.get("viewerDidAuthor") is not True:
-                    continue
                 review_id = review.get("id")
                 state = review.get("state")
                 body = review.get("body")
@@ -1070,6 +1068,17 @@ class PipelineGitHub:
                 commit_oid = commit.get("oid") if isinstance(commit, dict) else None
                 if not isinstance(review_id, str) or not review_id or not isinstance(state, str):
                     return None
+                if review.get("viewerDidAuthor") is not True:
+                    if state == "PENDING":
+                        pending_conflict_ids.append(review_id)
+                    elif (
+                        state == "COMMENTED"
+                        and isinstance(commit_oid, str)
+                        and commit_oid == expected_head_sha
+                        and self._is_implementation_reply_review_body(body)
+                    ):
+                        commented_conflict_ids.append(review_id)
+                    continue
                 if state == "PENDING":
                     if (
                         body == review_body
@@ -1230,94 +1239,36 @@ class PipelineGitHub:
             and review.get("body") == review_body
         )
 
-    def _delete_implementation_reply_review(self, review_id: str) -> bool:
-        """Delete one proven coordinator-owned pending review draft."""
-        query = (
-            "mutation($reviewId:ID!,$clientMutationId:String!){"
-            "deletePullRequestReview(input:{pullRequestReviewId:$reviewId,"
-            "clientMutationId:$clientMutationId}){pullRequestReview{id}}}"
-        )
-        data = self._graphql(
-            query,
-            reviewId=review_id,
-            clientMutationId=hashlib.sha256(
-                f"{review_id}:discard-implementation-replies".encode()
-            ).hexdigest(),
-        )
-        response_data = data.get("data") if isinstance(data, dict) else None
-        mutation = (
-            response_data.get("deletePullRequestReview")
-            if isinstance(response_data, dict)
-            else None
-        )
-        review = mutation.get("pullRequestReview") if isinstance(mutation, dict) else None
-        return bool(isinstance(review, dict) and review.get("id") == review_id)
-
-    def _reconcile_implementation_reply_reviews(
+    def _implementation_reply_review_state(
         self, pr_number: int, expected_head_sha: str, review_body: str
     ) -> tuple[str, tuple[str, str] | None, tuple[str, ...]] | None:
-        """Discard only proven stale drafts and return the current batch state.
+        """Return the exact batch and every visible preserved-review conflict.
 
-        The review inventory is reread before every deletion, so a head move
-        or a new current review preserves every draft instead of deleting one
-        whose identity is no longer proved.  A PENDING review for the current
-        head but another body is intentionally left alone.
+        This accessor is intentionally read-only.  It never tries to recover
+        from an interrupted batch by deleting a draft, because GitHub's review
+        API supplies no compare-and-swap precondition for that mutation.
         """
-        while True:
-            inventory = self._implementation_reply_review_inventory(
-                pr_number, expected_head_sha, review_body
-            )
-            if inventory is None:
-                return None
-            (
-                pr_id,
-                review,
-                stale_pending_ids,
-                pending_conflict_ids,
-                commented_conflict_ids,
-            ) = inventory
-            conflicting_review_ids = tuple(
-                sorted(set(pending_conflict_ids).union(commented_conflict_ids))
-            )
-            # GitHub offers no compare-and-swap delete.  Once a conflicting
-            # current review exists, a stale-looking coordinator draft might
-            # receive content before a deletion reaches GitHub.  Preserve all
-            # reviews and let the caller report the conflict instead.
-            if conflicting_review_ids or not stale_pending_ids:
-                return pr_id, review, conflicting_review_ids
-            stale_review_id = stale_pending_ids[0]
-            if not self._delete_implementation_reply_review(stale_review_id):
-                # GitHub may have applied the delete before losing its response.
-                # The next inventory read is the only safe recovery proof.
-                recovered = self._implementation_reply_review_inventory(
-                    pr_number, expected_head_sha, review_body
+        inventory = self._implementation_reply_review_inventory(
+            pr_number, expected_head_sha, review_body
+        )
+        if inventory is None:
+            return None
+        (
+            pr_id,
+            review,
+            stale_pending_ids,
+            pending_conflict_ids,
+            commented_conflict_ids,
+        ) = inventory
+        return (
+            pr_id,
+            review,
+            tuple(
+                sorted(
+                    set(stale_pending_ids).union(pending_conflict_ids).union(commented_conflict_ids)
                 )
-                if recovered is None or stale_review_id in recovered[2]:
-                    return None
-
-    def _discard_current_implementation_reply_review(
-        self,
-        pr_number: int,
-        expected_head_sha: str,
-        review_body: str,
-        pr_id: str,
-        review_id: str,
-    ) -> bool:
-        """Abort a current batch which cannot atomically cover every thread."""
-        current = self._reconcile_implementation_reply_reviews(
-            pr_number, expected_head_sha, review_body
+            ),
         )
-        if current is None:
-            return False
-        current_pr_id, review, conflicting_review_ids = current
-        if current_pr_id != pr_id or review != (review_id, "PENDING") or conflicting_review_ids:
-            return False
-        if self._delete_implementation_reply_review(review_id):
-            return True
-        recovered = self._reconcile_implementation_reply_reviews(
-            pr_number, expected_head_sha, review_body
-        )
-        return bool(recovered is not None and recovered[0] == pr_id and recovered[1] is None)
 
     @staticmethod
     def _final_comment_review_id(thread: dict[str, Any]) -> str | None:
@@ -1807,7 +1758,7 @@ class PipelineGitHub:
                 retryable=True,
             )
 
-    def discard_stale_implementation_thread_reply_batch(
+    def preserve_stale_implementation_thread_reply_batch(
         self,
         pr_number: int,
         *,
@@ -1815,16 +1766,15 @@ class PipelineGitHub:
         current_head_sha: str,
         replies: dict[str, str],
         batch_nonce: str | None = None,
-    ) -> bool:
-        """Discard verified old-head drafts after a handoff becomes stale.
+    ) -> tuple[str, ...] | None:
+        """Return visible reviews preserved after an old-head handoff goes stale.
 
-        The review stage calls this only after it has proved the PR remains
-        open and unarmed at ``current_head_sha``.  It never deletes a current
-        manual pending review; those are returned as a conflict by the
-        inventory and left for an operator.
+        GitHub has no conditional review-delete mutation, so this recovery
+        hook is deliberately read-only.  The stage uses the returned IDs to
+        stop the work item and request manual cleanup before a fresh pass.
         """
-        if self._skip(f"discard stale implementation reply draft on PR #{pr_number}"):
-            return True
+        if self._skip(f"preserve stale implementation reply drafts on PR #{pr_number}"):
+            return ()
         if (
             not re.fullmatch(r"[0-9a-f]{40}", expected_head_sha)
             or not re.fullmatch(r"[0-9a-f]{40}", current_head_sha)
@@ -1833,14 +1783,14 @@ class PipelineGitHub:
             or not isinstance(batch_nonce, str)
             or re.fullmatch(r"[0-9a-f]{32}", batch_nonce) is None
         ):
-            return False
+            return None
         bodies: dict[str, str] = {}
         for thread_id, reply in replies.items():
             if not isinstance(thread_id, str) or not thread_id:
-                return False
+                return None
             safe_reply = self._safe_thread_reply(reply)
             if safe_reply is None:
-                return False
+                return None
             bodies[thread_id] = self._implementation_thread_reply_body(
                 pr_number, expected_head_sha, thread_id, safe_reply
             )
@@ -1849,15 +1799,21 @@ class PipelineGitHub:
         )
         try:
             with file_lock(self._implementation_reply_lock_path(pr_number), require_exclusive=True):
-                reconciled = self._reconcile_implementation_reply_reviews(
+                state = self._implementation_reply_review_state(
                     pr_number, current_head_sha, review_body
                 )
         except (LockUnavailableError, OSError) as error:
             logger.warning(
                 "Stale implementation reply draft lock failed on PR #%s: %s", pr_number, error
             )
-            return False
-        return reconciled is not None
+            return None
+        if state is None:
+            return None
+        _pr_id, review, conflict_ids = state
+        preserved = set(conflict_ids)
+        if review is not None and review[1] == "PENDING":
+            preserved.add(review[0])
+        return tuple(sorted(preserved))
 
     def _post_implementation_thread_replies_locked(  # noqa: C901
         self,
@@ -1943,9 +1899,7 @@ class PipelineGitHub:
                 else None
             )
             current_batch = (
-                self._reconcile_implementation_reply_reviews(
-                    pr_number, expected_head_sha, review_body
-                )
+                self._implementation_reply_review_state(pr_number, expected_head_sha, review_body)
                 if review_body is not None
                 else None
             )
@@ -1964,30 +1918,20 @@ class PipelineGitHub:
                 # Include the local pending draft so operators can identify
                 # every review preserved by the terminal conflict.
                 reported_conflict_ids = set(conflicting_review_ids)
-                if blocked and existing_review is not None and existing_review[1] == "PENDING":
+                if existing_review is not None and existing_review[1] == "PENDING":
                     reported_conflict_ids.add(existing_review[0])
                 return ImplementationThreadReplyResult(
                     blocked_thread_ids=candidate_ids,
                     conflicting_current_review_ids=tuple(sorted(reported_conflict_ids)),
                 )
             if blocked:
-                # A PENDING review is not a receipt.  Abort the exact
-                # coordinator draft if any target changed, rather than
-                # reporting a hidden partial batch as delivered.
-                if (
-                    existing_review is not None
-                    and existing_review[1] == "PENDING"
-                    and not self._discard_current_implementation_reply_review(
-                        pr_number,
-                        expected_head_sha,
-                        review_body,
-                        pr_id,
-                        existing_review[0],
-                    )
-                ):
+                # A PENDING review is not a receipt.  Preserve it for manual
+                # cleanup instead of deleting it: GitHub cannot prove that a
+                # concurrent writer has not appended content after inventory.
+                if existing_review is not None and existing_review[1] == "PENDING":
                     return ImplementationThreadReplyResult(
-                        retryable_thread_ids=candidate_ids,
-                        retryable=True,
+                        blocked_thread_ids=candidate_ids,
+                        conflicting_current_review_ids=(existing_review[0],),
                     )
                 return ImplementationThreadReplyResult(
                     blocked_thread_ids=tuple(sorted(blocked)),

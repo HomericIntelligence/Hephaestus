@@ -468,7 +468,7 @@ class FakeStageGitHub(FakeGitHub):
         blocked = tuple(sorted(set(replies) - set(replied)))
         return ImplementationThreadReplyResult(replied, blocked, tuple(receipts))
 
-    def discard_stale_implementation_thread_reply_batch(
+    def preserve_stale_implementation_thread_reply_batch(
         self,
         pr_number: int,
         *,
@@ -476,17 +476,17 @@ class FakeStageGitHub(FakeGitHub):
         current_head_sha: str,
         replies: dict[str, str],
         batch_nonce: str,
-    ) -> bool:
-        """Record stale draft cleanup without modelling GitHub pending reviews."""
+    ) -> tuple[str, ...] | None:
+        """Record non-mutating stale-draft preservation for stage tests."""
         self._log(
-            "discard_stale_implementation_thread_reply_batch",
+            "preserve_stale_implementation_thread_reply_batch",
             pr_number,
             expected_head_sha,
             current_head_sha,
             tuple(sorted(replies)),
             batch_nonce,
         )
-        return True
+        return ()
 
     def reviewer_validation_receipts(
         self,

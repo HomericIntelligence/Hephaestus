@@ -304,7 +304,7 @@ class StageGitHub(Protocol):
         """
         ...
 
-    def discard_stale_implementation_thread_reply_batch(
+    def preserve_stale_implementation_thread_reply_batch(
         self,
         pr_number: int,
         *,
@@ -312,12 +312,13 @@ class StageGitHub(Protocol):
         current_head_sha: str,
         replies: dict[str, str],
         batch_nonce: str,
-    ) -> bool:
-        """Discard only a verified old-head implementation reply draft.
+    ) -> tuple[str, ...] | None:
+        """Return visible drafts preserved after an implementation handoff goes stale.
 
-        This recovery hook runs when a durable handoff becomes stale before a
-        retry.  It must never delete a current or manually authored pending
-        review, and returns False when the stale draft cannot be proved.
+        GitHub exposes no conditional review-delete mutation, so stale-draft
+        recovery is deliberately non-mutating.  The returned opaque review
+        IDs let the stage publish an idempotent manual-cleanup diagnostic;
+        ``None`` means the inventory could not be proved.
         """
         pass
 

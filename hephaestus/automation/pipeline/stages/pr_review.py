@@ -1812,7 +1812,7 @@ class PrReviewStage(Stage):
         return None
 
     @staticmethod
-    def _discard_stale_implementation_reply_draft(
+    def _preserve_stale_implementation_reply_draft(
         item: WorkItem,
         ctx: StageContext,
         *,
@@ -1821,7 +1821,7 @@ class PrReviewStage(Stage):
         replies: dict[str, str],
         batch_nonce: str,
     ) -> None:
-        """Best-effort cleanup after a saved implementation head was replaced."""
+        """Preserve visible stale drafts after a saved implementation head was replaced."""
         if not (
             isinstance(current_state, dict)
             and current_state.get("state") == "OPEN"
@@ -1833,7 +1833,7 @@ class PrReviewStage(Stage):
         ):
             return
         try:
-            ctx.github.discard_stale_implementation_thread_reply_batch(
+            preserved_review_ids = ctx.github.preserve_stale_implementation_thread_reply_batch(
                 item.pr,
                 expected_head_sha=expected_head_sha,
                 current_head_sha=current_state["headRefOid"],
@@ -1842,10 +1842,16 @@ class PrReviewStage(Stage):
             )
         except Exception as error:
             logger.warning(
-                "pr_review:%s: could not discard stale implementation reply draft (%s)",
+                "pr_review:%s: could not preserve stale implementation reply draft (%s)",
                 item.issue,
                 type(error).__name__,
             )
+            return
+        if preserved_review_ids:
+            item.payload[_IMPLEMENTATION_REPLY_REVIEW_CONFLICT] = {
+                "head_sha": current_state["headRefOid"],
+                "review_ids": tuple(sorted(str(review_id) for review_id in preserved_review_ids)),
+            }
 
     def _consume_implementation_reply_review_conflict(
         self,
@@ -1937,16 +1943,20 @@ class PrReviewStage(Stage):
     def _consume_implementation_reply_current_review_conflict(
         self, item: WorkItem, ctx: StageContext
     ) -> StepResult | None:
-        """Diagnose a non-owned current review without taking ownership of it."""
+        """Diagnose a preserved current review without taking ownership of it."""
         return self._consume_implementation_reply_review_conflict(
             item,
             ctx,
             payload_key=_IMPLEMENTATION_REPLY_REVIEW_CONFLICT,
             marker_kind="review-conflict",
             minimum_review_count=1,
-            explanation="a non-owned current implementation review prevents this reply batch",
+            explanation=(
+                "a preserved incomplete or competing implementation review "
+                "prevents this reply batch"
+            ),
             remediation=(
-                "Inspect the conflicting review, then run a fresh implementation-review pass."
+                "Inspect and manually clean up the preserved review, then run a fresh "
+                "implementation-review pass."
             ),
         )
 
@@ -2009,7 +2019,7 @@ class PrReviewStage(Stage):
                             IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRY_CAP,
                         )
                         return "visibility_wait"
-                PrReviewStage._discard_stale_implementation_reply_draft(
+                PrReviewStage._preserve_stale_implementation_reply_draft(
                     item,
                     ctx,
                     expected_head_sha=head_sha,
@@ -2147,6 +2157,10 @@ class PrReviewStage(Stage):
             return StageOutcome(
                 Disposition.FINISH_FAIL, "implementation_reply_review_conflict_invalid"
             )
+        if handoff_status == "stale":
+            conflict_outcome = self._consume_implementation_reply_current_review_conflict(item, ctx)
+            if conflict_outcome is not None:
+                return conflict_outcome
         if handoff_status == "visibility_wait":
             return StageOutcome(Disposition.RETRY, "implementation_reply_handoff_visibility_wait")
         if handoff_status == "invalid":

@@ -67,7 +67,7 @@ class PipelineGitHubForTest(pg.PipelineGitHub):
             batch_nonce=batch_nonce,
         )
 
-    def discard_stale_implementation_thread_reply_batch(
+    def preserve_stale_implementation_thread_reply_batch(
         self,
         pr_number: int,
         *,
@@ -75,8 +75,8 @@ class PipelineGitHubForTest(pg.PipelineGitHub):
         current_head_sha: str,
         replies: dict[str, str],
         batch_nonce: str | None = _BATCH_NONCE,
-    ) -> bool:
-        return super().discard_stale_implementation_thread_reply_batch(
+    ) -> tuple[str, ...] | None:
+        return super().preserve_stale_implementation_thread_reply_batch(
             pr_number,
             expected_head_sha=expected_head_sha,
             current_head_sha=current_head_sha,
@@ -871,6 +871,119 @@ class TestAllThreadReplyAndReviewerResolution:
         assert result.conflicting_current_review_ids == ("foreign-pending-draft",)
         assert result.retryable is False
 
+    def test_visible_foreign_pending_review_blocks_without_mutation(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A visible foreign pending review cannot be reused or bypassed."""
+        thread = _external_reviewer_thread()
+        mutations: list[str] = []
+
+        def graphql(query: str, **_fields: str | int) -> dict[str, Any]:
+            if "reviews(first:100" not in query:
+                mutations.append(query)
+                pytest.fail("a visible foreign pending review must stop before mutation")
+            return {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "id": "pr-7",
+                            "state": "OPEN",
+                            "headRefOid": "a" * 40,
+                            "autoMergeRequest": None,
+                            "reviews": {
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                "nodes": [
+                                    {
+                                        "id": "foreign-pending-draft",
+                                        "state": "PENDING",
+                                        "body": "Visible foreign draft.",
+                                        "viewerDidAuthor": False,
+                                        "commit": {"oid": "a" * 40},
+                                    }
+                                ],
+                            },
+                        }
+                    }
+                }
+            }
+
+        monkeypatch.setattr(
+            adapter,
+            "_review_thread_snapshot",
+            lambda _pr, _thread: _open_thread_snapshot(thread),
+        )
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+
+        result = adapter.post_implementation_thread_replies(
+            7,
+            expected_head_sha="a" * 40,
+            threads=[thread],
+            replies={thread["id"]: "Fixed the missing guard."},
+        )
+
+        assert result.replied_thread_ids == ()
+        assert result.blocked_thread_ids == (thread["id"],)
+        assert result.conflicting_current_review_ids == ("foreign-pending-draft",)
+        assert mutations == []
+
+    def test_visible_foreign_marked_review_blocks_without_mutation(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A visible foreign submitted implementation batch cannot be bypassed."""
+        thread = _external_reviewer_thread()
+        reply_body = adapter._implementation_thread_reply_body(
+            7, "a" * 40, thread["id"], "Fixed the missing guard."
+        )
+        foreign_body = adapter._implementation_reply_review_body(
+            7, "a" * 40, {thread["id"]: reply_body}, "d" * 32
+        )
+
+        def graphql(query: str, **_fields: str | int) -> dict[str, Any]:
+            if "reviews(first:100" not in query:
+                pytest.fail("a visible foreign batch must stop before mutation")
+            return {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "id": "pr-7",
+                            "state": "OPEN",
+                            "headRefOid": "a" * 40,
+                            "autoMergeRequest": None,
+                            "reviews": {
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                "nodes": [
+                                    {
+                                        "id": "foreign-submitted-review",
+                                        "state": "COMMENTED",
+                                        "body": foreign_body,
+                                        "viewerDidAuthor": False,
+                                        "commit": {"oid": "a" * 40},
+                                    }
+                                ],
+                            },
+                        }
+                    }
+                }
+            }
+
+        monkeypatch.setattr(
+            adapter,
+            "_review_thread_snapshot",
+            lambda _pr, _thread: _open_thread_snapshot(thread),
+        )
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+
+        result = adapter.post_implementation_thread_replies(
+            7,
+            expected_head_sha="a" * 40,
+            threads=[thread],
+            replies={thread["id"]: "Fixed the missing guard."},
+        )
+
+        assert result.replied_thread_ids == ()
+        assert result.blocked_thread_ids == (thread["id"],)
+        assert result.conflicting_current_review_ids == ("foreign-submitted-review",)
+
     def test_cross_checkout_submitted_batch_between_inventory_and_create_is_a_conflict(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -968,6 +1081,54 @@ class TestAllThreadReplyAndReviewerResolution:
         assert added_replies == []
         assert submitted_reviews == []
         assert deleted_reviews == []
+
+    def test_resumed_pending_batch_reports_its_own_review_with_a_competitor(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A resumed draft and a competing batch are both preserved and reported."""
+        thread = _external_reviewer_thread()
+        reply = "Fixed the missing guard."
+        mutations: list[str] = []
+
+        monkeypatch.setattr(
+            adapter,
+            "_review_thread_snapshot",
+            lambda _pr, _thread: _open_thread_snapshot(thread),
+        )
+        monkeypatch.setattr(
+            adapter,
+            "_implementation_reply_review_state",
+            lambda *_args: (
+                "pr-7",
+                ("local-pending-draft", "PENDING"),
+                ("competing-current-review",),
+            ),
+        )
+        monkeypatch.setattr(
+            adapter,
+            "_add_thread_reply",
+            lambda *_args, **_kwargs: mutations.append("reply"),
+        )
+        monkeypatch.setattr(
+            adapter,
+            "_submit_implementation_reply_review",
+            lambda *_args: mutations.append("submit"),
+        )
+
+        result = adapter.post_implementation_thread_replies(
+            7,
+            expected_head_sha="a" * 40,
+            threads=[thread],
+            replies={thread["id"]: reply},
+        )
+
+        assert result.replied_thread_ids == ()
+        assert result.blocked_thread_ids == (thread["id"],)
+        assert result.conflicting_current_review_ids == (
+            "competing-current-review",
+            "local-pending-draft",
+        )
+        assert mutations == []
 
     def test_submitted_batch_remains_a_receipt_beside_an_unrelated_draft(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
@@ -1173,10 +1334,10 @@ class TestAllThreadReplyAndReviewerResolution:
         assert reply_calls == [first["id"], second["id"]]
         assert deleted_review_ids == []
 
-    def test_head_drift_preserves_stale_batches_when_current_conflicts_exist(
+    def test_head_drift_reports_every_preserved_stale_batch(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Any current conflict prevents stale-draft cleanup from mutating reviews."""
+        """Stale handoff preservation reports every visible pending review without mutation."""
         replies = {"thread-one": "Fixed the finding."}
         old_body = adapter._implementation_reply_review_body(
             7,
@@ -1249,22 +1410,17 @@ class TestAllThreadReplyAndReviewerResolution:
                     }
                 }
             if "deletePullRequestReview" in query:
-                review_id = str(fields["reviewId"])
-                deleted_review_ids.append(review_id)
-                reviews[:] = [review for review in reviews if review["id"] != review_id]
-                return {
-                    "data": {"deletePullRequestReview": {"pullRequestReview": {"id": review_id}}}
-                }
+                pytest.fail("stale draft preservation must not delete any review")
             raise AssertionError(query)
 
         monkeypatch.setattr(adapter, "_graphql", graphql)
 
-        assert adapter.discard_stale_implementation_thread_reply_batch(
+        assert adapter.preserve_stale_implementation_thread_reply_batch(
             7,
             expected_head_sha="a" * 40,
             current_head_sha="b" * 40,
             replies=replies,
-        )
+        ) == ("foreign-old-draft", "manual-draft", "old-automation-draft")
         assert deleted_review_ids == []
         assert [review["id"] for review in reviews] == [
             "old-automation-draft",
@@ -1272,18 +1428,21 @@ class TestAllThreadReplyAndReviewerResolution:
             "manual-draft",
         ]
 
-    def test_dry_run_never_inventories_or_deletes_stale_reply_drafts(
+    def test_dry_run_never_inventories_or_mutates_stale_reply_drafts(
         self, dry_adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Dry-run stale cleanup must not read or mutate review drafts."""
+        """Dry-run stale preservation must not inventory or mutate review drafts."""
         graphql = MagicMock()
         monkeypatch.setattr(dry_adapter, "_graphql", graphql)
 
-        assert dry_adapter.discard_stale_implementation_thread_reply_batch(
-            7,
-            expected_head_sha="a" * 40,
-            current_head_sha="b" * 40,
-            replies={"thread-one": "Fixed the finding."},
+        assert (
+            dry_adapter.preserve_stale_implementation_thread_reply_batch(
+                7,
+                expected_head_sha="a" * 40,
+                current_head_sha="b" * 40,
+                replies={"thread-one": "Fixed the finding."},
+            )
+            == ()
         )
         graphql.assert_not_called()
 
@@ -1348,7 +1507,7 @@ class TestAllThreadReplyAndReviewerResolution:
         monkeypatch.setattr(adapter, "_graphql", graphql)
         monkeypatch.setattr(
             adapter,
-            "_reconcile_implementation_reply_reviews",
+            "_implementation_reply_review_state",
             lambda *_args: ("pr-7", ("implementation-review", "PENDING"), False),
         )
         monkeypatch.setattr(
@@ -1476,7 +1635,7 @@ class TestAllThreadReplyAndReviewerResolution:
         monkeypatch.setattr(adapter, "_graphql", graphql)
         monkeypatch.setattr(
             adapter,
-            "_reconcile_implementation_reply_reviews",
+            "_implementation_reply_review_state",
             lambda *_args: ("pr-7", ("implementation-review", "PENDING"), False),
         )
         monkeypatch.setattr(
@@ -1801,7 +1960,7 @@ class TestAllThreadReplyAndReviewerResolution:
         monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
         monkeypatch.setattr(
             adapter,
-            "_reconcile_implementation_reply_reviews",
+            "_implementation_reply_review_state",
             lambda *_args: ("pr-7", ("implementation-review", "PENDING"), False),
         )
         monkeypatch.setattr(
@@ -1862,7 +2021,7 @@ class TestAllThreadReplyAndReviewerResolution:
         )
         monkeypatch.setattr(
             adapter,
-            "_reconcile_implementation_reply_reviews",
+            "_implementation_reply_review_state",
             lambda *_args: ("pr-7", None, False),
         )
         graphql = MagicMock()
