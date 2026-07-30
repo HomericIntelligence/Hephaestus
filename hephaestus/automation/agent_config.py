@@ -569,10 +569,20 @@ def _registered_worktree_roots(cwd: Path) -> tuple[Path, ...]:
             text=True,
             timeout=5,
         )
-    except subprocess.CalledProcessError:
-        # A non-repository has no registered family; its exact cwd remains a
-        # valid transcript owner without masking a Git discovery failure.
-        return (resolved_cwd,)
+    except subprocess.CalledProcessError as exc:
+        # ``rev-parse`` uses exit 128 for both an ordinary non-repository
+        # directory and operational failures (for example, dubious ownership
+        # or corrupt metadata). Only the former is an exact-cwd transcript
+        # owner; silently treating the latter as non-repository would recreate
+        # sessions after a Git discovery failure.
+        stderr = exc.stderr
+        if (
+            exc.returncode == 128
+            and isinstance(stderr, str)
+            and "not a git repository" in stderr.lower()
+        ):
+            return (resolved_cwd,)
+        raise RuntimeError(f"unable to determine whether {resolved_cwd} is a Git checkout") from exc
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError(f"unable to determine whether {resolved_cwd} is a Git checkout") from exc
 

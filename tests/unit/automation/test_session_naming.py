@@ -460,11 +460,33 @@ class TestSessionTranscriptResolver:
         transcript.write_text(f'{{"cwd": "{cwd.resolve()}"}}\n', encoding="utf-8")
 
         with patch.object(
-            subprocess, "run", side_effect=subprocess.CalledProcessError(128, ["git"])
+            subprocess,
+            "run",
+            side_effect=subprocess.CalledProcessError(
+                128,
+                ["git"],
+                stderr="fatal: not a git repository (or any of the parent directories): .git\n",
+            ),
         ):
             resolved = resolve_session_jsonl_path("session-id", cwd)
 
         assert resolved == transcript
+
+    def test_operational_git_failure_is_not_treated_as_non_repository(self, tmp_path: Path) -> None:
+        cwd = tmp_path / "checkout"
+        cwd.mkdir()
+
+        with patch.object(
+            subprocess,
+            "run",
+            side_effect=subprocess.CalledProcessError(
+                128,
+                ["git"],
+                stderr="fatal: detected dubious ownership in repository\n",
+            ),
+        ):
+            with pytest.raises(RuntimeError, match="unable to determine whether"):
+                agent_config._registered_worktree_roots(cwd)
 
     def test_git_discovery_failure_raises_explicitly(self, tmp_path: Path) -> None:
         cwd = tmp_path / "checkout"
