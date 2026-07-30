@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import deque
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -4102,6 +4103,151 @@ class TestRealCommitGate:
         assert github.reply_attempts == 2
         assert "pending_implementation_reply_handoff" not in item.payload
         assert item.payload["push_no_commit"] is False
+
+    def test_reply_handoff_waits_for_post_push_head_visibility(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A stale read immediately after push earns a delayed host-only retry."""
+
+        class HeadVisibilityLagGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__()
+                self._states = deque(
+                    [
+                        {"state": "OPEN", "headRefOid": "b" * 40, "autoMergeRequest": None},
+                        {"state": "OPEN", "headRefOid": "b" * 40, "autoMergeRequest": None},
+                        {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
+                    ]
+                )
+                self.reply_attempts = 0
+
+            def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
+                del pr_number
+                return self._states.popleft() if self._states else None
+
+            def post_implementation_thread_replies(
+                self,
+                pr_number: int,
+                *,
+                expected_head_sha: str,
+                threads: list[dict[str, Any]],
+                replies: dict[str, str],
+            ) -> ImplementationThreadReplyResult:
+                self.reply_attempts += 1
+                return super().post_implementation_thread_replies(
+                    pr_number,
+                    expected_head_sha=expected_head_sha,
+                    threads=threads,
+                    replies=replies,
+                )
+
+        stage = PrReviewStage()
+        github = HeadVisibilityLagGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=40, pr=1001, state="PUSH_WAIT")
+        snapshot = {
+            "id": "thread-1",
+            "path": "a.py",
+            "line": 3,
+            "side": "RIGHT",
+            "body": "fix this",
+            "comments": [{"id": "comment-1", "author": "reviewer", "body": "fix this"}],
+        }
+        item.payload.update(
+            {
+                "remediation_threads": [{"thread_id": "thread-1", "body": "fix this"}],
+                "remediation_thread_snapshots": [snapshot],
+                "address_output": {
+                    "addressed": ["thread-1"],
+                    "replies": {"thread-1": "Fixed the guard."},
+                },
+            }
+        )
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),
+            ctx,
+        )
+
+        item.state = "EVAL"
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.RETRY, "implementation_reply_handoff_visibility_wait"
+        )
+        assert item.payload["retry_delay_s"] == 1.0
+        assert github.reply_attempts == 0
+
+        assert stage.step(item, ctx) == Continue(next_state="REVIEW_WAIT")
+        assert github.reply_attempts == 1
+        assert "pending_implementation_reply_handoff" not in item.payload
+
+    def test_reply_handoff_stops_waiting_when_the_head_stays_drifted(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A persistent different open head cannot inherit the saved reply."""
+
+        class HeadStaysDriftedGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__()
+                self.reply_attempts = 0
+
+            def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
+                del pr_number
+                return {"state": "OPEN", "headRefOid": "b" * 40, "autoMergeRequest": None}
+
+            def post_implementation_thread_replies(
+                self,
+                pr_number: int,
+                *,
+                expected_head_sha: str,
+                threads: list[dict[str, Any]],
+                replies: dict[str, str],
+            ) -> ImplementationThreadReplyResult:
+                self.reply_attempts += 1
+                return super().post_implementation_thread_replies(
+                    pr_number,
+                    expected_head_sha=expected_head_sha,
+                    threads=threads,
+                    replies=replies,
+                )
+
+        stage = PrReviewStage()
+        github = HeadStaysDriftedGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=40, pr=1001, state="PUSH_WAIT")
+        snapshot = {
+            "id": "thread-1",
+            "path": "a.py",
+            "line": 3,
+            "side": "RIGHT",
+            "body": "fix this",
+            "comments": [{"id": "comment-1", "author": "reviewer", "body": "fix this"}],
+        }
+        item.payload.update(
+            {
+                "remediation_threads": [{"thread_id": "thread-1", "body": "fix this"}],
+                "remediation_thread_snapshots": [snapshot],
+                "address_output": {
+                    "addressed": ["thread-1"],
+                    "replies": {"thread-1": "Fixed the guard."},
+                },
+            }
+        )
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),
+            ctx,
+        )
+
+        item.state = "EVAL"
+        for _ in range(2):
+            assert stage.step(item, ctx) == StageOutcome(
+                Disposition.RETRY, "implementation_reply_handoff_visibility_wait"
+            )
+        assert stage.step(item, ctx) == Continue(next_state="REVIEW_WAIT")
+        assert github.reply_attempts == 0
+        assert "pending_implementation_reply_handoff" not in item.payload
 
     def test_stale_reply_handoff_restarts_fresh_review_without_retrying(
         self, make_ctx: Any, make_work_item: Any
