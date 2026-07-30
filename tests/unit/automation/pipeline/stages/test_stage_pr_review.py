@@ -2328,16 +2328,8 @@ class TestEvalVerdicts:
             Disposition.FINISH_FAIL, "implementation_reply_batch_conflict"
         )
         assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
-        assert any(
-            name == "gh_issue_upsert_comment"
-            and args[0] == 1001
-            and args[1].startswith(
-                "<!-- hephaestus-implementation-reply-duplicate-review-conflict:"
-            )
-            for name, args in github.mutation_log
-        )
-        body = github.comments[1001][-1]
-        assert "No review thread was resolved and no conflicting review was mutated." in body
+        assert github.comments.get(1001, []) == []
+        assert not any(name == "gh_issue_upsert_comment" for name, _args in github.mutation_log)
 
     def test_current_reply_review_conflict_is_terminally_diagnosed(
         self, make_ctx: Any, make_work_item: Any
@@ -2361,9 +2353,8 @@ class TestEvalVerdicts:
             Disposition.FINISH_FAIL, "implementation_reply_review_conflict"
         )
         assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
-        body = github.comments[1001][-1]
-        assert "No review thread was resolved and no conflicting review was mutated." in body
-        assert "foreign-pending-draft" in body
+        assert github.comments.get(1001, []) == []
+        assert not any(name == "gh_issue_upsert_comment" for name, _args in github.mutation_log)
 
     def test_on_enter_stands_down_without_auto_merge_mutation(
         self, make_ctx: Any, make_work_item: Any
@@ -2530,7 +2521,8 @@ class TestEvalVerdicts:
             for name, _args in github.mutation_log
         )
         assert github.pr_has_implementation_state_label(1001) == (False, True)
-        assert "review activity changed" in github.comments[1001][0].lower()
+        assert github.comments.get(1001, []) == []
+        assert not any(name == "gh_issue_comment" for name, _args in github.mutation_log)
 
     def test_clean_go_does_not_call_the_removed_auto_merge_mutator(
         self, make_ctx: Any, make_work_item: Any
@@ -4454,9 +4446,8 @@ class TestRealCommitGate:
             Disposition.FINISH_FAIL, "implementation_reply_review_conflict"
         )
         assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
-        comment_bodies = [str(comment) for comment in github.comments[1001]]
-        assert any("preserved-stale-draft" in body for body in comment_bodies)
-        assert any("manually clean up" in body for body in comment_bodies)
+        assert github.comments.get(1001, []) == []
+        assert not any(name == "gh_issue_upsert_comment" for name, _args in github.mutation_log)
 
     def test_retry_duplicate_reply_drafts_are_terminally_diagnosed(
         self, make_ctx: Any, make_work_item: Any

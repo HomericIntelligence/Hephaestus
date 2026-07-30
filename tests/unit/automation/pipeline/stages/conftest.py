@@ -563,20 +563,6 @@ class FakeStageGitHub(FakeGitHub):
         self._pr_impl_state = (False, True)
         self._log("mark_pr_implementation_no_go", pr_number)
 
-    def post_pr_comment(self, pr_number: int, body: str) -> None:
-        """Mirror the coordinator PR-comment post (delegates to gh_issue_comment).
-
-        PRs share the issue comment channel, so the canonical
-        ``gh_issue_comment`` recorder keeps the mutation_log format and
-        stores the body for content assertions.
-        """
-        self.gh_issue_comment(pr_number, body)
-
-    def upsert_pr_comment(self, pr_number: int, marker_prefix: str, body: str) -> bool:
-        """Mirror the coordinator PR-comment upsert (delegates to issue comments)."""
-        self.gh_issue_upsert_comment(pr_number, marker_prefix, body)
-        return True
-
     def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
         """Mirror ci_driver.CIDriver._gh_pr_state (canned answer)."""
         del pr_number  # single canned answer; not per-PR keyed

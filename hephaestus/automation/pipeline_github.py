@@ -2883,67 +2883,6 @@ class PipelineGitHub:
             )
         return github_api.gh_pr_create(branch, title, body)
 
-    def post_pr_comment(self, pr_number: int, body: str) -> None:
-        """Post an explanatory PR comment (``gh_issue_comment`` channel)."""
-        if self._skip(f"post comment on PR #{pr_number}"):
-            return
-        if self._repo_slug is not None:
-            with github_api._body_file(body) as path:
-                self._gh(["issue", "comment", str(pr_number), "--body-file", path])
-            return
-        github_api.gh_issue_comment(pr_number, body)
-
-    def upsert_pr_comment(self, pr_number: int, marker_prefix: str, body: str) -> bool:
-        """Create-or-update a marker-keyed PR comment (issue comment channel)."""
-        if self._skip(f"upsert comment on PR #{pr_number}"):
-            return False
-        if self._repo_slug is None:
-            github_api.gh_issue_upsert_comment(pr_number, marker_prefix, body)
-            return True
-        self._upsert_repo_issue_comment(pr_number, marker_prefix, body)
-        return True
-
-    def _upsert_repo_issue_comment(
-        self, issue_number: int, marker_prefix: str, body: str
-    ) -> int | None:
-        """Repo-scoped version of ``gh_issue_upsert_comment``."""
-        comments = self._repo_issue_comments(issue_number)
-        matching = [
-            comment
-            for comment in comments
-            if str(comment.get("body", "")).startswith(marker_prefix)
-            and comment.get("databaseId") is not None
-        ]
-        if not matching:
-            self.post_pr_comment(issue_number, body)
-            return None
-
-        owner, name = self._owner_name()
-        target_id = int(matching[-1]["databaseId"])
-        for duplicate in matching[:-1]:
-            duplicate_id = duplicate.get("databaseId")
-            if duplicate_id is not None:
-                gh_call(
-                    [
-                        "api",
-                        "--method",
-                        "DELETE",
-                        f"/repos/{owner}/{name}/issues/comments/{int(duplicate_id)}",
-                    ]
-                )
-        with github_api._body_file(body) as path:
-            gh_call(
-                [
-                    "api",
-                    "--method",
-                    "PATCH",
-                    f"/repos/{owner}/{name}/issues/comments/{target_id}",
-                    "-F",
-                    f"body=@{path}",
-                ]
-            )
-        return target_id
-
     def mark_pr_implementation_no_go(self, pr_number: int) -> None:
         """Apply and read back exclusive ``state:implementation-no-go``."""
         if self._skip(f"mark PR #{pr_number} implementation-no-go"):
@@ -2979,6 +2918,14 @@ class PipelineGitHub:
         expected_head_sha: str,
     ) -> list[dict[str, Any]]:
         """Post review threads only on a fresh, exact reviewed PR head."""
+        # GitHub renders a review-level ``body`` as an unanchored general
+        # comment. Publish only reviews that contain source-positioned threads.
+        if not threads:
+            logger.info(
+                "PR #%s: skipped review publication without source-anchored threads",
+                pr_number,
+            )
+            return []
         if self._skip(f"post {len(threads)} review thread(s) on PR #{pr_number}"):
             return []
         if not self._pr_is_current_open_head(self.gh_pr_state(pr_number), expected_head_sha):
@@ -3006,7 +2953,6 @@ class PipelineGitHub:
             owner, name = self._owner_name()
             request_body = json.dumps(
                 {
-                    "body": summary,
                     "commit_id": expected_head_sha,
                     "event": "COMMENT",
                     "comments": review_comments,

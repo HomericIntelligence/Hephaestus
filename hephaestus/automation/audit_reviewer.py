@@ -3,9 +3,8 @@
 Issue #994: ``PRReviewer`` (``hephaestus/automation/pr_reviewer.py``) spawns
 one worker thread per PR; this module instead drives a single agent session
 whose prompt enumerates every open PR, then parses one multi-PR JSON report.
-Used for batch audits where per-PR sessions would saturate the agent
-budget. Read-only: posts a summary-only review per PR, never commits or
-pushes.
+Used for batch audits where per-PR sessions would saturate the agent budget.
+Read-only: writes and prints local audit reports, never commits or pushes.
 """
 
 from __future__ import annotations
@@ -41,7 +40,7 @@ from .agent_config import DEFAULT_AGENT_TIMEOUT
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import reviewer_model
 from .git_utils import get_repo_root, get_repo_slug
-from .github_api import _gh_call, fetch_open_prs, gh_pr_review_post
+from .github_api import _gh_call, fetch_open_prs
 from .session_naming import AGENT_PR_REVIEWER
 
 logger = logging.getLogger(__name__)
@@ -189,7 +188,7 @@ def run_audit_coordinator(
 
 @dataclass
 class AuditReviewer:
-    """Run the coordinator audit and post a summary review per PR."""
+    """Run the coordinator audit and retain a local report per PR."""
 
     agent: str = "claude"
     pr_numbers: list[int] = field(default_factory=list)
@@ -204,7 +203,7 @@ class AuditReviewer:
             self.state_dir = ensure_state_dir(get_repo_root())
 
     def run(self) -> tuple[int, list[dict[str, Any]]]:
-        """Run the coordinator audit and post a summary review per PR."""
+        """Run the coordinator audit and retain a local report per PR."""
         # __post_init__ guarantees state_dir is set; narrow type for mypy.
         if self.state_dir is None:  # pragma: no cover - mypy type-narrowing; unreachable, see #1426
             raise RuntimeError("state_dir unexpectedly None after __post_init__")
@@ -227,20 +226,6 @@ class AuditReviewer:
             report = write_audit_report(self.state_dir, audits)
             logger.info("Audit report written to %s", report)
         print_audit_summary(audits)
-        for a in audits:
-            if self.shutdown_event is not None and self.shutdown_event.is_set():
-                logger.warning("Interrupted; stopping before remaining PR postings.")
-                break
-            try:
-                gh_pr_review_post(
-                    pr_number=int(a["pr_number"]),
-                    comments=[],
-                    summary=a.get("summary", ""),
-                    event="COMMENT",
-                    dry_run=self.dry_run,
-                )
-            except Exception as exc:
-                logger.warning("Posting failed for PR #%s: %s", a.get("pr_number"), exc)
         return 0, audits
 
 
@@ -250,7 +235,7 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Audit ALL open PRs in one coordinator agent invocation.",
         add_max_workers=False,
         add_github_throttle=True,
-        dry_run_help="Skip the agent call and the GitHub posting step.",
+        dry_run_help="Skip the agent call and local audit-report writing.",
         verbose_help="DEBUG-level logging.",
     )
     parser.add_argument(

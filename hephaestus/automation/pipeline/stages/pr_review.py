@@ -1859,12 +1859,14 @@ class PrReviewStage(Stage):
         ctx: StageContext,
         *,
         payload_key: str,
-        marker_kind: str,
         minimum_review_count: int,
-        explanation: str,
-        remediation: str,
     ) -> StepResult | None:
-        """Record one terminal diagnostic without mutating conflicting reviews."""
+        """Record one terminal diagnostic without mutating conflicting reviews.
+
+        A conflict has no safe existing thread to reply to. It is therefore
+        deliberately recorded in the stage outcome and logs, rather than as a
+        free-standing PR conversation comment.
+        """
         conflict = item.payload.pop(payload_key, None)
         if conflict is None:
             return None
@@ -1893,32 +1895,14 @@ class PrReviewStage(Stage):
         no_go_outcome = self._write_no_go(item, ctx)
         if no_go_outcome is not None:
             return no_go_outcome
-        marker_hash = hashlib.sha256(
-            f"{item.pr}:{head_sha}:{','.join(review_ids)}".encode()
-        ).hexdigest()[:24]
-        marker = f"<!-- hephaestus-implementation-reply-{marker_kind}:{marker_hash} -->"
-        body = (
-            f"{marker}\n\n"
-            f"Automation stopped before posting implementation replies because {explanation}.\n\n"
-            f"Head: `{head_sha}`\n\n"
-            f"Conflicting review IDs: {', '.join(f'`{review_id}`' for review_id in review_ids)}\n\n"
-            "No review thread was resolved and no conflicting review was mutated. "
-            f"{remediation}"
+        logger.warning(
+            "pr_review:%d: stopped implementation replies on PR #%d at %s because "
+            "conflicting review IDs were preserved: %s",
+            item.issue,
+            item.pr,
+            head_sha,
+            ", ".join(review_ids),
         )
-        try:
-            ctx.github.upsert_pr_comment(item.pr, marker, body)
-        except Exception as error:
-            logger.warning(
-                "pr_review:%d: failed to record implementation-reply review conflict (%s)",
-                item.issue,
-                type(error).__name__,
-            )
-            return StageOutcome(
-                Disposition.FINISH_FAIL,
-                "implementation_reply_batch_conflict_comment_failed"
-                if payload_key == _IMPLEMENTATION_REPLY_BATCH_CONFLICT
-                else "implementation_reply_review_conflict_comment_failed",
-            )
         return StageOutcome(
             Disposition.FINISH_FAIL,
             "implementation_reply_batch_conflict"
@@ -1934,10 +1918,7 @@ class PrReviewStage(Stage):
             item,
             ctx,
             payload_key=_IMPLEMENTATION_REPLY_BATCH_CONFLICT,
-            marker_kind="duplicate-review-conflict",
             minimum_review_count=2,
-            explanation="multiple current-head draft reviews claim the same reply batch",
-            remediation="Remove the duplicate drafts, then run a fresh implementation-review pass.",
         )
 
     def _consume_implementation_reply_current_review_conflict(
@@ -1948,16 +1929,7 @@ class PrReviewStage(Stage):
             item,
             ctx,
             payload_key=_IMPLEMENTATION_REPLY_REVIEW_CONFLICT,
-            marker_kind="review-conflict",
             minimum_review_count=1,
-            explanation=(
-                "a preserved incomplete or competing implementation review "
-                "prevents this reply batch"
-            ),
-            remediation=(
-                "Inspect and manually clean up the preserved review, then run a fresh "
-                "implementation-review pass."
-            ),
         )
 
     @staticmethod
@@ -2678,21 +2650,6 @@ class PrReviewStage(Stage):
             unresolved_threads,
             item.pr,
         )
-        body = (
-            "**Automation review activity changed during GO admission.**\n\n"
-            f"{unresolved_threads} review thread(s) were observed after the implementation "
-            "state write. Automation cannot prove it still owns the current labels, so it "
-            "made no further label changes. A fresh automation review will re-read the "
-            "current diff and threads before it validates, responds to, or resolves them."
-        )
-        try:
-            ctx.github.post_pr_comment(item.pr, body)
-        except Exception as error:
-            logger.warning(
-                "pr_review: failed to post late-thread race notice on PR #%d (non-fatal): %s",
-                item.pr,
-                error,
-            )
         return StageOutcome(Disposition.FINISH_FAIL, "review_activity_changed")
 
     @staticmethod

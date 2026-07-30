@@ -369,24 +369,6 @@ class StageGitHub(Protocol):
         """
         ...
 
-    def post_pr_comment(self, pr_number: int, body: str) -> None:
-        """Durably post an explanatory comment on the PR conversation.
-
-        The coordinator maps this onto ``gh_issue_comment`` (PRs share the
-        issue comment channel). Used for neutral automation status notices
-        when an external race invalidates this process's review proof.
-        """
-        ...
-
-    def upsert_pr_comment(self, pr_number: int, marker_prefix: str, body: str) -> bool:
-        """Durably create-or-update a marker-keyed PR conversation comment.
-
-        PRs share the issue comment channel, so the coordinator maps this onto
-        an issue-comment upsert scoped to the PR number. Used by lightweight
-        durable artifacts that should remain one-per-role across retries.
-        """
-        pass
-
     def mark_pr_implementation_no_go(self, pr_number: int) -> None:
         """Durably apply ``state:implementation-no-go`` to the PR.
 

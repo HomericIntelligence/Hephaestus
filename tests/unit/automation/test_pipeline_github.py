@@ -2837,13 +2837,6 @@ _MUTATOR_CASES = [
     ("add_labels", (5, ["x"]), "github_api", "gh_issue_add_labels"),
     ("remove_labels", (5, ["x"]), "github_api", "gh_issue_remove_labels"),
     ("close_issue_as_covered", (5, 7), "module", "close_issue_as_covered"),
-    ("post_pr_comment", (7, "why"), "github_api", "gh_issue_comment"),
-    (
-        "upsert_pr_comment",
-        (7, "<!-- marker -->", "<!-- marker -->\nbody"),
-        "github_api",
-        "gh_issue_upsert_comment",
-    ),
     ("mark_pr_implementation_go", (7,), "pr_manager", "mark_pr_implementation_go"),
     ("mark_pr_implementation_no_go", (7,), "pr_manager", "mark_pr_implementation_no_go"),
     ("skip_epics", ({5: ["epic"]},), "github_api", "skip_epics"),
@@ -2909,19 +2902,6 @@ class TestMutatorMapping:
 
         mock.assert_not_called()
         assert any("[dry-run] would" in record.message for record in caplog.records)
-
-    def test_dry_run_pr_comment_upsert_reports_not_written(
-        self,
-        dry_adapter: pg.PipelineGitHub,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Dry-run artifacts must be reported as absent in durable stage events."""
-        mock = _patch_target(monkeypatch, "github_api", "gh_issue_upsert_comment")
-
-        written = dry_adapter.upsert_pr_comment(7, "<!-- marker -->", "body")
-
-        assert written is False
-        mock.assert_not_called()
 
     def test_upsert_plan_comment_keys_on_marker(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
@@ -3320,34 +3300,6 @@ class TestRepoScoping:
                 "org/repo-a",
             ],
         ]
-
-    def test_repo_scoped_pr_comment_upsert_reads_pr_comments_via_rest_issue_channel(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """PR numbers are valid issue-comment REST targets but not GraphQL issue nodes."""
-        calls: list[list[str]] = []
-
-        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
-            calls.append(argv)
-            if argv == [
-                "api",
-                "/repos/org/repo-a/issues/1001/comments?per_page=100&page=1",
-            ]:
-                payload = [{"id": 42, "body": "<!-- marker -->\nstale"}]
-                return SimpleNamespace(stdout=json.dumps(payload))
-            return SimpleNamespace(stdout="")
-
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
-
-        pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).upsert_pr_comment(
-            1001, "<!-- marker -->", "<!-- marker -->\nupdated"
-        )
-
-        assert calls[0] == [
-            "api",
-            "/repos/org/repo-a/issues/1001/comments?per_page=100&page=1",
-        ]
-        assert all("graphql" not in call for call in calls)
 
     def test_repo_scoped_has_existing_plan_detects_plan_comment(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -4200,33 +4152,7 @@ class TestRepoScoping:
         assert any("/repos/org/repo-a/issues/comments/9" in call for call in calls)
         assert not any(call[:2] == ["issue", "comment"] for call in calls)
 
-    def test_repo_scoped_upsert_pr_comment_updates_marker_comment(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        calls: list[list[str]] = []
-        marker = "<!-- hephaestus-pr-review-go -->"
-
-        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
-            calls.append(argv)
-            if argv == [
-                "api",
-                "/repos/org/repo-a/issues/7/comments?per_page=100&page=1",
-            ]:
-                payload = [{"id": 12, "body": f"{marker}\nold"}]
-                return SimpleNamespace(stdout=json.dumps(payload))
-            return SimpleNamespace(stdout="")
-
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
-
-        pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).upsert_pr_comment(
-            7, marker, f"{marker}\nnew"
-        )
-
-        assert any(call[:3] == ["api", "--method", "PATCH"] for call in calls)
-        assert any("/repos/org/repo-a/issues/comments/12" in call for call in calls)
-        assert not any(call[:2] == ["issue", "comment"] for call in calls)
-
-    def test_repo_scoped_review_post_uses_repo_endpoint(
+    def test_repo_scoped_review_post_skips_an_unanchored_summary(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         calls: list[list[str]] = []
@@ -4271,7 +4197,57 @@ class TestRepoScoping:
         posted = adapter.post_review_threads(7, [], "summary", expected_head_sha="a" * 40)
 
         assert posted == []
-        assert any("repos/org/repo-a/pulls/7/reviews" in call for call in calls)
+        assert calls == []
+
+    def test_repo_scoped_review_post_omits_the_unanchored_summary_body(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A source-anchored finding must not carry a review-level body."""
+        diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+ok\n"
+        review_payloads: list[dict[str, object]] = []
+
+        def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            if argv[:2] == ["pr", "diff"]:
+                return SimpleNamespace(stdout=diff)
+            if argv[:3] == ["api", "-X", "POST"]:
+                review_payloads.append(json.loads(Path(argv[-1]).read_text()))
+                return SimpleNamespace(stdout=json.dumps({"node_id": "review-node"}))
+            raise AssertionError(f"unexpected GitHub call: {argv}")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_state",
+            lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
+        )
+        monkeypatch.setattr(
+            adapter,
+            "_repo_review_thread_receipts_for_review",
+            lambda *_args: [],
+        )
+
+        adapter.post_review_threads(
+            7,
+            [{"path": "a.py", "line": 1, "side": "RIGHT", "body": "finding"}],
+            "This summary must never become a general review comment.",
+            expected_head_sha="a" * 40,
+        )
+
+        assert review_payloads == [
+            {
+                "commit_id": "a" * 40,
+                "event": "COMMENT",
+                "comments": [
+                    {
+                        "path": "a.py",
+                        "line": 1,
+                        "side": "RIGHT",
+                        "body": "<!-- hephaestus-severity: major -->\nfinding",
+                    }
+                ],
+            }
+        ]
 
     def test_repo_scoped_review_post_rejects_mixed_anchor_batch_before_write(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -4687,6 +4663,13 @@ class TestRepoScopedAutoMerge:
 
         assert not hasattr(adapter, "arm_auto_merge")
         assert not hasattr(adapter, "defer_auto_merge")
+
+    def test_pipeline_adapter_has_no_unanchored_pr_comment_surface(self, tmp_path: Path) -> None:
+        """PR responses must be review-thread replies, never issue comments."""
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+
+        assert not hasattr(adapter, "post_pr_comment")
+        assert not hasattr(adapter, "upsert_pr_comment")
 
 
 class TestCreatePr:
