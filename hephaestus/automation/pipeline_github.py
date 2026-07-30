@@ -1046,7 +1046,7 @@ class PipelineGitHub:
                     ):
                         matches.append((review_id, state))
                     elif (
-                        self._is_implementation_reply_review_body(body)
+                        body == review_body
                         and isinstance(commit_oid, str)
                         and re.fullmatch(r"[0-9a-f]{40}", commit_oid) is not None
                         and commit_oid != expected_head_sha
@@ -1278,7 +1278,15 @@ class PipelineGitHub:
             return None
         reply_id, reply_body = snapshot[-1]
         final_comment = comments[-1]
-        if not isinstance(final_comment, dict) or not final_comment.get("viewer_did_author"):
+        if (
+            not isinstance(final_comment, dict)
+            or not final_comment.get("viewer_did_author")
+            or not isinstance(final_comment.get("review_id"), str)
+            or not final_comment["review_id"]
+            or final_comment.get("review_state") != "COMMENTED"
+            or not self._is_implementation_reply_review_body(final_comment.get("review_body"))
+            or final_comment.get("review_commit_sha") != reviewed_head_sha
+        ):
             return None
         marker_match = re.fullmatch(
             r"(?s)(.*)\n\n<!-- hephaestus-implementation-reply:[0-9a-f]{24} -->",
@@ -1424,7 +1432,7 @@ class PipelineGitHub:
             "id number repository{name owner{login}}}"
             "comments(first:100,after:$after){pageInfo{hasNextPage endCursor}"
             "nodes{id body viewerDidAuthor author{login __typename} "
-            "pullRequestReview{id body commit{oid}}}}}}}"
+            "pullRequestReview{id state body commit{oid}}}}}}}"
         )
 
         def read_once() -> tuple[dict[str, Any], bool] | None:  # noqa: C901
@@ -1546,6 +1554,7 @@ class PipelineGitHub:
                     comment_id = comment.get("id")
                     body = comment.get("body")
                     review_id = review.get("id") if isinstance(review, dict) else ""
+                    review_state = review.get("state") if isinstance(review, dict) else ""
                     review_body = review.get("body") if isinstance(review, dict) else ""
                     review_commit_sha = commit.get("oid") if isinstance(commit, dict) else ""
                     if (
@@ -1556,6 +1565,7 @@ class PipelineGitHub:
                         or not isinstance(author_type, str)
                         or not isinstance(comment.get("viewerDidAuthor"), bool)
                         or not isinstance(review_id, str)
+                        or not isinstance(review_state, str)
                         or not isinstance(review_body, str)
                         or not isinstance(review_commit_sha, str)
                     ):
@@ -1571,6 +1581,7 @@ class PipelineGitHub:
                             "author_type": author_type,
                             "viewer_did_author": comment["viewerDidAuthor"],
                             "review_id": review_id,
+                            "review_state": review_state,
                             "review_body": review_body,
                             "review_commit_sha": review_commit_sha,
                         }
@@ -1681,6 +1692,8 @@ class PipelineGitHub:
         manual pending review; those are returned as a conflict by the
         inventory and left for an operator.
         """
+        if self._skip(f"discard stale implementation reply draft on PR #{pr_number}"):
+            return True
         if (
             not re.fullmatch(r"[0-9a-f]{40}", expected_head_sha)
             or not re.fullmatch(r"[0-9a-f]{40}", current_head_sha)
@@ -1829,13 +1842,11 @@ class PipelineGitHub:
                 )
             if existing_review is None:
                 # A reply from an old per-comment review is not a successful
-                # batch receipt.  Do not duplicate it by creating a new batch
-                # over the same thread; a fresh review pass must establish a
-                # coherent current handoff.
+                # batch receipt.  A fresh review pass must establish a
+                # coherent current handoff without retrying this stale one.
                 if recovered:
                     return ImplementationThreadReplyResult(
-                        retryable_thread_ids=candidate_ids,
-                        retryable=True,
+                        blocked_thread_ids=candidate_ids,
                     )
                 review_id = self._create_implementation_reply_review(
                     pr_id, expected_head_sha, review_body

@@ -129,6 +129,37 @@ def _open_thread_snapshot(thread: dict[str, Any], *, resolved: bool = False) -> 
     }
 
 
+def _submitted_implementation_receipt(
+    adapter: pg.PipelineGitHub,
+    thread: dict[str, Any],
+    reply: str,
+    *,
+    head_sha: str = "a" * 40,
+) -> dict[str, Any]:
+    """Return a complete host snapshot for one submitted implementation batch."""
+    reply_body = adapter._implementation_thread_reply_body(7, head_sha, thread["id"], reply)
+    review_body = adapter._implementation_reply_review_body(7, head_sha, {thread["id"]: reply_body})
+    return {
+        **thread,
+        "comments": [
+            *thread["comments"],
+            {
+                "id": "implementation-comment",
+                "author": "hephaestus[bot]",
+                "body": reply_body,
+                "viewer_did_author": True,
+                "review_id": "implementation-review",
+                "review_state": "COMMENTED",
+                "review_body": review_body,
+                "review_commit_sha": head_sha,
+            },
+        ],
+        "implementation_reply_id": "implementation-comment",
+        "implementation_reply_body": reply_body,
+        "implementation_head_sha": head_sha,
+    }
+
+
 class TestAllThreadReplyAndReviewerResolution:
     """The implementation/reviewer split applies to every open thread author."""
 
@@ -806,9 +837,15 @@ class TestAllThreadReplyAndReviewerResolution:
             {
                 "id": "manual-draft",
                 "state": "PENDING",
-                "body": "Notes for a human review",
+                # This has a valid coordinator marker but is not the exact
+                # deterministic body of the stale batch.  It is still a
+                # manual draft and must never be deleted by cleanup.
+                "body": (
+                    "Implementation responses for 1 review thread(s).\n\n"
+                    "<!-- hephaestus-implementation-review:000000000000000000000000 -->"
+                ),
                 "viewerDidAuthor": True,
-                "commit": {"oid": "b" * 40},
+                "commit": {"oid": "a" * 40},
             },
         ]
         deleted_review_ids: list[str] = []
@@ -851,6 +888,21 @@ class TestAllThreadReplyAndReviewerResolution:
         assert deleted_review_ids == ["old-automation-draft"]
         assert [review["id"] for review in reviews] == ["manual-draft"]
 
+    def test_dry_run_never_inventories_or_deletes_stale_reply_drafts(
+        self, dry_adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Dry-run stale cleanup must not read or mutate review drafts."""
+        graphql = MagicMock()
+        monkeypatch.setattr(dry_adapter, "_graphql", graphql)
+
+        assert dry_adapter.discard_stale_implementation_thread_reply_batch(
+            7,
+            expected_head_sha="a" * 40,
+            current_head_sha="b" * 40,
+            replies={"thread-one": "Fixed the finding."},
+        )
+        graphql.assert_not_called()
+
     def test_external_thread_is_replied_to_then_resolved_by_fresh_reviewer(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -862,6 +914,7 @@ class TestAllThreadReplyAndReviewerResolution:
         def graphql(query: str, **fields: str | int) -> dict[str, Any]:
             if "addPullRequestReviewThreadReply" in query:
                 calls.append("implementation-reply")
+                reply_body = str(fields["body"])
                 live[0] = {
                     **live[0],
                     "comments": [
@@ -869,9 +922,14 @@ class TestAllThreadReplyAndReviewerResolution:
                         {
                             "id": "implementation-comment",
                             "author": "hephaestus[bot]",
-                            "body": fields["body"],
+                            "body": reply_body,
                             "viewer_did_author": True,
                             "review_id": "implementation-review",
+                            "review_state": "COMMENTED",
+                            "review_body": adapter._implementation_reply_review_body(
+                                7, "a" * 40, {thread["id"]: reply_body}
+                            ),
+                            "review_commit_sha": "a" * 40,
                         },
                     ],
                 }
@@ -981,6 +1039,8 @@ class TestAllThreadReplyAndReviewerResolution:
         def graphql(query: str, **fields: str | int) -> dict[str, Any]:
             if "addPullRequestReviewThreadReply" in query:
                 calls.append(str(fields["body"]))
+                is_implementation_reply = "reviewId" in fields
+                reply_body = str(fields["body"])
                 live[0] = {
                     **live[0],
                     "comments": [
@@ -988,13 +1048,22 @@ class TestAllThreadReplyAndReviewerResolution:
                         {
                             "id": f"reply-{len(calls)}",
                             "author": "hephaestus[bot]",
-                            "body": fields["body"],
+                            "body": reply_body,
                             "viewer_did_author": True,
                             "review_id": (
                                 "implementation-review"
-                                if "reviewId" in fields
+                                if is_implementation_reply
                                 else "reviewer-review"
                             ),
+                            "review_state": "COMMENTED" if is_implementation_reply else "",
+                            "review_body": (
+                                adapter._implementation_reply_review_body(
+                                    7, "a" * 40, {thread["id"]: reply_body}
+                                )
+                                if is_implementation_reply
+                                else ""
+                            ),
+                            "review_commit_sha": "a" * 40 if is_implementation_reply else "",
                         },
                     ],
                 }
@@ -1065,6 +1134,17 @@ class TestAllThreadReplyAndReviewerResolution:
         reviewed_head_sha = "a" * 40
         resolving = _external_reviewer_thread("thread-resolve")
         feedback = _external_reviewer_thread("thread-feedback")
+        resolving_reply = adapter._implementation_thread_reply_body(
+            7, reviewed_head_sha, resolving["id"], "Resolved the finding."
+        )
+        feedback_reply = adapter._implementation_thread_reply_body(
+            7, reviewed_head_sha, feedback["id"], "Attempted a fix."
+        )
+        batch_body = adapter._implementation_reply_review_body(
+            7,
+            reviewed_head_sha,
+            {resolving["id"]: resolving_reply, feedback["id"]: feedback_reply},
+        )
         live_by_id = {
             resolving["id"]: {
                 **resolving,
@@ -1073,10 +1153,12 @@ class TestAllThreadReplyAndReviewerResolution:
                     {
                         "id": "implementation-resolve",
                         "author": "hephaestus[bot]",
-                        "body": adapter._implementation_thread_reply_body(
-                            7, reviewed_head_sha, resolving["id"], "Resolved the finding."
-                        ),
+                        "body": resolving_reply,
                         "viewer_did_author": True,
+                        "review_id": "implementation-review",
+                        "review_state": "COMMENTED",
+                        "review_body": batch_body,
+                        "review_commit_sha": reviewed_head_sha,
                     },
                 ],
             },
@@ -1087,10 +1169,12 @@ class TestAllThreadReplyAndReviewerResolution:
                     {
                         "id": "implementation-feedback",
                         "author": "hephaestus[bot]",
-                        "body": adapter._implementation_thread_reply_body(
-                            7, reviewed_head_sha, feedback["id"], "Attempted a fix."
-                        ),
+                        "body": feedback_reply,
                         "viewer_did_author": True,
+                        "review_id": "implementation-review",
+                        "review_state": "COMMENTED",
+                        "review_body": batch_body,
+                        "review_commit_sha": reviewed_head_sha,
                     },
                 ],
             },
@@ -1164,6 +1248,59 @@ class TestAllThreadReplyAndReviewerResolution:
         assert result.blocked_thread_ids == ()
         assert calls == [("feedback", feedback["id"]), ("resolve", resolving["id"])]
 
+    def test_pending_batch_reply_is_not_a_reviewer_validation_receipt(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only a submitted, exact-head implementation batch may be resolved."""
+        thread = _external_reviewer_thread()
+        head_sha = "a" * 40
+        reply_body = adapter._implementation_thread_reply_body(
+            7, head_sha, thread["id"], "Fixed the missing guard."
+        )
+        batch_body = adapter._implementation_reply_review_body(
+            7, head_sha, {thread["id"]: reply_body}
+        )
+        pending = {
+            **thread,
+            "comments": [
+                *thread["comments"],
+                {
+                    "id": "implementation-comment",
+                    "author": "hephaestus[bot]",
+                    "body": reply_body,
+                    "viewer_did_author": True,
+                    "review_id": "implementation-review",
+                    "review_state": "PENDING",
+                    "review_body": batch_body,
+                    "review_commit_sha": head_sha,
+                },
+            ],
+        }
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_state",
+            lambda _pr: {"state": "OPEN", "headRefOid": head_sha, "autoMergeRequest": None},
+        )
+
+        assert (
+            adapter.reviewer_validation_receipts(7, reviewed_head_sha=head_sha, threads=[pending])
+            == []
+        )
+
+        submitted = {
+            **pending,
+            "comments": [
+                *pending["comments"][:-1],
+                {**pending["comments"][-1], "review_state": "COMMENTED"},
+            ],
+        }
+        receipts = adapter.reviewer_validation_receipts(
+            7, reviewed_head_sha=head_sha, threads=[submitted]
+        )
+        assert [receipt["implementation_reply_id"] for receipt in receipts] == [
+            "implementation-comment"
+        ]
+
     def test_malformed_reply_response_recovers_an_exact_host_read_receipt(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1229,6 +1366,50 @@ class TestAllThreadReplyAndReviewerResolution:
         assert result.replied_thread_ids == (thread["id"],)
         assert result.blocked_thread_ids == ()
         assert result.receipts[0]["implementation_reply_id"] == "implementation-comment"
+
+    def test_legacy_recovered_reply_restarts_fresh_review_without_retry_cap(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A unary legacy reply blocks for fresh review instead of retrying forever."""
+        thread = _external_reviewer_thread()
+        body = adapter._implementation_thread_reply_body(
+            7, "a" * 40, thread["id"], "Fixed the guard."
+        )
+        after = {
+            **thread,
+            "comments": [
+                *thread["comments"],
+                {
+                    "id": "legacy-comment",
+                    "author": "hephaestus[bot]",
+                    "body": body,
+                    "viewer_did_author": True,
+                    "review_id": "legacy-review",
+                },
+            ],
+        }
+        monkeypatch.setattr(
+            adapter, "_review_thread_snapshot", lambda _pr, _thread: _open_thread_snapshot(after)
+        )
+        monkeypatch.setattr(
+            adapter,
+            "_reconcile_implementation_reply_reviews",
+            lambda *_args: ("pr-7", None, False),
+        )
+        graphql = MagicMock()
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+
+        result = adapter.post_implementation_thread_replies(
+            7,
+            expected_head_sha="a" * 40,
+            threads=[thread],
+            replies={thread["id"]: "Fixed the guard."},
+        )
+
+        assert result.blocked_thread_ids == (thread["id"],)
+        assert result.retryable is False
+        assert result.retryable_thread_ids == ()
+        graphql.assert_not_called()
 
     def test_reconciliation_rejects_a_receipt_without_the_host_read_reply(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
@@ -1342,21 +1523,9 @@ class TestAllThreadReplyAndReviewerResolution:
         """A stale-head resolution blocks for fresh review without reopening it."""
         thread = _external_reviewer_thread()
         reply = "Fixed the missing guard."
-        reply_body = adapter._implementation_thread_reply_body(7, "a" * 40, thread["id"], reply)
-        live = [
-            {
-                **thread,
-                "comments": [
-                    *thread["comments"],
-                    {
-                        "id": "implementation-comment",
-                        "author": "hephaestus[bot]",
-                        "body": reply_body,
-                        "viewer_did_author": True,
-                    },
-                ],
-            }
-        ]
+        receipt = _submitted_implementation_receipt(adapter, thread, reply)
+        reply_body = str(receipt["implementation_reply_body"])
+        live = [receipt]
         receipts = adapter.reviewer_validation_receipts
         monkeypatch.setattr(
             adapter,
@@ -1451,24 +1620,7 @@ class TestAllThreadReplyAndReviewerResolution:
     ) -> None:
         """A reply racing resolution is never hidden by the resolved-thread list."""
         thread = _external_reviewer_thread()
-        reply_body = adapter._implementation_thread_reply_body(
-            7, "a" * 40, thread["id"], "Fixed the missing guard."
-        )
-        receipt = {
-            **thread,
-            "comments": [
-                *thread["comments"],
-                {
-                    "id": "implementation-comment",
-                    "author": "hephaestus[bot]",
-                    "body": reply_body,
-                    "viewer_did_author": True,
-                },
-            ],
-            "implementation_reply_id": "implementation-comment",
-            "implementation_reply_body": reply_body,
-            "implementation_head_sha": "a" * 40,
-        }
+        receipt = _submitted_implementation_receipt(adapter, thread, "Fixed the missing guard.")
         live = [dict(receipt)]
         calls: list[str] = []
         monkeypatch.setattr(
@@ -1535,24 +1687,7 @@ class TestAllThreadReplyAndReviewerResolution:
     ) -> None:
         """An unknown resolve outcome is blocked without an unsafe compensation write."""
         thread = _external_reviewer_thread()
-        reply_body = adapter._implementation_thread_reply_body(
-            7, "a" * 40, thread["id"], "Fixed the missing guard."
-        )
-        receipt = {
-            **thread,
-            "comments": [
-                *thread["comments"],
-                {
-                    "id": "implementation-comment",
-                    "author": "hephaestus[bot]",
-                    "body": reply_body,
-                    "viewer_did_author": True,
-                },
-            ],
-            "implementation_reply_id": "implementation-comment",
-            "implementation_reply_body": reply_body,
-            "implementation_head_sha": "a" * 40,
-        }
+        receipt = _submitted_implementation_receipt(adapter, thread, "Fixed the missing guard.")
         monkeypatch.setattr(
             adapter,
             "gh_pr_state",
@@ -1597,24 +1732,7 @@ class TestAllThreadReplyAndReviewerResolution:
     ) -> None:
         """A malformed response blocks without reopening a possibly foreign resolution."""
         thread = _external_reviewer_thread()
-        reply_body = adapter._implementation_thread_reply_body(
-            7, "a" * 40, thread["id"], "Fixed the missing guard."
-        )
-        receipt = {
-            **thread,
-            "comments": [
-                *thread["comments"],
-                {
-                    "id": "implementation-comment",
-                    "author": "hephaestus[bot]",
-                    "body": reply_body,
-                    "viewer_did_author": True,
-                },
-            ],
-            "implementation_reply_id": "implementation-comment",
-            "implementation_reply_body": reply_body,
-            "implementation_head_sha": "a" * 40,
-        }
+        receipt = _submitted_implementation_receipt(adapter, thread, "Fixed the missing guard.")
         calls: list[str] = []
         monkeypatch.setattr(
             adapter,
@@ -1666,24 +1784,7 @@ class TestAllThreadReplyAndReviewerResolution:
     ) -> None:
         """An uncertain resolve stops for re-review instead of reopening a thread."""
         thread = _external_reviewer_thread()
-        reply_body = adapter._implementation_thread_reply_body(
-            7, "a" * 40, thread["id"], "Fixed the missing guard."
-        )
-        receipt = {
-            **thread,
-            "comments": [
-                *thread["comments"],
-                {
-                    "id": "implementation-comment",
-                    "author": "hephaestus[bot]",
-                    "body": reply_body,
-                    "viewer_did_author": True,
-                },
-            ],
-            "implementation_reply_id": "implementation-comment",
-            "implementation_reply_body": reply_body,
-            "implementation_head_sha": "a" * 40,
-        }
+        receipt = _submitted_implementation_receipt(adapter, thread, "Fixed the missing guard.")
         calls: list[str] = []
         monkeypatch.setattr(
             adapter,
@@ -1728,24 +1829,7 @@ class TestAllThreadReplyAndReviewerResolution:
     ) -> None:
         """An uncertain resolve is blocked without issuing a compensating mutation."""
         thread = _external_reviewer_thread()
-        reply_body = adapter._implementation_thread_reply_body(
-            7, "a" * 40, thread["id"], "Fixed the missing guard."
-        )
-        receipt = {
-            **thread,
-            "comments": [
-                *thread["comments"],
-                {
-                    "id": "implementation-comment",
-                    "author": "hephaestus[bot]",
-                    "body": reply_body,
-                    "viewer_did_author": True,
-                },
-            ],
-            "implementation_reply_id": "implementation-comment",
-            "implementation_reply_body": reply_body,
-            "implementation_head_sha": "a" * 40,
-        }
+        receipt = _submitted_implementation_receipt(adapter, thread, "Fixed the missing guard.")
         calls: list[str] = []
         monkeypatch.setattr(
             adapter,
@@ -1790,24 +1874,7 @@ class TestAllThreadReplyAndReviewerResolution:
     ) -> None:
         """The post-resolve proof must not make a second, racy PR-state read."""
         thread = _external_reviewer_thread()
-        reply_body = adapter._implementation_thread_reply_body(
-            7, "a" * 40, thread["id"], "Fixed the missing guard."
-        )
-        receipt = {
-            **thread,
-            "comments": [
-                *thread["comments"],
-                {
-                    "id": "implementation-comment",
-                    "author": "hephaestus[bot]",
-                    "body": reply_body,
-                    "viewer_did_author": True,
-                },
-            ],
-            "implementation_reply_id": "implementation-comment",
-            "implementation_reply_body": reply_body,
-            "implementation_head_sha": "a" * 40,
-        }
+        receipt = _submitted_implementation_receipt(adapter, thread, "Fixed the missing guard.")
         state_reads = 0
 
         def pr_state(_pr: int) -> dict[str, Any]:
@@ -3296,6 +3363,7 @@ class TestRepoScoping:
                 "author": {"login": "reviewer", "__typename": "User"},
                 "pullRequestReview": {
                     "id": "R1",
+                    "state": "COMMENTED",
                     "body": "review body",
                     "commit": {"oid": "a" * 40},
                 },
