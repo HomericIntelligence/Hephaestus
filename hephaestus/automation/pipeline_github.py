@@ -1376,25 +1376,27 @@ class PipelineGitHub:
         repo_key = hashlib.sha256((self._repo_slug or self.org).encode("utf-8")).hexdigest()[:16]
         git_metadata = self._repo_root / ".git"
         lock_root = ensure_state_dir(self._repo_root) / "locks"
-        try:
-            if git_metadata.is_dir():
-                lock_root = git_metadata / "hephaestus-automation-locks"
-            elif git_metadata.is_file():
+        if git_metadata.is_dir():
+            lock_root = git_metadata / "hephaestus-automation-locks"
+        elif git_metadata.is_file():
+            try:
                 first_line = git_metadata.read_text(encoding="utf-8").splitlines()[0]
-                prefix, separator, raw_git_dir = first_line.partition(":")
-                if prefix == "gitdir" and separator and raw_git_dir.strip():
-                    git_dir = Path(raw_git_dir.strip())
-                    if not git_dir.is_absolute():
-                        git_dir = git_metadata.parent / git_dir
-                    if git_dir.parent.name == "worktrees":
-                        lock_root = git_dir.parent.parent / "hephaestus-automation-locks"
-                    else:
-                        lock_root = git_dir / "hephaestus-automation-locks"
-        except (IndexError, OSError, UnicodeDecodeError):
-            logger.warning(
-                "could not read Git metadata for implementation reply lock at %s",
-                git_metadata,
-            )
+            except (IndexError, OSError, UnicodeDecodeError) as error:
+                raise LockUnavailableError(
+                    f"could not read Git metadata for implementation reply lock at {git_metadata}"
+                ) from error
+            prefix, separator, raw_git_dir = first_line.partition(":")
+            if prefix != "gitdir" or not separator or not raw_git_dir.strip():
+                raise LockUnavailableError(
+                    f"invalid Git metadata for implementation reply lock at {git_metadata}"
+                )
+            git_dir = Path(raw_git_dir.strip())
+            if not git_dir.is_absolute():
+                git_dir = git_metadata.parent / git_dir
+            if git_dir.parent.name == "worktrees":
+                lock_root = git_dir.parent.parent / "hephaestus-automation-locks"
+            else:
+                lock_root = git_dir / "hephaestus-automation-locks"
         return lock_root / f"implementation-replies-{repo_key}-{pr_number}.lock"
 
     def post_implementation_thread_replies(

@@ -578,6 +578,40 @@ class TestAllThreadReplyAndReviewerResolution:
         assert sum(result.replied_thread_ids == (thread["id"],) for result in resolved) == 1
         assert sum(result.blocked_thread_ids == (thread["id"],) for result in resolved) == 1
 
+    def test_linked_worktrees_with_invalid_git_metadata_fail_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Malformed linked-worktree metadata cannot fall back to private locks."""
+        first_root = tmp_path / "worktree-first"
+        second_root = tmp_path / "worktree-second"
+        adapters: list[PipelineGitHubForTest] = []
+        for root in (first_root, second_root):
+            root.mkdir()
+            (root / ".git").write_text("not valid git metadata\n", encoding="utf-8")
+            adapters.append(PipelineGitHubForTest("org", repo="repo-a", repo_root=root))
+
+        thread = _external_reviewer_thread("thread-one")
+        for adapter in adapters:
+            monkeypatch.setattr(
+                adapter,
+                "_graphql",
+                lambda *_args, **_kwargs: pytest.fail("invalid metadata must not reply"),
+            )
+
+        results = [
+            adapter.post_implementation_thread_replies(
+                7,
+                expected_head_sha="a" * 40,
+                threads=[thread],
+                replies={thread["id"]: "Fixed the finding."},
+                batch_nonce="c" * 32,
+            )
+            for adapter in adapters
+        ]
+
+        assert all(result.retryable_thread_ids == (thread["id"],) for result in results)
+        assert all(result.retryable for result in results)
+
     def test_external_thread_is_replied_to_then_resolved_by_fresh_reviewer(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
