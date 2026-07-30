@@ -150,10 +150,10 @@ def test_stage_burst_is_deferred_until_queue_drains(
     assert any(record["event"] == "queue_deferred" for record in records)
 
 
-def test_stage_burst_beyond_spool_bound_is_durable_and_resident_work_stays_bounded(
+def test_large_production_seed_source_allocates_only_with_available_permits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Production seeding stays lazy when a stalled stage reaches its admission bound."""
+    """A 10,000-entry production source retains an iterator, not a seed list."""
     event_log = tmp_path / "bounded-admission-events.jsonl"
     burst_size = 10_000
     repos = [f"repo-{index}" for index in range(1, burst_size + 1)]
@@ -187,7 +187,9 @@ def test_stage_burst_beyond_spool_bound_is_durable_and_resident_work_stays_bound
 
     assert coordinator._admission_spool_capacity == len(StageName)
     assert pushed == 1
-    # The global permit check happens before advancing the real generator.
+    # The global permit check happens before advancing the real generator, so
+    # neither the coordinator nor seed_from_cli materializes the remaining
+    # 9,999 SeedEntry instances.
     assert created_entries == 1
     assert created_entries < burst_size
     assert len(coordinator.queues[StageName.REPO]) == 1
@@ -204,7 +206,12 @@ def test_stage_burst_beyond_spool_bound_is_durable_and_resident_work_stays_bound
     assert len(coordinator.items) < burst_size
     assert coordinator.items[-1].result is None
     assert coordinator.live_work_count == coordinator._work_window == 1
-    assert coordinator._seed_entries is not None
+    remaining_entries = coordinator._seed_entries
+    assert remaining_entries is not None
+    assert iter(remaining_entries) is remaining_entries
+    second_entry = next(remaining_entries)
+    assert second_entry.identifier == "repo-2"
+    assert created_entries == 2
     assert not coordinator.shutdown.is_set()
     assert coordinator._fatal is False
 
@@ -226,8 +233,9 @@ def test_stage_burst_beyond_spool_bound_is_durable_and_resident_work_stays_bound
 def test_push_fallback_overflow_preserves_spool_and_journals_exact_boundary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The bounded fallback refuses overflow without deque maxlen eviction."""
+    """A far-over-bound burst retains only the spool and exact recovery boundary."""
     event_log = tmp_path / "push-fallback-overflow.jsonl"
+    burst_size = 10_000
     coordinator = _coordinator(
         tmp_path,
         monkeypatch,
@@ -264,14 +272,47 @@ def test_push_fallback_overflow_preserves_spool_and_journals_exact_boundary(
 
     assert coordinator._push_item(boundary, StageName.PLANNING, enter=True) is False
 
+    # Once the exact saturation boundary is parked, a burst far beyond C+1 is
+    # refused before acquiring a permit or entering coordinator accounting.
+    # This proves the bounded spool cannot become an alternate unbounded queue.
+    for issue in range(boundary_issue + 1, burst_size + 1):
+        assert (
+            coordinator._push_item(
+                WorkItem(
+                    repo="repo-a",
+                    kind=ItemKind.ISSUE,
+                    issue=issue,
+                    stage=StageName.PLANNING,
+                ),
+                StageName.PLANNING,
+                enter=True,
+            )
+            is False
+        )
+
     assert list(coordinator._pending_admissions) == pending_before
     assert boundary.result is not None
     assert "admission spool saturated" in boundary.result.reason
-    receipt = next(
+    assert len(coordinator.items) == coordinator._admission_spool_capacity + 2
+    assert coordinator.live_work_count == coordinator._admission_spool_capacity + 1
+    resident_depth = sum(queue.occupancy for queue in coordinator.queues.values()) + len(
+        coordinator._pending_admissions
+    )
+    resident_capacity = sum(queue.capacity for queue in coordinator.queues.values()) + (
+        coordinator._admission_spool_capacity
+    )
+    assert resident_depth == coordinator._admission_spool_capacity + 1
+    assert resident_depth <= resident_capacity
+    snapshot = coordinator._observability_snapshot()
+    assert snapshot["admission_depth"] == coordinator._admission_spool_capacity
+    assert snapshot["admission_capacity"] == coordinator._admission_spool_capacity
+    receipts = [
         record
         for record in (json.loads(line) for line in event_log.read_text().splitlines())
         if record["event"] == "queue_saturated"
-    )
+    ]
+    assert len(receipts) == 1
+    receipt = receipts[0]
     assert receipt["fields"][0]["item"] == f"repo-a#{boundary_issue}"
     assert receipt["fields"][0]["details"] == {
         "admission_depth": coordinator._admission_spool_capacity,
