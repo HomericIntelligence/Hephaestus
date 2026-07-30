@@ -30,7 +30,6 @@ from weakref import WeakKeyDictionary
 if TYPE_CHECKING:
     from hephaestus._localization import Localizer
 
-_LOCALIZER_RECORD_ATTR = "_hephaestus_localizer"
 _RECORD_LOCALIZERS: WeakKeyDictionary[logging.LogRecord, Localizer] = WeakKeyDictionary()
 _RECORD_LOCALIZERS_LOCK = Lock()
 

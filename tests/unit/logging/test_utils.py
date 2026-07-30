@@ -181,6 +181,7 @@ class TestGetLogger:
         external_calls = 0
 
         logger = get_logger("test.external_factory_preserved")
+        assert logging.getLogRecordFactory() is original_factory
         external_delegate = logging.getLogRecordFactory()
 
         def external_factory(*args: Any, **kwargs: Any) -> logging.LogRecord:

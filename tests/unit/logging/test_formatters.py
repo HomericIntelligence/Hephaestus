@@ -10,12 +10,13 @@ import pytest
 
 from hephaestus.cli.localization import Localizer, using_localizer
 from hephaestus.logging.formatters import (
-    _LOCALIZER_RECORD_ATTR,
     RESERVED_FIELDS,
     JsonFormatter,
     _capture_record_localizer,
     _LocalizedFormatter,
 )
+
+_LEGACY_LOCALIZER_RECORD_ATTR = "_hephaestus_localizer"
 
 
 @pytest.fixture()
@@ -132,9 +133,9 @@ class TestJsonFormatterExtras:
         self, formatter: JsonFormatter, make_record: Callable[..., logging.LogRecord]
     ) -> None:
         """An arbitrary caller extra cannot be mistaken for internal state."""
-        record = make_record(extra={_LOCALIZER_RECORD_ATTR: "caller-value"})
+        record = make_record(extra={_LEGACY_LOCALIZER_RECORD_ATTR: "caller-value"})
 
-        assert json.loads(formatter.format(record))[_LOCALIZER_RECORD_ATTR] == "caller-value"
+        assert json.loads(formatter.format(record))[_LEGACY_LOCALIZER_RECORD_ATTR] == "caller-value"
 
     def test_reserved_field_collision_prefixed(
         self, formatter: JsonFormatter, make_record: Callable[..., logging.LogRecord]
@@ -282,7 +283,7 @@ class TestLocalizedFormatter:
     def test_caller_field_named_like_localizer_cannot_break_plain_output(self) -> None:
         """A same-named caller extra falls back to the formatter's localizer."""
         record = logging.LogRecord("test", logging.INFO, "test.py", 1, "Ready", (), None)
-        setattr(record, _LOCALIZER_RECORD_ATTR, "caller-value")
+        setattr(record, _LEGACY_LOCALIZER_RECORD_ATTR, "caller-value")
         _capture_record_localizer(record, Localizer({"Ready": "Prêt"}))
         formatter = _LocalizedFormatter("%(message)s")
 
