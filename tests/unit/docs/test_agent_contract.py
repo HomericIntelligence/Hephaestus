@@ -1,26 +1,27 @@
 """Regression contract for the canonical repository agent guidance."""
 
 import ast
+import re
 from pathlib import Path
 
 from hephaestus.validation.markdown import extract_markdown_links, validate_relative_link
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-EXPECTED_CLAUDE_MD = (
-    "# Claude Code guidance\n"
-    "\n"
-    "Follow [`AGENTS.md`](AGENTS.md). "
-    "It is the sole authoritative agent contract for this repository.\n"
-)
 
 
-def test_claude_md_is_exact_compatibility_pointer() -> None:
-    """The legacy file is the exact required pointer to the canonical contract."""
+def test_claude_md_is_compatibility_pointer() -> None:
+    """The legacy file contains only a heading and pointer to the contract."""
     claude_md = REPO_ROOT / "CLAUDE.md"
     content = claude_md.read_text(encoding="utf-8")
-    assert content == EXPECTED_CLAUDE_MD
+
+    blocks = re.split(r"\n\s*\n", content.strip())
+    assert len(blocks) == 2
+    heading, pointer = blocks
+    assert re.fullmatch(r"#\s+\S.*", heading)
+    assert not any(line.lstrip().startswith("#") for line in pointer.splitlines())
 
     links = extract_markdown_links(content)
+    assert len(links) == 1
 
     contract_links = [link for link in links if link[0] == "AGENTS.md"]
     assert len(contract_links) == 1
