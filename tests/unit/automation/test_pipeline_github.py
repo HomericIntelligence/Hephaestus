@@ -945,13 +945,7 @@ class TestAllThreadReplyAndReviewerResolution:
                 submitted_reviews.append(str(fields["reviewId"]))
                 pytest.fail("must not submit a competing batch")
             if "deletePullRequestReview" in query:
-                review_id = str(fields["reviewId"])
-                assert review_id == "worker-b-draft"
-                deleted_reviews.append(review_id)
-                reviews[:] = [review for review in reviews if review["id"] != review_id]
-                return {
-                    "data": {"deletePullRequestReview": {"pullRequestReview": {"id": review_id}}}
-                }
+                pytest.fail("a current-review conflict must not delete any draft")
             raise AssertionError(query)
 
         monkeypatch.setattr(
@@ -970,10 +964,10 @@ class TestAllThreadReplyAndReviewerResolution:
 
         assert result.replied_thread_ids == ()
         assert result.blocked_thread_ids == (thread["id"],)
-        assert result.conflicting_current_review_ids == ("worker-a-review",)
+        assert result.conflicting_current_review_ids == ("worker-a-review", "worker-b-draft")
         assert added_replies == []
         assert submitted_reviews == []
-        assert deleted_reviews == ["worker-b-draft"]
+        assert deleted_reviews == []
 
     def test_submitted_batch_remains_a_receipt_beside_an_unrelated_draft(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch

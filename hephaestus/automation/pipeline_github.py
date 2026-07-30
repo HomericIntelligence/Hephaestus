@@ -2018,29 +2018,21 @@ class PipelineGitHub:
                     )
                 )
                 if post_create_conflicts:
-                    # This draft is proven to be this invocation's exact,
-                    # still-empty PENDING review.  Retain every competing
-                    # review, but remove our own orphan before issuing the
-                    # terminal diagnostic so a fresh pass is not blocked by
-                    # an unreported local draft.
-                    if (
-                        confirmed_pr_id != pr_id
-                        or post_create_review != (review_id, "PENDING")
-                        or not self._discard_current_implementation_reply_review(
-                            pr_number,
-                            expected_head_sha,
-                            review_body,
-                            pr_id,
-                            review_id,
-                        )
-                    ):
+                    if confirmed_pr_id != pr_id or post_create_review != (review_id, "PENDING"):
                         return ImplementationThreadReplyResult(
                             retryable_thread_ids=candidate_ids,
                             retryable=True,
                         )
+                    # GitHub exposes no compare-and-swap delete. A competing
+                    # actor could attach a reply after this inventory, so a
+                    # conflict must preserve every draft. Include this
+                    # operation's otherwise-empty review in the diagnostic
+                    # rather than deleting it on stale ownership evidence.
                     return ImplementationThreadReplyResult(
                         blocked_thread_ids=candidate_ids,
-                        conflicting_current_review_ids=post_create_conflicts,
+                        conflicting_current_review_ids=tuple(
+                            sorted(set(post_create_conflicts).union({review_id}))
+                        ),
                     )
                 if post_create_review != (review_id, "PENDING") or confirmed_pr_id != pr_id:
                     return ImplementationThreadReplyResult(
