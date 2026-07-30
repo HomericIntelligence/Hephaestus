@@ -312,7 +312,7 @@ class StageGitHub(Protocol):
         retry.  It must never delete a current or manually authored pending
         review, and returns False when the stale draft cannot be proved.
         """
-        ...
+        pass
 
     def reviewer_validation_receipts(
         self,
