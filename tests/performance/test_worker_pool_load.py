@@ -247,6 +247,18 @@ class _ObservedCompletionQueue(CompletionQueue):
                 )
                 self._offer_condition.wait(timeout=remaining)
 
+    def paused_publication_state(self) -> tuple[int, int, int, int, int, bool]:
+        """Return an atomic channel snapshot while the consumer is parked."""
+        with self._offer_condition, self._rejection_lock:
+            return (
+                self.offer_count,
+                self.accepted_count,
+                self.rejected_count,
+                self.qsize(),
+                self._rejections.qsize(),
+                self._rejection_overflowed,
+            )
+
 
 class _StalledConsumerHarness:
     """Synchronize two complete worker waves without relying on sleeps."""
@@ -545,6 +557,8 @@ def test_worker_pool_stalled_consumer_preserves_and_recovers(
     workers = 3
     stalled = _make_recovery_coordinator(monkeypatch, workers, observed=True)
     assert isinstance(stalled.completion_q, _ObservedCompletionQueue)
+    assert stalled.config.parallel_repos == 1
+    assert stalled.config.max_workers == workers
     assert stalled._work_window == stalled.config.parallel_repos * stalled.config.max_workers
     assert stalled.completion_q.capacity == stalled._work_window == workers
     harness = _StalledConsumerHarness(workers)
@@ -602,6 +616,14 @@ def test_worker_pool_stalled_consumer_preserves_and_recovers(
         assert run_thread.is_alive()
         assert not resume_consumer.is_set()
         assert harness.legitimate_started == workers
+        assert stalled.completion_q.paused_publication_state() == (
+            (2 * workers) + 1,
+            workers,
+            workers + 1,
+            workers,
+            workers,
+            True,
+        )
         assert stalled.completion_q.offer_count == (2 * workers) + 1
         assert stalled.completion_q.accepted_count == workers
         assert stalled.completion_q.rejected_count == workers + 1
@@ -619,7 +641,7 @@ def test_worker_pool_stalled_consumer_preserves_and_recovers(
         run_thread.join(timeout=5.0)
 
     assert not run_thread.is_alive()
-    assert run_codes and run_codes[0] != 0
+    assert run_codes == [1]
     assert len(stalled.items) == workers
     expected_issues = set(range(workers))
     assert {item.issue for item in stalled.items} == expected_issues
@@ -629,6 +651,7 @@ def test_worker_pool_stalled_consumer_preserves_and_recovers(
     )
 
     recovered = _make_recovery_coordinator(monkeypatch, workers)
+    assert recovered._work_window == workers
     assert recovered.completion_q.capacity == recovered._work_window
     with patch.object(
         WorkerPool,

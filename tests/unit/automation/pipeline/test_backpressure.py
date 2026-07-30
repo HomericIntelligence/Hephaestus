@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -155,18 +156,27 @@ def test_stage_burst_beyond_spool_bound_is_durable_and_resident_work_stays_bound
     """A stalled stage cannot move an arbitrary source burst into coordinator memory."""
     event_log = tmp_path / "bounded-admission-events.jsonl"
     burst_size = 10_000
-    monkeypatch.setattr(
-        seeding_mod,
-        "seed_from_cli",
-        lambda repos, issues, prs: [
-            seeding_mod.SeedEntry(
+    produced = 0
+
+    def stream_seed_entries(
+        repos: list[str], issues: list[int], prs: list[int]
+    ) -> Iterator[seeding_mod.SeedEntry]:
+        """Yield a large source lazily and expose how far admission reads it."""
+        del repos, issues, prs
+        nonlocal produced
+        for issue in range(1, burst_size + 1):
+            produced += 1
+            yield seeding_mod.SeedEntry(
                 kind="issue",
                 identifier=issue,
                 stage=StageName.PLANNING,
                 reason="burst seed",
             )
-            for issue in range(1, burst_size + 1)
-        ],
+
+    monkeypatch.setattr(
+        seeding_mod,
+        "seed_from_cli",
+        stream_seed_entries,
     )
     coordinator = Coordinator(
         PipelineConfig(
@@ -188,6 +198,10 @@ def test_stage_burst_beyond_spool_bound_is_durable_and_resident_work_stays_bound
 
     assert coordinator._admission_spool_capacity == len(StageName)
     assert pushed == 1 + coordinator._admission_spool_capacity
+    # The source is lazy: only the admitted batch and exact saturation receipt
+    # are materialized, rather than all 10,000 SeedEntry objects.
+    assert produced == pushed + 1
+    assert produced < burst_size
     assert len(coordinator.queues[StageName.PLANNING]) == 1
     assert len(coordinator._pending_admissions) == coordinator._admission_spool_capacity
     resident_depth = sum(len(queue) for queue in coordinator.queues.values()) + len(
