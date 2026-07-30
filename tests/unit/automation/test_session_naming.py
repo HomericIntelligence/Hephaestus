@@ -525,7 +525,26 @@ class TestSessionTranscriptResolver:
             with pytest.raises(RuntimeError, match="unable to determine whether"):
                 agent_config._registered_worktree_roots(cwd)
 
-    def test_git_discovery_failure_raises_explicitly(self, tmp_path: Path) -> None:
+    def test_corrupt_git_metadata_with_generic_diagnostic_is_not_non_repository(
+        self, tmp_path: Path
+    ) -> None:
+        """Fail closed when corrupt metadata imitates Git's no-repository result."""
+        cwd = tmp_path / "checkout"
+        (cwd / ".git").mkdir(parents=True)
+
+        with patch.object(
+            subprocess,
+            "run",
+            side_effect=subprocess.CalledProcessError(
+                128,
+                ["git"],
+                stderr="fatal: not a git repository (or any of the parent directories): .git\n",
+            ),
+        ):
+            with pytest.raises(RuntimeError, match="unable to determine whether"):
+                agent_config._registered_worktree_roots(cwd)
+
+    def test_git_discovery_failure_allows_exact_cwd_session_creation(self, tmp_path: Path) -> None:
         cwd = tmp_path / "checkout"
         cwd.mkdir()
 
@@ -534,8 +553,31 @@ class TestSessionTranscriptResolver:
             "run",
             side_effect=(MagicMock(stdout="true\n"), subprocess.TimeoutExpired(["git"], 5)),
         ):
-            with pytest.raises(RuntimeError, match="unable to discover registered Git worktrees"):
-                resolve_session_jsonl_path("session-id", cwd)
+            assert resolve_session_jsonl_path("session-id", cwd) is None
+
+    def test_exact_cwd_transcript_does_not_require_git_discovery(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        cwd = tmp_path / "checkout"
+        cwd.mkdir()
+        transcript = session_jsonl_path("session-id", cwd)
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text(f'{{"cwd": "{cwd.resolve()}"}}\n', encoding="utf-8")
+
+        with (
+            patch.object(
+                agent_config,
+                "_registered_worktree_roots",
+                side_effect=AssertionError("exact-cwd resume must not invoke Git"),
+            ),
+            patch.object(
+                agent_config,
+                "_git_common_dir",
+                side_effect=AssertionError("exact-cwd resume must not invoke Git"),
+            ),
+        ):
+            assert resolve_session_jsonl_path("session-id", cwd) == transcript
 
     def test_duplicate_transcripts_choose_lexicographically_first_path(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
