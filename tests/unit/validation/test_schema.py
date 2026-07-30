@@ -243,6 +243,7 @@ class TestCheckFiles:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """Human schema diagnostics use the localization boundary."""
+        pytest.importorskip("jsonschema")
         missing_yaml = tmp_path / "missing.yaml"
         schema_file = tmp_path / "schema.json"
         schema_file.write_text(json.dumps({"type": "object"}))

@@ -31,9 +31,12 @@ and subparser help. Flags, destinations, metavars, choices, defaults, actions,
 types, version payloads, and exit codes remain unchanged. Stdlib-owned argparse
 headings and diagnostics remain in the stdlib fallback language.
 
-Plain-text log formatters and `CursesUI` capture the active immutable localizer
-when they are constructed so later background-thread rendering is deterministic.
-JSON formatters and serialized system-information output bypass localization.
+Hephaestus-owned plain-text loggers and handlers capture the active immutable
+localizer on each record at emission time, while their formatter keeps a
+construction-time fallback. `CursesUI` captures the active localizer when it is
+constructed. These scoped mechanisms keep later background-thread rendering
+deterministic without replacing the process-global log-record factory. JSON
+formatters and serialized system-information output bypass localization.
 Machine-readable output, log field names, protocol tokens, runtime values, and
 environment keys must never be translated.
 

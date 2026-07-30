@@ -175,26 +175,24 @@ class TestGetLogger:
 
         assert len(underlying.handlers) == 1
 
-    def test_external_record_factory_between_calls_does_not_recurse(self) -> None:
-        """Reinstalling over an external wrapper preserves the prior delegate."""
+    def test_get_logger_leaves_external_record_factory_untouched(self) -> None:
+        """Logger-local context capture does not replace an application factory."""
         original_factory = logging.getLogRecordFactory()
-        logger = get_logger("test.external_factory_reinstall")
-        localized_factory = logging.getLogRecordFactory()
         external_calls = 0
 
         def external_factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
             nonlocal external_calls
             external_calls += 1
-            return localized_factory(*args, **kwargs)
+            return original_factory(*args, **kwargs)
 
         logging.setLogRecordFactory(external_factory)
         try:
-            logger = get_logger("test.external_factory_reinstall")
+            logger = get_logger("test.external_factory_preserved")
             logger.logger.handlers.clear()
             logger.logger.addHandler(logging.NullHandler())
+            logger.info("factory remains installed")
 
-            logger.info("factory chain remains acyclic")
-
+            assert logging.getLogRecordFactory() is external_factory
             assert external_calls == 1
         finally:
             logging.setLogRecordFactory(original_factory)
@@ -473,6 +471,31 @@ class TestSetupLogging:
         finally:
             root.handlers.clear()
             root.handlers.extend(saved)
+
+    def test_setup_logging_leaves_external_record_factory_untouched(self) -> None:
+        """Root-handler setup does not replace an application record factory."""
+        root = logging.getLogger()
+        saved_handlers = list(root.handlers)
+        original_factory = logging.getLogRecordFactory()
+        external_calls = 0
+
+        def external_factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
+            nonlocal external_calls
+            external_calls += 1
+            return original_factory(*args, **kwargs)
+
+        root.handlers.clear()
+        logging.setLogRecordFactory(external_factory)
+        try:
+            setup_logging()
+            logging.getLogger("test.setup_external_factory").info("factory remains installed")
+
+            assert logging.getLogRecordFactory() is external_factory
+            assert external_calls == 1
+        finally:
+            logging.setLogRecordFactory(original_factory)
+            root.handlers.clear()
+            root.handlers.extend(saved_handlers)
 
     def test_with_log_file(self, tmp_path: Path) -> None:
         """setup_logging creates log file handler."""
