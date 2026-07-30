@@ -231,13 +231,24 @@ def _pi_models_configured() -> bool:
     return False
 
 
+def _require_pi_automation_admission() -> None:
+    """Block Pi at every generic automation boundary until admission exists.
+
+    The direct ``run_pi_*`` helpers remain the intentionally explicit
+    operator-smoke seam.  Normal callers must use a generic runner, where this
+    guard prevents a provider argument from bypassing the resolver.  #2516
+    replaces this temporary block with verified package-preflight evidence.
+    """
+    raise RuntimeError(PI_AUTOMATION_PREFLIGHT_ERROR)
+
+
 def resolve_agent(agent: str | None) -> AgentName:
     """Resolve an optional provider selection into a concrete backend."""
     if agent is not None:
         if agent not in AGENT_CHOICES:
             raise ValueError(f"Unsupported agent: {agent}")
         if agent == "pi":
-            raise RuntimeError(PI_AUTOMATION_PREFLIGHT_ERROR)
+            _require_pi_automation_admission()
         if not is_agent_authenticated(agent):
             if shutil.which(agent) is None:
                 raise RuntimeError(
@@ -263,7 +274,7 @@ def resolve_agent(agent: str | None) -> AgentName:
     )
     if not installed_agents:
         if shutil.which("pi") is not None:
-            raise RuntimeError(PI_AUTOMATION_PREFLIGHT_ERROR)
+            _require_pi_automation_admission()
         raise RuntimeError(
             "No supported agent backend found on PATH. Install `claude`, `codex`, or `pi`, "
             "or pass --agent after installing the selected backend."
@@ -977,6 +988,8 @@ def run_agent_text(
     approval: str = "never",
 ) -> subprocess.CompletedProcess[str]:
     """Run a direct-runner agent non-interactively and return text output."""
+    if is_pi(agent):
+        _require_pi_automation_admission()
     if is_codex(agent):
         return run_codex_text(
             prompt,
@@ -1010,6 +1023,8 @@ def run_agent_session(
     process_tracker: ProcessTracker | None = None,
 ) -> AgentRunResult:
     """Run a direct-runner agent session and return output plus session id."""
+    if is_pi(agent):
+        _require_pi_automation_admission()
     if is_codex(agent):
         return run_codex_session(
             prompt,
@@ -1045,6 +1060,8 @@ def resume_agent_session(
     process_tracker: ProcessTracker | None = None,
 ) -> AgentRunResult:
     """Resume a direct-runner agent session."""
+    if is_pi(agent):
+        _require_pi_automation_admission()
     if is_codex(agent):
         return resume_codex_session(
             session_id,

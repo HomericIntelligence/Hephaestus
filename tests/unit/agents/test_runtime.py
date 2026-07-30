@@ -42,6 +42,14 @@ def test_pi_capability_contract_separates_native_packages_and_unsupported_contro
             agent_runtime.AgentCapability.OS_SANDBOX,
         }
     )
+    assert capabilities.core_capabilities.isdisjoint(capabilities.package_capabilities)
+    assert capabilities.core_capabilities.isdisjoint(capabilities.unavailable_capabilities)
+    assert capabilities.package_capabilities.isdisjoint(capabilities.unavailable_capabilities)
+    assert (
+        capabilities.core_capabilities
+        | capabilities.package_capabilities
+        | capabilities.unavailable_capabilities
+    ) == frozenset(agent_runtime.AgentCapability)
     assert capabilities.supports_sandbox is False
 
 
@@ -889,6 +897,39 @@ def test_agent_json_stdout_wraps_direct_agent_text() -> None:
     assert agent_runtime.agent_json_stdout("learned", "pi-session") == (
         '{"result": "learned", "session_id": "pi-session", "is_error": false}'
     )
+
+
+def test_run_agent_text_rejects_unadmitted_pi_before_dispatch(tmp_path: Path) -> None:
+    """The shared text boundary cannot bypass Pi admission through direct use."""
+    with patch("hephaestus.agents.runtime.run_pi_text") as run_pi_text:
+        with pytest.raises(RuntimeError, match="Pi automation preflight is unavailable"):
+            agent_runtime.run_agent_text("pi", "prompt", cwd=tmp_path, timeout=30)
+
+    run_pi_text.assert_not_called()
+
+
+def test_run_agent_session_rejects_unadmitted_pi_before_dispatch(tmp_path: Path) -> None:
+    """The shared session boundary cannot bypass Pi admission through direct use."""
+    with patch("hephaestus.agents.runtime.run_pi_session") as run_pi_session:
+        with pytest.raises(RuntimeError, match="Pi automation preflight is unavailable"):
+            agent_runtime.run_agent_session("pi", "prompt", cwd=tmp_path, timeout=30)
+
+    run_pi_session.assert_not_called()
+
+
+def test_resume_agent_session_rejects_unadmitted_pi_before_dispatch(tmp_path: Path) -> None:
+    """The shared resume boundary cannot bypass Pi admission through direct use."""
+    with patch("hephaestus.agents.runtime.resume_pi_session") as resume_pi_session:
+        with pytest.raises(RuntimeError, match="Pi automation preflight is unavailable"):
+            agent_runtime.resume_agent_session(
+                "pi",
+                "pi-session-123",
+                "prompt",
+                cwd=tmp_path,
+                timeout=30,
+            )
+
+    resume_pi_session.assert_not_called()
 
 
 def test_run_claude_text_builds_stage_command(tmp_path: Path) -> None:

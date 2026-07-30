@@ -68,8 +68,8 @@ is descriptive; Hephaestus owns the enforcement boundary passed to Pi.
 
 | Surface | Pi role and required contract | Current boundary |
 | --- | --- | --- |
-| Direct `run_agent_text` callers (`audit_reviewer`, `plan_reviewer`, `pr_review_core`, `tidy`, and related legacy flows) | Native JSON execution, model/provider selection, and a role-derived tool grant | Adapter parity is required; unsupported grant fails before invocation. |
-| Direct `run_agent_session` and `resume_agent_session` callers (`agent_stage`, implementation, CI-fix, follow-up, learn, and post-merge flows) | Opaque session ID, resume, timeout, process lifecycle, and redacted diagnostics | Session lifecycle has executable runtime tests; process tracking is completed in #2518. |
+| Direct `run_agent_text` callers (`audit_reviewer`, `plan_reviewer`, `pr_review_core`, `tidy`, and related legacy flows) | Native JSON execution, model/provider selection, and a role-derived tool grant | The shared runner rejects Pi before dispatch until its admission prerequisites exist; unsupported grants must fail before invocation. |
+| Direct `run_agent_session` and `resume_agent_session` callers (`agent_stage`, implementation, CI-fix, follow-up, learn, and post-merge flows) | Opaque session ID, resume, timeout, process lifecycle, and redacted diagnostics | The shared runner rejects Pi before dispatch until its admission prerequisites exist. Session lifecycle has executable runtime tests; process tracking is completed in #2518. |
 | `repo` | No model job | Safe tested N/A; it performs repository and GitHub discovery only. |
 | `planning` | Athena `advise` plus planner read/search scope | Requires canonical Mnemosyne resolution and Athena discovery. |
 | `plan_review` | Read-only plan-review scope | No write, merge, CI mutation, delegation, or web capability. |
@@ -81,13 +81,16 @@ is descriptive; Hephaestus owns the enforcement boundary passed to Pi.
 
 ### Authentication, configuration, and errors
 
-Pi configuration is operator-local.  A valid provider can use Pi's supported
+Pi configuration is operator-local. A valid provider can use Pi's supported
 OAuth/API-key flow or local model configuration; Hephaestus must not require a
-specific private `models.json` path.  `PI_CODING_AGENT_DIR` is respected when
-Pi configuration is inspected.  The runtime passes an explicitly selected
-provider/model through Pi's native CLI contract, keeps prompts out of argv, and
-redacts private aliases from diagnostics.  The concrete auth and package probes
-are delivered by #2516 and adapter invocation parity by #2518.
+specific private `models.json` path. `PI_CODING_AGENT_DIR` is respected when Pi
+configuration is inspected. The current operator-only smoke seam does **not**
+yet turn `HEPH_PI_PROVIDER` / `HEPH_PI_MODEL` into Pi's native provider/model
+selection arguments, so it is not automation-admission evidence. #2516 owns
+the concrete authentication and security-cleared package probes; #2518 owns
+native provider/model selection, role-derived tool grants, and lifecycle parity.
+Those later stages must keep prompts and private aliases out of publishable
+diagnostics.
 
 The Pi adapter uses JSON mode and explicit non-interactive execution.  A
 timeout, unavailable tool, missing command, malformed event, or absent session
@@ -117,7 +120,8 @@ pipeline verdict or widen a tool grant.
 
 - #2515 publishes and proves the native Athena package.
 - #2516 owns package installation, inventory, command capability probes, and
-  selection preflight.
+  selection preflight; it cannot advance until #2515 has an accepted,
+  security-cleared artifact.
 - #2517 replaces legacy Mnemosyne handling with Athena-equivalent semantics.
 - #2518 implements the tool-scope translation, direct-adapter lifecycle, and
   complete stage coverage described here.

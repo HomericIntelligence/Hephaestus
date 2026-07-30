@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+SOURCE_ROOTS = (REPO_ROOT / "hephaestus", REPO_ROOT / "scripts")
 
 NEUTRAL_RUNTIME_CALL_NAMES = {
     "resolve_agent",
@@ -53,15 +54,16 @@ def _provider_neutral_runtime_files() -> list[str]:
     """
     runtime_path = REPO_ROOT / "hephaestus" / "agents" / "runtime.py"
     paths: list[str] = []
-    for path in sorted((REPO_ROOT / "hephaestus").rglob("*.py")):
-        if path == runtime_path:
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        if any(
-            isinstance(node, ast.Call) and _node_name(node.func) in NEUTRAL_RUNTIME_CALL_NAMES
-            for node in ast.walk(tree)
-        ):
-            paths.append(path.relative_to(REPO_ROOT).as_posix())
+    for root in SOURCE_ROOTS:
+        for path in sorted(root.rglob("*.py")):
+            if path == runtime_path:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            if any(
+                isinstance(node, ast.Call) and _node_name(node.func) in NEUTRAL_RUNTIME_CALL_NAMES
+                for node in ast.walk(tree)
+            ):
+                paths.append(path.relative_to(REPO_ROOT).as_posix())
     return paths
 
 
@@ -87,10 +89,26 @@ def _provider_adapter_violations(
 
 
 def _direct_provider_string_compare(node: ast.Compare) -> bool:
-    comparators = [node.left, *node.comparators]
     return any(
-        isinstance(item, ast.Constant) and item.value in {"codex", "pi"} for item in comparators
+        isinstance(item, ast.Constant) and item.value in {"codex", "pi"} for item in ast.walk(node)
     )
+
+
+def test_direct_provider_guard_rejects_aliased_adapter_imports() -> None:
+    """Provider adapters cannot evade the import guard through an alias."""
+    tree = ast.parse("from hephaestus.agents.runtime import run_pi_session as invoke_pi_session\n")
+
+    assert _provider_adapter_violations(tree) == ["line 1: imports ['run_pi_session']"]
+
+
+def test_direct_provider_guard_detects_membership_style_provider_branches() -> None:
+    """Provider-specific membership checks are as risky as equality branches."""
+    tree = ast.parse("if agent in {'pi', 'codex'}:\n    pass\n")
+    comparison = tree.body[0]
+
+    assert isinstance(comparison, ast.If)
+    assert isinstance(comparison.test, ast.Compare)
+    assert _direct_provider_string_compare(comparison.test)
 
 
 @pytest.mark.parametrize("relative_path", _provider_neutral_runtime_files())
