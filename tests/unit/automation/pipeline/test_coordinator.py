@@ -599,7 +599,8 @@ class TestDrainOrder:
         assert coordinator.queues[StageName.PLAN_REVIEW].snapshot() == [blocker]
         assert coordinator._pending_handoffs[id(source)].target is StageName.PLAN_REVIEW
 
-        assert coordinator.queues[StageName.PLAN_REVIEW].pop() is blocker
+        released = coordinator.queues[StageName.PLAN_REVIEW].pop()
+        assert released is blocker
         coordinator._drain_pending_handoffs()
 
         assert coordinator.queues[StageName.PLANNING].occupancy == 0
@@ -1391,9 +1392,14 @@ class TestDurableEventLog:
     def test_event_log_retains_only_configured_recent_events(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The in-memory diagnostic event view cannot grow for a long-lived run."""
+        """Memory stays bounded while the durable JSONL history stays complete."""
         coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
-        config = replace(coordinator.config, event_log_capacity=2)
+        event_log_path = tmp_path / "bounded-events.jsonl"
+        config = replace(
+            coordinator.config,
+            event_log_capacity=2,
+            event_log_path=event_log_path,
+        )
         coordinator = Coordinator(
             config,
             github=FakeStageGitHub(),
@@ -1409,6 +1415,8 @@ class TestDurableEventLog:
 
         assert coordinator.event_log.maxlen == 2
         assert list(coordinator.event_log) == [("test", 1), ("test", 2)]
+        records = [json.loads(line) for line in event_log_path.read_text().splitlines()]
+        assert [record["fields"] for record in records] == [[0], [1], [2]]
 
     @pytest.mark.parametrize("capacity", [0, -1])
     def test_event_log_rejects_non_positive_capacity(self, tmp_path: Path, capacity: int) -> None:

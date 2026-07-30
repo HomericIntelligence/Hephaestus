@@ -279,6 +279,67 @@ def _list_open_pr_meta(org: str, repo: str) -> list[dict[str, Any]]:
     return sorted(pulls, key=lambda pr: pr["number"])
 
 
+def _iter_open_pr_meta(org: str, repo: str) -> Iterator[dict[str, Any]]:
+    """Yield normalized open-PR metadata one GitHub page at a time.
+
+    This is the bounded counterpart to :func:`_list_open_pr_meta`: callers can
+    stop advancing the cursor while downstream admission is full, so neither
+    the repository stage nor ``gh`` materializes every open pull request.
+
+    Raises:
+        RuntimeError: On a network, JSON, or malformed-response failure.
+
+    """
+    page = 1
+    while True:
+        try:
+            out = gh_call(
+                [
+                    "api",
+                    f"/repos/{org}/{repo}/pulls?state=open&per_page=100"
+                    f"&sort=created&direction=asc&page={page}",
+                ],
+                timeout=NETWORK_TIMEOUT,
+            )
+            entries = json.loads(out.stdout or "[]")
+            if not isinstance(entries, list):
+                raise ValueError("expected a pull-list page")
+        except (
+            subprocess.SubprocessError,
+            RuntimeError,
+            OSError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as exc:
+            raise RuntimeError(f"failed to list open PRs for {org}/{repo}: {exc}") from exc
+
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise RuntimeError(f"failed to list open PRs for {org}/{repo}: malformed pull row")
+            number = entry.get("number")
+            if not isinstance(number, int) or number <= 0:
+                raise RuntimeError(
+                    f"failed to list open PRs for {org}/{repo}: malformed pull number"
+                )
+            raw_user = entry.get("user")
+            user = raw_user if isinstance(raw_user, dict) else {}
+            raw_state = entry.get("state")
+            state = raw_state if isinstance(raw_state, str) else "open"
+            yield {
+                "number": number,
+                "state": state.upper(),
+                "isDraft": bool(entry.get("draft", False)),
+                "user": {
+                    "login": user.get("login"),
+                    "type": user.get("type"),
+                },
+            }
+
+        if len(entries) < 100:
+            return
+        page += 1
+
+
 def _list_open_issue_numbers(org: str, repo: str, *, dry_run: bool = False) -> list[int]:
     """Return open NON-epic issue numbers in ``org/repo``, sorted ascending.
 

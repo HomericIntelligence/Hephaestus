@@ -15,6 +15,13 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from .work_item import WorkItem
 
+__all__ = [
+    "CompletionQueue",
+    "CompletionRejection",
+    "StageQueue",
+    "StageQueueLease",
+]
+
 
 @dataclass(frozen=True)
 class CompletionRejection:

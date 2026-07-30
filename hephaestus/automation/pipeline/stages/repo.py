@@ -14,10 +14,13 @@ Steps:
    checkout. Both operations are logged-skipped under dry-run — the
    coordinator's ``_submit`` asserts no job is ever submitted in dry-run.
    Budget ``clone`` = 2; exhaustion -> finished(fail).
-3. [M] DISCOVER: initialize one page-at-a-time metadata cursor. It never
-   materializes a list of classified products.
-4. [M] SOURCE: the coordinator owns the bounded cursor and admits one metadata
-   row only when its bounded stage/admission path has room.
+3. [M] DISCOVER: initialize one page-at-a-time issue cursor and, for
+   ``--drive-green-all``, a one-page-at-a-time PR cursor. Neither materializes
+   a list of classified products.
+4. [M] SOURCE: the coordinator owns the bounded cursors and admits one metadata
+   row only when its bounded stage/admission path has room. Issue discovery
+   drains first; eligible PRs not already represented by an issue product then
+   enter the same capacity-controlled path.
 
 Discovery seams (``_repo_manager`` / ``_seeding`` module attributes) mirror
 the ``loop_runner._admission`` seam pattern so unit tests patch the reads
@@ -57,16 +60,21 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RepoIssueSource:
-    """Bounded repository-discovery cursor handed to the coordinator.
+    """Bounded repository issue/PR discovery cursors handed to the coordinator.
 
-    ``pending`` retains at most the one metadata row waiting for downstream
-    admission. The iterator itself holds at most one fetched GitHub page.
-    Classified ``WorkItem`` products are never accumulated here.
+    ``pending`` and ``pending_pr`` retain at most one row for their respective
+    source while downstream admission is unavailable. Each iterator holds at
+    most one fetched GitHub page. Classified ``WorkItem`` products are never
+    accumulated here.
     """
 
     metadata: Iterator[dict[str, Any]]
     pending: dict[str, Any] | None = None
     seeded_count: int = 0
+    pr_metadata: Iterator[dict[str, Any]] | None = None
+    pending_pr: dict[str, Any] | None = None
+    issues_exhausted: bool = False
+    viewer_login: str = ""
 
 
 def _drive_green_pr_is_in_scope(
@@ -225,6 +233,12 @@ class RepoStage(Stage):
         """[M] Initialize a bounded metadata source without eager classification."""
         try:
             source = RepoIssueSource(_repo_manager._iter_open_issue_meta(ctx.org, item.repo))
+            if getattr(ctx.config, "drive_green_all", False):
+                include_all_authors = bool(getattr(ctx.config, "include_all_authors", False))
+                source.viewer_login = (
+                    "" if include_all_authors else _pr_discovery._resolve_viewer_login()
+                )
+                source.pr_metadata = _repo_manager._iter_open_pr_meta(ctx.org, item.repo)
         except Exception as exc:
             logger.warning("repo:%s: discovery failed: %s", item.repo, exc)
             return StageOutcome(Disposition.FINISH_FAIL, note=f"discovery failed: {exc}")

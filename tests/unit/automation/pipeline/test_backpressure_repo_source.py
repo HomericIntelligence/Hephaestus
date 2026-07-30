@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from hephaestus.automation import loop_repo_manager
+from hephaestus.automation import loop_repo_manager, pr_discovery
 from hephaestus.automation.pipeline import seeding as seeding_mod
 from hephaestus.automation.pipeline.coordinator import Coordinator, PipelineConfig
-from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
+from hephaestus.automation.pipeline.routing import (
+    PIPELINE_ORDER,
+    Disposition,
+    StageName,
+    StageOutcome,
+)
 from hephaestus.automation.pipeline.seeding import IssueFacts
 from hephaestus.automation.pipeline.stages.repo import RepoStage
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
@@ -32,6 +38,26 @@ class _ImmediatePassStage:
         assert item.issue is not None
         self._events.append(("complete", item.issue))
         return StageOutcome(Disposition.FINISH_PASS, f"completed #{item.issue}")
+
+    def on_job_done(self, item: WorkItem, result: Any, ctx: Any) -> None:
+        del item, result, ctx
+        raise AssertionError("source-pull test must not submit a worker job")
+
+
+class _ImmediatePrPassStage:
+    """Finish PR review synchronously so bounded PR admission is observable."""
+
+    def __init__(self, events: list[int]) -> None:
+        self._events = events
+
+    def on_enter(self, item: WorkItem, ctx: Any) -> None:
+        del item, ctx
+
+    def step(self, item: WorkItem, ctx: Any) -> StageOutcome:
+        del ctx
+        assert item.pr is not None
+        self._events.append(item.pr)
+        return StageOutcome(Disposition.FINISH_PASS, f"reviewed PR #{item.pr}")
 
     def on_job_done(self, item: WorkItem, result: Any, ctx: Any) -> None:
         del item, result, ctx
@@ -89,7 +115,7 @@ def test_large_repo_discovery_retains_only_page_cursor_and_one_pending_row(
 
     # Fill every possible downstream stage and the bounded spool so the
     # cursor can retain only one not-yet-classified metadata row.
-    for stage in StageName:
+    for stage in PIPELINE_ORDER:
         if stage is StageName.REPO:
             continue
         blocker = WorkItem(repo="block", kind=ItemKind.REPO, stage=stage)
@@ -207,6 +233,97 @@ def test_repo_source_deduplicates_metadata_after_completed_work_at_capacity_one(
         ("classify", 2),
         ("complete", 2),
     ]
+    assert Counter(events) == Counter(
+        {
+            ("classify", 1): 1,
+            ("complete", 1): 1,
+            ("classify", 2): 1,
+            ("complete", 2): 1,
+        }
+    )
     issues = [item for item in coordinator.items if item.kind is ItemKind.ISSUE]
     assert [item.issue for item in issues] == [1, 2]
     assert all(item.result is not None and item.result.passed for item in issues)
+
+
+def test_drive_green_pr_source_is_filtered_lossless_and_capacity_controlled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Eligible linked PRs stream after issues and drain through a C=1 window."""
+    produced: list[int] = []
+    reviewed: list[int] = []
+    pulls: list[dict[str, Any]] = [
+        {
+            "number": 31,
+            "state": "OPEN",
+            "isDraft": False,
+            "user": {"login": "alice", "type": "User"},
+        },
+        {
+            "number": 32,
+            "state": "OPEN",
+            "isDraft": False,
+            "user": {"login": "alice", "type": "User"},
+        },
+        {
+            "number": 33,
+            "state": "OPEN",
+            "isDraft": False,
+            "user": {"login": "bob", "type": "User"},
+        },
+        {
+            "number": 34,
+            "state": "OPEN",
+            "isDraft": False,
+            "user": {"login": "alice", "type": "Bot"},
+        },
+        {
+            "number": 35,
+            "state": "OPEN",
+            "isDraft": True,
+            "user": {"login": "alice", "type": "User"},
+        },
+    ]
+
+    def pull_source(_org: str, _repo: str):
+        for pull in pulls:
+            produced.append(int(pull["number"]))
+            yield pull
+
+    monkeypatch.setattr(loop_repo_manager, "_iter_open_issue_meta", lambda _org, _repo: iter(()))
+    monkeypatch.setattr(loop_repo_manager, "_iter_open_pr_meta", pull_source)
+    monkeypatch.setattr(pr_discovery, "_resolve_viewer_login", lambda: "alice")
+    monkeypatch.setattr(
+        seeding_mod,
+        "seed_issue_from_github",
+        lambda issue, github: _facts(issue),
+    )
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            loops=1,
+            parallel_repos=1,
+            max_workers=1,
+            stage_queue_capacity=1,
+            drive_green_all=True,
+            include_all_authors=False,
+            include_bot_prs=False,
+            dry_run=True,
+            projects_dir=tmp_path,
+        ),
+        github=FakeStageGitHub(pr_issue=901),
+        pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+    coordinator.stages[StageName.PR_REVIEW] = _ImmediatePrPassStage(reviewed)
+
+    assert coordinator.run() == 0
+
+    assert produced == [31, 32, 33, 34, 35]
+    assert reviewed == [31, 32]
+    prs = [item for item in coordinator.items if item.kind is ItemKind.PR]
+    assert [item.pr for item in prs] == [31, 32]
+    assert all(item.issue == 901 for item in prs)
+    assert all(item.result is not None and item.result.passed for item in prs)
+    assert not coordinator._repo_issue_sources

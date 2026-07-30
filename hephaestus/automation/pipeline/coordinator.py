@@ -118,7 +118,11 @@ from hephaestus.automation.pipeline.stages import (
     StageGitHub,
 )
 from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARGV
-from hephaestus.automation.pipeline.stages.repo import RepoIssueSource, product_to_work_item
+from hephaestus.automation.pipeline.stages.repo import (
+    RepoIssueSource,
+    _drive_green_pr_is_in_scope,
+    product_to_work_item,
+)
 from hephaestus.automation.pipeline.summary import RunStats, latest_logical_items, print_summary
 from hephaestus.automation.pipeline.work_item import (
     ItemKind,
@@ -1436,14 +1440,16 @@ class Coordinator:
         """Consume source rows until one is admitted, deferred, or exhausted."""
         source = active.source
         ctx = self._ctx_for_repo(active.repo)
+        if source.issues_exhausted:
+            return self._drain_repo_pr_source(active)
         while True:
             metadata = source.pending
             if metadata is None:
                 try:
                     metadata = next(source.metadata)
                 except StopIteration:
-                    self._record_event("repo_source_complete", active.repo, source.seeded_count)
-                    return False
+                    source.issues_exhausted = True
+                    return self._drain_repo_pr_source(active)
                 except Exception as exc:
                     self._record_repo_source_failure(active.repo, f"discovery failed: {exc}")
                     return False
@@ -1519,6 +1525,86 @@ class Coordinator:
                     self._pass_work_count += 1
             self._progress = True
             return True
+
+    def _drain_repo_pr_source(  # noqa: C901 - source lifecycle is intentionally linear
+        self, active: _ActiveRepoIssueSource
+    ) -> bool:
+        """Admit one eligible drive-green PR through the bounded source path."""
+        source = active.source
+        metadata_iter = source.pr_metadata
+        if metadata_iter is None:
+            self._record_event("repo_source_complete", active.repo, source.seeded_count)
+            return False
+
+        metadata = source.pending_pr
+        if metadata is None:
+            try:
+                metadata = next(metadata_iter)
+            except StopIteration:
+                self._record_event("repo_source_complete", active.repo, source.seeded_count)
+                return False
+            except Exception as exc:
+                self._record_repo_source_failure(active.repo, f"PR discovery failed: {exc}")
+                return False
+
+        include_bot_prs = bool(getattr(self.config, "include_bot_prs", True))
+        if not _drive_green_pr_is_in_scope(
+            metadata,
+            include_bot_prs=include_bot_prs,
+            viewer_login=source.viewer_login,
+        ):
+            source.pending_pr = None
+            self._progress = True
+            return True
+        try:
+            pr_number = int(metadata["number"])
+        except (KeyError, TypeError, ValueError) as exc:
+            self._record_repo_source_failure(
+                active.repo, f"PR discovery failed: malformed metadata: {exc}"
+            )
+            return False
+
+        # Issue discovery runs first. Its WorkItems remain in ``items`` after
+        # terminalization, so this constant-space lookup prevents the PR cursor
+        # from producing a second item for an already-covered pull request.
+        if any(item.repo == active.repo and item.pr == pr_number for item in self.items):
+            source.pending_pr = None
+            self._record_event("repo_pr_source_covered", active.repo, pr_number)
+            self._progress = True
+            return True
+        if not self._repo_source_can_admit():
+            source.pending_pr = metadata
+            return True
+
+        ctx = self._ctx_for_repo(active.repo)
+        try:
+            entry = self._seed_entry_for_pr(pr_number, ctx.github, fail_unlinked=False)
+        except Exception as exc:
+            self._record_repo_source_failure(active.repo, f"PR discovery failed: {exc}")
+            return False
+        source.pending_pr = None
+        if entry is None:
+            logger.info(
+                "repo:%s: skipping PR #%d; no linked issue supplies requirements",
+                active.repo,
+                pr_number,
+            )
+            self._progress = True
+            return True
+
+        new_item = self._entry_to_item(entry, active.repo)
+        if new_item.stage is StageName.FINISHED and new_item.result is None:
+            new_item.result = ItemResult(
+                passed=entry.passed,
+                reason=entry.reason,
+                final_stage=StageName.FINISHED,
+            )
+        if self._push_item(new_item, new_item.stage, enter=True):
+            source.seeded_count += 1
+            if new_item.stage not in (StageName.REPO, StageName.FINISHED):
+                self._pass_work_count += 1
+        self._progress = True
+        return True
 
     def _record_repo_source_failure(self, repo: str, reason: str) -> None:
         """Record a bounded terminal failure when a discovery cursor aborts."""
@@ -2236,102 +2322,106 @@ class Coordinator:
             stage, reason, passed = self._scope_seed_decision(issue, stage, reason, scope_stages)
             yield replace(entry, stage=stage, reason=reason, passed=passed)
         for pr in self.config.prs:
-            issue_number = github.find_issue_for_pr(pr)
-            if issue_number is None:
-                yield _seeding.SeedEntry(
-                    kind="pr",
-                    identifier=pr,
-                    stage=StageName.FINISHED,
-                    reason=(
-                        f"PR #{pr} has no linked issue; refusing review without "
-                        "requirements context"
-                    ),
-                    pr_number=pr,
-                    passed=False,
-                )
-                continue
-            scope_identifier = issue_number if issue_number is not None else pr
-            pr_state = github.gh_pr_state(pr)
-            pr_state_name = ((pr_state or {}).get("state") or "").upper()
-            if pr_state_name == "MERGED":
-                yield _seeding.SeedEntry(
-                    kind="pr",
-                    identifier=pr,
-                    stage=StageName.FINISHED,
-                    reason=f"PR #{pr} already merged",
-                    pr_number=pr,
-                    issue_number=issue_number,
-                    passed=True,
-                )
-                continue
-            if pr_state_name == "CLOSED":
-                yield _seeding.SeedEntry(
-                    kind="pr",
-                    identifier=pr,
-                    stage=StageName.FINISHED,
-                    reason=f"PR #{pr} already closed without merging",
-                    pr_number=pr,
-                    issue_number=issue_number,
-                    passed=False,
-                )
-                continue
-            has_go, _has_no_go = github.pr_has_implementation_state_label(pr)
-            if has_go:
-                stage, reason, passed = self._scope_seed_decision(
-                    scope_identifier,
-                    StageName.MERGE_WAIT,
-                    f"PR #{pr} carries {STATE_IMPLEMENTATION_GO}",
-                    scope_stages,
-                )
-                yield _seeding.SeedEntry(
-                    kind="pr",
-                    identifier=pr,
-                    stage=stage,
-                    reason=reason,
-                    pr_number=pr,
-                    issue_number=issue_number,
-                    passed=passed,
-                )
-            else:
-                issue_facts: _seeding.IssueFacts | None
-                review_context: dict[str, str] | None
-                try:
-                    issue_facts = _seeding.seed_issue_from_github(issue_number, github)
-                    review_context = github.pr_review_context(pr)
-                except Exception as exc:
-                    logger.warning("PR #%d: review context read failed: %s", pr, exc)
-                    review_context = None
-                    issue_facts = None
-                if issue_facts is None or review_context is None:
-                    yield _seeding.SeedEntry(
-                        kind="pr",
-                        identifier=pr,
-                        stage=StageName.FINISHED,
-                        reason=f"PR #{pr} review context could not be read",
-                        pr_number=pr,
-                        issue_number=issue_number,
-                        passed=False,
-                    )
-                    continue
-                stage, reason, passed = self._scope_seed_decision(
-                    scope_identifier,
-                    StageName.PR_REVIEW,
-                    f"PR #{pr} without {STATE_IMPLEMENTATION_GO} — awaiting review",
-                    scope_stages,
-                )
-                yield _seeding.SeedEntry(
-                    kind="pr",
-                    identifier=pr,
-                    stage=stage,
-                    reason=reason,
-                    pr_number=pr,
-                    issue_number=issue_number,
-                    issue_title=issue_facts.title,
-                    issue_body=issue_facts.body,
-                    pr_diff=review_context["pr_diff"],
-                    pr_description=review_context["pr_description"],
-                    passed=passed,
-                )
+            pr_entry = self._seed_entry_for_pr(pr, github, fail_unlinked=True)
+            assert pr_entry is not None  # noqa: S101 - fail_unlinked guarantees an entry
+            yield pr_entry
+
+    def _seed_entry_for_pr(
+        self,
+        pr: int,
+        github: Any,
+        *,
+        fail_unlinked: bool,
+    ) -> _seeding.SeedEntry | None:
+        """Hydrate one linked PR without weakening requirements-context fencing."""
+        issue_number = github.find_issue_for_pr(pr)
+        if issue_number is None:
+            if not fail_unlinked:
+                return None
+            return _seeding.SeedEntry(
+                kind="pr",
+                identifier=pr,
+                stage=StageName.FINISHED,
+                reason=(
+                    f"PR #{pr} has no linked issue; refusing review without requirements context"
+                ),
+                pr_number=pr,
+                passed=False,
+            )
+        scope_stages = self.config.scope.stages if self.config.scope is not None else None
+        pr_state = github.gh_pr_state(pr)
+        pr_state_name = ((pr_state or {}).get("state") or "").upper()
+        if pr_state_name == "MERGED":
+            return _seeding.SeedEntry(
+                kind="pr",
+                identifier=pr,
+                stage=StageName.FINISHED,
+                reason=f"PR #{pr} already merged",
+                pr_number=pr,
+                issue_number=issue_number,
+                passed=True,
+            )
+        if pr_state_name == "CLOSED":
+            return _seeding.SeedEntry(
+                kind="pr",
+                identifier=pr,
+                stage=StageName.FINISHED,
+                reason=f"PR #{pr} already closed without merging",
+                pr_number=pr,
+                issue_number=issue_number,
+                passed=False,
+            )
+        has_go, _has_no_go = github.pr_has_implementation_state_label(pr)
+        if has_go:
+            stage, reason, passed = self._scope_seed_decision(
+                issue_number,
+                StageName.MERGE_WAIT,
+                f"PR #{pr} carries {STATE_IMPLEMENTATION_GO}",
+                scope_stages,
+            )
+            return _seeding.SeedEntry(
+                kind="pr",
+                identifier=pr,
+                stage=stage,
+                reason=reason,
+                pr_number=pr,
+                issue_number=issue_number,
+                passed=passed,
+            )
+
+        try:
+            issue_facts = _seeding.seed_issue_from_github(issue_number, github)
+            review_context = github.pr_review_context(pr)
+        except Exception as exc:
+            logger.warning("PR #%d: review context read failed: %s", pr, exc)
+            return _seeding.SeedEntry(
+                kind="pr",
+                identifier=pr,
+                stage=StageName.FINISHED,
+                reason=f"PR #{pr} review context could not be read",
+                pr_number=pr,
+                issue_number=issue_number,
+                passed=False,
+            )
+        stage, reason, passed = self._scope_seed_decision(
+            issue_number,
+            StageName.PR_REVIEW,
+            f"PR #{pr} without {STATE_IMPLEMENTATION_GO} — awaiting review",
+            scope_stages,
+        )
+        return _seeding.SeedEntry(
+            kind="pr",
+            identifier=pr,
+            stage=stage,
+            reason=reason,
+            pr_number=pr,
+            issue_number=issue_number,
+            issue_title=issue_facts.title,
+            issue_body=issue_facts.body,
+            pr_diff=review_context["pr_diff"],
+            pr_description=review_context["pr_description"],
+            passed=passed,
+        )
 
     @staticmethod
     def _entry_to_item(entry: _seeding.SeedEntry, default_repo: str) -> WorkItem:

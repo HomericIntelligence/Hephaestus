@@ -10,7 +10,7 @@ from hephaestus.automation.pipeline import (
     StageQueue,
     WorkItem,
 )
-from hephaestus.automation.pipeline.queues import CompletionRejection
+from hephaestus.automation.pipeline.queues import CompletionRejection, StageQueueLease
 
 
 class TestStageQueue:
@@ -101,6 +101,21 @@ class TestStageQueue:
         assert q.offer(second) is False
         assert q.occupancy == q.capacity == 1
         assert q.snapshot() == [first]
+
+    def test_stage_queue_claim_keeps_public_capacity_reserving_lease(self) -> None:
+        """The queue API retains the lease contract used by the coordinator."""
+        q = StageQueue(capacity=1)
+        item = WorkItem(repo="repo1", kind=ItemKind.REPO)
+        q.push(item)
+
+        lease = q.claim()
+
+        assert isinstance(lease, StageQueueLease)
+        assert lease.item is item
+        assert q.occupancy == q.capacity == 1
+        assert q.offer(WorkItem(repo="repo2", kind=ItemKind.REPO)) is False
+        lease.restore()
+        assert q.snapshot() == [item]
 
     def test_stage_queue_push_raises_when_full(self) -> None:
         """Strict push callers cannot silently lose ownership on saturation."""
