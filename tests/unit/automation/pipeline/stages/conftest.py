@@ -468,26 +468,6 @@ class FakeStageGitHub(FakeGitHub):
         blocked = tuple(sorted(set(replies) - set(replied)))
         return ImplementationThreadReplyResult(replied, blocked, tuple(receipts))
 
-    def preserve_stale_implementation_thread_reply_batch(
-        self,
-        pr_number: int,
-        *,
-        expected_head_sha: str,
-        current_head_sha: str,
-        replies: dict[str, str],
-        batch_nonce: str,
-    ) -> tuple[str, ...] | None:
-        """Record non-mutating stale-draft preservation for stage tests."""
-        self._log(
-            "preserve_stale_implementation_thread_reply_batch",
-            pr_number,
-            expected_head_sha,
-            current_head_sha,
-            tuple(sorted(replies)),
-            batch_nonce,
-        )
-        return ()
-
     def reviewer_validation_receipts(
         self,
         pr_number: int,

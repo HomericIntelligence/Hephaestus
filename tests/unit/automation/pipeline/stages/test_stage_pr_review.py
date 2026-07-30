@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from collections import deque
 from types import SimpleNamespace
 from typing import Any
@@ -2309,53 +2308,6 @@ class TestPrReviewRestartSafetyGuards:
 class TestEvalVerdicts:
     """EVAL: re-housed _evaluate_go_verdict semantics + the budget gate."""
 
-    def test_duplicate_current_reply_drafts_are_terminally_diagnosed(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """Cross-checkout ownership ambiguity stops without retrying or deleting drafts."""
-        stage = PrReviewStage()
-        github = FakeStageGitHub()
-        ctx = make_ctx(github=github)
-        item = make_work_item(issue=1, pr=1001, state="EVAL")
-        item.payload["implementation_reply_batch_conflict"] = {
-            "head_sha": "a" * 40,
-            "review_ids": ("draft-one", "draft-two"),
-        }
-
-        result = stage.step(item, ctx)
-
-        assert result == StageOutcome(
-            Disposition.FINISH_FAIL, "implementation_reply_batch_conflict"
-        )
-        assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
-        assert github.comments.get(1001, []) == []
-        assert not any(name == "gh_issue_upsert_comment" for name, _args in github.mutation_log)
-
-    def test_current_reply_review_conflict_is_terminally_diagnosed(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A foreign current review is retained and explained, never retried as transport failure.
-
-        The terminal record covers both pending drafts and completed conflicting batches.
-        """
-        stage = PrReviewStage()
-        github = FakeStageGitHub()
-        ctx = make_ctx(github=github)
-        item = make_work_item(issue=1, pr=1001, state="EVAL")
-        item.payload["implementation_reply_review_conflict"] = {
-            "head_sha": "a" * 40,
-            "review_ids": ("foreign-pending-draft",),
-        }
-
-        result = stage.step(item, ctx)
-
-        assert result == StageOutcome(
-            Disposition.FINISH_FAIL, "implementation_reply_review_conflict"
-        )
-        assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
-        assert github.comments.get(1001, []) == []
-        assert not any(name == "gh_issue_upsert_comment" for name, _args in github.mutation_log)
-
     def test_on_enter_stands_down_without_auto_merge_mutation(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -4270,7 +4222,7 @@ class TestRealCommitGate:
     def test_reply_handoff_stops_waiting_when_the_head_stays_drifted(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A persistent different open head cannot inherit the saved reply."""
+        """A persistent different open head drops its stale direct-reply handoff."""
 
         class HeadStaysDriftedGitHub(FakeStageGitHub):
             def __init__(self) -> None:
@@ -4336,10 +4288,7 @@ class TestRealCommitGate:
         assert stage.step(item, ctx) == Continue(next_state="REVIEW_WAIT")
         assert github.reply_attempts == 0
         assert "pending_implementation_reply_handoff" not in item.payload
-        name, args = github.mutation_log[-1]
-        assert name == "preserve_stale_implementation_thread_reply_batch"
-        assert args[:4] == (1001, "a" * 40, "b" * 40, ("thread-1",))
-        assert re.fullmatch(r"[0-9a-f]{32}", args[4]) is not None
+        assert github.mutation_log == []
 
     def test_stale_reply_handoff_restarts_fresh_review_without_retrying(
         self, make_ctx: Any, make_work_item: Any
@@ -4393,127 +4342,6 @@ class TestRealCommitGate:
         assert "pending_implementation_reply_handoff" not in item.payload
         item.state = "EVAL"
         assert stage.step(item, ctx) == Continue(next_state="REVIEW_WAIT")
-
-    def test_stale_reply_handoff_with_preserved_draft_is_terminally_diagnosed(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A visible stale draft requires manual cleanup before another reply pass."""
-
-        class PreservedStaleDraftGitHub(FakeStageGitHub):
-            def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
-                del pr_number
-                return {"state": "OPEN", "headRefOid": "b" * 40, "autoMergeRequest": None}
-
-            def preserve_stale_implementation_thread_reply_batch(
-                self,
-                pr_number: int,
-                *,
-                expected_head_sha: str,
-                current_head_sha: str,
-                replies: dict[str, str],
-                batch_nonce: str,
-            ) -> tuple[str, ...] | None:
-                super().preserve_stale_implementation_thread_reply_batch(
-                    pr_number,
-                    expected_head_sha=expected_head_sha,
-                    current_head_sha=current_head_sha,
-                    replies=replies,
-                    batch_nonce=batch_nonce,
-                )
-                return ("preserved-stale-draft",)
-
-        stage = PrReviewStage()
-        github = PreservedStaleDraftGitHub()
-        ctx = make_ctx(github=github)
-        item = make_work_item(issue=40, pr=1001, state="EVAL")
-        item.payload["pending_implementation_reply_handoff"] = {
-            "head_sha": "a" * 40,
-            "threads": [
-                {
-                    "id": "thread-1",
-                    "comments": [{"id": "comment-1", "body": "fix this"}],
-                }
-            ],
-            "replies": {"thread-1": "Fixed the guard."},
-            "batch_nonce": "c" * 32,
-        }
-
-        for _ in range(2):
-            assert stage.step(item, ctx) == StageOutcome(
-                Disposition.RETRY, "implementation_reply_handoff_visibility_wait"
-            )
-        assert stage.step(item, ctx) == StageOutcome(
-            Disposition.FINISH_FAIL, "implementation_reply_review_conflict"
-        )
-        assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
-        assert github.comments.get(1001, []) == []
-        assert not any(name == "gh_issue_upsert_comment" for name, _args in github.mutation_log)
-
-    def test_retry_duplicate_reply_drafts_are_terminally_diagnosed(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A duplicate found on host-only retry cannot become ordinary stale work."""
-
-        class ReplyFailsThenFindsDuplicatesGitHub(FakeStageGitHub):
-            def __init__(self) -> None:
-                super().__init__()
-                self.reply_attempts = 0
-
-            def post_implementation_thread_replies(
-                self,
-                pr_number: int,
-                *,
-                expected_head_sha: str,
-                threads: list[dict[str, Any]],
-                replies: dict[str, str],
-                batch_nonce: str,
-            ) -> ImplementationThreadReplyResult:
-                del pr_number, expected_head_sha, threads, replies, batch_nonce
-                self.reply_attempts += 1
-                if self.reply_attempts == 1:
-                    raise OSError("temporary GitHub transport failure")
-                return ImplementationThreadReplyResult(
-                    blocked_thread_ids=("thread-1",),
-                    duplicate_current_draft_ids=("draft-one", "draft-two"),
-                )
-
-        stage = PrReviewStage()
-        github = ReplyFailsThenFindsDuplicatesGitHub()
-        ctx = make_ctx(github=github)
-        item = make_work_item(issue=40, pr=1001, state="PUSH_WAIT")
-        snapshot = {
-            "id": "thread-1",
-            "path": "a.py",
-            "line": 3,
-            "side": "RIGHT",
-            "body": "fix this",
-            "comments": [{"id": "comment-1", "author": "reviewer", "body": "fix this"}],
-        }
-        item.payload.update(
-            {
-                "remediation_threads": [{"thread_id": "thread-1", "body": "fix this"}],
-                "remediation_thread_snapshots": [snapshot],
-                "address_output": {
-                    "addressed": ["thread-1"],
-                    "replies": {"thread-1": "Fixed the guard."},
-                },
-            }
-        )
-
-        stage.on_job_done(
-            item,
-            JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),
-            ctx,
-        )
-
-        assert "pending_implementation_reply_handoff" in item.payload
-        item.state = "EVAL"
-        assert stage.step(item, ctx) == StageOutcome(
-            Disposition.FINISH_FAIL, "implementation_reply_batch_conflict"
-        )
-        assert github.reply_attempts == 2
-        assert "pending_implementation_reply_handoff" not in item.payload
-        assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
 
     def test_mixed_stale_and_transport_reply_batch_retries_only_ambiguous_thread(
         self, make_ctx: Any, make_work_item: Any

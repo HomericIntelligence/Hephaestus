@@ -89,20 +89,10 @@ logger = logging.getLogger(__name__)
 _CLOSES_ISSUE_LINE_RE = re.compile(r"^Closes #(\d+)\s*$", re.MULTILINE)
 _STANDALONE_VERDICT_LINE_RE = re.compile(r"(?i)^\s*verdict\s*:")
 _HTTP_STATUS_RE = re.compile(r"^HTTP/\S+\s+(\d{3})\b", re.MULTILINE)
-_IMPLEMENTATION_REPLY_REVIEW_BODY_RE = re.compile(
-    r"\AImplementation responses for [1-9]\d* review thread\(s\)\.\n\n"
-    r"<!-- hephaestus-implementation-review:[0-9a-f]{24} -->\n"
+_IMPLEMENTATION_REPLY_BODY_RE = re.compile(
+    r"(?s)\A(.*)\n\n<!-- hephaestus-implementation-reply:[0-9a-f]{24} -->\n"
     r"<!-- hephaestus-implementation-batch:([0-9a-f]{32}) -->\Z"
 )
-
-
-class DuplicateImplementationReplyDraftsError(RuntimeError):
-    """Two current pending drafts make cross-checkout ownership unprovable."""
-
-    def __init__(self, review_ids: tuple[str, ...]) -> None:
-        """Record the opaque draft review IDs that made ownership ambiguous."""
-        super().__init__("multiple current implementation reply drafts")
-        self.review_ids = review_ids
 
 
 def _parse_included_http_response(
@@ -914,7 +904,6 @@ class PipelineGitHub:
         live: dict[str, Any],
         reply_body: str,
         expected_comment_id: str | None = None,
-        expected_review_id: str | None = None,
     ) -> str | None:
         """Return a proven coordinator reply appended to one exact snapshot.
 
@@ -937,11 +926,6 @@ class PipelineGitHub:
         comment_id = after[-1][0]
         if expected_comment_id is not None and comment_id != expected_comment_id:
             return None
-        if (
-            expected_review_id is not None
-            and cls._final_comment_review_id(live) != expected_review_id
-        ):
-            return None
         return (
             comment_id
             if cls._same_snapshot_with_reply(receipt, live, reply_body, comment_id)
@@ -957,337 +941,30 @@ class PipelineGitHub:
         return reply if 0 < len(reply) <= 4_000 else None
 
     def _implementation_thread_reply_body(
-        self, pr_number: int, head_sha: str, thread_id: str, reply: str
+        self, pr_number: int, head_sha: str, thread_id: str, reply: str, batch_nonce: str
     ) -> str:
-        """Bind an implementation reply to one exact thread and pushed head."""
-        seed = ":".join([self._repo_slug or self.org, str(pr_number), thread_id, head_sha, reply])
-        marker = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
-        return f"{reply}\n\n<!-- hephaestus-implementation-reply:{marker} -->"
-
-    def _implementation_reply_review_body(
-        self,
-        pr_number: int,
-        head_sha: str,
-        replies: dict[str, str],
-        batch_nonce: str | None = None,
-    ) -> str:
-        """Return the durable summary marker for one implementation reply batch."""
-        if not isinstance(batch_nonce, str) or re.fullmatch(r"[0-9a-f]{32}", batch_nonce) is None:
+        """Bind an implementation reply to one exact thread, head, and batch."""
+        if re.fullmatch(r"[0-9a-f]{32}", batch_nonce) is None:
             raise ValueError(
                 "implementation reply batch nonce must be 32 lowercase hexadecimal chars"
             )
         seed = ":".join(
-            [
-                self._repo_slug or self.org,
-                str(pr_number),
-                head_sha,
-                batch_nonce,
-                *(f"{thread_id}:{reply}" for thread_id, reply in sorted(replies.items())),
-            ]
+            [self._repo_slug or self.org, str(pr_number), thread_id, head_sha, reply, batch_nonce]
         )
         marker = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
         return (
-            f"Implementation responses for {len(replies)} review thread(s).\n\n"
-            f"<!-- hephaestus-implementation-review:{marker} -->\n"
+            f"{reply}\n\n"
+            f"<!-- hephaestus-implementation-reply:{marker} -->\n"
             f"<!-- hephaestus-implementation-batch:{batch_nonce} -->"
         )
 
     @staticmethod
     def _implementation_reply_batch_nonce(review_body: object) -> str | None:
-        """Return the opaque nonce from one valid implementation batch body."""
+        """Return the nonce carried by one source-attached implementation reply."""
         if not isinstance(review_body, str):
             return None
-        match = _IMPLEMENTATION_REPLY_REVIEW_BODY_RE.fullmatch(review_body)
-        return match.group(1) if match is not None else None
-
-    @staticmethod
-    def _is_implementation_reply_review_body(body: object) -> bool:
-        """Return whether ``body`` is a coordinator-owned batch marker."""
-        return (
-            isinstance(body, str)
-            and _IMPLEMENTATION_REPLY_REVIEW_BODY_RE.fullmatch(body) is not None
-        )
-
-    def _implementation_reply_review_inventory(  # noqa: C901 - paginated GraphQL proof is fail-closed
-        self, pr_number: int, expected_head_sha: str, review_body: str
-    ) -> (
-        tuple[str, tuple[str, str] | None, tuple[str, ...], tuple[str, ...], tuple[str, ...]] | None
-    ):
-        """Return the exact batch review plus stale and conflicting current reviews.
-
-        Every visible current pending review and every visible marked current
-        implementation review is a conflict unless it is this exact batch.
-        Stale drafts are preserved for manual cleanup; GitHub offers no
-        conditional delete that could prove a later actor had not changed one.
-        """
-        query = (
-            "query($owner:String!,$name:String!,$number:Int!,$after:String){"
-            "repository(owner:$owner,name:$name){pullRequest(number:$number){"
-            "id state headRefOid autoMergeRequest{enabledAt} reviews(first:100,after:$after){"
-            "pageInfo{hasNextPage endCursor} nodes{id state body viewerDidAuthor commit{oid}}}}}}"
-        )
-        expected_pr_id: str | None = None
-        pending_matches: list[tuple[str, str]] = []
-        commented_matches: list[tuple[str, str]] = []
-        stale_pending_ids: list[str] = []
-        pending_conflict_ids: list[str] = []
-        commented_conflict_ids: list[str] = []
-        seen_cursors: set[str] = set()
-        after: str | None = None
-        while True:
-            fields: dict[str, int | str] = {"number": pr_number}
-            if after is not None:
-                fields["after"] = after
-            data = self._graphql(query, **fields)
-            data_node = data.get("data") if isinstance(data, dict) else None
-            repository = data_node.get("repository") if isinstance(data_node, dict) else None
-            pull_request = repository.get("pullRequest") if isinstance(repository, dict) else None
-            if not isinstance(pull_request, dict):
-                return None
-            pr_id = pull_request.get("id")
-            if (
-                not isinstance(pr_id, str)
-                or not pr_id
-                or not self._pr_is_current_open_head(pull_request, expected_head_sha)
-            ):
-                return None
-            if expected_pr_id is None:
-                expected_pr_id = pr_id
-            elif expected_pr_id != pr_id:
-                return None
-            reviews = pull_request.get("reviews")
-            if not isinstance(reviews, dict) or not isinstance(reviews.get("nodes"), list):
-                return None
-            for review in reviews["nodes"]:
-                if not isinstance(review, dict):
-                    return None
-                review_id = review.get("id")
-                state = review.get("state")
-                body = review.get("body")
-                commit = review.get("commit")
-                commit_oid = commit.get("oid") if isinstance(commit, dict) else None
-                if not isinstance(review_id, str) or not review_id or not isinstance(state, str):
-                    return None
-                if review.get("viewerDidAuthor") is not True:
-                    if state == "PENDING":
-                        pending_conflict_ids.append(review_id)
-                    elif (
-                        state == "COMMENTED"
-                        and isinstance(commit_oid, str)
-                        and commit_oid == expected_head_sha
-                        and self._is_implementation_reply_review_body(body)
-                    ):
-                        commented_conflict_ids.append(review_id)
-                    continue
-                if state == "PENDING":
-                    if (
-                        body == review_body
-                        and isinstance(commit_oid, str)
-                        and commit_oid == expected_head_sha
-                    ):
-                        pending_matches.append((review_id, state))
-                    elif (
-                        body == review_body
-                        and isinstance(commit_oid, str)
-                        and re.fullmatch(r"[0-9a-f]{40}", commit_oid) is not None
-                        and commit_oid != expected_head_sha
-                    ):
-                        stale_pending_ids.append(review_id)
-                    else:
-                        pending_conflict_ids.append(review_id)
-                    continue
-                if body != review_body:
-                    if (
-                        state == "COMMENTED"
-                        and isinstance(commit_oid, str)
-                        and commit_oid == expected_head_sha
-                        and self._is_implementation_reply_review_body(body)
-                    ):
-                        commented_conflict_ids.append(review_id)
-                    continue
-                if (
-                    state == "COMMENTED"
-                    and isinstance(commit_oid, str)
-                    and re.fullmatch(r"[0-9a-f]{40}", commit_oid) is not None
-                    and commit_oid != expected_head_sha
-                ):
-                    # A submitted old-head batch is immutable history, not a
-                    # recoverable pending draft.  Keep inventorying so a
-                    # current incomplete review cannot be hidden behind it.
-                    continue
-                if (
-                    state != "COMMENTED"
-                    or not isinstance(commit_oid, str)
-                    or commit_oid != expected_head_sha
-                ):
-                    return None
-                commented_matches.append((review_id, state))
-            page_info = reviews.get("pageInfo")
-            if not isinstance(page_info, dict) or not isinstance(
-                page_info.get("hasNextPage"), bool
-            ):
-                return None
-            if not page_info["hasNextPage"]:
-                break
-            next_cursor = page_info.get("endCursor")
-            if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen_cursors:
-                return None
-            seen_cursors.add(next_cursor)
-            after = next_cursor
-        if expected_pr_id is None or len(commented_matches) > 1:
-            return None
-        if commented_matches:
-            # A completed batch remains durable proof even when a losing
-            # cross-checkout process left a current-head pending draft. The
-            # adapter never deletes that draft, but it must not force the
-            # already-submitted review back through a retry loop.
-            return (
-                expected_pr_id,
-                commented_matches[0],
-                tuple(sorted(set(stale_pending_ids))),
-                tuple(sorted(set(pending_conflict_ids))),
-                tuple(sorted(set(commented_conflict_ids))),
-            )
-        if len(pending_matches) > 1:
-            raise DuplicateImplementationReplyDraftsError(
-                tuple(sorted(review_id for review_id, _ in pending_matches))
-            )
-        return (
-            expected_pr_id,
-            pending_matches[0] if pending_matches else None,
-            tuple(sorted(set(stale_pending_ids))),
-            tuple(sorted(set(pending_conflict_ids))),
-            tuple(sorted(set(commented_conflict_ids))),
-        )
-
-    def _find_implementation_reply_review(
-        self, pr_number: int, expected_head_sha: str, review_body: str
-    ) -> tuple[str, tuple[str, str] | None] | None:
-        """Find the current actor's durable batch review for an exact PR head.
-
-        The pending review is the restart-safe receipt for an interrupted
-        implementation-reply pass.  A matching submitted review proves that a
-        prior call completed after its transport response was lost.
-        """
-        inventory = self._implementation_reply_review_inventory(
-            pr_number, expected_head_sha, review_body
-        )
-        if inventory is None:
-            return None
-        pr_id, review, stale_pending_ids, pending_conflict_ids, commented_conflict_ids = inventory
-        if stale_pending_ids or (
-            (pending_conflict_ids or commented_conflict_ids)
-            and (review is None or review[1] != "COMMENTED")
-        ):
-            return None
-        return pr_id, review
-
-    def _create_implementation_reply_review(
-        self, pr_id: str, expected_head_sha: str, review_body: str
-    ) -> str | None:
-        """Create one pending review that will own every implementation reply."""
-        query = (
-            "mutation($prId:ID!,$commitOid:GitObjectID!,$body:String!,$clientMutationId:String!){"
-            "addPullRequestReview(input:{pullRequestId:$prId,commitOID:$commitOid,body:$body,"
-            "clientMutationId:$clientMutationId}){pullRequestReview{id state body commit{oid}}}}"
-        )
-        data = self._graphql(
-            query,
-            prId=pr_id,
-            commitOid=expected_head_sha,
-            body=review_body,
-            clientMutationId=hashlib.sha256(review_body.encode("utf-8")).hexdigest(),
-        )
-        response_data = data.get("data") if isinstance(data, dict) else None
-        mutation = (
-            response_data.get("addPullRequestReview") if isinstance(response_data, dict) else None
-        )
-        review = mutation.get("pullRequestReview") if isinstance(mutation, dict) else None
-        commit = review.get("commit") if isinstance(review, dict) else None
-        if (
-            not isinstance(review, dict)
-            or not isinstance(review.get("id"), str)
-            or not review["id"]
-            or review.get("state") != "PENDING"
-            or review.get("body") != review_body
-            or not isinstance(commit, dict)
-            or commit.get("oid") != expected_head_sha
-        ):
-            return None
-        return str(review["id"])
-
-    def _submit_implementation_reply_review(
-        self, pr_id: str, review_id: str, review_body: str
-    ) -> bool:
-        """Submit the fully proven reply batch as one COMMENTED review."""
-        query = (
-            "mutation($prId:ID!,$reviewId:ID!,$body:String!,$clientMutationId:String!){"
-            "submitPullRequestReview(input:{pullRequestId:$prId,pullRequestReviewId:$reviewId,"
-            "event:COMMENT,body:$body,clientMutationId:$clientMutationId})"
-            "{pullRequestReview{id state body}}}"
-        )
-        data = self._graphql(
-            query,
-            prId=pr_id,
-            reviewId=review_id,
-            body=review_body,
-            clientMutationId=hashlib.sha256(
-                f"{review_id}:{review_body}:submit".encode()
-            ).hexdigest(),
-        )
-        response_data = data.get("data") if isinstance(data, dict) else None
-        mutation = (
-            response_data.get("submitPullRequestReview")
-            if isinstance(response_data, dict)
-            else None
-        )
-        review = mutation.get("pullRequestReview") if isinstance(mutation, dict) else None
-        return bool(
-            isinstance(review, dict)
-            and review.get("id") == review_id
-            and review.get("state") == "COMMENTED"
-            and review.get("body") == review_body
-        )
-
-    def _implementation_reply_review_state(
-        self, pr_number: int, expected_head_sha: str, review_body: str
-    ) -> tuple[str, tuple[str, str] | None, tuple[str, ...]] | None:
-        """Return the exact batch and every visible preserved-review conflict.
-
-        This accessor is intentionally read-only.  It never tries to recover
-        from an interrupted batch by deleting a draft, because GitHub's review
-        API supplies no compare-and-swap precondition for that mutation.
-        """
-        inventory = self._implementation_reply_review_inventory(
-            pr_number, expected_head_sha, review_body
-        )
-        if inventory is None:
-            return None
-        (
-            pr_id,
-            review,
-            stale_pending_ids,
-            pending_conflict_ids,
-            commented_conflict_ids,
-        ) = inventory
-        return (
-            pr_id,
-            review,
-            tuple(
-                sorted(
-                    set(stale_pending_ids).union(pending_conflict_ids).union(commented_conflict_ids)
-                )
-            ),
-        )
-
-    @staticmethod
-    def _final_comment_review_id(thread: dict[str, Any]) -> str | None:
-        """Return the review owning a complete thread's final comment."""
-        comments = thread.get("comments")
-        if not isinstance(comments, list) or not comments or not isinstance(comments[-1], dict):
-            return None
-        review_id = comments[-1].get("review_id")
-        return review_id if isinstance(review_id, str) and review_id else None
+        match = _IMPLEMENTATION_REPLY_BODY_RE.fullmatch(review_body)
+        return match.group(2) if match is not None else None
 
     def _validated_implementation_reply(
         self, pr_number: int, reviewed_head_sha: str, thread: dict[str, Any]
@@ -1312,21 +989,18 @@ class PipelineGitHub:
             or not isinstance(final_comment.get("review_id"), str)
             or not final_comment["review_id"]
             or final_comment.get("review_state") != "COMMENTED"
-            or not self._is_implementation_reply_review_body(final_comment.get("review_body"))
             or final_comment.get("review_commit_sha") != reviewed_head_sha
         ):
             return None
-        marker_match = re.fullmatch(
-            r"(?s)(.*)\n\n<!-- hephaestus-implementation-reply:[0-9a-f]{24} -->",
-            reply_body,
-        )
+        marker_match = _IMPLEMENTATION_REPLY_BODY_RE.fullmatch(reply_body)
         if marker_match is None:
             return None
         reply = self._safe_thread_reply(marker_match.group(1))
-        if reply is None:
+        batch_nonce = marker_match.group(2)
+        if reply is None or batch_nonce is None:
             return None
         expected_body = self._implementation_thread_reply_body(
-            pr_number, reviewed_head_sha, thread_id, reply
+            pr_number, reviewed_head_sha, thread_id, reply, batch_nonce
         )
         if reply_body != expected_body:
             return None
@@ -1340,13 +1014,11 @@ class PipelineGitHub:
     ) -> list[tuple[dict[str, Any], str, str]]:
         """Return one complete, submitted implementation reply batch.
 
-        A per-thread reply marker only establishes that one response is bound
-        to a thread and head.  It cannot establish that an implementation pass
-        used a single review.  Before the reviewer may act, every eligible
-        final reply must therefore belong to one submitted review whose
-        deterministic summary covers the complete live group.
+        A per-thread reply marker binds one response to a thread and head. The
+        shared CSPRNG batch nonce binds the complete implementation pass without
+        publishing an unanchored review-level summary.
         """
-        candidates: list[tuple[dict[str, Any], str, str, str, str]] = []
+        candidates: list[tuple[dict[str, Any], str, str, str]] = []
         seen_thread_ids: set[str] = set()
         for thread in threads:
             if not isinstance(thread, dict):
@@ -1367,32 +1039,18 @@ class PipelineGitHub:
                 or not isinstance(comments[-1], dict)
             ):
                 return []
-            review_id = comments[-1].get("review_id")
-            review_body = comments[-1].get("review_body")
-            if not isinstance(review_id, str) or not review_id or not isinstance(review_body, str):
+            reply_id, reply_body = implementation_reply
+            batch_nonce = self._implementation_reply_batch_nonce(reply_body)
+            if batch_nonce is None:
                 return []
             seen_thread_ids.add(thread_id)
-            reply_id, reply_body = implementation_reply
-            candidates.append((thread, reply_id, reply_body, review_id, review_body))
+            candidates.append((thread, reply_id, reply_body, batch_nonce))
         if not candidates:
             return []
-        review_ids = {candidate[3] for candidate in candidates}
-        review_bodies = {candidate[4] for candidate in candidates}
-        if len(review_ids) != 1 or len(review_bodies) != 1:
+        batch_nonces = {candidate[3] for candidate in candidates}
+        if len(batch_nonces) != 1:
             return []
-        review_body = review_bodies.pop()
-        batch_nonce = self._implementation_reply_batch_nonce(review_body)
-        if batch_nonce is None:
-            return []
-        expected_body = self._implementation_reply_review_body(
-            pr_number,
-            reviewed_head_sha,
-            {str(candidate[0]["id"]): candidate[2] for candidate in candidates},
-            batch_nonce,
-        )
-        if review_body != expected_body:
-            return []
-        return [(thread, reply_id, reply_body) for thread, reply_id, reply_body, _, _ in candidates]
+        return [(thread, reply_id, reply_body) for thread, reply_id, reply_body, _ in candidates]
 
     def reviewer_validation_receipts(
         self,
@@ -1450,37 +1108,23 @@ class PipelineGitHub:
             f"<!-- hephaestus-reviewer-validation:{marker} -->"
         )
 
-    def _add_thread_reply(
-        self, thread_id: str, body: str, *, review_id: str | None = None
-    ) -> str | None:
-        """Post one coordinator-owned reply and return its opaque comment ID.
+    def _add_thread_reply(self, thread_id: str, body: str) -> str | None:
+        """Post one response on an existing review thread.
 
-        Implementation replies supply a pending review id so GitHub associates
-        every reply from one implementation pass with the same review.  Fresh
-        reviewer feedback remains a standalone thread reply.
+        Both implementation receipts and fresh reviewer feedback use this one
+        mutation.  It intentionally cannot attach a reply to a review-level
+        envelope: every response is anchored by ``pullRequestReviewThreadId``.
         """
-        if review_id is None:
-            query = (
-                "mutation($threadId:ID!,$body:String!,$clientMutationId:String!){"
-                "addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId,body:$body,"
-                "clientMutationId:$clientMutationId}){comment{id}}}"
-            )
-        else:
-            query = (
-                "mutation($threadId:ID!,$reviewId:ID!,$body:String!,$clientMutationId:String!){"
-                "addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId,"
-                "pullRequestReviewId:$reviewId,body:$body,clientMutationId:$clientMutationId})"
-                "{comment{id}}}"
-            )
+        query = (
+            "mutation($threadId:ID!,$body:String!,$clientMutationId:String!){"
+            "addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId,body:$body,"
+            "clientMutationId:$clientMutationId}){comment{id}}}"
+        )
         mutation_fields: dict[str, str] = {
             "threadId": thread_id,
             "body": body,
-            "clientMutationId": hashlib.sha256(
-                f"{review_id or ''}:{thread_id}:{body}".encode()
-            ).hexdigest(),
+            "clientMutationId": hashlib.sha256(f"{thread_id}:{body}".encode()).hexdigest(),
         }
-        if review_id is not None:
-            mutation_fields["reviewId"] = review_id
         data = self._graphql(
             query,
             **mutation_fields,
@@ -1743,7 +1387,7 @@ class PipelineGitHub:
         compare-and-swap primitive.  Cooperating loop processes therefore
         hold one PR-scoped lock across discovery, draft creation, replies, and
         submission.  The adapter fails closed on platforms without an
-        exclusive lock instead of risking duplicate draft reviews.
+        exclusive lock instead of risking duplicate thread replies.
         """
         candidate_ids = tuple(sorted(str(thread_id) for thread_id in replies))
         if not isinstance(batch_nonce, str) or re.fullmatch(r"[0-9a-f]{32}", batch_nonce) is None:
@@ -1767,63 +1411,6 @@ class PipelineGitHub:
                 retryable_thread_ids=candidate_ids,
                 retryable=True,
             )
-
-    def preserve_stale_implementation_thread_reply_batch(
-        self,
-        pr_number: int,
-        *,
-        expected_head_sha: str,
-        current_head_sha: str,
-        replies: dict[str, str],
-        batch_nonce: str | None = None,
-    ) -> tuple[str, ...] | None:
-        """Return visible reviews preserved after an old-head handoff goes stale.
-
-        GitHub has no conditional review-delete mutation, so this recovery
-        hook is deliberately read-only.  The stage uses the returned IDs to
-        stop the work item and request manual cleanup before a fresh pass.
-        """
-        if self._skip(f"preserve stale implementation reply drafts on PR #{pr_number}"):
-            return ()
-        if (
-            not re.fullmatch(r"[0-9a-f]{40}", expected_head_sha)
-            or not re.fullmatch(r"[0-9a-f]{40}", current_head_sha)
-            or expected_head_sha == current_head_sha
-            or not replies
-            or not isinstance(batch_nonce, str)
-            or re.fullmatch(r"[0-9a-f]{32}", batch_nonce) is None
-        ):
-            return None
-        bodies: dict[str, str] = {}
-        for thread_id, reply in replies.items():
-            if not isinstance(thread_id, str) or not thread_id:
-                return None
-            safe_reply = self._safe_thread_reply(reply)
-            if safe_reply is None:
-                return None
-            bodies[thread_id] = self._implementation_thread_reply_body(
-                pr_number, expected_head_sha, thread_id, safe_reply
-            )
-        review_body = self._implementation_reply_review_body(
-            pr_number, expected_head_sha, bodies, batch_nonce
-        )
-        try:
-            with file_lock(self._implementation_reply_lock_path(pr_number), require_exclusive=True):
-                state = self._implementation_reply_review_state(
-                    pr_number, current_head_sha, review_body
-                )
-        except (LockUnavailableError, OSError) as error:
-            logger.warning(
-                "Stale implementation reply draft lock failed on PR #%s: %s", pr_number, error
-            )
-            return None
-        if state is None:
-            return None
-        _pr_id, review, conflict_ids = state
-        preserved = set(conflict_ids)
-        if review is not None and review[1] == "PENDING":
-            preserved.add(review[0])
-        return tuple(sorted(preserved))
 
     def _post_implementation_thread_replies_locked(  # noqa: C901
         self,
@@ -1869,7 +1456,6 @@ class PipelineGitHub:
 
         prepared: list[tuple[str, dict[str, Any], str]] = []
         recovered: dict[str, dict[str, Any]] = {}
-        reply_bodies: dict[str, str] = {}
         try:
             for thread_id in candidate_ids:
                 reply = self._safe_thread_reply(replies.get(thread_id))
@@ -1878,9 +1464,8 @@ class PipelineGitHub:
                     blocked.append(thread_id)
                     continue
                 body = self._implementation_thread_reply_body(
-                    pr_number, expected_head_sha, thread_id, reply
+                    pr_number, expected_head_sha, thread_id, reply, batch_nonce
                 )
-                reply_bodies[thread_id] = body
                 live = self._review_thread_snapshot(pr_number, thread_id)
                 if (
                     not isinstance(live, dict)
@@ -1901,139 +1486,12 @@ class PipelineGitHub:
                     continue
                 prepared.append((thread_id, snapshot, body))
 
-            review_body = (
-                self._implementation_reply_review_body(
-                    pr_number, expected_head_sha, reply_bodies, batch_nonce
-                )
-                if len(reply_bodies) == len(candidate_ids)
-                else None
-            )
-            current_batch = (
-                self._implementation_reply_review_state(pr_number, expected_head_sha, review_body)
-                if review_body is not None
-                else None
-            )
-            if review_body is None or current_batch is None:
-                return ImplementationThreadReplyResult(
-                    retryable_thread_ids=candidate_ids,
-                    retryable=True,
-                )
-            pr_id, existing_review, conflicting_review_ids = current_batch
-            if conflicting_review_ids and (
-                existing_review is None or existing_review[1] != "COMMENTED"
-            ):
-                # A blocked target must not trigger cleanup once a competing
-                # current review exists: GitHub cannot conditionally delete
-                # this draft, and the competing actor may still append to it.
-                # Include the local pending draft so operators can identify
-                # every review preserved by the terminal conflict.
-                reported_conflict_ids = set(conflicting_review_ids)
-                if existing_review is not None and existing_review[1] == "PENDING":
-                    reported_conflict_ids.add(existing_review[0])
-                return ImplementationThreadReplyResult(
-                    blocked_thread_ids=candidate_ids,
-                    conflicting_current_review_ids=tuple(sorted(reported_conflict_ids)),
-                )
             if blocked:
-                # A PENDING review is not a receipt.  Preserve it for manual
-                # cleanup instead of deleting it: GitHub cannot prove that a
-                # concurrent writer has not appended content after inventory.
-                if existing_review is not None and existing_review[1] == "PENDING":
-                    return ImplementationThreadReplyResult(
-                        blocked_thread_ids=candidate_ids,
-                        conflicting_current_review_ids=(existing_review[0],),
-                    )
                 return ImplementationThreadReplyResult(
                     blocked_thread_ids=tuple(sorted(blocked)),
                 )
-            if existing_review is None:
-                # A reply from an old per-comment review is not a successful
-                # batch receipt.  A fresh review pass must establish a
-                # coherent current handoff without retrying this stale one.
-                if recovered:
-                    return ImplementationThreadReplyResult(
-                        blocked_thread_ids=candidate_ids,
-                    )
-                review_id = self._create_implementation_reply_review(
-                    pr_id, expected_head_sha, review_body
-                )
-                if review_id is None:
-                    return ImplementationThreadReplyResult(
-                        retryable_thread_ids=candidate_ids,
-                        retryable=True,
-                    )
-                review_state = "PENDING"
-                post_create_batch = self._implementation_reply_review_inventory(
-                    pr_number, expected_head_sha, review_body
-                )
-                if post_create_batch is None:
-                    return ImplementationThreadReplyResult(
-                        retryable_thread_ids=candidate_ids,
-                        retryable=True,
-                    )
-                (
-                    confirmed_pr_id,
-                    post_create_review,
-                    _stale_pending_ids,
-                    post_create_pending_conflicts,
-                    post_create_commented_conflicts,
-                ) = post_create_batch
-                post_create_conflicts = tuple(
-                    sorted(
-                        set(post_create_pending_conflicts).union(post_create_commented_conflicts)
-                    )
-                )
-                if post_create_conflicts:
-                    if confirmed_pr_id != pr_id or post_create_review != (review_id, "PENDING"):
-                        return ImplementationThreadReplyResult(
-                            retryable_thread_ids=candidate_ids,
-                            retryable=True,
-                        )
-                    # GitHub exposes no compare-and-swap delete. A competing
-                    # actor could attach a reply after this inventory, so a
-                    # conflict must preserve every draft. Include this
-                    # operation's otherwise-empty review in the diagnostic
-                    # rather than deleting it on stale ownership evidence.
-                    return ImplementationThreadReplyResult(
-                        blocked_thread_ids=candidate_ids,
-                        conflicting_current_review_ids=tuple(
-                            sorted(set(post_create_conflicts).union({review_id}))
-                        ),
-                    )
-                if post_create_review != (review_id, "PENDING") or confirmed_pr_id != pr_id:
-                    return ImplementationThreadReplyResult(
-                        retryable_thread_ids=candidate_ids,
-                        retryable=True,
-                    )
-            else:
-                review_id, review_state = existing_review
-
-            recovered_review_ids = {
-                self._final_comment_review_id(recovered[thread_id]) for thread_id in recovered
-            }
-            if recovered_review_ids and recovered_review_ids != {review_id}:
-                return ImplementationThreadReplyResult(
-                    retryable_thread_ids=candidate_ids,
-                    retryable=True,
-                )
-            if review_state == "COMMENTED":
-                if not prepared and len(recovered) == len(candidate_ids):
-                    return ImplementationThreadReplyResult(
-                        replied_thread_ids=candidate_ids,
-                        receipts=tuple(recovered[thread_id] for thread_id in candidate_ids),
-                    )
-                return ImplementationThreadReplyResult(
-                    retryable_thread_ids=candidate_ids,
-                    retryable=True,
-                )
-            if review_state != "PENDING":
-                return ImplementationThreadReplyResult(
-                    retryable_thread_ids=candidate_ids,
-                    retryable=True,
-                )
-
             for thread_id, snapshot, body in prepared:
-                comment_id = self._add_thread_reply(thread_id, body, review_id=review_id)
+                comment_id = self._add_thread_reply(thread_id, body)
                 replied_live = self._review_thread_snapshot(pr_number, thread_id)
                 if (
                     not isinstance(replied_live, dict)
@@ -2051,7 +1509,6 @@ class PipelineGitHub:
                     replied_live,
                     body,
                     comment_id,
-                    expected_review_id=review_id,
                 )
                 if proved_comment_id is None:
                     return ImplementationThreadReplyResult(
@@ -2059,29 +1516,6 @@ class PipelineGitHub:
                         retryable=True,
                     )
                 recovered[thread_id] = receipt(replied_live, proved_comment_id, body)
-
-            confirmed_review = self._find_implementation_reply_review(
-                pr_number, expected_head_sha, review_body
-            )
-            if (
-                len(recovered) != len(candidate_ids)
-                or confirmed_review != (pr_id, (review_id, "PENDING"))
-                or not self._submit_implementation_reply_review(pr_id, review_id, review_body)
-            ):
-                return ImplementationThreadReplyResult(
-                    retryable_thread_ids=candidate_ids,
-                    retryable=True,
-                )
-        except DuplicateImplementationReplyDraftsError as error:
-            logger.error(
-                "Implementation reply batch on PR #%s stopped: duplicate current drafts %s",
-                pr_number,
-                ", ".join(error.review_ids),
-            )
-            return ImplementationThreadReplyResult(
-                blocked_thread_ids=candidate_ids,
-                duplicate_current_draft_ids=error.review_ids,
-            )
         except (
             AttributeError,
             OSError,

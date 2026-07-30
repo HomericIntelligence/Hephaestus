@@ -135,10 +135,9 @@ class ImplementationThreadReplyResult:
     GitHub object. ``retryable_thread_ids`` identifies only replies whose host
     outcome is transport/read-ambiguous. An ordinary ``blocked_thread_ids``
     result means the saved snapshot is stale and must return through a fresh
-    reviewer pass rather than replay. ``duplicate_current_draft_ids`` and
-    ``conflicting_current_review_ids`` are terminal ownership conflicts; no
-    current review is mutated and the stage records a durable no-go diagnostic
-    instead of retrying into its handoff cap.
+    reviewer pass rather than replay. Direct thread replies never create a
+    review-level envelope, so there is no review ownership conflict state to
+    recover or preserve.
     """
 
     replied_thread_ids: tuple[str, ...] = ()
@@ -146,8 +145,6 @@ class ImplementationThreadReplyResult:
     receipts: tuple[dict[str, Any], ...] = ()
     retryable_thread_ids: tuple[str, ...] = ()
     retryable: bool = False
-    duplicate_current_draft_ids: tuple[str, ...] = ()
-    conflicting_current_review_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -303,24 +300,6 @@ class StageGitHub(Protocol):
         thread.
         """
         ...
-
-    def preserve_stale_implementation_thread_reply_batch(
-        self,
-        pr_number: int,
-        *,
-        expected_head_sha: str,
-        current_head_sha: str,
-        replies: dict[str, str],
-        batch_nonce: str,
-    ) -> tuple[str, ...] | None:
-        """Return visible drafts preserved after an implementation handoff goes stale.
-
-        GitHub exposes no conditional review-delete mutation, so stale-draft
-        recovery is deliberately non-mutating.  The returned opaque review
-        IDs let the stage publish an idempotent manual-cleanup diagnostic;
-        ``None`` means the inventory could not be proved.
-        """
-        pass
 
     def reviewer_validation_receipts(
         self,

@@ -41,14 +41,17 @@ _BATCH_NONCE = "b" * 32
 class PipelineGitHubForTest(pg.PipelineGitHub):
     """Production adapter with an explicit test-only operation nonce default."""
 
-    def _implementation_reply_review_body(
+    def _implementation_thread_reply_body(
         self,
         pr_number: int,
         head_sha: str,
-        replies: dict[str, str],
-        batch_nonce: str | None = _BATCH_NONCE,
+        thread_id: str,
+        reply: str,
+        batch_nonce: str = _BATCH_NONCE,
     ) -> str:
-        return super()._implementation_reply_review_body(pr_number, head_sha, replies, batch_nonce)
+        return super()._implementation_thread_reply_body(
+            pr_number, head_sha, thread_id, reply, batch_nonce
+        )
 
     def post_implementation_thread_replies(
         self,
@@ -63,23 +66,6 @@ class PipelineGitHubForTest(pg.PipelineGitHub):
             pr_number,
             expected_head_sha=expected_head_sha,
             threads=threads,
-            replies=replies,
-            batch_nonce=batch_nonce,
-        )
-
-    def preserve_stale_implementation_thread_reply_batch(
-        self,
-        pr_number: int,
-        *,
-        expected_head_sha: str,
-        current_head_sha: str,
-        replies: dict[str, str],
-        batch_nonce: str | None = _BATCH_NONCE,
-    ) -> tuple[str, ...] | None:
-        return super().preserve_stale_implementation_thread_reply_batch(
-            pr_number,
-            expected_head_sha=expected_head_sha,
-            current_head_sha=current_head_sha,
             replies=replies,
             batch_nonce=batch_nonce,
         )
@@ -185,9 +171,10 @@ def _submitted_implementation_receipt(
     *,
     head_sha: str = "a" * 40,
 ) -> dict[str, Any]:
-    """Return a complete host snapshot for one submitted implementation batch."""
-    reply_body = adapter._implementation_thread_reply_body(7, head_sha, thread["id"], reply)
-    review_body = adapter._implementation_reply_review_body(7, head_sha, {thread["id"]: reply_body})
+    """Return a complete host snapshot for one source-attached reply."""
+    reply_body = adapter._implementation_thread_reply_body(
+        7, head_sha, thread["id"], reply, _BATCH_NONCE
+    )
     return {
         **thread,
         "comments": [
@@ -199,7 +186,6 @@ def _submitted_implementation_receipt(
                 "viewer_did_author": True,
                 "review_id": "implementation-review",
                 "review_state": "COMMENTED",
-                "review_body": review_body,
                 "review_commit_sha": head_sha,
             },
         ],
@@ -212,72 +198,75 @@ def _submitted_implementation_receipt(
 class TestAllThreadReplyAndReviewerResolution:
     """The implementation/reviewer split applies to every open thread author."""
 
-    def test_implementation_replies_share_one_submitted_review(
+    def test_implementation_responses_use_only_thread_reply_mutations(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """One implementation pass submits every thread reply in one review."""
+        """Implementation output has no general PullRequestReview body."""
+        thread = _external_reviewer_thread("thread-one")
+        live = thread
+        queries: list[str] = []
+
+        def snapshot(_pr: int, _thread_id: str) -> dict[str, Any]:
+            return _open_thread_snapshot(live)
+
+        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+            nonlocal live
+            queries.append(query)
+            if "addPullRequestReviewThreadReply" not in query:
+                raise AssertionError(f"unexpected review-envelope mutation: {query}")
+            assert "pullRequestReviewId" not in query
+            body = str(fields["body"])
+            live = {
+                **live,
+                "comments": [
+                    *live["comments"],
+                    {
+                        "id": "implementation-comment",
+                        "author": "hephaestus[bot]",
+                        "body": body,
+                        "viewer_did_author": True,
+                    },
+                ],
+            }
+            return {
+                "data": {
+                    "addPullRequestReviewThreadReply": {"comment": {"id": "implementation-comment"}}
+                }
+            }
+
+        monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+
+        result = adapter.post_implementation_thread_replies(
+            7,
+            expected_head_sha="a" * 40,
+            threads=[thread],
+            replies={thread["id"]: "Fixed the missing guard."},
+            batch_nonce="b" * 32,
+        )
+
+        assert result.replied_thread_ids == (thread["id"],)
+        assert len(result.receipts) == 1
+        assert len(queries) == 1
+
+    def test_implementation_replies_share_one_source_attached_batch(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One implementation pass attaches every response to its own thread."""
         first = _external_reviewer_thread("thread-one")
         second = _external_reviewer_thread("thread-two")
         live_by_id = {first["id"]: first, second["id"]: second}
-        review_ids: list[str] = []
-        reply_review_ids: list[str] = []
-        submitted_review_ids: list[str] = []
-        review_body = ""
+        reply_bodies: list[str] = []
 
         def snapshot(_pr: int, thread_id: str) -> dict[str, Any]:
             return _open_thread_snapshot(live_by_id[thread_id])
 
         def graphql(query: str, **fields: str | int) -> dict[str, Any]:
-            nonlocal review_body
-            if "reviews(first:100" in query:
-                return {
-                    "data": {
-                        "repository": {
-                            "pullRequest": {
-                                "id": "pr-7",
-                                "state": "OPEN",
-                                "headRefOid": "a" * 40,
-                                "autoMergeRequest": None,
-                                "reviews": {
-                                    "pageInfo": {"hasNextPage": False, "endCursor": None},
-                                    "nodes": (
-                                        [
-                                            {
-                                                "id": "implementation-review",
-                                                "state": "PENDING",
-                                                "body": review_body,
-                                                "viewerDidAuthor": True,
-                                                "commit": {"oid": "a" * 40},
-                                            }
-                                        ]
-                                        if review_body
-                                        else []
-                                    ),
-                                },
-                            }
-                        }
-                    }
-                }
-            if "addPullRequestReview(input" in query:
-                review_ids.append("implementation-review")
-                review_body = str(fields["body"])
-                return {
-                    "data": {
-                        "addPullRequestReview": {
-                            "pullRequestReview": {
-                                "id": "implementation-review",
-                                "state": "PENDING",
-                                "body": review_body,
-                                "commit": {"oid": "a" * 40},
-                            }
-                        }
-                    }
-                }
             if "addPullRequestReviewThreadReply" in query:
-                assert "pullRequestReviewId:$reviewId" in query
+                assert "pullRequestReviewId" not in query
+                assert "reviewId" not in fields
                 thread_id = str(fields["threadId"])
-                review_id = str(fields["reviewId"])
-                reply_review_ids.append(review_id)
+                reply_bodies.append(str(fields["body"]))
                 comment_id = f"implementation-{thread_id}"
                 live_by_id[thread_id] = {
                     **live_by_id[thread_id],
@@ -288,25 +277,15 @@ class TestAllThreadReplyAndReviewerResolution:
                             "author": "hephaestus[bot]",
                             "body": fields["body"],
                             "viewer_did_author": True,
-                            "review_id": review_id,
+                            "review_id": "implementation-review",
+                            "review_state": "COMMENTED",
+                            "review_body": "",
+                            "review_commit_sha": "a" * 40,
                         },
                     ],
                 }
                 return {
                     "data": {"addPullRequestReviewThreadReply": {"comment": {"id": comment_id}}}
-                }
-            if "submitPullRequestReview" in query:
-                submitted_review_ids.append(str(fields["reviewId"]))
-                return {
-                    "data": {
-                        "submitPullRequestReview": {
-                            "pullRequestReview": {
-                                "id": fields["reviewId"],
-                                "state": "COMMENTED",
-                                "body": fields["body"],
-                            }
-                        }
-                    }
                 }
             raise AssertionError(query)
 
@@ -324,82 +303,30 @@ class TestAllThreadReplyAndReviewerResolution:
         )
 
         assert result.replied_thread_ids == (first["id"], second["id"])
-        assert review_ids == ["implementation-review"]
-        assert reply_review_ids == ["implementation-review", "implementation-review"]
-        assert submitted_review_ids == ["implementation-review"]
+        assert len(reply_bodies) == 2
+        assert {adapter._implementation_reply_batch_nonce(body) for body in reply_bodies} == {
+            _BATCH_NONCE
+        }
 
-    def test_reply_batch_retry_reuses_pending_review_and_adds_only_missing_replies(
+    def test_reply_batch_retry_recovers_attached_replies_and_adds_only_missing_one(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A failed batch resumes the same draft review without duplicate replies."""
+        """A retry recognizes its source-attached reply before posting again."""
         first = _external_reviewer_thread("thread-one")
         second = _external_reviewer_thread("thread-two")
         live_by_id = {first["id"]: first, second["id"]: second}
-        review_body = ""
-        created_review_ids: list[str] = []
-        reply_calls: list[tuple[str, str]] = []
-        submit_calls: list[str] = []
+        reply_calls: list[str] = []
 
         def snapshot(_pr: int, thread_id: str) -> dict[str, Any]:
             return _open_thread_snapshot(live_by_id[thread_id])
 
         def graphql(query: str, **fields: str | int) -> dict[str, Any]:
-            nonlocal review_body
-            if "reviews(first:100" in query:
-                nodes = (
-                    [
-                        {
-                            "id": "implementation-review",
-                            "state": "PENDING",
-                            "body": review_body,
-                            "viewerDidAuthor": True,
-                            "commit": {"oid": "a" * 40},
-                        }
-                    ]
-                    if created_review_ids
-                    else []
-                )
-                return {
-                    "data": {
-                        "repository": {
-                            "pullRequest": {
-                                "id": "pr-7",
-                                "state": "OPEN",
-                                "headRefOid": "a" * 40,
-                                "autoMergeRequest": None,
-                                "reviews": {
-                                    "pageInfo": {"hasNextPage": False, "endCursor": None},
-                                    "nodes": nodes,
-                                },
-                            }
-                        }
-                    }
-                }
-            if "addPullRequestReview(input" in query:
-                assert not created_review_ids
-                created_review_ids.append("implementation-review")
-                review_body = str(fields["body"])
-                return {
-                    "data": {
-                        "addPullRequestReview": {
-                            "pullRequestReview": {
-                                "id": "implementation-review",
-                                "state": "PENDING",
-                                "body": review_body,
-                                "commit": {"oid": "a" * 40},
-                            }
-                        }
-                    }
-                }
             if "addPullRequestReviewThreadReply" in query:
-                assert "pullRequestReviewId:$reviewId" in query
+                assert "pullRequestReviewId" not in query
+                assert "reviewId" not in fields
                 thread_id = str(fields["threadId"])
-                review_id = str(fields["reviewId"])
-                reply_calls.append((thread_id, review_id))
-                if (
-                    thread_id == second["id"]
-                    and [call[0] for call in reply_calls].count(thread_id) == 1
-                ):
+                reply_calls.append(thread_id)
+                if thread_id == second["id"] and reply_calls.count(thread_id) == 1:
                     raise OSError("transient GitHub reply failure")
                 comment_id = f"implementation-{thread_id}"
                 live_by_id[thread_id] = {
@@ -411,25 +338,15 @@ class TestAllThreadReplyAndReviewerResolution:
                             "author": "hephaestus[bot]",
                             "body": fields["body"],
                             "viewer_did_author": True,
-                            "review_id": review_id,
+                            "review_id": "implementation-review",
+                            "review_state": "COMMENTED",
+                            "review_body": "",
+                            "review_commit_sha": "a" * 40,
                         },
                     ],
                 }
                 return {
                     "data": {"addPullRequestReviewThreadReply": {"comment": {"id": comment_id}}}
-                }
-            if "submitPullRequestReview" in query:
-                submit_calls.append(str(fields["reviewId"]))
-                return {
-                    "data": {
-                        "submitPullRequestReview": {
-                            "pullRequestReview": {
-                                "id": fields["reviewId"],
-                                "state": "COMMENTED",
-                                "body": fields["body"],
-                            }
-                        }
-                    }
                 }
             raise AssertionError(query)
 
@@ -456,88 +373,27 @@ class TestAllThreadReplyAndReviewerResolution:
         assert failed.replied_thread_ids == ()
         assert failed.retryable_thread_ids == (first["id"], second["id"])
         assert retried.replied_thread_ids == (first["id"], second["id"])
-        assert created_review_ids == ["implementation-review"]
-        assert reply_calls == [
-            (first["id"], "implementation-review"),
-            (second["id"], "implementation-review"),
-            (second["id"], "implementation-review"),
-        ]
-        assert submit_calls == ["implementation-review"]
+        assert reply_calls == [first["id"], second["id"], second["id"]]
 
-    @pytest.mark.parametrize("lost_response", ["create", "submit"])
-    def test_reply_batch_recovers_after_a_lost_create_or_submit_response(
+    def test_reply_batch_recovers_after_a_lost_thread_reply_response(
         self,
         adapter: pg.PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
-        lost_response: str,
     ) -> None:
-        """A mutation may apply before its response is lost without replaying it."""
+        """A direct reply may apply before its response is lost without replaying it."""
         first = _external_reviewer_thread("thread-one")
         second = _external_reviewer_thread("thread-two")
         live_by_id = {first["id"]: first, second["id"]: second}
-        review_body = ""
-        review_state: str | None = None
-        created_review_ids: list[str] = []
-        reply_calls: list[tuple[str, str]] = []
-        submit_calls: list[str] = []
+        reply_calls: list[str] = []
 
         def snapshot(_pr: int, thread_id: str) -> dict[str, Any]:
             return _open_thread_snapshot(live_by_id[thread_id])
 
         def graphql(query: str, **fields: str | int) -> dict[str, Any]:
-            nonlocal review_body, review_state
-            if "reviews(first:100" in query:
-                nodes = (
-                    [
-                        {
-                            "id": "implementation-review",
-                            "state": review_state,
-                            "body": review_body,
-                            "viewerDidAuthor": True,
-                            "commit": {"oid": "a" * 40},
-                        }
-                    ]
-                    if review_state is not None
-                    else []
-                )
-                return {
-                    "data": {
-                        "repository": {
-                            "pullRequest": {
-                                "id": "pr-7",
-                                "state": "OPEN",
-                                "headRefOid": "a" * 40,
-                                "autoMergeRequest": None,
-                                "reviews": {
-                                    "pageInfo": {"hasNextPage": False, "endCursor": None},
-                                    "nodes": nodes,
-                                },
-                            }
-                        }
-                    }
-                }
-            if "addPullRequestReview(input" in query:
-                created_review_ids.append("implementation-review")
-                review_body = str(fields["body"])
-                review_state = "PENDING"
-                review = {
-                    "id": "implementation-review",
-                    "state": "PENDING",
-                    "body": review_body,
-                    "commit": {"oid": "a" * 40},
-                }
-                return {
-                    "data": {
-                        "addPullRequestReview": {
-                            "pullRequestReview": None if lost_response == "create" else review
-                        }
-                    }
-                }
             if "addPullRequestReviewThreadReply" in query:
-                assert "pullRequestReviewId:$reviewId" in query
+                assert "pullRequestReviewId" not in query
                 thread_id = str(fields["threadId"])
-                review_id = str(fields["reviewId"])
-                reply_calls.append((thread_id, review_id))
+                reply_calls.append(thread_id)
                 comment_id = f"implementation-{thread_id}"
                 live_by_id[thread_id] = {
                     **live_by_id[thread_id],
@@ -548,28 +404,14 @@ class TestAllThreadReplyAndReviewerResolution:
                             "author": "hephaestus[bot]",
                             "body": fields["body"],
                             "viewer_did_author": True,
-                            "review_id": review_id,
+                            "review_id": "implementation-review",
+                            "review_state": "COMMENTED",
+                            "review_body": "",
+                            "review_commit_sha": "a" * 40,
                         },
                     ],
                 }
-                return {
-                    "data": {"addPullRequestReviewThreadReply": {"comment": {"id": comment_id}}}
-                }
-            if "submitPullRequestReview" in query:
-                submit_calls.append(str(fields["reviewId"]))
-                review_state = "COMMENTED"
-                review = {
-                    "id": str(fields["reviewId"]),
-                    "state": "COMMENTED",
-                    "body": str(fields["body"]),
-                }
-                return {
-                    "data": {
-                        "submitPullRequestReview": {
-                            "pullRequestReview": None if lost_response == "submit" else review
-                        }
-                    }
-                }
+                return {"data": {"addPullRequestReviewThreadReply": None}}
             raise AssertionError(query)
 
         monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
@@ -592,81 +434,28 @@ class TestAllThreadReplyAndReviewerResolution:
             replies=replies,
         )
 
-        assert first_attempt.retryable is True
+        assert first_attempt.replied_thread_ids == (first["id"], second["id"])
         assert second_attempt.replied_thread_ids == (first["id"], second["id"])
-        assert created_review_ids == ["implementation-review"]
-        assert reply_calls == [
-            (first["id"], "implementation-review"),
-            (second["id"], "implementation-review"),
-        ]
-        assert submit_calls == ["implementation-review"]
+        assert reply_calls == [first["id"], second["id"]]
 
-    def test_parallel_reply_batches_share_one_draft_review(
+    def test_parallel_reply_batches_recover_one_attached_reply_per_thread(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The PR-scoped lock prevents two local loops creating competing drafts."""
+        """The PR-scoped lock prevents two local loops duplicating thread replies."""
         first = _external_reviewer_thread("thread-one")
         second = _external_reviewer_thread("thread-two")
         live_by_id = {first["id"]: first, second["id"]: second}
-        review_body = ""
-        review_state: str | None = None
-        create_calls: list[str] = []
+        reply_calls: list[str] = []
 
         def snapshot(_pr: int, thread_id: str) -> dict[str, Any]:
             return _open_thread_snapshot(live_by_id[thread_id])
 
         def graphql(query: str, **fields: str | int) -> dict[str, Any]:
-            nonlocal review_body, review_state
-            if "reviews(first:100" in query:
-                nodes = (
-                    [
-                        {
-                            "id": "implementation-review",
-                            "state": review_state,
-                            "body": review_body,
-                            "viewerDidAuthor": True,
-                            "commit": {"oid": "a" * 40},
-                        }
-                    ]
-                    if review_state is not None
-                    else []
-                )
-                return {
-                    "data": {
-                        "repository": {
-                            "pullRequest": {
-                                "id": "pr-7",
-                                "state": "OPEN",
-                                "headRefOid": "a" * 40,
-                                "autoMergeRequest": None,
-                                "reviews": {
-                                    "pageInfo": {"hasNextPage": False, "endCursor": None},
-                                    "nodes": nodes,
-                                },
-                            }
-                        }
-                    }
-                }
-            if "addPullRequestReview(input" in query:
-                create_calls.append(str(fields["body"]))
-                review_body = str(fields["body"])
-                review_state = "PENDING"
-                sleep(0.05)
-                return {
-                    "data": {
-                        "addPullRequestReview": {
-                            "pullRequestReview": {
-                                "id": "implementation-review",
-                                "state": "PENDING",
-                                "body": review_body,
-                                "commit": {"oid": "a" * 40},
-                            }
-                        }
-                    }
-                }
             if "addPullRequestReviewThreadReply" in query:
-                assert "pullRequestReviewId:$reviewId" in query
+                assert "pullRequestReviewId" not in query
                 thread_id = str(fields["threadId"])
+                reply_calls.append(thread_id)
+                sleep(0.05)
                 comment_id = f"implementation-{thread_id}"
                 live_by_id[thread_id] = {
                     **live_by_id[thread_id],
@@ -677,25 +466,15 @@ class TestAllThreadReplyAndReviewerResolution:
                             "author": "hephaestus[bot]",
                             "body": fields["body"],
                             "viewer_did_author": True,
-                            "review_id": fields["reviewId"],
+                            "review_id": "implementation-review",
+                            "review_state": "COMMENTED",
+                            "review_body": "",
+                            "review_commit_sha": "a" * 40,
                         },
                     ],
                 }
                 return {
                     "data": {"addPullRequestReviewThreadReply": {"comment": {"id": comment_id}}}
-                }
-            if "submitPullRequestReview" in query:
-                review_state = "COMMENTED"
-                return {
-                    "data": {
-                        "submitPullRequestReview": {
-                            "pullRequestReview": {
-                                "id": fields["reviewId"],
-                                "state": "COMMENTED",
-                                "body": fields["body"],
-                            }
-                        }
-                    }
                 }
             raise AssertionError(query)
 
@@ -723,787 +502,7 @@ class TestAllThreadReplyAndReviewerResolution:
             (first["id"], second["id"]),
             (first["id"], second["id"]),
         ]
-        assert len(create_calls) == 1
-
-    def test_cross_checkout_duplicate_current_drafts_stop_without_mutation(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Independent lock roots do not retry or delete ambiguous current drafts."""
-        thread = _external_reviewer_thread()
-        reply = "Fixed the missing guard."
-        head_sha = "a" * 40
-        first_adapter = PipelineGitHubForTest("org", dry_run=False, repo_root=tmp_path / "one")
-        second_adapter = PipelineGitHubForTest("org", dry_run=False, repo_root=tmp_path / "two")
-        review_body = first_adapter._implementation_reply_review_body(
-            7,
-            head_sha,
-            {
-                thread["id"]: first_adapter._implementation_thread_reply_body(
-                    7, head_sha, thread["id"], reply
-                )
-            },
-        )
-
-        def graphql(query: str, **_fields: str | int) -> dict[str, Any]:
-            if "reviews(first:100" not in query:
-                pytest.fail(f"duplicate-draft conflict must not mutate: {query}")
-            return {
-                "data": {
-                    "repository": {
-                        "pullRequest": {
-                            "id": "pr-7",
-                            "state": "OPEN",
-                            "headRefOid": head_sha,
-                            "autoMergeRequest": None,
-                            "reviews": {
-                                "pageInfo": {"hasNextPage": False, "endCursor": None},
-                                "nodes": [
-                                    {
-                                        "id": "draft-one",
-                                        "state": "PENDING",
-                                        "body": review_body,
-                                        "viewerDidAuthor": True,
-                                        "commit": {"oid": head_sha},
-                                    },
-                                    {
-                                        "id": "draft-two",
-                                        "state": "PENDING",
-                                        "body": review_body,
-                                        "viewerDidAuthor": True,
-                                        "commit": {"oid": head_sha},
-                                    },
-                                ],
-                            },
-                        }
-                    }
-                }
-            }
-
-        for current in (first_adapter, second_adapter):
-            monkeypatch.setattr(
-                current,
-                "_review_thread_snapshot",
-                lambda _pr, _thread: _open_thread_snapshot(thread),
-            )
-            monkeypatch.setattr(current, "_graphql", graphql)
-
-        results = [
-            current.post_implementation_thread_replies(
-                7,
-                expected_head_sha=head_sha,
-                threads=[thread],
-                replies={thread["id"]: reply},
-            )
-            for current in (first_adapter, second_adapter)
-        ]
-
-        assert [result.duplicate_current_draft_ids for result in results] == [
-            ("draft-one", "draft-two"),
-            ("draft-one", "draft-two"),
-        ]
-        assert all(result.retryable is False for result in results)
-        assert all(result.blocked_thread_ids == (thread["id"],) for result in results)
-
-    def test_cross_checkout_foreign_nonce_draft_stops_without_mutation(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A different work item cannot reuse a pending draft from another checkout."""
-        thread = _external_reviewer_thread()
-        reply = "Fixed the missing guard."
-        head_sha = "a" * 40
-        adapter = PipelineGitHubForTest("org", dry_run=False, repo_root=tmp_path / "two")
-        foreign_body = adapter._implementation_reply_review_body(
-            7,
-            head_sha,
-            {
-                thread["id"]: adapter._implementation_thread_reply_body(
-                    7, head_sha, thread["id"], reply
-                )
-            },
-            "c" * 32,
-        )
-
-        def graphql(query: str, **_fields: str | int) -> dict[str, Any]:
-            if "reviews(first:100" not in query:
-                pytest.fail(f"foreign pending draft must not mutate: {query}")
-            return {
-                "data": {
-                    "repository": {
-                        "pullRequest": {
-                            "id": "pr-7",
-                            "state": "OPEN",
-                            "headRefOid": head_sha,
-                            "autoMergeRequest": None,
-                            "reviews": {
-                                "pageInfo": {"hasNextPage": False, "endCursor": None},
-                                "nodes": [
-                                    {
-                                        "id": "foreign-pending-draft",
-                                        "state": "PENDING",
-                                        "body": foreign_body,
-                                        "viewerDidAuthor": True,
-                                        "commit": {"oid": head_sha},
-                                    }
-                                ],
-                            },
-                        }
-                    }
-                }
-            }
-
-        monkeypatch.setattr(
-            adapter,
-            "_review_thread_snapshot",
-            lambda _pr, _thread: _open_thread_snapshot(thread),
-        )
-        monkeypatch.setattr(adapter, "_graphql", graphql)
-
-        result = adapter.post_implementation_thread_replies(
-            7,
-            expected_head_sha=head_sha,
-            threads=[thread],
-            replies={thread["id"]: reply},
-            batch_nonce="d" * 32,
-        )
-
-        assert result.replied_thread_ids == ()
-        assert result.blocked_thread_ids == (thread["id"],)
-        assert result.conflicting_current_review_ids == ("foreign-pending-draft",)
-        assert result.retryable is False
-
-    def test_visible_foreign_pending_review_blocks_without_mutation(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A visible foreign pending review cannot be reused or bypassed."""
-        thread = _external_reviewer_thread()
-        mutations: list[str] = []
-
-        def graphql(query: str, **_fields: str | int) -> dict[str, Any]:
-            if "reviews(first:100" not in query:
-                mutations.append(query)
-                pytest.fail("a visible foreign pending review must stop before mutation")
-            return {
-                "data": {
-                    "repository": {
-                        "pullRequest": {
-                            "id": "pr-7",
-                            "state": "OPEN",
-                            "headRefOid": "a" * 40,
-                            "autoMergeRequest": None,
-                            "reviews": {
-                                "pageInfo": {"hasNextPage": False, "endCursor": None},
-                                "nodes": [
-                                    {
-                                        "id": "foreign-pending-draft",
-                                        "state": "PENDING",
-                                        "body": "Visible foreign draft.",
-                                        "viewerDidAuthor": False,
-                                        "commit": {"oid": "a" * 40},
-                                    }
-                                ],
-                            },
-                        }
-                    }
-                }
-            }
-
-        monkeypatch.setattr(
-            adapter,
-            "_review_thread_snapshot",
-            lambda _pr, _thread: _open_thread_snapshot(thread),
-        )
-        monkeypatch.setattr(adapter, "_graphql", graphql)
-
-        result = adapter.post_implementation_thread_replies(
-            7,
-            expected_head_sha="a" * 40,
-            threads=[thread],
-            replies={thread["id"]: "Fixed the missing guard."},
-        )
-
-        assert result.replied_thread_ids == ()
-        assert result.blocked_thread_ids == (thread["id"],)
-        assert result.conflicting_current_review_ids == ("foreign-pending-draft",)
-        assert mutations == []
-
-    def test_visible_foreign_marked_review_blocks_without_mutation(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A visible foreign submitted implementation batch cannot be bypassed."""
-        thread = _external_reviewer_thread()
-        reply_body = adapter._implementation_thread_reply_body(
-            7, "a" * 40, thread["id"], "Fixed the missing guard."
-        )
-        foreign_body = adapter._implementation_reply_review_body(
-            7, "a" * 40, {thread["id"]: reply_body}, "d" * 32
-        )
-
-        def graphql(query: str, **_fields: str | int) -> dict[str, Any]:
-            if "reviews(first:100" not in query:
-                pytest.fail("a visible foreign batch must stop before mutation")
-            return {
-                "data": {
-                    "repository": {
-                        "pullRequest": {
-                            "id": "pr-7",
-                            "state": "OPEN",
-                            "headRefOid": "a" * 40,
-                            "autoMergeRequest": None,
-                            "reviews": {
-                                "pageInfo": {"hasNextPage": False, "endCursor": None},
-                                "nodes": [
-                                    {
-                                        "id": "foreign-submitted-review",
-                                        "state": "COMMENTED",
-                                        "body": foreign_body,
-                                        "viewerDidAuthor": False,
-                                        "commit": {"oid": "a" * 40},
-                                    }
-                                ],
-                            },
-                        }
-                    }
-                }
-            }
-
-        monkeypatch.setattr(
-            adapter,
-            "_review_thread_snapshot",
-            lambda _pr, _thread: _open_thread_snapshot(thread),
-        )
-        monkeypatch.setattr(adapter, "_graphql", graphql)
-
-        result = adapter.post_implementation_thread_replies(
-            7,
-            expected_head_sha="a" * 40,
-            threads=[thread],
-            replies={thread["id"]: "Fixed the missing guard."},
-        )
-
-        assert result.replied_thread_ids == ()
-        assert result.blocked_thread_ids == (thread["id"],)
-        assert result.conflicting_current_review_ids == ("foreign-submitted-review",)
-
-    def test_cross_checkout_submitted_batch_between_inventory_and_create_is_a_conflict(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A competing completed batch prevents this worker from adding a draft reply."""
-        thread = _external_reviewer_thread()
-        reply = "Fixed the missing guard."
-        head_sha = "a" * 40
-        adapter = PipelineGitHubForTest("org", dry_run=False, repo_root=tmp_path / "two")
-        reply_body = adapter._implementation_thread_reply_body(7, head_sha, thread["id"], reply)
-        submitted_body = adapter._implementation_reply_review_body(
-            7, head_sha, {thread["id"]: reply_body}, "c" * 32
-        )
-        reviews: list[dict[str, Any]] = []
-        added_replies: list[str] = []
-        submitted_reviews: list[str] = []
-        deleted_reviews: list[str] = []
-
-        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
-            if "reviews(first:100" in query:
-                return {
-                    "data": {
-                        "repository": {
-                            "pullRequest": {
-                                "id": "pr-7",
-                                "state": "OPEN",
-                                "headRefOid": head_sha,
-                                "autoMergeRequest": None,
-                                "reviews": {
-                                    "pageInfo": {"hasNextPage": False, "endCursor": None},
-                                    "nodes": reviews,
-                                },
-                            }
-                        }
-                    }
-                }
-            if "addPullRequestReview(input" in query:
-                batch_body = str(fields["body"])
-                # Worker A submits a distinct nonce batch after worker B's
-                # inventory but before B has created its own draft.
-                reviews[:] = [
-                    {
-                        "id": "worker-a-review",
-                        "state": "COMMENTED",
-                        "body": submitted_body,
-                        "viewerDidAuthor": True,
-                        "commit": {"oid": head_sha},
-                    },
-                    {
-                        "id": "worker-b-draft",
-                        "state": "PENDING",
-                        "body": batch_body,
-                        "viewerDidAuthor": True,
-                        "commit": {"oid": head_sha},
-                    },
-                ]
-                return {
-                    "data": {
-                        "addPullRequestReview": {
-                            "pullRequestReview": {
-                                "id": "worker-b-draft",
-                                "state": "PENDING",
-                                "body": batch_body,
-                                "commit": {"oid": head_sha},
-                            }
-                        }
-                    }
-                }
-            if "addPullRequestReviewThreadReply" in query:
-                added_replies.append(str(fields["threadId"]))
-                pytest.fail("must not add a reply after a competing submitted batch")
-            if "submitPullRequestReview" in query:
-                submitted_reviews.append(str(fields["reviewId"]))
-                pytest.fail("must not submit a competing batch")
-            if "deletePullRequestReview" in query:
-                pytest.fail("a current-review conflict must not delete any draft")
-            raise AssertionError(query)
-
-        monkeypatch.setattr(
-            adapter,
-            "_review_thread_snapshot",
-            lambda _pr, _thread: _open_thread_snapshot(thread),
-        )
-        monkeypatch.setattr(adapter, "_graphql", graphql)
-
-        result = adapter.post_implementation_thread_replies(
-            7,
-            expected_head_sha=head_sha,
-            threads=[thread],
-            replies={thread["id"]: reply},
-        )
-
-        assert result.replied_thread_ids == ()
-        assert result.blocked_thread_ids == (thread["id"],)
-        assert result.conflicting_current_review_ids == ("worker-a-review", "worker-b-draft")
-        assert added_replies == []
-        assert submitted_reviews == []
-        assert deleted_reviews == []
-
-    def test_resumed_pending_batch_reports_its_own_review_with_a_competitor(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A resumed draft and a competing batch are both preserved and reported."""
-        thread = _external_reviewer_thread()
-        reply = "Fixed the missing guard."
-        mutations: list[str] = []
-
-        monkeypatch.setattr(
-            adapter,
-            "_review_thread_snapshot",
-            lambda _pr, _thread: _open_thread_snapshot(thread),
-        )
-        monkeypatch.setattr(
-            adapter,
-            "_implementation_reply_review_state",
-            lambda *_args: (
-                "pr-7",
-                ("local-pending-draft", "PENDING"),
-                ("competing-current-review",),
-            ),
-        )
-        monkeypatch.setattr(
-            adapter,
-            "_add_thread_reply",
-            lambda *_args, **_kwargs: mutations.append("reply"),
-        )
-        monkeypatch.setattr(
-            adapter,
-            "_submit_implementation_reply_review",
-            lambda *_args: mutations.append("submit"),
-        )
-
-        result = adapter.post_implementation_thread_replies(
-            7,
-            expected_head_sha="a" * 40,
-            threads=[thread],
-            replies={thread["id"]: reply},
-        )
-
-        assert result.replied_thread_ids == ()
-        assert result.blocked_thread_ids == (thread["id"],)
-        assert result.conflicting_current_review_ids == (
-            "competing-current-review",
-            "local-pending-draft",
-        )
-        assert mutations == []
-
-    def test_submitted_batch_remains_a_receipt_beside_an_unrelated_draft(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A manual draft cannot make a complete exact batch retry forever."""
-        thread = _external_reviewer_thread()
-        reply = "Fixed the missing guard."
-        live = _open_thread_snapshot(_submitted_implementation_receipt(adapter, thread, reply))
-        review_body = str(live["comments"][-1]["review_body"])
-
-        def graphql(query: str, **_fields: str | int) -> dict[str, Any]:
-            if "reviews(first:100" not in query:
-                pytest.fail(f"submitted batch recovery must not mutate: {query}")
-            return {
-                "data": {
-                    "repository": {
-                        "pullRequest": {
-                            "id": "pr-7",
-                            "state": "OPEN",
-                            "headRefOid": "a" * 40,
-                            "autoMergeRequest": None,
-                            "reviews": {
-                                "pageInfo": {"hasNextPage": False, "endCursor": None},
-                                "nodes": [
-                                    {
-                                        "id": "implementation-review",
-                                        "state": "COMMENTED",
-                                        "body": review_body,
-                                        "viewerDidAuthor": True,
-                                        "commit": {"oid": "a" * 40},
-                                    },
-                                    {
-                                        "id": "manual-draft",
-                                        "state": "PENDING",
-                                        "body": "Unrelated reviewer draft.",
-                                        "viewerDidAuthor": True,
-                                        "commit": {"oid": "a" * 40},
-                                    },
-                                ],
-                            },
-                        }
-                    }
-                }
-            }
-
-        monkeypatch.setattr(adapter, "_review_thread_snapshot", lambda _pr, _id: live)
-        monkeypatch.setattr(adapter, "_graphql", graphql)
-
-        result = adapter.post_implementation_thread_replies(
-            7,
-            expected_head_sha="a" * 40,
-            threads=[thread],
-            replies={thread["id"]: reply},
-        )
-
-        assert result.replied_thread_ids == (thread["id"],)
-        assert result.receipts[0]["implementation_reply_id"] == "implementation-comment"
-        assert result.retryable is False
-
-    def test_stale_target_preserves_a_partial_pending_batch_on_a_current_conflict(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A current-review conflict prevents cleanup of an otherwise-owned pending batch."""
-        first = _external_reviewer_thread("thread-one")
-        second = _external_reviewer_thread("thread-two")
-        live_by_id = {first["id"]: first, second["id"]: second}
-        review_body = ""
-        review_exists = False
-        manual_draft_exists = False
-        reply_calls: list[str] = []
-        deleted_review_ids: list[str] = []
-
-        def snapshot(_pr: int, thread_id: str) -> dict[str, Any]:
-            return _open_thread_snapshot(live_by_id[thread_id])
-
-        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
-            nonlocal review_body, review_exists
-            if "reviews(first:100" in query:
-                nodes = (
-                    [
-                        {
-                            "id": "implementation-review",
-                            "state": "PENDING",
-                            "body": review_body,
-                            "viewerDidAuthor": True,
-                            "commit": {"oid": "a" * 40},
-                        }
-                    ]
-                    if review_exists
-                    else []
-                )
-                if manual_draft_exists:
-                    nodes.append(
-                        {
-                            "id": "manual-draft",
-                            "state": "PENDING",
-                            "body": "Unrelated reviewer draft.",
-                            "viewerDidAuthor": True,
-                            "commit": {"oid": "a" * 40},
-                        }
-                    )
-                return {
-                    "data": {
-                        "repository": {
-                            "pullRequest": {
-                                "id": "pr-7",
-                                "state": "OPEN",
-                                "headRefOid": "a" * 40,
-                                "autoMergeRequest": None,
-                                "reviews": {
-                                    "pageInfo": {"hasNextPage": False, "endCursor": None},
-                                    "nodes": nodes,
-                                },
-                            }
-                        }
-                    }
-                }
-            if "addPullRequestReview(input" in query:
-                review_exists = True
-                review_body = str(fields["body"])
-                return {
-                    "data": {
-                        "addPullRequestReview": {
-                            "pullRequestReview": {
-                                "id": "implementation-review",
-                                "state": "PENDING",
-                                "body": review_body,
-                                "commit": {"oid": "a" * 40},
-                            }
-                        }
-                    }
-                }
-            if "addPullRequestReviewThreadReply" in query:
-                assert "pullRequestReviewId:$reviewId" in query
-                thread_id = str(fields["threadId"])
-                reply_calls.append(thread_id)
-                if thread_id == second["id"]:
-                    raise OSError("transient second reply failure")
-                live_by_id[thread_id] = {
-                    **live_by_id[thread_id],
-                    "comments": [
-                        *live_by_id[thread_id]["comments"],
-                        {
-                            "id": "implementation-first",
-                            "author": "hephaestus[bot]",
-                            "body": fields["body"],
-                            "viewer_did_author": True,
-                            "review_id": "implementation-review",
-                        },
-                    ],
-                }
-                return {
-                    "data": {
-                        "addPullRequestReviewThreadReply": {
-                            "comment": {"id": "implementation-first"}
-                        }
-                    }
-                }
-            if "deletePullRequestReview" in query:
-                pytest.fail("a current-review conflict must not delete any draft")
-            raise AssertionError(query)
-
-        monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
-        monkeypatch.setattr(adapter, "_graphql", graphql)
-        replies = {
-            first["id"]: "Fixed the first finding.",
-            second["id"]: "Fixed the second finding.",
-        }
-
-        first_attempt = adapter.post_implementation_thread_replies(
-            7,
-            expected_head_sha="a" * 40,
-            threads=[first, second],
-            replies=replies,
-        )
-        live_by_id[second["id"]] = {
-            **live_by_id[second["id"]],
-            "comments": [
-                *live_by_id[second["id"]]["comments"],
-                {
-                    "id": "new-reviewer-comment",
-                    "author": "maintainer",
-                    "body": "Please also test it.",
-                },
-            ],
-        }
-        manual_draft_exists = True
-        second_attempt = adapter.post_implementation_thread_replies(
-            7,
-            expected_head_sha="a" * 40,
-            threads=[first, second],
-            replies=replies,
-        )
-
-        assert first_attempt.retryable is True
-        assert second_attempt.replied_thread_ids == ()
-        assert second_attempt.receipts == ()
-        assert second_attempt.blocked_thread_ids == (first["id"], second["id"])
-        assert second_attempt.conflicting_current_review_ids == (
-            "implementation-review",
-            "manual-draft",
-        )
         assert reply_calls == [first["id"], second["id"]]
-        assert deleted_review_ids == []
-
-    def test_head_drift_reports_every_preserved_stale_batch(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Stale handoff preservation reports every visible pending review without mutation."""
-        replies = {"thread-one": "Fixed the finding."}
-        old_body = adapter._implementation_reply_review_body(
-            7,
-            "a" * 40,
-            {
-                "thread-one": adapter._implementation_thread_reply_body(
-                    7, "a" * 40, "thread-one", replies["thread-one"]
-                )
-            },
-        )
-        foreign_old_body = adapter._implementation_reply_review_body(
-            7,
-            "a" * 40,
-            {
-                "thread-one": adapter._implementation_thread_reply_body(
-                    7, "a" * 40, "thread-one", replies["thread-one"]
-                )
-            },
-            "c" * 32,
-        )
-        reviews = [
-            {
-                "id": "old-automation-draft",
-                "state": "PENDING",
-                "body": old_body,
-                "viewerDidAuthor": True,
-                "commit": {"oid": "a" * 40},
-            },
-            {
-                "id": "foreign-old-draft",
-                "state": "PENDING",
-                # A valid body from another opaque operation must remain
-                # untouched even when its reply text and commit match.
-                "body": foreign_old_body,
-                "viewerDidAuthor": True,
-                "commit": {"oid": "a" * 40},
-            },
-            {
-                "id": "manual-draft",
-                "state": "PENDING",
-                # This has a valid coordinator marker but is not the exact
-                # deterministic body of the stale batch.  It is still a
-                # manual draft and must never be deleted by cleanup.
-                "body": (
-                    "Implementation responses for 1 review thread(s).\n\n"
-                    "<!-- hephaestus-implementation-review:000000000000000000000000 -->"
-                ),
-                "viewerDidAuthor": True,
-                "commit": {"oid": "a" * 40},
-            },
-        ]
-        deleted_review_ids: list[str] = []
-
-        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
-            if "reviews(first:100" in query:
-                return {
-                    "data": {
-                        "repository": {
-                            "pullRequest": {
-                                "id": "pr-7",
-                                "state": "OPEN",
-                                "headRefOid": "b" * 40,
-                                "autoMergeRequest": None,
-                                "reviews": {
-                                    "pageInfo": {"hasNextPage": False, "endCursor": None},
-                                    "nodes": list(reviews),
-                                },
-                            }
-                        }
-                    }
-                }
-            if "deletePullRequestReview" in query:
-                pytest.fail("stale draft preservation must not delete any review")
-            raise AssertionError(query)
-
-        monkeypatch.setattr(adapter, "_graphql", graphql)
-
-        assert adapter.preserve_stale_implementation_thread_reply_batch(
-            7,
-            expected_head_sha="a" * 40,
-            current_head_sha="b" * 40,
-            replies=replies,
-        ) == ("foreign-old-draft", "manual-draft", "old-automation-draft")
-        assert deleted_review_ids == []
-        assert [review["id"] for review in reviews] == [
-            "old-automation-draft",
-            "foreign-old-draft",
-            "manual-draft",
-        ]
-
-    def test_old_submitted_batch_does_not_hide_a_current_preserved_draft(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """An old completed batch is inert while current drafts remain terminally visible."""
-        replies = {"thread-one": "Fixed the finding."}
-        old_body = adapter._implementation_reply_review_body(
-            7,
-            "a" * 40,
-            {
-                "thread-one": adapter._implementation_thread_reply_body(
-                    7, "a" * 40, "thread-one", replies["thread-one"]
-                )
-            },
-        )
-
-        def graphql(query: str, **_fields: str | int) -> dict[str, Any]:
-            if "reviews(first:100" not in query:
-                pytest.fail("stale preservation must not mutate any review")
-            return {
-                "data": {
-                    "repository": {
-                        "pullRequest": {
-                            "id": "pr-7",
-                            "state": "OPEN",
-                            "headRefOid": "b" * 40,
-                            "autoMergeRequest": None,
-                            "reviews": {
-                                "pageInfo": {"hasNextPage": False, "endCursor": None},
-                                "nodes": [
-                                    {
-                                        "id": "old-submitted-review",
-                                        "state": "COMMENTED",
-                                        "body": old_body,
-                                        "viewerDidAuthor": True,
-                                        "commit": {"oid": "a" * 40},
-                                    },
-                                    {
-                                        "id": "current-pending-draft",
-                                        "state": "PENDING",
-                                        "body": "Incomplete current draft.",
-                                        "viewerDidAuthor": True,
-                                        "commit": {"oid": "b" * 40},
-                                    },
-                                ],
-                            },
-                        }
-                    }
-                }
-            }
-
-        monkeypatch.setattr(adapter, "_graphql", graphql)
-
-        assert adapter.preserve_stale_implementation_thread_reply_batch(
-            7,
-            expected_head_sha="a" * 40,
-            current_head_sha="b" * 40,
-            replies=replies,
-        ) == ("current-pending-draft",)
-
-    def test_dry_run_never_inventories_or_mutates_stale_reply_drafts(
-        self, dry_adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Dry-run stale preservation must not inventory or mutate review drafts."""
-        graphql = MagicMock()
-        monkeypatch.setattr(dry_adapter, "_graphql", graphql)
-
-        assert (
-            dry_adapter.preserve_stale_implementation_thread_reply_batch(
-                7,
-                expected_head_sha="a" * 40,
-                current_head_sha="b" * 40,
-                replies={"thread-one": "Fixed the finding."},
-            )
-            == ()
-        )
-        graphql.assert_not_called()
 
     def test_external_thread_is_replied_to_then_resolved_by_fresh_reviewer(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
@@ -1528,9 +527,6 @@ class TestAllThreadReplyAndReviewerResolution:
                             "viewer_did_author": True,
                             "review_id": "implementation-review",
                             "review_state": "COMMENTED",
-                            "review_body": adapter._implementation_reply_review_body(
-                                7, "a" * 40, {thread["id"]: reply_body}
-                            ),
                             "review_commit_sha": "a" * 40,
                         },
                     ],
@@ -1564,22 +560,6 @@ class TestAllThreadReplyAndReviewerResolution:
             lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
         )
         monkeypatch.setattr(adapter, "_graphql", graphql)
-        monkeypatch.setattr(
-            adapter,
-            "_implementation_reply_review_state",
-            lambda *_args: ("pr-7", ("implementation-review", "PENDING"), False),
-        )
-        monkeypatch.setattr(
-            adapter,
-            "_find_implementation_reply_review",
-            lambda *_args: ("pr-7", ("implementation-review", "PENDING")),
-        )
-        monkeypatch.setattr(
-            adapter,
-            "_create_implementation_reply_review",
-            lambda *_args: "implementation-review",
-        )
-        monkeypatch.setattr(adapter, "_submit_implementation_reply_review", lambda *_args: True)
 
         implementation = adapter.post_implementation_thread_replies(
             7,
@@ -1641,7 +621,7 @@ class TestAllThreadReplyAndReviewerResolution:
         def graphql(query: str, **fields: str | int) -> dict[str, Any]:
             if "addPullRequestReviewThreadReply" in query:
                 calls.append(str(fields["body"]))
-                is_implementation_reply = "reviewId" in fields
+                is_implementation_reply = len(calls) == 1
                 reply_body = str(fields["body"])
                 live[0] = {
                     **live[0],
@@ -1658,13 +638,6 @@ class TestAllThreadReplyAndReviewerResolution:
                                 else "reviewer-review"
                             ),
                             "review_state": "COMMENTED" if is_implementation_reply else "",
-                            "review_body": (
-                                adapter._implementation_reply_review_body(
-                                    7, "a" * 40, {thread["id"]: reply_body}
-                                )
-                                if is_implementation_reply
-                                else ""
-                            ),
                             "review_commit_sha": "a" * 40 if is_implementation_reply else "",
                         },
                     ],
@@ -1692,22 +665,6 @@ class TestAllThreadReplyAndReviewerResolution:
             lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
         )
         monkeypatch.setattr(adapter, "_graphql", graphql)
-        monkeypatch.setattr(
-            adapter,
-            "_implementation_reply_review_state",
-            lambda *_args: ("pr-7", ("implementation-review", "PENDING"), False),
-        )
-        monkeypatch.setattr(
-            adapter,
-            "_find_implementation_reply_review",
-            lambda *_args: ("pr-7", ("implementation-review", "PENDING")),
-        )
-        monkeypatch.setattr(
-            adapter,
-            "_create_implementation_reply_review",
-            lambda *_args: "implementation-review",
-        )
-        monkeypatch.setattr(adapter, "_submit_implementation_reply_review", lambda *_args: True)
         implementation = adapter.post_implementation_thread_replies(
             7,
             expected_head_sha="a" * 40,
@@ -1737,15 +694,10 @@ class TestAllThreadReplyAndReviewerResolution:
         resolving = _external_reviewer_thread("thread-resolve")
         feedback = _external_reviewer_thread("thread-feedback")
         resolving_reply = adapter._implementation_thread_reply_body(
-            7, reviewed_head_sha, resolving["id"], "Resolved the finding."
+            7, reviewed_head_sha, resolving["id"], "Resolved the finding.", _BATCH_NONCE
         )
         feedback_reply = adapter._implementation_thread_reply_body(
-            7, reviewed_head_sha, feedback["id"], "Attempted a fix."
-        )
-        batch_body = adapter._implementation_reply_review_body(
-            7,
-            reviewed_head_sha,
-            {resolving["id"]: resolving_reply, feedback["id"]: feedback_reply},
+            7, reviewed_head_sha, feedback["id"], "Attempted a fix.", _BATCH_NONCE
         )
         live_by_id = {
             resolving["id"]: {
@@ -1759,7 +711,6 @@ class TestAllThreadReplyAndReviewerResolution:
                         "viewer_did_author": True,
                         "review_id": "implementation-review",
                         "review_state": "COMMENTED",
-                        "review_body": batch_body,
                         "review_commit_sha": reviewed_head_sha,
                     },
                 ],
@@ -1775,7 +726,6 @@ class TestAllThreadReplyAndReviewerResolution:
                         "viewer_did_author": True,
                         "review_id": "implementation-review",
                         "review_state": "COMMENTED",
-                        "review_body": batch_body,
                         "review_commit_sha": reviewed_head_sha,
                     },
                 ],
@@ -1850,17 +800,14 @@ class TestAllThreadReplyAndReviewerResolution:
         assert result.blocked_thread_ids == ()
         assert calls == [("feedback", feedback["id"]), ("resolve", resolving["id"])]
 
-    def test_pending_batch_reply_is_not_a_reviewer_validation_receipt(
+    def test_noncommented_direct_reply_is_not_a_reviewer_validation_receipt(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Only a submitted, exact-head implementation batch may be resolved."""
+        """Only a COMMENTED, exact-head direct reply may be resolved."""
         thread = _external_reviewer_thread()
         head_sha = "a" * 40
         reply_body = adapter._implementation_thread_reply_body(
-            7, head_sha, thread["id"], "Fixed the missing guard."
-        )
-        batch_body = adapter._implementation_reply_review_body(
-            7, head_sha, {thread["id"]: reply_body}
+            7, head_sha, thread["id"], "Fixed the missing guard.", _BATCH_NONCE
         )
         pending = {
             **thread,
@@ -1873,7 +820,6 @@ class TestAllThreadReplyAndReviewerResolution:
                     "viewer_did_author": True,
                     "review_id": "implementation-review",
                     "review_state": "PENDING",
-                    "review_body": batch_body,
                     "review_commit_sha": head_sha,
                 },
             ],
@@ -1903,16 +849,18 @@ class TestAllThreadReplyAndReviewerResolution:
             "implementation-comment"
         ]
 
-    def test_split_submitted_reviews_cannot_become_validation_receipts(
+    def test_direct_replies_share_nonce_even_when_github_assigns_distinct_reviews(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Two singleton reviews cannot masquerade as one implementation batch."""
+        """The source-attached nonce is the batch receipt, not a review envelope."""
         head_sha = "a" * 40
         first = _external_reviewer_thread("thread-one")
         second = _external_reviewer_thread("thread-two")
 
         def singleton(thread: dict[str, Any], reply: str, review_id: str) -> dict[str, Any]:
-            reply_body = adapter._implementation_thread_reply_body(7, head_sha, thread["id"], reply)
+            reply_body = adapter._implementation_thread_reply_body(
+                7, head_sha, thread["id"], reply, _BATCH_NONCE
+            )
             return {
                 **thread,
                 "comments": [
@@ -1924,9 +872,6 @@ class TestAllThreadReplyAndReviewerResolution:
                         "viewer_did_author": True,
                         "review_id": review_id,
                         "review_state": "COMMENTED",
-                        "review_body": adapter._implementation_reply_review_body(
-                            7, head_sha, {thread["id"]: reply_body}
-                        ),
                         "review_commit_sha": head_sha,
                     },
                 ],
@@ -1937,26 +882,25 @@ class TestAllThreadReplyAndReviewerResolution:
             "gh_pr_state",
             lambda _pr: {"state": "OPEN", "headRefOid": head_sha, "autoMergeRequest": None},
         )
-        assert (
-            adapter.reviewer_validation_receipts(
-                7,
-                reviewed_head_sha=head_sha,
-                threads=[
-                    singleton(first, "Fixed the first finding.", "review-one"),
-                    singleton(second, "Fixed the second finding.", "review-two"),
-                ],
-            )
-            == []
+        receipts = adapter.reviewer_validation_receipts(
+            7,
+            reviewed_head_sha=head_sha,
+            threads=[
+                singleton(first, "Fixed the first finding.", "review-one"),
+                singleton(second, "Fixed the second finding.", "review-two"),
+            ],
         )
 
-    def test_noncanonical_batch_summary_cannot_become_validation_receipt(
+        assert [receipt["id"] for receipt in receipts] == [first["id"], second["id"]]
+
+    def test_validation_receipt_ignores_unanchored_review_body(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A syntactically valid but wrong batch marker cannot authorize resolution."""
+        """Only the attached direct-reply marker contributes to validation."""
         thread = _external_reviewer_thread()
         head_sha = "a" * 40
         reply_body = adapter._implementation_thread_reply_body(
-            7, head_sha, thread["id"], "Fixed the missing guard."
+            7, head_sha, thread["id"], "Fixed the missing guard.", _BATCH_NONCE
         )
         malformed = {
             **thread,
@@ -1969,10 +913,6 @@ class TestAllThreadReplyAndReviewerResolution:
                     "viewer_did_author": True,
                     "review_id": "implementation-review",
                     "review_state": "COMMENTED",
-                    "review_body": (
-                        "Implementation responses for 1 review thread(s).\n\n"
-                        "<!-- hephaestus-implementation-review:000000000000000000000000 -->"
-                    ),
                     "review_commit_sha": head_sha,
                 },
             ],
@@ -1983,10 +923,13 @@ class TestAllThreadReplyAndReviewerResolution:
             lambda _pr: {"state": "OPEN", "headRefOid": head_sha, "autoMergeRequest": None},
         )
 
-        assert (
-            adapter.reviewer_validation_receipts(7, reviewed_head_sha=head_sha, threads=[malformed])
-            == []
+        receipts = adapter.reviewer_validation_receipts(
+            7, reviewed_head_sha=head_sha, threads=[malformed]
         )
+
+        assert [receipt["implementation_reply_id"] for receipt in receipts] == [
+            "implementation-comment"
+        ]
 
     def test_malformed_reply_response_recovers_an_exact_host_read_receipt(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
@@ -1994,7 +937,7 @@ class TestAllThreadReplyAndReviewerResolution:
         """A reply mutation applied before a malformed response remains recoverable."""
         thread = _external_reviewer_thread()
         body = adapter._implementation_thread_reply_body(
-            7, "a" * 40, thread["id"], "Fixed the guard."
+            7, "a" * 40, thread["id"], "Fixed the guard.", _BATCH_NONCE
         )
         after = {
             **thread,
@@ -2019,22 +962,6 @@ class TestAllThreadReplyAndReviewerResolution:
         monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
         monkeypatch.setattr(
             adapter,
-            "_implementation_reply_review_state",
-            lambda *_args: ("pr-7", ("implementation-review", "PENDING"), False),
-        )
-        monkeypatch.setattr(
-            adapter,
-            "_find_implementation_reply_review",
-            lambda *_args: ("pr-7", ("implementation-review", "PENDING")),
-        )
-        monkeypatch.setattr(
-            adapter,
-            "_create_implementation_reply_review",
-            lambda *_args: "implementation-review",
-        )
-        monkeypatch.setattr(adapter, "_submit_implementation_reply_review", lambda *_args: True)
-        monkeypatch.setattr(
-            adapter,
             "_graphql",
             lambda query, **_fields: (
                 {"data": {"addPullRequestReviewThreadReply": None}}
@@ -2054,13 +981,13 @@ class TestAllThreadReplyAndReviewerResolution:
         assert result.blocked_thread_ids == ()
         assert result.receipts[0]["implementation_reply_id"] == "implementation-comment"
 
-    def test_legacy_recovered_reply_restarts_fresh_review_without_retry_cap(
+    def test_recovered_direct_reply_is_not_reposted_after_response_loss(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A unary legacy reply blocks for fresh review instead of retrying forever."""
+        """An exact source-attached reply is recovered without another mutation."""
         thread = _external_reviewer_thread()
         body = adapter._implementation_thread_reply_body(
-            7, "a" * 40, thread["id"], "Fixed the guard."
+            7, "a" * 40, thread["id"], "Fixed the guard.", _BATCH_NONCE
         )
         after = {
             **thread,
@@ -2078,11 +1005,6 @@ class TestAllThreadReplyAndReviewerResolution:
         monkeypatch.setattr(
             adapter, "_review_thread_snapshot", lambda _pr, _thread: _open_thread_snapshot(after)
         )
-        monkeypatch.setattr(
-            adapter,
-            "_implementation_reply_review_state",
-            lambda *_args: ("pr-7", None, False),
-        )
         graphql = MagicMock()
         monkeypatch.setattr(adapter, "_graphql", graphql)
 
@@ -2093,9 +1015,8 @@ class TestAllThreadReplyAndReviewerResolution:
             replies={thread["id"]: "Fixed the guard."},
         )
 
-        assert result.blocked_thread_ids == (thread["id"],)
+        assert result.replied_thread_ids == (thread["id"],)
         assert result.retryable is False
-        assert result.retryable_thread_ids == ()
         graphql.assert_not_called()
 
     def test_reconciliation_rejects_a_receipt_without_the_host_read_reply(
@@ -2129,7 +1050,7 @@ class TestAllThreadReplyAndReviewerResolution:
         """Only the host viewer's final comment can carry a resolve receipt."""
         thread = _external_reviewer_thread()
         reply_body = adapter._implementation_thread_reply_body(
-            7, "a" * 40, thread["id"], "Fixed the missing guard."
+            7, "a" * 40, thread["id"], "Fixed the missing guard.", _BATCH_NONCE
         )
         foreign_reply = {
             **thread,
