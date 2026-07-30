@@ -676,6 +676,85 @@ class TestAllThreadReplyAndReviewerResolution:
         ]
         assert len(create_calls) == 1
 
+    def test_cross_checkout_duplicate_current_drafts_stop_without_mutation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Independent lock roots do not retry or delete ambiguous current drafts."""
+        thread = _external_reviewer_thread()
+        reply = "Fixed the missing guard."
+        head_sha = "a" * 40
+        first_adapter = pg.PipelineGitHub("org", dry_run=False, repo_root=tmp_path / "one")
+        second_adapter = pg.PipelineGitHub("org", dry_run=False, repo_root=tmp_path / "two")
+        review_body = first_adapter._implementation_reply_review_body(
+            7,
+            head_sha,
+            {
+                thread["id"]: first_adapter._implementation_thread_reply_body(
+                    7, head_sha, thread["id"], reply
+                )
+            },
+        )
+
+        def graphql(query: str, **_fields: str | int) -> dict[str, Any]:
+            if "reviews(first:100" not in query:
+                pytest.fail(f"duplicate-draft conflict must not mutate: {query}")
+            return {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "id": "pr-7",
+                            "state": "OPEN",
+                            "headRefOid": head_sha,
+                            "autoMergeRequest": None,
+                            "reviews": {
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                "nodes": [
+                                    {
+                                        "id": "draft-one",
+                                        "state": "PENDING",
+                                        "body": review_body,
+                                        "viewerDidAuthor": True,
+                                        "commit": {"oid": head_sha},
+                                    },
+                                    {
+                                        "id": "draft-two",
+                                        "state": "PENDING",
+                                        "body": review_body,
+                                        "viewerDidAuthor": True,
+                                        "commit": {"oid": head_sha},
+                                    },
+                                ],
+                            },
+                        }
+                    }
+                }
+            }
+
+        for current in (first_adapter, second_adapter):
+            monkeypatch.setattr(
+                current,
+                "_review_thread_snapshot",
+                lambda _pr, _thread: _open_thread_snapshot(thread),
+            )
+            monkeypatch.setattr(current, "_graphql", graphql)
+
+        results = [
+            current.post_implementation_thread_replies(
+                7,
+                expected_head_sha=head_sha,
+                threads=[thread],
+                replies={thread["id"]: reply},
+            )
+            for current in (first_adapter, second_adapter)
+        ]
+
+        assert [result.duplicate_current_draft_ids for result in results] == [
+            ("draft-one", "draft-two"),
+            ("draft-one", "draft-two"),
+        ]
+        assert all(result.retryable is False for result in results)
+        assert all(result.blocked_thread_ids == (thread["id"],) for result in results)
+
     def test_stale_target_aborts_a_partial_pending_reply_batch(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1300,6 +1379,91 @@ class TestAllThreadReplyAndReviewerResolution:
         assert [receipt["implementation_reply_id"] for receipt in receipts] == [
             "implementation-comment"
         ]
+
+    def test_split_submitted_reviews_cannot_become_validation_receipts(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two singleton reviews cannot masquerade as one implementation batch."""
+        head_sha = "a" * 40
+        first = _external_reviewer_thread("thread-one")
+        second = _external_reviewer_thread("thread-two")
+
+        def singleton(thread: dict[str, Any], reply: str, review_id: str) -> dict[str, Any]:
+            reply_body = adapter._implementation_thread_reply_body(7, head_sha, thread["id"], reply)
+            return {
+                **thread,
+                "comments": [
+                    *thread["comments"],
+                    {
+                        "id": f"implementation-{thread['id']}",
+                        "author": "hephaestus[bot]",
+                        "body": reply_body,
+                        "viewer_did_author": True,
+                        "review_id": review_id,
+                        "review_state": "COMMENTED",
+                        "review_body": adapter._implementation_reply_review_body(
+                            7, head_sha, {thread["id"]: reply_body}
+                        ),
+                        "review_commit_sha": head_sha,
+                    },
+                ],
+            }
+
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_state",
+            lambda _pr: {"state": "OPEN", "headRefOid": head_sha, "autoMergeRequest": None},
+        )
+        assert (
+            adapter.reviewer_validation_receipts(
+                7,
+                reviewed_head_sha=head_sha,
+                threads=[
+                    singleton(first, "Fixed the first finding.", "review-one"),
+                    singleton(second, "Fixed the second finding.", "review-two"),
+                ],
+            )
+            == []
+        )
+
+    def test_noncanonical_batch_summary_cannot_become_validation_receipt(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A syntactically valid but wrong batch marker cannot authorize resolution."""
+        thread = _external_reviewer_thread()
+        head_sha = "a" * 40
+        reply_body = adapter._implementation_thread_reply_body(
+            7, head_sha, thread["id"], "Fixed the missing guard."
+        )
+        malformed = {
+            **thread,
+            "comments": [
+                *thread["comments"],
+                {
+                    "id": "implementation-comment",
+                    "author": "hephaestus[bot]",
+                    "body": reply_body,
+                    "viewer_did_author": True,
+                    "review_id": "implementation-review",
+                    "review_state": "COMMENTED",
+                    "review_body": (
+                        "Implementation responses for 1 review thread(s).\n\n"
+                        "<!-- hephaestus-implementation-review:000000000000000000000000 -->"
+                    ),
+                    "review_commit_sha": head_sha,
+                },
+            ],
+        }
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_state",
+            lambda _pr: {"state": "OPEN", "headRefOid": head_sha, "autoMergeRequest": None},
+        )
+
+        assert (
+            adapter.reviewer_validation_receipts(7, reviewed_head_sha=head_sha, threads=[malformed])
+            == []
+        )
 
     def test_malformed_reply_response_recovers_an_exact_host_read_receipt(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch

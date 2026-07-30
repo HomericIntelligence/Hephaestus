@@ -135,7 +135,10 @@ class ImplementationThreadReplyResult:
     GitHub object. ``retryable_thread_ids`` identifies only replies whose host
     outcome is transport/read-ambiguous. An ordinary ``blocked_thread_ids``
     result means the saved snapshot is stale and must return through a fresh
-    reviewer pass rather than replay.
+    reviewer pass rather than replay. ``duplicate_current_draft_ids`` is a
+    terminal ownership conflict from independent checkout roots; no current
+    draft is deleted and the stage records a durable no-go diagnostic instead
+    of retrying into its handoff cap.
     """
 
     replied_thread_ids: tuple[str, ...] = ()
@@ -143,6 +146,7 @@ class ImplementationThreadReplyResult:
     receipts: tuple[dict[str, Any], ...] = ()
     retryable_thread_ids: tuple[str, ...] = ()
     retryable: bool = False
+    duplicate_current_draft_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

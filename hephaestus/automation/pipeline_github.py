@@ -95,6 +95,15 @@ _IMPLEMENTATION_REPLY_REVIEW_BODY_RE = re.compile(
 )
 
 
+class DuplicateImplementationReplyDraftsError(RuntimeError):
+    """Two current pending drafts make cross-checkout ownership unprovable."""
+
+    def __init__(self, review_ids: tuple[str, ...]) -> None:
+        """Record the opaque draft review IDs that made ownership ambiguous."""
+        super().__init__("multiple current implementation reply drafts")
+        self.review_ids = review_ids
+
+
 def _parse_included_http_response(
     stdout: str,
 ) -> tuple[int | None, dict[str, Any] | None, bool]:
@@ -997,7 +1006,8 @@ class PipelineGitHub:
             "pageInfo{hasNextPage endCursor} nodes{id state body viewerDidAuthor commit{oid}}}}}}"
         )
         expected_pr_id: str | None = None
-        matches: list[tuple[str, str]] = []
+        pending_matches: list[tuple[str, str]] = []
+        commented_matches: list[tuple[str, str]] = []
         stale_pending_ids: list[str] = []
         has_pending_conflict = False
         seen_cursors: set[str] = set()
@@ -1044,7 +1054,7 @@ class PipelineGitHub:
                         and isinstance(commit_oid, str)
                         and commit_oid == expected_head_sha
                     ):
-                        matches.append((review_id, state))
+                        pending_matches.append((review_id, state))
                     elif (
                         body == review_body
                         and isinstance(commit_oid, str)
@@ -1063,7 +1073,7 @@ class PipelineGitHub:
                     or commit_oid != expected_head_sha
                 ):
                     return None
-                matches.append((review_id, state))
+                commented_matches.append((review_id, state))
             page_info = reviews.get("pageInfo")
             if not isinstance(page_info, dict) or not isinstance(
                 page_info.get("hasNextPage"), bool
@@ -1076,11 +1086,26 @@ class PipelineGitHub:
                 return None
             seen_cursors.add(next_cursor)
             after = next_cursor
-        if expected_pr_id is None or len(matches) > 1:
+        if expected_pr_id is None or len(commented_matches) > 1:
             return None
+        if commented_matches:
+            # A completed batch remains durable proof even when a losing
+            # cross-checkout process left a current-head pending draft. The
+            # adapter never deletes that draft, but it must not force the
+            # already-submitted review back through a retry loop.
+            return (
+                expected_pr_id,
+                commented_matches[0],
+                tuple(sorted(set(stale_pending_ids))),
+                has_pending_conflict,
+            )
+        if len(pending_matches) > 1:
+            raise DuplicateImplementationReplyDraftsError(
+                tuple(sorted(review_id for review_id, _ in pending_matches))
+            )
         return (
             expected_pr_id,
-            matches[0] if matches else None,
+            pending_matches[0] if pending_matches else None,
             tuple(sorted(set(stale_pending_ids))),
             has_pending_conflict,
         )
@@ -1304,6 +1329,63 @@ class PipelineGitHub:
             return None
         return reply_id, reply_body
 
+    def _validated_implementation_reply_batch(
+        self,
+        pr_number: int,
+        reviewed_head_sha: str,
+        threads: list[dict[str, Any]],
+    ) -> list[tuple[dict[str, Any], str, str]]:
+        """Return one complete, submitted implementation reply batch.
+
+        A per-thread reply marker only establishes that one response is bound
+        to a thread and head.  It cannot establish that an implementation pass
+        used a single review.  Before the reviewer may act, every eligible
+        final reply must therefore belong to one submitted review whose
+        deterministic summary covers the complete live group.
+        """
+        candidates: list[tuple[dict[str, Any], str, str, str, str]] = []
+        seen_thread_ids: set[str] = set()
+        for thread in threads:
+            if not isinstance(thread, dict):
+                return []
+            thread_id = thread.get("id")
+            comments = thread.get("comments")
+            implementation_reply = self._validated_implementation_reply(
+                pr_number, reviewed_head_sha, thread
+            )
+            if implementation_reply is None:
+                continue
+            if (
+                not isinstance(thread_id, str)
+                or not thread_id
+                or thread_id in seen_thread_ids
+                or not isinstance(comments, list)
+                or not comments
+                or not isinstance(comments[-1], dict)
+            ):
+                return []
+            review_id = comments[-1].get("review_id")
+            review_body = comments[-1].get("review_body")
+            if not isinstance(review_id, str) or not review_id or not isinstance(review_body, str):
+                return []
+            seen_thread_ids.add(thread_id)
+            reply_id, reply_body = implementation_reply
+            candidates.append((thread, reply_id, reply_body, review_id, review_body))
+        if not candidates:
+            return []
+        review_ids = {candidate[3] for candidate in candidates}
+        review_bodies = {candidate[4] for candidate in candidates}
+        if len(review_ids) != 1 or len(review_bodies) != 1:
+            return []
+        expected_body = self._implementation_reply_review_body(
+            pr_number,
+            reviewed_head_sha,
+            {str(candidate[0]["id"]): candidate[2] for candidate in candidates},
+        )
+        if review_bodies.pop() != expected_body:
+            return []
+        return [(thread, reply_id, reply_body) for thread, reply_id, reply_body, _, _ in candidates]
+
     def reviewer_validation_receipts(
         self,
         pr_number: int,
@@ -1334,12 +1416,9 @@ class PipelineGitHub:
             ):
                 raise RuntimeError("malformed live review-thread snapshot")
             seen.add(thread_id)
-            implementation_reply = self._validated_implementation_reply(
-                pr_number, reviewed_head_sha, thread
-            )
-            if implementation_reply is None:
-                continue
-            reply_id, reply_body = implementation_reply
+        for thread, reply_id, reply_body in self._validated_implementation_reply_batch(
+            pr_number, reviewed_head_sha, threads
+        ):
             receipts.append(
                 {
                     **thread,
@@ -1924,6 +2003,16 @@ class PipelineGitHub:
                     retryable_thread_ids=candidate_ids,
                     retryable=True,
                 )
+        except DuplicateImplementationReplyDraftsError as error:
+            logger.error(
+                "Implementation reply batch on PR #%s stopped: duplicate current drafts %s",
+                pr_number,
+                ", ".join(error.review_ids),
+            )
+            return ImplementationThreadReplyResult(
+                blocked_thread_ids=candidate_ids,
+                duplicate_current_draft_ids=error.review_ids,
+            )
         except (
             AttributeError,
             OSError,
@@ -1963,6 +2052,21 @@ class PipelineGitHub:
             or self._skip(
                 f"reconcile {len(candidate_ids)} reviewer-validated threads on PR #{pr_number}"
             )
+        ):
+            return ReviewerThreadReconciliationResult(blocked_thread_ids=candidate_ids)
+        batch = self._validated_implementation_reply_batch(pr_number, reviewed_head_sha, receipts)
+        batch_by_id = {
+            str(thread.get("id") or ""): (reply_id, reply_body)
+            for thread, reply_id, reply_body in batch
+        }
+        if set(batch_by_id) != expected_ids or any(
+            not isinstance(receipt, dict)
+            or batch_by_id.get(str(receipt.get("id") or ""))
+            != (
+                receipt.get("implementation_reply_id"),
+                receipt.get("implementation_reply_body"),
+            )
+            for receipt in receipts
         ):
             return ReviewerThreadReconciliationResult(blocked_thread_ids=candidate_ids)
         by_id: dict[str, dict[str, Any]] = {}

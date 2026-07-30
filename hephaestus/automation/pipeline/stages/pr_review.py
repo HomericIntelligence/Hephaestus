@@ -282,6 +282,7 @@ _PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES = "pending_implementation_reply_ha
 _PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES = (
     "pending_implementation_reply_handoff_visibility_retries"
 )
+_IMPLEMENTATION_REPLY_BATCH_CONFLICT = "implementation_reply_batch_conflict"
 
 #: Round-scoped payload keys cleared at REVIEW_WAIT submission so a failed
 #: later round can never replay an earlier round's results.
@@ -1257,6 +1258,19 @@ class PrReviewStage(Stage):
                         replied = set(getattr(reply_result, "replied_thread_ids", ()))
                         blocked = set(getattr(reply_result, "blocked_thread_ids", ()))
                         receipts = list(getattr(reply_result, "receipts", ()))
+                        duplicate_drafts = tuple(
+                            sorted(
+                                str(review_id)
+                                for review_id in getattr(
+                                    reply_result, "duplicate_current_draft_ids", ()
+                                )
+                            )
+                        )
+                        if duplicate_drafts:
+                            item.payload[_IMPLEMENTATION_REPLY_BATCH_CONFLICT] = {
+                                "head_sha": published_head,
+                                "draft_ids": duplicate_drafts,
+                            }
                         retryable = bool(getattr(reply_result, "retryable", False))
                         expected_ids = set(replies)
                         remaining_ids = expected_ids - replied
@@ -1938,6 +1952,59 @@ class PrReviewStage(Stage):
         if item.issue is None:  # guarded by step(); kept for type narrowing
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
         payload = item.payload
+
+        conflict = payload.pop(_IMPLEMENTATION_REPLY_BATCH_CONFLICT, None)
+        if conflict is not None:
+            if not isinstance(conflict, dict):
+                return StageOutcome(
+                    Disposition.FINISH_FAIL, "implementation_reply_batch_conflict_invalid"
+                )
+            head_sha = conflict.get("head_sha")
+            draft_ids = conflict.get("draft_ids")
+            if (
+                not is_full_commit_sha(head_sha)
+                or not isinstance(draft_ids, tuple)
+                or len(draft_ids) < 2
+                or any(
+                    not isinstance(review_id, str)
+                    or not review_id
+                    or len(review_id) > 256
+                    or re.fullmatch(r"[A-Za-z0-9_=-]+", review_id) is None
+                    for review_id in draft_ids
+                )
+            ):
+                return StageOutcome(
+                    Disposition.FINISH_FAIL, "implementation_reply_batch_conflict_invalid"
+                )
+            item.payload["reviewed_pr_head_sha"] = head_sha
+            no_go_outcome = self._write_no_go(item, ctx)
+            if no_go_outcome is not None:
+                return no_go_outcome
+            marker_hash = hashlib.sha256(
+                f"{item.pr}:{head_sha}:{','.join(draft_ids)}".encode()
+            ).hexdigest()[:24]
+            marker = f"<!-- hephaestus-implementation-reply-draft-conflict:{marker_hash} -->"
+            body = (
+                f"{marker}\n\n"
+                "Automation stopped before posting implementation replies because multiple "
+                "current-head draft reviews claim the same reply batch.\n\n"
+                f"Head: `{head_sha}`\n\n"
+                f"Draft review IDs: {', '.join(f'`{review_id}`' for review_id in draft_ids)}\n\n"
+                "No review thread was resolved and no current draft was deleted. "
+                "Remove the duplicate drafts, then run a fresh implementation-review pass."
+            )
+            try:
+                ctx.github.upsert_pr_comment(item.pr, marker, body)
+            except Exception as error:
+                logger.warning(
+                    "pr_review:%d: failed to record duplicate-draft conflict (%s)",
+                    item.issue,
+                    type(error).__name__,
+                )
+                return StageOutcome(
+                    Disposition.FINISH_FAIL, "implementation_reply_batch_conflict_comment_failed"
+                )
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_batch_conflict")
 
         if payload.pop("scope_retraction_failure", False):
             logger.warning(

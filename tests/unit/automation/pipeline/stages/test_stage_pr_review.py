@@ -2302,6 +2302,34 @@ class TestPrReviewRestartSafetyGuards:
 class TestEvalVerdicts:
     """EVAL: re-housed _evaluate_go_verdict semantics + the budget gate."""
 
+    def test_duplicate_current_reply_drafts_are_terminally_diagnosed(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Cross-checkout ownership ambiguity stops without retrying or deleting drafts."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="EVAL")
+        item.payload["implementation_reply_batch_conflict"] = {
+            "head_sha": "a" * 40,
+            "draft_ids": ("draft-one", "draft-two"),
+        }
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(
+            Disposition.FINISH_FAIL, "implementation_reply_batch_conflict"
+        )
+        assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
+        assert any(
+            name == "gh_issue_upsert_comment"
+            and args[0] == 1001
+            and args[1].startswith("<!-- hephaestus-implementation-reply-draft-conflict:")
+            for name, args in github.mutation_log
+        )
+        body = github.comments[1001][-1]
+        assert "No review thread was resolved and no current draft was deleted." in body
+
     def test_on_enter_stands_down_without_auto_merge_mutation(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
