@@ -175,19 +175,22 @@ class TestGetLogger:
 
         assert len(underlying.handlers) == 1
 
-    def test_get_logger_leaves_external_record_factory_untouched(self) -> None:
-        """Logger-local context capture does not replace an application factory."""
+    def test_external_record_factory_installed_between_get_logger_calls(self) -> None:
+        """Repeated setup does not wrap an intervening application factory."""
         original_factory = logging.getLogRecordFactory()
         external_calls = 0
+
+        logger = get_logger("test.external_factory_preserved")
+        external_delegate = logging.getLogRecordFactory()
 
         def external_factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
             nonlocal external_calls
             external_calls += 1
-            return original_factory(*args, **kwargs)
+            return external_delegate(*args, **kwargs)
 
         logging.setLogRecordFactory(external_factory)
         try:
-            logger = get_logger("test.external_factory_preserved")
+            get_logger("test.external_factory_preserved")
             logger.logger.handlers.clear()
             logger.logger.addHandler(logging.NullHandler())
             logger.info("factory remains installed")

@@ -118,10 +118,14 @@ class TestJsonFormatterExtras:
     ) -> None:
         """The internal record localizer is not emitted as a JSON extra."""
         record = make_record()
-        expected_keys = set(json.loads(formatter.format(record)))
         setattr(record, _LOCALIZER_RECORD_ATTR, object())
 
-        assert set(json.loads(formatter.format(record))) == expected_keys
+        assert set(json.loads(formatter.format(record))) == {
+            "timestamp",
+            "level",
+            "logger",
+            "message",
+        }
 
     def test_reserved_field_collision_prefixed(
         self, formatter: JsonFormatter, make_record: Callable[..., logging.LogRecord]
