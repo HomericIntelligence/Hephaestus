@@ -83,7 +83,7 @@ def get_impl_loop_review_prompt(
         prior_review: Previous iteration's review text, or ``None`` on iter 0.
 
     Returns:
-        Formatted prompt for a fresh reviewer session.
+        Formatted prompt for a fresh review iteration.
 
     """
     fenced = fence_content()

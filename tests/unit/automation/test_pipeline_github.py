@@ -100,466 +100,993 @@ def test_adapter_satisfies_stage_github_protocol(adapter: pg.PipelineGitHub) -> 
     assert isinstance(adapter, StageGitHub)
 
 
-def _process_thread_receipt(thread_id: str, review_id: str, body: str) -> dict[str, Any]:
-    """Return one exact process-created thread receipt fixture."""
+def _external_reviewer_thread(thread_id: str = "reviewer-thread") -> dict[str, Any]:
+    """Return an arbitrary reviewer-owned thread eligible for the new protocol."""
     return {
         "id": thread_id,
         "path": "a.py",
         "line": 7,
         "side": "RIGHT",
-        "body": body,
-        "author": "hephaestus[bot]",
-        "authors": ["hephaestus[bot]"],
+        "body": "Please fix this.",
+        "author": "maintainer",
+        "authors": ["maintainer"],
         "comments": [
-            {
-                "id": f"comment-{thread_id}",
-                "author": "hephaestus[bot]",
-                "body": body,
-                "review_id": review_id,
-            }
+            {"id": f"comment-{thread_id}", "author": "maintainer", "body": "Please fix this."}
         ],
-        "review_id": review_id,
-        "created_head_sha": "b" * 40,
     }
 
 
-class TestProcessReviewThreadReceipts:
-    """Durable receipts limit automated thread actions to this loop's threads."""
+def _open_thread_snapshot(thread: dict[str, Any], *, resolved: bool = False) -> dict[str, Any]:
+    """Add the direct-read PR proof required by thread-action tests."""
+    return {
+        **thread,
+        "isResolved": resolved,
+        "pr_state": {
+            "state": "OPEN",
+            "headRefOid": "a" * 40,
+            "autoMergeRequest": None,
+        },
+    }
 
-    def test_live_automated_thread_exposes_a_canonical_restart_receipt(
+
+class TestAllThreadReplyAndReviewerResolution:
+    """The implementation/reviewer split applies to every open thread author."""
+
+    def test_external_thread_is_replied_to_then_resolved_by_fresh_reviewer(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Only an immutable, marked automated review may be re-adopted after restart."""
-        review_id = "PRR_automation"
-        review_head = "b" * 40
-        automated_comment = "<!-- hephaestus-severity: major -->\nfix this"
-
-        monkeypatch.setattr(
-            adapter,
-            "_graphql",
-            lambda *_args, **_kwargs: {
-                "data": {
-                    "repository": {
-                        "pullRequest": {
-                            "reviewThreads": {
-                                "pageInfo": {"hasNextPage": False, "endCursor": None},
-                                "nodes": [
-                                    {
-                                        "id": "automated-thread",
-                                        "isResolved": False,
-                                        "path": "a.py",
-                                        "line": 7,
-                                        "side": "RIGHT",
-                                        "comments": {
-                                            "pageInfo": {"hasNextPage": False},
-                                            "nodes": [
-                                                {
-                                                    "id": "automated-comment",
-                                                    "body": automated_comment,
-                                                    "author": {"login": "mvillmow"},
-                                                    "pullRequestReview": {
-                                                        "id": review_id,
-                                                        "body": (
-                                                            "## Automated PR review\n\nSummary."
-                                                        ),
-                                                        "commit": {"oid": review_head},
-                                                    },
-                                                }
-                                            ],
-                                        },
-                                    },
-                                    {
-                                        "id": "human-thread",
-                                        "isResolved": False,
-                                        "path": "a.py",
-                                        "line": 9,
-                                        "side": "RIGHT",
-                                        "comments": {
-                                            "pageInfo": {"hasNextPage": False},
-                                            "nodes": [
-                                                {
-                                                    "id": "human-comment",
-                                                    "body": (
-                                                        "<!-- hephaestus-severity: major -->\n"
-                                                        "Keep the original text."
-                                                    ),
-                                                    "author": {"login": "mvillmow"},
-                                                    "pullRequestReview": {
-                                                        "id": "PRR_human",
-                                                        "body": "",
-                                                        "commit": {"oid": review_head},
-                                                    },
-                                                }
-                                            ],
-                                        },
-                                    },
-                                    {
-                                        "id": "replied-thread",
-                                        "isResolved": False,
-                                        "path": "a.py",
-                                        "line": 11,
-                                        "side": "RIGHT",
-                                        "comments": {
-                                            "pageInfo": {"hasNextPage": False},
-                                            "nodes": [
-                                                {
-                                                    "id": "replied-comment",
-                                                    "body": automated_comment,
-                                                    "author": {"login": "mvillmow"},
-                                                    "pullRequestReview": {
-                                                        "id": review_id,
-                                                        "body": (
-                                                            "## Automated PR review\n\nSummary."
-                                                        ),
-                                                        "commit": {"oid": review_head},
-                                                    },
-                                                },
-                                                {
-                                                    "id": "human-reply",
-                                                    "body": "Please leave this open.",
-                                                    "author": {"login": "reviewer"},
-                                                    "pullRequestReview": {
-                                                        "id": review_id,
-                                                        "body": (
-                                                            "## Automated PR review\n\nSummary."
-                                                        ),
-                                                        "commit": {"oid": review_head},
-                                                    },
-                                                },
-                                            ],
-                                        },
-                                    },
-                                    {
-                                        "id": "stale-thread",
-                                        "isResolved": False,
-                                        "path": "stale.py",
-                                        "line": None,
-                                        "side": "RIGHT",
-                                        "comments": {
-                                            "pageInfo": {"hasNextPage": False},
-                                            "nodes": [
-                                                {
-                                                    "id": "stale-comment",
-                                                    "body": automated_comment,
-                                                    "author": {"login": "mvillmow"},
-                                                    "pullRequestReview": {
-                                                        "id": review_id,
-                                                        "body": (
-                                                            "## Automated PR review\n\nSummary."
-                                                        ),
-                                                        "commit": {"oid": review_head},
-                                                    },
-                                                }
-                                            ],
-                                        },
-                                    },
-                                    {
-                                        "id": "bot-thread",
-                                        "isResolved": False,
-                                        "path": "bot.py",
-                                        "line": 13,
-                                        "side": "RIGHT",
-                                        "comments": {
-                                            "pageInfo": {"hasNextPage": False},
-                                            "nodes": [
-                                                {
-                                                    "id": "bot-comment",
-                                                    "body": "Please handle this finding.",
-                                                    "author": {
-                                                        "login": "github-code-quality",
-                                                        "__typename": "Bot",
-                                                    },
-                                                    "pullRequestReview": {
-                                                        "id": "PRR_bot",
-                                                        "body": "Automated quality review.",
-                                                        "commit": {"oid": review_head},
-                                                    },
-                                                }
-                                            ],
-                                        },
-                                    },
-                                ],
-                            }
-                        }
-                    }
-                }
-            },
-        )
-
-        threads = adapter._repo_unresolved_threads(7)
-
-        assert threads[0]["process_receipt"] == {
-            "id": "automated-thread",
-            "path": "a.py",
-            "line": 7,
-            "side": "RIGHT",
-            "body": automated_comment,
-            "author": "mvillmow",
-            "authors": ["mvillmow"],
-            "comments": [
-                {
-                    "id": "automated-comment",
-                    "author": "mvillmow",
-                    "body": automated_comment,
-                    "review_id": review_id,
-                }
-            ],
-            "review_id": review_id,
-            "created_head_sha": review_head,
-        }
-        assert "process_receipt" not in threads[1]
-        assert "process_receipt" not in threads[2]
-        assert threads[3]["process_receipt"] == {
-            "id": "stale-thread",
-            "path": "stale.py",
-            "line": None,
-            "side": "RIGHT",
-            "body": automated_comment,
-            "author": "mvillmow",
-            "authors": ["mvillmow"],
-            "comments": [
-                {
-                    "id": "stale-comment",
-                    "author": "mvillmow",
-                    "body": automated_comment,
-                    "review_id": review_id,
-                }
-            ],
-            "review_id": review_id,
-            "created_head_sha": review_head,
-            "restart_stale_line": True,
-        }
-        assert threads[4]["process_receipt"] == {
-            "id": "bot-thread",
-            "path": "bot.py",
-            "line": 13,
-            "side": "RIGHT",
-            "body": "Please handle this finding.",
-            "author": "github-code-quality",
-            "author_type": "Bot",
-            "authors": ["github-code-quality"],
-            "comments": [
-                {
-                    "id": "bot-comment",
-                    "author": "github-code-quality",
-                    "author_type": "Bot",
-                    "body": "Please handle this finding.",
-                    "review_id": "PRR_bot",
-                }
-            ],
-            "review_id": "PRR_bot",
-            "created_head_sha": review_head,
-            "external_bot": True,
-        }
-
-    def test_stale_line_receipt_requires_restart_provenance(
-        self, adapter: pg.PipelineGitHub
-    ) -> None:
-        """A null line is eligible only for the host-normalized restart shape."""
-        receipt = _process_thread_receipt("PRRT_stale", "PRR_stale", "finding")
-        receipt["line"] = None
-
-        assert not adapter._is_immutable_process_receipt(receipt)
-
-        receipt["restart_stale_line"] = True
-
-        assert adapter._is_immutable_process_receipt(receipt)
-
-    def test_verified_bot_receipt_is_automation_owned_without_login_matching(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A host-proven Bot receipt does not rely on a login allowlist."""
-        thread = {
-            "id": "bot-thread",
-            "process_receipt": {"external_bot": True},
-            "author": "github-code-quality",
-            "authors": ["github-code-quality"],
-        }
-        monkeypatch.setattr(adapter, "_unresolved_threads", lambda _pr: [dict(thread)])
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "mvillmow")
-
-        threads = adapter.list_unresolved_review_threads(7)
-
-        assert threads[0]["automation_owned"] is True
-
-    @pytest.mark.parametrize("external_bot", [False, True], ids=["process", "verified-bot"])
-    def test_replies_before_resolving_a_revalidated_process_receipt(
-        self,
-        adapter: pg.PipelineGitHub,
-        monkeypatch: pytest.MonkeyPatch,
-        external_bot: bool,
-    ) -> None:
-        """A handled process or verified-bot receipt replies before resolution."""
-        adapter.repo = "repo"
-        receipt = _process_thread_receipt("PRRT_process_1", "PRR_process_1", "finding")
-        if external_bot:
-            receipt.update({"external_bot": True, "author_type": "Bot"})
-            receipt["comments"][0]["author_type"] = "Bot"
-        reply_body: dict[str, str] = {}
-        live_reads = 0
-
-        def unresolved_threads(_pr_number: int) -> list[dict[str, Any]]:
-            nonlocal live_reads
-            live_reads += 1
-            if live_reads == 1:
-                return [dict(receipt)]
-            if live_reads == 2:
-                replied = dict(receipt)
-                replied["comments"] = [
-                    *receipt["comments"],
-                    {"id": "c1", "author": "hephaestus[bot]", "body": reply_body["body"]},
-                ]
-                return [replied]
-            return []
-
-        mutation_order: list[str] = []
+        """An externally authored thread receives the standard two-role handoff."""
+        thread = _external_reviewer_thread()
+        live = [thread]
+        calls: list[str] = []
 
         def graphql(query: str, **fields: str | int) -> dict[str, Any]:
             if "addPullRequestReviewThreadReply" in query:
-                mutation_order.append("reply")
-                reply_body["body"] = str(fields["body"])
-                return {"data": {"addPullRequestReviewThreadReply": {"comment": {"id": "c1"}}}}
-            if "resolveReviewThread" in query:
-                mutation_order.append("resolve")
+                calls.append("implementation-reply")
+                live[0] = {
+                    **live[0],
+                    "comments": [
+                        *live[0]["comments"],
+                        {
+                            "id": "implementation-comment",
+                            "author": "hephaestus[bot]",
+                            "body": fields["body"],
+                            "viewer_did_author": True,
+                        },
+                    ],
+                }
                 return {
                     "data": {
-                        "resolveReviewThread": {"thread": {"id": receipt["id"], "isResolved": True}}
+                        "addPullRequestReviewThreadReply": {
+                            "comment": {"id": "implementation-comment"}
+                        }
+                    }
+                }
+            if "resolveReviewThread" in query:
+                calls.append("resolve")
+                live.clear()
+                return {
+                    "data": {
+                        "resolveReviewThread": {"thread": {"id": thread["id"], "isResolved": True}}
                     }
                 }
             raise AssertionError(query)
 
-        monkeypatch.setattr(adapter, "_unresolved_threads", unresolved_threads)
+        monkeypatch.setattr(
+            adapter, "_unresolved_threads", lambda _pr: [dict(item) for item in live]
+        )
+        monkeypatch.setattr(
+            adapter, "_review_thread_snapshot", lambda _pr, _thread: _open_thread_snapshot(live[0])
+        )
         monkeypatch.setattr(
             adapter,
             "gh_pr_state",
-            lambda _pr_number: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
+            lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
         )
         monkeypatch.setattr(adapter, "_graphql", graphql)
 
-        result = adapter.reply_and_resolve_process_review_threads(
+        implementation = adapter.post_implementation_thread_replies(
+            7,
+            expected_head_sha="a" * 40,
+            threads=[thread],
+            replies={thread["id"]: "Fixed the missing guard and added a regression test."},
+        )
+
+        assert implementation.replied_thread_ids == (thread["id"],)
+        assert implementation.blocked_thread_ids == ()
+        assert (
+            "hephaestus-implementation-reply:" in implementation.receipts[0]["comments"][-1]["body"]
+        )
+
+        # Simulate a later loop process: it derives the receipt from the live
+        # GitHub thread, not from the prior process's in-memory result.
+        restarted_receipts = adapter.reviewer_validation_receipts(
+            7,
+            reviewed_head_sha="a" * 40,
+            threads=[dict(item) for item in live],
+        )
+        assert len(restarted_receipts) == 1
+        assert restarted_receipts[0]["implementation_reply_id"] == "implementation-comment"
+        resolved_snapshot = {
+            **live[0],
+            "isResolved": True,
+            "pr_state": {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
+        }
+        snapshot_reads = 0
+
+        def snapshot(_pr: int, _thread: str) -> dict[str, Any]:
+            nonlocal snapshot_reads
+            snapshot_reads += 1
+            return _open_thread_snapshot(live[0]) if snapshot_reads == 1 else resolved_snapshot
+
+        monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
+
+        reviewer = adapter.reconcile_reviewer_validated_threads(
+            7,
+            reviewed_head_sha="a" * 40,
+            receipts=restarted_receipts,
+            resolved_thread_ids={thread["id"]},
+            feedback={},
+        )
+
+        assert reviewer.resolved_thread_ids == (thread["id"],)
+        assert reviewer.feedback_thread_ids == ()
+        assert reviewer.blocked_thread_ids == ()
+        assert calls == ["implementation-reply", "resolve"]
+
+    def test_reviewer_rejection_posts_explanation_and_keeps_thread_open(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A rejected fix yields a reviewer reply rather than a premature close."""
+        thread = _external_reviewer_thread()
+        live = [thread]
+        calls: list[str] = []
+
+        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+            if "addPullRequestReviewThreadReply" in query:
+                calls.append(str(fields["body"]))
+                live[0] = {
+                    **live[0],
+                    "comments": [
+                        *live[0]["comments"],
+                        {
+                            "id": f"reply-{len(calls)}",
+                            "author": "hephaestus[bot]",
+                            "body": fields["body"],
+                            "viewer_did_author": True,
+                        },
+                    ],
+                }
+                return {
+                    "data": {
+                        "addPullRequestReviewThreadReply": {
+                            "comment": {"id": f"reply-{len(calls)}"}
+                        }
+                    }
+                }
+            if "resolveReviewThread" in query:
+                pytest.fail("reviewer rejection must leave the thread open")
+            raise AssertionError(query)
+
+        monkeypatch.setattr(
+            adapter, "_unresolved_threads", lambda _pr: [dict(item) for item in live]
+        )
+        monkeypatch.setattr(
+            adapter, "_review_thread_snapshot", lambda _pr, _thread: _open_thread_snapshot(live[0])
+        )
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_state",
+            lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
+        )
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+        implementation = adapter.post_implementation_thread_replies(
+            7,
+            expected_head_sha="a" * 40,
+            threads=[thread],
+            replies={thread["id"]: "Fixed it."},
+        )
+
+        reviewer = adapter.reconcile_reviewer_validated_threads(
+            7,
+            reviewed_head_sha="a" * 40,
+            receipts=list(implementation.receipts),
+            resolved_thread_ids=set(),
+            feedback={thread["id"]: "The null case is still unguarded."},
+        )
+
+        assert reviewer.resolved_thread_ids == ()
+        assert reviewer.feedback_thread_ids == (thread["id"],)
+        assert reviewer.blocked_thread_ids == ()
+        assert len(live) == 1
+        assert "Reviewer validation found this still unresolved" in calls[-1]
+
+    def test_reviewer_reconciles_each_thread_against_its_own_receipt(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A mixed batch does not bind every thread to the final receipt."""
+        reviewed_head_sha = "a" * 40
+        resolving = _external_reviewer_thread("thread-resolve")
+        feedback = _external_reviewer_thread("thread-feedback")
+        live_by_id = {
+            resolving["id"]: {
+                **resolving,
+                "comments": [
+                    *resolving["comments"],
+                    {
+                        "id": "implementation-resolve",
+                        "author": "hephaestus[bot]",
+                        "body": adapter._implementation_thread_reply_body(
+                            7, reviewed_head_sha, resolving["id"], "Resolved the finding."
+                        ),
+                        "viewer_did_author": True,
+                    },
+                ],
+            },
+            feedback["id"]: {
+                **feedback,
+                "comments": [
+                    *feedback["comments"],
+                    {
+                        "id": "implementation-feedback",
+                        "author": "hephaestus[bot]",
+                        "body": adapter._implementation_thread_reply_body(
+                            7, reviewed_head_sha, feedback["id"], "Attempted a fix."
+                        ),
+                        "viewer_did_author": True,
+                    },
+                ],
+            },
+        }
+        resolved_ids: set[str] = set()
+        calls: list[tuple[str, str]] = []
+
+        def snapshot(_pr: int, thread_id: str) -> dict[str, Any]:
+            return _open_thread_snapshot(live_by_id[thread_id], resolved=thread_id in resolved_ids)
+
+        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+            thread_id = str(fields["threadId"])
+            if "resolveReviewThread" in query:
+                calls.append(("resolve", thread_id))
+                resolved_ids.add(thread_id)
+                return {
+                    "data": {
+                        "resolveReviewThread": {"thread": {"id": thread_id, "isResolved": True}}
+                    }
+                }
+            if "addPullRequestReviewThreadReply" in query:
+                calls.append(("feedback", thread_id))
+                live_by_id[thread_id] = {
+                    **live_by_id[thread_id],
+                    "comments": [
+                        *live_by_id[thread_id]["comments"],
+                        {
+                            "id": f"reviewer-{thread_id}",
+                            "author": "hephaestus[bot]",
+                            "body": fields["body"],
+                            "viewer_did_author": True,
+                        },
+                    ],
+                }
+                return {
+                    "data": {
+                        "addPullRequestReviewThreadReply": {
+                            "comment": {"id": f"reviewer-{thread_id}"}
+                        }
+                    }
+                }
+            raise AssertionError(query)
+
+        monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_state",
+            lambda _pr: {
+                "state": "OPEN",
+                "headRefOid": reviewed_head_sha,
+                "autoMergeRequest": None,
+            },
+        )
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+        receipts = adapter.reviewer_validation_receipts(
+            7,
+            reviewed_head_sha=reviewed_head_sha,
+            threads=[live_by_id[resolving["id"]], live_by_id[feedback["id"]]],
+        )
+
+        result = adapter.reconcile_reviewer_validated_threads(
+            7,
+            reviewed_head_sha=reviewed_head_sha,
+            receipts=receipts,
+            resolved_thread_ids={resolving["id"]},
+            feedback={feedback["id"]: "The null case still is not covered."},
+        )
+
+        assert result.resolved_thread_ids == (resolving["id"],)
+        assert result.feedback_thread_ids == (feedback["id"],)
+        assert result.blocked_thread_ids == ()
+        assert calls == [("feedback", feedback["id"]), ("resolve", resolving["id"])]
+
+    def test_malformed_reply_response_recovers_an_exact_host_read_receipt(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A reply mutation applied before a malformed response remains recoverable."""
+        thread = _external_reviewer_thread()
+        body = adapter._implementation_thread_reply_body(
+            7, "a" * 40, thread["id"], "Fixed the guard."
+        )
+        after = {
+            **thread,
+            "comments": [
+                *thread["comments"],
+                {
+                    "id": "implementation-comment",
+                    "author": "hephaestus[bot]",
+                    "body": body,
+                    "viewer_did_author": True,
+                },
+            ],
+        }
+        snapshot_reads = 0
+
+        def snapshot(_pr: int, _thread: str) -> dict[str, Any]:
+            nonlocal snapshot_reads
+            snapshot_reads += 1
+            return _open_thread_snapshot(thread if snapshot_reads == 1 else after)
+
+        monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
+        monkeypatch.setattr(
+            adapter,
+            "_graphql",
+            lambda query, **_fields: (
+                {"data": {"addPullRequestReviewThreadReply": None}}
+                if "addPullRequestReviewThreadReply" in query
+                else pytest.fail(query)
+            ),
+        )
+
+        result = adapter.post_implementation_thread_replies(
+            7,
+            expected_head_sha="a" * 40,
+            threads=[thread],
+            replies={thread["id"]: "Fixed the guard."},
+        )
+
+        assert result.replied_thread_ids == (thread["id"],)
+        assert result.blocked_thread_ids == ()
+        assert result.receipts[0]["implementation_reply_id"] == "implementation-comment"
+
+    def test_reconciliation_rejects_a_receipt_without_the_host_read_reply(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Metadata alone cannot authorize a thread resolution."""
+        thread = _external_reviewer_thread()
+        receipt = {
+            **thread,
+            "implementation_reply_id": "missing-comment",
+            "implementation_reply_body": "Fixed it.\n<!-- hephaestus-implementation-reply:x -->",
+            "implementation_head_sha": "a" * 40,
+        }
+        graphql = MagicMock()
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+
+        result = adapter.reconcile_reviewer_validated_threads(
             7,
             reviewed_head_sha="a" * 40,
             receipts=[receipt],
-            dispositions={receipt["id"]: "addressed"},
+            resolved_thread_ids={thread["id"]},
+            feedback={},
         )
 
-        assert result.resolved_thread_ids == (receipt["id"],)
-        assert result.blocked_thread_ids == ()
-        assert mutation_order == ["reply", "resolve"]
+        assert result.blocked_thread_ids == (thread["id"],)
+        graphql.assert_not_called()
 
-    def test_refuses_a_thread_with_an_unexpected_human_reply(
+    def test_foreign_marker_cannot_become_a_resolution_receipt(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A live thread with any non-receipted reply remains a human gate."""
-        receipt = _process_thread_receipt("PRRT_process_1", "PRR_process_1", "finding")
-        changed = dict(receipt)
-        changed["comments"] = [
-            *receipt["comments"],
-            {"author": "maintainer", "body": "Please keep this open."},
+        """Only the host viewer's final comment can carry a resolve receipt."""
+        thread = _external_reviewer_thread()
+        reply_body = adapter._implementation_thread_reply_body(
+            7, "a" * 40, thread["id"], "Fixed the missing guard."
+        )
+        foreign_reply = {
+            **thread,
+            "comments": [
+                *thread["comments"],
+                {
+                    "id": "foreign-marker",
+                    "author": "other-maintainer",
+                    "body": reply_body,
+                    "viewer_did_author": False,
+                },
+            ],
+        }
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_state",
+            lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
+        )
+
+        assert (
+            adapter.reviewer_validation_receipts(
+                7, reviewed_head_sha="a" * 40, threads=[foreign_reply]
+            )
+            == []
+        )
+
+        forged_receipt = {
+            **foreign_reply,
+            "implementation_reply_id": "foreign-marker",
+            "implementation_reply_body": reply_body,
+            "implementation_head_sha": "a" * 40,
+        }
+        graphql = MagicMock()
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+        result = adapter.reconcile_reviewer_validated_threads(
+            7,
+            reviewed_head_sha="a" * 40,
+            receipts=[forged_receipt],
+            resolved_thread_ids={thread["id"]},
+            feedback={},
+        )
+
+        assert result.blocked_thread_ids == (thread["id"],)
+        graphql.assert_not_called()
+
+        # Even a caller that flips the receipt's local ownership bit cannot
+        # make a foreign live reply eligible for a resolution mutation.
+        claimed_host_reply = {
+            **foreign_reply,
+            "comments": [
+                *foreign_reply["comments"][:-1],
+                {**foreign_reply["comments"][-1], "viewer_did_author": True},
+            ],
+            "implementation_reply_id": "foreign-marker",
+            "implementation_reply_body": reply_body,
+            "implementation_head_sha": "a" * 40,
+        }
+        monkeypatch.setattr(adapter, "_unresolved_threads", lambda _pr: [foreign_reply])
+        monkeypatch.setattr(
+            adapter,
+            "_review_thread_snapshot",
+            lambda _pr, _thread: _open_thread_snapshot(foreign_reply),
+        )
+        result = adapter.reconcile_reviewer_validated_threads(
+            7,
+            reviewed_head_sha="a" * 40,
+            receipts=[claimed_host_reply],
+            resolved_thread_ids={thread["id"]},
+            feedback={},
+        )
+
+        assert result.blocked_thread_ids == (thread["id"],)
+        graphql.assert_not_called()
+
+    def test_head_race_after_resolve_blocks_without_unresolving(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stale-head resolution blocks for fresh review without reopening it."""
+        thread = _external_reviewer_thread()
+        reply = "Fixed the missing guard."
+        reply_body = adapter._implementation_thread_reply_body(7, "a" * 40, thread["id"], reply)
+        live = [
+            {
+                **thread,
+                "comments": [
+                    *thread["comments"],
+                    {
+                        "id": "implementation-comment",
+                        "author": "hephaestus[bot]",
+                        "body": reply_body,
+                        "viewer_did_author": True,
+                    },
+                ],
+            }
         ]
-        monkeypatch.setattr(adapter, "_unresolved_threads", lambda _pr: [changed])
+        receipts = adapter.reviewer_validation_receipts
+        monkeypatch.setattr(
+            adapter,
+            "_unresolved_threads",
+            lambda _pr: [dict(item) for item in live],
+        )
+        state_reads = iter(
+            [
+                {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
+                {"state": "OPEN", "headRefOid": "b" * 40, "autoMergeRequest": None},
+            ]
+        )
+        monkeypatch.setattr(adapter, "gh_pr_state", lambda _pr: next(state_reads))
+        calls: list[str] = []
+
+        def graphql(query: str, **_fields: str) -> dict[str, Any]:
+            if "unresolveReviewThread" in query:
+                calls.append("unresolve")
+                live.append(
+                    {
+                        **thread,
+                        "comments": [
+                            *thread["comments"],
+                            {
+                                "id": "implementation-comment",
+                                "author": "hephaestus[bot]",
+                                "body": reply_body,
+                                "viewer_did_author": True,
+                            },
+                        ],
+                    }
+                )
+                return {
+                    "data": {
+                        "unresolveReviewThread": {
+                            "thread": {"id": thread["id"], "isResolved": False}
+                        }
+                    }
+                }
+            if "resolveReviewThread" in query:
+                calls.append("resolve")
+                live.clear()
+                return {
+                    "data": {
+                        "resolveReviewThread": {"thread": {"id": thread["id"], "isResolved": True}}
+                    }
+                }
+            raise AssertionError(query)
+
+        # Derive once under a stable state, then simulate the race only during
+        # the resolve operation itself.
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_state",
+            lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
+        )
+        derived = receipts(7, reviewed_head_sha="a" * 40, threads=[dict(item) for item in live])
+        monkeypatch.setattr(adapter, "gh_pr_state", lambda _pr: next(state_reads))
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+        resolved_snapshot = {
+            **_open_thread_snapshot(live[0], resolved=True),
+            "pr_state": {
+                "state": "OPEN",
+                "headRefOid": "b" * 40,
+                "autoMergeRequest": None,
+            },
+        }
+        snapshot_reads = 0
+
+        def snapshot(_pr: int, _thread: str) -> dict[str, Any]:
+            nonlocal snapshot_reads
+            snapshot_reads += 1
+            return _open_thread_snapshot(live[0]) if snapshot_reads == 1 else resolved_snapshot
+
+        monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
+
+        result = adapter.reconcile_reviewer_validated_threads(
+            7,
+            reviewed_head_sha="a" * 40,
+            receipts=derived,
+            resolved_thread_ids={thread["id"]},
+            feedback={},
+        )
+
+        assert result.resolved_thread_ids == ()
+        assert result.blocked_thread_ids == (thread["id"],)
+        assert calls == ["resolve"]
+        assert live == []
+
+    def test_post_resolve_comment_race_blocks_without_unresolving(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A reply racing resolution is never hidden by the resolved-thread list."""
+        thread = _external_reviewer_thread()
+        reply_body = adapter._implementation_thread_reply_body(
+            7, "a" * 40, thread["id"], "Fixed the missing guard."
+        )
+        receipt = {
+            **thread,
+            "comments": [
+                *thread["comments"],
+                {
+                    "id": "implementation-comment",
+                    "author": "hephaestus[bot]",
+                    "body": reply_body,
+                    "viewer_did_author": True,
+                },
+            ],
+            "implementation_reply_id": "implementation-comment",
+            "implementation_reply_body": reply_body,
+            "implementation_head_sha": "a" * 40,
+        }
+        live = [dict(receipt)]
+        calls: list[str] = []
         monkeypatch.setattr(
             adapter,
             "gh_pr_state",
             lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
         )
         monkeypatch.setattr(
-            adapter,
-            "_graphql",
-            lambda *_args, **_kwargs: pytest.fail("changed thread must not mutate"),
+            adapter, "_unresolved_threads", lambda _pr: [dict(item) for item in live]
         )
+        resolved_snapshot = {
+            **_open_thread_snapshot(receipt, resolved=True),
+            "comments": [
+                *receipt["comments"],
+                {"id": "racing-comment", "author": "reviewer", "body": "Please revisit."},
+            ],
+        }
+        snapshot_reads = 0
 
-        result = adapter.reply_and_resolve_process_review_threads(
-            7,
-            reviewed_head_sha="a" * 40,
-            receipts=[receipt],
-            dispositions={receipt["id"]: "addressed"},
-        )
+        def snapshot(_pr: int, _thread: str) -> dict[str, Any]:
+            nonlocal snapshot_reads
+            snapshot_reads += 1
+            return _open_thread_snapshot(receipt) if snapshot_reads == 1 else resolved_snapshot
 
-        assert result.resolved_thread_ids == ()
-        assert result.blocked_thread_ids == (receipt["id"],)
+        monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
 
-    def test_does_not_mutate_when_the_pr_head_is_already_stale(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A head changed before reconciliation prevents both reply and close."""
-        receipt = _process_thread_receipt("PRRT_process_1", "PRR_process_1", "finding")
-        monkeypatch.setattr(
-            adapter,
-            "gh_pr_state",
-            lambda _pr: {"state": "OPEN", "headRefOid": "c" * 40, "autoMergeRequest": None},
-        )
-        monkeypatch.setattr(
-            adapter,
-            "_graphql",
-            lambda *_args, **_kwargs: pytest.fail("stale head must not mutate"),
-        )
-
-        result = adapter.reply_and_resolve_process_review_threads(
-            7,
-            reviewed_head_sha="a" * 40,
-            receipts=[receipt],
-            dispositions={receipt["id"]: "addressed"},
-        )
-
-        assert result.resolved_thread_ids == ()
-        assert result.blocked_thread_ids == (receipt["id"],)
-
-    def test_receipt_readback_preserves_the_initial_review_identity(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The durable receipt includes the review identity needed after restart."""
-        adapter.repo = "repo"
-
-        def graphql(_query: str, **_fields: str | int) -> dict[str, Any]:
-            return {
-                "data": {
-                    "repository": {
-                        "pullRequest": {
-                            "reviewThreads": {
-                                "pageInfo": {"hasNextPage": False, "endCursor": None},
-                                "nodes": [
-                                    {
-                                        "id": "PRRT_process_1",
-                                        "isResolved": False,
-                                        "path": "a.py",
-                                        "line": 7,
-                                        "side": "RIGHT",
-                                        "comments": {
-                                            "pageInfo": {"hasNextPage": False},
-                                            "nodes": [
-                                                {
-                                                    "id": "PRRC_process_1",
-                                                    "body": "finding",
-                                                    "author": {"login": "hephaestus[bot]"},
-                                                    "pullRequestReview": {"id": "PRR_process_1"},
-                                                }
-                                            ],
-                                        },
-                                    }
-                                ],
-                            }
+        def graphql(query: str, **_fields: str) -> dict[str, Any]:
+            if "unresolveReviewThread" in query:
+                calls.append("unresolve")
+                live.append(dict(receipt))
+                return {
+                    "data": {
+                        "unresolveReviewThread": {
+                            "thread": {"id": thread["id"], "isResolved": False}
                         }
                     }
                 }
-            }
+            if "resolveReviewThread" in query:
+                calls.append("resolve")
+                live.clear()
+                return {
+                    "data": {
+                        "resolveReviewThread": {"thread": {"id": thread["id"], "isResolved": True}}
+                    }
+                }
+            raise AssertionError(query)
+
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+        result = adapter.reconcile_reviewer_validated_threads(
+            7,
+            reviewed_head_sha="a" * 40,
+            receipts=[receipt],
+            resolved_thread_ids={thread["id"]},
+            feedback={},
+        )
+
+        assert result.resolved_thread_ids == ()
+        assert result.blocked_thread_ids == (thread["id"],)
+        assert calls == ["resolve"]
+        assert live == []
+
+    def test_unproven_resolve_blocks_for_fresh_review(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unknown resolve outcome is blocked without an unsafe compensation write."""
+        thread = _external_reviewer_thread()
+        reply_body = adapter._implementation_thread_reply_body(
+            7, "a" * 40, thread["id"], "Fixed the missing guard."
+        )
+        receipt = {
+            **thread,
+            "comments": [
+                *thread["comments"],
+                {
+                    "id": "implementation-comment",
+                    "author": "hephaestus[bot]",
+                    "body": reply_body,
+                    "viewer_did_author": True,
+                },
+            ],
+            "implementation_reply_id": "implementation-comment",
+            "implementation_reply_body": reply_body,
+            "implementation_head_sha": "a" * 40,
+        }
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_state",
+            lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
+        )
+        monkeypatch.setattr(adapter, "_unresolved_threads", lambda _pr: [dict(receipt)])
+        snapshot_reads = 0
+
+        def snapshot(_pr: int, _thread: str) -> dict[str, Any] | None:
+            nonlocal snapshot_reads
+            snapshot_reads += 1
+            return _open_thread_snapshot(receipt) if snapshot_reads == 1 else None
+
+        monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
+        monkeypatch.setattr(
+            adapter,
+            "_graphql",
+            lambda query, **_fields: (
+                {
+                    "data": {
+                        "resolveReviewThread": {"thread": {"id": thread["id"], "isResolved": True}}
+                    }
+                }
+                if "resolveReviewThread" in query
+                else pytest.fail(query)
+            ),
+        )
+
+        result = adapter.reconcile_reviewer_validated_threads(
+            7,
+            reviewed_head_sha="a" * 40,
+            receipts=[receipt],
+            resolved_thread_ids={thread["id"]},
+            feedback={},
+        )
+
+        assert result.resolved_thread_ids == ()
+        assert result.blocked_thread_ids == (thread["id"],)
+
+    def test_malformed_resolve_payload_blocks_without_compensation(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A malformed response blocks without reopening a possibly foreign resolution."""
+        thread = _external_reviewer_thread()
+        reply_body = adapter._implementation_thread_reply_body(
+            7, "a" * 40, thread["id"], "Fixed the missing guard."
+        )
+        receipt = {
+            **thread,
+            "comments": [
+                *thread["comments"],
+                {
+                    "id": "implementation-comment",
+                    "author": "hephaestus[bot]",
+                    "body": reply_body,
+                    "viewer_did_author": True,
+                },
+            ],
+            "implementation_reply_id": "implementation-comment",
+            "implementation_reply_body": reply_body,
+            "implementation_head_sha": "a" * 40,
+        }
+        calls: list[str] = []
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_state",
+            lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
+        )
+        monkeypatch.setattr(adapter, "_unresolved_threads", lambda _pr: [dict(receipt)])
+        snapshot_reads = 0
+
+        def snapshot(_pr: int, _thread: str) -> dict[str, Any] | None:
+            nonlocal snapshot_reads
+            snapshot_reads += 1
+            return _open_thread_snapshot(receipt) if snapshot_reads == 1 else None
+
+        monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
+
+        def graphql(query: str, **_fields: str) -> dict[str, Any]:
+            if "unresolveReviewThread" in query:
+                calls.append("unresolve")
+                return {
+                    "data": {
+                        "unresolveReviewThread": {
+                            "thread": {"id": thread["id"], "isResolved": False}
+                        }
+                    }
+                }
+            if "resolveReviewThread" in query:
+                calls.append("resolve")
+                # GitHub accepted the request but returned a malformed body.
+                return {"data": {"resolveReviewThread": None}}
+            raise AssertionError(query)
 
         monkeypatch.setattr(adapter, "_graphql", graphql)
 
-        receipts = adapter._repo_review_thread_receipts_for_review(
+        result = adapter.reconcile_reviewer_validated_threads(
             7,
-            "PRR_process_1",
-            [{"path": "a.py", "line": 7, "side": "RIGHT", "body": "finding"}],
+            reviewed_head_sha="a" * 40,
+            receipts=[receipt],
+            resolved_thread_ids={thread["id"]},
+            feedback={},
         )
 
-        assert receipts[0]["comments"] == [
-            {
-                "id": "PRRC_process_1",
-                "author": "hephaestus[bot]",
-                "body": "finding",
-                "review_id": "PRR_process_1",
-            }
-        ]
+        assert result.resolved_thread_ids == ()
+        assert result.blocked_thread_ids == (thread["id"],)
+        assert calls == ["resolve"]
+
+    def test_ambiguous_resolve_never_emits_an_unresolve_mutation(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An uncertain resolve stops for re-review instead of reopening a thread."""
+        thread = _external_reviewer_thread()
+        reply_body = adapter._implementation_thread_reply_body(
+            7, "a" * 40, thread["id"], "Fixed the missing guard."
+        )
+        receipt = {
+            **thread,
+            "comments": [
+                *thread["comments"],
+                {
+                    "id": "implementation-comment",
+                    "author": "hephaestus[bot]",
+                    "body": reply_body,
+                    "viewer_did_author": True,
+                },
+            ],
+            "implementation_reply_id": "implementation-comment",
+            "implementation_reply_body": reply_body,
+            "implementation_head_sha": "a" * 40,
+        }
+        calls: list[str] = []
+        monkeypatch.setattr(
+            adapter,
+            "_review_thread_snapshot",
+            lambda _pr, _thread: _open_thread_snapshot(receipt),
+        )
+        monkeypatch.setattr(adapter, "_unresolved_threads", lambda _pr: [dict(receipt)])
+
+        def graphql(query: str, **_fields: str) -> dict[str, Any]:
+            if "unresolveReviewThread" in query:
+                calls.append("unresolve")
+                return {
+                    "data": {
+                        "unresolveReviewThread": {
+                            "thread": {"id": thread["id"], "isResolved": False}
+                        }
+                    }
+                }
+            if "resolveReviewThread" in query:
+                calls.append("resolve")
+                # A transport/protocol ambiguity cannot prove whether the
+                # mutation took effect.
+                return {"data": {"resolveReviewThread": None}}
+            raise AssertionError(query)
+
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+
+        result = adapter.reconcile_reviewer_validated_threads(
+            7,
+            reviewed_head_sha="a" * 40,
+            receipts=[receipt],
+            resolved_thread_ids={thread["id"]},
+            feedback={},
+        )
+
+        assert result.resolved_thread_ids == ()
+        assert result.blocked_thread_ids == (thread["id"],)
+        assert calls == ["resolve"]
+
+    def test_unproven_resolve_never_attempts_an_unresolve_mutation(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An uncertain resolve is blocked without issuing a compensating mutation."""
+        thread = _external_reviewer_thread()
+        reply_body = adapter._implementation_thread_reply_body(
+            7, "a" * 40, thread["id"], "Fixed the missing guard."
+        )
+        receipt = {
+            **thread,
+            "comments": [
+                *thread["comments"],
+                {
+                    "id": "implementation-comment",
+                    "author": "hephaestus[bot]",
+                    "body": reply_body,
+                    "viewer_did_author": True,
+                },
+            ],
+            "implementation_reply_id": "implementation-comment",
+            "implementation_reply_body": reply_body,
+            "implementation_head_sha": "a" * 40,
+        }
+        calls: list[str] = []
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_state",
+            lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
+        )
+        monkeypatch.setattr(adapter, "_unresolved_threads", lambda _pr: [dict(receipt)])
+        snapshot_reads = 0
+
+        def snapshot(_pr: int, _thread: str) -> dict[str, Any] | None:
+            nonlocal snapshot_reads
+            snapshot_reads += 1
+            return _open_thread_snapshot(receipt) if snapshot_reads == 1 else None
+
+        monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
+
+        def graphql(query: str, **_fields: str) -> dict[str, Any]:
+            if "unresolveReviewThread" in query:
+                calls.append("unresolve")
+                return {"data": {"unresolveReviewThread": None}}
+            if "resolveReviewThread" in query:
+                calls.append("resolve")
+                return {"data": {"resolveReviewThread": None}}
+            raise AssertionError(query)
+
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+
+        result = adapter.reconcile_reviewer_validated_threads(
+            7,
+            reviewed_head_sha="a" * 40,
+            receipts=[receipt],
+            resolved_thread_ids={thread["id"]},
+            feedback={},
+        )
+
+        assert result.resolved_thread_ids == ()
+        assert result.blocked_thread_ids == (thread["id"],)
+        assert calls == ["resolve"]
+
+    def test_resolve_proof_uses_the_atomic_thread_and_pr_snapshot(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The post-resolve proof must not make a second, racy PR-state read."""
+        thread = _external_reviewer_thread()
+        reply_body = adapter._implementation_thread_reply_body(
+            7, "a" * 40, thread["id"], "Fixed the missing guard."
+        )
+        receipt = {
+            **thread,
+            "comments": [
+                *thread["comments"],
+                {
+                    "id": "implementation-comment",
+                    "author": "hephaestus[bot]",
+                    "body": reply_body,
+                    "viewer_did_author": True,
+                },
+            ],
+            "implementation_reply_id": "implementation-comment",
+            "implementation_reply_body": reply_body,
+            "implementation_head_sha": "a" * 40,
+        }
+        state_reads = 0
+
+        def pr_state(_pr: int) -> dict[str, Any]:
+            nonlocal state_reads
+            state_reads += 1
+            if state_reads > 1:
+                pytest.fail("post-resolve proof must use the snapshot's PR state")
+            return {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None}
+
+        monkeypatch.setattr(adapter, "gh_pr_state", pr_state)
+        monkeypatch.setattr(adapter, "_unresolved_threads", lambda _pr: [dict(receipt)])
+        snapshot_reads = 0
+
+        def snapshot(_pr: int, _thread: str) -> dict[str, Any]:
+            nonlocal snapshot_reads
+            snapshot_reads += 1
+            return (
+                _open_thread_snapshot(receipt)
+                if snapshot_reads == 1
+                else _open_thread_snapshot(receipt, resolved=True)
+            )
+
+        monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
+        monkeypatch.setattr(
+            adapter,
+            "_graphql",
+            lambda query, **_fields: (
+                {
+                    "data": {
+                        "resolveReviewThread": {"thread": {"id": thread["id"], "isResolved": True}}
+                    }
+                }
+                if "resolveReviewThread" in query
+                else pytest.fail(query)
+            ),
+        )
+
+        result = adapter.reconcile_reviewer_validated_threads(
+            7,
+            reviewed_head_sha="a" * 40,
+            receipts=[receipt],
+            resolved_thread_ids={thread["id"]},
+            feedback={},
+        )
+
+        assert result.resolved_thread_ids == (thread["id"],)
+        assert state_reads == 0
+
+
+def test_unscoped_adapter_rejects_legacy_review_thread_fallback(adapter: pg.PipelineGitHub) -> None:
+    """Review-thread lifecycle needs complete repo-scoped GraphQL snapshots."""
+    with pytest.raises(RuntimeError, match="repo-scoped"):
+        adapter.list_unresolved_review_threads(7)
 
 
 class TestConditionalMerge:
@@ -1548,7 +2075,7 @@ class TestRepoScoping:
         adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
         assert adapter.find_merged_pr_for_issue(5) == 5
 
-    def test_repo_scoped_unresolved_threads_counts_automation_and_human(
+    def test_repo_scoped_unresolved_threads_returns_every_open_thread(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         calls: list[list[str]] = []
@@ -1600,21 +2127,254 @@ class TestRepoScoping:
             return SimpleNamespace(stdout=json.dumps(payload))
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "ci-bot")
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        snapshots = {
+            "T1": {
+                "id": "T1",
+                "isResolved": False,
+                "path": "a.py",
+                "line": 1,
+                "side": "RIGHT",
+                "comments": [
+                    {
+                        "id": "C1",
+                        "body": "bot",
+                        "author": "ci-bot",
+                        "author_type": "Bot",
+                        "viewer_did_author": False,
+                        "review_id": "R1",
+                        "review_body": "review",
+                        "review_commit_sha": "a" * 40,
+                    }
+                ],
+            },
+            "T2": {
+                "id": "T2",
+                "isResolved": False,
+                "path": "b.py",
+                "line": 2,
+                "side": "RIGHT",
+                "comments": [
+                    {
+                        "id": "C2",
+                        "body": "human",
+                        "author": "reviewer",
+                        "author_type": "User",
+                        "viewer_did_author": False,
+                        "review_id": "R2",
+                        "review_body": "review",
+                        "review_commit_sha": "a" * 40,
+                    }
+                ],
+            },
+        }
+        monkeypatch.setattr(
+            adapter, "_review_thread_snapshot", lambda _pr, thread_id: dict(snapshots[thread_id])
+        )
+        threads = adapter.list_unresolved_review_threads(7)
 
-        assert pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).count_unresolved_threads(
-            7
-        ) == (1, 1)
+        assert [thread["id"] for thread in threads] == ["T1", "T2"]
 
         assert calls[0][:2] == ["api", "graphql"]
         assert "-F" in calls[0]
         assert "owner=org" in calls[0]
         assert "name=repo-a" in calls[0]
 
+    @pytest.mark.parametrize(
+        "review_threads",
+        [
+            {"pageInfo": {"hasNextPage": False, "endCursor": None}},
+            {"nodes": [], "pageInfo": {}},
+            {"nodes": [], "pageInfo": {"hasNextPage": "false"}},
+            {"nodes": [], "pageInfo": {"hasNextPage": None}},
+        ],
+    )
+    def test_repo_scoped_unresolved_threads_rejects_incomplete_page_facts(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        review_threads: dict[str, Any],
+    ) -> None:
+        """Missing or malformed pagination never turns into an empty thread set."""
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        monkeypatch.setattr(
+            adapter,
+            "_graphql",
+            lambda _query, **_fields: {
+                "data": {"repository": {"pullRequest": {"reviewThreads": review_threads}}}
+            },
+        )
+
+        with pytest.raises(RuntimeError, match="could not fetch all PR review threads"):
+            adapter.list_unresolved_review_threads(7)
+
+    def test_thread_snapshot_accepts_deleted_author_and_outdated_side(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Valid nullable GitHub fields cannot wedge an otherwise open thread."""
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        monkeypatch.setattr(
+            adapter,
+            "_graphql",
+            lambda _query, **_fields: {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "id": "PR1",
+                            "state": "OPEN",
+                            "headRefOid": "a" * 40,
+                            "autoMergeRequest": None,
+                        }
+                    },
+                    "node": {
+                        "id": "T1",
+                        "isResolved": False,
+                        "path": "a.py",
+                        "line": None,
+                        "side": None,
+                        "pullRequest": {
+                            "id": "PR1",
+                            "number": 7,
+                            "repository": {"name": "repo-a", "owner": {"login": "org"}},
+                        },
+                        "comments": {
+                            "nodes": [
+                                {
+                                    "id": "C1",
+                                    "body": "Please fix this.",
+                                    "viewerDidAuthor": False,
+                                    "author": None,
+                                    "pullRequestReview": None,
+                                }
+                            ],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
+                    },
+                }
+            },
+        )
+
+        snapshot = adapter._review_thread_snapshot(7, "T1")
+
+        assert snapshot is not None
+        assert snapshot["side"] is None
+        assert snapshot["comments"][0]["author"] == ""
+
+    def test_multi_page_thread_snapshot_requires_a_stable_reread(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A long conversation is reread before it can authorize a mutation."""
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        comments = [
+            {
+                "id": f"C{index}",
+                "body": f"reply {index}",
+                "viewerDidAuthor": False,
+                "author": {"login": "reviewer", "__typename": "User"},
+                "pullRequestReview": None,
+            }
+            for index in range(101)
+        ]
+        calls: list[str | None] = []
+
+        def graphql(_query: str, **fields: str | int) -> dict[str, Any]:
+            after = fields.get("after")
+            calls.append(after if isinstance(after, str) else None)
+            last_page = after == "cursor-100"
+            return {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "id": "PR1",
+                            "state": "OPEN",
+                            "headRefOid": "a" * 40,
+                            "autoMergeRequest": None,
+                        }
+                    },
+                    "node": {
+                        "id": "T1",
+                        "isResolved": False,
+                        "path": "a.py",
+                        "line": 1,
+                        "side": "RIGHT",
+                        "pullRequest": {
+                            "id": "PR1",
+                            "number": 7,
+                            "repository": {"name": "repo-a", "owner": {"login": "org"}},
+                        },
+                        "comments": {
+                            "nodes": comments[100:] if last_page else comments[:100],
+                            "pageInfo": {
+                                "hasNextPage": not last_page,
+                                "endCursor": None if last_page else "cursor-100",
+                            },
+                        },
+                    },
+                }
+            }
+
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+        snapshot = adapter._review_thread_snapshot(7, "T1")
+
+        assert snapshot is not None
+        assert snapshot["comments"][-1]["id"] == "C100"
+        assert calls == [None, "cursor-100", None, "cursor-100"]
+
+    def test_multi_page_thread_snapshot_fails_closed_when_later_page_arms_pr(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A changed PR state on a later connection page invalidates the whole read."""
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+
+        def graphql(_query: str, **fields: str | int) -> dict[str, Any]:
+            after = fields.get("after") == "cursor-1"
+            return {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "id": "PR1",
+                            "state": "OPEN",
+                            "headRefOid": "a" * 40,
+                            "autoMergeRequest": {"enabledAt": "now"} if after else None,
+                        }
+                    },
+                    "node": {
+                        "id": "T1",
+                        "isResolved": False,
+                        "path": "a.py",
+                        "line": 1,
+                        "side": "RIGHT",
+                        "pullRequest": {
+                            "id": "PR1",
+                            "number": 7,
+                            "repository": {"name": "repo-a", "owner": {"login": "org"}},
+                        },
+                        "comments": {
+                            "nodes": [
+                                {
+                                    "id": "C2" if after else "C1",
+                                    "body": "later" if after else "first",
+                                    "viewerDidAuthor": False,
+                                    "author": {"login": "reviewer", "__typename": "User"},
+                                    "pullRequestReview": None,
+                                }
+                            ],
+                            "pageInfo": {
+                                "hasNextPage": not after,
+                                "endCursor": None if after else "cursor-1",
+                            },
+                        },
+                    },
+                }
+            }
+
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+        assert adapter._review_thread_snapshot(7, "T1") is None
+
     def test_repo_scoped_unresolved_threads_fetches_page_after_first_hundred(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A human thread after the first page must still block a GO decision."""
+        """Every open thread is returned even when it appears after page one."""
         calls: list[list[str]] = []
         first_page_nodes = [
             {
@@ -1655,18 +2415,180 @@ class TestRepoScoping:
             return SimpleNamespace(stdout=json.dumps(payload))
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "ci-bot")
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
 
-        assert pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).count_unresolved_threads(
-            7
-        ) == (100, 1)
-        assert len(calls) == 2
+        def snapshot(_pr: int, thread_id: str) -> dict[str, Any]:
+            return {
+                "id": thread_id,
+                "isResolved": False,
+                "path": "a.py",
+                "line": 1,
+                "side": "RIGHT",
+                "comments": [
+                    {
+                        "id": f"C-{thread_id}",
+                        "body": thread_id,
+                        "author": "ci-bot",
+                        "author_type": "Bot",
+                        "viewer_did_author": False,
+                        "review_id": "R1",
+                        "review_body": "review",
+                        "review_commit_sha": "a" * 40,
+                    }
+                ],
+            }
+
+        monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
+        threads = adapter.list_unresolved_review_threads(7)
+
+        assert len(threads) == 101
+        assert len(calls) == 4
         assert "after=cursor-1" in calls[1]
+        assert "after=cursor-1" in calls[3]
+
+    def test_repo_scoped_unresolved_threads_rejects_an_unstable_page_traversal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A thread set changing between complete reads cannot authorize a clean state."""
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        reads = 0
+
+        def graphql(_query: str, **_fields: str | int) -> dict[str, Any]:
+            nonlocal reads
+            reads += 1
+            thread_id = "T1" if reads == 1 else "T2"
+            return {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "nodes": [{"id": thread_id, "isResolved": False}],
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                            }
+                        }
+                    }
+                }
+            }
+
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+        with pytest.raises(RuntimeError, match="could not stabilize all PR review threads"):
+            adapter.list_unresolved_review_threads(7)
+
+    def test_repo_scoped_unresolved_threads_rejects_a_cursor_cycle(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-adjacent repeated cursor cannot loop forever."""
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+
+        def graphql(_query: str, **fields: str | int) -> dict[str, Any]:
+            after = fields.get("after")
+            cursor = "cursor-a" if after == "cursor-b" else "cursor-b" if after else "cursor-a"
+            return {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "nodes": [{"id": f"T-{after or 'first'}", "isResolved": False}],
+                                "pageInfo": {"hasNextPage": True, "endCursor": cursor},
+                            }
+                        }
+                    }
+                }
+            }
+
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+        with pytest.raises(RuntimeError, match="could not fetch all PR review threads"):
+            adapter.list_unresolved_review_threads(7)
+
+    def test_thread_snapshot_validator_rejects_duplicate_comment_ids(self) -> None:
+        """A replayed comment page cannot pass the final snapshot proof."""
+        thread = {
+            "comments": [
+                {"id": "C1", "author": "reviewer", "body": "first"},
+                {"id": "C1", "author": "reviewer", "body": "duplicate"},
+            ]
+        }
+        assert pg.PipelineGitHub._thread_comment_snapshot(thread) is None
+
+    def test_repo_scoped_unresolved_threads_reads_every_comment_in_long_thread(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A long-lived open conversation is passed to remediation in full."""
+        comments = [
+            {
+                "id": f"C{index}",
+                "body": f"reply {index}",
+                "viewerDidAuthor": False,
+                "author": {"login": "reviewer", "__typename": "User"},
+                "pullRequestReview": {
+                    "id": "R1",
+                    "body": "review body",
+                    "commit": {"oid": "a" * 40},
+                },
+            }
+            for index in range(21)
+        ]
+
+        def graphql(query: str, **_fields: str | int) -> dict[str, Any]:
+            if "node(id:$threadId)" in query:
+                return {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "id": "PR1",
+                                "state": "OPEN",
+                                "headRefOid": "a" * 40,
+                                "autoMergeRequest": None,
+                            }
+                        },
+                        "node": {
+                            "id": "T1",
+                            "isResolved": False,
+                            "path": "a.py",
+                            "line": 1,
+                            "side": "RIGHT",
+                            "pullRequest": {
+                                "id": "PR1",
+                                "number": 7,
+                                "repository": {
+                                    "name": "repo-a",
+                                    "owner": {"login": "org"},
+                                },
+                            },
+                            "comments": {
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                "nodes": comments,
+                            },
+                        },
+                    }
+                }
+            return {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                "nodes": [{"id": "T1", "isResolved": False}],
+                            }
+                        }
+                    }
+                }
+            }
+
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+
+        threads = adapter.list_unresolved_review_threads(7)
+
+        assert [thread["id"] for thread in threads] == ["T1"]
+        assert [comment["body"] for comment in threads[0]["comments"]] == [
+            f"reply {index}" for index in range(21)
+        ]
 
     def test_repo_scoped_unresolved_threads_fail_closed_on_truncated_comments(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A human reply after 20 bot comments cannot be omitted from ownership."""
+        """A truncated comment page cannot produce an incomplete thread snapshot."""
         all_comments = [
             {"body": f"bot reply {index}", "author": {"login": "ci-bot"}} for index in range(20)
         ]
@@ -1700,16 +2622,14 @@ class TestRepoScoping:
             "gh_call",
             lambda _argv, **_kwargs: SimpleNamespace(stdout=json.dumps(payload)),
         )
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "ci-bot")
-
         adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
         with pytest.raises(RuntimeError, match=r"could not fetch all comments.*T1"):
-            adapter.count_unresolved_threads_by_severity(7)
+            adapter.list_unresolved_review_threads(7)
 
     def test_repo_scoped_fetch_error_fails_closed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """#1868: repo-scoped path must propagate GraphQL errors, matching legacy."""
+        """A repo-scoped GraphQL failure must not hide open review threads."""
 
         def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
             raise RuntimeError("gh: GraphQL: Head sha can't be blank")
@@ -1718,7 +2638,7 @@ class TestRepoScoping:
 
         adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
         with pytest.raises(RuntimeError, match="Head sha"):
-            adapter.count_unresolved_threads(7)
+            adapter.list_unresolved_review_threads(7)
 
     def test_repo_scoped_upsert_plan_comment_updates_marker_comment(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1813,9 +2733,13 @@ class TestRepoScoping:
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
 
-        posted = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).post_review_threads(
-            7, [], "summary"
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_state",
+            lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
         )
+        posted = adapter.post_review_threads(7, [], "summary", expected_head_sha="a" * 40)
 
         assert posted == []
         assert any("repos/org/repo-a/pulls/7/reviews" in call for call in calls)
@@ -1836,6 +2760,11 @@ class TestRepoScoping:
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
 
         adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_state",
+            lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
+        )
         with pytest.raises(RuntimeError, match="anchor outside the current PR diff"):
             adapter.post_review_threads(
                 7,
@@ -1844,6 +2773,46 @@ class TestRepoScoping:
                     {"path": "a.py", "line": 2, "side": "RIGHT", "body": "stale"},
                 ],
                 "summary",
+                expected_head_sha="a" * 40,
+            )
+
+        assert len(calls) == 1
+        assert calls[0][:3] == ["pr", "diff", "7"]
+
+    def test_repo_scoped_review_post_rechecks_head_immediately_before_write(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A head change while deriving anchors prevents stale publication."""
+        calls: list[list[str]] = []
+        head_changed = False
+        diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+ok\n"
+
+        def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            nonlocal head_changed
+            calls.append(argv)
+            if argv[:2] == ["pr", "diff"]:
+                head_changed = True
+                return SimpleNamespace(stdout=diff)
+            raise AssertionError(f"stale review publication attempted: {argv}")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_state",
+            lambda _pr: {
+                "state": "OPEN",
+                "headRefOid": "b" * 40 if head_changed else "a" * 40,
+                "autoMergeRequest": None,
+            },
+        )
+
+        with pytest.raises(RuntimeError, match="review publication head is stale"):
+            adapter.post_review_threads(
+                7,
+                [{"path": "a.py", "line": 1, "side": "RIGHT", "body": "finding"}],
+                "summary",
+                expected_head_sha="a" * 40,
             )
 
         assert len(calls) == 1
@@ -1895,9 +2864,22 @@ class TestRepoScoping:
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
 
         with caplog.at_level("WARNING", logger=pg.__name__):
-            posted = pg.PipelineGitHub(
-                "org", repo="repo-a", repo_root=tmp_path
-            ).post_review_threads(7, [{"path": "a.py", "line": 1, "body": "x"}], "summary")
+            adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+            monkeypatch.setattr(
+                adapter,
+                "gh_pr_state",
+                lambda _pr: {
+                    "state": "OPEN",
+                    "headRefOid": "a" * 40,
+                    "autoMergeRequest": None,
+                },
+            )
+            posted = adapter.post_review_threads(
+                7,
+                [{"path": "a.py", "line": 1, "body": "x"}],
+                "summary",
+                expected_head_sha="a" * 40,
+            )
 
         assert posted == []
         assert any(
@@ -1959,10 +2941,17 @@ class TestRepoScoping:
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
 
-        posted = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).post_review_threads(
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_state",
+            lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
+        )
+        posted = adapter.post_review_threads(
             7,
             [{"path": "a.py", "line": 1, "side": "RIGHT", "severity": "major", "body": "finding"}],
             "summary",
+            expected_head_sha="a" * 40,
         )
 
         assert posted == []
@@ -2465,52 +3454,6 @@ class TestReadSurface:
         assert adapter.pr_has_implementation_state_label(7) == (True, False)
 
 
-class TestUnresolvedThreads:
-    """count_unresolved_threads mirrors #1152: counts only, resolves nothing."""
-
-    def test_count_unresolved_threads_uses_split_helper(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """count_unresolved_threads delegates ownership splitting to _split_threads."""
-        threads = [{"id": "a"}, {"id": "b"}]
-        monkeypatch.setattr(adapter, "_unresolved_threads", lambda n: threads)
-        split = MagicMock(return_value=(3, 4))
-        monkeypatch.setattr(pg, "_split_threads", split)
-
-        assert adapter.count_unresolved_threads(7) == (3, 4)
-        split.assert_called_once_with(threads)
-
-    def test_counts_by_ownership(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        threads = [{"id": "a"}, {"id": "b"}, {"id": "c"}]
-        monkeypatch.setattr(
-            github_api_mod, "gh_pr_list_unresolved_threads", lambda n, dry_run: threads
-        )
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "bot")
-        monkeypatch.setattr(pg, "_is_automation_owned_thread", lambda t, login: t["id"] == "a")
-
-        assert adapter.count_unresolved_threads(7) == (1, 2)
-
-    def test_empty_result_returns_zero(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(github_api_mod, "gh_pr_list_unresolved_threads", lambda n, dry_run: [])
-        assert adapter.count_unresolved_threads(7) == (0, 0)
-
-    def test_legacy_fetch_error_fails_closed(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """#1868: legacy path must propagate fetch errors, not fail open to (0, 0)."""
-
-        def boom(n: int, dry_run: bool) -> list[dict[str, Any]]:
-            raise RuntimeError("api")
-
-        monkeypatch.setattr(github_api_mod, "gh_pr_list_unresolved_threads", boom)
-        with pytest.raises(RuntimeError, match="api"):
-            adapter.count_unresolved_threads(7)
-
-
 class TestGhPrState:
     """The merge_wait single PR-state read (re-housed CIDriver._gh_pr_state)."""
 
@@ -2685,7 +3628,7 @@ class TestRateBudget:
 
 
 class TestSeverityMarker:
-    """Severity marker embedding and classification for the GO gate (#1856)."""
+    """Severity marker embedding for published review findings (#1856)."""
 
     def test_with_severity_marker_embeds(self) -> None:
         """_with_severity_marker embeds severity marker in body."""
@@ -2728,114 +3671,3 @@ class TestSeverityMarker:
         assert "<!-- hephaestus-severity: nitpick -->" not in result
         assert "Verdict: GO" not in result
         assert result.count("<!-- hephaestus-severity:") == 1
-
-    def test_thread_severity_is_blocking_critical(self) -> None:
-        """_thread_severity_is_blocking returns True for critical severity."""
-        thread = {"body": "<!-- hephaestus-severity: critical -->\nSome issue"}
-        assert pg._thread_severity_is_blocking(thread) is True
-
-    def test_thread_severity_is_blocking_major(self) -> None:
-        """_thread_severity_is_blocking returns True for major severity."""
-        thread = {"body": "<!-- hephaestus-severity: major -->\nSome issue"}
-        assert pg._thread_severity_is_blocking(thread) is True
-
-    def test_thread_severity_is_blocking_minor_false(self) -> None:
-        """_thread_severity_is_blocking returns False for minor severity."""
-        thread = {"body": "<!-- hephaestus-severity: minor -->\nSome issue"}
-        assert pg._thread_severity_is_blocking(thread) is False
-
-    def test_thread_severity_is_blocking_nitpick_false(self) -> None:
-        """_thread_severity_is_blocking returns False for nitpick severity."""
-        thread = {"body": "<!-- hephaestus-severity: nitpick -->\nSome issue"}
-        assert pg._thread_severity_is_blocking(thread) is False
-
-    def test_thread_severity_is_blocking_missing_defaults_true(self) -> None:
-        """_thread_severity_is_blocking returns True (blocking) for missing marker."""
-        thread = {"body": "No marker here\nJust plain text"}
-        assert pg._thread_severity_is_blocking(thread) is True
-
-    def test_thread_severity_anchors_on_marker_line(self) -> None:
-        """_thread_severity_is_blocking anchors on marker line, not substring."""
-        thread = {
-            "body": "Some text mentioning minor\n<!-- hephaestus-severity: critical -->\nMore text"
-        }
-        # Should find 'critical' in marker, not 'minor' in prose
-        assert pg._thread_severity_is_blocking(thread) is True
-
-    def test_count_unresolved_threads_by_severity_classifies(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """count_unresolved_threads_by_severity classifies threads by severity."""
-        automation_thread_critical = {
-            "body": "<!-- hephaestus-severity: critical -->\nIssue",
-            "author": "automation-bot",
-        }
-        automation_thread_minor = {
-            "body": "<!-- hephaestus-severity: minor -->\nNit",
-            "author": "automation-bot",
-        }
-        human_thread = {
-            "body": "Human comment",
-            "author": "reviewer",
-        }
-
-        threads = [automation_thread_critical, automation_thread_minor, human_thread]
-
-        monkeypatch.setattr(adapter, "_unresolved_threads", lambda pr: threads)
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "automation-bot")
-
-        blocking, minor, human = adapter.count_unresolved_threads_by_severity(42)
-
-        assert blocking == 1
-        assert minor == 1
-        assert human == 1
-
-    def test_count_unresolved_threads_by_severity_unmarked_is_blocking(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """count_unresolved_threads_by_severity treats unmarked automation as blocking."""
-        automation_thread_unmarked = {
-            "body": "No marker",
-            "author": "automation-bot",
-        }
-
-        threads = [automation_thread_unmarked]
-
-        monkeypatch.setattr(adapter, "_unresolved_threads", lambda pr: threads)
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "automation-bot")
-
-        blocking, minor, human = adapter.count_unresolved_threads_by_severity(42)
-
-        assert blocking == 1
-        assert minor == 0
-        assert human == 0
-
-    @pytest.mark.parametrize(
-        "marker",
-        [
-            "<!-- hephaestus-severity: unknown -->",
-            "<!-- hephaestus-severity: -->",
-        ],
-        ids=["unknown", "malformed"],
-    )
-    def test_unrecognized_severity_stays_blocking(
-        self,
-        adapter: pg.PipelineGitHub,
-        monkeypatch: pytest.MonkeyPatch,
-        marker: str,
-    ) -> None:
-        """Unknown or malformed durable severities remain blocking end to end."""
-        thread = {
-            "id": "corrupt_thread_id",
-            "body": f"{marker}\nFinding",
-            "author": "automation-bot",
-        }
-        monkeypatch.setattr(adapter, "_unresolved_threads", lambda _pr: [thread])
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "automation-bot")
-        mark_go = MagicMock()
-        monkeypatch.setattr(adapter, "mark_pr_implementation_go", mark_go)
-
-        counts = adapter.count_unresolved_threads_by_severity(42)
-
-        assert counts == (1, 0, 0)
-        mark_go.assert_not_called()

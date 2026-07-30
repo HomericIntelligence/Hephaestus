@@ -3314,8 +3314,8 @@ class TestGhPrReviewPost:
         )
         mock_index.return_value = {
             (
-                "tests/unit/automation/test_pr_reviewer_posting.py",
-                540,
+                "a.py",
+                2,
             ): (
                 "COMMENT_NODE_540",
                 "This regression coverage only exercises the Claude result-envelope path. "
@@ -3331,8 +3331,8 @@ class TestGhPrReviewPost:
             pr_number=1116,
             comments=[
                 {
-                    "path": "tests/unit/automation/test_pr_reviewer_posting.py",
-                    "line": 540,
+                    "path": "a.py",
+                    "line": 2,
                     "side": "RIGHT",
                     "body": (
                         "This regression test only exercises the Claude JSON-envelope path. "
@@ -3348,7 +3348,7 @@ class TestGhPrReviewPost:
         )
 
         mock_update.assert_not_called()
-        assert self._posted_comments(mock_write) == []
+        mock_write.assert_not_called()
 
     @patch("hephaestus.automation.github_api.gh_pr_update_review_comment")
     @patch("hephaestus.automation.github_api.gh_pr_inline_comment_index")
@@ -3422,8 +3422,8 @@ class TestGhPrReviewPost:
         )
         mock_index.return_value = {
             (
-                "tests/unit/automation/test_pr_reviewer_posting.py",
-                540,
+                "a.py",
+                2,
             ): (
                 "COMMENT_NODE_540",
                 "This regression coverage only exercises the Claude result-envelope path. "
@@ -3465,8 +3465,8 @@ class TestGhPrReviewPost:
                 pr_number=1116,
                 comments=[
                     {
-                        "path": "tests/unit/automation/test_pr_reviewer_posting.py",
-                        "line": 540,
+                        "path": "a.py",
+                        "line": 2,
                         "side": "RIGHT",
                         "body": body,
                     }
@@ -3476,7 +3476,7 @@ class TestGhPrReviewPost:
             )
 
         mock_update.assert_not_called()
-        assert self._posted_comments(mock_write) == []
+        mock_write.assert_not_called()
 
     @patch("hephaestus.automation.github_api.gh_pr_update_review_comment")
     @patch("hephaestus.automation.github_api.gh_pr_inline_comment_index")
@@ -3497,15 +3497,15 @@ class TestGhPrReviewPost:
         )
         mock_index.return_value = {
             (
-                "tests/unit/automation/test_pr_reviewer_posting.py",
-                589,
+                "a.py",
+                2,
             ): (
-                "COMMENT_NODE_589",
-                "This test proves `review_pr_inline()` returns `review_text`, but it does "
-                "not assert the other half of the contract: GitHub still receives the JSON "
-                "`summary` as the review body. Capture this mock and assert "
+                "COMMENT_NODE_A2",
+                "This test proves review publication receives the structural-audit summary, "
+                "but it does not assert the matching body is preserved. Capture this mock "
+                "and assert "
                 '`gh_pr_review_post(..., summary="a defect (no verdict token here)")` so a '
-                "future regression cannot post the full verdict prose.",
+                "future regression cannot post untrusted review prose.",
                 True,
             ),
         }
@@ -3514,16 +3514,16 @@ class TestGhPrReviewPost:
             pr_number=1116,
             comments=[
                 {
-                    "path": "tests/unit/automation/test_pr_reviewer_posting.py",
-                    "line": 589,
+                    "path": "a.py",
+                    "line": 2,
                     "side": "RIGHT",
                     "body": (
-                        "This test verifies that `review_pr_inline()` returns the prose, but "
-                        "it does not assert the other half of the contract: GitHub should "
-                        "still receive the JSON `summary` as the review body. Capture the "
+                        "This test verifies review publication receives a structural-audit "
+                        "summary, but it does not assert the matching body is preserved. "
+                        "Capture the "
                         "`gh_pr_review_post` mock and assert "
                         '`summary == "a defect (no verdict token here)"` so a future change '
-                        "cannot accidentally post `review_text` instead."
+                        "cannot accidentally post untrusted review prose instead."
                     ),
                 }
             ],
@@ -3532,7 +3532,7 @@ class TestGhPrReviewPost:
         )
 
         mock_update.assert_not_called()
-        assert self._posted_comments(mock_write) == []
+        mock_write.assert_not_called()
 
     @patch("hephaestus.automation.github_api.gh_pr_update_review_comment")
     @patch("hephaestus.automation.github_api.gh_pr_inline_comment_index")
@@ -3604,7 +3604,6 @@ class TestEditOrKeepUneditableComment:
     the same line, indexes it, and edits THAT comment on every later re-raise.
     """
 
-    @patch("hephaestus.automation.github_api.gh_pr_wont_fix_line_index", return_value=set())
     @patch("hephaestus.automation.github_api.gh_pr_update_review_comment")
     @patch("hephaestus.automation.github_api.gh_pr_review_post")
     @patch("hephaestus.automation.github_api.gh_pr_inline_comment_index")
@@ -3613,7 +3612,6 @@ class TestEditOrKeepUneditableComment:
         mock_index: Any,
         mock_post: Any,
         mock_update: Any,
-        _mock_wont_fix: Any,
     ) -> None:
         from hephaestus.automation.github_api import _edit_or_keep_comments
 
@@ -3641,7 +3639,6 @@ class TestEditOrKeepUneditableComment:
         # The finding was consumed (edited via shadow), not returned for re-post.
         assert kept == []
 
-    @patch("hephaestus.automation.github_api.gh_pr_wont_fix_line_index", return_value=set())
     @patch("hephaestus.automation.github_api.gh_pr_update_review_comment")
     @patch("hephaestus.automation.github_api.gh_pr_review_post")
     @patch("hephaestus.automation.github_api.gh_pr_inline_comment_index")
@@ -3650,7 +3647,6 @@ class TestEditOrKeepUneditableComment:
         mock_index: Any,
         mock_post: Any,
         mock_update: Any,
-        _mock_wont_fix: Any,
     ) -> None:
         """After shadowing a foreign comment, a second same-line finding edits OUR node."""
         from hephaestus.automation.github_api import _edit_or_keep_comments
@@ -3677,7 +3673,6 @@ class TestEditOrKeepUneditableComment:
         assert "first our note" in edited_body
         assert "a wholly different note" in edited_body
 
-    @patch("hephaestus.automation.github_api.gh_pr_wont_fix_line_index", return_value=set())
     @patch("hephaestus.automation.github_api.gh_pr_update_review_comment")
     @patch("hephaestus.automation.github_api.gh_pr_review_post")
     @patch("hephaestus.automation.github_api.gh_pr_inline_comment_index")
@@ -3686,7 +3681,6 @@ class TestEditOrKeepUneditableComment:
         mock_index: Any,
         mock_post: Any,
         mock_update: Any,
-        _mock_wont_fix: Any,
     ) -> None:
         """A "Body is not editable" mutation error (stale viewer flag) shadow-posts."""
         from hephaestus.automation.github_api import _edit_or_keep_comments
@@ -3708,7 +3702,6 @@ class TestEditOrKeepUneditableComment:
         # The finding was consumed by the shadow comment, not re-posted fresh.
         assert kept == []
 
-    @patch("hephaestus.automation.github_api.gh_pr_wont_fix_line_index", return_value=set())
     @patch("hephaestus.automation.github_api.gh_pr_update_review_comment")
     @patch("hephaestus.automation.github_api.gh_pr_review_post")
     @patch("hephaestus.automation.github_api.gh_pr_inline_comment_index")
@@ -3717,7 +3710,6 @@ class TestEditOrKeepUneditableComment:
         mock_index: Any,
         mock_post: Any,
         mock_update: Any,
-        _mock_wont_fix: Any,
         caplog: Any,
     ) -> None:
         """#1368: foreign-comment (viewerCanUpdate=False) path emits no ERROR logs.
@@ -3860,86 +3852,6 @@ class TestGhPrInlineCommentIndex:
         result.stdout = "not json{"
         mock_gh_call.return_value = result
         assert gh_pr_inline_comment_index(7) == {}
-
-
-class TestWontFixLineIndex:
-    """gh_pr_wont_fix_line_index / dedup suppression of intentional-design findings (#1163)."""
-
-    @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
-    @patch("hephaestus.automation.github_api._gh_call")
-    def test_indexes_only_resolved_marker_threads(self, mock_gh_call: Any, _mock_repo: Any) -> None:
-        from hephaestus.automation.github_api import gh_pr_wont_fix_line_index
-        from hephaestus.automation.protocol import WONT_FIX_MARKER
-
-        result = Mock()
-        result.stdout = json.dumps(
-            {
-                "data": {
-                    "repository": {
-                        "pullRequest": {
-                            "reviewThreads": {
-                                "nodes": [
-                                    {  # resolved + marker → indexed
-                                        "isResolved": True,
-                                        "path": "a.py",
-                                        "line": 2,
-                                        "side": "RIGHT",
-                                        "comments": {
-                                            "nodes": [
-                                                {"id": "N1", "body": "orig"},
-                                                {"id": "N2", "body": f"{WONT_FIX_MARKER} — stub"},
-                                            ]
-                                        },
-                                    },
-                                    {  # resolved but NO marker → not indexed
-                                        "isResolved": True,
-                                        "path": "b.py",
-                                        "line": 5,
-                                        "side": "RIGHT",
-                                        "comments": {"nodes": [{"id": "N3", "body": "fixed"}]},
-                                    },
-                                    {  # marker but UNRESOLVED → not indexed
-                                        "isResolved": False,
-                                        "path": "c.py",
-                                        "line": 9,
-                                        "side": "RIGHT",
-                                        "comments": {
-                                            "nodes": [{"id": "N4", "body": WONT_FIX_MARKER}]
-                                        },
-                                    },
-                                ]
-                            }
-                        }
-                    }
-                }
-            }
-        )
-        mock_gh_call.return_value = result
-
-        keys = gh_pr_wont_fix_line_index(7)
-
-        assert ("a.py", 2, "RIGHT") in keys
-        assert ("a.py", 2) in keys
-        assert ("b.py", 5, "RIGHT") not in keys
-        assert ("c.py", 9, "RIGHT") not in keys
-
-    @patch("hephaestus.automation.github_api.gh_pr_wont_fix_line_index")
-    @patch("hephaestus.automation.github_api.gh_pr_inline_comment_index", return_value={})
-    def test_dedup_suppresses_finding_on_wont_fix_line(
-        self, _mock_index: Any, mock_wont_fix: Any
-    ) -> None:
-        from hephaestus.automation.github_api import _edit_or_keep_comments
-
-        mock_wont_fix.return_value = {("a.py", 2, "RIGHT"), ("a.py", 2)}
-        comments = [
-            {"path": "a.py", "line": 2, "side": "RIGHT", "body": "re-raised intentional finding"},
-            {"path": "z.py", "line": 9, "side": "RIGHT", "body": "genuinely new finding"},
-        ]
-
-        kept = _edit_or_keep_comments(123, comments)
-
-        # The won't-fix line is dropped; the unrelated finding survives.
-        assert [c["path"] for c in kept] == ["z.py"]
 
 
 class TestValidReviewPositions:

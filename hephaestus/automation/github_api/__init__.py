@@ -114,7 +114,6 @@ from .reviews import (  # noqa: E402
     gh_pr_inline_comment_index as gh_pr_inline_comment_index,
     gh_pr_review_post as gh_pr_review_post,
     gh_pr_update_review_comment as gh_pr_update_review_comment,
-    gh_pr_wont_fix_line_index as gh_pr_wont_fix_line_index,
 )
 from .threads import (  # noqa: E402
     gh_pr_list_unresolved_threads as gh_pr_list_unresolved_threads,
@@ -181,7 +180,6 @@ __all__ = [
     "gh_pr_review_post",
     "gh_pr_state",
     "gh_pr_update_review_comment",
-    "gh_pr_wont_fix_line_index",
     "gh_rate_limit_reset_epoch",
     "is_issue_closed",
     "is_skipped",

@@ -216,42 +216,6 @@ class ImplementerOptions(ParallelWorkerOptionsBase):
     follow_up_timeout: int = DEFAULT_AGENT_TIMEOUT
 
 
-class ReviewPhase(str, Enum):
-    """Phase of PR review and fix workflow."""
-
-    ANALYZING = "analyzing"
-    FIXING = "fixing"
-    PUSHING = "pushing"
-    LEARN = "learn"
-    COMPLETED = "completed"
-    HUMAN_RESOLUTION_REQUIRED = "human_resolution_required"
-    FAILED = "failed"
-    POSTING = "posting"  # posting inline review comments to GitHub
-    WAITING_CI = "waiting_ci"  # waiting for CI checks
-    CI_FIXING = "ci_fixing"  # fixing CI failures
-    MERGED = "merged"  # PR merged
-
-
-class ReviewState(BaseModel):
-    """State tracking for PR review and fix workflow."""
-
-    issue_number: int
-    pr_number: int
-    phase: ReviewPhase = ReviewPhase.ANALYZING
-    worktree_path: str | None = None
-    branch_name: str | None = None
-    plan_path: str | None = None
-    session_id: str | None = None
-    session_agent: str | None = None
-    started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    completed_at: datetime | None = None
-    error: str | None = None
-    posted_thread_ids: list[str] = Field(default_factory=list)  # GitHub review thread IDs posted
-    # Thread IDs whose underlying code an agent claims to have fixed. These
-    # claims are not GitHub thread resolution: a human must verify/reply/resolve.
-    addressed_thread_ids: list[str] = Field(default_factory=list)
-
-
 class ReviewerOptions(ParallelWorkerOptionsBase):
     """Options for the PRReviewer."""
 
@@ -269,17 +233,6 @@ class PlanReviewerOptions(VerboseParallelWorkerOptionsBase):
     agent: str = "claude"
     enable_ui: bool = True
     agent_timeout: int = DEFAULT_AGENT_TIMEOUT
-
-
-class AddressReviewOptions(VerboseParallelWorkerOptionsBase):
-    """Options for the AddressReview workflow."""
-
-    issues: list[int] = Field(default_factory=list)
-    agent: str = "claude"
-    enable_ui: bool = True
-    resume_impl_session: bool = True  # attempt to resume implementer's saved agent session
-    agent_timeout: int = DEFAULT_AGENT_TIMEOUT
-    advise_timeout: int = DEFAULT_AGENT_TIMEOUT
 
 
 class CIDriverOptions(VerboseParallelWorkerOptionsBase):

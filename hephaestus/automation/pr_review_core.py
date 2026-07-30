@@ -4,23 +4,15 @@ Epic #1809's final omit-reduction wave (#1823) split the PR-review module into
 two layers:
 
 * This module holds the **shared review core** — the pure context assembler
-  (:func:`gather_impl_review_context`), the agent-invoking analysis session
-  (:func:`run_pr_review_analysis`), and the in-loop review+post orchestration
-  (:func:`review_pr_inline`). These are consumed directly by the pipeline
-  ``pr_review`` stage collaborators (``_review_phase`` / ``review_validator``)
-  and by the standalone :class:`~hephaestus.automation.pr_reviewer.PRReviewer`.
-  Every symbol here is reachable with mocked subprocess/agent seams, so the
-  module carries direct unit coverage and is **not** on the
-  ``[tool.coverage.run].omit`` allowlist.
+  (:func:`gather_impl_review_context`) and agent-invoking analysis session
+  (:func:`run_pr_review_analysis`) used by the pipeline. GitHub review-thread
+  mutation belongs exclusively to the pipeline adapter.
 
-* :mod:`hephaestus.automation.pr_reviewer` remains the console-script wrapper
-  (``hephaestus-review-prs``) around the live worktree/agent orchestration. It
-  re-exports the three cores below (``name as name``) so long-pinned patch
-  sites — ``hephaestus.automation.pr_reviewer.run_pr_review_analysis`` etc. —
-  keep resolving.
+* :mod:`hephaestus.automation.pr_reviewer` is the console-script wrapper
+  (``hephaestus-review-prs``) around the pipeline.
 
-The cores are intentionally free of the ``PRReviewer``/``BaseReviewer``
-scaffolding: they take everything they need as explicit keyword arguments, so
+The core is intentionally free of reviewer-class scaffolding: it takes
+everything it needs as explicit keyword arguments, so
 the in-loop implementer review step (Stage 2, #28) and the standalone reviewer
 share exactly one invocation body (DRY).
 """
@@ -48,10 +40,9 @@ from .agent_config import DEFAULT_AGENT_TIMEOUT
 from .claude_invoke import invoke_claude_with_session, raise_for_error_envelope
 from .claude_models import reviewer_model
 from .git_utils import get_repo_root, get_repo_slug, pr_ref
-from .github_api import gh_pr_review_post
 from .prompts import get_pr_review_analysis_prompt
-from .review_audit import ReviewAudit, parse_review_audit, render_review_audit
-from .session_naming import AGENT_PR_REVIEWER, reviewer_agent
+from .review_audit import ReviewAudit, parse_review_audit
+from .session_naming import AGENT_PR_REVIEWER
 
 logger = logging.getLogger(__name__)
 
@@ -258,18 +249,18 @@ def run_pr_review_analysis(
 ) -> dict[str, Any]:
     """Run a read-only reviewer session and return its parsed analysis.
 
-    Shared core of the standalone ``PRReviewer._run_analysis_session`` and the
-    in-loop implementer review step (Stage 2, #28). Builds the PR-review
-    analysis prompt, invokes the selected reviewer agent (Claude or Codex), and
-    returns a dict with a structural ``audit`` value, normalized inline
-    findings, an informational summary, and bounded supplemental feedback.
-    Review prose never carries authorization.
+    Shared core of the pipeline's read-only review analysis and the in-loop
+    implementer review step (Stage 2, #28). Builds the PR-review analysis
+    prompt, invokes the selected reviewer agent (Claude or Codex), and returns
+    a dict with a structural ``audit`` value, normalized inline findings, an
+    informational summary, and bounded supplemental feedback. Review prose
+    never carries authorization.
 
     Args:
         pr_number: GitHub PR number being reviewed.
         issue_number: Linked GitHub issue number.
         worktree_path: Worktree CWD for the reviewer session (read-only usage).
-        context: PR context dict (see :meth:`PRReviewer._gather_pr_context`).
+        context: Pipeline-supplied PR review context.
         agent: Selected implementation agent (``"claude"`` or ``"codex"``);
             determines the runtime used to invoke the reviewer.
         review_agent: Session-naming agent token for the Claude path. Defaults
@@ -446,80 +437,3 @@ def gather_impl_review_context(
         "advise_findings": advise_findings,
         "include_nitpicks": include_nitpicks,
     }
-
-
-def review_pr_inline(
-    *,
-    pr_number: int,
-    issue_number: int,
-    worktree_path: Path,
-    context: dict[str, Any],
-    agent: str,
-    iteration: int,
-    state_dir: Path,
-    dry_run: bool = False,
-    timeout: int = DEFAULT_AGENT_TIMEOUT,
-) -> tuple[ReviewAudit, list[str]]:
-    """Review an impl PR in-loop and return structural audit plus thread ids.
-
-    This is the in-loop equivalent of ``PRReviewer._review_pr`` used by the
-    Stage 2 implementer session (#28). It runs a fresh reviewer session per
-    iteration, posts normalized findings with an audit-only body, and never
-    treats review prose as authorization.
-
-    Args:
-        pr_number: GitHub PR number to review.
-        issue_number: Linked GitHub issue number.
-        worktree_path: Worktree CWD for the reviewer session.
-        context: PR context dict (see :func:`gather_impl_review_context`).
-        agent: Selected implementation agent (``"claude"`` / ``"codex"``).
-        iteration: Zero-based review-loop iteration (selects the fresh token).
-        state_dir: Directory for the reviewer log file.
-        dry_run: When True, skip the agent call and posting.
-
-    Returns:
-        ``(audit, posted_thread_ids)``. On dry-run, the audit is invalid and no
-        review threads are posted.
-
-    """
-    review_token = reviewer_agent(AGENT_PR_REVIEWER, iteration)
-    analysis = run_pr_review_analysis(
-        pr_number=pr_number,
-        issue_number=issue_number,
-        worktree_path=worktree_path,
-        context=context,
-        agent=agent,
-        review_agent=review_token,
-        state_dir=state_dir,
-        dry_run=dry_run,
-        timeout=timeout,
-    )
-    audit = analysis.get("audit")
-    if not isinstance(audit, ReviewAudit):
-        audit = parse_review_audit(str(analysis.get("review_text") or ""))
-    comments = [dict(comment) for comment in audit.findings]
-
-    if dry_run:
-        logger.info(
-            "[DRY RUN] Would post %s inline comment(s) on PR %s",
-            len(comments),
-            pr_ref(pr_number),
-        )
-        return audit, []
-
-    thread_ids = gh_pr_review_post(
-        pr_number=pr_number,
-        comments=comments,
-        summary=render_review_audit(audit),
-        dry_run=False,
-        # #1083: a later review iteration commenting on a line an earlier
-        # iteration already flagged edits that comment instead of duplicating.
-        dedupe_existing=True,
-    )
-    logger.info(
-        "In-loop review R%s posted %s thread(s) on PR %s",
-        iteration,
-        len(thread_ids),
-        pr_ref(pr_number),
-    )
-    return audit, thread_ids

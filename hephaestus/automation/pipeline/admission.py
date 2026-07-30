@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 LOG = logging.getLogger(__name__)
 
 # Backticked repo-relative path inside a plan's Files sections, e.g.
-# `hephaestus/automation/address_review.py`. Requires a slash so bare tokens
+# `hephaestus/automation/pipeline/stages/pr_review.py`. Requires a slash so bare tokens
 # like `pyproject.toml` or symbol refs like `os.replace` are not treated as
 # in-tree paths (over-match → needless deferral; the slash requirement keeps
 # the key tight to actual source paths).

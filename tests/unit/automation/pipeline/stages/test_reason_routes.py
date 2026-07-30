@@ -39,8 +39,6 @@ _EXPECTED_REASONS: dict[StageName, set[str]] = {
     StageName.PLANNING: set(),
     StageName.PLAN_REVIEW: {"nogo", "plan_cycles_exhausted"},
     StageName.IMPLEMENTATION: {"plan_not_go", "already_implementation_go_pr"},
-    # human_blocked is emitted as FINISH_FAIL (terminal), not FAIL_BACK —
-    # its ROUTES row entry (-> FINISHED) documents the same destination.
     StageName.PR_REVIEW: {"agent_error"},
     StageName.MERGE_WAIT: {
         "not_implementation_go",

@@ -4,10 +4,11 @@ You are the COORDINATOR for fixing code in response to the review threads on PR 
 
 This runs IN-LOOP as part of the implement stage — it is no longer a separate
 pipeline phase. You are fixing the underlying code concerns raised against the
-current diff. These GitHub threads live on the PR, not on the issue. Do not
-reply to or resolve them yourself: only the coordinator may close an exact,
-process-owned receipt after a fresh validation and revalidation; every other
-thread remains a human gate.
+current diff. These GitHub threads live on the PR, not on the issue. You do
+not call GitHub yourself. After the coordinator confirms that your fix was
+committed and pushed, it posts your implementation reply on each addressed
+thread. The reviewer then performs a fresh review of that reply and fix; only
+the reviewer may resolve the thread.
 
 **Working Directory:** {{ worktree_path }}
 
@@ -68,8 +69,10 @@ CI/CD remains outside this remediation loop.
    b. Read the cited file/line in the working directory `{{ worktree_path }}` and apply the
       code fix for its ONE assigned review comment (you pass it the thread body, line, and
       thread_id).
-   c. Report back the `thread_id` and a one-line reply describing the fix — or, if the
-      comment is not addressable in code, say so and leave it out of the fixed set.
+  c. Report back the `thread_id` and a one-line reply describing the completed fix.
+     Every supplied thread is required: do not omit, dismiss, or defer one. If a
+     sub-agent cannot complete a fix, investigate it yourself and finish it before
+     returning; an incomplete thread set is rejected by the coordinator.
 
    **Each sub-agent prompt MUST include these guardrails (critical):**
    - "Do NOT background your work, do NOT exit early, and do NOT defer. Complete the fix
@@ -84,24 +87,28 @@ CI/CD remains outside this remediation loop.
    - Fix any issues found (you may edit files directly at this stage).
    - Leave all changes uncommitted; the coordinator owns every commit and push.
 
-5. Trust but verify: only mark a thread `addressed` if the assigned sub-agent actually
-   edited the code for it. If a sub-agent claimed a fix but the file is unchanged for that
-   thread, drop it from `addressed`.
+5. Trust but verify: every supplied thread must be represented in `addressed` and
+   `replies`. Confirm the code change for each one yourself; if a sub-agent's edit is
+   insufficient, complete the fix before returning. Do not drop a thread from the result.
 
 **Output format:**
 Write your coordination notes in prose. At the very end of your response, emit a single
 fenced JSON block:
 
 ```json
-{"addressed": ["<thread_id>", ...]}
+{"addressed": ["<thread_id>", ...], "replies": {"<thread_id>": "what was fixed"}}
 ```
 
 Rules for the JSON block:
-- `addressed`: array of thread_id strings for threads actually fixed in code
-  (any thread_id not in the unresolved-set we presented is dropped silently)
-- Only include threads genuinely fixed. Leave unaddressable threads out of `addressed`.
+- `addressed`: array containing EVERY supplied `thread_id` exactly once, after
+  fixing each corresponding concern in code.
+- `replies`: a one-line explanation for EVERY supplied id, keyed by that exact
+  id. The coordinator posts these only after it proves a real fix commit reached
+  the PR head; it never resolves a thread in this implementation step.
+- Do not omit an unaddressable or difficult thread. Investigate and fix it; a
+  partial result is rejected and no reply is posted.
 - Emit only one JSON block, at the very end of your response (the parser takes the LAST one).
-- Do not attempt to reply to or resolve a GitHub thread. Your code-fix claim is
-  recorded by the coordinator; it may reply and resolve only its immutable,
-  revalidated process-owned receipt. Human or changed threads remain open for
-  a human to verify and resolve.
+- Do not attempt to resolve a GitHub thread. Return the required reply text in
+  the JSON instead; the coordinator posts it after the pushed fix is verified.
+  The reviewer performs a fresh review of the fix and reply, resolves verified threads,
+  and explains what remains wrong on threads it leaves open.

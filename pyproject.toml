@@ -287,7 +287,6 @@ omit = [
     # implementer_summary modules were deleted in the conversion (#1821).
     "hephaestus/automation/implementer.py",
     "hephaestus/automation/planner.py",
-    "hephaestus/automation/address_review.py",
     "hephaestus/automation/ci_driver.py",
     # CIDriver collaborators extracted from ci_driver.py (#1357 / refs #1179, #1289).
     # Each drives a live gh/claude/codex session, so like ci_driver.py they are

@@ -36,12 +36,12 @@ class TestParsePlannedFiles:
         body = (
             "# Implementation Plan\n\n"
             "## Files to Modify\n\n"
-            "### `hephaestus/automation/address_review.py`\n"
+            "### `hephaestus/automation/pipeline/stages/pr_review.py`\n"
             "Do a thing.\n"
             "- `hephaestus/automation/ci_driver.py`\n"
         )
         assert _parse_planned_files(body) == {
-            "hephaestus/automation/address_review.py",
+            "hephaestus/automation/pipeline/stages/pr_review.py",
             "hephaestus/automation/ci_driver.py",
         }
 
@@ -121,7 +121,7 @@ class TestFetchPlannedFiles:
             {
                 "body": (
                     "# Implementation Plan\n\n## Files to Modify\n\n"
-                    "- `hephaestus/automation/address_review.py`\n"
+                    "- `hephaestus/automation/pipeline/stages/pr_review.py`\n"
                 )
             },
         ]
@@ -131,7 +131,9 @@ class TestFetchPlannedFiles:
         ):
             from hephaestus.automation.pipeline.admission import _fetch_planned_files
 
-            assert _fetch_planned_files(103) == {"hephaestus/automation/address_review.py"}
+            assert _fetch_planned_files(103) == {
+                "hephaestus/automation/pipeline/stages/pr_review.py"
+            }
 
 
 class TestAdmissionRepoScoping:
@@ -186,10 +188,10 @@ class TestSelectNonOverlapping:
     """Greedy first-fit partitioning: defer issues with overlapping file sets."""
 
     def test_select_non_overlapping_defers_second_of_overlapping_pair(self) -> None:
-        """AC1/AC2: two issues both listing address_review.py → first runs, second defers."""
+        """AC1/AC2: overlapping planned files defer the second issue."""
         plans = {
-            1: {"hephaestus/automation/address_review.py", "hephaestus/automation/a.py"},
-            2: {"hephaestus/automation/address_review.py", "hephaestus/automation/b.py"},
+            1: {"hephaestus/automation/pipeline/stages/pr_review.py", "hephaestus/automation/a.py"},
+            2: {"hephaestus/automation/pipeline/stages/pr_review.py", "hephaestus/automation/b.py"},
         }
         with patch(
             "hephaestus.automation.pipeline.admission._fetch_planned_files",
@@ -216,24 +218,24 @@ class TestSelectNonOverlapping:
     def test_select_non_overlapping_unknown_plan_fails_open(self) -> None:
         """An issue whose plan file set is None claims no files → always dispatched."""
         plans: dict[int, set[str] | None] = {
-            1: {"hephaestus/automation/address_review.py"},
+            1: {"hephaestus/automation/pipeline/stages/pr_review.py"},
             2: None,  # no plan yet — fail open
-            3: {"hephaestus/automation/address_review.py"},
+            3: {"hephaestus/automation/pipeline/stages/pr_review.py"},
         }
         with patch(
             "hephaestus.automation.pipeline.admission._fetch_planned_files",
             side_effect=lambda i, repo=None: plans[i],
         ):
             dispatch, defer = _select_non_overlapping([1, 2, 3])
-        # #1 claims address_review.py; #2 unknown → dispatched; #3 overlaps #1 → deferred.
+        # #1 claims the shared path; #2 unknown → dispatched; #3 overlaps #1 → deferred.
         assert dispatch == [1, 2]
         assert defer == [3]
 
     def test_select_non_overlapping_first_issue_always_dispatched(self) -> None:
         """Liveness: the first issue always dispatches, so a batch is never wholly deferred."""
         plans = {
-            1: {"hephaestus/automation/address_review.py"},
-            2: {"hephaestus/automation/address_review.py"},
+            1: {"hephaestus/automation/pipeline/stages/pr_review.py"},
+            2: {"hephaestus/automation/pipeline/stages/pr_review.py"},
         }
         with patch(
             "hephaestus.automation.pipeline.admission._fetch_planned_files",

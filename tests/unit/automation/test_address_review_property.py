@@ -1,8 +1,8 @@
-"""Property-based (Hypothesis) fuzz tests for the address-review JSON parser.
+"""Property-based (Hypothesis) fuzz tests for the pipeline address JSON parser.
 
 Covers issue #1470 — ``_parse_addressed_block`` consumes free-form LLM output
 and must never raise; on malformed/absent JSON it returns the documented
-default shape. See hephaestus/automation/address_review.py:81.
+default shape.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import json
 
 from hypothesis import given, strategies as st
 
-from hephaestus.automation.address_review import (
+from hephaestus.automation.address_review_core import (
     _ADDRESS_PARSE_DEFAULT,
     _parse_addressed_block,
 )

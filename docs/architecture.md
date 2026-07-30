@@ -501,8 +501,8 @@ Key fields:
  advancement.
 - `payload` — `dict[str, Any]`. The stage-local scratchpad for cross-step
  handoff (`retry_delay_s`, base-captured `base_branch`, validated audit facts,
- and process-owned thread receipts). It is not a durable authorization
- channel.
+ and host-read implementation-reply receipts). It is not a durable
+ authorization channel.
 - `result` ([`ItemResult`](hephaestus/automation/pipeline/work_item.py)) —
  final `passed / reason / final_stage` written by
  [`_finish`](hephaestus/automation/pipeline/coordinator.py).
@@ -919,9 +919,10 @@ local process or agent-session loss.
 flowchart LR
     PR["PR diff and requirements"] --> Review
     Review --> GitHub["GitHub review and inline threads"]
-    GitHub --> Gate{"Blocking findings?"}
-    Gate -->|"automation-owned"| Address --> PublishFix --> Review
-    Gate -->|"human-owned"| Human["Human action"]
+    GitHub --> Gate{"Open review thread?"}
+    Gate -->|"open thread"| Address["Implementation fixes and replies"] --> Validate["Reviewer validates reply + diff"]
+    Validate -->|"resolved"| Review
+    Validate -->|"needs work"| Address
     Gate -->|"none"| Approve["state:implementation-go"]
     Approve --> MergeWait
 ```
@@ -935,25 +936,18 @@ stateDiagram-v2
     VerifyUnarmed --> OperatorOwned: external arm or incomplete state
     Review --> Checkout: GitHub snapshot captured
     Checkout --> Review: clean checkout matches snapshot head
-    Checkout --> RetryReview: checkout or head drift
-    RetryReview --> Review: bounded retry
+    Checkout --> Review: checkout or head drift requires a fresh snapshot
     Review --> Validate: review produced
-    Review --> RetryReview: invalid output
-    RetryReview --> Review: retry available
-    RetryReview --> Implementation: fresh implementation context required
+    Review --> Implementation: invalid output requires fresh implementation context
     Validate --> Post: findings normalized
     Post --> Evaluate: GitHub review recorded
-    Evaluate --> HumanBlocked: human-owned finding
-    Evaluate --> Address: blocking automation finding
-    Evaluate --> ResolveMinor: advisory findings only
+    Evaluate --> Address: any open review thread
     Evaluate --> Approve: no unresolved findings
     Evaluate --> Skipped: no progress or review limit reached
     Address --> PublishFix: changes produced
     PublishFix --> Review: fixes published
-    ResolveMinor --> Approve
     Approve --> MergeReady: implementation-go durable
     MergeReady --> [*]
-    HumanBlocked --> [*]
     Implementation --> [*]
     Skipped --> [*]
     Failed --> [*]
@@ -962,13 +956,24 @@ stateDiagram-v2
 Architectural contract:
 
 - Every implementation review is posted to the pull request.
-- Actionable findings use durable inline threads and severity.
+- Actionable findings use durable inline threads. Severity describes newly
+  posted findings only; it never makes an existing unresolved thread advisory.
 - Prior rounds remain visible in the PR timeline.
-- Blocking findings produce `state:implementation-no-go`; only a clean review
-  produces `state:implementation-go`.
-- Human-owned findings stop automation with an explanatory PR comment.
-- The review proof is a fresh GitHub snapshot plus a clean checkout at that
-  snapshot's head; it exists only in the current process.
+- Any open review thread produces `state:implementation-no-go`; only a fresh
+  review with no open threads produces `state:implementation-go`.
+- The implementation agent replies to every fixed open thread but never resolves it.
+- The reviewer validates each implementation reply against the current diff;
+  it resolves validated threads or posts corrective feedback and leaves them open.
+- Validation stores an immutable fingerprint of every implementation reply
+  receipt. If the current receipts differ at validation time, the stage returns
+  to validation without reconciling; it never resolves based on a stale
+  receipt. An unproven resolution similarly returns through fresh review and
+  never attempts an unsafe compensating unresolve mutation.
+- Open-thread pagination and multi-page conversation reads are stabilized by
+  matching complete rereads before they become remediation or mutation facts.
+- The review decision proof is a fresh GitHub snapshot plus a clean checkout
+  at that snapshot's head. A GitHub marker can recover only a candidate reply
+  after restart; it is never a substitute for that fresh proof.
 - No queue stage arms, disables, adopts, or polls auto-merge.
 
 ### 5.6 Merge wait
@@ -1094,19 +1099,15 @@ budgets. Every `routes.py` row and every doc row MUST agree.
 | `planning` | `PLAN_REVIEW` | `*` → `FINISHED` | `plan = 2` |
 | `plan_review` | `IMPLEMENTATION` | `nogo` → `PLANNING`; `plan_cycles_exhausted` → `FINISHED`; `*` → `PLANNING` | `plan_review_iter = 3`, `plan_cycles = 2` |
 | `implementation` | `PR_REVIEW` | `plan_not_go` → `PLAN_REVIEW`; `already_implementation_go_pr` → `MERGE_WAIT`; `*` → `FINISHED` | `implement = 2`, `test_fix = 1` |
-| `pr_review` | `MERGE_WAIT` | `agent_error` → `IMPLEMENTATION`; `human_blocked` → `FINISHED`; `exhaustion` → `FINISHED`; `*` → `PR_REVIEW` | `pr_review_iter = 3`, `pr_review_hard = 6` |
+| `pr_review` | `MERGE_WAIT` | `agent_error` → `IMPLEMENTATION`; `exhaustion` → `FINISHED`; `*` → `PR_REVIEW` | `pr_review_iter = 3`, `pr_review_hard = 6` |
 | `merge_wait` | `FINISHED` | `not_implementation_go`, `reviewed_head_missing`, or `reviewed_head_drift` → `PR_REVIEW`; `closed` → `FINISHED`; `*` → `FINISHED` | `merge = 5` |
 | `finished` | `FINISHED` | — (terminal) | — |
 
 Budget provenance (cross-check):
 
-- `plan_review_iter = 3`, `pr_review_iter = 3` ←
- [`_review_phase.py MAX_REVIEW_ITERATIONS`](hephaestus/automation/_review_phase.py)
- (the review-iteration cap; the value tag is the durable reference —
- line numbers drift).
-- `pr_review_hard = 6` ←
- [`_review_phase.py MAX_REVIEW_ITERATIONS_HARD_CAP`](hephaestus/automation/_review_phase.py)
- (= 3 × 2, the progress-aware extension cap).
+- `plan_review_iter = 3`, `pr_review_iter = 3`, and `pr_review_hard = 6`
+  are defined in [`pipeline/routing.py`](hephaestus/automation/pipeline/routing.py),
+  with the latter as the progress-aware extension cap.
 - `clone = 2`, `plan = 2`, `plan_cycles = 2`, `implement = 2`,
  `test_fix = 1`, `merge =
  DEFAULT_DRIVE_GREEN_LOOPS = 5` ←
@@ -1546,17 +1547,15 @@ Exit-code priority is:
  SHA-conditional merge rather than arming or polling auto-merge.
 - **Skip-reason marker** — the `<!-- hephaestus-state-skip-reason -->` HTML-comment marker ([`SKIP_REASON_MARKER`](hephaestus/automation/state_labels.py)) that prefixes every `state:skip` reason-comment body produced by [`format_skip_reason_comment`](hephaestus/automation/state_labels.py), so a repo reader can deterministically trace the automated skip reason.
 - **File-system loader** — the Jinja `FileSystemLoader` resolved from `__file__`-relative paths in [`prompts/catalog.py`](hephaestus/prompts/catalog.py); deliberately NOT `PackageLoader` to avoid importlib editable-install staleness (#2308).
-- **Conflict-resolution request** — the [`ConflictResolutionRequest`](hephaestus/automation/_review_conflict_resolver.py) immutable context consumed by the cohesive [`ReviewConflictResolver`](hephaestus/automation/_review_conflict_resolver.py) unit split out of `_review_phase.py` (#2209).
 - **Advise-skipped breadcrumb** — the [`advise_skipped(reason)`](hephaestus/automation/advise_runner.py) marker string returned by [`run_advise`](hephaestus/automation/advise_runner.py) when Mnemosyne is unavailable, so a stage aborts as `SKIP` rather than failing; the reason is forwarded verbatim from [`resolve_marketplace`](hephaestus/automation/advise_runner.py) (e.g. `clone_failed`, `manifest_missing`).
 - **Tool scope** — the explicit `(allowed_tools, permission_mode)` pair in [`AGENT_TOOL_SCOPES`](hephaestus/automation/pipeline/tool_scopes.py) for one of the 9 pipeline agent roles (advise, planner, plan-reviewer, implementer, pr-reviewer, comment-classifier, address-review, ci-driver, learnings); unmapped roles fall through to the read-only [`DEFAULT_TOOL_SCOPE`](hephaestus/automation/pipeline/tool_scopes.py) per the fail-closed security contract (#2319).
 - **Reasoning effort** — explicit Codex-only `--<role>-reasoning-effort` CLI flag value (`default|low|medium|high|xhigh`) mapped onto Codex's `model_reasoning_effort`; `default` omits the setting, `low|medium|high|xhigh` override per-role, and omitted flags preserve the model-alias default (#2287).
 - **Review posture** — the falsification-first rubric prefix [`REVIEW POSTURE`](hephaestus/prompts/templates/default/review_rubrics/reviewer.j2); combined with anti-inflation grading rules, the max grade is `C` for any dimension the reviewer did not actively attempt to falsify (#2302).
 - **Push retry** — [`_git_retry(item, "commit_push failed")`](hephaestus/automation/pipeline/stages/implementation.py) re-attempts a transient push before PR_CREATE; the retry is budget-untouched so the next `implement` attempt remains available (#2274).
 
-- **Severity-aware GO gate** — logic that classifies posted review
- comments by marker (`critical|major|minor|nitpick`) and decides
- whether the `pr_review` round can advance. **See [§5.5 _Gate
- logic_](#55-pr_review) for the authoritative definition and routing
- matrix.**
+- **Review-thread GO gate** — every unresolved review thread, regardless of
+ severity marker, prevents a `pr_review` round from advancing. Severity
+ (`critical|major|minor|nitpick`) is retained as annotation on newly posted
+ findings, not as a waiver for an existing thread.
 
 ---

@@ -1,11 +1,8 @@
 """Tests for the pure/parse/context PR-review cores (pr_review_core.py).
 
-Split out of ``test_pr_reviewer_posting.py`` in the #1823 omit-reduction wave:
-these exercise the extracted, unit-covered cores
-(:func:`gather_impl_review_context`, :func:`run_pr_review_analysis`,
-:func:`review_pr_inline`) directly, patching the ``pr_review_core`` seams the
-cores actually bind. The standalone ``PRReviewer`` class-method tests stay in
-``test_pr_reviewer_posting.py``.
+Extracted in the #1823 omit-reduction wave, these exercise the unit-covered cores
+(:func:`gather_impl_review_context`, :func:`run_pr_review_analysis`) directly,
+patching the ``pr_review_core`` seams the cores actually bind.
 """
 
 import json
@@ -19,7 +16,6 @@ from hephaestus.automation.pr_review_core import (
     DEFAULT_DIFF_BUDGET_CHARS,
     budget_diff_for_prompt,
     gather_impl_review_context,
-    review_pr_inline,
     run_pr_review_analysis,
 )
 from hephaestus.automation.review_audit import ReviewAudit
@@ -363,7 +359,7 @@ class TestRunPrReviewAnalysis:
 
         assert out["summary"] == "No inline findings."
         assert out["audit"].valid is True
-        assert "Verdict:" in out["review_text"]
+        assert "Verdict:" not in out["review_text"]
         assert out["audit"].grade == "A"
 
     def test_codex_path_uses_structural_audit(self, tmp_path: Path) -> None:
@@ -391,7 +387,7 @@ class TestRunPrReviewAnalysis:
 
         assert out["summary"] == "Needs fixes."
         assert out["audit"].valid is True
-        assert "Verdict:" in out["review_text"]
+        assert "Verdict:" not in out["review_text"]
         assert out["audit"].grade == "D"
 
     def test_uses_canonical_review_utils_parser_patch_target(self, tmp_path: Path) -> None:
@@ -532,81 +528,11 @@ class TestRunPrReviewAnalysis:
         assert issubclass(PromptTooLongError, RuntimeError)
 
 
-class TestReviewPrInline:
-    """review_pr_inline runs a FRESH per-iteration reviewer and posts inline threads."""
-
-    def test_posts_threads_and_returns_verdict(self, tmp_path: Path) -> None:
-        analysis = {
-            "comments": [{"path": "a.py", "line": 1, "body": "fix"}],
-            "summary": "Findings for GitHub.",
-            "review_text": "Full reviewer prose.",
-            "audit": ReviewAudit(
-                grade="C",
-                summary="Findings for GitHub.",
-                findings=(
-                    {
-                        "path": "a.py",
-                        "line": 1,
-                        "side": "RIGHT",
-                        "severity": "major",
-                        "body": "fix",
-                    },
-                ),
-                raw_feedback="Full reviewer prose.",
-                valid=True,
-            ),
-        }
-        with (
-            patch(
-                "hephaestus.automation.pr_review_core.run_pr_review_analysis",
-                return_value=analysis,
-            ) as mock_analysis,
-            patch(
-                "hephaestus.automation.pr_review_core.gh_pr_review_post",
-                return_value=["thread-1"],
-            ) as mock_post,
-        ):
-            audit, thread_ids = review_pr_inline(
-                pr_number=42,
-                issue_number=1,
-                worktree_path=tmp_path,
-                context={"pr_diff": "d"},
-                agent="claude",
-                iteration=2,
-                state_dir=tmp_path,
-                dry_run=False,
-            )
-
-        assert thread_ids == ["thread-1"]
-        assert isinstance(audit, ReviewAudit)
-        assert audit.grade == "C"
-        # FRESH per-iteration reviewer session: reviewer_agent(AGENT_PR_REVIEWER, 2).
-        assert mock_analysis.call_args.kwargs["review_agent"] == "pr-reviewer-r2"
-        mock_post.assert_called_once()
-        assert mock_post.call_args.kwargs["pr_number"] == 42
-        assert "Review summary: Findings for GitHub." in mock_post.call_args.kwargs["summary"]
-
-    def test_dry_run_skips_posting(self, tmp_path: Path) -> None:
-        with patch("hephaestus.automation.pr_review_core.gh_pr_review_post") as mock_post:
-            _summary, thread_ids = review_pr_inline(
-                pr_number=42,
-                issue_number=1,
-                worktree_path=tmp_path,
-                context={},
-                agent="claude",
-                iteration=0,
-                state_dir=tmp_path,
-                dry_run=True,
-            )
-        assert thread_ids == []
-        mock_post.assert_not_called()
-
-
 class TestStructuralAuditNotProse:
     """Structural audit fields drive review handling; prose is supplemental."""
 
-    def test_run_analysis_keeps_prose_supplemental(self, tmp_path: Path) -> None:
-        """A legacy decision token in prose does not change the structural audit."""
+    def test_run_analysis_strips_decision_tokens_from_prose(self, tmp_path: Path) -> None:
+        """Decision-shaped prose cannot be retained beside the structural audit."""
         prose = (
             "## Review\nFindings here.\n\n"
             "Grade: F\nVerdict: NOGO — two real defects.\n\n"
@@ -637,50 +563,4 @@ class TestStructuralAuditNotProse:
             )
         assert out["summary"] == "two defects"
         assert out["audit"].grade == "F"
-        assert "Verdict: NOGO" in out["review_text"]
-
-    def test_review_pr_inline_returns_structural_audit_not_prose(self, tmp_path: Path) -> None:
-        """review_pr_inline returns the structural audit and audit-only comment."""
-        analysis = {
-            "comments": [
-                {"path": "a.py", "line": 1, "side": "RIGHT", "severity": "major", "body": "x"}
-            ],
-            "summary": "a defect (no verdict token here)",
-            "review_text": "## Review\nProse.\n\nVerdict: NOGO — a real defect.\n",
-            "audit": ReviewAudit(
-                grade="F",
-                summary="a defect",
-                findings=(
-                    {
-                        "path": "a.py",
-                        "line": 1,
-                        "side": "RIGHT",
-                        "severity": "major",
-                        "body": "x",
-                    },
-                ),
-                raw_feedback="## Review\nProse.",
-                valid=True,
-            ),
-        }
-        with (
-            patch(
-                "hephaestus.automation.pr_review_core.run_pr_review_analysis", return_value=analysis
-            ),
-            patch(
-                "hephaestus.automation.pr_review_core.gh_pr_review_post", return_value=["thread-1"]
-            ),
-        ):
-            audit, thread_ids = review_pr_inline(
-                pr_number=1,
-                issue_number=1,
-                worktree_path=tmp_path,
-                context={},
-                agent="claude",
-                iteration=0,
-                state_dir=tmp_path,
-                dry_run=False,
-            )
-        assert isinstance(audit, ReviewAudit)
-        assert audit.grade == "F"
-        assert thread_ids == ["thread-1"]
+        assert "Verdict: NOGO" not in out["review_text"]

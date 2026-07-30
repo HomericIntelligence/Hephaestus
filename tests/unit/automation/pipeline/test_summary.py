@@ -116,7 +116,7 @@ class TestPrintSummaryRows:
             _item(1, StageName.FINISHED, passed=True, reason="merged", pr=11),
             _item(2, StageName.FINISHED, passed=False, reason="tests failed"),
             _item(3, StageName.FINISHED, passed=False, reason="skip: state:skip"),
-            _item(4, StageName.FINISHED, passed=False, reason="blocked: human threads"),
+            _item(4, StageName.FINISHED, passed=False, reason="blocked: open review threads"),
             _item(5, StageName.PR_REVIEW, passed=False, reason="resumable at pr_review"),
         ]
 
