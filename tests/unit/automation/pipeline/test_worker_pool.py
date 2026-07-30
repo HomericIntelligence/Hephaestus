@@ -132,10 +132,15 @@ def test_full_completion_queue_never_blocks_worker_callback(
 
     try:
         assert completion_q.offer((existing_handle, JobResult(ok=True)))
-        started = time.monotonic()
+        callback_thread = threading.Thread(
+            target=pool._on_future_done,
+            args=(handle, future),
+            daemon=True,
+        )
         with caplog.at_level(logging.CRITICAL, logger=_WP):
-            pool._on_future_done(handle, future)
-        assert time.monotonic() - started < 1.0
+            callback_thread.start()
+            callback_thread.join(timeout=1.0)
+        assert not callback_thread.is_alive(), "completion callback blocked on publication"
     finally:
         pool.shutdown(mark_interrupted=False)
 

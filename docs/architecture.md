@@ -1262,12 +1262,12 @@ state-transition is rendered as zero, not as stale active work.
 | Gauge | Type | Labels | Default | Semantics |
 |-------------------------------------------|--------|-----------|---------|-----------|
 | `hephaestus_pipeline_queue_depth` | Gauge | `stage` | `0` | Item count per pipeline stage. Useful for detecting back-pressure. |
-| `hephaestus_pipeline_queue_capacity` | Gauge | `stage` | `C` | Configured capacity for each stage queue. |
+| `hephaestus_pipeline_queue_capacity` | Gauge | `stage` | `stage_queue_capacity` (64) | Configured capacity for each stage queue. |
 | `hephaestus_pipeline_completion_depth` | Gauge | — | `0` | Completion results waiting for the coordinator. |
 | `hephaestus_pipeline_completion_capacity` | Gauge | — | `C` | Configured result-queue capacity. |
 | `hephaestus_pipeline_admission_depth` | Gauge | — | `0` | Deferred items waiting for a stage-queue slot. |
 | `hephaestus_pipeline_admission_capacity` | Gauge | — | `stages × stage capacity` | Configured admission-spool capacity. |
-| `hephaestus_pipeline_queue_rejections_total` | Counter | `queue` | `0` | Rejected stage or completion publications. |
+| `hephaestus_pipeline_queue_rejections_total` | Counter | `queue` | `0` | Rejected completion publications plus admission-spool and completion-rejection-mailbox saturation events. |
 | `hephaestus_pipeline_inflight_jobs` | Gauge | (none) | `0` | Total in-flight jobs across all worker pools. |
 | `hephaestus_pipeline_inflight_per_repo` | Gauge | `repo` | `0` | In-flight jobs by repo, capped by `max_workers`. |
 | `hephaestus_circuit_breaker_state` | Gauge | `name`,`state` | `0` | `1` for the active state, `0` for prior states (only emitted from the optional `circuit_breaker_snapshot_provider`). |

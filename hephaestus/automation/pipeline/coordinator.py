@@ -80,7 +80,7 @@ import signal
 import threading
 import time
 from collections import Counter, deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1711,15 +1711,13 @@ class Coordinator:
 
         """
         self._pass_work_count = 0
-        discovery_repos = [] if self.config.issues or self.config.prs else self.config.repos
-        entries = _seeding.seed_from_cli(discovery_repos, [], [])
         default_repo = self.config.repos[0] if self.config.repos else ""
         if self.config.issues or self.config.prs:
-            entries.extend(self._seed_direct_scope(default_repo))
+            entries = self._seed_direct_scope(default_repo)
+        else:
+            entries = _seeding.seed_from_cli(self.config.repos, [], [])
         pushed = 0
         for entry in entries:
-            if self._admission_saturated:
-                break
             if entry.stage is None:
                 # Epic tagging is the ONE sanctioned seeding write, executed
                 # here through the skip_epics chokepoint BEFORE the exclusion
@@ -1737,6 +1735,8 @@ class Coordinator:
                 if item.stage not in (StageName.REPO, StageName.FINISHED):
                     self._pass_work_count += 1
                 pushed += 1
+            if self._admission_saturated:
+                break
         return pushed
 
     def _clamp_seed_stage_to_scope(
@@ -1819,13 +1819,11 @@ class Coordinator:
             return StageName.FINISHED, f"#{issue} already past selected scope ({reason})", True
         return stage, reason, True
 
-    def _seed_direct_scope(self, repo: str) -> list[_seeding.SeedEntry]:
+    def _seed_direct_scope(self, repo: str) -> Iterator[_seeding.SeedEntry]:
         """Seed explicit ``--issues`` / ``--prs`` through the target repo accessor."""
         github = self._ctx_for_repo(repo).github if repo else self.github
-        entries: list[_seeding.SeedEntry] = []
         scope_stages = self.config.scope.stages if self.config.scope is not None else None
-        requested_issues = list(self.config.issues)
-        issue_numbers = requested_issues
+        issue_numbers = self.config.issues
         if issue_numbers:
             issue_numbers = _admission._filter_open_issues(repo, issue_numbers)
         for issue in issue_numbers:
@@ -1835,51 +1833,45 @@ class Coordinator:
             entry = _seeding.seed_entry_from_facts(facts)
             stage, reason = entry.stage, entry.reason
             stage, reason, passed = self._scope_seed_decision(issue, stage, reason, scope_stages)
-            entries.append(replace(entry, stage=stage, reason=reason, passed=passed))
+            yield replace(entry, stage=stage, reason=reason, passed=passed)
         for pr in self.config.prs:
             issue_number = github.find_issue_for_pr(pr)
             if issue_number is None:
-                entries.append(
-                    _seeding.SeedEntry(
-                        kind="pr",
-                        identifier=pr,
-                        stage=StageName.FINISHED,
-                        reason=(
-                            f"PR #{pr} has no linked issue; refusing review without "
-                            "requirements context"
-                        ),
-                        pr_number=pr,
-                        passed=False,
-                    )
+                yield _seeding.SeedEntry(
+                    kind="pr",
+                    identifier=pr,
+                    stage=StageName.FINISHED,
+                    reason=(
+                        f"PR #{pr} has no linked issue; refusing review without "
+                        "requirements context"
+                    ),
+                    pr_number=pr,
+                    passed=False,
                 )
                 continue
             scope_identifier = issue_number if issue_number is not None else pr
             pr_state = github.gh_pr_state(pr)
             pr_state_name = ((pr_state or {}).get("state") or "").upper()
             if pr_state_name == "MERGED":
-                entries.append(
-                    _seeding.SeedEntry(
-                        kind="pr",
-                        identifier=pr,
-                        stage=StageName.FINISHED,
-                        reason=f"PR #{pr} already merged",
-                        pr_number=pr,
-                        issue_number=issue_number,
-                        passed=True,
-                    )
+                yield _seeding.SeedEntry(
+                    kind="pr",
+                    identifier=pr,
+                    stage=StageName.FINISHED,
+                    reason=f"PR #{pr} already merged",
+                    pr_number=pr,
+                    issue_number=issue_number,
+                    passed=True,
                 )
                 continue
             if pr_state_name == "CLOSED":
-                entries.append(
-                    _seeding.SeedEntry(
-                        kind="pr",
-                        identifier=pr,
-                        stage=StageName.FINISHED,
-                        reason=f"PR #{pr} already closed without merging",
-                        pr_number=pr,
-                        issue_number=issue_number,
-                        passed=False,
-                    )
+                yield _seeding.SeedEntry(
+                    kind="pr",
+                    identifier=pr,
+                    stage=StageName.FINISHED,
+                    reason=f"PR #{pr} already closed without merging",
+                    pr_number=pr,
+                    issue_number=issue_number,
+                    passed=False,
                 )
                 continue
             has_go, _has_no_go = github.pr_has_implementation_state_label(pr)
@@ -1890,16 +1882,14 @@ class Coordinator:
                     f"PR #{pr} carries {STATE_IMPLEMENTATION_GO}",
                     scope_stages,
                 )
-                entries.append(
-                    _seeding.SeedEntry(
-                        kind="pr",
-                        identifier=pr,
-                        stage=stage,
-                        reason=reason,
-                        pr_number=pr,
-                        issue_number=issue_number,
-                        passed=passed,
-                    )
+                yield _seeding.SeedEntry(
+                    kind="pr",
+                    identifier=pr,
+                    stage=stage,
+                    reason=reason,
+                    pr_number=pr,
+                    issue_number=issue_number,
+                    passed=passed,
                 )
             else:
                 issue_facts: _seeding.IssueFacts | None
@@ -1912,16 +1902,14 @@ class Coordinator:
                     review_context = None
                     issue_facts = None
                 if issue_facts is None or review_context is None:
-                    entries.append(
-                        _seeding.SeedEntry(
-                            kind="pr",
-                            identifier=pr,
-                            stage=StageName.FINISHED,
-                            reason=f"PR #{pr} review context could not be read",
-                            pr_number=pr,
-                            issue_number=issue_number,
-                            passed=False,
-                        )
+                    yield _seeding.SeedEntry(
+                        kind="pr",
+                        identifier=pr,
+                        stage=StageName.FINISHED,
+                        reason=f"PR #{pr} review context could not be read",
+                        pr_number=pr,
+                        issue_number=issue_number,
+                        passed=False,
                     )
                     continue
                 stage, reason, passed = self._scope_seed_decision(
@@ -1930,22 +1918,19 @@ class Coordinator:
                     f"PR #{pr} without {STATE_IMPLEMENTATION_GO} — awaiting review",
                     scope_stages,
                 )
-                entries.append(
-                    _seeding.SeedEntry(
-                        kind="pr",
-                        identifier=pr,
-                        stage=stage,
-                        reason=reason,
-                        pr_number=pr,
-                        issue_number=issue_number,
-                        issue_title=issue_facts.title,
-                        issue_body=issue_facts.body,
-                        pr_diff=review_context["pr_diff"],
-                        pr_description=review_context["pr_description"],
-                        passed=passed,
-                    )
+                yield _seeding.SeedEntry(
+                    kind="pr",
+                    identifier=pr,
+                    stage=stage,
+                    reason=reason,
+                    pr_number=pr,
+                    issue_number=issue_number,
+                    issue_title=issue_facts.title,
+                    issue_body=issue_facts.body,
+                    pr_diff=review_context["pr_diff"],
+                    pr_description=review_context["pr_description"],
+                    passed=passed,
                 )
-        return entries
 
     @staticmethod
     def _entry_to_item(entry: _seeding.SeedEntry, default_repo: str) -> WorkItem:

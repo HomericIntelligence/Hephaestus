@@ -552,9 +552,21 @@ class TestSeedIssueFailClosed:
 class TestSeedFromCli:
     """CLI mapping: repos → repo queue; issues → classified; prs → review/merge."""
 
+    def test_issue_source_is_classified_lazily(self) -> None:
+        """A large issue scope does not materialize every SeedEntry up front."""
+        with patch(
+            "hephaestus.automation.pipeline.seeding.seed_issue",
+            side_effect=lambda issue: _facts(number=issue),
+        ) as mock_seed:
+            entries = seed_from_cli([], range(10_000), [])
+
+            assert mock_seed.call_count == 0
+            assert next(entries).identifier == 0
+            assert mock_seed.call_count == 1
+
     def test_repos_arm(self) -> None:
         """Each repo becomes a StageName.REPO discovery seed."""
-        entries = seed_from_cli(["RepoA", "RepoB"], [], [])
+        entries = list(seed_from_cli(["RepoA", "RepoB"], [], []))
         assert [e.kind for e in entries] == ["repo", "repo"]
         assert [e.identifier for e in entries] == ["RepoA", "RepoB"]
         assert all(e.stage is StageName.REPO for e in entries)
@@ -570,7 +582,7 @@ class TestSeedFromCli:
         with patch(
             "hephaestus.automation.pipeline.seeding.seed_issue", return_value=facts
         ) as mock_seed:
-            entries = seed_from_cli([], [9], [])
+            entries = list(seed_from_cli([], [9], []))
         mock_seed.assert_called_once_with(9)
         assert entries == [
             SeedEntry(
@@ -593,7 +605,7 @@ class TestSeedFromCli:
             pr_has_implementation_go=True,
         )
         with patch("hephaestus.automation.pipeline.seeding.seed_issue", return_value=facts):
-            entries = seed_from_cli([], [9], [])
+            entries = list(seed_from_cli([], [9], []))
 
         assert entries == [
             SeedEntry(
@@ -610,14 +622,14 @@ class TestSeedFromCli:
         """An excluded (skip/epic) issue surfaces stage=None to the caller."""
         facts = _facts(number=10, labels={STATE_SKIP})
         with patch("hephaestus.automation.pipeline.seeding.seed_issue", return_value=facts):
-            entries = seed_from_cli([], [10], [])
+            entries = list(seed_from_cli([], [10], []))
         assert entries[0].stage is None
 
     def test_untagged_epic_surfaces_a_typed_skip_tag_obligation(self) -> None:
         """The coordinator receives an explicit durable-write obligation, not a reason prefix."""
         facts = _facts(number=10, is_epic=True)
         with patch("hephaestus.automation.pipeline.seeding.seed_issue", return_value=facts):
-            entry = seed_from_cli([], [10], [])[0]
+            entry = next(seed_from_cli([], [10], []))
 
         assert entry.skip_tag_obligation == EpicSkipTagObligation(issue=10)
 
@@ -630,7 +642,7 @@ class TestSeedFromCli:
                 return_value=[STATE_IMPLEMENTATION_GO],
             ),
         ):
-            entries = seed_from_cli([], [], [77])
+            entries = list(seed_from_cli([], [], [77]))
         assert entries == [
             SeedEntry(
                 kind="pr",
@@ -650,7 +662,7 @@ class TestSeedFromCli:
                 return_value=[STATE_IMPLEMENTATION_NO_GO],
             ),
         ):
-            entries = seed_from_cli([], [], [78])
+            entries = list(seed_from_cli([], [], [78]))
         assert entries[0].stage is StageName.PR_REVIEW
 
     def test_prs_arm_label_fetch_failure_reads_as_not_reviewed(self) -> None:
@@ -662,7 +674,7 @@ class TestSeedFromCli:
             patch("hephaestus.automation.pipeline.seeding.gh_pr_state", return_value=None),
             patch("hephaestus.automation.pipeline.seeding.gh_pr_label_names", return_value=[]),
         ):
-            entries = seed_from_cli([], [], [79])
+            entries = list(seed_from_cli([], [], [79]))
         assert entries[0].stage is StageName.PR_REVIEW
 
     def test_prs_arm_uses_repo_scoped_accessor_when_given(self) -> None:
@@ -684,7 +696,7 @@ class TestSeedFromCli:
                 side_effect=AssertionError("must not call ambient label read when github is given"),
             ),
         ):
-            entries = seed_from_cli([], [], [77], github=github)
+            entries = list(seed_from_cli([], [], [77], github=github))
         github.gh_pr_state.assert_called_once_with(77)
         github.pr_has_implementation_state_label.assert_called_once_with(77)
         assert entries == [
@@ -702,14 +714,14 @@ class TestSeedFromCli:
         github = MagicMock()
         github.gh_pr_state.return_value = None
         github.pr_has_implementation_state_label.return_value = (False, True)
-        entries = seed_from_cli([], [], [78], github=github)
+        entries = list(seed_from_cli([], [], [78], github=github))
         assert entries[0].stage is StageName.PR_REVIEW
 
     def test_prs_arm_repo_scoped_merged_pr_routes_to_finished(self) -> None:
         """Repo-scoped accessor: a merged PR classifies FINISHED via github.gh_pr_state (#1865)."""
         github = MagicMock()
         github.gh_pr_state.return_value = {"state": "MERGED", "mergedAt": "2026-01-01T00:00:00Z"}
-        entries = seed_from_cli([], [], [80], github=github)
+        entries = list(seed_from_cli([], [], [80], github=github))
         assert entries == [
             SeedEntry(
                 kind="pr",
@@ -725,7 +737,7 @@ class TestSeedFromCli:
         """Repo-scoped accessor: a closed PR is excluded via github.gh_pr_state (#1865)."""
         github = MagicMock()
         github.gh_pr_state.return_value = {"state": "CLOSED", "mergedAt": None}
-        entries = seed_from_cli([], [], [81], github=github)
+        entries = list(seed_from_cli([], [], [81], github=github))
         assert entries[0].stage is None
         github.pr_has_implementation_state_label.assert_not_called()
 
@@ -735,7 +747,7 @@ class TestSeedFromCli:
             "hephaestus.automation.pipeline.seeding.gh_pr_state",
             return_value={"state": "MERGED", "mergedAt": "2026-01-01T00:00:00Z"},
         ):
-            entries = seed_from_cli([], [], [80])
+            entries = list(seed_from_cli([], [], [80]))
         assert entries == [
             SeedEntry(
                 kind="pr",
@@ -752,7 +764,7 @@ class TestSeedFromCli:
             "hephaestus.automation.pipeline.seeding.gh_pr_state",
             return_value={"state": "CLOSED", "mergedAt": None},
         ):
-            entries = seed_from_cli([], [], [81])
+            entries = list(seed_from_cli([], [], [81]))
         assert entries[0].stage is None
 
     def test_prs_arm_state_fetch_failure_falls_through_to_labels(self) -> None:
@@ -764,7 +776,7 @@ class TestSeedFromCli:
                 return_value=[STATE_IMPLEMENTATION_GO],
             ),
         ):
-            entries = seed_from_cli([], [], [82])
+            entries = list(seed_from_cli([], [], [82]))
         assert entries[0].stage is StageName.MERGE_WAIT
 
     def test_order_repos_then_issues_then_prs(self) -> None:
@@ -775,7 +787,7 @@ class TestSeedFromCli:
             patch("hephaestus.automation.pipeline.seeding.gh_pr_state", return_value=None),
             patch("hephaestus.automation.pipeline.seeding.gh_pr_label_names", return_value=[]),
         ):
-            entries = seed_from_cli(["R"], [5], [6])
+            entries = list(seed_from_cli(["R"], [5], [6]))
         assert [e.kind for e in entries] == ["repo", "issue", "pr"]
 
 

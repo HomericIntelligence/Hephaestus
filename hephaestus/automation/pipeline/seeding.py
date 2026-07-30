@@ -33,7 +33,7 @@ GitHub mutations in this module, so seeding returns an explicit
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -482,7 +482,7 @@ def seed_from_cli(
     issues: Sequence[int],
     prs: Sequence[int],
     github: Any | None = None,
-) -> list[SeedEntry]:
+) -> Iterator[SeedEntry]:
     """Map CLI scope args (``--repos`` / ``--issues`` / ``--prs``) to queue pushes.
 
     Pure planning plus thin fetch — no mutations:
@@ -516,42 +516,38 @@ def seed_from_cli(
             :func:`~hephaestus.automation.github_api.gh_pr_state` /
             :func:`~hephaestus.automation.github_api.gh_pr_label_names`.
 
-    Returns:
-        Planned queue pushes, in the given order (repos, issues, prs).
+    Yields:
+        Planned queue pushes, in the given order (repos, issues, prs). Entries
+        are classified lazily so the coordinator can stop reading the source
+        as soon as its bounded admission path reaches saturation.
 
     """
-    entries: list[SeedEntry] = [
-        SeedEntry(
+    for repo in repos:
+        yield SeedEntry(
             kind="repo", identifier=repo, stage=StageName.REPO, reason=f"{repo} CLI repo seed"
         )
-        for repo in repos
-    ]
     for issue in issues:
         facts = seed_issue(issue)
-        entries.append(seed_entry_from_facts(facts))
+        yield seed_entry_from_facts(facts)
     for pr in prs:
         pr_state = github.gh_pr_state(pr) if github is not None else gh_pr_state(pr)
         state = str((pr_state or {}).get("state") or "").upper()
         if state == "MERGED" or (pr_state or {}).get("mergedAt"):
-            entries.append(
-                SeedEntry(
-                    kind="pr",
-                    identifier=pr,
-                    stage=StageName.FINISHED,
-                    reason=f"PR #{pr} merged (idempotent)",
-                    pr_number=pr,
-                )
+            yield SeedEntry(
+                kind="pr",
+                identifier=pr,
+                stage=StageName.FINISHED,
+                reason=f"PR #{pr} merged (idempotent)",
+                pr_number=pr,
             )
             continue
         if state == "CLOSED":
-            entries.append(
-                SeedEntry(
-                    kind="pr",
-                    identifier=pr,
-                    stage=None,
-                    reason=f"PR #{pr} closed (not merged) — excluded",
-                    pr_number=pr,
-                )
+            yield SeedEntry(
+                kind="pr",
+                identifier=pr,
+                stage=None,
+                reason=f"PR #{pr} closed (not merged) — excluded",
+                pr_number=pr,
             )
             continue
 
@@ -560,26 +556,21 @@ def seed_from_cli(
         else:
             has_go = is_implementation_go(gh_pr_label_names(pr))
         if has_go:
-            entries.append(
-                SeedEntry(
-                    kind="pr",
-                    identifier=pr,
-                    stage=StageName.MERGE_WAIT,
-                    reason=f"PR #{pr} carries {STATE_IMPLEMENTATION_GO}",
-                    pr_number=pr,
-                )
+            yield SeedEntry(
+                kind="pr",
+                identifier=pr,
+                stage=StageName.MERGE_WAIT,
+                reason=f"PR #{pr} carries {STATE_IMPLEMENTATION_GO}",
+                pr_number=pr,
             )
         else:
-            entries.append(
-                SeedEntry(
-                    kind="pr",
-                    identifier=pr,
-                    stage=StageName.PR_REVIEW,
-                    reason=f"PR #{pr} without {STATE_IMPLEMENTATION_GO} — awaiting review",
-                    pr_number=pr,
-                )
+            yield SeedEntry(
+                kind="pr",
+                identifier=pr,
+                stage=StageName.PR_REVIEW,
+                reason=f"PR #{pr} without {STATE_IMPLEMENTATION_GO} — awaiting review",
+                pr_number=pr,
             )
-    return entries
 
 
 __all__ = [

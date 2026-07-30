@@ -385,7 +385,7 @@ class TestQuiescence:
             install_signals=False,
         )
 
-        entries = coordinator._seed_direct_scope("repo-a")
+        entries = list(coordinator._seed_direct_scope("repo-a"))
 
         assert len(entries) == 1
         assert entries[0].stage is StageName.FINISHED
@@ -410,7 +410,7 @@ class TestQuiescence:
             config, github=github, pool=FakeWorkerPool(), install_signals=False
         )
 
-        entries = coordinator._seed_direct_scope("repo-a")
+        entries = list(coordinator._seed_direct_scope("repo-a"))
         item = coordinator._entry_to_item(entries[0], "repo-a")
 
         assert item.pr == 701
@@ -1807,7 +1807,7 @@ class TestPipelineScopeWiring:
         config = self._scoped_config(tmp_path, issues=[1881])
         coordinator = Coordinator(config, github=gh, pool=FakeWorkerPool(), install_signals=False)
 
-        entries = coordinator._seed_direct_scope("repo-a")
+        entries = list(coordinator._seed_direct_scope("repo-a"))
         item = coordinator._entry_to_item(entries[0], "repo-a")
 
         assert entries[0].issue_title == "Hydrate planner context"
@@ -1871,7 +1871,7 @@ class TestPipelineScopeWiring:
         config = self._scoped_config(tmp_path, issues=[1], force=True)
         coordinator = Coordinator(config, github=gh, pool=FakeWorkerPool(), install_signals=False)
 
-        entries = coordinator._seed_direct_scope("repo-a")
+        entries = list(coordinator._seed_direct_scope("repo-a"))
 
         assert len(entries) == 1
         assert entries[0].stage is StageName.PLANNING
@@ -1906,7 +1906,7 @@ class TestPipelineScopeWiring:
         config = self._scoped_config(tmp_path, issues=[1])
         coordinator = Coordinator(config, github=gh, pool=FakeWorkerPool(), install_signals=False)
 
-        entries = coordinator._seed_direct_scope("repo-a")
+        entries = list(coordinator._seed_direct_scope("repo-a"))
 
         assert len(entries) == 1
         assert entries[0].stage is StageName.PLANNING
