@@ -276,8 +276,12 @@ REVIEW_CHECKOUT_RETRY_CAP = 2
 #: it replays the exact saved thread snapshots and agent prose, never asks an
 #: implementation model to invent a new response.
 IMPLEMENTATION_REPLY_HANDOFF_RETRY_CAP = 2
+IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRY_CAP = 2
 _PENDING_IMPLEMENTATION_REPLY_HANDOFF = "pending_implementation_reply_handoff"
 _PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES = "pending_implementation_reply_handoff_retries"
+_PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES = (
+    "pending_implementation_reply_handoff_visibility_retries"
+)
 
 #: Round-scoped payload keys cleared at REVIEW_WAIT submission so a failed
 #: later round can never replay an earlier round's results.
@@ -1774,11 +1778,12 @@ class PrReviewStage(Stage):
         """Retry one exact post-push reply batch without invoking an agent.
 
         Returns ``none`` when no handoff exists, ``completed`` when every
-        reply has a host receipt, ``stale`` when the exact pushed head can no
-        longer safely receive the saved response, ``invalid`` for malformed
-        persisted state, and ``retry`` for a bounded transient/incomplete
-        host operation.  No outcome grants reviewer authority; normal fresh
-        review still validates and resolves the replies.
+        reply has a host receipt, ``visibility_wait`` while GitHub is briefly
+        catching up with the pushed head, ``stale`` when the exact pushed head
+        can no longer safely receive the saved response, ``invalid`` for
+        malformed persisted state, and ``retry`` for a bounded
+        transient/incomplete host operation.  No outcome grants reviewer
+        authority; normal fresh review still validates and resolves the replies.
         """
         raw_handoff = item.payload.get(_PENDING_IMPLEMENTATION_REPLY_HANDOFF)
         if raw_handoff is None:
@@ -1794,10 +1799,40 @@ class PrReviewStage(Stage):
         threads = handoff["threads"]
         replies = handoff["replies"]
         try:
-            if not _pr_is_current_open_head(ctx.github.gh_pr_state(item.pr), head_sha):
+            state = ctx.github.gh_pr_state(item.pr)
+            if not _pr_is_current_open_head(state, head_sha):
+                if (
+                    isinstance(state, dict)
+                    and state.get("state") == "OPEN"
+                    and state.get("autoMergeRequest") is None
+                ):
+                    visibility_retries = item.payload.get(
+                        _PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES, 0
+                    )
+                    if (
+                        isinstance(visibility_retries, int)
+                        and not isinstance(visibility_retries, bool)
+                        and visibility_retries >= 0
+                        and visibility_retries < IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRY_CAP
+                    ):
+                        visibility_retries += 1
+                        item.payload[_PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES] = (
+                            visibility_retries
+                        )
+                        item.payload["retry_delay_s"] = float(2 ** (visibility_retries - 1))
+                        logger.info(
+                            "pr_review:%s: waiting for pushed implementation head visibility "
+                            "before replying to review threads (%d/%d)",
+                            item.issue,
+                            visibility_retries,
+                            IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRY_CAP,
+                        )
+                        return "visibility_wait"
                 item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
                 item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+                item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES, None)
                 return "stale"
+            item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES, None)
             result = ctx.github.post_implementation_thread_replies(
                 item.pr,
                 expected_head_sha=head_sha,
@@ -1871,6 +1906,8 @@ class PrReviewStage(Stage):
             return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_incomplete")
 
         handoff_status = self._retry_pending_implementation_reply_handoff(item, ctx)
+        if handoff_status == "visibility_wait":
+            return StageOutcome(Disposition.RETRY, "implementation_reply_handoff_visibility_wait")
         if handoff_status == "invalid":
             logger.error(
                 "pr_review:%d: refusing to replay malformed implementation reply handoff",
