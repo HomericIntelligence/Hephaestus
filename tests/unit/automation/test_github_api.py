@@ -3497,10 +3497,10 @@ class TestGhPrReviewPost:
         )
         mock_index.return_value = {
             (
-                "tests/unit/automation/test_pr_review_core.py",
-                589,
+                "a.py",
+                2,
             ): (
-                "COMMENT_NODE_589",
+                "COMMENT_NODE_A2",
                 "This test proves review publication receives the structural-audit summary, "
                 "but it does not assert the matching body is preserved. Capture this mock "
                 "and assert "
@@ -3514,8 +3514,8 @@ class TestGhPrReviewPost:
             pr_number=1116,
             comments=[
                 {
-                    "path": "tests/unit/automation/test_pr_review_core.py",
-                    "line": 589,
+                    "path": "a.py",
+                    "line": 2,
                     "side": "RIGHT",
                     "body": (
                         "This test verifies review publication receives a structural-audit "
@@ -3532,7 +3532,7 @@ class TestGhPrReviewPost:
         )
 
         mock_update.assert_not_called()
-        assert self._posted_comments(mock_write) == []
+        mock_write.assert_not_called()
 
     @patch("hephaestus.automation.github_api.gh_pr_update_review_comment")
     @patch("hephaestus.automation.github_api.gh_pr_inline_comment_index")
