@@ -135,7 +135,9 @@ class ImplementationThreadReplyResult:
     GitHub object. ``retryable_thread_ids`` identifies only replies whose host
     outcome is transport/read-ambiguous. An ordinary ``blocked_thread_ids``
     result means the saved snapshot is stale and must return through a fresh
-    reviewer pass rather than replay.
+    reviewer pass rather than replay. Direct thread replies never create a
+    review-level envelope, so there is no review ownership conflict state to
+    recover or preserve.
     """
 
     replied_thread_ids: tuple[str, ...] = ()
@@ -288,6 +290,7 @@ class StageGitHub(Protocol):
         expected_head_sha: str,
         threads: list[dict[str, Any]],
         replies: dict[str, str],
+        batch_nonce: str,
     ) -> ImplementationThreadReplyResult:
         """Post host-validated implementation replies after a successful push.
 
@@ -345,24 +348,6 @@ class StageGitHub(Protocol):
         """
         ...
 
-    def post_pr_comment(self, pr_number: int, body: str) -> None:
-        """Durably post an explanatory comment on the PR conversation.
-
-        The coordinator maps this onto ``gh_issue_comment`` (PRs share the
-        issue comment channel). Used for neutral automation status notices
-        when an external race invalidates this process's review proof.
-        """
-        ...
-
-    def upsert_pr_comment(self, pr_number: int, marker_prefix: str, body: str) -> bool:
-        """Durably create-or-update a marker-keyed PR conversation comment.
-
-        PRs share the issue comment channel, so the coordinator maps this onto
-        an issue-comment upsert scoped to the PR number. Used by lightweight
-        durable artifacts that should remain one-per-role across retries.
-        """
-        pass
-
     def mark_pr_implementation_no_go(self, pr_number: int) -> None:
         """Durably apply ``state:implementation-no-go`` to the PR.
 
@@ -376,7 +361,6 @@ class StageGitHub(Protocol):
         self,
         pr_number: int,
         threads: list[dict[str, Any]],
-        summary: str,
         *,
         expected_head_sha: str,
     ) -> list[dict[str, Any]]:

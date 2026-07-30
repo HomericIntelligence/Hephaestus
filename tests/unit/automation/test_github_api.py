@@ -3075,22 +3075,32 @@ class TestGhPrReviewPost:
 
     @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
     @patch("hephaestus.automation.github_api._gh_call")
-    def test_empty_comments_still_posts_summary_review(
+    def test_empty_comments_never_post_an_unanchored_review(
         self, mock_gh_call: Any, _mock_repo: Any
     ) -> None:
-        """An empty ``comments`` list must post a summary-only review, not crash.
+        """A review needs at least one source-anchored inline comment."""
+        assert gh_pr_review_post(pr_number=7, comments=[], summary="Summary only") == []
 
-        Regression: even ``comments=[]`` failed under the stringified GraphQL form
-        (``Expected "[]" to be a key-value object``), so summary-only NOGO reviews
-        could never post and the loop always saw a spurious failure.
-        """
+        mock_gh_call.assert_not_called()
+
+    @patch("hephaestus.automation.github_api.write_secure")
+    @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_inline_review_omits_an_unanchored_summary_body(
+        self, mock_gh_call: Any, _mock_repo: Any, mock_write: Any
+    ) -> None:
+        """Only source-anchored finding bodies are published to a review."""
         mock_gh_call.side_effect = self._gh_call_side_effect("REVIEW_1", [])
 
-        # Must not raise.
-        gh_pr_review_post(pr_number=7, comments=[], summary="Summary only")
+        gh_pr_review_post(
+            pr_number=7,
+            comments=[{"path": "a.py", "line": 1, "side": "RIGHT", "body": "fix"}],
+            summary="This must not become a general review comment.",
+        )
 
-        # The review POST was still sent.
-        self._review_post_call(mock_gh_call)
+        payload = json.loads(mock_write.call_args.args[1])
+        assert "body" not in payload
+        assert payload["comments"] == [{"path": "a.py", "line": 1, "side": "RIGHT", "body": "fix"}]
 
     # ------------------------------------------------------------------
     # #1039: filter inline comments to lines present in the diff hunks.
@@ -3146,10 +3156,10 @@ class TestGhPrReviewPost:
     @patch("hephaestus.automation.github_api.write_secure")
     @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
     @patch("hephaestus.automation.github_api._gh_call")
-    def test_all_comments_out_of_hunk_posts_summary_only(
+    def test_all_comments_out_of_hunk_never_posts_an_unanchored_summary(
         self, mock_gh_call: Any, _mock_repo: Any, mock_write: Any
     ) -> None:
-        """If every comment is out of hunk, the review still posts (summary only)."""
+        """If every comment is out of hunk, no unanchored review is posted."""
         mock_gh_call.side_effect = self._gh_call_side_effect(
             "REVIEW_1", [], diff_text=self._SAMPLE_DIFF
         )
@@ -3160,10 +3170,11 @@ class TestGhPrReviewPost:
             summary="Findings",
         )
 
-        posted = self._posted_comments(mock_write)
-        assert posted == []
-        # The review POST was still sent.
-        self._review_post_call(mock_gh_call)
+        mock_write.assert_not_called()
+        assert not any(
+            call.args[:4] == ("api", "-X", "POST", "repos/owner/repo/pulls/7/reviews")
+            for call in mock_gh_call.call_args_list
+        )
 
     @patch("hephaestus.automation.github_api.write_secure")
     @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))

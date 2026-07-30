@@ -83,27 +83,23 @@ Overall, we have 2 PRs ready to review."""
         assert "generated_at" in loaded
         assert len(loaded["audits"]) == 2
 
-    def test_audit_reviewer_run_posting_failure_isolated(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Verify posting failure does not prevent run completion."""
+    def test_audit_reviewer_run_keeps_summary_local(self, tmp_path: Path) -> None:
+        """Verify an audit completes without creating an unanchored PR review."""
         with mock.patch("hephaestus.automation.audit_reviewer.fetch_open_prs") as mock_fetch:
             with mock.patch(
                 "hephaestus.automation.audit_reviewer.run_audit_coordinator"
             ) as mock_coord:
-                with mock.patch(
-                    "hephaestus.automation.audit_reviewer.gh_pr_review_post"
-                ) as mock_post:
-                    mock_fetch.return_value = [{"number": 100, "title": "Test"}]
-                    mock_coord.return_value = [
-                        {"pr_number": 100, "verdict": "GO", "summary": "Good"}
-                    ]
-                    mock_post.side_effect = Exception("GitHub error")
-                    reviewer = AuditReviewer(state_dir=tmp_path)
-                    rc, audits = reviewer.run()
-                    assert rc == 0
-                    assert len(audits) == 1
-                    assert mock_post.called
+                mock_fetch.return_value = [{"number": 100, "title": "Test"}]
+                mock_coord.return_value = [{"pr_number": 100, "verdict": "GO", "summary": "Good"}]
+                reviewer = AuditReviewer(state_dir=tmp_path)
+                rc, audits = reviewer.run()
+
+        assert rc == 0
+        assert len(audits) == 1
+        reports = list(tmp_path.glob("audit-report-*.json"))
+        assert len(reports) == 1
+        report = json.loads(reports[0].read_text())
+        assert report["audits"] == audits
 
     def test_print_audit_summary_per_pr_log_line(self, caplog: pytest.LogCaptureFixture) -> None:
         """Verify one log line per PR with key info."""

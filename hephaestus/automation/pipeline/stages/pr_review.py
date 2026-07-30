@@ -98,6 +98,7 @@ import hashlib
 import json
 import logging
 import re
+import secrets
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass
@@ -124,7 +125,6 @@ from hephaestus.automation.review_audit import (
     ReviewAudit,
     has_reserved_finding_control,
     parse_review_audit,
-    render_review_audit,
 )
 from hephaestus.automation.session_naming import (
     AGENT_ADDRESS_REVIEW,
@@ -282,6 +282,7 @@ _PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES = "pending_implementation_reply_ha
 _PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES = (
     "pending_implementation_reply_handoff_visibility_retries"
 )
+_IMPLEMENTATION_REPLY_BATCH_NONCE_RE = re.compile(r"[0-9a-f]{32}")
 
 #: Round-scoped payload keys cleared at REVIEW_WAIT submission so a failed
 #: later round can never replay an earlier round's results.
@@ -536,6 +537,7 @@ def _implementation_reply_handoff(
     head_sha: object,
     threads: object,
     replies: object,
+    batch_nonce: object,
 ) -> dict[str, Any] | None:
     """Return a replay-safe outstanding implementation-reply handoff.
 
@@ -548,6 +550,8 @@ def _implementation_reply_handoff(
         not is_full_commit_sha(head_sha)
         or not isinstance(threads, list)
         or not isinstance(replies, dict)
+        or not isinstance(batch_nonce, str)
+        or _IMPLEMENTATION_REPLY_BATCH_NONCE_RE.fullmatch(batch_nonce) is None
     ):
         return None
     snapshots = [dict(thread) for thread in threads if isinstance(thread, dict)]
@@ -565,6 +569,7 @@ def _implementation_reply_handoff(
         "head_sha": head_sha,
         "threads": deepcopy(snapshots),
         "replies": dict(normalized_replies),
+        "batch_nonce": batch_nonce,
     }
 
 
@@ -1219,6 +1224,7 @@ class PrReviewStage(Stage):
                         published_head,
                         thread_snapshots,
                         replies,
+                        secrets.token_hex(16),
                     )
                     if handoff is None:
                         logger.warning(
@@ -1233,6 +1239,7 @@ class PrReviewStage(Stage):
                         # code commit has already changed the review head.
                         item.payload[_PENDING_IMPLEMENTATION_REPLY_HANDOFF] = handoff
                         item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+                    batch_nonce = handoff["batch_nonce"] if handoff is not None else ""
                     try:
                         # The worker returns the local commit it actually
                         # published.  A later arbitrary remote push must not
@@ -1246,6 +1253,7 @@ class PrReviewStage(Stage):
                             expected_head_sha=published_head,
                             threads=thread_snapshots,
                             replies=replies,
+                            batch_nonce=batch_nonce,
                         )
                     except Exception as error:
                         logger.warning(
@@ -1289,6 +1297,7 @@ class PrReviewStage(Stage):
                                             for thread_id, reply in replies.items()
                                             if thread_id in retryable_ids
                                         },
+                                        batch_nonce,
                                     )
                                 )
                             elif retryable_ids:
@@ -1300,7 +1309,7 @@ class PrReviewStage(Stage):
                             else:
                                 # A verified mismatch means the conversation changed.  Replaying
                                 # a stale snapshot can never repair it and eventually wedges the
-                                # work item; the pending review refresh will obtain new facts.
+                                # work item; the fresh reviewer cycle will obtain new facts.
                                 item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
                                 item.payload.pop(
                                     _PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None
@@ -1604,23 +1613,24 @@ class PrReviewStage(Stage):
             publication_guard = self._require_reviewed_unarmed(item, ctx)
             if publication_guard is not None:
                 return publication_guard
-        try:
-            post_receipts = list(
-                ctx.github.post_review_threads(
-                    item.pr,
-                    list(threads),
-                    self._final_review_comment(audit),
-                    expected_head_sha=reviewed_head,
+        post_receipts: list[dict[str, Any]] = []
+        if threads:
+            try:
+                post_receipts = list(
+                    ctx.github.post_review_threads(
+                        item.pr,
+                        list(threads),
+                        expected_head_sha=reviewed_head,
+                    )
                 )
-            )
-        except Exception as error:
-            logger.warning(
-                "pr_review:%s: review finding publication failed (%s)",
-                item.issue,
-                type(error).__name__,
-            )
-            item.payload["review_audit_failure"] = True
-            return Continue(next_state=EVAL)
+            except Exception as error:
+                logger.warning(
+                    "pr_review:%s: review finding publication failed (%s)",
+                    item.issue,
+                    type(error).__name__,
+                )
+                item.payload["review_audit_failure"] = True
+                return Continue(next_state=EVAL)
         if len(post_receipts) != len(threads):
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
@@ -1792,12 +1802,14 @@ class PrReviewStage(Stage):
             raw_handoff.get("head_sha") if isinstance(raw_handoff, dict) else None,
             raw_handoff.get("threads") if isinstance(raw_handoff, dict) else None,
             raw_handoff.get("replies") if isinstance(raw_handoff, dict) else None,
+            raw_handoff.get("batch_nonce") if isinstance(raw_handoff, dict) else None,
         )
         if handoff is None or item.pr is None:
             return "invalid"
         head_sha = handoff["head_sha"]
         threads = handoff["threads"]
         replies = handoff["replies"]
+        batch_nonce = handoff["batch_nonce"]
         try:
             state = ctx.github.gh_pr_state(item.pr)
             if not _pr_is_current_open_head(state, head_sha):
@@ -1838,6 +1850,7 @@ class PrReviewStage(Stage):
                 expected_head_sha=head_sha,
                 threads=threads,
                 replies=replies,
+                batch_nonce=batch_nonce,
             )
         except Exception as error:
             logger.warning(
@@ -1878,6 +1891,7 @@ class PrReviewStage(Stage):
                 for thread_id, reply in replies.items()
                 if thread_id in retryable_ids
             },
+            batch_nonce,
         )
         if replacement is None:
             return "invalid"
@@ -2423,21 +2437,6 @@ class PrReviewStage(Stage):
             unresolved_threads,
             item.pr,
         )
-        body = (
-            "**Automation review activity changed during GO admission.**\n\n"
-            f"{unresolved_threads} review thread(s) were observed after the implementation "
-            "state write. Automation cannot prove it still owns the current labels, so it "
-            "made no further label changes. A fresh automation review will re-read the "
-            "current diff and threads before it validates, responds to, or resolves them."
-        )
-        try:
-            ctx.github.post_pr_comment(item.pr, body)
-        except Exception as error:
-            logger.warning(
-                "pr_review: failed to post late-thread race notice on PR #%d (non-fatal): %s",
-                item.pr,
-                error,
-            )
         return StageOutcome(Disposition.FINISH_FAIL, "review_activity_changed")
 
     @staticmethod
@@ -2554,8 +2553,3 @@ class PrReviewStage(Stage):
         if postwrite_outcome is not None:
             return postwrite_outcome
         return StageOutcome(Disposition.ADVANCE, "review audit; merge wait pending")
-
-    @staticmethod
-    def _final_review_comment(audit: ReviewAudit) -> str:
-        """Build an audit-only review comment; labels carry eligibility."""
-        return render_review_audit(audit)
