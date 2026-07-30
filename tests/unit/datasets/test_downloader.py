@@ -2,6 +2,9 @@
 """Tests for dataset downloading utilities."""
 
 import gzip
+import io
+import tarfile
+import warnings
 from http.client import HTTPMessage
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -361,6 +364,18 @@ class TestCIFAR100Downloader:
         tar_path.write_bytes(b"not a valid tar")
         assert CIFAR100Downloader().download_cifar100(str(tmp_path)) is False
 
+    @patch.object(DatasetDownloader, "download_with_retry", return_value=True)
+    def test_download_uses_safe_extraction_helper(self, _mock, tmp_path: Path) -> None:
+        """CIFAR-100 routes extraction through the cross-version safety helper."""
+        tar_path = tmp_path / "cifar-100-python.tar.gz"
+        with tarfile.open(tar_path, "w"):
+            pass
+
+        with patch.object(downloader, "_extract_tar_safely") as extract:
+            assert CIFAR100Downloader().download_cifar100(str(tmp_path)) is True
+
+        extract.assert_called_once()
+
 
 class TestCIFAR10Downloader:
     """Tests for CIFAR10Downloader."""
@@ -374,6 +389,24 @@ class TestCIFAR10Downloader:
         with patch.dict(sys.modules, {"numpy": None}):
             with pytest.raises(ImportError, match="numpy"):
                 CIFAR10Downloader().download_cifar10(str(tmp_path))
+
+    @patch.object(DatasetDownloader, "download_with_retry", return_value=True)
+    def test_download_uses_safe_extraction_helper(self, _mock, tmp_path: Path) -> None:
+        """CIFAR-10 routes extraction through the cross-version safety helper."""
+        import sys
+
+        tar_path = tmp_path / "cifar-10-python.tar.gz"
+        with tarfile.open(tar_path, "w"):
+            pass
+
+        with (
+            patch.dict(sys.modules, {"numpy": MagicMock()}),
+            patch.object(CIFAR10Downloader, "_convert_batches", return_value=True),
+            patch.object(downloader, "_extract_tar_safely") as extract,
+        ):
+            assert CIFAR10Downloader().download_cifar10(str(tmp_path)) is True
+
+        extract.assert_called_once()
 
 
 class TestEMNISTDownloader:
@@ -442,15 +475,53 @@ class TestSecurityHardening:
         assert _verify_or_remove(target, "novel.bin") is True
         assert target.exists()
 
-    def test_extractall_uses_data_filter(self) -> None:
-        """Both CIFAR extract sites pass filter='data' to extractall (CWE-22)."""
-        from hephaestus.datasets.downloader import __file__ as downloader_file
+    def test_extract_tar_uses_data_filter_when_supported(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Modern Python uses the standard-library safe extraction filter."""
+        archive = MagicMock(spec=tarfile.TarFile)
+        monkeypatch.setattr(downloader, "_supports_tar_data_filter", lambda: True)
 
-        src = Path(downloader_file).read_text()
-        # Two extract sites, both with the filter.
-        assert src.count('tf.extractall(output_path, filter="data")') == 2
-        # No bare extractall(output_path) without filter.
-        assert "tf.extractall(output_path)\n" not in src
+        downloader._extract_tar_safely(archive, tmp_path)
+
+        archive.extractall.assert_called_once_with(tmp_path, filter="data")
+        archive.getmembers.assert_not_called()
+
+    def test_extract_tar_supports_legacy_python(self, tmp_path: Path) -> None:
+        """Python 3.10-compatible extraction handles ordinary CIFAR members."""
+        archive_path = tmp_path / "archive.tar"
+        destination = tmp_path / "destination"
+        destination.mkdir()
+        with tarfile.open(archive_path, "w") as archive:
+            payload = b"portable extraction"
+            member = tarfile.TarInfo("dataset/data.txt")
+            member.size = len(payload)
+            archive.addfile(member, io.BytesIO(payload))
+
+        with tarfile.open(archive_path) as archive:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                with patch.object(downloader, "_supports_tar_data_filter", return_value=False):
+                    downloader._extract_tar_safely(archive, destination)
+
+        assert (destination / "dataset/data.txt").read_bytes() == b"portable extraction"
+
+    def test_extract_tar_rejects_traversal_on_legacy_python(self, tmp_path: Path) -> None:
+        """Legacy extraction rejects zip-slip paths before writing any member."""
+        archive_path = tmp_path / "archive.tar"
+        destination = tmp_path / "destination"
+        with tarfile.open(archive_path, "w") as archive:
+            payload = b"must not escape"
+            member = tarfile.TarInfo("../outside.txt")
+            member.size = len(payload)
+            archive.addfile(member, io.BytesIO(payload))
+
+        with tarfile.open(archive_path) as archive:
+            with patch.object(downloader, "_supports_tar_data_filter", return_value=False):
+                with pytest.raises(tarfile.TarError, match="unsafe archive member"):
+                    downloader._extract_tar_safely(archive, destination)
+
+        assert not (tmp_path / "outside.txt").exists()
 
     def test_fashion_mnist_url_is_https(self) -> None:
         """Fashion-MNIST downloader uses HTTPS, not plain HTTP."""

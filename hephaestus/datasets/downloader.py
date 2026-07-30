@@ -33,7 +33,7 @@ import struct
 import sys
 import tarfile
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
@@ -145,6 +145,78 @@ def _verify_or_remove(path: Path, filename: str) -> bool:
     with contextlib.suppress(OSError):
         path.unlink()
     return False
+
+
+def _supports_tar_data_filter() -> bool:
+    """Return whether this interpreter supports ``TarFile.extractall`` filters.
+
+    The ``filter`` argument was backported to Python 3.11.4, but is not
+    available on Python 3.10 or earlier Python 3.11 patch releases.  Keep the
+    version check in one place so the downloaders remain usable across the
+    package's supported interpreter range.
+    """
+    return sys.version_info[:3] >= (3, 11, 4)
+
+
+def _ensure_tar_path_within(destination: Path, candidate: Path) -> None:
+    """Raise ``TarError`` when *candidate* escapes *destination*."""
+    try:
+        candidate.relative_to(destination)
+    except ValueError as exc:
+        raise tarfile.TarError(
+            f"Refusing archive member outside extraction directory: {candidate}"
+        ) from exc
+
+
+def _validate_legacy_tar_member(member: tarfile.TarInfo, destination: Path) -> None:
+    r"""Validate one archive member before legacy ``tarfile`` extraction.
+
+    Python versions without ``filter="data"`` need the checks performed by
+    that filter explicitly.  CIFAR archives contain regular files and
+    directories; links are validated as well so this helper remains safe if a
+    mirror ever adds one.
+    """
+    member_name = PurePosixPath(member.name)
+    if not member.name or member_name.is_absolute() or ".." in member_name.parts:
+        raise tarfile.TarError(f"Refusing unsafe archive member: {member.name!r}")
+
+    destination = destination.resolve()
+    member_path = (destination / member.name).resolve()
+    _ensure_tar_path_within(destination, member_path)
+
+    if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
+        raise tarfile.TarError(f"Refusing special archive member: {member.name!r}")
+
+    if member.issym():
+        link_name = PurePosixPath(member.linkname)
+        link_path = (member_path.parent / member.linkname).resolve()
+        if link_name.is_absolute():
+            raise tarfile.TarError(f"Refusing absolute archive link: {member.name!r}")
+        _ensure_tar_path_within(destination, link_path)
+    elif member.islnk():
+        link_name = PurePosixPath(member.linkname)
+        link_path = (destination / member.linkname).resolve()
+        if link_name.is_absolute():
+            raise tarfile.TarError(f"Refusing absolute archive link: {member.name!r}")
+        _ensure_tar_path_within(destination, link_path)
+
+
+def _extract_tar_safely(tf: tarfile.TarFile, destination: Path) -> None:
+    r"""Extract *tf* without permitting archive paths to escape *destination*.
+
+    ``filter="data"`` is the standard-library implementation on supported
+    Python versions that provide it.  Older supported versions do not accept
+    that keyword, so validate every member before using their legacy
+    ``extractall`` implementation.
+    """
+    if _supports_tar_data_filter():
+        tf.extractall(destination, filter="data")
+        return
+
+    destination = destination.resolve()
+    for member in tf.getmembers():
+        _validate_legacy_tar_member(member, destination)
+        tf.extract(member, destination)
 
 
 class DatasetDownloader:
@@ -425,9 +497,7 @@ class CIFAR10Downloader(DatasetDownloader):
         batch_dir = output_path / "cifar-10-batches-py"
         try:
             with tarfile.open(tar_path) as tf:
-                # filter='data' (Python 3.12+) rejects members with absolute or
-                # ../-traversing paths, blocking the CWE-22 zip-slip class.
-                tf.extractall(output_path, filter="data")
+                _extract_tar_safely(tf, output_path)
         except (tarfile.TarError, OSError) as exc:
             logger.error("Failed to extract CIFAR-10 tarball: %s", exc)
             return False
@@ -559,9 +629,7 @@ class CIFAR100Downloader(DatasetDownloader):
         logger.info("Extracting CIFAR-100 tarball...")
         try:
             with tarfile.open(tar_path) as tf:
-                # filter='data' (Python 3.12+) rejects members with absolute or
-                # ../-traversing paths, blocking the CWE-22 zip-slip class.
-                tf.extractall(output_path, filter="data")
+                _extract_tar_safely(tf, output_path)
         except (tarfile.TarError, OSError) as exc:
             logger.error("Failed to extract CIFAR-100 tarball: %s", exc)
             return False
