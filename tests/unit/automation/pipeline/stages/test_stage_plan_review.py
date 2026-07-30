@@ -7,7 +7,6 @@ from typing import Any
 
 import pytest
 
-from hephaestus.automation.claude_invoke import ReviewVerdict
 from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome, plan_review
@@ -31,6 +30,7 @@ from hephaestus.automation.review_journal import (
     render_current_plan,
     render_current_review,
 )
+from hephaestus.automation.review_types import ReviewVerdict
 from hephaestus.automation.state_labels import (
     STATE_NEEDS_PLAN,
     STATE_PLAN_BLOCKED,

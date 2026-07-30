@@ -19,7 +19,7 @@ def test_parse_review_audit_uses_only_structured_json() -> None:
         grade="A",
         summary="Looks good",
         findings=(),
-        raw_feedback="Review prose\n\nVerdict: GO",
+        raw_feedback="Review prose",
         valid=True,
     )
 

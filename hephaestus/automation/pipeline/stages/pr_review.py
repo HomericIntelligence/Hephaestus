@@ -1,15 +1,7 @@
 """PR-review stage: review, validate, post, address, and evaluate.
 
-Re-houses the legacy implementation-review semantics now isolated in
-``_review_loop.ReviewLoopCoordinator`` and
-``_review_conflict_resolver.ReviewConflictResolver``. The queue stage remains
-the live implementation of the review/validate/address state machine. Its
-collaborators include
-(``pr_reviewer.review_pr_inline``, ``review_validator
-.validate_prior_comments_addressed``, ``address_review
-.run_address_fix_session``) as a pipeline stage
-(docs/architecture.md §5.5 "pr_review" is the binding
-contract):
+The queue stage is the sole live implementation of the review/validate/address
+state machine (docs/architecture.md §5.5 "pr_review" is the binding contract):
 
 - States: ENTER -> REVIEW_WAIT -> VALIDATE_WAIT -> POST -> DIFFICULTY_WAIT
   -> ADDRESS_WAIT -> PUSH_WAIT -> EVAL -> COMPACT_REVIEWER_WAIT
@@ -18,9 +10,7 @@ contract):
   advances to ``merge_wait`` from EVAL.
 - Budgets: ``pr_review_iter`` = 3 (soft cap), ``pr_review_hard`` = 6 (hard
   cap; rounds 4-6 are admitted ONLY while the unresolved-thread count
-  strictly decreases — the #1554 progress-aware extension, legacy
-  ``_review_thread_count_decreased`` +
-  :class:`_review_loop.ReviewLoopCoordinator`'s progress-extension contract).
+  strictly decreases under the progress-aware extension contract).
   Both read from ROUTES via
   ``ctx.budget``, never hardcoded here.
 - Iteration accounting: ``item.attempts["pr_review_iter"]`` is the
@@ -38,14 +28,15 @@ contract):
   pattern). At the cap the item fails back ``agent_error`` (routes to
   implementation: a fresh implement pass, bounded by the ``implement``
   budget, is the doc's designated agent-error recovery).
-- EVAL structural-audit semantics: eligibility requires ZERO unresolved
-  blocking automation threads (#1152). Any open HUMAN thread -> HUMAN_BLOCKED:
-  an explanatory PR comment is posted [durable, before the outcome] naming the
-  blocking human thread count and automation stands down, then finish failed
-  without mutating implementation-state labels (a human must act; automation
-  cannot prove ownership of a concurrent label transition). Any open blocking
-  automation thread -> no-go label and
-  address + re-review. A clean audit ->
+- Review-thread ownership semantics: every open review thread—regardless of
+  author—is implementation work. The implementation agent investigates and
+  fixes each thread, then returns a concise reply. The host posts that reply
+  only after the fix commit is pushed and never resolves the thread. The
+  reviewer then performs a fresh review of the current change, prior review,
+  implementation reply, and every open thread. The reviewer is the sole actor
+  that can resolve a valid
+  thread or post precise rejection feedback while leaving it open. Any open
+  thread -> no-go label and address + re-review. A clean audit ->
   ``_write_go`` performs one final complete-thread live-read, requires a
   confirmed-unarmed live PR, and applies ``state:implementation-go``.
   The checkout GitJob-proven reviewed head accompanies that label;
@@ -54,29 +45,29 @@ contract):
   real blocking round durably writes ``state:implementation-no-go`` before
   looping/regressing, non-fatally. Exhaustion -> durably
   apply ``state:skip`` [durable] -> SKIP.
-- Downgraded-GO cost (DELIBERATE 2-round divergence from legacy): legacy
-  downgraded a GO with open automation threads and ran the address step in
-  the SAME iteration; this stage records the downgrade in EVAL and lets
+- Downgraded-eligibility cost: when open automation threads invalidate an
+  otherwise clean audit, this stage records the downgrade in EVAL and lets
   the NEXT round's POST re-count the live threads before dispatching the
   address leg, so a downgraded GO costs one extra review round. Chosen
   because POST live-checks the unresolved counts (a thread resolved
   out-of-band between rounds skips the address leg entirely) and the
   budget/extension gate stays a single chokepoint in EVAL.
-- Progress metric (#1554 parity): the extension gate compares AUTOMATION
-  unresolved counts only — a human resolving their own thread is not
-  automation progress and must not earn extension rounds.
-- POST posts only SURVIVING threads: the round's reviewer threads are
-  filtered through the validation job's verdict
-  (:func:`_surviving_threads`, re-housed ``review_validator`` semantics —
-  ``wont_fix`` findings are accepted and dropped, ``unaddressed`` prior
-  findings are re-opened as new postable threads; an unparseable
-  validator output filters nothing, the legacy fail-open).
+- Progress metric (#1554 parity): the extension gate compares the total
+  open-thread count. Only a reviewer resolution may demonstrate progress.
+- POST publishes only genuinely new blocking audit findings. Validation does
+  not recreate, replace, or suppress existing threads; it only gives the
+  reviewer the authority to reconcile current implementation replies.
 - Real-commit gating (#1575): PUSH_WAIT's commit_push result is inspected
   in EVAL. A push that produced NO commit (the fix agent punted or
   self-reported a phantom fix) is NOT treated as addressed: the address
   step is retried ONCE with the ``build_unaddressed_directive`` block
   (via ``get_address_review_prompt``'s ``unaddressed_findings``), and a
   second consecutive no-commit turn is evaluated as an unaddressed round.
+- Reply-handoff recovery: an ambiguous GitHub transport/read failure after a
+  fix reaches its verified head preserves the exact outstanding snapshot and
+  reply batch for bounded host-only retry. A complete but mismatched read is
+  stale evidence, not retryable: the host clears it and routes through fresh
+  review so a changed conversation cannot wedge on an unreplayable snapshot.
 - If the one-shot no-commit retry's address/push leg hard-fails, EVAL treats
   that as an explicit agent infrastructure failure, not as a second no-commit
   review round: it consumes the retry sentinel/directive, fails back
@@ -103,13 +94,16 @@ contract):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, cast
 
+from hephaestus.automation.address_review_core import _parse_addressed_block
 from hephaestus.automation.agent_config import (
     address_review_claude_timeout,
     implementer_claude_timeout,
@@ -253,6 +247,17 @@ def _issue_number(item: WorkItem) -> int:
     return item.issue
 
 
+def _pr_is_current_open_head(state: object, expected_head_sha: object) -> bool:
+    """Return whether a fresh PR state proves one exact open, unarmed head."""
+    return bool(
+        is_full_commit_sha(expected_head_sha)
+        and isinstance(state, dict)
+        and state.get("state") == "OPEN"
+        and state.get("autoMergeRequest") is None
+        and state.get("headRefOid") == expected_head_sha
+    )
+
+
 def _review_context_kind(item: WorkItem) -> str:
     """Return the prompt-facing numeric context kind for this review item."""
     return "PR" if item.payload.get("review_context_kind") == "PR" else "issue"
@@ -266,6 +271,14 @@ def _review_context_kind(item: WorkItem) -> str:
 REVIEW_ERROR_RETRY_CAP = 2
 REVIEW_CHECKOUT_RETRY_CAP = 2
 
+#: A pushed implementation fix must receive its review-thread explanation
+#: without requiring a second code change.  This bounded retry is host-only:
+#: it replays the exact saved thread snapshots and agent prose, never asks an
+#: implementation model to invent a new response.
+IMPLEMENTATION_REPLY_HANDOFF_RETRY_CAP = 2
+_PENDING_IMPLEMENTATION_REPLY_HANDOFF = "pending_implementation_reply_handoff"
+_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES = "pending_implementation_reply_handoff_retries"
+
 #: Round-scoped payload keys cleared at REVIEW_WAIT submission so a failed
 #: later round can never replay an earlier round's results.
 _ROUND_PAYLOAD_KEYS = (
@@ -278,6 +291,7 @@ _ROUND_PAYLOAD_KEYS = (
     "raw_review_threads",
     "posted_thread_ids",
     "remediation_threads",
+    "remediation_thread_snapshots",
     "difficulty_tiers",
     "address_error",
     "address_output",
@@ -289,7 +303,8 @@ _ROUND_PAYLOAD_KEYS = (
     "review_audit_failure",
     "review_refresh_required",
     "prior_comments_json",
-    "validation_process_threads",
+    "validation_threads",
+    "validation_receipt_fingerprints",
     "scope_retraction_paths",
     "reviewed_pr_base_sha",
 )
@@ -307,10 +322,11 @@ def _parse_validation_result(raw: Any) -> dict[str, Any] | None:
     """Parse the validator job's output into its verdict dict, tolerantly.
 
     The validation prompt asks for a single fenced JSON block at the END of
-    the response (``{"unaddressed": [...], "wont_fix": [...]}``); the parser
-    takes the LAST parseable block (legacy last-block-wins convention), then
-    falls back to treating the whole output as JSON. Returns None when
-    nothing parses — callers fail open.
+    the response (``{"resolved": [...], "unaddressed": [...]}``). When a
+    response contains fenced blocks, only its complete final block can be a
+    verdict; an earlier valid block must never authorize a malformed later
+    answer. An unfenced response must be exactly one JSON object. Returns None
+    when the final verdict does not parse — callers fail closed.
 
     Args:
         raw: The validation job's stored output (str, dict, or anything).
@@ -323,15 +339,19 @@ def _parse_validation_result(raw: Any) -> dict[str, Any] | None:
         return raw
     if not isinstance(raw, str) or not raw.strip():
         return None
-    blocks = re.findall(r"```(?:json)?\s*(.*?)```", raw, flags=re.DOTALL)
-    for candidate in (*reversed(blocks), raw):
-        try:
-            parsed = json.loads(candidate.strip())
-        except (json.JSONDecodeError, ValueError):
-            continue
-        if isinstance(parsed, dict):
-            return parsed
-    return None
+    blocks = list(re.finditer(r"```(?:json)?\s*(.*?)```", raw, flags=re.DOTALL))
+    if blocks:
+        final = blocks[-1]
+        if raw[final.end() :].strip():
+            return None
+        candidate = final.group(1)
+    else:
+        candidate = raw
+    try:
+        parsed = json.loads(candidate.strip())
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def _thread_ids(entries: Any) -> set[str]:
@@ -346,74 +366,6 @@ def _thread_ids(entries: Any) -> set[str]:
         if thread_id:
             ids.add(str(thread_id))
     return ids
-
-
-def _surviving_threads(
-    threads: list[dict[str, Any]],
-    validation_result: Any,
-) -> list[dict[str, Any]]:
-    """Filter the round's reviewer threads through the validator's verdict.
-
-    Re-housed ``review_validator`` consumption semantics (m1):
-
-    - ``wont_fix`` entries are documented-by-design decisions — accepted,
-      so any reviewer thread re-raising one of those thread ids is DROPPED
-      (never re-posted; the legacy recurrence-acceptance path, #1329).
-    - ``unaddressed`` entries are prior findings the current diff does not
-      address. They are represented in the next audit, but a still-open
-      process thread is handed to a human rather than being resolved or
-      replaced by automation.
-
-    Fail-open: a missing/unparseable validator output filters nothing — a
-    validator blip must never suppress the reviewer's own findings (the
-    legacy fail-open pattern).
-
-    Args:
-        threads: The round's reviewer-produced thread dicts.
-        validation_result: The validation job's stored output.
-
-    Returns:
-        The surviving thread list to durably post.
-
-    """
-    surviving = [dict(t) for t in threads]
-    parsed = _parse_validation_result(validation_result)
-    if parsed is None:
-        return surviving
-    wont_fix_ids = _thread_ids(parsed.get("wont_fix"))
-    if wont_fix_ids:
-        surviving = [
-            t for t in surviving if str(t.get("thread_id") or t.get("id") or "") not in wont_fix_ids
-        ]
-    present_ids = {str(t.get("thread_id") or t.get("id") or "") for t in surviving}
-    unaddressed = parsed.get("unaddressed")
-    if isinstance(unaddressed, list):
-        for entry in unaddressed:
-            if not isinstance(entry, dict):
-                continue
-            thread_id = str(entry.get("thread_id") or entry.get("id") or "")
-            if thread_id and thread_id in present_ids:
-                continue  # reviewer already re-raised it this round
-            detail = (
-                str(entry.get("detail") or "").strip()
-                or str(entry.get("original_body") or "").strip()
-                or "prior review comment not addressed"
-            )
-            surviving.append(
-                {
-                    "path": entry.get("path") or "",
-                    "line": entry.get("line"),
-                    "side": "RIGHT",
-                    "severity": "major",
-                    "body": f"Reopened (prior round, still unaddressed): {detail}",
-                    # The live reconciliation below uses this host-presented
-                    # identity to suppress a replacement only when the old
-                    # receipt is still actually open. A stale validation
-                    # snapshot alone must never lose a finding.
-                    "prior_thread_id": thread_id,
-                }
-            )
-    return surviving
 
 
 def _is_postable_finding(thread: dict[str, Any]) -> bool:
@@ -432,29 +384,6 @@ def _is_postable_finding(thread: dict[str, Any]) -> bool:
     )
 
 
-def _thread_is_automation_owned(thread: dict[str, Any]) -> bool:
-    """Classify a fresh GitHub thread by its durable author facts."""
-    if isinstance(thread.get("automation_owned"), bool):
-        return bool(thread["automation_owned"])
-    authors: set[str] = set()
-    for key in ("author", "authors"):
-        value = thread.get(key)
-        if isinstance(value, str):
-            authors.add(value.strip())
-        elif isinstance(value, list):
-            authors.update(str(author).strip() for author in value if str(author).strip())
-    for comment in thread.get("comments", []):
-        if isinstance(comment, dict) and comment.get("author"):
-            authors.add(str(comment["author"]).strip())
-    return bool(
-        authors
-        & {
-            "github-actions[bot]",
-            "hephaestus[bot]",
-        }
-    )
-
-
 def _durable_thread_id(thread: dict[str, Any]) -> str | None:
     """Return one non-empty durable GraphQL thread id, if present."""
     value = thread.get("id") or thread.get("thread_id")
@@ -462,195 +391,6 @@ def _durable_thread_id(thread: dict[str, Any]) -> str | None:
         return None
     value = value.strip()
     return value or None
-
-
-def _thread_comment_signature(thread: dict[str, Any]) -> tuple[tuple[str, str], ...] | None:
-    """Return a complete immutable participant/body signature for a thread.
-
-    The GitHub accessor fails closed rather than returning a truncated comment
-    page. Requiring this snapshot to remain exact means a later reply cannot
-    be mistaken for the process's original single-comment thread, even when a
-    human happens to use the same login as the automation host.
-    """
-    comments = thread.get("comments")
-    if not isinstance(comments, list) or not comments:
-        return None
-    signature: list[tuple[str, str]] = []
-    for comment in comments:
-        if not isinstance(comment, dict):
-            return None
-        author = comment.get("author")
-        body = comment.get("body")
-        if not isinstance(author, str) or not author.strip() or not isinstance(body, str):
-            return None
-        signature.append((author.strip(), body))
-    return tuple(signature)
-
-
-def _is_process_thread_receipt(raw: dict[str, Any]) -> bool:
-    """Return whether a post-time or host-normalized stale receipt is exact."""
-    review_id = raw.get("review_id")
-    line = raw.get("line")
-    comments = raw.get("comments")
-    initial = comments[0] if isinstance(comments, list) and len(comments) == 1 else None
-    external_bot = raw.get("external_bot") is True
-    return bool(
-        _durable_thread_id(raw)
-        and isinstance(review_id, str)
-        and review_id.strip()
-        and isinstance(comments, list)
-        and len(comments) == 1
-        and isinstance(initial, dict)
-        and isinstance(initial.get("id"), str)
-        and initial["id"].strip()
-        and initial.get("review_id") == review_id
-        and (
-            (isinstance(line, int) and not isinstance(line, bool) and line > 0)
-            or (line is None and raw.get("restart_stale_line") is True)
-        )
-        and _thread_comment_signature(raw) is not None
-        and (
-            not external_bot
-            or (
-                raw.get("author_type") == "Bot"
-                and isinstance(initial, dict)
-                and initial.get("author_type") == "Bot"
-            )
-        )
-    )
-
-
-def _process_thread_records(item: WorkItem) -> dict[str, dict[str, Any]] | None:
-    """Load the process-only post receipts, rejecting malformed identities."""
-    raw_records = item.payload.get("process_review_threads", [])
-    if not isinstance(raw_records, list):
-        return None
-    records: dict[str, dict[str, Any]] = {}
-    for raw in raw_records:
-        if not isinstance(raw, dict) or not _is_process_thread_receipt(raw):
-            return None
-        thread_id = _durable_thread_id(raw)
-        if thread_id is None or thread_id in records:
-            return None
-        records[thread_id] = raw
-    return records
-
-
-def _adopt_live_process_receipts(
-    records: dict[str, dict[str, Any]], live_threads: list[dict[str, Any]]
-) -> dict[str, dict[str, Any]] | None:
-    """Merge host-normalized restart receipts into the single receipt set.
-
-    ``PipelineGitHub`` attaches ``process_receipt`` only after proving the
-    marker, sole-comment shape, automated-review parent, and review commit.
-    The stage still verifies the complete receipt against the same live thread
-    before letting the validator describe it as addressed.
-    """
-    adopted = dict(records)
-    for live in live_threads:
-        if not isinstance(live, dict):
-            return None
-        raw_receipt = live.get("process_receipt")
-        if raw_receipt is None:
-            continue
-        if not isinstance(raw_receipt, dict) or not _is_process_thread_receipt(raw_receipt):
-            return None
-        thread_id = _durable_thread_id(raw_receipt)
-        if thread_id is None or thread_id != _durable_thread_id(live):
-            return None
-        if _thread_comment_signature(raw_receipt) != _thread_comment_signature(live):
-            return None
-        existing = adopted.get(thread_id)
-        if existing is not None and existing != raw_receipt:
-            return None
-        adopted[thread_id] = raw_receipt
-    return adopted
-
-
-def _handled_process_receipts(
-    item: WorkItem,
-) -> tuple[list[dict[str, Any]], dict[str, str]] | None:
-    """Return strictly validated receipts the validator marked as handled.
-
-    The validator never expands mutation scope: every id must be a host-read
-    receipt that was presented to that validation job.  Missing or malformed
-    validation output therefore leaves the existing human handoff intact.
-    """
-    records = _process_thread_records(item)
-    validation_threads = item.payload.get("validation_process_threads")
-    parsed = _parse_validation_result(item.payload.get("validation_result"))
-    if records is None or not isinstance(validation_threads, list) or parsed is None:
-        return None
-    unaddressed = parsed.get("unaddressed")
-    wont_fix = parsed.get("wont_fix")
-    if not isinstance(unaddressed, list) or not isinstance(wont_fix, list):
-        return None
-    validation_ids: list[str] = []
-    for thread in validation_threads:
-        if not isinstance(thread, dict):
-            return None
-        thread_id = _durable_thread_id(thread)
-        if thread_id is None or thread_id not in records:
-            return None
-        if _thread_comment_signature(thread) != _thread_comment_signature(records[thread_id]):
-            return None
-        validation_ids.append(thread_id)
-    if len(validation_ids) != len(set(validation_ids)):
-        return None
-    unaddressed_ids = _thread_ids(unaddressed)
-    wont_fix_ids = _thread_ids(wont_fix)
-    known_ids = set(validation_ids)
-    if (
-        not unaddressed_ids.issubset(known_ids)
-        or not wont_fix_ids.issubset(known_ids)
-        or unaddressed_ids & wont_fix_ids
-    ):
-        return None
-    reviewed_head = item.payload.get("reviewed_pr_head_sha")
-    dispositions = {
-        thread_id: "addressed"
-        for thread_id in validation_ids
-        if (
-            thread_id not in unaddressed_ids
-            and thread_id not in wont_fix_ids
-            and isinstance(reviewed_head, str)
-            and reviewed_head.strip()
-            and isinstance(records[thread_id].get("created_head_sha"), str)
-            and records[thread_id]["created_head_sha"].strip()
-            and records[thread_id]["created_head_sha"] != reviewed_head
-        )
-    }
-    return ([records[thread_id] for thread_id in dispositions], dispositions)
-
-
-def _live_process_threads(
-    records: dict[str, dict[str, Any]], live_threads: list[dict[str, Any]]
-) -> dict[str, dict[str, Any]] | None:
-    """Return only fresh live threads that exactly still match process receipts.
-
-    A retained id is not enough to call a thread a live process receipt: a
-    human may have replied through the same login or otherwise changed it.
-    Callers use this helper for duplicate suppression, so returning only exact
-    participant/body matches ensures a validator finding is re-posted whenever
-    the prior thread was resolved or has ceased to be this process's receipt.
-    """
-    live_by_id: dict[str, dict[str, Any]] = {}
-    for thread in live_threads:
-        if not isinstance(thread, dict):
-            return None
-        thread_id = _durable_thread_id(thread)
-        if thread_id is None or thread_id in live_by_id:
-            return None
-        live_by_id[thread_id] = thread
-    matched: dict[str, dict[str, Any]] = {}
-    for thread_id, receipt in records.items():
-        live = live_by_id.get(thread_id)
-        if live is None:
-            continue
-        receipt_signature = _thread_comment_signature(receipt)
-        if receipt_signature is not None and receipt_signature == _thread_comment_signature(live):
-            matched[thread_id] = live
-    return matched
 
 
 def _finding_key(thread: dict[str, Any]) -> tuple[str, int, str, str] | None:
@@ -677,17 +417,17 @@ def _finding_key(thread: dict[str, Any]) -> tuple[str, int, str, str] | None:
     return (path.strip(), line, side.strip().upper(), re.sub(r"\s+", " ", body).casefold())
 
 
-def _without_duplicate_live_process_findings(
-    findings: list[dict[str, Any]], live_process_threads: dict[str, dict[str, Any]]
+def _without_duplicate_live_findings(
+    findings: list[dict[str, Any]], live_threads: dict[str, dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """Keep genuinely new findings while retaining their open process twins."""
+    """Keep genuinely new audit findings while retaining their open-thread twins."""
     existing = {
-        key for thread in live_process_threads.values() if (key := _finding_key(thread)) is not None
+        key for thread in live_threads.values() if (key := _finding_key(thread)) is not None
     }
     retained: list[dict[str, Any]] = []
     for finding in findings:
         prior_thread_id = finding.get("prior_thread_id")
-        if isinstance(prior_thread_id, str) and prior_thread_id in live_process_threads:
+        if isinstance(prior_thread_id, str) and prior_thread_id in live_threads:
             continue
         key = _finding_key(finding)
         if key is not None and key in existing:
@@ -698,57 +438,40 @@ def _without_duplicate_live_process_findings(
     return retained
 
 
-def _thread_is_blocking(thread: dict[str, Any]) -> bool:
-    """Recover the durable blocking severity from a fresh thread fact."""
-    severity = str(thread.get("severity") or "").strip().lower()
-    if severity in VALID_SEVERITIES:
-        return severity in BLOCKING_SEVERITIES
-    body = str(thread.get("body") or "")
-    for line in body.splitlines():
-        marker = "<!-- hephaestus-severity:"
-        stripped = line.strip()
-        if stripped.startswith(marker) and stripped.endswith("-->"):
-            recovered = stripped[len(marker) : -3].strip().lower()
-            if recovered not in VALID_SEVERITIES:
-                return True
-            return recovered in BLOCKING_SEVERITIES
-    return True
-
-
-def _thread_counts(threads: list[dict[str, Any]]) -> tuple[int, int, int]:
-    """Return fresh ``(blocking automation, advisory automation, human)`` counts."""
-    blocking = advisory = human = 0
-    for thread in threads:
-        if not _thread_is_automation_owned(thread):
-            human += 1
-        elif _thread_is_blocking(thread):
-            blocking += 1
-        else:
-            advisory += 1
-    return blocking, advisory, human
-
-
-def _normalize_blocking_remediation_threads(
+def _normalize_remediation_threads(
     threads: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Normalize live blocking automation threads for address prompts.
+    """Normalize every live review thread for implementation remediation.
 
     The reviewer audit contains proposed findings, not durable GitHub thread
     identities. Address jobs must instead consume the live post/read-back
-    snapshot so pre-existing blockers are included and every presented finding
-    carries the GraphQL thread id used to identify the required human
-    verification and resolution handoff.
-    Threads without a durable id are omitted; POST verifies the normalized
-    count against the live blocking count and fails closed on any mismatch.
+    snapshot so every open thread—regardless of author—is investigated.  The
+    implementation agent replies after a real fix commit; the reviewer later
+    performs a fresh review and resolves or returns the exact thread.
     """
     normalized: list[dict[str, Any]] = []
     for thread in threads:
-        if not _thread_is_automation_owned(thread) or not _thread_is_blocking(thread):
-            continue
         thread_id = str(thread.get("id") or thread.get("thread_id") or "").strip()
         if not thread_id:
             continue
         line = thread.get("line")
+        body = str(thread.get("body") or "")
+        comments = thread.get("comments")
+        # The first thread body is already supplied above.  Once a reviewer
+        # leaves a follow-up, retain the entire conversation in the next
+        # implementer prompt so the agent can act on the precise remaining
+        # defect rather than trying the original fix again.
+        if isinstance(comments, list) and len(comments) > 1:
+            rendered_comments: list[str] = []
+            for comment in comments:
+                if not isinstance(comment, dict):
+                    continue
+                author = str(comment.get("author") or "unknown reviewer").strip()
+                comment_body = str(comment.get("body") or "").strip()
+                if comment_body:
+                    rendered_comments.append(f"{author}: {comment_body}")
+            if rendered_comments:
+                body = f"{body}\n\nThread conversation:\n" + "\n\n".join(rendered_comments)
         normalized.append(
             {
                 "thread_id": thread_id,
@@ -758,10 +481,243 @@ def _normalize_blocking_remediation_threads(
                     if isinstance(line, int) and not isinstance(line, bool) and line > 0
                     else None
                 ),
-                "body": str(thread.get("body") or ""),
+                "body": body,
             }
         )
     return normalized
+
+
+def _address_replies(address_result: Any, threads: list[dict[str, Any]]) -> dict[str, str] | None:
+    """Validate one implementation reply for every supplied open thread.
+
+    An address pass is not complete when an agent silently omits a thread.
+    The host therefore accepts only an exact, duplicate-free mapping of every
+    snapshot ID to a bounded reply.  The agent may not resolve a thread; the
+    returned prose is posted by the host only after its fix commit is pushed.
+    """
+    if not isinstance(address_result, dict):
+        return None
+    addressed = address_result.get("addressed")
+    replies = address_result.get("replies")
+    if not isinstance(addressed, list) or not isinstance(replies, dict):
+        return None
+    known_ids: list[str] = []
+    for thread in threads:
+        if not isinstance(thread, dict):
+            return None
+        thread_id = str(thread.get("thread_id") or thread.get("id") or "").strip()
+        if not thread_id or thread_id in known_ids:
+            return None
+        known_ids.append(thread_id)
+    claimed_ids: list[str] = []
+    for thread_id in addressed:
+        if not isinstance(thread_id, str) or not thread_id.strip():
+            return None
+        normalized_id = thread_id.strip()
+        if normalized_id in claimed_ids:
+            return None
+        claimed_ids.append(normalized_id)
+    if set(claimed_ids) != set(known_ids) or set(replies) != set(known_ids):
+        return None
+    normalized_replies: dict[str, str] = {}
+    for thread_id in known_ids:
+        reply = replies.get(thread_id)
+        if not isinstance(reply, str) or not 0 < len(reply.strip()) <= 4_000:
+            return None
+        normalized_replies[thread_id] = reply.strip()
+    return normalized_replies
+
+
+def _implementation_reply_handoff(
+    head_sha: object,
+    threads: object,
+    replies: object,
+) -> dict[str, Any] | None:
+    """Return a replay-safe outstanding implementation-reply handoff.
+
+    The persisted value is intentionally an exact host snapshot plus the
+    model's already validated reply mapping.  It is neither a review receipt
+    nor an authority to mutate: the adapter rechecks the live PR and thread
+    state before each retry.
+    """
+    if (
+        not is_full_commit_sha(head_sha)
+        or not isinstance(threads, list)
+        or not isinstance(replies, dict)
+    ):
+        return None
+    snapshots = [dict(thread) for thread in threads if isinstance(thread, dict)]
+    if len(snapshots) != len(threads):
+        return None
+    normalized_replies = _address_replies(
+        {"addressed": list(replies), "replies": replies}, snapshots
+    )
+    if normalized_replies is None:
+        return None
+    ids = {str(snapshot.get("id") or "") for snapshot in snapshots}
+    if "" in ids or ids != set(normalized_replies) or len(ids) != len(snapshots):
+        return None
+    return {
+        "head_sha": head_sha,
+        "threads": deepcopy(snapshots),
+        "replies": dict(normalized_replies),
+    }
+
+
+def _validation_thread_snapshots(
+    live_threads: list[dict[str, Any]], receipts: list[dict[str, Any]]
+) -> list[dict[str, Any]] | None:
+    """Decorate every open thread for reviewer validation.
+
+    The reviewer always receives the full open-thread snapshot.  Only the
+    subset with a host-verified implementation reply on the reviewed head is
+    eligible for a resolve or reviewer-feedback mutation in this pass; the
+    remainder stays open for the implementation agent.  Receipts come from a
+    fresh GitHub read, rather than this process's former work-item payload.
+    """
+    receipt_by_id: dict[str, dict[str, Any]] = {}
+    for receipt in receipts:
+        thread_id = _durable_thread_id(receipt)
+        if thread_id is None or thread_id in receipt_by_id:
+            return None
+        receipt_by_id[thread_id] = receipt
+
+    snapshots: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for thread in live_threads:
+        if not isinstance(thread, dict):
+            return None
+        thread_id = _durable_thread_id(thread)
+        if thread_id is None or thread_id in seen:
+            return None
+        seen.add(thread_id)
+        snapshot = dict(thread)
+        matched_receipt = receipt_by_id.get(thread_id)
+        if matched_receipt is not None:
+            snapshot["implementation_reply_body"] = matched_receipt["implementation_reply_body"]
+            snapshot["implementation_reply_submitted"] = True
+        else:
+            snapshot["implementation_reply_body"] = None
+            snapshot["implementation_reply_submitted"] = False
+        snapshots.append(snapshot)
+
+    if not set(receipt_by_id).issubset(seen):
+        return None
+    return snapshots
+
+
+def _validation_receipt_fingerprints(
+    receipts: list[dict[str, Any]],
+) -> dict[str, str] | None:
+    """Bind a validator decision to the exact host-read reply receipt.
+
+    A thread ID alone is not an immutable decision target: another reply can
+    be appended on the same thread and head while the validation job is
+    running.  Store a canonical digest of the complete comment receipt that
+    the reviewer was shown, then require an identical fresh receipt before
+    consuming its decision in ``POST``.
+    """
+    fingerprints: dict[str, str] = {}
+    for receipt in receipts:
+        thread_id = _durable_thread_id(receipt)
+        comments = receipt.get("comments") if isinstance(receipt, dict) else None
+        reply_id = receipt.get("implementation_reply_id") if isinstance(receipt, dict) else None
+        reply_body = receipt.get("implementation_reply_body") if isinstance(receipt, dict) else None
+        head_sha = receipt.get("implementation_head_sha") if isinstance(receipt, dict) else None
+        if (
+            thread_id is None
+            or thread_id in fingerprints
+            or not isinstance(comments, list)
+            or not isinstance(reply_id, str)
+            or not isinstance(reply_body, str)
+            or not is_full_commit_sha(head_sha)
+        ):
+            return None
+        snapshot: list[tuple[str, str]] = []
+        seen_comment_ids: set[str] = set()
+        for comment in comments:
+            if not isinstance(comment, dict):
+                return None
+            comment_id = comment.get("id")
+            body = comment.get("body")
+            if (
+                not isinstance(comment_id, str)
+                or not comment_id
+                or comment_id in seen_comment_ids
+                or not isinstance(body, str)
+            ):
+                return None
+            seen_comment_ids.add(comment_id)
+            snapshot.append((comment_id, body))
+        if not snapshot or snapshot[-1] != (reply_id, reply_body):
+            return None
+        canonical = json.dumps(
+            {
+                "comments": snapshot,
+                "head_sha": head_sha,
+                "implementation_reply_body": reply_body,
+                "implementation_reply_id": reply_id,
+                "thread_id": thread_id,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        fingerprints[thread_id] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return fingerprints
+
+
+def _reviewer_thread_decisions(  # noqa: C901
+    receipts: list[dict[str, Any]], validation_result: Any
+) -> tuple[set[str], dict[str, str]] | None:
+    """Return reviewer-approved IDs and rejection explanations, fail closed."""
+    parsed = _parse_validation_result(validation_result)
+    if parsed is None:
+        return None
+    # Resolution is authority-bearing.  Require the reviewer to make an
+    # explicit, exhaustive two-way decision for every host-read receipt;
+    # omission and a historical ``wont_fix`` bucket must never silently close
+    # a discussion.
+    if set(parsed) != {"resolved", "unaddressed"}:
+        return None
+    resolved = parsed.get("resolved")
+    unaddressed = parsed.get("unaddressed")
+    if not isinstance(resolved, list) or not isinstance(unaddressed, list):
+        return None
+    known_ids: set[str] = set()
+    for receipt in receipts:
+        thread_id = _durable_thread_id(receipt)
+        if thread_id is None:
+            return None
+        known_ids.add(thread_id)
+    if len(known_ids) != len(receipts):
+        return None
+    resolved_ids: set[str] = set()
+    for thread_id in resolved:
+        if not isinstance(thread_id, str) or not thread_id.strip():
+            return None
+        normalized_id = thread_id.strip()
+        if normalized_id in resolved_ids:
+            return None
+        resolved_ids.add(normalized_id)
+    feedback: dict[str, str] = {}
+    for entry in unaddressed:
+        if not isinstance(entry, dict):
+            return None
+        thread_id = str(entry.get("thread_id") or entry.get("id") or "").strip()
+        detail = str(entry.get("detail") or "").strip()
+        if not thread_id or not detail or thread_id in feedback:
+            return None
+        feedback[thread_id] = detail
+    feedback_ids = set(feedback)
+    if (
+        not resolved_ids.issubset(known_ids)
+        or not feedback_ids.issubset(known_ids)
+        or resolved_ids & feedback_ids
+        or resolved_ids | feedback_ids != known_ids
+    ):
+        return None
+    return (resolved_ids, feedback)
 
 
 def _address_review_feedback(item: WorkItem) -> str:
@@ -786,7 +742,7 @@ class PrReviewStage(Stage):
       straight to EVAL when the review job failed — the ERROR path burns
       no downstream work).
     - POST [M]: durably post surviving review threads, refresh the
-      unresolved-thread counts; zero open automation threads skip the
+      unresolved-thread counts; zero open review threads skip the
       address leg straight to EVAL.
     - DIFFICULTY_WAIT: submit the comment-difficulty classification job.
     - ADDRESS_WAIT: fresh-PR path resumes the implementer with the review
@@ -1041,7 +997,7 @@ class PrReviewStage(Stage):
         return JobRequest(job, on_done_state=VALIDATE_WAIT)
 
     def _validate_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """VALIDATE_WAIT either skips the dead round or submits validation."""
+        """Perform a fresh review of implementation replies before resolution."""
         issue = _issue_number(item)
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
@@ -1050,45 +1006,33 @@ class PrReviewStage(Stage):
             # address leg — EVAL's missing-verdict ERROR path handles it
             # without burning a round.
             return Continue(next_state=EVAL)
-        records = _process_thread_records(item)
-        if records is None:
-            item.payload["review_audit_failure"] = True
-            return Continue(next_state=EVAL)
-        if records:
-            try:
-                live_threads = ctx.github.list_unresolved_review_threads(item.pr)
-            except Exception as error:
-                logger.warning(
-                    "pr_review:%s: could not fetch complete process-thread facts "
-                    "for validation (%s)",
-                    item.issue,
-                    type(error).__name__,
+        reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
+        try:
+            live_threads = ctx.github.list_unresolved_review_threads(item.pr)
+            receipts = (
+                ctx.github.reviewer_validation_receipts(
+                    item.pr,
+                    reviewed_head_sha=reviewed_head,
+                    threads=live_threads,
                 )
-                item.payload["review_audit_failure"] = True
-                return Continue(next_state=EVAL)
-        else:
-            try:
-                live_threads = ctx.github.list_restart_process_review_threads(item.pr)
-            except Exception as error:
-                logger.warning(
-                    "pr_review:%s: could not fetch complete process-thread facts "
-                    "for restart validation (%s)",
-                    item.issue,
-                    type(error).__name__,
-                )
-                item.payload["review_audit_failure"] = True
-                return Continue(next_state=EVAL)
-        records = _adopt_live_process_receipts(records, live_threads)
-        if records is None:
+                if is_full_commit_sha(reviewed_head)
+                else []
+            )
+        except Exception as error:
+            logger.warning(
+                "pr_review:%s: could not fetch validation receipts (%s)",
+                item.issue,
+                type(error).__name__,
+            )
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
-        item.payload["process_review_threads"] = list(records.values())
-        live_process = _live_process_threads(records, live_threads)
-        if live_process is None:
+        validation_threads = _validation_thread_snapshots(live_threads, receipts)
+        receipt_fingerprints = _validation_receipt_fingerprints(receipts)
+        if validation_threads is None or receipt_fingerprints is None:
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
-        validation_threads = list(live_process.values())
-        item.payload["validation_process_threads"] = [dict(thread) for thread in validation_threads]
+        item.payload["validation_threads"] = validation_threads
+        item.payload["validation_receipt_fingerprints"] = receipt_fingerprints
         item.payload["prior_comments_json"] = json.dumps(
             validation_threads, ensure_ascii=False, sort_keys=True
         )
@@ -1221,7 +1165,9 @@ class PrReviewStage(Stage):
         )
         return JobRequest(job, on_done_state=REVIEW_WAIT)
 
-    def on_job_done(self, item: WorkItem, result: JobResult, ctx: StageContext) -> None:
+    def on_job_done(  # noqa: C901
+        self, item: WorkItem, result: JobResult, ctx: StageContext
+    ) -> None:
         """Store job results on the item payload (state is still the WAIT state).
 
         Args:
@@ -1245,13 +1191,137 @@ class PrReviewStage(Stage):
             # was actually produced (value/changed True). A no-commit push
             # means the address turn was a phantom fix — EVAL must NOT treat
             # the round as addressed.
-            produced_commit = bool(result.value)
+            push_receipt = result.value if isinstance(result.value, dict) else {}
+            raw_published_head = push_receipt.get("head_sha")
+            published_head = raw_published_head if isinstance(raw_published_head, str) else ""
+            produced_commit = bool(push_receipt.get("pushed")) and is_full_commit_sha(
+                published_head
+            )
             if produced_commit:
+                remediation_threads = item.payload.get("remediation_threads")
+                threads = remediation_threads if isinstance(remediation_threads, list) else []
+                snapshots = item.payload.get("remediation_thread_snapshots")
+                thread_snapshots = snapshots if isinstance(snapshots, list) else []
+                replies = _address_replies(item.payload.get("address_output"), threads)
+                reply_contract_failed = bool(threads) and replies is None
+                if reply_contract_failed:
+                    logger.warning(
+                        "pr_review:%s: implementation did not return one reply for every open "
+                        "thread; refusing to accept a partial address pass",
+                        item.issue,
+                    )
+                elif replies and item.pr is not None:
+                    handoff = _implementation_reply_handoff(
+                        published_head,
+                        thread_snapshots,
+                        replies,
+                    )
+                    if handoff is None:
+                        logger.warning(
+                            "pr_review:%s: could not preserve the exact implementation "
+                            "reply handoff; refusing to infer a replacement response",
+                            item.issue,
+                        )
+                    else:
+                        # Keep the exact, already-validated agent output until
+                        # GitHub proves every reply. _clear_round_review_state
+                        # deliberately does not clear this handoff because the
+                        # code commit has already changed the review head.
+                        item.payload[_PENDING_IMPLEMENTATION_REPLY_HANDOFF] = handoff
+                        item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+                    try:
+                        # The worker returns the local commit it actually
+                        # published.  A later arbitrary remote push must not
+                        # acquire this implementation reply by being read as
+                        # the current head.
+                        state = ctx.github.gh_pr_state(item.pr)
+                        if not _pr_is_current_open_head(state, published_head):
+                            raise RuntimeError("published implementation head no longer current")
+                        reply_result = ctx.github.post_implementation_thread_replies(
+                            item.pr,
+                            expected_head_sha=published_head,
+                            threads=thread_snapshots,
+                            replies=replies,
+                        )
+                    except Exception as error:
+                        logger.warning(
+                            "pr_review:%s: could not post implementation replies (%s)",
+                            item.issue,
+                            type(error).__name__,
+                        )
+                    else:
+                        replied = set(getattr(reply_result, "replied_thread_ids", ()))
+                        blocked = set(getattr(reply_result, "blocked_thread_ids", ()))
+                        receipts = list(getattr(reply_result, "receipts", ()))
+                        retryable = bool(getattr(reply_result, "retryable", False))
+                        expected_ids = set(replies)
+                        remaining_ids = expected_ids - replied
+                        result_retryable_ids = set(
+                            getattr(reply_result, "retryable_thread_ids", ())
+                        )
+                        retryable_ids = (
+                            result_retryable_ids
+                            if result_retryable_ids and result_retryable_ids.issubset(remaining_ids)
+                            else remaining_ids
+                            if retryable and not result_retryable_ids
+                            else set()
+                        )
+                        if replied != set(replies) or len(receipts) != len(replied):
+                            logger.warning(
+                                "pr_review:%s: some implementation replies could not be verified",
+                                item.issue,
+                            )
+                            if retryable_ids and handoff is not None:
+                                item.payload[_PENDING_IMPLEMENTATION_REPLY_HANDOFF] = (
+                                    _implementation_reply_handoff(
+                                        published_head,
+                                        [
+                                            snapshot
+                                            for snapshot in thread_snapshots
+                                            if str(snapshot.get("id") or "") in retryable_ids
+                                        ],
+                                        {
+                                            thread_id: reply
+                                            for thread_id, reply in replies.items()
+                                            if thread_id in retryable_ids
+                                        },
+                                    )
+                                )
+                            elif retryable_ids:
+                                logger.info(
+                                    "pr_review:%s: retaining an exact reply handoff after an "
+                                    "ambiguous host failure",
+                                    item.issue,
+                                )
+                            else:
+                                # A verified mismatch means the conversation changed.  Replaying
+                                # a stale snapshot can never repair it and eventually wedges the
+                                # work item; the pending review refresh will obtain new facts.
+                                item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
+                                item.payload.pop(
+                                    _PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None
+                                )
+                        else:
+                            item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
+                            item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+                        if blocked:
+                            logger.info(
+                                "pr_review:%s: %d changed thread(s) remain open for a new "
+                                "implementation pass",
+                                item.issue,
+                                len(blocked),
+                            )
                 # The old audit and checkout receipt describe the pre-push
                 # head. Discard the entire round before EVAL can bind the new
                 # head to any implementation-state transition.
                 _clear_round_review_state(item)
                 item.payload["review_refresh_required"] = True
+                if reply_contract_failed:
+                    # The code commit may already be durable, but accepting an
+                    # incomplete agent transcript would let one supplied open
+                    # thread disappear from the implementation handoff. Route
+                    # back through the normal bounded implementation recovery.
+                    item.payload["address_error"] = True
             else:
                 # Preserve the existing no-commit gate while requiring it to
                 # re-confirm the unchanged remote head before a negative write.
@@ -1266,7 +1336,7 @@ class PrReviewStage(Stage):
         elif item.state == DIFFICULTY_WAIT and result.value is not None:
             item.payload["difficulty_tiers"] = str(result.value)
         elif item.state == ADDRESS_WAIT and result.value is not None:
-            item.payload["address_output"] = str(result.value)
+            item.payload["address_output"] = result.value
 
     @staticmethod
     def _consume_direct_worktree_result(item: WorkItem, result: JobResult) -> bool:
@@ -1384,99 +1454,13 @@ class PrReviewStage(Stage):
         elif item.state == ADDRESS_WAIT:
             item.payload["address_error"] = True
 
-    @staticmethod
-    def _reconcile_process_threads_before_post(
-        item: WorkItem, ctx: StageContext, threads: list[dict[str, Any]]
-    ) -> list[dict[str, Any]] | StepResult:
-        """Suppress duplicate findings and preserve process-thread boundaries.
-
-        Guarded receipt reconciliation runs immediately before this helper.
-        A verified process receipt may proceed only when the validator
-        explicitly reports it unaddressed; POST then routes its fenced finding
-        through the normal address path. Any changed, replied, malformed,
-        user, or validator-ambiguous thread remains a hard handoff.
-        """
-        if item.pr is None:
-            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
-        records = _process_thread_records(item)
-        if records is None:
-            item.payload["review_audit_failure"] = True
-            return Continue(next_state=EVAL)
-        if not records:
-            return threads
-        try:
-            current_live = ctx.github.list_unresolved_review_threads(item.pr)
-        except Exception as error:
-            logger.warning(
-                "pr_review:%s: could not refresh process threads (%s)",
-                item.issue,
-                type(error).__name__,
-            )
-            item.payload["review_audit_failure"] = True
-            return Continue(next_state=EVAL)
-        live_process = _live_process_threads(records, current_live)
-        if live_process is None:
-            item.payload["review_audit_failure"] = True
-            return Continue(next_state=EVAL)
-        process_ids = set(live_process)
-        if process_ids:
-            parsed = _parse_validation_result(item.payload.get("validation_result"))
-            if parsed is None:
-                return PrReviewStage._handle_automation_threads_requiring_human_resolution(
-                    item, len(process_ids), ctx
-                )
-            unaddressed = _thread_ids(parsed.get("unaddressed"))
-            wont_fix = _thread_ids(parsed.get("wont_fix"))
-            if process_ids & wont_fix or not process_ids.issubset(unaddressed):
-                return PrReviewStage._handle_automation_threads_requiring_human_resolution(
-                    item, len(process_ids), ctx
-                )
-        return _without_duplicate_live_process_findings(threads, live_process)
-
-    @staticmethod
-    def _record_posted_process_threads(item: WorkItem, post_receipts: list[dict[str, Any]]) -> bool:
-        """Append only immutable receipts produced at the post boundary.
-
-        A later full unresolved-thread read is deliberately not a source of
-        receipts: a same-login human reply can arrive in that window. The
-        adapter returns each process-created thread only after proving its
-        sole initial comment and owning review identity.
-        """
-        if not post_receipts:
-            return _process_thread_records(item) is not None
-        created_head = item.payload.get("reviewed_pr_head_sha")
-        if not isinstance(created_head, str) or not created_head.strip():
-            return False
-        new_records: dict[str, dict[str, Any]] = {}
-        for receipt in post_receipts:
-            if not isinstance(receipt, dict):
-                return False
-            thread_id = _durable_thread_id(receipt)
-            if thread_id is None or thread_id in new_records:
-                return False
-            new_records[thread_id] = {**receipt, "created_head_sha": created_head}
-        if any(not _is_process_thread_receipt(receipt) for receipt in new_records.values()):
-            return False
-        records = _process_thread_records(item)
-        if records is None or any(thread_id in records for thread_id in new_records):
-            return False
-        # Keep the original post receipt intact. A later human reply must not
-        # be absorbed into the baseline used to prove this is still our thread.
-        item.payload["process_review_threads"] = [*records.values(), *new_records.values()]
-        return True
-
     def _post(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901
-        """POST [M]: durably post SURVIVING threads, refresh unresolved counts.
+        """Reconcile reviewer decisions, publish new findings, and queue remediation.
 
-        The thread post is the round's durable write (doc step 3). The
-        reviewer's threads (parsed by the worker/coordinator (#1817) into
-        ``payload["review_threads"]``) are first filtered through the
-        validation job's verdict (:func:`_surviving_threads`, m1): wont_fix
-        findings are dropped, unaddressed prior findings are re-opened.
-        Zero open blocking automation threads skip the address leg straight to
-        EVAL. Advisory findings remain in the audit summary but are never
-        published as inline threads: GitHub conversation resolution would make
-        such a thread a merge blocker that this loop must not resolve.
+        Reviewer validation can only resolve or return current implementation
+        reply receipts. Fresh audit findings are deduplicated against live
+        threads, then every remaining open thread enters implementation
+        remediation regardless of its author.
         """
         if item.pr is None:  # guarded by step(); kept for restart safety
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
@@ -1485,52 +1469,125 @@ class PrReviewStage(Stage):
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
         raw_threads = [dict(t) for t in item.payload.get("review_threads") or []]
-        threads = _surviving_threads(raw_threads, item.payload.get("validation_result"))
+        # Validation controls only the reviewer-owned reconciliation of
+        # implementation replies. Fresh audit findings are independently
+        # deduplicated against live threads below; a validator must never
+        # recreate, replace, or suppress an open review conversation.
+        threads = raw_threads
         item.payload["raw_review_threads"] = raw_threads
 
-        handled = _handled_process_receipts(item)
-        if handled is not None:
-            receipts, dispositions = handled
-            if dispositions:
-                reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
-                if not reviewed_head:
-                    item.payload["review_audit_failure"] = True
-                    return Continue(next_state=EVAL)
-                try:
-                    resolution = ctx.github.reply_and_resolve_process_review_threads(
-                        item.pr,
-                        reviewed_head_sha=reviewed_head,
-                        receipts=receipts,
-                        dispositions=dispositions,
-                    )
-                except Exception as error:
-                    logger.warning(
-                        "pr_review:%s: process review-thread reconciliation failed (%s)",
-                        item.issue,
-                        type(error).__name__,
-                    )
-                    item.payload["review_audit_failure"] = True
-                    return Continue(next_state=EVAL)
-                resolved_ids = set(getattr(resolution, "resolved_thread_ids", ()))
-                blocked_ids = set(getattr(resolution, "blocked_thread_ids", ()))
-                if resolved_ids != set(dispositions) or blocked_ids:
-                    return PrReviewStage._handle_automation_threads_requiring_human_resolution(
-                        item,
-                        len(dispositions),
-                        ctx,
-                    )
-                item.payload["process_review_threads"] = [
-                    receipt
-                    for receipt in item.payload.get("process_review_threads", [])
-                    if _durable_thread_id(receipt) not in resolved_ids
-                ]
-
-        reconciled = self._reconcile_process_threads_before_post(item, ctx, threads)
-        if not isinstance(reconciled, list):
-            return reconciled
+        reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
+        try:
+            live_for_reconciliation = ctx.github.list_unresolved_review_threads(item.pr)
+            validation_receipts = (
+                ctx.github.reviewer_validation_receipts(
+                    item.pr,
+                    reviewed_head_sha=reviewed_head,
+                    threads=live_for_reconciliation,
+                )
+                if is_full_commit_sha(reviewed_head)
+                else []
+            )
+        except Exception as error:
+            logger.warning(
+                "pr_review:%s: could not refresh reviewer validation receipts (%s)",
+                item.issue,
+                type(error).__name__,
+            )
+            item.payload["review_audit_failure"] = True
+            return Continue(next_state=EVAL)
+        live_receipt_fingerprints = _validation_receipt_fingerprints(validation_receipts)
+        validated_receipt_fingerprints = item.payload.get("validation_receipt_fingerprints")
+        if live_receipt_fingerprints is None:
+            item.payload["review_audit_failure"] = True
+            return Continue(next_state=EVAL)
+        if validated_receipt_fingerprints is not None and (
+            not isinstance(validated_receipt_fingerprints, dict)
+            or validated_receipt_fingerprints != live_receipt_fingerprints
+        ):
+            # The validation agent reviewed a different immutable receipt than
+            # the one currently open on GitHub.  Its decision must not act on
+            # a replacement reply, even if the durable thread ID is unchanged.
+            item.payload.pop("validation_result", None)
+            item.payload.pop("validation_threads", None)
+            item.payload.pop("validation_receipt_fingerprints", None)
+            logger.info(
+                "pr_review:%s: implementation reply receipt changed after validation; "
+                "revalidating before reconciliation",
+                item.issue,
+            )
+            return Continue(next_state=VALIDATE_WAIT)
+        if validation_receipts:
+            decisions = _reviewer_thread_decisions(
+                validation_receipts, item.payload.get("validation_result")
+            )
+            if decisions is None:
+                item.payload["review_audit_failure"] = True
+                return Continue(next_state=EVAL)
+            resolved_ids, feedback = decisions
+            try:
+                reconciliation = ctx.github.reconcile_reviewer_validated_threads(
+                    item.pr,
+                    reviewed_head_sha=reviewed_head,
+                    receipts=validation_receipts,
+                    resolved_thread_ids=resolved_ids,
+                    feedback=feedback,
+                )
+            except Exception as error:
+                logger.warning(
+                    "pr_review:%s: reviewer thread reconciliation failed (%s)",
+                    item.issue,
+                    type(error).__name__,
+                )
+                item.payload["review_audit_failure"] = True
+                return Continue(next_state=EVAL)
+            expected_ids = {_durable_thread_id(receipt) for receipt in validation_receipts}
+            completed_ids = set(reconciliation.resolved_thread_ids) | set(
+                reconciliation.feedback_thread_ids
+            )
+            if None in expected_ids or not completed_ids.issubset(expected_ids):
+                item.payload["review_audit_failure"] = True
+                return Continue(next_state=EVAL)
+            if reconciliation.blocked_thread_ids:
+                # Resolution status was not proven for at least one exact
+                # receipt.  The adapter deliberately does not issue an
+                # unresolve compensation mutation; discard this validator's
+                # decisions and obtain a new audit/check-out proof instead.
+                item.payload.pop("validation_result", None)
+                item.payload.pop("validation_threads", None)
+                item.payload.pop("validation_receipt_fingerprints", None)
+                return Continue(next_state=REVIEW_WAIT)
+            # A concurrent mutation can make one receipt ineligible after a
+            # previous receipt was safely resolved or received feedback.  Do
+            # not retain that stale, partially consumed receipt set: doing so
+            # wedges the next validation pass because the completed thread is
+            # no longer open.  Drop all receipts and rebuild remediation from
+            # the fresh complete live snapshot below.  The adapter's snapshot
+            # checks prevent duplicate mutations for the blocked IDs.
+            if completed_ids != expected_ids:
+                logger.info(
+                    "pr_review:%s: reviewer reconciliation was partial; refreshing live threads",
+                    item.issue,
+                )
+        try:
+            live_before_post = ctx.github.list_unresolved_review_threads(item.pr)
+        except Exception as error:
+            logger.warning(
+                "pr_review:%s: review finding dedupe read failed (%s)",
+                item.issue,
+                type(error).__name__,
+            )
+            item.payload["review_audit_failure"] = True
+            return Continue(next_state=EVAL)
+        live_by_id = {
+            thread_id: thread
+            for thread in live_before_post
+            if (thread_id := _durable_thread_id(thread)) is not None
+        }
+        threads = _without_duplicate_live_findings(threads, live_by_id)
         threads = [
             thread
-            for thread in reconciled
+            for thread in threads
             if str(thread.get("severity") or "").strip().lower() in BLOCKING_SEVERITIES
         ]
         if any(not _is_postable_finding(thread) for thread in threads):
@@ -1539,12 +1596,17 @@ class PrReviewStage(Stage):
         # The surviving audit set is what gets posted. Classification and
         # addressing use the normalized live read-back installed below.
         item.payload["review_threads"] = threads
+        if threads and is_full_commit_sha(reviewed_head):
+            publication_guard = self._require_reviewed_unarmed(item, ctx)
+            if publication_guard is not None:
+                return publication_guard
         try:
             post_receipts = list(
                 ctx.github.post_review_threads(
                     item.pr,
                     list(threads),
                     self._final_review_comment(audit),
+                    expected_head_sha=reviewed_head,
                 )
             )
         except Exception as error:
@@ -1556,9 +1618,6 @@ class PrReviewStage(Stage):
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
         if len(post_receipts) != len(threads):
-            item.payload["review_audit_failure"] = True
-            return Continue(next_state=EVAL)
-        if not self._record_posted_process_threads(item, post_receipts):
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
         item.payload["posted_thread_ids"] = [str(receipt["id"]) for receipt in post_receipts]
@@ -1573,15 +1632,14 @@ class PrReviewStage(Stage):
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
         item.payload["unresolved_threads"] = [dict(thread) for thread in live_threads]
-        blocking_auto, minor_auto, human_unresolved = _thread_counts(live_threads)
-        remediation_threads = _normalize_blocking_remediation_threads(live_threads)
-        if len(remediation_threads) != blocking_auto:
+        remediation_threads = _normalize_remediation_threads(live_threads)
+        if len(remediation_threads) != len(live_threads):
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
         item.payload["remediation_threads"] = remediation_threads
-        item.payload["unresolved_auto"] = blocking_auto + minor_auto
-        item.payload["unresolved_human"] = human_unresolved
-        if blocking_auto == 0:
+        item.payload["remediation_thread_snapshots"] = [dict(thread) for thread in live_threads]
+        item.payload["unresolved_threads_before_address"] = len(remediation_threads)
+        if not remediation_threads:
             return Continue(next_state=EVAL)
         return Continue(next_state=DIFFICULTY_WAIT)
 
@@ -1669,6 +1727,7 @@ class PrReviewStage(Stage):
                     # build_unaddressed_directive.
                     "unaddressed_findings": list(item.payload.get("unaddressed_findings") or []),
                 },
+                parse=_parse_addressed_block,
                 descr="address",
             )
             return JobRequest(job, on_done_state=PUSH_WAIT)
@@ -1687,6 +1746,7 @@ class PrReviewStage(Stage):
                 "prev_iteration": item.payload.get("pr_review_round", 0),
                 "review_feedback": _address_review_feedback(item),
             },
+            parse=_parse_addressed_block,
             descr="address",
         )
         return JobRequest(job, on_done_state=PUSH_WAIT)
@@ -1709,6 +1769,86 @@ class PrReviewStage(Stage):
         _clear_round_review_state(item)
         return None
 
+    @staticmethod
+    def _retry_pending_implementation_reply_handoff(item: WorkItem, ctx: StageContext) -> str:
+        """Retry one exact post-push reply batch without invoking an agent.
+
+        Returns ``none`` when no handoff exists, ``completed`` when every
+        reply has a host receipt, ``stale`` when the exact pushed head can no
+        longer safely receive the saved response, ``invalid`` for malformed
+        persisted state, and ``retry`` for a bounded transient/incomplete
+        host operation.  No outcome grants reviewer authority; normal fresh
+        review still validates and resolves the replies.
+        """
+        raw_handoff = item.payload.get(_PENDING_IMPLEMENTATION_REPLY_HANDOFF)
+        if raw_handoff is None:
+            return "none"
+        handoff = _implementation_reply_handoff(
+            raw_handoff.get("head_sha") if isinstance(raw_handoff, dict) else None,
+            raw_handoff.get("threads") if isinstance(raw_handoff, dict) else None,
+            raw_handoff.get("replies") if isinstance(raw_handoff, dict) else None,
+        )
+        if handoff is None or item.pr is None:
+            return "invalid"
+        head_sha = handoff["head_sha"]
+        threads = handoff["threads"]
+        replies = handoff["replies"]
+        try:
+            if not _pr_is_current_open_head(ctx.github.gh_pr_state(item.pr), head_sha):
+                item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
+                item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+                return "stale"
+            result = ctx.github.post_implementation_thread_replies(
+                item.pr,
+                expected_head_sha=head_sha,
+                threads=threads,
+                replies=replies,
+            )
+        except Exception as error:
+            logger.warning(
+                "pr_review:%s: implementation reply handoff retry failed (%s)",
+                item.issue,
+                type(error).__name__,
+            )
+            return "retry"
+
+        expected_ids = set(replies)
+        replied = set(getattr(result, "replied_thread_ids", ()))
+        receipts = list(getattr(result, "receipts", ()))
+        if replied == expected_ids and len(receipts) == len(replied):
+            item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
+            item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+            return "completed"
+        remaining_ids = expected_ids - replied
+        retryable = bool(getattr(result, "retryable", False))
+        result_retryable_ids = set(getattr(result, "retryable_thread_ids", ()))
+        retryable_ids = (
+            result_retryable_ids
+            if result_retryable_ids and result_retryable_ids.issubset(remaining_ids)
+            else remaining_ids
+            if retryable and not result_retryable_ids
+            else set()
+        )
+        if not retryable_ids:
+            item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
+            item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+            return "stale"
+        if not replied.issubset(expected_ids) or len(receipts) != len(replied):
+            return "invalid"
+        replacement = _implementation_reply_handoff(
+            head_sha,
+            [snapshot for snapshot in threads if str(snapshot.get("id") or "") in retryable_ids],
+            {
+                thread_id: reply
+                for thread_id, reply in replies.items()
+                if thread_id in retryable_ids
+            },
+        )
+        if replacement is None:
+            return "invalid"
+        item.payload[_PENDING_IMPLEMENTATION_REPLY_HANDOFF] = replacement
+        return "retry"
+
     def _eval(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901 - state-machine gate
         """EVAL [M]: apply the structural-audit gate and review budget.
 
@@ -1729,6 +1869,33 @@ class PrReviewStage(Stage):
                 item.issue,
             )
             return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_incomplete")
+
+        handoff_status = self._retry_pending_implementation_reply_handoff(item, ctx)
+        if handoff_status == "invalid":
+            logger.error(
+                "pr_review:%d: refusing to replay malformed implementation reply handoff",
+                item.issue,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_handoff_invalid")
+        if handoff_status == "retry":
+            retries = payload.get(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, 0)
+            if isinstance(retries, bool) or not isinstance(retries, int) or retries < 0:
+                return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_handoff_invalid")
+            retries += 1
+            payload[_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES] = retries
+            if retries <= IMPLEMENTATION_REPLY_HANDOFF_RETRY_CAP:
+                logger.warning(
+                    "pr_review:%d: retrying exact implementation reply handoff %d/%d",
+                    item.issue,
+                    retries,
+                    IMPLEMENTATION_REPLY_HANDOFF_RETRY_CAP,
+                )
+                return StageOutcome(Disposition.RETRY, "implementation_reply_handoff_retry")
+            logger.error(
+                "pr_review:%d: implementation reply handoff retry cap reached",
+                item.issue,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_handoff_failed")
 
         detached_push_failure = payload.pop("detached_push_failure", None)
         if detached_push_failure == "remote_unchanged":
@@ -1833,20 +2000,12 @@ class PrReviewStage(Stage):
                 live_threads = ctx.github.list_unresolved_review_threads(item.pr)
             except Exception:
                 return self._compact_before_next_review(item, ctx)
-            blocking, advisory, human = _thread_counts(live_threads)
-            if not blocking and not advisory and not human:
+            unresolved_count = len(live_threads)
+            if not unresolved_count:
                 return self._compact_before_next_review(item, ctx)
             bind_outcome = self._bind_current_head_for_negative(item, ctx)
             if bind_outcome is not None:
                 return bind_outcome
-            if human:
-                return PrReviewStage._handle_human_blocked(item, human, ctx)
-            if blocking or advisory:
-                return PrReviewStage._handle_automation_threads_requiring_human_resolution(
-                    item,
-                    blocking + advisory,
-                    ctx,
-                )
             payload["review_error_retries"] = 0
             round_done = payload.get("pr_review_round", 0) + 1
             payload["pr_review_round"] = round_done
@@ -1855,15 +2014,15 @@ class PrReviewStage(Stage):
                 item,
                 ctx,
                 audit,
-                blocking,
-                blocking,
+                unresolved_count,
+                unresolved_count,
                 round_done,
                 ctx.budget("pr_review_iter"),
                 ctx.budget("pr_review_hard"),
             )
 
-        # Fresh counts AFTER the address/push leg, split by severity so a GO is
-        # downgraded only by BLOCKING automation threads (#1856 / re-introduced #1554).
+        # A fresh total open-thread count after the address/push leg is the
+        # only thread fact that can downgrade a GO decision.
         try:
             live_threads = ctx.github.list_unresolved_review_threads(item.pr)
         except Exception as error:
@@ -1874,9 +2033,7 @@ class PrReviewStage(Stage):
             )
             return self._handle_error_verdict(item, None)
         item.payload["unresolved_threads"] = [dict(thread) for thread in live_threads]
-        blocking_auto, minor_auto, human_unresolved = _thread_counts(live_threads)
-        automation_unresolved = blocking_auto + minor_auto  # progress-trail parity (#1554)
-        unresolved = automation_unresolved + human_unresolved
+        open_thread_count = len(live_threads)
 
         # A valid structural audit is a real review result. Grade, summary,
         # and supplemental feedback never select the implementation state.
@@ -1890,30 +2047,15 @@ class PrReviewStage(Stage):
             # Audit trail of progress-earned extension rounds (4..hard_cap).
             item.attempts["pr_review_hard"] = item.attempts.get("pr_review_hard", 0) + 1
 
-        if human_unresolved:
-            logger.info(
-                "pr_review:%d: audit blocked by %d human thread(s); finishing (unlabeled)",
-                item.issue,
-                human_unresolved,
-            )
-            return PrReviewStage._handle_human_blocked(item, human_unresolved, ctx)
-
-        if blocking_auto == 0 and minor_auto == 0:
+        if not open_thread_count:
             return self._handle_clean_go(item, ctx)
-
-        if minor_auto and not blocking_auto:
-            return self._handle_automation_threads_requiring_human_resolution(
-                item,
-                minor_auto,
-                ctx,
-            )
 
         return self._handle_non_go(
             item,
             ctx,
             audit,
-            automation_unresolved,
-            unresolved,
+            open_thread_count,
+            open_thread_count,
             round_done,
             soft_cap,
             hard_cap,
@@ -1924,8 +2066,8 @@ class PrReviewStage(Stage):
         item: WorkItem,
         ctx: StageContext,
         verdict: Any,
-        automation_unresolved: int,
-        unresolved: int,
+        open_thread_count: int,
+        unresolved_count: int,
         round_done: int,
         soft_cap: int,
         hard_cap: int,
@@ -1936,15 +2078,12 @@ class PrReviewStage(Stage):
         guard_outcome = self._write_no_go(item, ctx)
         if guard_outcome is not None:
             return guard_outcome
-        # #1554 parity (m2): the progress trail counts AUTOMATION threads
-        # only — a human resolving their own thread is not automation
-        # progress and must not earn extension rounds.
         # #1863: prev_unresolved is THIS round's pre-address snapshot
-        # (POST's unresolved_auto) so the extension gate compares
+        # (POST's unresolved_threads_before_address) so the extension gate compares
         # pre-address vs post-address WITHIN the round being evaluated —
         # progress landing on the soft-cap round is no longer invisible
         # to a stale cross-round comparison.
-        prev_unresolved = item.payload.get("unresolved_auto")
+        prev_unresolved = item.payload.get("unresolved_threads_before_address")
         if round_done < soft_cap:
             logger.info(
                 "pr_review:%d: %s (round %d/%d, %d unresolved); re-reviewing",
@@ -1952,30 +2091,29 @@ class PrReviewStage(Stage):
                 "structured audit",
                 round_done,
                 soft_cap,
-                unresolved,
+                unresolved_count,
             )
             return self._compact_before_next_review(item, ctx)
-        made_progress = prev_unresolved is not None and automation_unresolved < prev_unresolved
+        made_progress = prev_unresolved is not None and open_thread_count < prev_unresolved
         if round_done < hard_cap and made_progress:
             # #1554 progress-aware extension: rounds soft_cap+1..hard_cap are
-            # admitted only while the AUTOMATION unresolved count strictly
-            # decreases.
+            # admitted only while the total open-thread count strictly decreases.
             logger.info(
-                "pr_review:%d: extension round %d/%d earned (%s -> %d automation unresolved)",
+                "pr_review:%d: extension round %d/%d earned (%s -> %d open threads)",
                 item.issue,
                 round_done + 1,
                 hard_cap,
                 prev_unresolved,
-                automation_unresolved,
+                open_thread_count,
             )
             return self._compact_before_next_review(item, ctx)
 
         logger.warning(
-            "pr_review:%d: exhausted at round %d (automation unresolved %s -> %d); applying %s",
+            "pr_review:%d: exhausted at round %d (open threads %s -> %d); applying %s",
             item.issue,
             round_done,
             prev_unresolved,
-            automation_unresolved,
+            open_thread_count,
             STATE_SKIP,
         )
         # Reuse the exact-head guard after the durable NO-GO write: a push in
@@ -1988,8 +2126,8 @@ class PrReviewStage(Stage):
             item.issue,
             ctx,
             f"PR review rounds exhausted at round {round_done} with the "
-            f"automation-unresolved thread count stuck "
-            f"({prev_unresolved} -> {automation_unresolved}); further re-review "
+            f"open-thread count stuck "
+            f"({prev_unresolved} -> {open_thread_count}); further re-review "
             f"cannot make progress. Push new commits addressing the review "
             f"feedback, then remove this label to re-enter the loop.",
         )
@@ -2174,8 +2312,9 @@ class PrReviewStage(Stage):
         missing reviewed head only discards this process's proof and restarts
         review. A complete thread read after the label write detects review
         activity in the remaining admission window. This run cannot establish
-        ownership of a label after that race, so it only posts a neutral human
-        handoff and makes no further label mutation.
+        ownership of a label after that race, so it preserves the live
+        threads for a fresh automation pass and makes no further label
+        mutation.
         """
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
@@ -2205,17 +2344,10 @@ class PrReviewStage(Stage):
                 type(error).__name__,
             )
             return StageOutcome(Disposition.FINISH_FAIL, "review_threads_unavailable")
-        blocking, advisory, human_unresolved = _thread_counts(live_threads)
-        if human_unresolved:
+        if live_threads:
             return PrReviewStage._handle_late_threads_after_go_write(
                 item,
-                blocking + advisory + human_unresolved,
-                ctx,
-            )
-        if blocking or advisory:
-            return PrReviewStage._handle_late_threads_after_go_write(
-                item,
-                blocking + advisory,
+                len(live_threads),
                 ctx,
             )
         try:
@@ -2239,9 +2371,11 @@ class PrReviewStage(Stage):
     ) -> StageOutcome:
         """Stand down after a post-GO thread race without touching state labels.
 
-        The GO write is non-conditional. A concurrent human or automation actor
-        may own the current implementation state by the time the late thread is
-        observed, so clearing or replacing a label would be an unsafe mutation.
+        The GO write is non-conditional. A concurrent actor may own the current
+        implementation state by the time the late thread is observed, so
+        clearing or replacing a label would be an unsafe mutation. The next
+        loop invocation must start a new review proof before it can validate
+        and reconcile those threads.
         """
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
@@ -2253,22 +2387,21 @@ class PrReviewStage(Stage):
             item.pr,
         )
         body = (
-            "**Automation stand-down: review activity changed during GO admission.**\n\n"
-            f"{unresolved_threads} unresolved review thread(s) were observed after the "
-            "implementation state write. Automation cannot prove it still owns the current "
-            "labels, so it made no further label changes. A human must verify the current "
-            "diff, reply if appropriate, and resolve the review thread(s) before another "
-            "review/merge attempt."
+            "**Automation review activity changed during GO admission.**\n\n"
+            f"{unresolved_threads} review thread(s) were observed after the implementation "
+            "state write. Automation cannot prove it still owns the current labels, so it "
+            "made no further label changes. A fresh automation review will re-read the "
+            "current diff and threads before it validates, responds to, or resolves them."
         )
         try:
             ctx.github.post_pr_comment(item.pr, body)
         except Exception as error:
             logger.warning(
-                "pr_review: failed to post late-thread handoff on PR #%d (non-fatal): %s",
+                "pr_review: failed to post late-thread race notice on PR #%d (non-fatal): %s",
                 item.pr,
                 error,
             )
-        return StageOutcome(Disposition.FINISH_FAIL, "late_threads_require_human_resolution")
+        return StageOutcome(Disposition.FINISH_FAIL, "review_activity_changed")
 
     @staticmethod
     def _bind_current_head_for_negative(item: WorkItem, ctx: StageContext) -> StageOutcome | None:
@@ -2341,98 +2474,6 @@ class PrReviewStage(Stage):
         return None
 
     @staticmethod
-    def _post_human_blocked_comment(
-        pr_number: int, human_unresolved: int, ctx: StageContext
-    ) -> None:
-        """Post the HUMAN_BLOCKED stand-down comment, non-fatally [durable].
-
-        Written BEFORE the FINISH_FAIL outcome so the reason automation
-        stood down is durably visible on the PR (M3): without it, an
-        unlabeled PR that automation stops touching looks abandoned.
-
-        Args:
-            pr_number: GitHub PR number blocked by human threads.
-            human_unresolved: Count of unresolved human-owned review threads.
-            ctx: Stage context carrying the GitHub accessor.
-
-        """
-        body = (
-            "**Automation stand-down: unresolved human review thread(s) prevent a transition.**\n\n"
-            f"The implementation review cannot transition while {human_unresolved} "
-            "unresolved review thread(s) opened by a human remain on this PR. "
-            "Automation will not resolve human threads and cannot act on them, "
-            "so it is standing down without changing implementation-state labels. "
-            "Automation does not arm auto-merge. Once the human thread(s) are resolved, "
-            "the next automation pass will re-review this PR."
-        )
-        try:
-            ctx.github.post_pr_comment(pr_number, body)
-        except Exception as e:
-            logger.warning(
-                "pr_review: failed to post HUMAN_BLOCKED comment on PR #%d (non-fatal): %s",
-                pr_number,
-                e,
-            )
-
-    @staticmethod
-    def _handle_human_blocked(
-        item: WorkItem, human_unresolved: int, ctx: StageContext
-    ) -> StepResult:
-        """Stand down without mutating labels whose current owner is unknowable.
-
-        GitHub exposes only unconditional label deletion.  A human or another
-        actor can write an implementation-state label after the thread read and
-        before this method could delete it, so neither a precondition read nor
-        a post-delete readback can prove that deletion is safe.  The terminal
-        human-thread outcome itself prevents this work item from advancing;
-        later runs lack this process's reviewed-head proof and must re-review.
-        """
-        if item.pr is None:
-            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
-        pr_number = item.pr
-        PrReviewStage._post_human_blocked_comment(pr_number, human_unresolved, ctx)
-        return StageOutcome(Disposition.FINISH_FAIL, "human_blocked")
-
-    @staticmethod
-    def _handle_automation_threads_requiring_human_resolution(
-        item: WorkItem,
-        automation_unresolved: int,
-        ctx: StageContext,
-    ) -> StepResult:
-        """Record a fail-closed handoff for open threads that cannot be proven safe.
-
-        The guarded adapter may reply and resolve a canonical receipt from any
-        loop invocation after revalidating it immediately before each mutation.
-        A remaining changed, human-owned, malformed, or otherwise unprovable
-        thread must remain a human gate.
-        """
-        if item.pr is None:
-            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
-        no_go = PrReviewStage._write_no_go(item, ctx)
-        if no_go is not None:
-            return no_go
-        body = (
-            "**Automation stand-down: unresolved automation review thread(s) require "
-            "human resolution.**\n\n"
-            f"{automation_unresolved} automation-created review thread(s) remain open on this "
-            "PR without a verifiable immutable receipt. The guarded loop could not prove "
-            "that a reply and resolution would leave human activity untouched. "
-            "The PR is marked `state:implementation-no-go`; automation does not arm auto-merge. "
-            "A human must "
-            "verify the fixes and resolve the thread(s); a fresh automation pass can then "
-            "re-review the current head."
-        )
-        try:
-            ctx.github.post_pr_comment(item.pr, body)
-        except Exception as error:
-            logger.warning(
-                "pr_review: failed to post automation-thread handoff on PR #%d (non-fatal): %s",
-                item.pr,
-                error,
-            )
-        return StageOutcome(Disposition.FINISH_FAIL, "automation_threads_require_human_resolution")
-
-    @staticmethod
     def _write_go(item: WorkItem, ctx: StageContext) -> StepResult:
         """Apply GO only to the exact live head reviewed in this process.
 
@@ -2456,21 +2497,14 @@ class PrReviewStage(Stage):
                 type(error).__name__,
             )
             return StageOutcome(Disposition.FINISH_FAIL, "review_threads_unavailable")
-        blocking, advisory, human_unresolved = _thread_counts(live_threads)
-        if human_unresolved:
+        if live_threads:
             logger.info(
-                "pr_review: clean GO recheck found %d late human thread(s) on PR #%d; "
-                "not advancing",
-                human_unresolved,
+                "pr_review: clean GO recheck found %d open thread(s) on PR #%d; "
+                "restarting automation review",
+                len(live_threads),
                 pr_number,
             )
-            return PrReviewStage._handle_human_blocked(item, human_unresolved, ctx)
-        if blocking or advisory:
-            return PrReviewStage._handle_automation_threads_requiring_human_resolution(
-                item,
-                blocking + advisory,
-                ctx,
-            )
+            return Continue(next_state=REVIEW_WAIT)
         arm_outcome = PrReviewStage._require_reviewed_unarmed(item, ctx)
         if arm_outcome is not None:
             return arm_outcome

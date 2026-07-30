@@ -635,13 +635,10 @@ review before merge.
 | Call site | Tools | Scope / controls |
 | --- | --- | --- |
 | `audit_reviewer.py:run_audit_coordinator` | `Read,Glob,Grep` | Repo-root audit analysis; no write tools; direct-runner parity uses `sandbox="read-only"`. |
-| `review_validator.py:_run_validation_session` | `Read,Glob,Grep` | Worktree validation of prior review comments; no write tools; GitHub updates stay in orchestrator code. |
 | `comment_difficulty.py:_run_classifier_session` | `Read,Glob,Grep` | Worktree comment classification; no write tools; result is parsed JSON only. |
 | `pr_review_core.py:_invoke_and_parse_review_session` | `Read,Glob,Grep,Bash,Skill,Agent,WebFetch` | Worktree PR analysis invokes the normal read-only `$athena:pr-review` workflow when available (or its inline fallback); the agent does not post reviews or mutate CI/CD. |
 | `pipeline/stages/pr_review.py:PrReviewStage._review_wait` | `Read,Glob,Grep,Bash,Skill,Agent,WebFetch` | The sole pipeline GO/NOGO review uses the read-only AgentJob policy and may invoke the normal read-only `$athena:pr-review` workflow; validation and difficulty jobs keep `Read,Glob,Grep`. |
 | `_implement_phase.py:ImplementPhase._run_claude_impl_session` | `Read,Write,Edit,Glob,Grep,Bash` | Initial implementation runs in the isolated issue worktree and remains subject to review and branch protection. |
-| `_review_phase.py:ReviewPhase._resume_impl_with_feedback` | `Read,Write,Edit,Glob,Grep,Bash` | Review-feedback fixes resume the implementer in the isolated issue worktree and cannot bypass PR review or merge gates. |
-| `address_review_core.py:_invoke_address_fix_session` | `Read,Write,Edit,Glob,Grep,Bash,Task,Skill` | Review-thread fixes run in the isolated issue worktree; `Task`/`Skill` support per-comment sub-agents and skill-advisor routing. |
 | `github/fleet_sync/conflict_resolver.py:_run_conflict_agent` | `none` | Claude-only conflict planner receives only nonce-fenced conflict text and returns JSON edits; direct runtimes are rejected because their tool surfaces cannot provide the zero-tool contract, no agent invocation occurs in `--dry-run`, and the host validates/writes only known paths, owns all Git continuation/signing/push, snapshots remote URLs, and pins the final lease to the discovered branch SHA. |
 
 Fleet-sync `--dry-run` is a preview contract: GitHub reads and writes, Git subprocesses, pushes,

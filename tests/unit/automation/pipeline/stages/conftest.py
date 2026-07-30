@@ -19,7 +19,8 @@ from hephaestus.automation.pipeline.events import StageEvent
 from hephaestus.automation.pipeline.routing import ROUTES, StageName
 from hephaestus.automation.pipeline.stages import (
     ConditionalMergeResult,
-    ProcessThreadResolutionResult,
+    ImplementationThreadReplyResult,
+    ReviewerThreadReconciliationResult,
     StageContext,
     StageGitHub,
 )
@@ -97,13 +98,13 @@ class FakeStageGitHub(FakeGitHub):
             pr_impl_readbacks: Optional FIFO of independent label readbacks;
                 entries may be contradictory, absent, or exceptions. When
                 empty, the current post-mutation state is returned.
-            unresolved: FIFO of (automation, human) answers for
-                count_unresolved_threads — consumed one per call, last
-                entry repeating (lets tests script a decreasing /
-                plateauing thread count for the #1554 progress rule).
-            by_severity: FIFO of (blocking, minor, human) answers for
-                count_unresolved_threads_by_severity (#1856); defaults to
-                deriving from unresolved (legacy: all automation = blocking).
+            unresolved: FIFO of ``(automation, external)`` review-thread
+                shapes.  Each shape is consumed per fresh snapshot, with the
+                final shape repeating; this concise form treats automation
+                threads as blocking.
+            by_severity: FIFO of ``(blocking, advisory, external)``
+                review-thread shapes.  Supply this form when a test needs to
+                distinguish blocking and advisory automation threads.
             pr_state: Canned answer for gh_pr_state (merge_wait's single
                 PR-state read); ``None`` mirrors a transient read failure.
             conversation_resolution: Whether the admitted PR base has the
@@ -129,7 +130,7 @@ class FakeStageGitHub(FakeGitHub):
         self._by_severity = (
             list(by_severity)
             if by_severity is not None
-            else [(a, 0, h) for (a, h) in self._unresolved]  # legacy: all automation = blocking
+            else [(a, 0, h) for (a, h) in self._unresolved]
         )
         self._pr_state = (
             {
@@ -153,6 +154,7 @@ class FakeStageGitHub(FakeGitHub):
         )
         self._learn_terminal = learn_terminal
         self._posted_thread_ids: dict[int, list[str]] = {}
+        self._thread_replies: dict[str, list[dict[str, str]]] = {}
         self.learn_results: dict[int, bool] = {}
         self.learn_claims: set[int] = set()
 
@@ -239,25 +241,15 @@ class FakeStageGitHub(FakeGitHub):
         del pr_number
         return dict(self._pr_review_context) if self._pr_review_context is not None else None
 
-    def count_unresolved_threads(self, pr_number: int) -> tuple[int, int]:
-        """Mirror _review_phase._count_unresolved_threads_blocking_go (FIFO).
-
-        Consumes one scripted (automation, human) answer per call; the last
-        entry repeats once the FIFO drains.
-        """
-        if len(self._unresolved) > 1:
-            return self._unresolved.pop(0)
-        return self._unresolved[0]
-
-    def count_unresolved_threads_by_severity(self, pr_number: int) -> tuple[int, int, int]:
-        """FIFO of scripted (blocking, minor, human) answers (#1856)."""
+    def _next_unresolved_thread_counts(self) -> tuple[int, int, int]:
+        """Return the next scripted open-thread shape for this test double."""
         if len(self._by_severity) > 1:
             return self._by_severity.pop(0)
         return self._by_severity[0]
 
     def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
         """Return scripted fresh review-thread facts for label-gate tests."""
-        blocking, advisory, human = self.count_unresolved_threads_by_severity(pr_number)
+        blocking, advisory, external = self._next_unresolved_thread_counts()
         posted = list(self._posted_thread_ids.get(pr_number, []))
         posted_comments = (
             list(self.reviews.get(pr_number, [{}])[-1].get("comments", []))
@@ -266,10 +258,10 @@ class FakeStageGitHub(FakeGitHub):
         )
         threads: list[dict[str, Any]] = []
         cursor = 0
-        for count, is_human, severity in (
+        for count, author, severity in (
             (blocking, False, "major"),
             (advisory, False, "nitpick"),
-            (human, True, "major"),
+            (external, True, "major"),
         ):
             for _ in range(count):
                 posted_comment = posted_comments[cursor] if cursor < len(posted_comments) else {}
@@ -288,24 +280,20 @@ class FakeStageGitHub(FakeGitHub):
                             f"<!-- hephaestus-severity: {severity} -->\n"
                             f"{posted_comment.get('body') or 'finding'}"
                         ),
-                        "automation_owned": not is_human,
-                        "author": "hephaestus[bot]" if not is_human else "reviewer",
-                        "authors": ["hephaestus[bot]" if not is_human else "reviewer"],
+                        "author": "reviewer" if author else "hephaestus[bot]",
+                        "authors": ["reviewer" if author else "hephaestus[bot]"],
                         "review_id": f"review-{pr_number}-{cursor}",
                         "comments": [
                             {
-                                "author": "hephaestus[bot]" if not is_human else "reviewer",
+                                "id": f"comment-{thread_id}",
+                                "author": "reviewer" if author else "hephaestus[bot]",
                                 "body": posted_comment.get("body") or "finding",
-                            }
+                            },
+                            *self._thread_replies.get(thread_id, []),
                         ],
                     }
                 )
         return threads
-
-    def list_restart_process_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
-        """Return no restart receipts unless a test explicitly supplies one."""
-        del pr_number
-        return []
 
     # -- mutator surface used by the stages ----------------------------------
     # Coordinator-neutral names (the pipeline architecture guard forbids
@@ -406,9 +394,15 @@ class FakeStageGitHub(FakeGitHub):
         return self.gh_pr_create(branch, title, body)
 
     def post_review_threads(
-        self, pr_number: int, threads: list[dict[str, Any]], summary: str
+        self,
+        pr_number: int,
+        threads: list[dict[str, Any]],
+        summary: str,
+        *,
+        expected_head_sha: str,
     ) -> list[dict[str, Any]]:
         """Mirror a post-time immutable receipt returned by the coordinator."""
+        del expected_head_sha
         ids = self.gh_pr_review_post(pr_number, threads, summary)
         self._posted_thread_ids[pr_number] = list(ids)
         review_id = f"review-{pr_number}-{len(self.reviews.get(pr_number, []))}"
@@ -434,17 +428,109 @@ class FakeStageGitHub(FakeGitHub):
             for thread_id, thread in zip(ids, threads, strict=True)
         ]
 
-    def reply_and_resolve_process_review_threads(
+    def post_implementation_thread_replies(
+        self,
+        pr_number: int,
+        *,
+        expected_head_sha: str,
+        threads: list[dict[str, Any]],
+        replies: dict[str, str],
+    ) -> ImplementationThreadReplyResult:
+        """Record commit-gated implementation replies for stage tests."""
+        del expected_head_sha
+        by_id = {
+            str(thread.get("thread_id") or thread.get("id") or ""): thread for thread in threads
+        }
+        receipts: list[dict[str, Any]] = []
+        for thread_id, reply in replies.items():
+            thread = by_id.get(thread_id)
+            if not isinstance(thread, dict):
+                continue
+            reply_record = {
+                "id": f"implementation-reply-{thread_id}",
+                "author": "hephaestus[bot]",
+                "body": reply,
+            }
+            self._thread_replies.setdefault(thread_id, []).append(reply_record)
+            receipts.append(
+                {
+                    **thread,
+                    "id": thread_id,
+                    "comments": [*thread.get("comments", []), reply_record],
+                    "implementation_reply_id": reply_record["id"],
+                    "implementation_reply_body": reply,
+                    "implementation_head_sha": "a" * 40,
+                }
+            )
+        self._log("post_implementation_thread_replies", pr_number, tuple(sorted(replies)))
+        replied = tuple(sorted(str(thread_id) for thread_id in replies if thread_id in by_id))
+        blocked = tuple(sorted(set(replies) - set(replied)))
+        return ImplementationThreadReplyResult(replied, blocked, tuple(receipts))
+
+    def reviewer_validation_receipts(
+        self,
+        pr_number: int,
+        *,
+        reviewed_head_sha: str,
+        threads: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Derive test receipts from the current live thread conversation.
+
+        The production adapter validates the signed marker.  The stage fake
+        instead preserves the same durable property needed here: only a final
+        host-posted implementation reply for the current reviewed head may
+        reach reconciliation, never a process-local payload receipt.
+        """
+        del pr_number
+        receipts: list[dict[str, Any]] = []
+        for thread in threads:
+            if not isinstance(thread, dict):
+                continue
+            comments = thread.get("comments")
+            if not isinstance(comments, list) or not comments:
+                continue
+            final_comment = comments[-1]
+            if not isinstance(final_comment, dict):
+                continue
+            reply_id = final_comment.get("id")
+            reply_body = final_comment.get("body")
+            if not (
+                isinstance(reply_id, str)
+                and reply_id.startswith("implementation-reply-")
+                and isinstance(reply_body, str)
+            ):
+                continue
+            receipts.append(
+                {
+                    **thread,
+                    "implementation_reply_id": reply_id,
+                    "implementation_reply_body": reply_body,
+                    "implementation_head_sha": reviewed_head_sha,
+                }
+            )
+        return receipts
+
+    def reconcile_reviewer_validated_threads(
         self,
         pr_number: int,
         *,
         reviewed_head_sha: str,
         receipts: list[dict[str, Any]],
-        dispositions: dict[str, str],
-    ) -> ProcessThreadResolutionResult:
-        """Fail closed by default; resolution-specific tests opt in explicitly."""
-        del pr_number, reviewed_head_sha, receipts
-        return ProcessThreadResolutionResult(blocked_thread_ids=tuple(sorted(dispositions)))
+        resolved_thread_ids: set[str],
+        feedback: dict[str, str],
+    ) -> ReviewerThreadReconciliationResult:
+        """Record the reviewer's fresh resolution/rejection decision for tests."""
+        del reviewed_head_sha, receipts
+        self._log(
+            "reconcile_reviewer_validated_threads",
+            pr_number,
+            tuple(sorted(resolved_thread_ids)),
+            tuple(sorted(feedback)),
+        )
+        return ReviewerThreadReconciliationResult(
+            resolved_thread_ids=tuple(sorted(resolved_thread_ids)),
+            feedback_thread_ids=tuple(sorted(feedback)),
+        )
 
     def mark_pr_implementation_go(self, pr_number: int) -> None:
         """Mirror pr_manager.mark_pr_implementation_go (records mutation)."""

@@ -17,8 +17,6 @@ import pytest
 import hephaestus.automation as automation
 
 EXPECTED_PUBLIC_SYMBOLS = {
-    "AddressReviewOptions": "hephaestus.automation.models",
-    "AddressReviewer": "hephaestus.automation.address_review",
     "AuditReviewer": "hephaestus.automation.audit_reviewer",
     "CIDriver": "hephaestus.automation.ci_driver",
     "CIDriverOptions": "hephaestus.automation.models",
@@ -34,7 +32,6 @@ EXPECTED_PUBLIC_SYMBOLS = {
 }
 
 _PHASE_ENTRYPOINTS = (
-    "hephaestus.automation.address_review",
     "hephaestus.automation.ci_driver",
     "hephaestus.automation.implementer",
     "hephaestus.automation.plan_reviewer",
@@ -102,8 +99,6 @@ def test_public_surface_pins_expected_symbols() -> None:
     import hephaestus.automation as automation
 
     expected = {
-        "AddressReviewOptions",
-        "AddressReviewer",
         "AuditReviewer",
         "CIDriver",
         "CIDriverOptions",

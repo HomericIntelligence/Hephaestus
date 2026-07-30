@@ -10,7 +10,6 @@ from typing import Any
 import pytest
 
 from hephaestus.automation import (
-    address_review,
     audit_reviewer,
     ci_driver,
     ensure_state_labels,
@@ -361,36 +360,6 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
         _verbose_spec("Enable verbose logging"),
         _json_spec(),
         _version_spec(),
-    ),
-    "address_review": (
-        _action_spec(
-            ("--issues",),
-            "issues",
-            "_StoreAction",
-            None,
-            required=True,
-            nargs="+",
-            help_text="Issue numbers whose linked PRs should have review threads addressed",
-        ),
-        _agent_spec(),
-        _max_workers_spec(COMMON_REVIEW_MAX_WORKERS),
-        *_github_throttle_specs(),
-        _dry_run_spec(
-            _dry_help("Show what would be done without actually resolving threads or pushing code.")
-        ),
-        _no_ui_spec(),
-        _timeout_spec(
-            "--agent-timeout",
-            "agent_timeout",
-            "Agent subprocess timeout in seconds (default: 7200).",
-        ),
-        _timeout_spec(
-            "--advise-timeout",
-            "advise_timeout",
-            "Timeout for the advise sub-agent in seconds (default: 7200).",
-        ),
-        _verbose_spec("Enable verbose logging"),
-        _json_spec(),
     ),
     "ci_driver": (
         _action_spec(
@@ -838,7 +807,6 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
         ("planner", planner._build_parser),
         ("plan_reviewer", plan_reviewer._build_parser),
         ("pr_reviewer", pr_reviewer._build_parser),
-        ("address_review", address_review._build_parser),
         ("ci_driver", ci_driver._build_parser),
         ("implementer", implementer._build_parser),
         ("loop_runner", loop_runner._build_parser),

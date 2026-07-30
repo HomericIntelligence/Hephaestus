@@ -994,13 +994,15 @@ class TestAddressReviewPrompt:
     def test_preserves_json_block_contract(self) -> None:
         """The final JSON-block contract the pipeline parses must be intact.
 
-        #1085 C4: ``replies`` was dropped — the address step no longer consumes
-        it (the reviewer resolves threads on its next pass), so the coordinator
-        must not be asked to generate per-thread replies.
+        The implementation agent must return one reply for every fixed thread.
+        The host posts that reply after verifying the pushed fix; the reviewer
+        then performs a fresh review before resolving or leaving feedback.
         """
         out = self._build()
         assert '"addressed"' in out
-        assert '"replies"' not in out
+        assert '"replies"' in out
+        assert "never resolves a thread in this implementation step" in out
+        assert "fresh review of the fix and reply" in out
 
     def test_threads_json_is_fenced_untrusted(self) -> None:
         """Reviewer bodies stay fenced as untrusted input."""
@@ -1112,18 +1114,22 @@ class TestReviewValidationPrompt:
         assert "fix the leak" in out
         assert "diff --git a/a.py b/a.py" in out
 
-    def test_states_validation_not_fresh_review(self) -> None:
+    def test_states_validation_uses_current_and_prior_review_context(self) -> None:
         out = self._build()
         assert "VALIDATING" in out
-        assert "NOT performing a fresh review" in out
+        assert "fresh validation review" in out
+        assert "current diff, the prior review conversation, and the implementation reply" in out
 
-    def test_preserves_unaddressed_json_contract(self) -> None:
+    def test_requires_explicit_two_way_validation_contract(self) -> None:
         out = self._build()
+        assert '"resolved"' in out
         assert '"unaddressed"' in out
         assert "original_body" in out
         assert "detail" in out
         # #1085 C2: the sub-agent must echo thread_id so resolution matches by id.
         assert "thread_id" in out
+        assert "WON'T FIX" not in out
+        assert '"wont_fix"' not in out
 
     def test_inputs_fenced_untrusted(self) -> None:
         out = self._build()

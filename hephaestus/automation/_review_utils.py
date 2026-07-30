@@ -1,18 +1,16 @@
-"""Shared helpers for the PR / plan reviewer trio.
+"""Shared helpers for automation review and discovery.
 
-Extracts utilities that were previously duplicated across
-``pr_reviewer.py`` and ``address_review.py``.
+Extracts utilities used by the queue pipeline and its thin CLI wrappers.
 
 Provides:
 - ``DEFAULT_STATE_DIR`` / ``ensure_state_dir``: Canonical automation state
   directory path and creation helper.
 - ``parse_json_block``: Extract the last ```json``` block from Claude output.
-- ``_discover_prs_simple``: Shared issue-to-PR discovery loop for reviewer
-  callers that supply their own single-issue lookup function.
+- ``_discover_prs_simple``: Shared issue-to-PR discovery loop for callers
+  that supply their own single-issue lookup function.
 - ``find_pr_for_issue``: Locate the open PR for a GitHub issue (two or three
   lookup strategies depending on the caller's needs).
-- ``setup_review_logging``: Standard logging configuration for the reviewer
-  CLIs (#599 dedupe).
+- ``setup_review_logging``: Standard logging configuration for review CLIs.
 - ``print_worker_summary``: Standard worker-run summary logging for reviewer
   and driver classes (#1381 dedupe).
 - ``drain_completed_futures``: Shared concurrent-futures drain loop with
@@ -20,12 +18,10 @@ Provides:
 - ``ensure_state_dir``: Create and return the canonical automation state directory.
 - ``build_automation_parser``: Argparse parser builder for automation CLIs
   with opt-in common flags (#1392 dedupe).
-- ``build_review_parser``: Argparse parser builder shared by ``pr_reviewer``
-  and ``address_review`` (#599 dedupe).
-- ``instance_log``: Shared body of the per-instance ``_log`` helper used by
-  the reviewer classes (#599 dedupe).
+- ``build_review_parser``: Argparse parser builder for ``pr_reviewer``.
+- ``instance_log``: Shared body of the per-instance ``_log`` helper.
 - ``load_impl_session_id``: Shared implementer-session state loader for
-  drive-green and address-review.
+  drive-green.
 - ``log_file_path``: Standard per-issue automation log filename builder.
 - ``load_state_file``: Generic state file loader (raw dict or Pydantic model).
 - ``save_state_file``: Generic secure state file writer.
@@ -193,8 +189,7 @@ def save_state_file(state_dir: Path, prefix: str, issue_number: int, state: Base
 def setup_review_logging(verbose: bool = False) -> None:
     """Configure root logging for the reviewer CLIs.
 
-    Identical to the previously-duplicated ``_setup_logging`` helpers in
-    ``pr_reviewer.py`` and ``address_review.py``.
+    Centralizes the review CLI's logging configuration.
 
     Args:
         verbose: Enable DEBUG-level logging (otherwise INFO).
@@ -282,9 +277,8 @@ def drain_completed_futures(
 
     Encapsulates the drain scaffold previously duplicated across the four
     worker loops (#1463). The canonical exponential-backoff-with-logging
-    behavior is taken from ``address_review.py`` — the prior bare
-    ``except Exception: time.sleep(0.1); continue`` variants in
-    ``ci_driver``/``pr_reviewer``/``plan_reviewer`` silently busy-looped.
+    behavior avoids the prior bare ``except Exception: time.sleep(0.1);
+    continue`` busy-loop pattern.
 
     The caller retains ownership of ``futures`` and MUST ``pop`` each yielded
     future from its own dict; this generator stops when ``futures`` is empty,
@@ -434,12 +428,7 @@ def build_review_parser(
     issues_help: str,
     dry_run_prefix: str,
 ) -> argparse.ArgumentParser:
-    """Build the argparse parser shared by ``pr_reviewer`` and ``address_review``.
-
-    The two CLIs differ only in their ``description``/``epilog`` text and in
-    the help strings for ``--issues`` / ``--dry-run``. Every other option
-    (``--agent``, ``--max-workers``, ``--no-ui``, ``-v/--verbose``) is
-    identical.
+    """Build the argparse parser used by the PR-review CLI wrapper.
 
     Args:
         description: Parser description text.
@@ -482,11 +471,8 @@ def instance_log(
 ) -> None:
     """Log to both the caller's module logger and the per-thread UI buffer.
 
-    Shared body of the previously-duplicated ``PRReviewer._log`` and
-    ``AddressReviewer._log`` instance methods. ``caller_logger`` defaults
-    to this module's logger so callers that don't care about provenance
-    can omit it, but the reviewer classes pass their own module logger to
-    preserve the pre-refactor log-record source.
+    ``caller_logger`` defaults to this module's logger so callers that do not
+    need a specific provenance can omit it.
 
     Args:
         log_manager: A ``ThreadLogManager`` exposing ``.log(thread_id, msg)``.
@@ -717,16 +703,14 @@ def find_pr_for_issue(
     2. PR-body text search (``#{issue} in:body``).
 
     When ``extra_strategies=True`` a third strategy is attempted between 1
-    and 2: the stored ``pr_number`` from the on-disk review state is
-    checked via ``gh pr view``.  The caller supplies ``_load_review_state_fn``
-    (a zero-arg callable that returns a ``ReviewState | None``) to keep this
-    module free of circular imports.
+    and 2: the stored ``pr_number`` from caller-provided state is checked via
+    ``gh pr view``.
 
     Args:
         issue_number: GitHub issue number.
         extra_strategies: When True, also check the on-disk review state.
-        _load_review_state_fn: Callable ``() -> ReviewState | None`` used
-            when ``extra_strategies=True``.
+        _load_review_state_fn: Callable returning state with a ``pr_number``
+            attribute, used when ``extra_strategies=True``.
 
     Returns:
         PR number if found, ``None`` otherwise.

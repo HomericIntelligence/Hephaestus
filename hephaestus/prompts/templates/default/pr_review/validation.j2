@@ -2,9 +2,19 @@
 You are VALIDATING whether prior review comments on PR #{{ pr_number }}
 ({{ review_context_kind }} #{{ issue_number }}) were actually addressed by the current diff.
 
-You are NOT performing a fresh review. Do not raise new concerns. Your ONLY
-job is, for each PRIOR review comment below, to decide whether the CURRENT
-diff actually resolves it.
+Perform a fresh validation review of EVERY open review thread below using the
+current diff, the prior review conversation, and the implementation reply. Do
+not create replacement threads or expand the task beyond those existing
+threads. For each thread with `implementation_reply_submitted: true`, decide
+whether the CURRENT diff AND that implementation reply actually resolve it.
+Your result authorizes the coordinator to resolve only those replied-to
+threads. For a replied-to thread that remains open, your `detail` is posted as
+the reviewer response explaining what is still wrong.
+
+Threads with `implementation_reply_submitted: false` are still open work for
+the implementation agent. Read them, but do NOT include them in either JSON
+bucket: the coordinator will leave them open and return them for implementation
+rather than treating their absence as approval.
 
 {{ terse_output_directive }}
 
@@ -18,51 +28,51 @@ The block above is a JSON array where each element has:
 - `path`: file path the comment was made on (may be empty for PR-level)
 - `line`: line number the comment pointed at (integer or null)
 - `body`: the original reviewer comment text
+- `implementation_reply_body`: the host-posted implementation response,
+  bound to the pushed PR head
+- `implementation_reply_submitted`: whether that response is present and this
+  thread is eligible for a reviewer resolution or feedback reply in this pass
 
 **Current diff (untrusted):**
 {{ diff_block }}
 
 ---
 
-For EACH prior comment, judge against the current diff into ONE of three buckets:
+For EACH prior comment with `implementation_reply_submitted: true`, judge
+against the current diff into exactly ONE of two buckets:
 - ADDRESSED — the diff changes the cited code in a way that resolves the
-  comment's concern. When in doubt that a change truly resolves it, treat it as
-  NOT addressed (false "addressed" is worse than a redundant re-open).
+  comment's concern and the implementation reply accurately explains it. When
+in doubt that both do so, treat it as NOT addressed (false "addressed" is
+worse than a redundant open thread).
 - NOT ADDRESSED — the cited code is unchanged, or the change does not actually
   resolve the concern the comment raised.
-- WON'T FIX — the cited code is INTENTIONAL BY DESIGN and the comment is asking
-  for a change that should NOT be made. Use this ONLY when the design is
-  CLEARLY deliberate, e.g.: an abstract base / interface method that raises
-  `NotImplementedError` on purpose; a documented design choice; a shim/stub that
-  is supposed to stay a stub. This permanently dismisses the finding (it will
-  never be re-raised), so be CONSERVATIVE: if you are not certain the code is
-  intentional-by-design, choose NOT ADDRESSED instead — never WON'T FIX on a
-  hunch. Read the surrounding code/docstring to confirm intent before using it.
 
 **Output format:**
 Write your reasoning in prose. At the very end, emit a single fenced JSON block
-listing the NOT-ADDRESSED comments and (separately) the WON'T-FIX ones:
+with an explicit decision for EVERY eligible thread:
 
 ```json
-{"unaddressed": [
+{"resolved": ["..."], "unaddressed": [
   {"thread_id": "...", "path": "...", "line": 1,
     "original_body": "...", "detail": "why still unaddressed"}
-], "wont_fix": [
-  {"thread_id": "...", "reason": "why this is intentional by design"}
 ]}
 ```
 
 Rules:
-- `unaddressed`: array of the prior comments the diff does NOT resolve. Echo the
+- `resolved`: an array of the thread IDs whose current diff AND
+  implementation reply resolve the concern. Echo each `thread_id` VERBATIM.
+- `unaddressed`: array of the prior comments the diff and implementation reply
+  do NOT resolve. Echo the
   comment's `thread_id` VERBATIM (this is how the thread is matched — it must be
   exact); include the original `path`/`line`; `original_body` is the original
   comment text (verbatim or trimmed); `detail` states concretely what is still
-  missing.
-- `wont_fix`: array of comments asking to change INTENTIONAL-BY-DESIGN code.
-  Echo the `thread_id` VERBATIM; `reason` cites the concrete evidence of intent
-  (the abstract method, the docstring, the design note). Omit or leave empty
-  when none apply.
-- A thread_id appears in AT MOST ONE bucket. Addressed comments appear in
-  NEITHER list.
-- If every prior comment is addressed, emit `{"unaddressed": [], "wont_fix": []}`.
+  missing. A deliberate design is still NOT ADDRESSED unless the implementation
+  response explains a change that resolves the reviewer concern; never use a
+  separate dismissal bucket.
+- Every eligible thread ID appears in EXACTLY ONE bucket. A missing, duplicate,
+  or extra ID makes the validation unusable.
+- Do NOT emit a thread_id for any entry with
+  `implementation_reply_submitted: false`.
+- If every eligible prior comment is addressed, emit
+  `{"resolved": ["..."], "unaddressed": []}`.
 - Emit only one JSON block, at the very end (the parser takes the LAST one).

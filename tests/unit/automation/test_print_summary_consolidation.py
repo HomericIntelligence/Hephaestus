@@ -3,8 +3,8 @@
 The four reviewer/driver classes must delegate worker-summary printing to
 ``print_worker_summary`` rather than re-implementing it (DRY).
 
-The reviewer classes ``PRReviewer``, ``AddressReviewer`` and ``PlanReviewer``
-once each carried a near-identical ``_print_summary`` body
+The reviewer classes ``PRReviewer`` and ``PlanReviewer`` once each carried a
+near-identical ``_print_summary`` body
 (total/successful/failed computation, the ``"=" * 60`` banner, and the
 failed-issue loop). PR #1612 consolidated that into the single canonical
 ``print_worker_summary`` helper in ``_review_utils.py``; these tests guard
@@ -20,7 +20,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 import hephaestus.automation as automation_pkg
-from hephaestus.automation.address_review import AddressReviewer
 from hephaestus.automation.models import WorkerResult
 from hephaestus.automation.plan_reviewer import PlanReviewer
 
@@ -28,10 +27,7 @@ _AUTOMATION_DIR = Path(automation_pkg.__file__).parent
 
 # The reviewer classes the issue named, the module that holds each one, and the
 # exact ``print_worker_summary`` call the delegate must make.
-_DELEGATING_MODULES = (
-    "address_review.py",
-    "plan_reviewer.py",
-)
+_DELEGATING_MODULES = ("plan_reviewer.py",)
 
 
 def test_named_classes_carry_no_inline_summary_separator() -> None:
@@ -48,18 +44,6 @@ def test_named_classes_carry_no_inline_summary_separator() -> None:
             f"{name} re-introduced an inline summary separator; it must delegate "
             f"to print_worker_summary (issue #1461)."
         )
-
-
-def test_address_reviewer_delegates_to_print_worker_summary() -> None:
-    """``AddressReviewer._print_summary`` must delegate with its header arg."""
-    results: dict[int, WorkerResult] = {}
-    with patch("hephaestus.automation.address_review.print_worker_summary") as mock_summary:
-        AddressReviewer._print_summary(object.__new__(AddressReviewer), results)
-    mock_summary.assert_called_once_with(
-        "Address Review Summary",
-        results,
-        failed_header="\nFailed issues:",
-    )
 
 
 def test_plan_reviewer_delegates_to_print_worker_summary() -> None:

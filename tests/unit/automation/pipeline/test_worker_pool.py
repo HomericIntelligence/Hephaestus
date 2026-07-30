@@ -1823,6 +1823,7 @@ class TestGitOps:
                 "hephaestus.automation.git_utils.commit_if_changes", return_value=True
             ) as mock_commit,
             patch("hephaestus.automation.git_utils.push_branch") as mock_push,
+            patch.object(pool, "_read_detached_push_head", return_value="b" * 40),
         ):
             pool.submit(job, StageName.PR_REVIEW)
             _, result = completion_q.get(timeout=10)
@@ -1836,7 +1837,7 @@ class TestGitOps:
         )
         mock_push.assert_called_once_with("5-auto", tmp_path, timeout=60)
         assert result.ok is True
-        assert result.value is True  # value carries commit_if_changes' bool
+        assert result.value == {"pushed": True, "head_sha": "b" * 40}
 
     def test_commit_push_rejects_incomplete_scope_retraction_before_publish(
         self,
@@ -1950,11 +1951,13 @@ class TestGitOps:
             patch("hephaestus.automation.git_utils.commit_if_changes", return_value=True),
             patch("hephaestus.automation.git_utils.push_branch_if_remote_matches") as strict_push,
             patch("hephaestus.automation.git_utils.push_branch") as normal_push,
+            patch.object(pool, "_read_detached_push_head", return_value="b" * 40),
         ):
             pool.submit(job, StageName.IMPLEMENTATION)
             _, result = completion_q.get(timeout=10)
 
         assert result.ok is True
+        assert result.value == {"pushed": True, "head_sha": "b" * 40}
         strict_push.assert_called_once_with("5-auto", pin, tmp_path, timeout=60)
         normal_push.assert_not_called()
 
@@ -2039,6 +2042,7 @@ class TestGitOps:
             ) as mock_ahead,
             patch("hephaestus.automation.git_utils.run", return_value=MagicMock(stdout="")),
             patch("hephaestus.automation.git_utils.push_branch") as mock_push,
+            patch.object(pool, "_read_detached_push_head", return_value="b" * 40),
         ):
             pool.submit(job, StageName.PR_REVIEW)
             _, result = completion_q.get(timeout=10)
@@ -2046,7 +2050,7 @@ class TestGitOps:
         mock_ahead.assert_called_once_with("5-auto", tmp_path, timeout=60)
         mock_push.assert_called_once_with("5-auto", tmp_path, timeout=60)
         assert result.ok is True
-        assert result.value is True
+        assert result.value == {"pushed": True, "head_sha": "b" * 40}
 
     def test_commit_push_does_not_publish_dirty_worktree_after_failed_commit(
         self,
@@ -2115,7 +2119,7 @@ class TestGitOps:
         )
         normal_push.assert_not_called()
         assert result.ok is True
-        assert result.value is True
+        assert result.value == {"pushed": True, "head_sha": "b" * 40}
 
     def test_clean_detached_pr_review_does_not_release_remote_branch(
         self,
@@ -2193,7 +2197,7 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         assert result.ok is True
-        assert result.value is True
+        assert result.value == {"pushed": True, "head_sha": source_sha}
         push.assert_called_once_with(
             "5-auto", expected_remote_sha, tmp_path, source_sha=source_sha, timeout=60
         )

@@ -13,8 +13,8 @@ from hephaestus.automation.pipeline.jobs import AgentJob, CompactJob, GitJob, Jo
 from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import (
     Continue,
+    ImplementationThreadReplyResult,
     JobRequest,
-    ProcessThreadResolutionResult,
     StageOutcome,
 )
 from hephaestus.automation.pipeline.stages.pr_review import (
@@ -24,9 +24,15 @@ from hephaestus.automation.pipeline.stages.pr_review import (
     REVIEW_CHECKOUT_WAIT,
     REVIEW_ERROR_RETRY_CAP,
     PrReviewStage,
-    _handled_process_receipts,
-    _is_process_thread_receipt,
-    _surviving_threads,
+    _address_replies,
+    _implementation_reply_handoff,
+    _is_postable_finding,
+    _normalize_remediation_threads,
+    _parse_validation_result,
+    _pr_is_current_open_head,
+    _reviewer_thread_decisions,
+    _validation_receipt_fingerprints,
+    _validation_thread_snapshots,
 )
 from hephaestus.automation.pipeline.work_item import ItemKind
 from hephaestus.automation.prompts.address_review import get_address_review_prompt
@@ -617,13 +623,31 @@ class TestPrReviewStageStep:
         item.state = "DIFFICULTY_WAIT"
         stage.on_job_done(item, JobResult(ok=True, value="critical"), ctx)
         item.state = "ADDRESS_WAIT"
-        stage.on_job_done(item, JobResult(ok=True, value="addressed"), ctx)
+        thread_id = item.payload["remediation_threads"][0]["thread_id"]
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value={
+                    "addressed": [thread_id],
+                    "replies": {thread_id: "Fixed the review race."},
+                },
+            ),
+            ctx,
+        )
         item.state = "PUSH_WAIT"
-        stage.on_job_done(item, JobResult(ok=True, value=True), ctx)
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),
+            ctx,
+        )
         item.state = "EVAL"
 
         assert stage.step(item, ctx) == Continue(next_state="COMPACT_REVIEWER_WAIT")
-        assert github.mutation_log == [("gh_pr_review_post", (1001, "COMMENT"))]
+        assert github.mutation_log == [
+            ("gh_pr_review_post", (1001, "COMMENT")),
+            ("post_implementation_thread_replies", (1001, (thread_id,))),
+        ]
         assert events == []
 
     def test_review_wait_forwards_nitpick_config(self, make_ctx: Any, make_work_item: Any) -> None:
@@ -768,7 +792,7 @@ class TestPrReviewStageStep:
         assert result.next_state == "DIFFICULTY_WAIT"
         assert github.mutation_log == [("gh_pr_review_post", (1001, "COMMENT"))]
         assert item.payload["posted_thread_ids"] == ["thread-1001-0", "thread-1001-1"]
-        assert item.payload["unresolved_auto"] == 2
+        assert item.payload["unresolved_threads_before_address"] == 2
 
     def test_post_with_zero_open_automation_threads_skips_to_eval(
         self, make_ctx: Any, make_work_item: Any
@@ -1159,7 +1183,7 @@ class TestPrReviewStageStep:
         """A restart without active item receipts must fail closed without local state I/O."""
 
         class NoReceiptJournalGitHub(FakeStageGitHub):
-            def load_process_review_thread_receipts(self, pr_number: int) -> list[dict[str, Any]]:
+            def load_legacy_review_thread_receipts(self, pr_number: int) -> list[dict[str, Any]]:
                 del pr_number
                 pytest.fail("PR-review entry must not restore mutation authority from local state")
 
@@ -1179,8 +1203,8 @@ class TestPrReviewStageStep:
         assert result.disposition == Disposition.FINISH_FAIL
 
 
-class TestProcessOwnedReviewThreadLifecycle:
-    """Process-owned review threads survive rounds without count inflation."""
+class TestReviewThreadLifecycle:
+    """Open review threads remain actionable through the two-role lifecycle."""
 
     @staticmethod
     def _thread(
@@ -1198,7 +1222,6 @@ class TestProcessOwnedReviewThreadLifecycle:
             "side": "RIGHT",
             "severity": "major",
             "body": f"<!-- hephaestus-severity: major -->\n{body}",
-            "automation_owned": participants == ["hephaestus[bot]"],
             "author": participants[0],
             "authors": participants,
             "comments": [
@@ -1214,51 +1237,384 @@ class TestProcessOwnedReviewThreadLifecycle:
             "created_head_sha": "b" * 40,
         }
 
-    def test_process_receipt_requires_the_original_comment_node_id(self) -> None:
-        """A process receipt without its original immutable comment ID is unproven."""
-        receipt = self._thread("process-1", 3, "fix this")
-        del receipt["comments"][0]["id"]
-
-        assert not _is_process_thread_receipt(receipt)
-
-    def test_stale_line_receipt_requires_explicit_restart_provenance(self) -> None:
-        """Only host-normalized restart receipts may retain GitHub's null line."""
-        receipt = self._thread("process-1", 3, "fix this")
-        receipt["line"] = None
-
-        assert not _is_process_thread_receipt(receipt)
-
-        receipt["restart_stale_line"] = True
-
-        assert _is_process_thread_receipt(receipt)
-
-    def test_external_bot_receipt_requires_verified_bot_actor(self) -> None:
-        """A login-shaped user thread must not enter the external-bot path."""
-        receipt = self._thread("bot-1", 3, "fix this")
-        receipt.update(
+    def test_reviewer_decisions_are_limited_to_host_replied_threads(self) -> None:
+        """Only a fresh host reply receipt may become a resolution candidate."""
+        replied = {
+            **self._thread("thread-1", 3, "fix this"),
+            "implementation_reply_id": "reply-1",
+            "implementation_reply_body": (
+                "Added the missing guard and regression test.\n\n"
+                "<!-- hephaestus-implementation-reply:fixture -->"
+            ),
+            "implementation_head_sha": "a" * 40,
+        }
+        replied["comments"].append(
             {
-                "external_bot": True,
-                "author_type": "Bot",
+                "id": "reply-1",
+                "author": "hephaestus[bot]",
+                "body": replied["implementation_reply_body"],
+                "review_id": "review-thread-1",
             }
         )
-        receipt["comments"][0]["author_type"] = "Bot"
+        inherited = self._thread("thread-2", 8, "manual review")
 
-        assert _is_process_thread_receipt(receipt)
+        snapshots = _validation_thread_snapshots([replied, inherited], [replied])
 
-        receipt["author_type"] = "User"
+        assert snapshots is not None
+        assert snapshots[0]["implementation_reply_submitted"] is True
+        assert snapshots[1]["implementation_reply_submitted"] is False
+        assert _reviewer_thread_decisions(
+            [replied],
+            {"resolved": ["thread-1"], "unaddressed": []},
+        ) == ({"thread-1"}, {})
 
-        assert not _is_process_thread_receipt(receipt)
+    def test_reviewer_decisions_require_an_explicit_exhaustive_partition(self) -> None:
+        """A missing decision or legacy dismissal bucket cannot resolve a thread."""
+        receipt = {"id": "thread-1"}
 
-    def test_unaddressed_external_bot_receipt_routes_to_remediation(
+        assert _reviewer_thread_decisions([receipt], {"resolved": [], "unaddressed": []}) is None
+        assert _reviewer_thread_decisions([receipt], {"unaddressed": [], "wont_fix": []}) is None
+
+    def test_implementation_replies_require_an_exact_all_thread_mapping(self) -> None:
+        """An address agent cannot complete a pass by silently omitting a thread."""
+        threads = [self._thread("thread-1", 3, "first"), self._thread("thread-2", 4, "second")]
+
+        assert (
+            _address_replies(
+                {
+                    "addressed": ["thread-1"],
+                    "replies": {"thread-1": "Fixed the first concern."},
+                },
+                threads,
+            )
+            is None
+        )
+        assert _address_replies(
+            {
+                "addressed": ["thread-1", "thread-2"],
+                "replies": {
+                    "thread-1": "Fixed the first concern.",
+                    "thread-2": "Fixed the second concern.",
+                },
+            },
+            threads,
+        ) == {
+            "thread-1": "Fixed the first concern.",
+            "thread-2": "Fixed the second concern.",
+        }
+
+    @pytest.mark.parametrize(
+        ("result", "threads"),
+        [
+            (None, []),
+            ({"addressed": "thread-1", "replies": {}}, []),
+            ({"addressed": [], "replies": {}}, ["not-a-thread"]),
+            (
+                {"addressed": ["thread-1"], "replies": {"thread-1": "fixed"}},
+                [{"id": ""}],
+            ),
+            (
+                {"addressed": ["thread-1"], "replies": {"thread-1": "fixed"}},
+                [{"id": "thread-1"}, {"thread_id": "thread-1"}],
+            ),
+            (
+                {"addressed": [None], "replies": {"thread-1": "fixed"}},
+                [{"id": "thread-1"}],
+            ),
+            (
+                {
+                    "addressed": ["thread-1", "thread-1"],
+                    "replies": {"thread-1": "fixed"},
+                },
+                [{"id": "thread-1"}],
+            ),
+            (
+                {"addressed": ["thread-1"], "replies": {"thread-1": "   "}},
+                [{"id": "thread-1"}],
+            ),
+        ],
+    )
+    def test_implementation_reply_mapping_fails_closed_for_invalid_input(
+        self, result: object, threads: list[object]
+    ) -> None:
+        """Malformed implementation handoffs cannot skip or forge a reply."""
+        assert _address_replies(result, threads) is None  # type: ignore[arg-type]
+
+    def test_implementation_reply_handoff_is_immutable_and_well_formed(self) -> None:
+        """The retry journal preserves only a valid, copied host snapshot."""
+        thread = self._thread("thread-1", 3, "first")
+        handoff = _implementation_reply_handoff(
+            "a" * 40,
+            [thread],
+            {"thread-1": "  Fixed the first concern.  "},
+        )
+
+        assert handoff == {
+            "head_sha": "a" * 40,
+            "threads": [thread],
+            "replies": {"thread-1": "Fixed the first concern."},
+        }
+        thread["body"] = "mutated after the handoff"
+        assert handoff["threads"][0]["body"] != thread["body"]
+        assert (
+            _implementation_reply_handoff("not-a-sha", [self._thread("thread-1", 3, "x")], {})
+            is None
+        )
+        assert _implementation_reply_handoff("a" * 40, ["not-a-thread"], {}) is None
+        assert _implementation_reply_handoff("a" * 40, [{"id": ""}], {"": "fixed"}) is None
+
+    def test_validation_receipts_require_one_complete_immutable_thread_snapshot(self) -> None:
+        """Validation binds a thread decision to its exact host-read reply."""
+        reply = "Fixed the first concern."
+        thread = self._thread("thread-1", 3, "first")
+        receipt = {
+            **thread,
+            "comments": [
+                *thread["comments"],
+                {"id": "reply-1", "body": reply, "author": "hephaestus[bot]"},
+            ],
+            "implementation_reply_id": "reply-1",
+            "implementation_reply_body": reply,
+            "implementation_head_sha": "a" * 40,
+        }
+
+        fingerprints = _validation_receipt_fingerprints([receipt])
+        assert fingerprints is not None
+        assert set(fingerprints) == {"thread-1"}
+        assert len(fingerprints["thread-1"]) == 64
+        assert _validation_receipt_fingerprints([receipt, receipt]) is None
+        assert _validation_receipt_fingerprints([{**receipt, "comments": []}]) is None
+        assert (
+            _validation_receipt_fingerprints(
+                [{**receipt, "comments": [{"id": "reply-1", "body": 7}]}]
+            )
+            is None
+        )
+        assert (
+            _validation_receipt_fingerprints(
+                [{**receipt, "comments": [*receipt["comments"], dict(receipt["comments"][-1])]}]
+            )
+            is None
+        )
+
+    def test_validation_snapshot_and_head_guard_fail_closed_on_drift(self) -> None:
+        """Only an open, unarmed exact head and matching receipt enter validation."""
+        receipt = {
+            "id": "thread-1",
+            "implementation_reply_body": "fixed",
+            "implementation_reply_id": "reply-1",
+        }
+        assert _validation_thread_snapshots([{"id": "thread-1"}], [receipt]) == [
+            {
+                "id": "thread-1",
+                "implementation_reply_body": "fixed",
+                "implementation_reply_submitted": True,
+            }
+        ]
+        assert _validation_thread_snapshots([{"id": "thread-1"}], [receipt, receipt]) is None
+        assert _validation_thread_snapshots([{"id": "thread-1"}, {"id": "thread-1"}], []) is None
+        assert _validation_thread_snapshots([{"id": "thread-1"}], [{"id": "thread-2"}]) is None
+        state = {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None}
+        assert _pr_is_current_open_head(state, "a" * 40)
+        assert not _pr_is_current_open_head({**state, "autoMergeRequest": {}}, "a" * 40)
+        assert not _pr_is_current_open_head({**state, "headRefOid": "b" * 40}, "a" * 40)
+
+    def test_validation_parser_uses_only_a_complete_final_json_verdict(self) -> None:
+        """Prose and malformed JSON cannot become reviewer authorization."""
+        assert _parse_validation_result(None) is None
+        assert _parse_validation_result("not a verdict") is None
+        assert _parse_validation_result("```json\n[]\n```") is None
+        assert _parse_validation_result(
+            'earlier ```json\n{"resolved": ["old"], "unaddressed": []}\n```\n'
+            'final ```json\n{"resolved": ["thread-1"], "unaddressed": []}\n```'
+        ) == {"resolved": ["thread-1"], "unaddressed": []}
+        assert (
+            _parse_validation_result(
+                'earlier ```json\n{"resolved": ["old"], "unaddressed": []}\n```\n'
+                "final ```json\n{not valid json}\n```"
+            )
+            is None
+        )
+        assert (
+            _parse_validation_result(
+                '```json\n{"resolved": ["thread-1"], "unaddressed": []}\n```\n'
+                "untrusted trailing text"
+            )
+            is None
+        )
+
+    @pytest.mark.parametrize(
+        ("receipts", "verdict"),
+        [
+            ([{"id": "thread-1"}], None),
+            ([{"id": "thread-1"}], {"resolved": "thread-1", "unaddressed": []}),
+            ([{}], {"resolved": [], "unaddressed": []}),
+            (
+                [{"id": "thread-1"}, {"id": "thread-1"}],
+                {"resolved": [], "unaddressed": []},
+            ),
+            ([{"id": "thread-1"}], {"resolved": [7], "unaddressed": []}),
+            (
+                [{"id": "thread-1"}],
+                {"resolved": ["thread-1", "thread-1"], "unaddressed": []},
+            ),
+            ([{"id": "thread-1"}], {"resolved": [], "unaddressed": ["not-an-object"]}),
+            (
+                [{"id": "thread-1"}],
+                {"resolved": [], "unaddressed": [{"thread_id": "thread-1", "detail": ""}]},
+            ),
+        ],
+    )
+    def test_reviewer_decisions_fail_closed_for_malformed_or_ambiguous_verdicts(
+        self, receipts: list[dict[str, object]], verdict: object
+    ) -> None:
+        """Every receipt must have one well-formed, non-overlapping decision."""
+        assert _reviewer_thread_decisions(receipts, verdict) is None
+
+    def test_postable_audit_finding_requires_a_real_inline_location_and_body(self) -> None:
+        """Only structurally valid new audit findings can be published."""
+        valid = {
+            "path": "hephaestus/example.py",
+            "line": 3,
+            "side": "RIGHT",
+            "severity": "major",
+            "body": "Handle the null value before reading it.",
+        }
+        assert _is_postable_finding(valid)
+        assert not _is_postable_finding({**valid, "path": ""})
+        assert not _is_postable_finding({**valid, "line": True})
+        assert not _is_postable_finding({**valid, "side": "LEFT"})
+        assert not _is_postable_finding({**valid, "severity": "informational"})
+        assert not _is_postable_finding({**valid, "body": "<!-- hephaestus-severity: major -->"})
+
+    def test_reviewer_feedback_is_preserved_for_the_next_implementer(self) -> None:
+        """A rejection reply is present in the next remediation prompt payload."""
+        thread = self._thread("thread-1", 3, "fix this")
+        thread["comments"].append(
+            {
+                "id": "reviewer-follow-up",
+                "author": "reviewer",
+                "body": "Reviewer validation found this still unresolved: guard None first.",
+            }
+        )
+
+        normalized = _normalize_remediation_threads([thread])
+
+        assert len(normalized) == 1
+        assert "guard None first" in normalized[0]["body"]
+        assert "Thread conversation:" in normalized[0]["body"]
+
+    def test_partial_reconciliation_restarts_fresh_review_without_stale_receipts(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """An exact bot finding is fenced into the address path, not a human handoff."""
+        """A partial race discards the validator decision for a fresh review."""
+        first = self._thread("live-thread-1001-0", 3, "first")
+        second = self._thread("live-thread-1001-1", 4, "second")
+        receipts = [
+            {
+                **thread,
+                "implementation_reply_id": f"reply-{thread['id']}",
+                "implementation_reply_body": "fixed",
+                "comments": [
+                    *thread["comments"],
+                    {
+                        "id": f"implementation-reply-{thread['id']}",
+                        "author": "hephaestus[bot]",
+                        "body": "fixed",
+                    },
+                ],
+            }
+            for thread in (first, second)
+        ]
+
+        class PartialGitHub(FakeStageGitHub):
+            def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+                del pr_number
+                return [dict(thread) for thread in receipts]
+
+            def reconcile_reviewer_validated_threads(self, *args: Any, **kwargs: Any) -> Any:
+                del args, kwargs
+                from hephaestus.automation.pipeline.stages.base import (
+                    ReviewerThreadReconciliationResult,
+                )
+
+                return ReviewerThreadReconciliationResult(
+                    resolved_thread_ids=("live-thread-1001-0",),
+                    blocked_thread_ids=("live-thread-1001-1",),
+                )
+
+        item = make_work_item(issue=1, pr=1001, state="POST")
+        item.payload.update(
+            {
+                "reviewed_pr_head_sha": "a" * 40,
+                "validation_result": {
+                    "resolved": ["live-thread-1001-0", "live-thread-1001-1"],
+                    "unaddressed": [],
+                },
+                "review_audit": _valid_audit(),
+                "review_threads": [],
+            }
+        )
+
+        result = PrReviewStage().step(item, make_ctx(github=PartialGitHub(unresolved=[(2, 0)])))
+
+        assert result == Continue(next_state="REVIEW_WAIT")
+        assert item.payload.get("review_audit_failure") is not True
+
+    def test_reconciliation_blocked_receipt_restarts_fresh_review(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An unproven resolution discards the validator decision for a fresh review."""
+        thread = self._thread("live-thread-restore-failed", 3, "first")
+        thread["comments"].append(
+            {
+                "id": "implementation-reply-live-thread-restore-failed",
+                "author": "hephaestus[bot]",
+                "body": "Fixed the first concern.",
+            }
+        )
+
+        class BlockedReconciliationGitHub(FakeStageGitHub):
+            def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+                del pr_number
+                return [dict(thread)]
+
+            def reconcile_reviewer_validated_threads(self, *args: Any, **kwargs: Any) -> Any:
+                del args, kwargs
+                from hephaestus.automation.pipeline.stages.base import (
+                    ReviewerThreadReconciliationResult,
+                )
+
+                return ReviewerThreadReconciliationResult(
+                    blocked_thread_ids=("live-thread-restore-failed",)
+                )
+
+        item = make_work_item(issue=1, pr=1001, state="POST")
+        item.payload.update(
+            {
+                "reviewed_pr_head_sha": "a" * 40,
+                "validation_result": {
+                    "resolved": ["live-thread-restore-failed"],
+                    "unaddressed": [],
+                },
+                "review_audit": _valid_audit(),
+                "review_threads": [],
+            }
+        )
+
+        assert PrReviewStage().step(
+            item, make_ctx(github=BlockedReconciliationGitHub(unresolved=[(2, 0)]))
+        ) == Continue(next_state="REVIEW_WAIT")
+
+    def test_unaddressed_external_bot_thread_routes_to_remediation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An exact bot finding is routed to the implementation/reviewer cycle."""
         bot = self._thread("bot-1", 3, "fix this")
         bot.update(
             {
                 "external_bot": True,
                 "author_type": "Bot",
-                "automation_owned": True,
             }
         )
         bot["comments"][0]["author_type"] = "Bot"
@@ -1274,8 +1630,6 @@ class TestProcessOwnedReviewThreadLifecycle:
             {
                 "existing_pr": True,
                 "reviewed_pr_head_sha": "a" * 40,
-                "process_review_threads": [dict(bot)],
-                "validation_process_threads": [dict(bot)],
                 "validation_result": {"unaddressed": [{"thread_id": "bot-1"}], "wont_fix": []},
                 "review_audit": ReviewAudit("A", "clean", (), "", valid=True),
                 "review_threads": [],
@@ -1295,18 +1649,13 @@ class TestProcessOwnedReviewThreadLifecycle:
             }
         ]
 
-    def test_validation_adopts_a_canonical_live_restart_receipt(
+    def test_validation_reads_all_open_threads_after_restart(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A host-normalized prior automation thread re-enters the one receipt flow."""
-        receipt = self._thread("process-1", 3, "fix this")
-        live = {**receipt, "process_receipt": dict(receipt)}
+        """A restarted reviewer reads the live thread rather than stale state."""
+        live = self._thread("thread-1", 3, "fix this")
 
         class RestartGitHub(FakeStageGitHub):
-            def list_restart_process_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
-                del pr_number
-                return [dict(live)]
-
             def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
                 del pr_number
                 return [dict(live)]
@@ -1318,13 +1667,18 @@ class TestProcessOwnedReviewThreadLifecycle:
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)
-        assert item.payload["process_review_threads"] == [receipt]
-        assert json.loads(result.job.prompt_kwargs["prior_comments_json"]) == [live]
+        assert json.loads(result.job.prompt_kwargs["prior_comments_json"]) == [
+            {
+                **live,
+                "implementation_reply_body": None,
+                "implementation_reply_submitted": False,
+            }
+        ]
         item.state = "POST"
         item.payload.update(
             {
                 "validation_result": {
-                    "unaddressed": [{"thread_id": "process-1"}],
+                    "unaddressed": [{"thread_id": "thread-1"}],
                     "wont_fix": [],
                 },
                 "review_audit": ReviewAudit("A", "clean", (), "", valid=True),
@@ -1337,52 +1691,17 @@ class TestProcessOwnedReviewThreadLifecycle:
         )
         assert item.payload["remediation_threads"] == [
             {
-                "thread_id": "process-1",
+                "thread_id": "thread-1",
                 "path": "a.py",
                 "line": 3,
                 "body": "<!-- hephaestus-severity: major -->\nfix this",
             }
         ]
 
-    def test_wont_fix_process_thread_is_not_a_resolution_candidate(
-        self, make_work_item: Any
-    ) -> None:
-        """Only a verified code fix may make a process thread eligible for closure."""
-        process = self._thread("process-1", 3, "fix this")
-        item = make_work_item(issue=1, pr=1001, state="POST")
-        item.payload.update(
-            {
-                "reviewed_pr_head_sha": "a" * 40,
-                "process_review_threads": [process],
-                "validation_process_threads": [dict(process)],
-                "validation_result": {"unaddressed": [], "wont_fix": [{"thread_id": "process-1"}]},
-            }
-        )
-
-        assert _handled_process_receipts(item) == ([], {})
-
-    def test_process_thread_at_its_creation_head_is_not_a_resolution_candidate(
-        self, make_work_item: Any
-    ) -> None:
-        """A validator claim alone cannot prove the code changed after the finding was posted."""
-        process = self._thread("process-1", 3, "fix this")
-        process["created_head_sha"] = "a" * 40
-        item = make_work_item(issue=1, pr=1001, state="POST")
-        item.payload.update(
-            {
-                "reviewed_pr_head_sha": "a" * 40,
-                "process_review_threads": [process],
-                "validation_process_threads": [dict(process)],
-                "validation_result": {"unaddressed": [], "wont_fix": []},
-            }
-        )
-
-        assert _handled_process_receipts(item) == ([], {})
-
-    def test_live_process_threads_stand_down_without_duplication(
+    def test_live_threads_are_remediated_without_duplicate_findings(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """Existing loop threads stay visible for human resolution, not replacement posts."""
+        """Every live thread enters remediation while matching findings are not reposted."""
 
         class LiveThreadGitHub(FakeStageGitHub):
             def __init__(self, live: list[dict[str, Any]]) -> None:
@@ -1396,9 +1715,14 @@ class TestProcessOwnedReviewThreadLifecycle:
                 return [dict(thread) for thread in self.live]
 
             def post_review_threads(
-                self, pr_number: int, threads: list[dict[str, Any]], summary: str
+                self,
+                pr_number: int,
+                threads: list[dict[str, Any]],
+                summary: str,
+                *,
+                expected_head_sha: str,
             ) -> list[dict[str, Any]]:
-                del summary
+                del summary, expected_head_sha
                 self.posted_batches.append([dict(thread) for thread in threads])
                 thread_ids: list[str] = []
                 for thread in threads:
@@ -1406,7 +1730,7 @@ class TestProcessOwnedReviewThreadLifecycle:
                     self.next_id += 1
                     thread_ids.append(thread_id)
                     self.live.append(
-                        TestProcessOwnedReviewThreadLifecycle._thread(
+                        TestReviewThreadLifecycle._thread(
                             thread_id, int(thread["line"]), str(thread["body"])
                         )
                     )
@@ -1417,11 +1741,10 @@ class TestProcessOwnedReviewThreadLifecycle:
         inherited = [
             self._thread(f"inherited-{index}", index + 1, f"old {index}") for index in range(10)
         ]
-        prior_process = [
-            self._thread(f"process-{index}", index + 20, f"duplicate {index}")
-            for index in range(12)
+        prior_threads = [
+            self._thread(f"thread-{index}", index + 20, f"duplicate {index}") for index in range(12)
         ]
-        github = LiveThreadGitHub(inherited + prior_process)
+        github = LiveThreadGitHub(inherited + prior_threads)
         ctx = make_ctx(github=github)
         stage = PrReviewStage()
         item = make_work_item(issue=1, pr=1001, state="POST")
@@ -1448,12 +1771,10 @@ class TestProcessOwnedReviewThreadLifecycle:
         item.payload.update(
             {
                 "reviewed_pr_head_sha": "a" * 40,
-                "process_review_threads": [dict(thread) for thread in prior_process],
-                "validation_process_threads": [dict(thread) for thread in prior_process],
                 "validation_result": {
                     "unaddressed": [
-                        {"thread_id": "process-0"},
-                        {"thread_id": "process-1"},
+                        {"thread_id": "thread-0"},
+                        {"thread_id": "thread-1"},
                     ],
                     "wont_fix": [],
                 },
@@ -1470,37 +1791,30 @@ class TestProcessOwnedReviewThreadLifecycle:
 
         result = stage.step(item, ctx)
 
-        assert result == StageOutcome(
-            Disposition.FINISH_FAIL,
-            "automation_threads_require_human_resolution",
-        )
-        assert github.posted_batches == []
-        assert len(github.live) == 22
+        assert result == Continue(next_state="DIFFICULTY_WAIT")
+        assert len(github.posted_batches) == 1
+        assert len(github.posted_batches[0]) == 7
+        assert len(github.live) == 29
 
-    def test_addressed_process_thread_stands_down_when_guarded_accessor_blocks(
+    def test_preexisting_thread_continues_to_remediation(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A blocked guarded-resolution result remains a human handoff."""
+        """An inherited thread is addressed instead of becoming a terminal handoff."""
 
         class ResolverForbiddenGitHub(FakeStageGitHub):
             def __init__(self) -> None:
                 super().__init__()
-                self.live = [
-                    TestProcessOwnedReviewThreadLifecycle._thread("process-1", 3, "fix this")
-                ]
+                self.live = [TestReviewThreadLifecycle._thread("thread-1", 3, "fix this")]
 
             def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
                 del pr_number
                 return [dict(thread) for thread in self.live]
 
-        process = ResolverForbiddenGitHub().live[0]
         github = ResolverForbiddenGitHub()
         item = make_work_item(issue=1, pr=1001, state="POST")
         item.payload.update(
             {
                 "reviewed_pr_head_sha": "a" * 40,
-                "process_review_threads": [dict(process)],
-                "validation_process_threads": [dict(process)],
                 "validation_result": {"unaddressed": [], "wont_fix": []},
                 "review_audit": ReviewAudit("A", "clean", (), "", valid=True),
                 "review_threads": [],
@@ -1509,50 +1823,29 @@ class TestProcessOwnedReviewThreadLifecycle:
 
         result = PrReviewStage().step(item, make_ctx(github=github))
 
-        assert result == StageOutcome(
-            Disposition.FINISH_FAIL,
-            "automation_threads_require_human_resolution",
-        )
-        assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
+        assert result == Continue(next_state="DIFFICULTY_WAIT")
         assert not any(name == "mark_pr_implementation_go" for name, _ in github.mutation_log)
 
-    def test_addressed_process_thread_replies_and_resolves_before_post(
+    def test_preexisting_thread_is_not_resolved_before_fresh_validation(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """Validated handled receipts use the narrow reply-before-resolve accessor."""
+        """Only a post-fix reviewer decision may resolve an inherited thread."""
 
         class ResolvingGitHub(FakeStageGitHub):
             def __init__(self) -> None:
                 super().__init__()
-                self.live = [
-                    TestProcessOwnedReviewThreadLifecycle._thread("process-1", 3, "fix this")
-                ]
+                self.live = [TestReviewThreadLifecycle._thread("thread-1", 3, "fix this")]
                 self.calls: list[tuple[int, str, list[dict[str, Any]], dict[str, str]]] = []
 
             def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
                 del pr_number
                 return [dict(thread) for thread in self.live]
 
-            def reply_and_resolve_process_review_threads(
-                self,
-                pr_number: int,
-                *,
-                reviewed_head_sha: str,
-                receipts: list[dict[str, Any]],
-                dispositions: dict[str, str],
-            ) -> ProcessThreadResolutionResult:
-                self.calls.append((pr_number, reviewed_head_sha, receipts, dispositions))
-                self.live = []
-                return ProcessThreadResolutionResult(resolved_thread_ids=("process-1",))
-
         github = ResolvingGitHub()
-        process = github.live[0]
         item = make_work_item(issue=1, pr=1001, state="POST")
         item.payload.update(
             {
                 "reviewed_pr_head_sha": "a" * 40,
-                "process_review_threads": [dict(process)],
-                "validation_process_threads": [dict(process)],
                 "validation_result": {"unaddressed": [], "wont_fix": []},
                 "review_audit": ReviewAudit("A", "clean", (), "", valid=True),
                 "review_threads": [],
@@ -1561,9 +1854,8 @@ class TestProcessOwnedReviewThreadLifecycle:
 
         result = PrReviewStage().step(item, make_ctx(github=github))
 
-        assert result == Continue(next_state="EVAL")
-        assert github.calls == [(1001, "a" * 40, [process], {"process-1": "addressed"})]
-        assert item.payload["process_review_threads"] == []
+        assert result == Continue(next_state="DIFFICULTY_WAIT")
+        assert github.calls == []
 
     def test_minor_finding_is_audit_only_not_an_inline_merge_blocker(
         self, make_ctx: Any, make_work_item: Any
@@ -1576,10 +1868,17 @@ class TestProcessOwnedReviewThreadLifecycle:
                 self.posted_batches: list[list[dict[str, Any]]] = []
 
             def post_review_threads(
-                self, pr_number: int, threads: list[dict[str, Any]], summary: str
+                self,
+                pr_number: int,
+                threads: list[dict[str, Any]],
+                summary: str,
+                *,
+                expected_head_sha: str,
             ) -> list[dict[str, Any]]:
                 self.posted_batches.append([dict(thread) for thread in threads])
-                return super().post_review_threads(pr_number, threads, summary)
+                return super().post_review_threads(
+                    pr_number, threads, summary, expected_head_sha=expected_head_sha
+                )
 
         github = CapturePostsGitHub()
         item = make_work_item(issue=1, pr=1001, state="POST")
@@ -1603,33 +1902,43 @@ class TestProcessOwnedReviewThreadLifecycle:
         assert result == Continue(next_state="EVAL")
         assert github.posted_batches == [[]]
 
-    def test_validation_receives_only_durable_live_process_thread_facts(
+    def test_validation_receives_all_live_thread_facts(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """The validator gets host-read thread ids, never agent-supplied ids."""
+        """The reviewer validates every open host-read thread, not only reply receipts."""
         stage = PrReviewStage()
         item = make_work_item(issue=1, pr=1001, state="VALIDATE_WAIT")
-        process = self._thread("process-1", 3, "fix this")
+        first_thread = self._thread("thread-1", 3, "fix this")
         inherited = self._thread("inherited", 8, "manual review")
 
         class ProcessOnlyGitHub(FakeStageGitHub):
             def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
                 del pr_number
-                return [dict(process), dict(inherited)]
+                return [dict(first_thread), dict(inherited)]
 
         ctx = make_ctx(github=ProcessOnlyGitHub())
-        item.payload["process_review_threads"] = [dict(process)]
 
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)
-        assert json.loads(result.job.prompt_kwargs["prior_comments_json"]) == [process]
+        assert json.loads(result.job.prompt_kwargs["prior_comments_json"]) == [
+            {
+                **first_thread,
+                "implementation_reply_body": None,
+                "implementation_reply_submitted": False,
+            },
+            {
+                **inherited,
+                "implementation_reply_body": None,
+                "implementation_reply_submitted": False,
+            },
+        ]
 
-    def test_externally_resolved_unaddressed_receipt_is_reopened(
+    def test_externally_resolved_thread_is_not_recreated_from_validator_output(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A vanished prior thread cannot suppress the validator's re-opened finding."""
+        """A vanished thread stays closed; validation output never recreates it."""
 
         class ExternallyResolvedGitHub(FakeStageGitHub):
             def __init__(self) -> None:
@@ -1642,14 +1951,19 @@ class TestProcessOwnedReviewThreadLifecycle:
                 return [dict(thread) for thread in self.live]
 
             def post_review_threads(
-                self, pr_number: int, threads: list[dict[str, Any]], summary: str
+                self,
+                pr_number: int,
+                threads: list[dict[str, Any]],
+                summary: str,
+                *,
+                expected_head_sha: str,
             ) -> list[dict[str, Any]]:
-                del summary
+                del summary, expected_head_sha
                 self.posted = [dict(thread) for thread in threads]
                 posted_ids = [f"reopened-{index}" for index, _ in enumerate(threads)]
                 for thread_id, thread in zip(posted_ids, threads, strict=True):
                     self.live.append(
-                        TestProcessOwnedReviewThreadLifecycle._thread(
+                        TestReviewThreadLifecycle._thread(
                             thread_id,
                             int(thread["line"]),
                             str(thread["body"]),
@@ -1658,18 +1972,15 @@ class TestProcessOwnedReviewThreadLifecycle:
                 self._log("gh_pr_review_post", pr_number, "COMMENT")
                 return [dict(thread) for thread in self.live if thread["id"] in posted_ids]
 
-        prior = self._thread("process-1", 3, "fix this")
         github = ExternallyResolvedGitHub()
         item = make_work_item(issue=1, pr=1001, state="POST")
         item.payload.update(
             {
                 "reviewed_pr_head_sha": "a" * 40,
-                "process_review_threads": [prior],
-                "validation_process_threads": [prior],
                 "validation_result": {
                     "unaddressed": [
                         {
-                            "thread_id": "process-1",
+                            "thread_id": "thread-1",
                             "path": "a.py",
                             "line": 3,
                             "detail": "fix this",
@@ -1684,14 +1995,13 @@ class TestProcessOwnedReviewThreadLifecycle:
 
         result = PrReviewStage().step(item, make_ctx(github=github))
 
-        assert result == Continue(next_state="DIFFICULTY_WAIT")
-        assert len(github.posted) == 1
-        assert github.posted[0]["body"] == "Reopened (prior round, still unaddressed): fix this"
+        assert result == Continue(next_state="EVAL")
+        assert github.posted == []
 
-    def test_changed_unaddressed_receipt_is_reopened(
+    def test_changed_open_thread_is_sent_back_to_implementation(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A reply makes an old receipt ineligible to suppress a re-open."""
+        """A changed thread remains open for a fresh implementation reply."""
 
         class ChangedReceiptGitHub(FakeStageGitHub):
             def __init__(self, live: list[dict[str, Any]]) -> None:
@@ -1704,14 +2014,19 @@ class TestProcessOwnedReviewThreadLifecycle:
                 return [dict(thread) for thread in self.live]
 
             def post_review_threads(
-                self, pr_number: int, threads: list[dict[str, Any]], summary: str
+                self,
+                pr_number: int,
+                threads: list[dict[str, Any]],
+                summary: str,
+                *,
+                expected_head_sha: str,
             ) -> list[dict[str, Any]]:
-                del summary
+                del summary, expected_head_sha
                 self.posted = [dict(thread) for thread in threads]
                 posted_ids = [f"reopened-{index}" for index, _ in enumerate(threads)]
                 for thread_id, thread in zip(posted_ids, threads, strict=True):
                     self.live.append(
-                        TestProcessOwnedReviewThreadLifecycle._thread(
+                        TestReviewThreadLifecycle._thread(
                             thread_id,
                             int(thread["line"]),
                             str(thread["body"]),
@@ -1720,23 +2035,21 @@ class TestProcessOwnedReviewThreadLifecycle:
                 self._log("gh_pr_review_post", pr_number, "COMMENT")
                 return [dict(thread) for thread in self.live if thread["id"] in posted_ids]
 
-        prior = self._thread("process-1", 3, "fix this")
+        prior = self._thread("thread-1", 3, "fix this")
         changed = dict(prior)
         changed["comments"] = [
             {"author": "hephaestus[bot]", "body": "fix this"},
-            {"author": "hephaestus[bot]", "body": "human follow-up"},
+            {"author": "hephaestus[bot]", "body": "reviewer follow-up"},
         ]
         github = ChangedReceiptGitHub([changed])
         item = make_work_item(issue=1, pr=1001, state="POST")
         item.payload.update(
             {
                 "reviewed_pr_head_sha": "a" * 40,
-                "process_review_threads": [prior],
-                "validation_process_threads": [prior],
                 "validation_result": {
                     "unaddressed": [
                         {
-                            "thread_id": "process-1",
+                            "thread_id": "thread-1",
                             "path": "a.py",
                             "line": 3,
                             "detail": "fix this",
@@ -1752,8 +2065,73 @@ class TestProcessOwnedReviewThreadLifecycle:
         result = PrReviewStage().step(item, make_ctx(github=github))
 
         assert result == Continue(next_state="DIFFICULTY_WAIT")
-        assert len(github.posted) == 1
-        assert github.posted[0]["body"] == "Reopened (prior round, still unaddressed): fix this"
+        assert github.posted == []
+        assert item.payload["remediation_threads"][0]["thread_id"] == "thread-1"
+
+    def test_replaced_validation_receipt_restarts_validation_without_reconciliation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A reviewer decision for reply A cannot act on a later reply B."""
+        reply_a = self._thread("thread-1", 3, "fix this")
+        reply_a["comments"].append(
+            {
+                "id": "implementation-reply-a",
+                "author": "hephaestus[bot]",
+                "body": "Fixed it with receipt A.",
+            }
+        )
+        reply_b = {
+            **reply_a,
+            "comments": [
+                *reply_a["comments"],
+                {
+                    "id": "implementation-reply-b",
+                    "author": "hephaestus[bot]",
+                    "body": "Fixed it differently with receipt B.",
+                },
+            ],
+        }
+
+        class ReceiptRaceGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__()
+                self.live = [reply_a]
+                self.reconciliation_calls: list[dict[str, Any]] = []
+
+            def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+                del pr_number
+                return [dict(thread) for thread in self.live]
+
+            def reconcile_reviewer_validated_threads(self, *args: Any, **kwargs: Any) -> Any:
+                self.reconciliation_calls.append(dict(kwargs))
+                return super().reconcile_reviewer_validated_threads(*args, **kwargs)
+
+        github = ReceiptRaceGitHub()
+        ctx = make_ctx(github=github)
+        stage = PrReviewStage()
+        item = make_work_item(issue=1, pr=1001, state="VALIDATE_WAIT")
+        item.payload["reviewed_pr_head_sha"] = "a" * 40
+
+        validation = stage.step(item, ctx)
+        assert isinstance(validation, JobRequest)
+        assert item.payload["validation_threads"][-1]["comments"][-1]["id"] == (
+            "implementation-reply-a"
+        )
+
+        github.live = [reply_b]
+        item.state = "POST"
+        item.payload.update(
+            {
+                "validation_result": {"resolved": ["thread-1"], "unaddressed": []},
+                "review_audit": _valid_audit(),
+                "review_threads": [],
+            }
+        )
+
+        result = stage.step(item, ctx)
+
+        assert result == Continue(next_state="VALIDATE_WAIT")
+        assert github.reconciliation_calls == []
 
     @pytest.mark.parametrize(
         ("pr_state", "validation_result", "authors"),
@@ -1774,11 +2152,11 @@ class TestProcessOwnedReviewThreadLifecycle:
                 {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
                 {"unaddressed": [], "wont_fix": []},
                 ["hephaestus[bot]", "reviewer"],
-                id="human-participant",
+                id="multiple-participants",
             ),
         ],
     )
-    def test_unsafe_validated_process_thread_never_resolves(
+    def test_unproven_prior_state_never_resolves_a_thread(
         self,
         make_ctx: Any,
         make_work_item: Any,
@@ -1786,15 +2164,13 @@ class TestProcessOwnedReviewThreadLifecycle:
         validation_result: dict[str, Any],
         authors: list[str],
     ) -> None:
-        """Head drift, malformed ids, and human replies are all no-resolve boundaries."""
+        """Only a current implementation reply may authorize reviewer resolution."""
 
         class ResolutionRecordingGitHub(FakeStageGitHub):
             def __init__(self) -> None:
                 super().__init__(pr_state=pr_state)
                 self.live = [
-                    TestProcessOwnedReviewThreadLifecycle._thread(
-                        "process-1", 3, "fix this", authors=authors
-                    )
+                    TestReviewThreadLifecycle._thread("thread-1", 3, "fix this", authors=authors)
                 ]
 
             def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
@@ -1802,8 +2178,14 @@ class TestProcessOwnedReviewThreadLifecycle:
                 return [dict(thread) for thread in self.live]
 
             def post_review_threads(
-                self, pr_number: int, threads: list[dict[str, Any]], summary: str
+                self,
+                pr_number: int,
+                threads: list[dict[str, Any]],
+                summary: str,
+                *,
+                expected_head_sha: str,
             ) -> list[dict[str, Any]]:
+                del expected_head_sha
                 self._log("gh_pr_review_post", pr_number, "COMMENT")
                 return []
 
@@ -1811,12 +2193,9 @@ class TestProcessOwnedReviewThreadLifecycle:
         ctx = make_ctx(github=github)
         stage = PrReviewStage()
         item = make_work_item(issue=1, pr=1001, state="POST")
-        process = self._thread("process-1", 3, "fix this")
         item.payload.update(
             {
                 "reviewed_pr_head_sha": "a" * 40,
-                "process_review_threads": [process],
-                "validation_process_threads": [process],
                 "validation_result": validation_result,
                 "review_audit": ReviewAudit("A", "clean", (), "", valid=True),
                 "review_threads": [],
@@ -1826,10 +2205,10 @@ class TestProcessOwnedReviewThreadLifecycle:
         result = stage.step(item, ctx)
 
         if pr_state["headRefOid"] != "a" * 40:
-            assert result == Continue(next_state="REVIEW_WAIT")
-            assert github.mutation_log == []
+            assert result == Continue(next_state="DIFFICULTY_WAIT")
+            assert not any("reconcile" in name for name, _ in github.mutation_log)
 
-    def test_unaddressed_process_thread_routes_to_remediation(
+    def test_unaddressed_thread_routes_to_remediation(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
         """A verified prior finding is sent to the address leg, not handed off."""
@@ -1843,16 +2222,14 @@ class TestProcessOwnedReviewThreadLifecycle:
                 del pr_number
                 return [dict(self.live)]
 
-        process = self._thread("process-1", 3, "fix this")
-        github = GuardRaceGitHub(process)
+        review_thread = self._thread("thread-1", 3, "fix this")
+        github = GuardRaceGitHub(review_thread)
         item = make_work_item(issue=1, pr=1001, state="POST")
         item.payload.update(
             {
                 "reviewed_pr_head_sha": "a" * 40,
-                "process_review_threads": [process],
-                "validation_process_threads": [process],
                 "validation_result": {
-                    "unaddressed": [{"thread_id": "process-1"}],
+                    "unaddressed": [{"thread_id": "thread-1"}],
                     "wont_fix": [],
                 },
                 "review_audit": ReviewAudit("A", "clean", (), "", valid=True),
@@ -1865,7 +2242,7 @@ class TestProcessOwnedReviewThreadLifecycle:
         assert result == Continue(next_state="DIFFICULTY_WAIT")
         assert item.payload["remediation_threads"] == [
             {
-                "thread_id": "process-1",
+                "thread_id": "thread-1",
                 "path": "a.py",
                 "line": 3,
                 "body": "<!-- hephaestus-severity: major -->\nfix this",
@@ -1876,7 +2253,7 @@ class TestProcessOwnedReviewThreadLifecycle:
     def test_truncated_live_thread_facts_skip_validation_and_all_writes(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A pagination/read failure cannot hide a later human participant."""
+        """A pagination/read failure cannot hide a later review participant."""
 
         class TruncatedThreadsGitHub(FakeStageGitHub):
             def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
@@ -1887,7 +2264,6 @@ class TestProcessOwnedReviewThreadLifecycle:
         github = TruncatedThreadsGitHub()
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, pr=1001, state="VALIDATE_WAIT")
-        item.payload["process_review_threads"] = [self._thread("process-1", 3, "fix this")]
 
         result = stage.step(item, ctx)
 
@@ -2045,7 +2421,7 @@ class TestEvalVerdicts:
         assert ("arm_auto_merge", (1001,)) not in github.mutation_log
         assert item.attempts["pr_review_iter"] == 1  # real verdict counted
 
-    def test_thread_added_during_go_write_preserves_external_labels_and_requires_human_handoff(
+    def test_thread_added_during_go_write_preserves_external_labels_and_restarts_review(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
         """A late thread must not let this run relabel an external state."""
@@ -2083,10 +2459,7 @@ class TestEvalVerdicts:
 
         result = stage.step(item, ctx)
 
-        assert result == StageOutcome(
-            Disposition.FINISH_FAIL,
-            "late_threads_require_human_resolution",
-        )
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "review_activity_changed")
         assert ("mark_pr_implementation_go", (1001,)) in github.mutation_log
         assert not any(
             name in {"mark_pr_implementation_no_go", "gh_issue_remove_labels"}
@@ -2298,10 +2671,10 @@ class TestEvalVerdicts:
         assert item.payload["review_audit"].grade is None
         assert item.payload["review_audit"].valid is False
 
-    def test_go_rechecks_human_threads_and_stands_down(
+    def test_go_rechecks_preexisting_threads_and_reenters_remediation(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A late human thread stands down without deleting unknown label state."""
+        """A late thread is requeued for the implementation/reviewer cycle."""
         stage = PrReviewStage()
         github = FakeStageGitHub(by_severity=[(0, 0, 0), (0, 0, 1)])
         ctx = make_ctx(github=github)
@@ -2310,13 +2683,10 @@ class TestEvalVerdicts:
 
         result = stage.step(item, ctx)
 
-        assert isinstance(result, StageOutcome)
-        assert result.disposition == Disposition.FINISH_FAIL
-        assert result.note == "human_blocked"
-        assert github.mutation_log == [("gh_issue_comment", (1001,))]
+        assert result == Continue(next_state="REVIEW_WAIT")
+        assert not any(name == "mark_pr_implementation_no_go" for name, _ in github.mutation_log)
         assert ("mark_pr_implementation_go", (1001,)) not in github.mutation_log
         assert ("arm_auto_merge", (1001,)) not in github.mutation_log
-        assert "Automation stand-down" in github.comments[1001][0]
 
     def test_go_with_follow_up_enabled_advances_to_merge_wait(
         self, make_ctx: Any, make_work_item: Any
@@ -2333,15 +2703,10 @@ class TestEvalVerdicts:
         assert result == StageOutcome(Disposition.ADVANCE, "review audit; merge wait pending")
         assert github.mutation_log == [("mark_pr_implementation_go", (1001,))]
 
-    def test_go_with_human_thread_is_human_blocked_without_label_mutation(
+    def test_go_with_preexisting_thread_reenters_remediation_cycle(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """GO + open human thread -> HUMAN_BLOCKED without label mutation.
-
-        A human may concurrently own either implementation-state label, and
-        GitHub offers no compare-and-set deletion.  Automation must stand down
-        rather than erase a state it cannot prove it owns.
-        """
+        """GO + an open thread remains actionable rather than terminal."""
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(0, 1)])
         ctx = make_ctx(github=github)
@@ -2350,15 +2715,13 @@ class TestEvalVerdicts:
 
         result = stage.step(item, ctx)
 
-        assert isinstance(result, StageOutcome)
-        assert result.disposition == Disposition.FINISH_FAIL
-        assert result.note == "human_blocked"
-        assert github.mutation_log == [("gh_issue_comment", (1001,))]
+        assert result == Continue(next_state="REVIEW_WAIT")
+        assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
 
-    def test_failed_audit_with_human_thread_has_no_go_shaped_stand_down(
+    def test_failed_audit_with_external_thread_reenters_remediation(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A human-blocked F audit cannot publish false GO prose."""
+        """An externally authored thread is retried through implementation and review."""
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(0, 1)])
         ctx = make_ctx(github=github)
@@ -2373,10 +2736,8 @@ class TestEvalVerdicts:
 
         result = stage.step(item, ctx)
 
-        assert result == StageOutcome(Disposition.FINISH_FAIL, "human_blocked")
-        body = github.comments[1001][0]
-        assert "reached GO" not in body
-        assert "prevent a transition" in body
+        assert result == Continue(next_state="REVIEW_WAIT")
+        assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
 
     def test_go_with_automation_thread_downgrades_and_loops(
         self, make_ctx: Any, make_work_item: Any
@@ -2513,7 +2874,11 @@ class TestEvalVerdicts:
         item = make_work_item(issue=1, pr=1001, state="PUSH_WAIT")
         item.payload["direct_push_retries"] = DIRECT_PUSH_RETRY_CAP
 
-        stage.on_job_done(item, JobResult(ok=True, value=True), ctx)
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),
+            ctx,
+        )
 
         assert "direct_push_retries" not in item.payload
         item.state = "PUSH_WAIT"
@@ -2644,10 +3009,10 @@ class TestEvalVerdicts:
         assert item.payload["detached_push_failure"] == "remote_changed"
 
     # Severity-aware GO gate tests (#1856)
-    def test_same_login_human_reply_to_process_advisory_thread_blocks_go(
+    def test_same_login_external_reply_remains_actionable(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A reply sharing the host login is not proof the process wrote it."""
+        """A reply sharing the host login remains an open remediation item."""
 
         class SameLoginReplyGitHub(FakeStageGitHub):
             def __init__(self) -> None:
@@ -2659,15 +3024,12 @@ class TestEvalVerdicts:
                     "side": "RIGHT",
                     "severity": "nitpick",
                     "body": "<!-- hephaestus-severity: nitpick -->\noriginal finding",
-                    # The production adapter sets this from current_login;
-                    # it is deliberately true despite the human reply.
-                    "automation_owned": True,
                     "author": "mvillmow",
                     "authors": ["mvillmow", "mvillmow"],
                     "review_id": "review-process-advisory",
                     "comments": [
                         {"author": "mvillmow", "body": "original finding"},
-                        {"author": "mvillmow", "body": "human reply"},
+                        {"author": "mvillmow", "body": "reviewer reply"},
                     ],
                 }
 
@@ -2682,43 +3044,28 @@ class TestEvalVerdicts:
             {
                 "review_audit": _valid_audit(),
                 "reviewed_pr_head_sha": "a" * 40,
-                "process_review_threads": [
-                    {
-                        **github.live,
-                        "authors": ["mvillmow"],
-                        "review_id": "review-process-advisory",
-                        "comments": [{"author": "mvillmow", "body": "original finding"}],
-                    }
-                ],
             }
         )
 
         result = stage.step(item, make_ctx(github=github))
 
-        assert result == StageOutcome(
-            Disposition.FINISH_FAIL,
-            "automation_threads_require_human_resolution",
-        )
+        assert result == Continue(next_state="REVIEW_WAIT")
         assert not any(name == "mark_pr_implementation_go" for name, _ in github.mutation_log)
 
-    def test_go_with_only_minor_automation_thread_requires_human_resolution(
+    def test_go_with_only_minor_thread_reenters_remediation_cycle(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """Even advisory threads are GitHub merge blockers and stay human-owned."""
+        """Every open thread is handled by the implementation/reviewer cycle."""
         stage = PrReviewStage()
-        github = FakeStageGitHub(by_severity=[(0, 2, 0)])  # 0 blocking, 2 minor, 0 human
+        github = FakeStageGitHub(by_severity=[(0, 2, 0)])  # 0 blocking, 2 minor, 0 external
         ctx = make_ctx(github=github)
         ctx.config.enable_follow_up = False
         item = make_work_item(issue=1, pr=1001, state="EVAL")
         item.payload["review_audit"] = _valid_audit()
-        item.payload["process_review_threads"] = github.list_unresolved_review_threads(1001)
 
         result = stage.step(item, ctx)
 
-        assert result == StageOutcome(
-            Disposition.FINISH_FAIL,
-            "automation_threads_require_human_resolution",
-        )
+        assert result == Continue(next_state="REVIEW_WAIT")
         assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
         assert ("mark_pr_implementation_go", (1001,)) not in github.mutation_log
 
@@ -2738,7 +3085,6 @@ class TestEvalVerdicts:
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, pr=1001, state="EVAL")
         item.payload["review_audit"] = _valid_audit()
-        item.payload["process_review_threads"] = github.list_unresolved_review_threads(1001)
 
         result = stage.step(item, ctx)
 
@@ -2746,15 +3092,10 @@ class TestEvalVerdicts:
         assert "reviewed_pr_head_sha" not in item.payload
         assert github.mutation_log == []
 
-    def test_go_with_blocking_automation_thread_downgrades(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """GO with blocking automation threads downgrades to NOGO.
-
-        Tightening check: blocking threads still block, minor threads don't.
-        """
+    def test_go_with_open_thread_downgrades(self, make_ctx: Any, make_work_item: Any) -> None:
+        """Any open thread downgrades a GO result to NOGO."""
         stage = PrReviewStage()
-        github = FakeStageGitHub(by_severity=[(1, 0, 0)])  # 1 blocking, 0 minor, 0 human
+        github = FakeStageGitHub(by_severity=[(1, 0, 0)])  # 1 blocking, 0 minor, 0 external
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, pr=1001, state="EVAL")
         item.payload["review_audit"] = _valid_audit()
@@ -2782,7 +3123,6 @@ class TestEvalVerdicts:
                     {
                         "id": f"unknown-{pr_number}",
                         "body": "<!-- hephaestus-severity: unknown -->\nfinding",
-                        "automation_owned": True,
                         "author": "hephaestus[bot]",
                     }
                 ]
@@ -2799,28 +3139,25 @@ class TestEvalVerdicts:
         assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
         assert not any(name == "mark_pr_implementation_go" for name, _ in github.mutation_log)
 
-    def test_go_with_human_thread_still_blocks(self, make_ctx: Any, make_work_item: Any) -> None:
-        """GO with human thread still hard-blocks (unregressed).
-
-        Human threads are never filtered by severity.
-        """
+    def test_go_with_external_thread_reenters_remediation_cycle(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A pre-existing thread is eligible for implementation remediation."""
         stage = PrReviewStage()
-        github = FakeStageGitHub(by_severity=[(0, 0, 1)])  # 0 blocking, 0 minor, 1 human
+        github = FakeStageGitHub(by_severity=[(0, 0, 1)])  # 0 blocking, 0 minor, 1 external
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, pr=1001, state="EVAL")
         item.payload["review_audit"] = _valid_audit()
 
         result = stage.step(item, ctx)
 
-        assert isinstance(result, StageOutcome)
-        assert result.disposition == Disposition.FINISH_FAIL
-        # The underlying comment function is gh_issue_comment (not post_pr_comment).
-        assert github.mutation_log[-1][0] == "gh_issue_comment"
+        assert result == Continue(next_state="REVIEW_WAIT")
+        assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
 
     def test_go_zero_threads_advances(self, make_ctx: Any, make_work_item: Any) -> None:
         """A clean fresh read is the only route that can advance to merge wait."""
         stage = PrReviewStage()
-        github = FakeStageGitHub(by_severity=[(0, 0, 0)])  # 0 blocking, 0 minor, 0 human
+        github = FakeStageGitHub(by_severity=[(0, 0, 0)])  # 0 blocking, 0 minor, 0 external
         ctx = make_ctx(github=github)
         ctx.config.enable_follow_up = False
         item = make_work_item(issue=1, pr=1001, state="EVAL")
@@ -2922,7 +3259,7 @@ class TestProgressAwareBudget:
         """Run one EVAL with a fresh structured audit (state machine loop shortcut).
 
         ``pre_address`` mirrors what POST would have written to
-        ``payload["unresolved_auto"]`` THIS round (the pre-address
+        ``payload["unresolved_threads_before_address"]`` THIS round (the pre-address
         snapshot) — EVAL's progress gate now compares it against this
         same round's post-address count instead of a value carried from
         the previous round (#1863).
@@ -2930,7 +3267,7 @@ class TestProgressAwareBudget:
         item.payload["review_audit"] = _valid_audit()
         item.payload["reviewed_pr_head_sha"] = "a" * 40
         if pre_address is not None:
-            item.payload["unresolved_auto"] = pre_address
+            item.payload["unresolved_threads_before_address"] = pre_address
         item.state = "EVAL"
         return stage.step(item, ctx)
 
@@ -2972,9 +3309,9 @@ class TestProgressAwareBudget:
         """Strictly decreasing threads admit rounds 4+ until the plateau."""
         stage = PrReviewStage()
         # by_severity/unresolved FIFO supplies each round's POST-ADDRESS count
-        # (EVAL's automation_unresolved): r1=5, r2=3, r3=2, r4=1, r5=1(repeats).
+        # (EVAL's open-thread count): r1=5, r2=3, r3=2, r4=1, r5=1(repeats).
         # pre_address seeds each round's PRE-ADDRESS count (POST's
-        # unresolved_auto) so soft_cap+ rounds prove progress WITHIN
+        # unresolved_threads_before_address) so soft_cap+ rounds prove progress WITHIN
         # themselves (#1863): r3 pre=4>post=2, r4 pre=2>post=1, r5 pre=1==post=1.
         github = FakeStageGitHub(unresolved=[(5, 0), (3, 0), (2, 0), (1, 0), (1, 0)])
         ctx = make_ctx(github=github)
@@ -3030,8 +3367,8 @@ class TestProgressAwareBudget:
         """#1863: address work landing ON the soft-cap round earns an extension.
 
         Round 3 (soft cap) starts with 6 pre-address unresolved (POST's
-        unresolved_auto) and the address leg drives it down to 3
-        post-address (EVAL's automation_unresolved) -- progress made
+        unresolved_threads_before_address) and the address leg drives it down to 3
+        post-address (EVAL's open-thread count) -- progress made
         WITHIN round 3. Round 2 ALSO ended at 3 post-address, so the OLD
         cross-round comparison (round 3 post=3 vs round 2's stored
         post=3) would see a plateau and strand the PR at the soft cap.
@@ -3146,7 +3483,7 @@ class TestProgressAwareBudget:
         github = LateStateGitHub()
         item = make_work_item(issue=17, pr=1001, state="EVAL")
         item.payload["pr_review_round"] = 2
-        item.payload["unresolved_auto"] = 3
+        item.payload["unresolved_threads_before_address"] = 3
         item.payload["review_audit"] = _valid_audit()
 
         outcome = PrReviewStage().step(item, make_ctx(github=github))
@@ -3175,7 +3512,7 @@ class TestProgressAwareBudget:
         github = PushedHeadGitHub()
         item = make_work_item(issue=18, pr=1001, state="EVAL")
         item.payload["pr_review_round"] = 2
-        item.payload["unresolved_auto"] = 3
+        item.payload["unresolved_threads_before_address"] = 3
         item.payload["review_audit"] = _valid_audit()
 
         outcome = PrReviewStage().step(item, make_ctx(github=github))
@@ -3280,13 +3617,20 @@ class TestFullWalks:
         resolved -> merge-wait advance.
         """
         stage = PrReviewStage()
-        # POST calls count_unresolved_threads once per round; EVAL calls the
-        # new by_severity method once per round. Two rounds => one entry each
-        # per round. Round 1 has 2 open blocking threads (NOGO address leg);
-        # round 2 is clean (GO: skips difficulty/address, then advances).
+        # Each fresh review snapshot consumes one scripted thread shape.
+        # Round 1 has two open blocking threads for the address leg; round 2
+        # is clean and therefore skips difficulty/address before advancing.
         github = FakeStageGitHub(
-            unresolved=[(2, 0), (0, 0)],
-            by_severity=[(2, 0, 0), (0, 0, 0)],
+            by_severity=[
+                (2, 0, 0),
+                (2, 0, 0),
+                (2, 0, 0),
+                (2, 0, 0),
+                (2, 0, 0),
+                (0, 0, 0),
+                (0, 0, 0),
+                (0, 0, 0),
+            ],
         )
         ctx = make_ctx(github=github)
         item = make_work_item(issue=21, pr=1001, state="ENTER")
@@ -3296,14 +3640,28 @@ class TestFullWalks:
         pool = FakeWorkerPool()
         pool.script(
             JobResult(ok=True, value=_valid_audit()),  # review round 1
-            JobResult(ok=True, value='{"unaddressed": []}'),  # validate round 1
+            JobResult(ok=True, value='{"resolved": [], "unaddressed": []}'),  # validate round 1
             JobResult(ok=True, value="tier list"),  # difficulty
-            JobResult(ok=True, value="addressed"),  # address
-            JobResult(ok=True, value=True),  # push
+            JobResult(
+                ok=True,
+                value={
+                    "addressed": ["live-thread-1001-0", "live-thread-1001-1"],
+                    "replies": {
+                        "live-thread-1001-0": "Fixed it.",
+                        "live-thread-1001-1": "Fixed it.",
+                    },
+                },
+            ),  # address
+            JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),  # push
             JobResult(ok=True, value=True),  # compact reviewer before round 2
             JobResult(ok=True, value=True),  # compact writer before round 2
             JobResult(ok=True, value=_valid_audit()),  # review round 2
-            JobResult(ok=True, value='{"unaddressed": []}'),  # validate round 2
+            JobResult(
+                ok=True,
+                value=(
+                    '{"resolved": ["live-thread-1001-0", "live-thread-1001-1"], "unaddressed": []}'
+                ),
+            ),  # validate round 2
         )
 
         outcome = _drive(stage, item, ctx, pool)
@@ -3320,16 +3678,17 @@ class TestFullWalks:
             "compact_session",
             "review",
             "validate",
+            "validate",
         ]
         assert item.attempts["pr_review_iter"] == 1  # only the fresh-head round counts
         assert not any(name == "mark_pr_implementation_no_go" for name, _ in github.mutation_log)
         assert ("mark_pr_implementation_go", (1001,)) in github.mutation_log
         assert github.mutation_log.count(("gh_pr_review_post", (1001, "COMMENT"))) == 2
 
-    def test_unresolved_process_thread_walk_requires_human_resolution(
+    def test_unresolved_thread_walk_exhausts_without_terminal_handoff(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A later review pass stops at the GitHub conversation-resolution gate."""
+        """A persistently unaddressed thread exhausts the bounded loop rather than handoff."""
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(3, 0)])  # plateau forever
         ctx = make_ctx(github=github)
@@ -3353,10 +3712,7 @@ class TestFullWalks:
         outcome = _drive(stage, item, ctx, pool)
 
         assert isinstance(outcome, StageOutcome)
-        assert outcome == StageOutcome(
-            Disposition.FINISH_FAIL,
-            "automation_threads_require_human_resolution",
-        )
+        assert outcome == StageOutcome(Disposition.SKIP, "exhaustion")
         assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
 
     def test_reviewer_error_walk_burns_nothing(self, make_ctx: Any, make_work_item: Any) -> None:
@@ -3511,8 +3867,8 @@ class TestNoGoLabel:
         assert github.mutation_log == []
 
 
-class TestHumanBlockedComment:
-    """M3: HUMAN_BLOCKED posts a durable stand-down comment before finishing."""
+class TestPreexistingThreadRemediation:
+    """Pre-existing threads re-enter the implementation/reviewer workflow."""
 
     @pytest.mark.parametrize(
         "starting_state",
@@ -3521,13 +3877,13 @@ class TestHumanBlockedComment:
             pytest.param((False, True), id="implementation-no-go"),
         ],
     )
-    def test_preserves_existing_implementation_state_when_standing_down(
+    def test_replaces_stale_implementation_state_with_no_go_for_remediation(
         self,
         make_ctx: Any,
         make_work_item: Any,
         starting_state: tuple[bool, bool],
     ) -> None:
-        """A human block never deletes a label whose owner is unknowable."""
+        """An open thread gets the same recoverable no-go route as any thread."""
         stage = PrReviewStage()
         github = FakeStageGitHub(
             unresolved=[(0, 1)],
@@ -3539,18 +3895,14 @@ class TestHumanBlockedComment:
 
         result = stage.step(item, ctx)
 
-        assert result == StageOutcome(Disposition.FINISH_FAIL, "human_blocked")
-        assert github.pr_has_implementation_state_label(1001) == starting_state
-        assert github.mutation_log == [("gh_issue_comment", (1001,))]
+        assert result == Continue(next_state="REVIEW_WAIT")
+        assert github.pr_has_implementation_state_label(1001) == (False, True)
+        assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
 
-    def test_comment_explains_blockage_before_finish_fail(
+    def test_open_thread_does_not_emit_a_handoff_comment(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """The comment names the blocking human threads and the stand-down.
-
-        Journal-order oracle: the comment is the only mutation before
-        FINISH_FAIL is returned.
-        """
+        """The loop owns the next implementation/reviewer pass for open threads."""
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(0, 2)])
         ctx = make_ctx(github=github)
@@ -3559,18 +3911,14 @@ class TestHumanBlockedComment:
 
         result = stage.step(item, ctx)
 
-        assert isinstance(result, StageOutcome)
-        assert result.disposition == Disposition.FINISH_FAIL
-        assert result.note == "human_blocked"
-        assert github.mutation_log == [("gh_issue_comment", (1001,))]
-        body = github.comments[1001][0]
-        assert "2 unresolved review thread(s) opened by a human" in body
-        assert "standing down" in body
-        assert "without changing implementation-state labels" in body
-        assert "Automation does not arm auto-merge" in body
+        assert result == Continue(next_state="REVIEW_WAIT")
+        assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
+        assert github.comments.get(1001, []) == []
 
-    def test_comment_failure_is_non_fatal(self, make_ctx: Any, make_work_item: Any) -> None:
-        """A failing comment write still finishes failed (never crashes)."""
+    def test_unused_handoff_comment_writer_does_not_affect_recovery(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """No terminal handoff comment is written while the thread remains actionable."""
 
         class CommentFailsGitHub(FakeStageGitHub):
             def post_pr_comment(self, pr_number: int, body: str) -> None:
@@ -3583,8 +3931,7 @@ class TestHumanBlockedComment:
 
         result = stage.step(item, ctx)  # must not raise
 
-        assert isinstance(result, StageOutcome)
-        assert result.note == "human_blocked"
+        assert result == Continue(next_state="REVIEW_WAIT")
 
 
 class TestRealCommitGate:
@@ -3593,7 +3940,7 @@ class TestRealCommitGate:
     def test_push_result_records_the_no_commit_flag(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """commit_push value False -> push_no_commit True; True -> False."""
+        """commit_push requires a matching immutable publication receipt."""
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=40, pr=1001, state="PUSH_WAIT")
@@ -3601,7 +3948,11 @@ class TestRealCommitGate:
         stage.on_job_done(item, JobResult(ok=True, value=False), ctx)
         assert item.payload["push_no_commit"] is True
 
-        stage.on_job_done(item, JobResult(ok=True, value=True), ctx)
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),
+            ctx,
+        )
         assert item.payload["push_no_commit"] is False
 
     def test_successful_push_discards_review_evidence_and_forces_fresh_review(
@@ -3624,7 +3975,11 @@ class TestRealCommitGate:
             }
         )
 
-        stage.on_job_done(item, JobResult(ok=True, value=True), ctx)
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),
+            ctx,
+        )
 
         for key in (
             "review_audit",
@@ -3642,6 +3997,240 @@ class TestRealCommitGate:
         assert result == Continue(next_state="COMPACT_REVIEWER_WAIT")
         assert item.attempts["pr_review_iter"] == 0
         assert github.mutation_log == []
+
+    def test_head_drift_after_push_cannot_post_an_implementation_reply(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A later push cannot inherit a reply from the implementation commit."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(
+            pr_state={"state": "OPEN", "headRefOid": "b" * 40, "autoMergeRequest": None}
+        )
+        item = make_work_item(issue=40, pr=1001, state="PUSH_WAIT")
+        thread = {
+            "id": "thread-1",
+            "path": "a.py",
+            "line": 3,
+            "side": "RIGHT",
+            "body": "fix this",
+            "comments": [{"id": "comment-1", "author": "reviewer", "body": "fix this"}],
+        }
+        item.payload.update(
+            {
+                "remediation_threads": [{"thread_id": "thread-1", "body": "fix this"}],
+                "remediation_thread_snapshots": [thread],
+                "address_output": {
+                    "addressed": ["thread-1"],
+                    "replies": {"thread-1": "Fixed the guard."},
+                },
+            }
+        )
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),
+            make_ctx(github=github),
+        )
+
+        assert not any(
+            name == "post_implementation_thread_replies" for name, _ in github.mutation_log
+        )
+        assert "pending_thread_reply_receipts" not in item.payload
+
+    def test_reply_handoff_retries_the_pushed_fix_without_a_second_commit(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A transient reply-post failure must not turn a real fix into a no-op loop."""
+
+        class ReplyFailsOnceGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__()
+                self.reply_attempts = 0
+
+            def post_implementation_thread_replies(
+                self,
+                pr_number: int,
+                *,
+                expected_head_sha: str,
+                threads: list[dict[str, Any]],
+                replies: dict[str, str],
+            ) -> Any:
+                self.reply_attempts += 1
+                if self.reply_attempts == 1:
+                    raise OSError("temporary GitHub transport failure")
+                return super().post_implementation_thread_replies(
+                    pr_number,
+                    expected_head_sha=expected_head_sha,
+                    threads=threads,
+                    replies=replies,
+                )
+
+        stage = PrReviewStage()
+        github = ReplyFailsOnceGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=40, pr=1001, state="PUSH_WAIT")
+        snapshot = {
+            "id": "thread-1",
+            "path": "a.py",
+            "line": 3,
+            "side": "RIGHT",
+            "body": "fix this",
+            "comments": [{"id": "comment-1", "author": "reviewer", "body": "fix this"}],
+        }
+        item.payload.update(
+            {
+                "remediation_threads": [{"thread_id": "thread-1", "body": "fix this"}],
+                "remediation_thread_snapshots": [snapshot],
+                "address_output": {
+                    "addressed": ["thread-1"],
+                    "replies": {"thread-1": "Fixed the guard."},
+                },
+            }
+        )
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),
+            ctx,
+        )
+
+        assert "pending_implementation_reply_handoff" in item.payload
+        assert github.reply_attempts == 1
+
+        item.state = "EVAL"
+        assert stage.step(item, ctx) == Continue(next_state="REVIEW_WAIT")
+        assert github.reply_attempts == 2
+        assert "pending_implementation_reply_handoff" not in item.payload
+        assert item.payload["push_no_commit"] is False
+
+    def test_stale_reply_handoff_restarts_fresh_review_without_retrying(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A post/read-back race must not exhaust retries on a stale snapshot."""
+
+        class ReplyRacedGitHub(FakeStageGitHub):
+            def post_implementation_thread_replies(
+                self,
+                pr_number: int,
+                *,
+                expected_head_sha: str,
+                threads: list[dict[str, Any]],
+                replies: dict[str, str],
+            ) -> ImplementationThreadReplyResult:
+                del pr_number, expected_head_sha, threads, replies
+                # The reply may already be visible, but a reviewer comment
+                # raced the post-read.  This is a factual stale handoff, not
+                # a transport ambiguity that can be replayed.
+                return ImplementationThreadReplyResult(blocked_thread_ids=("thread-1",))
+
+        stage = PrReviewStage()
+        ctx = make_ctx(github=ReplyRacedGitHub())
+        item = make_work_item(issue=40, pr=1001, state="PUSH_WAIT")
+        snapshot = {
+            "id": "thread-1",
+            "path": "a.py",
+            "line": 3,
+            "side": "RIGHT",
+            "body": "fix this",
+            "comments": [{"id": "comment-1", "author": "reviewer", "body": "fix this"}],
+        }
+        item.payload.update(
+            {
+                "remediation_threads": [{"thread_id": "thread-1", "body": "fix this"}],
+                "remediation_thread_snapshots": [snapshot],
+                "address_output": {
+                    "addressed": ["thread-1"],
+                    "replies": {"thread-1": "Fixed the guard."},
+                },
+            }
+        )
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),
+            ctx,
+        )
+
+        assert "pending_implementation_reply_handoff" not in item.payload
+        item.state = "EVAL"
+        assert stage.step(item, ctx) == Continue(next_state="REVIEW_WAIT")
+
+    def test_mixed_stale_and_transport_reply_batch_retries_only_ambiguous_thread(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A known-stale thread cannot remain in a later transport retry batch."""
+
+        class MixedReplyOutcomeGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__()
+                self.reply_batches: list[tuple[str, ...]] = []
+
+            def post_implementation_thread_replies(
+                self,
+                pr_number: int,
+                *,
+                expected_head_sha: str,
+                threads: list[dict[str, Any]],
+                replies: dict[str, str],
+            ) -> ImplementationThreadReplyResult:
+                del pr_number, expected_head_sha, threads
+                self.reply_batches.append(tuple(sorted(replies)))
+                return ImplementationThreadReplyResult(
+                    blocked_thread_ids=("stale-thread",),
+                    retryable_thread_ids=("ambiguous-thread",),
+                    retryable=True,
+                )
+
+        stage = PrReviewStage()
+        ctx = make_ctx(github=MixedReplyOutcomeGitHub())
+        item = make_work_item(issue=40, pr=1001, state="PUSH_WAIT")
+        snapshots = [
+            {
+                "id": thread_id,
+                "path": "a.py",
+                "line": 3,
+                "side": "RIGHT",
+                "body": "fix this",
+                "comments": [
+                    {"id": f"comment-{thread_id}", "author": "reviewer", "body": "fix this"}
+                ],
+            }
+            for thread_id in ("stale-thread", "ambiguous-thread")
+        ]
+        item.payload.update(
+            {
+                "remediation_threads": [
+                    {"thread_id": snapshot["id"], "body": "fix this"} for snapshot in snapshots
+                ],
+                "remediation_thread_snapshots": snapshots,
+                "address_output": {
+                    "addressed": ["stale-thread", "ambiguous-thread"],
+                    "replies": {
+                        "stale-thread": "Fixed stale thread.",
+                        "ambiguous-thread": "Fixed ambiguous thread.",
+                    },
+                },
+            }
+        )
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),
+            ctx,
+        )
+
+        handoff = item.payload["pending_implementation_reply_handoff"]
+        assert [snapshot["id"] for snapshot in handoff["threads"]] == ["ambiguous-thread"]
+        assert handoff["replies"] == {"ambiguous-thread": "Fixed ambiguous thread."}
+
+        item.state = "EVAL"
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.RETRY, "implementation_reply_handoff_retry"
+        )
+        assert ctx.github.reply_batches == [
+            ("ambiguous-thread", "stale-thread"),
+            ("ambiguous-thread",),
+        ]
 
     def test_first_no_commit_retries_address_with_directive(
         self, make_ctx: Any, make_work_item: Any
@@ -3787,99 +4376,13 @@ class TestRealCommitGate:
         assert "unaddressed_findings" not in item.payload
 
 
-class TestSurvivingThreads:
-    """m1: POST posts only threads that survive the validation verdict."""
+class TestAuditPublication:
+    """Fresh audit findings and validation reconciliation have separate authority."""
 
-    def test_wont_fix_threads_are_dropped(self) -> None:
-        """Threads re-raising a wont_fix (by-design) finding are not posted."""
-        threads = [
-            {"thread_id": "t1", "body": "real bug"},
-            {"thread_id": "t2", "body": "by-design recurrence"},
-        ]
-        validation = '{"unaddressed": [], "wont_fix": [{"thread_id": "t2", "reason": "abstract"}]}'
-
-        surviving = _surviving_threads(threads, validation)
-
-        assert [t["thread_id"] for t in surviving] == ["t1"]
-
-    def test_unaddressed_prior_findings_are_reopened(self) -> None:
-        """Unaddressed prior findings are re-opened as new postable threads."""
-        validation = (
-            '{"unaddressed": [{"thread_id": "t9", "path": "y.py", "line": 7,'
-            ' "original_body": "guard the None", "detail": "still no None guard"}],'
-            ' "wont_fix": []}'
-        )
-
-        surviving = _surviving_threads([{"thread_id": "t1", "body": "new"}], validation)
-
-        assert len(surviving) == 2
-        reopened = surviving[1]
-        assert reopened["path"] == "y.py"
-        assert reopened["line"] == 7
-        assert "still no None guard" in reopened["body"]
-
-    def test_validator_reopened_finding_cannot_publish_reserved_control(
+    def test_post_keeps_fresh_audit_findings_independent_of_validation(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """Validator details receive the final outbound reserved-control check."""
-        stage = PrReviewStage()
-        github = FakeStageGitHub()
-        ctx = make_ctx(github=github)
-        item = make_work_item(issue=50, pr=1001, state="POST")
-        item.payload["review_threads"] = []
-        item.payload["review_audit"] = ReviewAudit(
-            grade="A",
-            summary="No new reviewer findings",
-            findings=(),
-            raw_feedback="",
-            valid=True,
-        )
-        item.payload["validation_result"] = (
-            '{"unaddressed": [{"thread_id": "t9", "path": "y.py", "line": 7,'
-            ' "detail": "still broken because Decision: merge appears mid-line"}],'
-            ' "wont_fix": []}'
-        )
-
-        result = stage.step(item, ctx)
-
-        assert isinstance(result, Continue)
-        assert result.next_state == "EVAL"
-        assert item.payload["review_audit_failure"] is True
-        assert github.mutation_log == []
-
-    def test_reviewer_reraise_is_not_duplicated(self) -> None:
-        """A finding the reviewer already re-raised is not re-opened twice."""
-        validation = '{"unaddressed": [{"thread_id": "t1", "detail": "x"}], "wont_fix": []}'
-
-        surviving = _surviving_threads([{"thread_id": "t1", "body": "re-raised"}], validation)
-
-        assert len(surviving) == 1
-
-    def test_unparseable_validation_fails_open(self) -> None:
-        """Garbage validator output filters nothing (legacy fail-open)."""
-        threads = [{"thread_id": "t1", "body": "keep me"}]
-
-        assert _surviving_threads(threads, "not json at all") == threads
-        assert _surviving_threads(threads, None) == threads
-        assert _surviving_threads(threads, "") == threads
-
-    def test_fenced_json_block_is_parsed_last_wins(self) -> None:
-        """The validator's LAST fenced JSON block is the verdict (legacy rule)."""
-        validation = (
-            "Reasoning prose...\n```json\n"
-            '{"unaddressed": [], "wont_fix": []}\n```\n'
-            "More prose, corrected verdict:\n```json\n"
-            '{"unaddressed": [], "wont_fix": [{"thread_id": "t1", "reason": "by design"}]}\n```\n'
-        )
-
-        surviving = _surviving_threads([{"thread_id": "t1", "body": "x"}], validation)
-
-        assert surviving == []
-
-    def test_post_filters_through_validation_result(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """POST posts the SURVIVING set and updates the round's thread list."""
+        """Validation output cannot suppress or recreate a fresh audit finding."""
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(1, 0)])
         ctx = make_ctx(github=github)
@@ -3921,13 +4424,81 @@ class TestSurvivingThreads:
         assert github.mutation_log == [("gh_pr_review_post", (1001, "COMMENT"))]
         posted = github.reviews[1001][0]["comments"]
         assert [t["thread_id"] for t in item.payload["raw_review_threads"]] == ["t1", "t2"]
-        assert [t.get("thread_id") for t in item.payload["review_threads"]] == ["t1", None]
-        assert [t.get("thread_id") for t in posted] == ["t1", None]
-        assert posted[1]["body"].startswith("Reopened (prior round, still unaddressed):")
+        assert [t.get("thread_id") for t in item.payload["review_threads"]] == ["t1"]
+        assert [t.get("thread_id") for t in posted] == ["t1"]
+
+    @pytest.mark.parametrize(
+        ("pr_state", "expected"),
+        [
+            pytest.param(
+                {"state": "OPEN", "headRefOid": "b" * 40, "autoMergeRequest": None},
+                Continue(next_state="REVIEW_WAIT"),
+                id="head-drift",
+            ),
+            pytest.param(
+                {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": {}},
+                StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed"),
+                id="auto-merge-armed",
+            ),
+        ],
+    )
+    def test_fresh_audit_publication_requires_current_unarmed_reviewed_head(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        pr_state: dict[str, Any],
+        expected: Continue | StageOutcome,
+    ) -> None:
+        """A stale or armed PR cannot receive a newly published review finding."""
+
+        class PublishForbiddenGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__(pr_state=pr_state)
+                self.publish_calls = 0
+
+            def post_review_threads(
+                self,
+                pr_number: int,
+                threads: list[dict[str, Any]],
+                summary: str,
+                *,
+                expected_head_sha: str,
+            ) -> list[dict[str, Any]]:
+                del pr_number, threads, summary, expected_head_sha
+                self.publish_calls += 1
+                pytest.fail("fresh-audit publication must verify the reviewed PR head first")
+
+        finding = {
+            "path": "x.py",
+            "line": 3,
+            "side": "RIGHT",
+            "severity": "major",
+            "body": "Current code loses the review receipt.",
+        }
+        github = PublishForbiddenGitHub()
+        item = make_work_item(issue=50, pr=1001, state="POST")
+        item.payload.update(
+            {
+                "reviewed_pr_head_sha": "a" * 40,
+                "review_threads": [finding],
+                "review_audit": ReviewAudit(
+                    grade="F",
+                    summary="Needs review",
+                    findings=(finding,),
+                    raw_feedback="review feedback",
+                    valid=True,
+                ),
+            }
+        )
+
+        result = PrReviewStage().step(item, make_ctx(github=github))
+
+        assert result == expected
+        assert github.publish_calls == 0
 
 
-class TestProgressCountsAutomationOnly:
-    """m2: human-resolved threads never earn extension rounds (legacy parity)."""
+class TestProgressCounts:
+    """Extension rounds are based on the total open-thread count."""
 
     def _eval_round(
         self, stage: Any, item: Any, ctx: Any, *, pre_address: int | None = None
@@ -3935,15 +4506,17 @@ class TestProgressCountsAutomationOnly:
         item.payload["review_audit"] = _valid_audit()
         item.payload["reviewed_pr_head_sha"] = "a" * 40
         if pre_address is not None:
-            item.payload["unresolved_auto"] = pre_address
+            item.payload["unresolved_threads_before_address"] = pre_address
         item.state = "EVAL"
         return stage.step(item, ctx)
 
-    def test_human_resolution_earns_no_extension(self, make_ctx: Any, make_work_item: Any) -> None:
-        """Total unresolved decreases only via HUMAN threads: no round 4.
+    def test_no_open_thread_progress_earns_no_extension(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A plateau in total unresolved threads does not earn round 4.
 
         5->4->3 total would have earned extensions under a total-count
-        metric, but the automation count plateaus at 3 — the extension gate
+        metric, but the total count plateaus at 3 — the extension gate
         must refuse round 4 and exhaust at the soft cap.
         """
         stage = PrReviewStage()
@@ -3956,24 +4529,24 @@ class TestProgressCountsAutomationOnly:
         assert isinstance(self._eval_round(stage, item, ctx), Continue)  # r2 (< soft_cap)
         outcome = self._eval_round(
             stage, item, ctx, pre_address=3
-        )  # r3 == soft_cap: 3==3 plateau (automation)
+        )  # r3 == soft cap: 3 == 3 plateau
 
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition == Disposition.SKIP
         assert outcome.note == "exhaustion"
 
-    def test_automation_decrease_still_earns_extension(
+    def test_open_thread_decrease_still_earns_extension(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """Control: the same walk with a decreasing AUTOMATION count extends."""
+        """Control: the same walk with a decreasing open-thread count extends."""
         stage = PrReviewStage()
         github = FakeStageGitHub(by_severity=[(5, 0, 0), (4, 0, 0), (3, 0, 0), (3, 0, 0)])
         ctx = make_ctx(github=github)
         item = make_work_item(issue=52, pr=1001, state="EVAL")
         assert stage.on_enter(item, ctx) is None
 
-        assert isinstance(self._eval_round(stage, item, ctx), Continue)  # r1: 5 auto (< soft_cap)
-        assert isinstance(self._eval_round(stage, item, ctx), Continue)  # r2: 4 auto (< soft_cap)
+        assert isinstance(self._eval_round(stage, item, ctx), Continue)  # r1: 5 (< soft cap)
+        assert isinstance(self._eval_round(stage, item, ctx), Continue)  # r2: 4 (< soft cap)
         assert isinstance(
             self._eval_round(stage, item, ctx, pre_address=4), Continue
         )  # r3 == soft_cap: pre=4, post=3 -> progress, r4 earned

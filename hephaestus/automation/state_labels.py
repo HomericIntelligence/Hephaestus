@@ -129,13 +129,13 @@ STATE_LABEL_SPECS: dict[str, dict[str, str]] = {
     STATE_IMPLEMENTATION_NO_GO: {
         "color": "d93f0b",  # red — blocked
         "description": (
-            "Current reviewed head has unresolved blocking implementation-review facts; revise."
+            "Current reviewed head has unresolved implementation-review threads; revise."
         ),
     },
     STATE_IMPLEMENTATION_GO: {
         "color": "0e8a16",  # green — approved
         "description": (
-            "Exact reviewed head has no unresolved blocking or human review facts; "
+            "Exact reviewed head has no unresolved review threads; "
             "merge-wait still requires the process-local reviewed-head proof."
         ),
     },

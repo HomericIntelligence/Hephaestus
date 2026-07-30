@@ -20,7 +20,7 @@ re-pointed at the pipeline (#1820):
   ``0..plan_review_iter-1``; ``plan_cycles`` bounds the number of cycles.
 - Both counters advance in EVAL and ONLY for real verdicts
   (GO/NOGO/BLOCKED). ERROR, unsupported, and missing verdicts never burn an iteration
-  (claude_invoke ``ReviewVerdict`` doctrine: "the reviewer never ran" must
+  (the shared ``review_types.ReviewVerdict`` doctrine: "the reviewer never ran" must
   not be mistaken for a judgement, #911/#1554/#1794); they RETRY with
   labels untouched, bounded in-stage by
   ``item.payload["review_error_retries"]`` (cap

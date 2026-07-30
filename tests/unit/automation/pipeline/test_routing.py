@@ -210,7 +210,6 @@ class TestROUTES:
                 next=StageName.MERGE_WAIT,
                 fail_routes={
                     "agent_error": StageName.IMPLEMENTATION,
-                    "human_blocked": StageName.FINISHED,
                     "exhaustion": StageName.FINISHED,
                     "*": StageName.PR_REVIEW,
                 },
@@ -243,41 +242,6 @@ class TestROUTES:
         assert "loop_runner.py:" not in source
         assert "LoopConfig.drive_green_loops" in source
         assert "--drive-green-loops" in source
-
-    def test_review_iter_budget_provenance_uses_stable_source_references(self) -> None:
-        """Sibling of #1902 for plan_review / pr_review hard-cap cites.
-
-        The cheap defense against cite rot: assert the comment block names
-        the budget-determining CONSTANT and its value, and does NOT pin a
-        volatile ``:NN`` line number that drifts the first time someone
-        reorders a constants block.
-        """
-        assert routing.__file__ is not None
-        # Scope the assertions to the ROUTES provenance comment block so
-        # an unrelated ``_review_phase.py:NN`` cite elsewhere in routing.py
-        # does not false-positive (#2298 reviewer feedback).
-        source_lines = Path(routing.__file__).read_text(encoding="utf-8").splitlines()
-        block_start: int | None = None
-        block_end: int | None = None
-        for index, line in enumerate(source_lines):
-            if "Budget provenance:" in line:
-                block_start = index
-            if line.startswith("ROUTES: dict["):
-                block_end = index
-                break
-        assert block_start is not None and block_end is not None
-        block = "\n".join(source_lines[block_start:block_end])
-        assert "_review_phase.py MAX_REVIEW_ITERATIONS (=3)" in block
-        assert "_review_phase.py MAX_REVIEW_ITERATIONS_HARD_CAP (=3*2)" in block
-        assert "thread handoffs never" in block
-        # No ``_review_phase.py:<NN>`` cite may replace the value-tag form.
-        cite_lines = [
-            tail
-            for line in block.splitlines()
-            if "<-" in line
-            for tail in [line.split("<-", 1)[-1]]
-        ]
-        assert not any("_review_phase.py:" in tail for tail in cite_lines)
 
 
 class TestPipelineScope:
