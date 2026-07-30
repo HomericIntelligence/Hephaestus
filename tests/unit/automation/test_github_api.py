@@ -3314,8 +3314,8 @@ class TestGhPrReviewPost:
         )
         mock_index.return_value = {
             (
-                "tests/unit/automation/test_pr_review_core.py",
-                540,
+                "a.py",
+                2,
             ): (
                 "COMMENT_NODE_540",
                 "This regression coverage only exercises the Claude result-envelope path. "
@@ -3331,8 +3331,8 @@ class TestGhPrReviewPost:
             pr_number=1116,
             comments=[
                 {
-                    "path": "tests/unit/automation/test_pr_review_core.py",
-                    "line": 540,
+                    "path": "a.py",
+                    "line": 2,
                     "side": "RIGHT",
                     "body": (
                         "This regression test only exercises the Claude JSON-envelope path. "
@@ -3348,7 +3348,7 @@ class TestGhPrReviewPost:
         )
 
         mock_update.assert_not_called()
-        assert self._posted_comments(mock_write) == []
+        mock_write.assert_not_called()
 
     @patch("hephaestus.automation.github_api.gh_pr_update_review_comment")
     @patch("hephaestus.automation.github_api.gh_pr_inline_comment_index")
@@ -3422,8 +3422,8 @@ class TestGhPrReviewPost:
         )
         mock_index.return_value = {
             (
-                "tests/unit/automation/test_pr_review_core.py",
-                540,
+                "a.py",
+                2,
             ): (
                 "COMMENT_NODE_540",
                 "This regression coverage only exercises the Claude result-envelope path. "
@@ -3465,8 +3465,8 @@ class TestGhPrReviewPost:
                 pr_number=1116,
                 comments=[
                     {
-                        "path": "tests/unit/automation/test_pr_review_core.py",
-                        "line": 540,
+                        "path": "a.py",
+                        "line": 2,
                         "side": "RIGHT",
                         "body": body,
                     }
@@ -3476,7 +3476,7 @@ class TestGhPrReviewPost:
             )
 
         mock_update.assert_not_called()
-        assert self._posted_comments(mock_write) == []
+        mock_write.assert_not_called()
 
     @patch("hephaestus.automation.github_api.gh_pr_update_review_comment")
     @patch("hephaestus.automation.github_api.gh_pr_inline_comment_index")

@@ -3617,12 +3617,10 @@ class TestFullWalks:
         resolved -> merge-wait advance.
         """
         stage = PrReviewStage()
-        # POST calls count_unresolved_threads once per round; EVAL calls the
-        # new by_severity method once per round. Two rounds => one entry each
-        # per round. Round 1 has 2 open blocking threads (NOGO address leg);
-        # round 2 is clean (GO: skips difficulty/address, then advances).
+        # Each fresh review snapshot consumes one scripted thread shape.
+        # Round 1 has two open blocking threads for the address leg; round 2
+        # is clean and therefore skips difficulty/address before advancing.
         github = FakeStageGitHub(
-            unresolved=[(2, 0), (2, 0), (2, 0), (2, 0), (2, 0), (0, 0), (0, 0)],
             by_severity=[
                 (2, 0, 0),
                 (2, 0, 0),
@@ -3642,7 +3640,7 @@ class TestFullWalks:
         pool = FakeWorkerPool()
         pool.script(
             JobResult(ok=True, value=_valid_audit()),  # review round 1
-            JobResult(ok=True, value='{"unaddressed": [], "wont_fix": []}'),  # validate round 1
+            JobResult(ok=True, value='{"resolved": [], "unaddressed": []}'),  # validate round 1
             JobResult(ok=True, value="tier list"),  # difficulty
             JobResult(
                 ok=True,

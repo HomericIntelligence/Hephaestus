@@ -98,13 +98,13 @@ class FakeStageGitHub(FakeGitHub):
             pr_impl_readbacks: Optional FIFO of independent label readbacks;
                 entries may be contradictory, absent, or exceptions. When
                 empty, the current post-mutation state is returned.
-            unresolved: FIFO of (pipeline, external) answers for
-                count_unresolved_threads — consumed one per call, last
-                entry repeating (lets tests script a decreasing /
-                plateauing thread count for the #1554 progress rule).
-            by_severity: FIFO of (blocking, minor, external) answers for
-                count_unresolved_threads_by_severity (#1856); defaults to
-                deriving from unresolved (legacy: all automation = blocking).
+            unresolved: FIFO of ``(automation, external)`` review-thread
+                shapes.  Each shape is consumed per fresh snapshot, with the
+                final shape repeating; this concise form treats automation
+                threads as blocking.
+            by_severity: FIFO of ``(blocking, advisory, external)``
+                review-thread shapes.  Supply this form when a test needs to
+                distinguish blocking and advisory automation threads.
             pr_state: Canned answer for gh_pr_state (merge_wait's single
                 PR-state read); ``None`` mirrors a transient read failure.
             conversation_resolution: Whether the admitted PR base has the
@@ -130,7 +130,7 @@ class FakeStageGitHub(FakeGitHub):
         self._by_severity = (
             list(by_severity)
             if by_severity is not None
-            else [(a, 0, h) for (a, h) in self._unresolved]  # legacy: all automation = blocking
+            else [(a, 0, h) for (a, h) in self._unresolved]
         )
         self._pr_state = (
             {
